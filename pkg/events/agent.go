@@ -44,6 +44,14 @@ type SubagentIteration struct {
 	ToolCalls []ToolCallRequest // tool calls made this iteration
 }
 
+// AgentToolChoice is emitted by plugins to dynamically override the agent's
+// tool choice for subsequent LLM requests.
+type AgentToolChoice struct {
+	Mode     string // "auto" | "required" | "none" | "tool"
+	ToolName string // when Mode == "tool"
+	Duration string // "once" = next request only; "sticky" = until replaced
+}
+
 // SubagentComplete signals that a subagent has finished execution.
 type SubagentComplete struct {
 	SpawnID      string

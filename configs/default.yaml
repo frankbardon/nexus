@@ -57,6 +57,22 @@ plugins:
   #   # prompt: "custom compaction prompt inline"
   #   # prompt_file: ./prompts/compaction.md
 
+  # nexus.agent.react tool_choice examples:
+  #   tool_choice: required           # shorthand: force tool use every iteration
+  #   tool_choice:
+  #     mode: auto                    # static default
+  #   tool_choice:
+  #     sequence:                     # per-iteration pattern
+  #       - mode: required            # iteration 1: force tool use
+  #       - mode: tool                # iteration 2: force specific tool
+  #         name: shell
+  #       - mode: auto                # iteration 3+: last entry repeats
+
+  # nexus.gate.tool_filter:          # Tool filtering gate
+  #   include: [file_read, file_write]  # allowlist (only these tools)
+  #   # or
+  #   exclude: [shell]                  # blocklist (remove these tools)
+
   nexus.observe.logger:
     output: stderr
     level: warn

@@ -1,11 +1,26 @@
 package events
 
+// ToolChoice controls which tools the LLM is allowed or required to use.
+type ToolChoice struct {
+	Mode string `json:"mode"` // "auto" | "required" | "none" | "tool"
+	Name string `json:"name,omitempty"` // tool name when Mode == "tool"
+}
+
+// ToolFilter restricts which tools are available for an LLM request.
+// Include and Exclude are mutually exclusive; Include takes precedence.
+type ToolFilter struct {
+	Include []string `json:"include,omitempty"` // only these tools (empty = all)
+	Exclude []string `json:"exclude,omitempty"` // remove these tools
+}
+
 // LLMRequest describes a request to a language model.
 type LLMRequest struct {
 	Role        string // Model role (e.g., "reasoning", "balanced", "quick")
 	Model       string // Explicit model ID override (takes precedence over Role)
 	Messages    []Message
 	Tools       []ToolDef
+	ToolChoice  *ToolChoice  // nil = provider default (auto)
+	ToolFilter  *ToolFilter  // nil = no filtering
 	MaxTokens   int
 	Temperature *float64
 	Stream      bool

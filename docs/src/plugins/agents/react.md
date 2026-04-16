@@ -18,6 +18,7 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
 | `model_role` | string | *(default)* | Model role to use (e.g., `reasoning`, `balanced`, `quick`) |
 | `system_prompt` | string | *(none)* | Inline system prompt text |
 | `system_prompt_file` | string | *(none)* | Path to a system prompt markdown file |
+| `tool_choice` | string/object | *(none)* | Tool choice mode — shorthand string or object with `mode`/`name`/`sequence` |
 
 ## Events
 
@@ -36,6 +37,8 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
 | `cancel.active` | 5 | Handles cancellation |
 | `cancel.resume` | 5 | Handles resumption after cancel |
 | `memory.compacted` | 50 | Updates conversation history after compaction |
+| `gate.llm.retry` | 50 | Retries previously vetoed LLM request |
+| `agent.tool_choice` | 50 | Dynamic tool choice override from other plugins |
 
 ### Emits
 
@@ -78,6 +81,39 @@ When `planning: true`, the agent requests a plan before starting iteration:
 4. The plan steps are injected into the system prompt as context
 5. Normal ReAct iteration begins with the plan as guidance
 
+## Tool Choice
+
+Controls whether the LLM must use tools. Supports static defaults, per-iteration sequences, and dynamic overrides.
+
+### Static default (shorthand or object)
+
+```yaml
+nexus.agent.react:
+  tool_choice: required              # shorthand: force tool use every iteration
+  # or
+  tool_choice:
+    mode: auto                       # "auto" | "required" | "none" | "tool"
+    name: shell                      # only when mode == "tool"
+```
+
+### Per-iteration sequence
+
+```yaml
+nexus.agent.react:
+  tool_choice:
+    sequence:
+      - mode: required               # iteration 1: force tool use
+      - mode: tool                   # iteration 2: force specific tool
+        name: shell
+      - mode: auto                   # iteration 3+: last entry repeats
+```
+
+### Dynamic override
+
+Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Duration}`:
+- `Duration: "once"` — applies to next LLM request only, then reverts to config default.
+- `Duration: "sticky"` — persists until replaced by another override. Reset on new turn.
+
 ## Example Configuration
 
 ```yaml
@@ -86,6 +122,10 @@ nexus.agent.react:
   planning: true
   model_role: balanced
   system_prompt_file: ./prompts/coding-assistant.md
+  tool_choice:
+    sequence:
+      - mode: required
+      - mode: auto
 ```
 
 ## Tool Discovery

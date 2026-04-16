@@ -144,6 +144,8 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Model` | string | Explicit model ID (optional, overrides role) |
 | `Messages` | []Message | Conversation messages |
 | `Tools` | []ToolDef | Available tools |
+| `ToolChoice` | *ToolChoice | Tool choice constraint (nil = provider default) |
+| `ToolFilter` | *ToolFilter | Tool include/exclude filter (nil = no filtering) |
 | `MaxTokens` | int | Max response tokens |
 | `Temperature` | *float64 | Sampling temperature (nil = provider default) |
 | `Stream` | bool | Enable streaming |
@@ -170,6 +172,18 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Name` | string | Tool name |
 | `Description` | string | What the tool does |
 | `Parameters` | string | JSON Schema for parameters |
+
+**ToolChoice**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Mode` | string | `"auto"`, `"required"`, `"none"`, `"tool"` |
+| `Name` | string | Tool name (only when Mode is `"tool"`) |
+
+**ToolFilter**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Include` | []string | Only these tools (empty = all). Takes precedence over Exclude |
+| `Exclude` | []string | Remove these tools |
 
 **LLMResponse**
 | Field | Type | Description |
@@ -245,6 +259,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `agent.turn.start` | `TurnInfo` | Agent began processing |
 | `agent.turn.end` | `TurnInfo` | Agent finished processing |
 | `agent.plan` | `Plan` | Agent's current plan |
+| `agent.tool_choice` | `AgentToolChoice` | Dynamic tool choice override |
 
 ### Payloads
 
@@ -266,6 +281,13 @@ Complete reference for all event types in Nexus, organized by domain.
 |-------|------|-------------|
 | `Description` | string | What this step does |
 | `Status` | string | `"pending"`, `"active"`, `"completed"`, `"failed"` |
+
+**AgentToolChoice**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Mode` | string | `"auto"`, `"required"`, `"none"`, `"tool"` |
+| `ToolName` | string | Tool name when Mode is `"tool"` |
+| `Duration` | string | `"once"` (next request only) or `"sticky"` (until replaced) |
 
 ---
 

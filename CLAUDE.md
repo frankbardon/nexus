@@ -87,6 +87,7 @@ plugins/
   gates/output_length/   # Output length limit with LLM retry
   gates/content_safety/  # PII/secrets/sensitive content detection (block or redact)
   gates/context_window/  # Context size estimation, triggers compaction
+  gates/tool_filter/     # Tool allowlist/blocklist filtering
   gates/internal/retry/  # Shared retry-with-LLM helper for gates
 ```
 
@@ -170,7 +171,62 @@ nexus.gate.context_window:
   max_context_tokens: 100000
   trigger_ratio: 0.85    # trigger at 85% of max
   chars_per_token: 4.0
+
+# Tool filtering (allowlist or blocklist).
+nexus.gate.tool_filter:
+  include: [file_read, file_write]  # only these tools (empty = all)
+  # or
+  exclude: [shell]                  # remove these tools
 ```
+
+## Tool Choice
+
+Controls which tools the LLM is allowed or required to use per request. Three layers compose:
+
+### LLMRequest fields
+
+`ToolChoice *events.ToolChoice` — mode (`auto`|`required`|`none`|`tool`) + optional tool name.
+`ToolFilter *events.ToolFilter` — include/exclude tool lists. Include takes precedence.
+
+### Provider mapping
+
+Providers map `ToolChoice` to native API format:
+
+| Mode | Anthropic | OpenAI |
+|------|-----------|--------|
+| `auto` | `{"type": "auto"}` | `"auto"` |
+| `required` | `{"type": "any"}` | `"required"` |
+| `none` | strips tools | `"none"` |
+| `tool` | `{"type": "tool", "name": "X"}` | `{"type": "function", "function": {"name": "X"}}` |
+
+For providers without native support, simulation: `none` strips tools, `required`/`tool` use system prompt injection + tool restriction.
+
+### Agent config
+
+ReAct agent supports static default, shorthand, and per-iteration sequences:
+
+```yaml
+nexus.agent.react:
+  tool_choice: required             # shorthand
+  tool_choice:
+    mode: auto                      # static default
+  tool_choice:
+    sequence:                       # per-iteration pattern
+      - mode: required              # iteration 1
+      - mode: tool                  # iteration 2
+        name: shell
+      - mode: auto                  # iteration 3+ (last entry repeats)
+```
+
+### Dynamic override via events
+
+Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Duration}`:
+- `Duration: "once"` — next request only, reverts to config default.
+- `Duration: "sticky"` — persists until replaced. Reset on new turn.
+
+### Evaluation order
+
+1. All registered tools → 2. `nexus.gate.tool_filter` (config include/exclude) → 3. `before:llm.request` gate modifications → 4. Resolve tool choice (event override > config sequence > config default) → 5. Validate (named tool filtered out → fall back to required) → 6. Provider maps to native or simulates.
 
 ## Code Conventions
 
