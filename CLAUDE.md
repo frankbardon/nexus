@@ -73,6 +73,7 @@ plugins/
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   memory/conversation/   # Conversation history persistence
   observe/logger/        # Structured event logging
+  observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL)
   planners/dynamic/      # LLM-generated execution plans
   planners/static/       # Config-defined fixed execution plans

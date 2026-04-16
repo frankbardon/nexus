@@ -20,6 +20,7 @@ import (
 	compactionplugin "github.com/frankbardon/nexus/plugins/memory/compaction"
 	"github.com/frankbardon/nexus/plugins/memory/conversation"
 	"github.com/frankbardon/nexus/plugins/observe/logger"
+	otelplugin "github.com/frankbardon/nexus/plugins/observe/otel"
 	thinkingplugin "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
 	staticplanner "github.com/frankbardon/nexus/plugins/planners/static"
@@ -93,6 +94,7 @@ func main() {
 	eng.Registry.Register("nexus.planner.dynamic", dynamicplanner.New)
 	eng.Registry.Register("nexus.planner.static", staticplanner.New)
 	eng.Registry.Register("nexus.observe.thinking", thinkingplugin.New)
+	eng.Registry.Register("nexus.observe.otel", otelplugin.New)
 	eng.Registry.Register("nexus.control.cancel", cancelplugin.New)
 	eng.Registry.Register("nexus.system.dynvars", dynvarsplugin.New)
 
