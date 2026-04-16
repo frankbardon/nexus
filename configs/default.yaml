@@ -60,3 +60,12 @@ plugins:
   nexus.observe.logger:
     output: stderr
     level: warn
+
+  # nexus.observe.otel:
+  #   endpoint: "localhost:4317"    # OTLP collector endpoint
+  #   protocol: grpc               # grpc | http
+  #   insecure: true               # skip TLS verification
+  #   service_name: nexus           # OTel service name
+  #   exclude_events:              # event types to skip (supports prefix.* wildcards)
+  #     - llm.stream.chunk
+  #     - core.tick

@@ -50,6 +50,7 @@
 - [Observers](./plugins/observers/index.md)
   - [Event Logger](./plugins/observers/logger.md)
   - [Thinking Persistence](./plugins/observers/thinking.md)
+  - [OpenTelemetry](./plugins/observers/otel.md)
 - [Planners](./plugins/planners/index.md)
   - [Dynamic Planner](./plugins/planners/dynamic.md)
   - [Static Planner](./plugins/planners/static.md)
