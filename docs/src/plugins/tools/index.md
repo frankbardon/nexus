@@ -18,8 +18,9 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 2. The agent collects registered tools and includes them in `llm.request`
 3. When the LLM responds with a tool call, the agent emits `before:tool.invoke` (vetoable for approval)
 4. If not vetoed, the agent emits `tool.invoke`
-5. The tool plugin handles the invocation and emits `tool.result`
-6. The agent feeds the result back to the LLM
+5. The tool plugin handles the invocation and emits `before:tool.result` (vetoable — gates can inspect/block results)
+6. If not vetoed, the tool plugin emits `tool.result`
+7. The agent feeds the result back to the LLM
 
 ## Tool Registration Event
 

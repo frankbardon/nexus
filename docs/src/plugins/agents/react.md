@@ -44,6 +44,7 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
 | `llm.request` | Sending a message to the LLM |
 | `before:tool.invoke` | Before executing a tool (vetoable — enables approval) |
 | `tool.invoke` | Invoking a tool |
+| `before:tool.result` | Before tool result propagation (vetoable) |
 | `tool.result` | Synthetic tool results (e.g., for vetoed tools) |
 | `before:io.output` | Before sending output (vetoable) |
 | `io.output` | Final agent response to the user |
@@ -61,6 +62,7 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
 4. If tool calls exist:
    - Agent emits `before:tool.invoke` (can be vetoed for approval)
    - Agent emits `tool.invoke` for each tool call
+   - Tool plugin emits `before:tool.result` (vetoable — gates can inspect/block)
    - Waits for `tool.result` events
    - Loops back to step 2 with tool results appended
 5. If no tool calls, the LLM's response is the final answer → `io.output`

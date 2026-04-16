@@ -71,7 +71,8 @@ User types message
         → Agent emits "before:tool.invoke" (vetoable)
         → Agent emits "tool.invoke"
         → nexus.tool.shell receives "tool.invoke"
-        → Tool executes, emits "tool.result"
+        → Tool executes, emits "before:tool.result" (vetoable)
+        → Tool emits "tool.result"
         → Agent receives result, loops back to LLM
     → If no tool calls:
         → Agent emits "io.output"

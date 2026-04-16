@@ -46,6 +46,7 @@ The orchestrator implements a manager-worker pattern. It uses an LLM to decompos
 |-------|------|
 | `llm.request` | Decomposition and synthesis LLM calls |
 | `before:tool.invoke` / `tool.invoke` | Tool invocation |
+| `before:tool.result` | Before tool result propagation (vetoable) |
 | `thinking.step` | Decomposition and synthesis reasoning |
 | `io.status` | Phase transitions |
 | `agent.turn.start` / `agent.turn.end` | Turn boundaries |

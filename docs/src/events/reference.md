@@ -212,6 +212,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `tool.register` | `ToolDef` | Tool available for use |
 | `before:tool.invoke` | `ToolCall` | Before tool execution (vetoable) |
 | `tool.invoke` | `ToolCall` | Tool invocation |
+| `before:tool.result` | `ToolResult` | Before tool result propagation (vetoable) |
 | `tool.result` | `ToolResult` | Tool execution result |
 
 ### Payloads
