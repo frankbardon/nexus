@@ -29,19 +29,21 @@ type Plugin struct {
 	systemPromptFile string
 	planningEnabled  bool
 	modelRole        string
+	toolChoiceCfg    toolChoiceConfig
 
-	mu               sync.Mutex
-	history          []events.Message
-	registeredTools  []events.ToolDef
-	skillContexts    []string
-	currentTurnID    string
-	currentPlan      *events.PlanResult
-	currentPlanStep  int // index into currentPlan.Steps; -1 when no plan is active
-	iteration        int
-	pendingToolCalls int
-	streamed         bool
-	cancelled        bool
-	unsubs           []func()
+	mu                sync.Mutex
+	history           []events.Message
+	registeredTools   []events.ToolDef
+	skillContexts     []string
+	currentTurnID     string
+	currentPlan       *events.PlanResult
+	currentPlanStep   int // index into currentPlan.Steps; -1 when no plan is active
+	iteration         int
+	pendingToolCalls  int
+	streamed          bool
+	cancelled         bool
+	toolChoiceOverride *toolChoiceOverride
+	unsubs            []func()
 }
 
 // New creates a new ReAct agent plugin.
@@ -79,6 +81,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.systemPrompt = sp
 	}
 
+	p.toolChoiceCfg = parseToolChoiceConfig(ctx.Config)
+
 	// Register event handlers.
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInputEvent,
@@ -104,6 +108,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("memory.compacted", p.handleCompactedEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("gate.llm.retry", p.handleGateRetry,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("agent.tool_choice", p.handleToolChoiceEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
@@ -132,6 +138,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "cancel.resume", Priority: 50},
 		{EventType: "memory.compacted", Priority: 50},
 		{EventType: "gate.llm.retry", Priority: 50},
+		{EventType: "agent.tool_choice", Priority: 50},
 	}
 }
 
@@ -345,6 +352,24 @@ func (p *Plugin) handleCompactedEvent(event engine.Event[any]) {
 	p.logger.Info("history replaced by compaction", "messages", len(cc.Messages))
 }
 
+// handleToolChoiceEvent processes dynamic tool choice overrides from other plugins.
+func (p *Plugin) handleToolChoiceEvent(event engine.Event[any]) {
+	atc, ok := event.Payload.(events.AgentToolChoice)
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.toolChoiceOverride = &toolChoiceOverride{
+		Choice: events.ToolChoice{
+			Mode: atc.Mode,
+			Name: atc.ToolName,
+		},
+		Duration: atc.Duration,
+	}
+	p.logger.Info("tool choice override set", "mode", atc.Mode, "name", atc.ToolName, "duration", atc.Duration)
+}
+
 // handleGateRetry is called when a gate (rate limiter, context window, etc.)
 // signals that a previously vetoed LLM request should be retried.
 func (p *Plugin) handleGateRetry(_ engine.Event[any]) {
@@ -391,6 +416,7 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.iteration = 0
 	p.pendingToolCalls = 0
 	p.streamed = false
+	p.toolChoiceOverride = nil
 
 	// Add user message to history.
 	p.history = append(p.history, events.Message{
@@ -639,13 +665,17 @@ func (p *Plugin) sendLLMRequest() {
 	tools := make([]events.ToolDef, len(p.registeredTools))
 	copy(tools, p.registeredTools)
 
+	// Resolve tool choice for this iteration.
+	tc := resolveToolChoice(p.toolChoiceCfg, p.iteration, &p.toolChoiceOverride)
+
 	p.mu.Unlock()
 
 	req := events.LLMRequest{
-		Role:     p.modelRole,
-		Messages: messages,
-		Tools:    tools,
-		Stream:   true,
+		Role:       p.modelRole,
+		Messages:   messages,
+		Tools:      tools,
+		ToolChoice: tc,
+		Stream:     true,
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {

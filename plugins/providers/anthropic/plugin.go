@@ -307,10 +307,16 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	}
 	body["messages"] = apiMessages
 
+	// Apply tool filtering. Mode "none" strips all tools.
+	filteredTools := applyToolFilter(req.Tools, req.ToolFilter)
+	if req.ToolChoice != nil && req.ToolChoice.Mode == "none" {
+		filteredTools = nil
+	}
+
 	// Convert tool definitions.
-	if len(req.Tools) > 0 {
+	if len(filteredTools) > 0 {
 		var tools []map[string]any
-		for _, t := range req.Tools {
+		for _, t := range filteredTools {
 			tools = append(tools, map[string]any{
 				"name":         t.Name,
 				"description":  t.Description,
@@ -318,6 +324,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 			})
 		}
 		body["tools"] = tools
+	}
+
+	// Map tool choice to Anthropic API format.
+	if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
+		body["tool_choice"] = tc
 	}
 
 	return body

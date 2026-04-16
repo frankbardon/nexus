@@ -39,6 +39,7 @@ import (
 	ratelimitergate "github.com/frankbardon/nexus/plugins/gates/rate_limiter"
 	stopwordsgate "github.com/frankbardon/nexus/plugins/gates/stop_words"
 	tokenbudgetgate "github.com/frankbardon/nexus/plugins/gates/token_budget"
+	toolfiltergate "github.com/frankbardon/nexus/plugins/gates/tool_filter"
 
 	"github.com/frankbardon/nexus/plugins/tools/ask"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
@@ -108,6 +109,7 @@ func main() {
 	eng.Registry.Register("nexus.gate.rate_limiter", ratelimitergate.New)
 	eng.Registry.Register("nexus.gate.stop_words", stopwordsgate.New)
 	eng.Registry.Register("nexus.gate.token_budget", tokenbudgetgate.New)
+	eng.Registry.Register("nexus.gate.tool_filter", toolfiltergate.New)
 
 	// Run handles SIGINT/SIGTERM internally; embedders call Boot/Stop directly.
 	if err := eng.Run(context.Background()); err != nil {
