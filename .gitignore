@@ -1,0 +1,37 @@
+# Environment
+.env
+.env.*
+!.env.dist
+
+# Build output
+bin/*
+!bin/.gitkeep
+tmp/*
+!tmp/.gitkeep
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Docs
+docs/book/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude
+.claude/settings.local.json

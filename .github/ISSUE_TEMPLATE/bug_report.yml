@@ -1,0 +1,80 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a bug.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the behavior.
+      placeholder: |
+        1. Configure with ...
+        2. Run `bin/nexus -config ...`
+        3. Send message "..."
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened. Include error messages or logs if available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant YAML config (redact API keys).
+      render: yaml
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Engine / Core
+        - Agent (ReAct / PlanExec / Orchestrator)
+        - LLM Provider (Anthropic)
+        - LLM Provider (OpenAI)
+        - Tools (Shell / FileIO / PDF)
+        - I/O (TUI / Browser / Wails)
+        - Memory / Compaction
+        - Gates
+        - Planner (Dynamic / Static)
+        - Desktop Shell
+        - Other
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go Version
+      placeholder: "1.23"
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 14.5 / Ubuntu 24.04 / Windows 11"

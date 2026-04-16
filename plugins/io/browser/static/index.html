@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="h-screen overflow-hidden bg-base-100 text-base-content">
+
+  <!-- ── Main Layout ─────────────────────────────────────────────── -->
+  <div x-data class="flex h-screen">
+
+    <!-- ── Left Navigation ─────────────────────────────────────── -->
+    <aside class="w-60 flex-shrink-0 bg-base-200 flex flex-col border-r border-base-300">
+
+      <!-- Logo -->
+      <div class="px-4 py-3 border-b border-base-300">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-primary-content" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <span class="font-bold text-lg tracking-tight">Nexus</span>
+          <!-- Connection indicator -->
+          <div class="ml-auto">
+            <div :class="$store.app.connected ? 'bg-success' : 'bg-error'" class="w-2 h-2 rounded-full"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Session info -->
+      <div x-show="$store.app.sessionId" class="px-4 py-2 border-b border-base-300">
+        <div class="text-xs opacity-50">Session</div>
+        <div class="text-xs font-mono truncate" x-text="$store.app.sessionId"></div>
+      </div>
+
+      <!-- Nav tabs -->
+      <div class="flex border-b border-base-300">
+        <button @click="$store.app.navSection = 'chat'"
+                :class="$store.app.navSection === 'chat' ? 'bg-base-100 border-b-2 border-primary' : 'opacity-60 hover:opacity-100'"
+                class="flex-1 px-3 py-2 text-sm font-medium transition-all">
+          Chat
+        </button>
+        <button @click="$store.app.navSection = 'files'"
+                :class="$store.app.navSection === 'files' ? 'bg-base-100 border-b-2 border-primary' : 'opacity-60 hover:opacity-100'"
+                class="flex-1 px-3 py-2 text-sm font-medium transition-all">
+          Files
+        </button>
+      </div>
+
+      <!-- Nav content -->
+      <div class="flex-1 overflow-y-auto">
+
+        <!-- Chat nav (placeholder for future: saved conversations, etc.) -->
+        <div x-show="$store.app.navSection === 'chat'" class="p-3">
+        </div>
+
+        <!-- File explorer -->
+        <div x-show="$store.app.navSection === 'files'" class="p-2">
+          <div x-show="$store.app.files.length === 0" class="text-xs opacity-40 italic p-2">No files in session</div>
+          <template x-for="file in $store.app.files" :key="file.path">
+            <button x-show="!file.is_dir"
+                    @click="$store.app.viewFile(file)"
+                    class="w-full text-left px-2 py-1.5 rounded text-sm hover:bg-base-300 nav-item flex items-center gap-2 group">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 opacity-40 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+              </svg>
+              <span class="truncate" x-text="file.name"></span>
+              <span class="ml-auto text-xs opacity-30 group-hover:opacity-60" x-text="$store.app.formatFileSize(file.size)"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <!-- Theme switcher -->
+      <div class="p-3 border-t border-base-300">
+        <div class="text-xs opacity-50 uppercase tracking-wider mb-1.5">Theme</div>
+        <select @change="$store.app.setTheme($event.target.value)"
+                :value="$store.app.currentTheme"
+                class="select select-xs select-bordered w-full">
+          <option value="dark">Dark</option>
+          <option value="night">Night</option>
+          <option value="dim">Dim</option>
+          <option value="sunset">Sunset</option>
+          <option value="dracula">Dracula</option>
+          <option value="synthwave">Synthwave</option>
+          <option value="cyberpunk">Cyberpunk</option>
+          <option value="forest">Forest</option>
+          <option value="luxury">Luxury</option>
+          <option value="coffee">Coffee</option>
+          <option value="business">Business</option>
+          <option value="halloween">Halloween</option>
+          <option value="light">Light</option>
+          <option value="cupcake">Cupcake</option>
+          <option value="nord">Nord</option>
+        </select>
+      </div>
+    </aside>
+
+    <!-- ── Main Content ────────────────────────────────────────── -->
+    <main class="flex-1 flex flex-col min-w-0">
+
+      <!-- File Viewer (inline panel) -->
+      <template x-if="$store.app.activeView === 'file' && $store.app.viewingFile">
+        <div class="flex flex-col h-full">
+          <div class="px-4 py-2 border-b border-base-300 flex items-center gap-2 bg-base-200">
+            <button @click="$store.app.closeFileView()" class="btn btn-ghost btn-xs btn-circle">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
+              </svg>
+            </button>
+            <span class="font-mono text-sm" x-text="$store.app.viewingFile.path"></span>
+          </div>
+          <div class="flex-1 overflow-auto p-4">
+            <div x-show="$store.app.viewingFile.loading" class="flex items-center justify-center h-full">
+              <span class="loading loading-spinner loading-md"></span>
+            </div>
+            <pre x-show="!$store.app.viewingFile.loading"
+                 class="text-sm font-mono whitespace-pre-wrap break-words"
+                 x-text="$store.app.viewingFile.content"></pre>
+          </div>
+        </div>
+      </template>
+
+      <!-- Chat View -->
+      <template x-if="$store.app.activeView === 'chat'">
+        <div class="flex flex-col h-full">
+
+          <!-- Messages -->
+          <div x-ref="chatScroll" class="flex-1 overflow-y-auto chat-scroll px-4 py-4 space-y-1"
+               x-effect="$nextTick(() => { if ($refs.chatScroll) $refs.chatScroll.scrollTop = $refs.chatScroll.scrollHeight })">
+
+            <!-- Empty state -->
+            <div x-show="$store.app.messages.length === 0" class="flex items-center justify-center h-full">
+              <div class="text-center">
+                <div class="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                  </svg>
+                </div>
+                <h2 class="text-xl font-semibold mb-1">Nexus</h2>
+                <p class="text-sm opacity-50">Type a message to begin.</p>
+              </div>
+            </div>
+
+            <!-- Message list -->
+            <template x-for="msg in $store.app.messages" :key="msg.id">
+              <div>
+                <!-- User message -->
+                <template x-if="msg.role === 'user'">
+                  <div class="chat chat-end">
+                    <div class="chat-header opacity-50 text-xs mb-1">You</div>
+                    <div class="chat-bubble chat-bubble-primary" x-text="msg.content"></div>
+                  </div>
+                </template>
+
+                <!-- Assistant message -->
+                <template x-if="msg.role === 'assistant'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-50 text-xs mb-1">Assistant</div>
+                    <div class="chat-bubble chat-bubble-neutral msg-content" x-markdown="msg.content"></div>
+                  </div>
+                </template>
+
+                <!-- System message -->
+                <template x-if="msg.role === 'system'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-50 text-xs mb-1">System</div>
+                    <div class="chat-bubble chat-bubble-info chat-bubble-sm text-sm" x-text="msg.content"></div>
+                  </div>
+                </template>
+
+                <!-- Tool message -->
+                <template x-if="msg.role === 'tool'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-50 text-xs mb-1">Tool</div>
+                    <div class="chat-bubble chat-bubble-accent msg-content text-sm" x-markdown="msg.content"></div>
+                  </div>
+                </template>
+
+                <!-- Thinking message -->
+                <template x-if="msg.role === 'thinking'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-40 text-xs mb-1">
+                      <span class="uppercase tracking-wider" x-text="msg.phase || 'thinking'"></span>
+                    </div>
+                    <div class="chat-bubble chat-bubble-ghost text-sm opacity-60 italic" x-text="msg.content"></div>
+                  </div>
+                </template>
+
+                <!-- Error message -->
+                <template x-if="msg.role === 'error'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-50 text-xs mb-1">Error</div>
+                    <div class="chat-bubble chat-bubble-error text-sm" x-text="msg.content"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Typing indicator -->
+            <div x-show="$store.app.isWorking && !$store.app.streamTurnId" class="chat chat-start">
+              <div class="chat-bubble chat-bubble-neutral py-3">
+                <div class="flex gap-1">
+                  <span class="typing-dot w-2 h-2 rounded-full bg-current inline-block"></span>
+                  <span class="typing-dot w-2 h-2 rounded-full bg-current inline-block"></span>
+                  <span class="typing-dot w-2 h-2 rounded-full bg-current inline-block"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Status bar -->
+          <div x-show="$store.app.isWorking" class="status-bar px-4 py-1.5 flex items-center gap-2 text-xs opacity-60">
+            <span class="loading loading-spinner loading-xs"></span>
+            <span x-text="$store.app.status.detail || $store.app.status.state"></span>
+            <button x-show="$store.app.features.cancel"
+                    @click="$store.app.requestCancel()"
+                    class="btn btn-ghost btn-xs ml-auto opacity-60 hover:opacity-100">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+              Cancel
+            </button>
+          </div>
+
+          <!-- Resume bar -->
+          <div x-show="!$store.app.isWorking && $store.app.cancelResumable && $store.app.features.cancel"
+               class="status-bar px-4 py-1.5 flex items-center gap-2 text-xs">
+            <span class="opacity-60">Operation cancelled.</span>
+            <button @click="$store.app.requestResume()"
+                    class="btn btn-ghost btn-xs text-primary">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              Resume
+            </button>
+          </div>
+
+          <!-- Input area -->
+          <div class="input-area p-3" x-data="{ input: '' }">
+            <div class="flex gap-2">
+              <textarea
+                x-model="input"
+                @keydown.enter.prevent="if (!$event.shiftKey && input.trim()) { $store.app.sendInput(input); input = ''; }"
+                :disabled="!$store.app.connected || $store.app.pendingApproval"
+                placeholder="Type a message... (Shift+Enter for newline)"
+                class="textarea textarea-bordered flex-1 min-h-[2.5rem] max-h-32 resize-none leading-snug"
+                rows="1"
+                @input="$el.style.height = '2.5rem'; $el.style.height = $el.scrollHeight + 'px'"></textarea>
+              <button
+                @click="if (input.trim()) { $store.app.sendInput(input); input = ''; }"
+                :disabled="!$store.app.connected || !input.trim() || $store.app.pendingApproval"
+                class="btn btn-primary btn-sm self-end">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </main>
+
+    <!-- ── Right Rail ──────────────────────────────────────────── -->
+    <aside x-show="$store.app.isRightRailVisible"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="translate-x-full opacity-0"
+           x-transition:enter-end="translate-x-0 opacity-100"
+           class="w-80 flex-shrink-0 right-rail bg-base-200 flex flex-col overflow-hidden">
+
+      <!-- Plan viewer -->
+      <div x-show="$store.app.currentPlan" class="flex flex-col">
+        <div class="px-4 py-3 border-b border-base-300 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-info" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+            </svg>
+            <span class="font-semibold text-sm">Plan</span>
+          </div>
+          <template x-if="$store.app.currentPlan">
+            <span class="badge badge-xs badge-ghost" x-text="$store.app.currentPlan.source"></span>
+          </template>
+        </div>
+
+        <template x-if="$store.app.currentPlan">
+          <div class="p-4 space-y-3 overflow-y-auto">
+            <p class="text-sm opacity-70" x-text="$store.app.currentPlan.summary"></p>
+            <div class="space-y-2">
+              <template x-for="step in $store.app.currentPlan.steps" :key="step.id">
+                <div class="flex items-start gap-2 text-sm" :class="{
+                  'step-pending': step.status === 'pending',
+                  'step-active': step.status === 'active',
+                  'step-completed': step.status === 'completed',
+                  'step-failed': step.status === 'failed'
+                }">
+                  <!-- Status icon -->
+                  <span class="flex-shrink-0 mt-0.5">
+                    <template x-if="step.status === 'pending'">
+                      <span class="opacity-40">&#9675;</span>
+                    </template>
+                    <template x-if="step.status === 'active'">
+                      <span class="loading loading-spinner loading-xs"></span>
+                    </template>
+                    <template x-if="step.status === 'completed'">
+                      <span>&#10003;</span>
+                    </template>
+                    <template x-if="step.status === 'failed'">
+                      <span>&#10007;</span>
+                    </template>
+                  </span>
+                  <span x-text="step.description"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ── Approval Modal ──────────────────────────────────────────── -->
+  <div x-data x-show="$store.app.pendingApproval"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0"
+       x-transition:enter-end="opacity-100"
+       class="fixed inset-0 z-50 flex items-center justify-center approval-overlay bg-black/50">
+    <div x-show="$store.app.pendingApproval"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="scale-95 opacity-0"
+         x-transition:enter-end="scale-100 opacity-100"
+         class="bg-base-100 rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+
+      <template x-if="$store.app.pendingApproval">
+        <div>
+          <!-- Header -->
+          <div class="px-6 py-4 border-b border-base-300 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full flex items-center justify-center"
+                 :class="$store.app.pendingApproval.risk === 'high' ? 'bg-error/10' : 'bg-warning/10'">
+              <svg xmlns="http://www.w3.org/2000/svg"
+                   class="w-5 h-5"
+                   :class="$store.app.pendingApproval.risk === 'high' ? 'text-error' : 'text-warning'"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="font-semibold">Approval Required</div>
+              <div x-show="$store.app.pendingApproval.risk" class="mt-0.5">
+                <span class="badge badge-sm"
+                      :class="$store.app.pendingApproval.risk === 'high' ? 'badge-error' : 'badge-warning'"
+                      x-text="$store.app.pendingApproval.risk + ' risk'"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Body -->
+          <div class="px-6 py-4 space-y-3">
+            <p class="text-sm" x-text="$store.app.pendingApproval.description"></p>
+            <div x-show="$store.app.pendingApproval.toolCall" class="bg-base-200 rounded-lg p-3">
+              <div class="text-xs opacity-50 uppercase tracking-wider mb-1">Tool</div>
+              <div class="font-mono text-sm" x-text="$store.app.pendingApproval.toolCall"></div>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="px-6 py-4 border-t border-base-300 flex gap-2 justify-end">
+            <button @click="$store.app.respondApproval(false, false)" class="btn btn-sm btn-ghost">Deny</button>
+            <button @click="$store.app.respondApproval(true, true)" class="btn btn-sm btn-outline">Always Allow</button>
+            <button @click="$store.app.respondApproval(true, false)" class="btn btn-sm btn-primary">Approve</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Ask User Modal ───────────────────────────────────────────── -->
+  <div x-data="{ askInput: '' }" x-show="$store.app.pendingAsk"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0"
+       x-transition:enter-end="opacity-100"
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div x-show="$store.app.pendingAsk"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="scale-95 opacity-0"
+         x-transition:enter-end="scale-100 opacity-100"
+         class="bg-base-100 rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+
+      <template x-if="$store.app.pendingAsk">
+        <div>
+          <!-- Header -->
+          <div class="px-6 py-4 border-b border-base-300 flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full flex items-center justify-center bg-info/10">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-info" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+            <div class="font-semibold">Question</div>
+          </div>
+
+          <!-- Body -->
+          <div class="px-6 py-4 space-y-3">
+            <p class="text-sm" x-text="$store.app.pendingAsk.question"></p>
+            <textarea
+              x-model="askInput"
+              x-init="$nextTick(() => $el.focus())"
+              @keydown.enter.prevent="if (!$event.shiftKey && askInput.trim()) { $store.app.respondAsk(askInput); askInput = ''; }"
+              placeholder="Type your answer... (Shift+Enter for newline)"
+              class="textarea textarea-bordered w-full min-h-[4rem] resize-none"
+              rows="3"></textarea>
+          </div>
+
+          <!-- Actions -->
+          <div class="px-6 py-4 border-t border-base-300 flex gap-2 justify-end">
+            <button @click="$store.app.respondAsk(askInput); askInput = '';"
+                    :disabled="!askInput.trim()"
+                    class="btn btn-sm btn-primary">Submit</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Disconnected Banner ─────────────────────────────────────── -->
+  <div x-data x-show="!$store.app.connected"
+       x-transition
+       class="fixed top-4 left-1/2 -translate-x-1/2 z-40">
+    <div class="alert alert-warning shadow-lg px-4 py-2 text-sm">
+      <span class="loading loading-spinner loading-xs"></span>
+      <span>Disconnected — reconnecting...</span>
+    </div>
+  </div>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

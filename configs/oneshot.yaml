@@ -1,0 +1,57 @@
+core:
+  log_level: error
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+# Minimal example demonstrating the oneshot IO plugin: one prompt in, one
+# JSON transcript out, then the process exits.
+plugins:
+  active:
+    - nexus.io.oneshot
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.io.oneshot:
+    # Prompt resolution order: NEXUS_ONESHOT_PROMPT env var, then `input`,
+    # then `input_file`, then stdin (when piped). Leave `input` empty to
+    # require the caller to supply one of the other sources.
+    input: ""
+    # input_file: ./prompt.txt
+    # output_file: ./result.json
+    pretty: true
+    read_stdin: true
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    max_iterations: 10
+    system_prompt_file: ./prompts/conversationalist.md
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: error

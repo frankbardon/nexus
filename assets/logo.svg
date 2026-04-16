@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#00B4D8"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#6C5CE7" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#00B4D8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="arm1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+    <linearGradient id="arm2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#00B4D8"/>
+    </linearGradient>
+    <linearGradient id="arm3" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00B4D8"/>
+      <stop offset="100%" stop-color="#0096C7"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ambient glow -->
+  <circle cx="256" cy="256" r="200" fill="url(#glow)"/>
+
+  <!-- Event bus ring -->
+  <circle cx="256" cy="256" r="128" stroke="url(#core)" stroke-width="3" stroke-opacity="0.18" fill="none"/>
+
+  <!-- Connection arms — six radiating lines from center to plugin nodes -->
+  <!-- Top -->
+  <line x1="256" y1="196" x2="256" y2="96" stroke="url(#arm1)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- Top-right -->
+  <line x1="308" y1="216" x2="394" y2="138" stroke="url(#arm2)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.55"/>
+  <!-- Bottom-right -->
+  <line x1="308" y1="296" x2="394" y2="374" stroke="url(#arm3)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.55"/>
+  <!-- Bottom -->
+  <line x1="256" y1="316" x2="256" y2="416" stroke="url(#arm1)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- Bottom-left -->
+  <line x1="204" y1="296" x2="118" y2="374" stroke="url(#arm2)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.55"/>
+  <!-- Top-left -->
+  <line x1="204" y1="216" x2="118" y2="138" stroke="url(#arm3)" stroke-width="4" stroke-linecap="round" stroke-opacity="0.55"/>
+
+  <!-- Plugin nodes — small circles at arm endpoints -->
+  <circle cx="256" cy="88"  r="14" fill="#A78BFA" fill-opacity="0.85"/>
+  <circle cx="400" cy="132" r="12" fill="#7C6DD8" fill-opacity="0.7"/>
+  <circle cx="400" cy="380" r="12" fill="#00B4D8" fill-opacity="0.7"/>
+  <circle cx="256" cy="424" r="14" fill="#A78BFA" fill-opacity="0.85"/>
+  <circle cx="112" cy="380" r="12" fill="#7C6DD8" fill-opacity="0.7"/>
+  <circle cx="112" cy="132" r="12" fill="#00B4D8" fill-opacity="0.7"/>
+
+  <!-- Central hexagonal nexus core -->
+  <polygon
+    points="256,192 311.4,224 311.4,288 256,320 200.6,288 200.6,224"
+    fill="url(#core)"
+    stroke="#fff"
+    stroke-width="2"
+    stroke-opacity="0.12"
+  />
+
+  <!-- Inner bolt / spark mark — the "N" negative space -->
+  <path
+    d="M 238 228 L 252 228 L 246 254 L 268 254 L 248 292 L 254 264 L 238 264 Z"
+    fill="#fff"
+    fill-opacity="0.92"
+  />
+</svg>

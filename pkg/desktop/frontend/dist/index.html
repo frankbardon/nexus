@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Desktop</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { overflow: hidden; }
+    .nav-sidebar { transition: width 200ms ease; }
+  </style>
+</head>
+<body class="bg-base-100 text-base-content">
+
+<!--
+  Nexus Desktop Shell — default base template.
+
+  This template ships with pkg/desktop/ and provides:
+  - AlpineJS, Tailwind CSS, DaisyUI, Font Awesome from CDN
+  - The shared bus.js helper (createBus) for agent-to-engine communication
+  - Left-nav sidebar with agent selector and status indicators
+  - A content area for agent UI (agents provide their own via Shell.Assets)
+
+  Developers should override this entirely by providing Shell.Assets in
+  their cmd/<app>/main.go with agent-specific UI sections. This default
+  shows the nav chrome and a placeholder content area.
+-->
+
+<div x-data class="h-screen flex" x-init="$store.shell.init()">
+
+  <!-- Left Nav Sidebar -->
+  <nav class="nav-sidebar flex-shrink-0 bg-base-200 border-r border-base-300 flex flex-col h-full"
+       :style="{ width: $store.shell.collapsed ? '64px' : '220px' }">
+
+    <div class="flex items-center gap-2 px-3 py-4 border-b border-base-300">
+      <button @click="$store.shell.collapsed = !$store.shell.collapsed"
+              class="btn btn-ghost btn-sm btn-square">
+        <i class="fa-solid fa-bolt text-primary"></i>
+      </button>
+      <span x-show="!$store.shell.collapsed" x-transition.opacity
+            class="font-semibold text-sm truncate select-none">Nexus</span>
+    </div>
+
+    <div class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+      <template x-for="agent in $store.shell.agents" :key="agent.id">
+        <button @click="$store.shell.selectAgent(agent.id)"
+                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-left group"
+                :class="$store.shell.activeAgentID === agent.id
+                  ? 'bg-primary/15 text-primary'
+                  : 'hover:bg-base-300 text-base-content/70 hover:text-base-content'"
+                :title="$store.shell.collapsed ? agent.name : ''">
+          <div class="relative flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center"
+               :class="$store.shell.activeAgentID === agent.id ? 'bg-primary/20' : 'bg-base-300 group-hover:bg-base-100'">
+            <i :class="agent.icon" class="text-sm"></i>
+            <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-base-200"
+                 x-show="agent.status !== 'idle'"
+                 :class="{
+                   'bg-success': agent.status === 'running',
+                   'bg-warning animate-pulse': agent.status === 'booting',
+                   'bg-error': agent.status === 'error'
+                 }"></div>
+          </div>
+          <div x-show="!$store.shell.collapsed" x-transition.opacity class="min-w-0 flex-1">
+            <div class="text-sm font-medium truncate" x-text="agent.name"></div>
+            <div class="text-xs opacity-50 truncate" x-text="agent.description"></div>
+          </div>
+        </button>
+      </template>
+    </div>
+
+    <div class="px-3 py-3 border-t border-base-300">
+      <button @click="$store.shell.collapsed = !$store.shell.collapsed"
+              class="btn btn-ghost btn-xs w-full">
+        <i class="fa-solid text-xs" :class="$store.shell.collapsed ? 'fa-angles-right' : 'fa-angles-left'"></i>
+        <span x-show="!$store.shell.collapsed" x-transition.opacity class="text-xs">Collapse</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Content Area -->
+  <div class="flex-1 flex flex-col min-w-0 h-full">
+    <header class="px-6 py-3 border-b border-base-300 flex items-center gap-3 bg-base-100"
+            x-show="$store.shell.activeAgentID">
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-base leading-tight"
+             x-text="$store.shell.activeAgent?.name || ''"></div>
+        <div class="text-xs opacity-50"
+             x-text="$store.shell.activeAgent?.description || ''"></div>
+      </div>
+    </header>
+
+    <main class="flex-1 overflow-hidden relative">
+      <div x-show="!$store.shell.activeAgentID"
+           class="flex items-center justify-center h-full">
+        <div class="text-center max-w-sm">
+          <div class="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+            <i class="fa-solid fa-bolt text-primary text-2xl"></i>
+          </div>
+          <h2 class="text-lg font-semibold mb-1">Select an agent</h2>
+          <p class="text-sm opacity-60">Choose an agent from the sidebar to get started.</p>
+        </div>
+      </div>
+
+      <div x-show="$store.shell.activeAgent?.status === 'booting'"
+           x-transition
+           class="absolute inset-0 flex items-center justify-center bg-base-100/80 z-10">
+        <div class="text-center">
+          <span class="loading loading-spinner loading-lg text-primary"></span>
+          <p class="mt-3 text-sm opacity-60">Starting engine...</p>
+        </div>
+      </div>
+
+      <!-- Agent content mount point. Apps that override Shell.Assets
+           place their agent UI sections here with x-show guards. -->
+      <div id="agent-content" class="h-full"></div>
+    </main>
+  </div>
+</div>
+
+<!-- ── Bus helper ────────────────────────────────────────────────── -->
+<script>
+function createBus(agentID) {
+  const listeners = {};
+  window.runtime.EventsOn(`${agentID}:nexus`, (raw) => {
+    let env;
+    if (typeof raw === 'string') {
+      try { env = JSON.parse(raw); } catch { return; }
+    } else {
+      env = raw;
+    }
+    const handlers = listeners[env.type] || [];
+    let payload = env.payload;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch {}
+    }
+    handlers.forEach(fn => fn(payload, env));
+  });
+
+  return {
+    emit(eventType, payload) {
+      const env = JSON.stringify({
+        type: eventType,
+        payload: JSON.stringify(payload || {}),
+        timestamp: new Date().toISOString(),
+      });
+      window.runtime.EventsEmit(`${agentID}:nexus.input`, env);
+    },
+    on(eventType, handler) {
+      if (!listeners[eventType]) listeners[eventType] = [];
+      listeners[eventType].push(handler);
+    },
+    off(eventType, handler) {
+      if (!listeners[eventType]) return;
+      listeners[eventType] = listeners[eventType].filter(fn => fn !== handler);
+    },
+    async call(requestEvent, responseEvent, payload, timeoutMs = 60000) {
+      const requestID = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.off(responseEvent, handler);
+          reject(new Error(`${requestEvent} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        const handler = (data) => {
+          if (data.RequestID === requestID || data.requestID === requestID) {
+            clearTimeout(timer);
+            this.off(responseEvent, handler);
+            resolve(data);
+          }
+        };
+        this.on(responseEvent, handler);
+        this.emit(requestEvent, { ...payload, requestID });
+      });
+    },
+  };
+}
+window.createBus = createBus;
+</script>
+
+<!-- ── Shell store ──────────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('shell', {
+    agents: [],
+    activeAgentID: null,
+    collapsed: false,
+
+    get activeAgent() {
+      return this.agents.find(a => a.id === this.activeAgentID) || null;
+    },
+
+    async init() {
+      try {
+        const agents = await window.go.desktop.Shell.ListAgents();
+        this.agents = agents || [];
+      } catch (err) {
+        console.error('Failed to list agents:', err);
+      }
+    },
+
+    async selectAgent(id) {
+      if (this.activeAgentID === id) return;
+      this.activeAgentID = id;
+      const agent = this.agents.find(a => a.id === id);
+      if (!agent || agent.status === 'running') return;
+      agent.status = 'booting';
+      try {
+        await window.go.desktop.Shell.EnsureAgentRunning(id);
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) this.agents = updated;
+      } catch (err) {
+        console.error(`Failed to start agent ${id}:`, err);
+        agent.status = 'error';
+      }
+    },
+  });
+});
+</script>
+
+</body>
+</html>

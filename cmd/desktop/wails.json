@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "nexus-desktop",
+  "outputfilename": "nexus-desktop",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "Frank Bardon"
+  },
+  "info": {
+    "companyName": "Nerds, Rescue Me!",
+    "productName": "Nexus Desktop Reference",
+    "productVersion": "0.1.0",
+    "copyright": "",
+    "comments": "Multi-agent Nexus desktop shell"
+  }
+}
