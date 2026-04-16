@@ -1,0 +1,29 @@
+# Hello World — minimal agent to prove the desktop shell bus bridge.
+#
+# This file is //go:embed'd into cmd/desktop/main.go and loaded
+# via engine.NewFromBytes. No filesystem dependency at runtime.
+
+core:
+  log_level: info
+  tick_interval: 5s
+
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.wails
+    - nexus.app.helloworld
+
+  nexus.io.wails:
+    subscribe:
+      - "hello.response"
+      - "ui.state.restore"
+    accept:
+      - "hello.request"
+      - "ui.state.save"
+
+  nexus.app.helloworld:
+    greeting: "${greeting}"

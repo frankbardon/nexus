@@ -1,0 +1,21 @@
+[book]
+authors = ["Frank Bardon"]
+language = "en"
+src = "src"
+title = "Nexus Documentation"
+description = "Modular AI agent harness built on a pure event-driven architecture in Go"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/frankbardon/nexus"
+edit-url-template = "https://github.com/frankbardon/nexus/edit/main/docs/src/{path}"
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+boost-hierarchy = 2

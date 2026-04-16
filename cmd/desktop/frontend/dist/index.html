@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Desktop</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { overflow: hidden; }
+
+    /* Nav transition for collapse */
+    .nav-sidebar {
+      transition: width 200ms ease;
+    }
+
+    /* Wails window drag region */
+    .wails-drag { --wails-draggable: drag; }
+  </style>
+</head>
+<body class="bg-base-100 text-base-content">
+
+<!--
+  Nexus Desktop — multi-agent shell with left-nav navigation.
+
+  Architecture:
+  - Alpine.store('shell') owns the global nav state
+  - Each agent's UI lives in a persistent DOM section with x-show
+  - Agent engines boot lazily on first selection via Shell.EnsureAgentRunning
+  - All agent domain communication flows through scoped bus bridges
+  - Shell services (PickFile, Notify, etc.) are the only Wails-bound methods
+-->
+
+<div x-data class="h-screen flex" x-init="$store.shell.init()">
+
+  <!-- ── Left Nav Sidebar ──────────────────────────────────────── -->
+  <nav class="nav-sidebar flex-shrink-0 bg-base-200 border-r border-base-300 flex flex-col h-full"
+       :style="{ width: $store.shell.collapsed ? '64px' : '220px' }">
+
+    <!-- App logo / collapse toggle -->
+    <div class="flex items-center gap-2 px-3 py-4 border-b border-base-300">
+      <button @click="$store.shell.collapsed = !$store.shell.collapsed"
+              class="btn btn-ghost btn-sm btn-square"
+              :title="$store.shell.collapsed ? 'Expand nav' : 'Collapse nav'">
+        <i class="fa-solid fa-bolt text-primary"></i>
+      </button>
+      <span x-show="!$store.shell.collapsed"
+            x-transition.opacity
+            class="font-semibold text-sm truncate select-none">
+        Nexus
+      </span>
+    </div>
+
+    <!-- Agent list -->
+    <div class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+      <template x-for="agent in $store.shell.agents" :key="agent.id">
+        <button @click="$store.shell.selectAgent(agent.id)"
+                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-left group"
+                :class="$store.shell.activeAgentID === agent.id
+                  ? 'bg-primary/15 text-primary'
+                  : 'hover:bg-base-300 text-base-content/70 hover:text-base-content'"
+                :title="$store.shell.collapsed ? agent.name : ''">
+
+          <!-- Icon with status indicator -->
+          <div class="relative flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center"
+               :class="$store.shell.activeAgentID === agent.id
+                 ? 'bg-primary/20'
+                 : 'bg-base-300 group-hover:bg-base-100'">
+            <i :class="agent.icon" class="text-sm"></i>
+
+            <!-- Status dot -->
+            <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-base-200"
+                 x-show="agent.status !== 'idle'"
+                 :class="{
+                   'bg-success': agent.status === 'running',
+                   'bg-warning animate-pulse': agent.status === 'booting',
+                   'bg-error': agent.status === 'error'
+                 }"></div>
+          </div>
+
+          <!-- Label (hidden when collapsed) -->
+          <div x-show="!$store.shell.collapsed" x-transition.opacity class="min-w-0 flex-1">
+            <div class="text-sm font-medium truncate" x-text="agent.name"></div>
+            <div class="text-xs opacity-50 truncate" x-text="agent.description"></div>
+          </div>
+        </button>
+      </template>
+    </div>
+
+    <!-- Settings + collapse -->
+    <div class="px-2 py-3 border-t border-base-300 space-y-1">
+      <button @click="$store.shell.showSettings()"
+              class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left"
+              :class="$store.shell.activeView === 'settings'
+                ? 'bg-primary/15 text-primary'
+                : 'hover:bg-base-300 text-base-content/70 hover:text-base-content'"
+              :title="$store.shell.collapsed ? 'Settings' : ''">
+        <div class="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center"
+             :class="$store.shell.activeView === 'settings' ? 'bg-primary/20' : 'bg-base-300'">
+          <i class="fa-solid fa-gear text-sm"></i>
+        </div>
+        <span x-show="!$store.shell.collapsed" x-transition.opacity class="text-sm font-medium">Settings</span>
+      </button>
+      <button @click="$store.shell.collapsed = !$store.shell.collapsed"
+              class="btn btn-ghost btn-xs w-full"
+              :title="$store.shell.collapsed ? 'Expand' : 'Collapse'">
+        <i class="fa-solid text-xs"
+           :class="$store.shell.collapsed ? 'fa-angles-right' : 'fa-angles-left'"></i>
+        <span x-show="!$store.shell.collapsed" x-transition.opacity class="text-xs">Collapse</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ── Sessions Panel (visible when an agent is selected) ──── -->
+  <aside x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgentID"
+         x-transition:enter="transition ease-out duration-150"
+         x-transition:enter-start="opacity-0 -translate-x-2"
+         x-transition:enter-end="opacity-100 translate-x-0"
+         class="flex-shrink-0 w-64 bg-base-200/50 border-r border-base-300 flex flex-col h-full">
+
+    <!-- Header -->
+    <div class="px-3 py-3 border-b border-base-300 flex items-center gap-2">
+      <span class="text-xs font-semibold uppercase tracking-wider opacity-50 flex-1">Sessions</span>
+      <button class="btn btn-ghost btn-xs btn-square"
+              @click="$store.sessions.newSession()"
+              title="New session">
+        <i class="fa-solid fa-plus text-xs"></i>
+      </button>
+    </div>
+
+    <!-- Session list -->
+    <div class="flex-1 overflow-y-auto py-1 px-2 space-y-0.5">
+
+      <!-- Loading -->
+      <div x-show="$store.sessions.loading" class="flex justify-center py-4">
+        <span class="loading loading-spinner loading-sm opacity-40"></span>
+      </div>
+
+      <!-- Empty state -->
+      <div x-show="!$store.sessions.loading && $store.sessions.list.length === 0"
+           class="text-center py-6 px-2">
+        <p class="text-xs opacity-40">No sessions yet</p>
+      </div>
+
+      <!-- Session entries -->
+      <template x-for="session in $store.sessions.list" :key="session.id">
+        <div @click="$store.sessions.recallSession(session.id)"
+             class="group px-2.5 py-2 rounded-lg cursor-pointer transition-colors"
+             :class="$store.sessions.activeSessionID === session.id
+               ? 'bg-primary/15 text-primary'
+               : 'hover:bg-base-300/60 text-base-content/70 hover:text-base-content'">
+
+          <div class="flex items-start gap-2">
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium truncate" x-text="session.title || 'Untitled'"></div>
+              <div class="text-xs opacity-50 mt-0.5" x-text="$store.sessions.formatTime(session.created_at)"></div>
+
+              <!-- Preview data -->
+              <div x-show="session.preview" class="mt-1">
+                <template x-if="session.preview?.candidateCount !== undefined">
+                  <span class="text-xs opacity-40">
+                    <span x-text="session.preview.candidateCount"></span> candidates
+                    <template x-if="session.preview?.topCandidate">
+                      <span> · <span x-text="session.preview.topCandidate"></span></span>
+                    </template>
+                  </span>
+                </template>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-1 flex-shrink-0">
+              <!-- Status badge -->
+              <div class="w-1.5 h-1.5 rounded-full mt-1.5"
+                   :class="{
+                     'bg-success': session.status === 'completed',
+                     'bg-primary animate-pulse': session.status === 'running',
+                     'bg-error': session.status === 'failed'
+                   }"></div>
+
+              <!-- Delete button -->
+              <button @click.stop="$store.sessions.deleteSession(session.id)"
+                      class="btn btn-ghost btn-xs btn-square opacity-0 group-hover:opacity-50 hover:!opacity-100 hover:text-error"
+                      :class="session.status === 'running' ? 'hidden' : ''"
+                      title="Delete session">
+                <i class="fa-solid fa-xmark text-xs"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </aside>
+
+  <!-- ── Content Area ──────────────────────────────────────────── -->
+  <div class="flex-1 flex flex-col min-w-0 h-full">
+
+    <!-- Content header -->
+    <header class="px-6 py-3 border-b border-base-300 flex items-center gap-3 bg-base-100 wails-drag"
+            x-show="$store.shell.activeAgentID || $store.shell.activeView === 'settings'">
+      <div class="flex-1 min-w-0">
+        <template x-if="$store.shell.activeView === 'settings'">
+          <div>
+            <div class="font-semibold text-base leading-tight">Settings</div>
+            <div class="text-xs opacity-50">Configure shell and agent settings</div>
+          </div>
+        </template>
+        <template x-if="$store.shell.activeView !== 'settings'">
+          <div>
+            <div class="font-semibold text-base leading-tight"
+                 x-text="$store.shell.activeAgent?.name || ''"></div>
+            <div class="text-xs opacity-50"
+                 x-text="$store.shell.activeAgent?.description || ''"></div>
+          </div>
+        </template>
+      </div>
+      <!-- File panel toggle (only for agent views) -->
+      <button x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgentID"
+              @click="$store.files.toggle()"
+              class="btn btn-ghost btn-sm btn-square"
+              :class="$store.files.open ? 'text-primary' : 'opacity-60'"
+              title="Toggle file browser">
+        <i class="fa-solid fa-folder-open text-sm"></i>
+      </button>
+    </header>
+
+    <!-- Agent content + file panel row -->
+    <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- Agent content sections -->
+    <main class="flex-1 overflow-hidden relative">
+
+      <!-- No agent selected state -->
+      <div x-show="$store.shell.activeView === 'home'"
+           class="flex items-center justify-center h-full">
+        <div class="text-center max-w-sm">
+          <div class="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+            <i class="fa-solid fa-bolt text-primary text-2xl"></i>
+          </div>
+          <h2 class="text-lg font-semibold mb-1">Select an agent</h2>
+          <p class="text-sm opacity-60">
+            Choose an agent from the sidebar to get started.
+          </p>
+        </div>
+      </div>
+
+      <!-- Boot spinner overlay (shown while agent engine is starting) -->
+      <div x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgent?.status === 'booting'"
+           x-transition
+           class="absolute inset-0 flex items-center justify-center bg-base-100/80 z-10">
+        <div class="text-center">
+          <span class="loading loading-spinner loading-lg text-primary"></span>
+          <p class="mt-3 text-sm opacity-60">Starting engine...</p>
+        </div>
+      </div>
+
+      <!-- ── Staffing Match Agent UI ─────────────────────────── -->
+      <div x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgentID === 'staffing-match'"
+           class="h-full flex flex-col">
+
+        <!-- Job description + action row -->
+        <section class="px-6 py-5 border-b border-base-300 bg-base-100 space-y-3">
+          <div>
+            <label class="block text-xs font-medium opacity-60 uppercase tracking-wider mb-1.5">
+              Job description
+            </label>
+            <textarea
+              x-model="$store.staffing.jobText"
+              :disabled="$store.staffing.isMatching"
+              placeholder="Paste the job description here. The ranker matches candidates against this text."
+              class="textarea textarea-bordered w-full min-h-[7rem] text-sm leading-snug"
+              rows="5"></textarea>
+          </div>
+
+          <!-- Upload row + action button -->
+          <div class="flex items-center gap-3">
+            <button class="btn btn-ghost btn-sm"
+                    @click="$store.staffing.selectJob()"
+                    :disabled="$store.staffing.isMatching">
+              <i class="fa-solid fa-paperclip text-sm"></i>
+              Attach PDF
+            </button>
+
+            <div class="flex-1 min-w-0 text-sm">
+              <template x-if="$store.staffing.jobFilename">
+                <div class="flex items-center gap-2">
+                  <span class="font-mono truncate opacity-80" x-text="$store.staffing.jobFilename"></span>
+                  <button @click="$store.staffing.clearJobPDF()"
+                          class="btn btn-ghost btn-xs btn-circle opacity-50 hover:opacity-100"
+                          title="Remove attached PDF">
+                    <i class="fa-solid fa-xmark text-xs"></i>
+                  </button>
+                </div>
+              </template>
+              <template x-if="!$store.staffing.jobFilename">
+                <span class="opacity-40 italic text-xs">Attach a job PDF or paste the description above</span>
+              </template>
+            </div>
+
+            <button class="btn btn-primary btn-sm"
+                    @click="$store.staffing.findMatches()"
+                    :disabled="!$store.staffing.canMatch() || $store.staffing.isMatching">
+              <span x-show="!$store.staffing.isMatching">Find matches</span>
+              <span x-show="$store.staffing.isMatching" class="flex items-center gap-2">
+                <span class="loading loading-spinner loading-xs"></span>
+                Matching...
+              </span>
+            </button>
+          </div>
+
+          <div x-show="$store.staffing.errorMessage"
+               x-transition
+               class="alert alert-error py-2 text-sm">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <span x-text="$store.staffing.errorMessage"></span>
+          </div>
+        </section>
+
+        <!-- Results list -->
+        <div class="flex-1 overflow-y-auto px-6 py-5">
+
+          <!-- Empty state -->
+          <div x-show="$store.staffing.candidates.length === 0 && !$store.staffing.isMatching"
+               class="flex items-center justify-center h-full">
+            <div class="text-center max-w-sm">
+              <div class="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+                <i class="fa-solid fa-magnifying-glass text-primary text-xl"></i>
+              </div>
+              <h2 class="text-lg font-semibold mb-1">No matches yet</h2>
+              <p class="text-sm opacity-60">
+                Upload a job PDF and click <span class="font-medium">Find matches</span>
+                to see ranked candidates from your pool.
+              </p>
+            </div>
+          </div>
+
+          <!-- Matching spinner -->
+          <div x-show="$store.staffing.isMatching && $store.staffing.candidates.length === 0"
+               class="flex items-center justify-center h-full">
+            <span class="loading loading-spinner loading-lg text-primary"></span>
+          </div>
+
+          <!-- Cost/latency/token line -->
+          <div x-show="$store.staffing.candidates.length > 0 && $store.staffing.cost"
+               class="flex items-center justify-end gap-3 mb-3 text-xs opacity-50 font-mono">
+            <span x-show="$store.staffing.cost">
+              <span x-text="$store.staffing.formatTokens($store.staffing.cost && $store.staffing.cost.TotalTokens)"></span>
+              tokens
+            </span>
+            <span class="opacity-30">&middot;</span>
+            <span x-text="$store.staffing.formatUSD($store.staffing.cost && $store.staffing.cost.USD)"></span>
+            <span class="opacity-30">&middot;</span>
+            <span x-text="$store.staffing.formatLatency($store.staffing.cost && $store.staffing.cost.LatencyMs)"></span>
+          </div>
+
+          <!-- Candidate list -->
+          <div x-show="$store.staffing.candidates.length > 0" class="space-y-3">
+            <template x-for="(c, idx) in $store.staffing.candidates" :key="c.ID">
+              <div class="card bg-base-200 border border-base-300 hover:border-primary/40 transition-colors">
+                <div class="card-body p-4">
+                  <div class="flex items-start gap-3">
+                    <div class="shrink-0 w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-semibold text-sm"
+                         x-text="idx + 1"></div>
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2 mb-1">
+                        <span class="font-semibold text-base truncate" x-text="c.Name"></span>
+                        <span class="badge badge-sm"
+                              :class="c.Score >= 0.85 ? 'badge-success' : c.Score >= 0.7 ? 'badge-warning' : 'badge-ghost'"
+                              x-text="$store.staffing.formatScore(c.Score)"></span>
+                      </div>
+                      <p class="text-sm opacity-80" x-text="c.Reasoning"></p>
+                      <div class="mt-2 text-xs opacity-40" x-show="c.ResumePath">
+                        <span class="font-mono" x-text="c.ResumePath"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Hello World Agent UI ────────────────────────────── -->
+      <div x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgentID === 'hello-world'"
+           class="h-full flex items-center justify-center px-6">
+        <div class="w-full max-w-md space-y-6">
+
+          <!-- Input -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Your name</span>
+            </label>
+            <div class="flex gap-2">
+              <input type="text"
+                     x-model="$store.hello.name"
+                     @keydown.enter="$store.hello.sayHello()"
+                     placeholder="Enter your name"
+                     class="input input-bordered flex-1"
+                     :disabled="$store.hello.loading">
+              <button class="btn btn-primary"
+                      @click="$store.hello.sayHello()"
+                      :disabled="!$store.hello.name.trim() || $store.hello.loading">
+                <span x-show="!$store.hello.loading">Say hello</span>
+                <span x-show="$store.hello.loading" class="loading loading-spinner loading-xs"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Response -->
+          <div x-show="$store.hello.response"
+               x-transition
+               class="card bg-base-200 border border-base-300">
+            <div class="card-body p-4">
+              <p class="text-lg" x-text="$store.hello.response"></p>
+            </div>
+          </div>
+
+          <!-- Error -->
+          <div x-show="$store.hello.error"
+               x-transition
+               class="alert alert-error py-2 text-sm">
+            <span x-text="$store.hello.error"></span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Settings Page ───────────────────────────────────── -->
+      <div x-show="$store.shell.activeView === 'settings'"
+           class="h-full overflow-y-auto px-6 py-5">
+        <div class="max-w-2xl mx-auto space-y-6">
+
+          <!-- Missing required fields banner -->
+          <div x-show="Object.keys($store.settings.missingRequired).length > 0"
+               class="alert alert-warning">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <div>
+              <div class="font-semibold">Required settings missing</div>
+              <div class="text-sm opacity-80">Configure the highlighted fields below before starting agents.</div>
+            </div>
+          </div>
+
+          <!-- General (shell) settings -->
+          <div class="collapse collapse-arrow bg-base-200 border border-base-300">
+            <input type="checkbox" checked>
+            <div class="collapse-title font-semibold flex items-center gap-2">
+              <i class="fa-solid fa-sliders text-sm opacity-60"></i>
+              General
+            </div>
+            <div class="collapse-content space-y-4">
+              <template x-for="field in $store.settings.schema.shell || []" :key="field.key">
+                <div x-data="settingsField('shell', field)">
+                  <label class="block text-sm font-medium mb-1" x-text="field.display"></label>
+                  <div class="text-xs opacity-50 mb-2" x-show="field.description" x-text="field.description"></div>
+
+                  <!-- Path field -->
+                  <template x-if="field.type === 'path'">
+                    <div class="flex gap-2">
+                      <input type="text" class="input input-bordered input-sm flex-1"
+                             :value="currentValue()" @change="save($event.target.value)">
+                      <button class="btn btn-ghost btn-sm" @click="browse()">
+                        <i class="fa-solid fa-folder-open text-xs"></i> Browse
+                      </button>
+                    </div>
+                  </template>
+
+                  <!-- Number field -->
+                  <template x-if="field.type === 'number'">
+                    <input type="number" class="input input-bordered input-sm w-full"
+                           :min="field.validation?.min" :max="field.validation?.max"
+                           :value="currentValue()" @change="save(Number($event.target.value))">
+                  </template>
+
+                  <!-- String field (non-secret) -->
+                  <template x-if="field.type === 'string' && !field.secret">
+                    <input type="text" class="input input-bordered input-sm w-full"
+                           :value="currentValue()" @change="save($event.target.value)">
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Per-agent settings -->
+          <template x-for="agent in $store.shell.agents" :key="'settings-' + agent.id">
+            <div x-show="($store.settings.schema.agents?.[agent.id] || []).length > 0"
+                 class="collapse collapse-arrow bg-base-200 border border-base-300"
+                 :class="$store.settings.missingRequired[agent.id] ? 'border-warning' : ''">
+              <input type="checkbox" checked>
+              <div class="collapse-title font-semibold flex items-center gap-2">
+                <i :class="agent.icon" class="text-sm opacity-60"></i>
+                <span x-text="agent.name"></span>
+                <span x-show="agent.status === 'running' && $store.settings.dirtyAgents[agent.id]"
+                      class="badge badge-warning badge-xs ml-2">restart required</span>
+              </div>
+              <div class="collapse-content space-y-4">
+                <template x-for="field in $store.settings.schema.agents?.[agent.id] || []" :key="field.key">
+                  <div x-data="settingsField(agent.id, field)">
+                    <label class="block text-sm font-medium mb-1" x-text="field.display">
+                    </label>
+                    <div class="text-xs opacity-50 mb-2" x-show="field.description" x-text="field.description"></div>
+
+                    <!-- Required field missing indicator -->
+                    <div x-show="field.required && !hasValue()"
+                         class="text-xs text-warning mb-1">
+                      <i class="fa-solid fa-circle-exclamation"></i> Required
+                    </div>
+
+                    <!-- Secret field -->
+                    <template x-if="field.secret">
+                      <div class="flex gap-2">
+                        <div class="relative flex-1">
+                          <input :type="showSecret ? 'text' : 'password'"
+                                 class="input input-bordered input-sm w-full pr-10"
+                                 :class="field.required && !hasValue() ? 'input-warning' : ''"
+                                 :placeholder="hasValue() ? '********' : 'Enter value...'"
+                                 @change="saveSecret($event.target.value); $event.target.value = ''">
+                          <button class="absolute right-2 top-1/2 -translate-y-1/2 btn btn-ghost btn-xs btn-circle"
+                                  @click="showSecret = !showSecret">
+                            <i class="fa-solid text-xs" :class="showSecret ? 'fa-eye-slash' : 'fa-eye'"></i>
+                          </button>
+                        </div>
+                        <button x-show="hasValue()" class="btn btn-ghost btn-sm text-error"
+                                @click="deleteValue()" title="Remove">
+                          <i class="fa-solid fa-trash-can text-xs"></i>
+                        </button>
+                      </div>
+                    </template>
+
+                    <!-- Path field -->
+                    <template x-if="field.type === 'path' && !field.secret">
+                      <div class="flex gap-2">
+                        <input type="text" class="input input-bordered input-sm flex-1"
+                               :class="field.required && !hasValue() ? 'input-warning' : ''"
+                               :value="currentValue()" @change="save($event.target.value)">
+                        <button class="btn btn-ghost btn-sm" @click="browse()">
+                          <i class="fa-solid fa-folder-open text-xs"></i> Browse
+                        </button>
+                      </div>
+                    </template>
+
+                    <!-- Text (multiline) field -->
+                    <template x-if="field.type === 'text' && !field.secret">
+                      <textarea class="textarea textarea-bordered textarea-sm w-full min-h-[6rem]"
+                                :value="currentValue()" @change="save($event.target.value)"></textarea>
+                    </template>
+
+                    <!-- Number field -->
+                    <template x-if="field.type === 'number' && !field.secret">
+                      <input type="number" class="input input-bordered input-sm w-full"
+                             :min="field.validation?.min" :max="field.validation?.max"
+                             :value="currentValue()" @change="save(Number($event.target.value))">
+                    </template>
+
+                    <!-- Bool field -->
+                    <template x-if="field.type === 'bool' && !field.secret">
+                      <input type="checkbox" class="toggle toggle-primary toggle-sm"
+                             :checked="currentValue() === true || currentValue() === 'true'"
+                             @change="save($event.target.checked)">
+                    </template>
+
+                    <!-- Select field -->
+                    <template x-if="field.type === 'select' && !field.secret">
+                      <select class="select select-bordered select-sm w-full"
+                              :value="currentValue()" @change="save($event.target.value)">
+                        <template x-for="opt in field.options || []" :key="opt.value">
+                          <option :value="opt.value" x-text="opt.display" :selected="currentValue() === opt.value"></option>
+                        </template>
+                      </select>
+                    </template>
+
+                    <!-- String field (non-secret, non-path) -->
+                    <template x-if="field.type === 'string' && !field.secret">
+                      <input type="text" class="input input-bordered input-sm w-full"
+                             :class="field.required && !hasValue() ? 'input-warning' : ''"
+                             :value="currentValue()" @change="save($event.target.value)">
+                    </template>
+                  </div>
+                </template>
+
+                <!-- Restart button for running agents with changed settings -->
+                <div x-show="agent.status === 'running' && $store.settings.dirtyAgents[agent.id]"
+                     class="pt-2 border-t border-base-300">
+                  <button class="btn btn-warning btn-sm"
+                          @click="$store.settings.restartAgent(agent.id)">
+                    <i class="fa-solid fa-rotate-right text-xs"></i>
+                    Restart agent
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+        </div>
+      </div>
+
+    </main>
+
+    <!-- ── File Browser Panel (right side) ───────────────────── -->
+    <aside x-show="$store.files.open && $store.shell.activeView === 'agent'"
+           x-transition:enter="transition ease-out duration-150"
+           x-transition:enter-start="opacity-0 translate-x-2"
+           x-transition:enter-end="opacity-100 translate-x-0"
+           x-transition:leave="transition ease-in duration-100"
+           x-transition:leave-start="opacity-100 translate-x-0"
+           x-transition:leave-end="opacity-0 translate-x-2"
+           class="flex-shrink-0 w-72 bg-base-200/50 border-l border-base-300 flex flex-col h-full"
+           @dragover.prevent="$store.files.dragOver = true"
+           @dragleave.prevent="$store.files.dragOver = false"
+           @drop.prevent="$store.files.handleDrop($event)">
+
+      <!-- Panel header -->
+      <div class="px-3 py-3 border-b border-base-300 flex items-center gap-2">
+        <i class="fa-solid fa-folder-open text-xs opacity-50"></i>
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-50 flex-1">Files</span>
+        <button class="btn btn-ghost btn-xs btn-square"
+                @click="$store.files.refresh()"
+                title="Refresh file list">
+          <i class="fa-solid fa-arrows-rotate text-xs" :class="$store.files.loading ? 'animate-spin' : ''"></i>
+        </button>
+      </div>
+
+      <!-- Drop zone overlay -->
+      <div x-show="$store.files.dragOver"
+           x-transition
+           class="absolute inset-0 z-20 bg-primary/10 border-2 border-dashed border-primary rounded-lg flex items-center justify-center pointer-events-none">
+        <div class="text-center">
+          <i class="fa-solid fa-cloud-arrow-up text-primary text-2xl mb-2"></i>
+          <p class="text-sm font-medium text-primary">Drop files here</p>
+        </div>
+      </div>
+
+      <!-- Not configured state -->
+      <div x-show="!$store.files.configured && !$store.files.loading"
+           class="flex-1 flex items-center justify-center px-4">
+        <div class="text-center">
+          <i class="fa-solid fa-folder-plus text-2xl opacity-20 mb-2"></i>
+          <p class="text-xs opacity-40">No input folder configured</p>
+          <button class="btn btn-ghost btn-xs mt-2" @click="$store.shell.showSettings()">
+            <i class="fa-solid fa-gear text-xs"></i> Configure
+          </button>
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div x-show="$store.files.loading" class="flex justify-center py-6">
+        <span class="loading loading-spinner loading-sm opacity-40"></span>
+      </div>
+
+      <!-- Empty state -->
+      <div x-show="$store.files.configured && !$store.files.loading && $store.files.list.length === 0"
+           class="flex-1 flex items-center justify-center px-4">
+        <div class="text-center">
+          <i class="fa-solid fa-file-circle-plus text-2xl opacity-20 mb-2"></i>
+          <p class="text-xs opacity-40">No files found</p>
+          <p class="text-xs opacity-30 mt-1">Drop files here or add them to the input folder</p>
+        </div>
+      </div>
+
+      <!-- File list -->
+      <div x-show="$store.files.configured && !$store.files.loading && $store.files.list.length > 0"
+           class="flex-1 overflow-y-auto py-1 px-2 space-y-0.5">
+        <template x-for="file in $store.files.list" :key="file.path">
+          <div @click="$store.files.selectFile(file)"
+               class="group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors"
+               :class="$store.files.selectedPath === file.path
+                 ? 'bg-primary/15 text-primary'
+                 : 'hover:bg-base-300/60 text-base-content/70 hover:text-base-content'">
+
+            <!-- File type icon -->
+            <div class="flex-shrink-0 w-7 h-7 rounded flex items-center justify-center"
+                 :class="$store.files.selectedPath === file.path ? 'bg-primary/20' : 'bg-base-300'">
+              <i class="text-xs" :class="$store.files.fileIcon(file)"></i>
+            </div>
+
+            <!-- File info -->
+            <div class="flex-1 min-w-0">
+              <div class="text-sm truncate" x-text="file.name"></div>
+              <div class="text-xs opacity-40 flex items-center gap-1.5">
+                <span x-text="$store.files.formatSize(file.size)"></span>
+                <span class="opacity-30">&middot;</span>
+                <span x-text="$store.files.formatDate(file.modified)"></span>
+              </div>
+            </div>
+
+            <!-- Actions (visible on hover) -->
+            <div class="flex-shrink-0 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button @click.stop="$store.files.openExternal(file)"
+                      class="btn btn-ghost btn-xs btn-square" title="Open">
+                <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+              </button>
+              <button @click.stop="$store.files.revealInFinder(file)"
+                      class="btn btn-ghost btn-xs btn-square" title="Reveal">
+                <i class="fa-solid fa-folder text-xs"></i>
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Input dir path footer -->
+      <div x-show="$store.files.configured"
+           class="px-3 py-2 border-t border-base-300 text-xs opacity-30 truncate font-mono"
+           x-text="$store.files.inputDir"
+           :title="$store.files.inputDir">
+      </div>
+    </aside>
+
+    </div><!-- end content + file panel row -->
+  </div>
+</div>
+
+<!-- ── Bus helper ────────────────────────────────────────────────── -->
+<script>
+/**
+ * createBus creates a bus instance scoped to a specific agent.
+ * All communication with the agent's Nexus engine flows through this.
+ *
+ * @param {string} agentID - The agent ID for channel scoping
+ * @returns {object} Bus with emit, on, off, and call methods
+ */
+function createBus(agentID) {
+  const listeners = {};
+
+  // Subscribe to scoped outbound events from this agent's engine.
+  window.runtime.EventsOn(`${agentID}:nexus`, (raw) => {
+    let env;
+    if (typeof raw === 'string') {
+      try { env = JSON.parse(raw); } catch { return; }
+    } else {
+      env = raw;
+    }
+    const handlers = listeners[env.type] || [];
+    let payload = env.payload;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch {}
+    }
+    handlers.forEach(fn => fn(payload, env));
+  });
+
+  return {
+    emit(eventType, payload) {
+      const env = JSON.stringify({
+        type: eventType,
+        payload: payload || {},
+        timestamp: new Date().toISOString(),
+      });
+      window.runtime.EventsEmit(`${agentID}:nexus.input`, env);
+    },
+
+    on(eventType, handler) {
+      if (!listeners[eventType]) listeners[eventType] = [];
+      listeners[eventType].push(handler);
+    },
+
+    off(eventType, handler) {
+      if (!listeners[eventType]) return;
+      listeners[eventType] = listeners[eventType].filter(fn => fn !== handler);
+    },
+
+    async call(requestEvent, responseEvent, payload, timeoutMs = 60000) {
+      const requestID = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.off(responseEvent, handler);
+          reject(new Error(`${requestEvent} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        const handler = (data) => {
+          if (data.RequestID === requestID || data.requestID === requestID) {
+            clearTimeout(timer);
+            this.off(responseEvent, handler);
+            resolve(data);
+          }
+        };
+        this.on(responseEvent, handler);
+        this.emit(requestEvent, { ...payload, requestID });
+      });
+    },
+  };
+}
+
+window.createBus = createBus;
+
+// Global registry of agent bus instances for cross-store access.
+window._agentBuses = {};
+</script>
+
+<!-- ── Shell store (nav state + agent lifecycle) ───────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('shell', {
+    agents: [],
+    activeAgentID: null,
+    activeView: 'home', // 'home', 'agent', 'settings'
+    collapsed: false,
+
+    get activeAgent() {
+      return this.agents.find(a => a.id === this.activeAgentID) || null;
+    },
+
+    async init() {
+      try {
+        const agents = await window.go.desktop.Shell.ListAgents();
+        this.agents = agents || [];
+      } catch (err) {
+        console.error('Failed to list agents:', err);
+      }
+
+      // Check for missing required settings and redirect to settings page.
+      try {
+        const missing = await window.go.desktop.Shell.HasMissingRequired();
+        if (missing && Object.keys(missing).length > 0) {
+          Alpine.store('settings').missingRequired = missing;
+          this.activeView = 'settings';
+          this.activeAgentID = null;
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to check required settings:', err);
+      }
+    },
+
+    showSettings() {
+      this.activeView = 'settings';
+      this.activeAgentID = null;
+      Alpine.store('settings').load();
+    },
+
+    async selectAgent(id) {
+      if (this.activeAgentID === id && this.activeView === 'agent') return;
+      this.activeView = 'agent';
+      this.activeAgentID = id;
+
+      // Load file panel for this agent.
+      Alpine.store('files').loadForAgent(id);
+
+      const agent = this.agents.find(a => a.id === id);
+      if (!agent) return;
+      if (agent.status === 'running') {
+        // Already running — just load the session list.
+        Alpine.store('sessions').load(id);
+        return;
+      }
+
+      // Mark as booting locally for instant UI feedback.
+      agent.status = 'booting';
+
+      try {
+        await window.go.desktop.Shell.EnsureAgentRunning(id);
+        // Refresh agent list to get authoritative status.
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) {
+          this.agents = updated;
+        }
+        // Load session list for this agent.
+        Alpine.store('sessions').load(id);
+      } catch (err) {
+        console.error(`Failed to start agent ${id}:`, err);
+        // If the error is about missing settings, redirect to settings.
+        if (err && String(err).includes('missing required settings')) {
+          agent.status = 'error';
+          Alpine.store('shell').showSettings();
+          return;
+        }
+        agent.status = 'error';
+      }
+    },
+  });
+});
+</script>
+
+<!-- ── Staffing Match store ─────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  const staffingBus = createBus('staffing-match');
+  window._agentBuses['staffing-match'] = staffingBus;
+
+  Alpine.store('staffing', {
+    jobPath: '',
+    jobFilename: '',
+    jobText: '',
+    isMatching: false,
+    errorMessage: '',
+    candidates: [],
+    cost: null,
+
+    canMatch() {
+      return !!(this.jobText.trim() || this.jobPath);
+    },
+
+    async selectJob() {
+      this.errorMessage = '';
+      try {
+        const path = await window.go.desktop.Shell.PickFile(
+          'staffing-match',
+          'Select a job description PDF',
+          '*.pdf;*.PDF'
+        );
+        if (!path) return;
+        this.jobPath = path;
+        this.jobFilename = this.basename(path);
+      } catch (err) {
+        this.errorMessage = 'Failed to open file dialog: ' + (err && err.message ? err.message : err);
+      }
+    },
+
+    clearJobPDF() {
+      this.jobPath = '';
+      this.jobFilename = '';
+    },
+
+    reset() {
+      this.jobPath = '';
+      this.jobFilename = '';
+      this.jobText = '';
+      this.isMatching = false;
+      this.errorMessage = '';
+      this.candidates = [];
+      this.cost = null;
+    },
+
+    _saveState() {
+      staffingBus.emit('ui.state.save', {
+        state: {
+          jobPath: this.jobPath,
+          jobFilename: this.jobFilename,
+          jobText: this.jobText,
+          candidates: this.candidates,
+          cost: this.cost,
+        },
+      });
+    },
+
+    async findMatches() {
+      if (!this.canMatch() || this.isMatching) return;
+      this.errorMessage = '';
+      this.candidates = [];
+      this.cost = null;
+      this.isMatching = true;
+      try {
+        const result = await staffingBus.call('match.request', 'match.result', {
+          jobText: this.jobText,
+          pdfPath: this.jobPath,
+        });
+        if (result.Error) {
+          this.errorMessage = 'Match failed: ' + result.Error;
+        } else {
+          this.candidates = result.Candidates || [];
+          this.cost = result.Cost || null;
+          this._saveState();
+        }
+      } catch (err) {
+        this.errorMessage = 'Match failed: ' + (err && err.message ? err.message : err);
+      } finally {
+        this.isMatching = false;
+      }
+    },
+
+    basename(path) {
+      if (!path) return '';
+      const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+      return idx >= 0 ? path.slice(idx + 1) : path;
+    },
+
+    formatScore(score) {
+      if (typeof score !== 'number') return '\u2014';
+      return Math.round(score * 100) + '%';
+    },
+
+    formatTokens(n) {
+      if (typeof n !== 'number') return '\u2014';
+      return n.toLocaleString();
+    },
+
+    formatUSD(usd) {
+      if (typeof usd !== 'number') return '\u2014';
+      if (usd < 0.01) return '$' + usd.toFixed(4);
+      if (usd < 1) return '$' + usd.toFixed(3);
+      return '$' + usd.toFixed(2);
+    },
+
+    formatLatency(ms) {
+      if (typeof ms !== 'number') return '\u2014';
+      if (ms < 1000) return ms + 'ms';
+      return (ms / 1000).toFixed(1) + 's';
+    },
+  });
+
+  // Retrieve the reactive proxy after registration.
+  const staffing = Alpine.store('staffing');
+
+  // Wire io.file.selected: auto-fill job PDF path when a file is selected
+  // in the file browser panel.
+  staffingBus.on('io.file.selected', (data) => {
+    if (data && data.path) {
+      const ext = (data.name || '').split('.').pop().toLowerCase();
+      if (ext === 'pdf') {
+        staffing.jobPath = data.path;
+        staffing.jobFilename = data.name || '';
+      }
+    }
+  });
+
+  // Wire session.file.created: refresh file panel when match results are written.
+  staffingBus.on('session.file.created', () => {
+    Alpine.store('files').refresh();
+  });
+
+  // Wire ui.state.restore listener eagerly for session recall.
+  staffingBus.on('ui.state.restore', (data) => {
+    if (data && data.state) {
+      const s = data.state;
+      if (s.jobPath) staffing.jobPath = s.jobPath;
+      if (s.jobFilename) staffing.jobFilename = s.jobFilename;
+      if (s.jobText) staffing.jobText = s.jobText;
+      if (s.candidates) staffing.candidates = s.candidates;
+      if (s.cost !== undefined) staffing.cost = s.cost;
+    }
+  });
+});
+</script>
+
+<!-- ── Hello World store ───────────────────────────��───────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  const helloBus = createBus('hello-world');
+  window._agentBuses['hello-world'] = helloBus;
+
+  Alpine.store('hello', {
+    name: '',
+    response: '',
+    error: '',
+    loading: false,
+
+    reset() {
+      this.name = '';
+      this.response = '';
+      this.error = '';
+      this.loading = false;
+    },
+
+    _saveState() {
+      helloBus.emit('ui.state.save', {
+        state: { name: this.name, response: this.response },
+      });
+    },
+
+    sayHello() {
+      if (!this.name.trim() || this.loading) return;
+      this.error = '';
+      this.response = '';
+      this.loading = true;
+      helloBus.emit('hello.request', { name: this.name.trim() });
+
+      // Safety timeout.
+      const self = this;
+      setTimeout(() => {
+        if (self.loading) {
+          self.loading = false;
+          self.error = 'No response from engine — is the plugin running?';
+        }
+      }, 10000);
+    },
+  });
+
+  // Retrieve the reactive proxy — Alpine.store(name, def) doesn't
+  // reliably return it, but Alpine.store(name) always does.
+  const hello = Alpine.store('hello');
+
+  // Wire bus listeners eagerly so ui.state.restore works on recall.
+  helloBus.on('hello.response', (data) => {
+    hello.response = data.message || '';
+    hello.loading = false;
+    hello._saveState();
+  });
+  helloBus.on('ui.state.restore', (data) => {
+    if (data && data.state) {
+      if (data.state.name) hello.name = data.state.name;
+      if (data.state.response) hello.response = data.state.response;
+    }
+  });
+});
+</script>
+
+<!-- ── Sessions store ──────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('sessions', {
+    list: [],
+    loading: false,
+    activeSessionID: null,
+    _agentID: null,
+    _eventCleanup: null,
+
+    async load(agentID) {
+      if (!agentID) return;
+
+      // Clean up previous event listener.
+      if (this._eventCleanup) {
+        this._eventCleanup();
+        this._eventCleanup = null;
+      }
+
+      this._agentID = agentID;
+      this.loading = true;
+      this.list = [];
+      this.activeSessionID = null;
+
+      try {
+        const sessions = await window.go.desktop.Shell.ListSessions(agentID);
+        this.list = sessions || [];
+        // The most recent session (first in list) is the active one
+        // after a fresh boot.
+        if (this.list.length > 0) {
+          this.activeSessionID = this.list[0].id;
+        }
+      } catch (err) {
+        console.error('Failed to load sessions:', err);
+      } finally {
+        this.loading = false;
+      }
+
+      // Listen for session list updates from the shell.
+      const self = this;
+      const handler = (raw) => {
+        let sessions;
+        if (typeof raw === 'string') {
+          try { sessions = JSON.parse(raw); } catch { return; }
+        } else {
+          sessions = raw;
+        }
+        self.list = sessions || [];
+      };
+      window.runtime.EventsOn(`${agentID}:sessions.updated`, handler);
+      this._eventCleanup = () => {
+        window.runtime.EventsOff(`${agentID}:sessions.updated`);
+      };
+    },
+
+    _resetAgentUI(agentID) {
+      const storeMap = { 'hello-world': 'hello', 'staffing-match': 'staffing' };
+      const storeName = storeMap[agentID];
+      if (storeName) {
+        const store = Alpine.store(storeName);
+        if (store && typeof store.reset === 'function') store.reset();
+      }
+    },
+
+    async newSession() {
+      if (!this._agentID) return;
+      this.loading = true;
+      try {
+        await window.go.desktop.Shell.NewSession(this._agentID);
+        this._resetAgentUI(this._agentID);
+        // Refresh agent list for status update.
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) Alpine.store('shell').agents = updated;
+        // Reload sessions — the new session will be at the top.
+        await this.load(this._agentID);
+      } catch (err) {
+        console.error('Failed to create new session:', err);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async recallSession(sessionID) {
+      if (!this._agentID || sessionID === this.activeSessionID) return;
+      this.loading = true;
+      try {
+        this._resetAgentUI(this._agentID);
+        await window.go.desktop.Shell.RecallSession(this._agentID, sessionID);
+        this.activeSessionID = sessionID;
+        // Refresh agent list for status update.
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) Alpine.store('shell').agents = updated;
+      } catch (err) {
+        console.error('Failed to recall session:', err);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async deleteSession(sessionID) {
+      if (!this._agentID) return;
+      try {
+        await window.go.desktop.Shell.DeleteSession(this._agentID, sessionID);
+        this.list = this.list.filter(s => s.id !== sessionID);
+        if (this.activeSessionID === sessionID) {
+          this.activeSessionID = this.list.length > 0 ? this.list[0].id : null;
+        }
+      } catch (err) {
+        console.error('Failed to delete session:', err);
+      }
+    },
+
+    formatTime(isoStr) {
+      if (!isoStr) return '';
+      const d = new Date(isoStr);
+      const now = new Date();
+      const diffMs = now - d;
+      const diffMin = Math.floor(diffMs / 60000);
+      if (diffMin < 1) return 'Just now';
+      if (diffMin < 60) return `${diffMin}m ago`;
+      const diffHr = Math.floor(diffMin / 60);
+      if (diffHr < 24) return `${diffHr}h ago`;
+      const diffDay = Math.floor(diffHr / 24);
+      if (diffDay < 7) return `${diffDay}d ago`;
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    },
+  });
+});
+</script>
+
+<!-- ── Files store (file browser panel) ─────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('files', {
+    open: false,
+    list: [],
+    loading: false,
+    configured: false,
+    inputDir: '',
+    selectedPath: null,
+    dragOver: false,
+    _agentID: null,
+    _eventCleanup: null,
+
+    toggle() {
+      this.open = !this.open;
+      if (this.open && this._agentID) {
+        this.refresh();
+        this._startWatching();
+      } else {
+        this._stopWatching();
+      }
+    },
+
+    async loadForAgent(agentID) {
+      if (!agentID) {
+        this.list = [];
+        this.configured = false;
+        this.inputDir = '';
+        this.selectedPath = null;
+        return;
+      }
+
+      // Clean up previous event listener.
+      this._stopWatching();
+      this._agentID = agentID;
+
+      // Try to list files — if it fails with "no input directory", mark as not configured.
+      await this.refresh();
+
+      if (this.open) {
+        this._startWatching();
+      }
+    },
+
+    async refresh() {
+      if (!this._agentID) return;
+      this.loading = true;
+      try {
+        const files = await window.go.desktop.Shell.ListFiles(this._agentID, '');
+        this.list = files || [];
+        this.configured = true;
+        // Resolve the input dir path from the first file, or try settings.
+        if (this.list.length > 0 && this.list[0].path) {
+          this.inputDir = this.list[0].path.replace(/[/\\][^/\\]+$/, '');
+        } else {
+          // Empty directory — try to get the path from settings.
+          const settings = Alpine.store('settings');
+          const val = settings.getValue(this._agentID, 'input_dir');
+          this.inputDir = val || '';
+        }
+      } catch (err) {
+        const msg = err && (err.message || String(err));
+        if (msg && msg.includes('no input directory')) {
+          this.configured = false;
+          this.list = [];
+          this.inputDir = '';
+        } else {
+          console.error('Failed to list files:', err);
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    _startWatching() {
+      if (!this._agentID) return;
+
+      // Tell Go to start the fsnotify watcher on this agent's input dir.
+      try {
+        window.go.desktop.Shell.WatchInputDir(this._agentID);
+      } catch {}
+
+      // Listen for change events from the watcher.
+      const self = this;
+      const handler = () => { self.refresh(); };
+      window.runtime.EventsOn(`${this._agentID}:files.changed`, handler);
+      this._eventCleanup = () => {
+        window.runtime.EventsOff(`${this._agentID}:files.changed`);
+      };
+    },
+
+    _stopWatching() {
+      if (this._eventCleanup) {
+        this._eventCleanup();
+        this._eventCleanup = null;
+      }
+    },
+
+    selectFile(file) {
+      this.selectedPath = file.path;
+      // Emit io.file.selected on the agent's bus.
+      if (this._agentID) {
+        const bus = window._agentBuses && window._agentBuses[this._agentID];
+        if (bus) {
+          bus.emit('io.file.selected', {
+            path: file.path,
+            name: file.name,
+            size: file.size,
+          });
+        }
+      }
+    },
+
+    async openExternal(file) {
+      try {
+        await window.go.desktop.Shell.OpenExternal(file.path);
+      } catch (err) {
+        console.error('Open external failed:', err);
+      }
+    },
+
+    async revealInFinder(file) {
+      try {
+        await window.go.desktop.Shell.RevealInFinder(file.path);
+      } catch (err) {
+        console.error('Reveal in finder failed:', err);
+      }
+    },
+
+    async handleDrop(event) {
+      this.dragOver = false;
+      if (!this._agentID) return;
+
+      const files = event.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+
+      for (const file of files) {
+        // Try path-based approach first (works in some webview environments).
+        const filePath = file.path;
+        if (filePath && (filePath.includes('/') || filePath.includes('\\'))) {
+          try {
+            await window.go.desktop.Shell.CopyFileToInputDir(this._agentID, filePath);
+          } catch (err) {
+            console.error('Copy file failed:', err);
+          }
+        } else {
+          // Fallback: read file contents via FileReader, base64-encode,
+          // and write via shell method.
+          try {
+            const buf = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsArrayBuffer(file);
+            });
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            const b64 = btoa(binary);
+            await window.go.desktop.Shell.WriteFileToInputDir(this._agentID, file.name, b64);
+          } catch (err) {
+            console.error('File drop write failed:', err);
+          }
+        }
+      }
+      // Refresh after all writes.
+      setTimeout(() => this.refresh(), 300);
+    },
+
+    fileIcon(file) {
+      if (file.is_dir) return 'fa-solid fa-folder text-warning';
+      const ext = (file.name || '').split('.').pop().toLowerCase();
+      switch (ext) {
+        case 'pdf': return 'fa-solid fa-file-pdf text-error';
+        case 'json': return 'fa-solid fa-file-code text-info';
+        case 'txt': case 'md': return 'fa-solid fa-file-lines';
+        case 'csv': case 'xlsx': case 'xls': return 'fa-solid fa-file-excel text-success';
+        case 'doc': case 'docx': return 'fa-solid fa-file-word text-info';
+        case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': return 'fa-solid fa-file-image text-secondary';
+        default: return 'fa-solid fa-file';
+      }
+    },
+
+    formatSize(bytes) {
+      if (typeof bytes !== 'number') return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+
+    formatDate(isoStr) {
+      if (!isoStr) return '';
+      const d = new Date(isoStr);
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    },
+  });
+});
+</script>
+
+<!-- ── Settings store ──────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('settings', {
+    schema: { shell: [], agents: {} },
+    values: {},
+    missingRequired: {},
+    dirtyAgents: {},
+    _loaded: false,
+
+    async load() {
+      try {
+        const [schema, values, missing] = await Promise.all([
+          window.go.desktop.Shell.GetSettingsSchema(),
+          window.go.desktop.Shell.GetSettings(),
+          window.go.desktop.Shell.HasMissingRequired(),
+        ]);
+        this.schema = schema || { shell: [], agents: {} };
+        this.values = values || {};
+        this.missingRequired = missing || {};
+        this._loaded = true;
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+      }
+    },
+
+    getValue(scope, key) {
+      const scopeVals = this.values[scope];
+      if (!scopeVals) return undefined;
+      const val = scopeVals[key];
+      if (val === '__keychain__') return val;
+      return val;
+    },
+
+    async setValue(scope, key, value) {
+      await window.go.desktop.Shell.UpdateSetting(scope, key, value);
+      if (!this.values[scope]) this.values[scope] = {};
+      this.values[scope][key] = value;
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    async setSecret(scope, key, value) {
+      await window.go.desktop.Shell.UpdateSecret(scope, key, value);
+      if (!this.values[scope]) this.values[scope] = {};
+      this.values[scope][key] = '__keychain__';
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    async deleteValue(scope, key, secret) {
+      await window.go.desktop.Shell.DeleteSetting(scope, key, secret);
+      if (this.values[scope]) delete this.values[scope][key];
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    _markDirty(scope) {
+      if (scope === 'shell') return;
+      const agent = Alpine.store('shell').agents.find(a => a.id === scope);
+      if (agent && agent.status === 'running') {
+        this.dirtyAgents[scope] = true;
+      }
+    },
+
+    async _refreshMissing() {
+      try {
+        this.missingRequired = await window.go.desktop.Shell.HasMissingRequired() || {};
+      } catch {}
+    },
+
+    async restartAgent(agentID) {
+      try {
+        await window.go.desktop.Shell.StopAgent(agentID);
+        await window.go.desktop.Shell.EnsureAgentRunning(agentID);
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) Alpine.store('shell').agents = updated;
+        delete this.dirtyAgents[agentID];
+      } catch (err) {
+        console.error(`Failed to restart agent ${agentID}:`, err);
+      }
+    },
+  });
+
+  // Load settings on init.
+  Alpine.store('settings').load();
+});
+
+/**
+ * settingsField is a reusable Alpine component for a single settings field.
+ * It provides currentValue, hasValue, save, saveSecret, deleteValue, browse.
+ */
+function settingsField(scope, field) {
+  // For shell-scoped fields (key starts with "shell."), use shell scope
+  // and strip the prefix.
+  let effectiveScope = scope;
+  let effectiveKey = field.key;
+  if (field.key.startsWith('shell.')) {
+    effectiveScope = 'shell';
+    effectiveKey = field.key.slice(6);
+  }
+
+  return {
+    showSecret: false,
+
+    currentValue() {
+      const val = Alpine.store('settings').getValue(effectiveScope, effectiveKey);
+      if (val === undefined && field.default !== undefined) return field.default;
+      if (val === '__keychain__') return undefined;
+      return val;
+    },
+
+    hasValue() {
+      const val = Alpine.store('settings').getValue(effectiveScope, effectiveKey);
+      return val !== undefined && val !== null && val !== '';
+    },
+
+    async save(value) {
+      await Alpine.store('settings').setValue(effectiveScope, effectiveKey, value);
+    },
+
+    async saveSecret(value) {
+      if (!value) return;
+      await Alpine.store('settings').setSecret(effectiveScope, effectiveKey, value);
+    },
+
+    async deleteValue() {
+      await Alpine.store('settings').deleteValue(effectiveScope, effectiveKey, field.secret);
+    },
+
+    async browse() {
+      try {
+        const path = await window.go.desktop.Shell.PickFolder(scope, field.display);
+        if (path) await this.save(path);
+      } catch (err) {
+        console.error('Browse failed:', err);
+      }
+    },
+  };
+}
+</script>
+
+</body>
+</html>

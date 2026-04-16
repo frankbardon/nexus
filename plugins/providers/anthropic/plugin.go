@@ -1,0 +1,681 @@
+package anthropic
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
+)
+
+const (
+	pluginID   = "nexus.llm.anthropic"
+	pluginName = "Anthropic LLM Provider"
+	version    = "0.1.0"
+	apiURL     = "https://api.anthropic.com/v1/messages"
+)
+
+// Plugin implements the Anthropic LLM provider.
+type Plugin struct {
+	bus     engine.EventBus
+	logger  *slog.Logger
+	models  *engine.ModelRegistry
+	session *engine.SessionWorkspace
+
+	apiKey  string
+	client  *http.Client
+	prompts *engine.PromptRegistry
+	unsubs  []func()
+	debug   bool
+	retry   retryConfig
+
+	mu                 sync.Mutex
+	currentRequestMeta map[string]any
+	cancelFunc         context.CancelFunc // cancels the in-flight HTTP request
+	requestSeq         int                // monotonic counter for debug log filenames
+}
+
+// New creates a new Anthropic provider plugin.
+func New() engine.Plugin {
+	return &Plugin{}
+}
+
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return pluginName }
+func (p *Plugin) Version() string        { return version }
+func (p *Plugin) Dependencies() []string { return nil }
+
+func (p *Plugin) Init(ctx engine.PluginContext) error {
+	p.bus = ctx.Bus
+	p.logger = ctx.Logger
+	p.models = ctx.Models
+	p.session = ctx.Session
+
+	if debug, ok := ctx.Config["debug"].(bool); ok {
+		p.debug = debug
+	}
+
+	// Read API key: direct config value takes priority over env var.
+	if key, ok := ctx.Config["api_key"].(string); ok && key != "" {
+		p.apiKey = key
+	} else {
+		apiKeyEnv, _ := ctx.Config["api_key_env"].(string)
+		if apiKeyEnv == "" {
+			apiKeyEnv = "ANTHROPIC_API_KEY"
+		}
+		p.apiKey = os.Getenv(apiKeyEnv)
+	}
+	if p.apiKey == "" {
+		return fmt.Errorf("anthropic: no API key configured (set api_key in config or %s env var)", "ANTHROPIC_API_KEY")
+	}
+
+	p.client = &http.Client{
+		Timeout: 5 * time.Minute,
+	}
+	p.prompts = ctx.Prompts
+
+	p.retry = parseRetryConfig(ctx.Config)
+	if p.retry.Enabled {
+		p.logger.Info("retry enabled",
+			"max_retries", p.retry.MaxRetries,
+			"backoff", string(p.retry.Backoff),
+			"initial_delay", p.retry.InitialDelay,
+			"max_delay", p.retry.MaxDelay,
+		)
+	}
+
+	// Register event handlers.
+	p.unsubs = append(p.unsubs,
+		p.bus.Subscribe("llm.request", p.handleEvent,
+			engine.WithPriority(10),
+			engine.WithSource(pluginID),
+		),
+		p.bus.Subscribe("cancel.active", p.handleCancel,
+			engine.WithPriority(5),
+			engine.WithSource(pluginID),
+		),
+	)
+
+	return nil
+}
+
+func (p *Plugin) Ready() error { return nil }
+
+func (p *Plugin) Shutdown(_ context.Context) error {
+	for _, unsub := range p.unsubs {
+		unsub()
+	}
+	p.client.CloseIdleConnections()
+	return nil
+}
+
+func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	return []engine.EventSubscription{
+		{EventType: "llm.request", Priority: 10},
+		{EventType: "cancel.active", Priority: 5},
+	}
+}
+
+func (p *Plugin) Emissions() []string {
+	return []string{
+		"llm.response",
+		"llm.stream.chunk",
+		"llm.stream.end",
+		"core.error",
+	}
+}
+
+// handleEvent dispatches incoming events.
+func (p *Plugin) handleEvent(event engine.Event[any]) {
+	if event.Type != "llm.request" {
+		return
+	}
+	req, ok := event.Payload.(events.LLMRequest)
+	if !ok {
+		p.emitError(fmt.Errorf("anthropic: invalid llm.request payload type: %T", event.Payload))
+		return
+	}
+	p.handleRequest(req)
+}
+
+func (p *Plugin) handleCancel(event engine.Event[any]) {
+	p.mu.Lock()
+	cancel := p.cancelFunc
+	p.cancelFunc = nil
+	p.mu.Unlock()
+
+	if cancel != nil {
+		p.logger.Info("cancelling in-flight LLM request")
+		cancel()
+	}
+}
+
+func (p *Plugin) handleRequest(req events.LLMRequest) {
+	model := req.Model
+	maxTokens := req.MaxTokens
+
+	// Resolve model role if no explicit model is set.
+	if model == "" && p.models != nil {
+		if cfg, ok := p.models.Resolve(req.Role); ok {
+			// If the resolved config targets a different provider, skip this request.
+			if cfg.Provider != "" && cfg.Provider != pluginID {
+				return
+			}
+			if cfg.Model != "" {
+				model = cfg.Model
+			}
+			if maxTokens == 0 && cfg.MaxTokens > 0 {
+				maxTokens = cfg.MaxTokens
+			}
+		}
+	}
+
+	// Fall back to default model role.
+	if model == "" && p.models != nil {
+		def := p.models.Default()
+		if def.Provider == "" || def.Provider == pluginID {
+			model = def.Model
+			if maxTokens == 0 {
+				maxTokens = def.MaxTokens
+			}
+		}
+	}
+
+	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+
+	body := p.buildRequestBody(model, maxTokens, req)
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		p.emitError(fmt.Errorf("anthropic: failed to marshal request: %w", err))
+		return
+	}
+
+	if p.debug {
+		p.mu.Lock()
+		p.requestSeq++
+		p.mu.Unlock()
+		p.debugLog("request", jsonBody)
+	}
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	p.mu.Lock()
+	p.cancelFunc = cancel
+	p.mu.Unlock()
+
+	makeReq := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", apiURL, bytes.NewReader(jsonBody))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("x-api-key", p.apiKey)
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+		httpReq.Header.Set("content-type", "application/json")
+		return httpReq, nil
+	}
+
+	resp, err := p.doWithRetry(reqCtx, makeReq)
+	if err != nil {
+		p.mu.Lock()
+		p.cancelFunc = nil
+		p.mu.Unlock()
+		if reqCtx.Err() == context.Canceled {
+			p.logger.Info("LLM request cancelled")
+			return
+		}
+		p.emitError(fmt.Errorf("anthropic: HTTP request failed: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		p.emitError(fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)))
+		return
+	}
+
+	// Store request metadata for passthrough to response.
+	p.mu.Lock()
+	p.currentRequestMeta = req.Metadata
+	p.mu.Unlock()
+
+	var responseBody io.Reader = resp.Body
+	var debugBuf *bytes.Buffer
+	if p.debug {
+		debugBuf = new(bytes.Buffer)
+		responseBody = io.TeeReader(resp.Body, debugBuf)
+	}
+
+	if req.Stream {
+		p.handleStreamResponse(responseBody)
+	} else {
+		p.handleSyncResponse(responseBody)
+	}
+
+	if debugBuf != nil {
+		p.debugLog("response", debugBuf.Bytes())
+	}
+
+	p.mu.Lock()
+	p.cancelFunc = nil
+	p.mu.Unlock()
+}
+
+// buildRequestBody constructs the Anthropic API request body.
+func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
+	body := map[string]any{
+		"model":      model,
+		"max_tokens": maxTokens,
+		"stream":     req.Stream,
+	}
+
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+
+	// Extract system prompt and build messages.
+	var systemPrompt string
+	var apiMessages []map[string]any
+
+	for _, msg := range req.Messages {
+		if msg.Role == "system" {
+			systemPrompt = msg.Content
+			continue
+		}
+
+		apiMsg := p.convertMessage(msg)
+		if apiMsg != nil {
+			apiMessages = append(apiMessages, apiMsg)
+		}
+	}
+
+	if p.prompts != nil {
+		systemPrompt = p.prompts.Apply(systemPrompt)
+	}
+	if systemPrompt != "" {
+		body["system"] = systemPrompt
+	}
+	body["messages"] = apiMessages
+
+	// Convert tool definitions.
+	if len(req.Tools) > 0 {
+		var tools []map[string]any
+		for _, t := range req.Tools {
+			tools = append(tools, map[string]any{
+				"name":         t.Name,
+				"description":  t.Description,
+				"input_schema": t.Parameters,
+			})
+		}
+		body["tools"] = tools
+	}
+
+	return body
+}
+
+// convertMessage converts an events.Message to the Anthropic API format.
+func (p *Plugin) convertMessage(msg events.Message) map[string]any {
+	switch msg.Role {
+	case "assistant":
+		if len(msg.ToolCalls) > 0 {
+			var content []map[string]any
+			if msg.Content != "" {
+				content = append(content, map[string]any{
+					"type": "text",
+					"text": msg.Content,
+				})
+			}
+			for _, tc := range msg.ToolCalls {
+				var input any
+				if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
+					input = map[string]any{}
+				}
+				content = append(content, map[string]any{
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  tc.Name,
+					"input": input,
+				})
+			}
+			return map[string]any{
+				"role":    "assistant",
+				"content": content,
+			}
+		}
+		return map[string]any{
+			"role":    "assistant",
+			"content": msg.Content,
+		}
+
+	case "tool":
+		return map[string]any{
+			"role": "user",
+			"content": []map[string]any{
+				{
+					"type":        "tool_result",
+					"tool_use_id": msg.ToolCallID,
+					"content":     msg.Content,
+				},
+			},
+		}
+
+	case "user":
+		return map[string]any{
+			"role":    "user",
+			"content": msg.Content,
+		}
+
+	default:
+		return map[string]any{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+}
+
+// apiResponse represents the Anthropic Messages API non-streaming response.
+type apiResponse struct {
+	ID         string            `json:"id"`
+	Type       string            `json:"type"`
+	Role       string            `json:"role"`
+	Content    []apiContentBlock `json:"content"`
+	Model      string            `json:"model"`
+	StopReason string            `json:"stop_reason"`
+	Usage      apiUsage          `json:"usage"`
+}
+
+type apiContentBlock struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+type apiUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+func (p *Plugin) handleSyncResponse(body io.Reader) {
+	var apiResp apiResponse
+	if err := json.NewDecoder(body).Decode(&apiResp); err != nil {
+		p.emitError(fmt.Errorf("anthropic: failed to decode response: %w", err))
+		return
+	}
+
+	resp := p.convertAPIResponse(apiResp)
+
+	p.mu.Lock()
+	resp.Metadata = p.currentRequestMeta
+	p.mu.Unlock()
+
+	if err := p.bus.Emit("llm.response", resp); err != nil {
+		p.logger.Error("failed to emit llm.response", "error", err)
+	}
+}
+
+func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
+	var content strings.Builder
+	var toolCalls []events.ToolCallRequest
+
+	for _, block := range apiResp.Content {
+		switch block.Type {
+		case "text":
+			content.WriteString(block.Text)
+		case "tool_use":
+			args := string(block.Input)
+			toolCalls = append(toolCalls, events.ToolCallRequest{
+				ID:        block.ID,
+				Name:      block.Name,
+				Arguments: args,
+			})
+		}
+	}
+
+	return events.LLMResponse{
+		Content:   content.String(),
+		ToolCalls: toolCalls,
+		Usage: events.Usage{
+			PromptTokens:     apiResp.Usage.InputTokens,
+			CompletionTokens: apiResp.Usage.OutputTokens,
+			TotalTokens:      apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
+		},
+		Model:        apiResp.Model,
+		FinishReason: apiResp.StopReason,
+	}
+}
+
+// SSE streaming response handling.
+
+type sseEvent struct {
+	Event string
+	Data  string
+}
+
+func (p *Plugin) handleStreamResponse(body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var currentEvent sseEvent
+	var fullContent strings.Builder
+	var toolCalls []events.ToolCallRequest
+	var currentToolCall *events.ToolCallRequest
+	var currentToolInput strings.Builder
+	var usage apiUsage
+	var model string
+	var finishReason string
+	turnID := ""
+	chunkIndex := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			// Empty line means end of SSE event; process it.
+			if currentEvent.Event != "" {
+				p.processSSEEvent(currentEvent, &fullContent, &toolCalls, &currentToolCall,
+					&currentToolInput, &usage, &model, &finishReason, &turnID, &chunkIndex)
+			}
+			currentEvent = sseEvent{}
+			continue
+		}
+
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent.Event = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			currentEvent.Data = strings.TrimPrefix(line, "data: ")
+		}
+	}
+
+	// Process any remaining event.
+	if currentEvent.Event != "" {
+		p.processSSEEvent(currentEvent, &fullContent, &toolCalls, &currentToolCall,
+			&currentToolInput, &usage, &model, &finishReason, &turnID, &chunkIndex)
+	}
+
+	if err := scanner.Err(); err != nil {
+		p.emitError(fmt.Errorf("anthropic: stream read error: %w", err))
+	}
+
+	// Emit stream end.
+	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
+		TurnID:       turnID,
+		FinishReason: finishReason,
+		Usage: events.Usage{
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+			TotalTokens:      usage.InputTokens + usage.OutputTokens,
+		},
+	})
+
+	// Also emit the complete llm.response for downstream consumers.
+	p.mu.Lock()
+	meta := p.currentRequestMeta
+	p.mu.Unlock()
+
+	_ = p.bus.Emit("llm.response", events.LLMResponse{
+		Content:   fullContent.String(),
+		ToolCalls: toolCalls,
+		Usage: events.Usage{
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+			TotalTokens:      usage.InputTokens + usage.OutputTokens,
+		},
+		Model:        model,
+		FinishReason: finishReason,
+		Metadata:     meta,
+	})
+}
+
+func (p *Plugin) processSSEEvent(
+	sse sseEvent,
+	fullContent *strings.Builder,
+	toolCalls *[]events.ToolCallRequest,
+	currentToolCall **events.ToolCallRequest,
+	currentToolInput *strings.Builder,
+	usage *apiUsage,
+	model *string,
+	finishReason *string,
+	turnID *string,
+	chunkIndex *int,
+) {
+	switch sse.Event {
+	case "message_start":
+		var data struct {
+			Message struct {
+				ID    string   `json:"id"`
+				Model string   `json:"model"`
+				Usage apiUsage `json:"usage"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(sse.Data), &data) == nil {
+			*turnID = data.Message.ID
+			*model = data.Message.Model
+			usage.InputTokens = data.Message.Usage.InputTokens
+		}
+
+	case "content_block_start":
+		var data struct {
+			Index        int             `json:"index"`
+			ContentBlock apiContentBlock `json:"content_block"`
+		}
+		if json.Unmarshal([]byte(sse.Data), &data) == nil {
+			if data.ContentBlock.Type == "tool_use" {
+				*currentToolCall = &events.ToolCallRequest{
+					ID:   data.ContentBlock.ID,
+					Name: data.ContentBlock.Name,
+				}
+				currentToolInput.Reset()
+			}
+		}
+
+	case "content_block_delta":
+		var data struct {
+			Index int `json:"index"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text,omitempty"`
+				PartialJSON string `json:"partial_json,omitempty"`
+			} `json:"delta"`
+		}
+		if json.Unmarshal([]byte(sse.Data), &data) == nil {
+			switch data.Delta.Type {
+			case "text_delta":
+				fullContent.WriteString(data.Delta.Text)
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
+					Content: data.Delta.Text,
+					Index:   *chunkIndex,
+					TurnID:  *turnID,
+				})
+				*chunkIndex++
+
+			case "input_json_delta":
+				if *currentToolCall != nil {
+					currentToolInput.WriteString(data.Delta.PartialJSON)
+				}
+			}
+		}
+
+	case "content_block_stop":
+		if *currentToolCall != nil {
+			(*currentToolCall).Arguments = currentToolInput.String()
+			*toolCalls = append(*toolCalls, **currentToolCall)
+
+			_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
+				ToolCall: *currentToolCall,
+				Index:    *chunkIndex,
+				TurnID:   *turnID,
+			})
+			*chunkIndex++
+
+			*currentToolCall = nil
+			currentToolInput.Reset()
+		}
+
+	case "message_delta":
+		var data struct {
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Usage apiUsage `json:"usage"`
+		}
+		if json.Unmarshal([]byte(sse.Data), &data) == nil {
+			*finishReason = data.Delta.StopReason
+			if data.Usage.OutputTokens > 0 {
+				usage.OutputTokens = data.Usage.OutputTokens
+			}
+		}
+
+	case "message_stop":
+		// End of message; handled after the loop.
+
+	case "ping":
+		// Keepalive; ignore.
+
+	case "error":
+		var data struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(sse.Data), &data) == nil {
+			p.emitError(fmt.Errorf("anthropic: stream error: %s: %s", data.Error.Type, data.Error.Message))
+		}
+	}
+}
+
+func (p *Plugin) debugLog(label string, data []byte) {
+	if !p.debug || p.session == nil {
+		return
+	}
+
+	p.mu.Lock()
+	seq := p.requestSeq
+	p.mu.Unlock()
+
+	filename := fmt.Sprintf("plugins/%s/%04d_%s.json", pluginID, seq, label)
+	if err := p.session.WriteFile(filename, data); err != nil {
+		p.logger.Error("failed to write debug log", "file", filename, "error", err)
+	}
+}
+
+func (p *Plugin) emitError(err error) {
+	p.logger.Error(err.Error())
+	_ = p.bus.Emit("core.error", events.ErrorInfo{
+		Source: pluginID,
+		Err:    err,
+		Fatal:  false,
+	})
+}

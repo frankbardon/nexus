@@ -1,0 +1,62 @@
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.subagent
+    - nexus.gate.endless_loop
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/conversationalist.md
+
+  nexus.agent.subagent:
+    system_prompt: "Take in the user input and summarize the problem. Speak like a pirate."
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  # nexus.memory.compaction:
+  #   strategy: token_estimate    # message_count | token_estimate | turn_count
+  #   token_threshold: 30000      # for token_estimate strategy
+  #   message_threshold: 50       # for message_count strategy
+  #   turn_threshold: 10          # for turn_count strategy
+  #   model_role: quick           # LLM role for the compaction call
+  #   protect_recent: 4           # keep N most recent messages verbatim
+  #   # prompt: "custom compaction prompt inline"
+  #   # prompt_file: ./prompts/compaction.md
+
+  nexus.observe.logger:
+    output: stderr
+    level: warn

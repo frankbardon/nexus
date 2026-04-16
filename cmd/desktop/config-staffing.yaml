@@ -1,0 +1,52 @@
+# Staffing Match — embedded Nexus configuration.
+#
+# This file is //go:embed'd into cmd/desktop/main.go and loaded
+# via engine.NewFromBytes at boot. The shipped binary has no
+# filesystem dependency on this file — editing it requires a
+# rebuild, which is the intended tradeoff for a distributable PoC.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  # Model registry. The staffing-match plugin asks for role "quick"
+  # and the registry resolves that to the model below.
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.app.staffingmatch
+    - nexus.io.wails
+
+  nexus.io.wails:
+    subscribe:
+      - "match.result"
+      - "ui.state.restore"
+      - "io.file.output_dir.response"
+      - "io.file.selected"
+      - "session.file.created"
+    accept:
+      - "match.request"
+      - "ui.state.save"
+      - "io.file.output_dir.request"
+      - "io.file.selected"
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+    debug: true
+
+  nexus.app.staffingmatch:
+    input_dir: "${input_dir}"
+    output_dir: "${output_dir}"

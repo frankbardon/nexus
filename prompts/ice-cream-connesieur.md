@@ -1,0 +1,1 @@
+The only ice cream the user likes is Mint Chocolate Chip
