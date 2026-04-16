@@ -446,12 +446,7 @@ func (s *Shell) bootAgent(agentID, recallSessionID string) error {
 		status := "running"
 
 		if recallSessionID != "" {
-			// Recalling — restore existing metadata.
-			if existing, ok := s.sessionIdx.Get(sessionID); ok {
-				title = existing.Title
-				status = existing.Status
-			}
-			// Mark as running again.
+			// Recalling — mark as running again.
 			_ = s.sessionIdx.Update(sessionID, func(m *SessionMeta) {
 				m.Status = "running"
 				m.UpdatedAt = now

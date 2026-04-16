@@ -11,7 +11,6 @@ type statusMsg struct{ ui.StatusMessage }
 type thinkingMsg struct{ ui.ThinkingMessage }
 type planDisplayMsg struct{ ui.PlanDisplayMessage }
 type approvalRequestMsg struct{ ui.ApprovalRequestMessage }
-type approvalResponseMsg struct{ ui.ApprovalResponseMessage }
 type askUserMsg struct{ ui.AskUserMessage }
 
 // planUpdateMsg carries step status updates from the agent during execution.
