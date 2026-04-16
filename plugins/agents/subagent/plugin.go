@@ -145,6 +145,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"tool.register",
+		"before:tool.result",
 		"tool.result",
 		"llm.request",
 		"before:llm.request",
@@ -174,12 +175,17 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
-		_ = p.bus.Emit("tool.result", events.ToolResult{
+		errResult := events.ToolResult{
 			ID:     tc.ID,
 			Name:   tc.Name,
 			Error:  "task is required",
 			TurnID: tc.TurnID,
-		})
+		}
+		if veto, vErr := p.bus.EmitVetoable("before:tool.result", &errResult); vErr == nil && veto.Vetoed {
+			p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+			return
+		}
+		_ = p.bus.Emit("tool.result", errResult)
 		return
 	}
 
@@ -187,15 +193,20 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	modelRole, _ := tc.Arguments["model_role"].(string)
 
 	spawnID := generateSpawnID()
-	result := p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
+	subResult := p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
 
-	_ = p.bus.Emit("tool.result", events.ToolResult{
+	toolResult := events.ToolResult{
 		ID:     tc.ID,
 		Name:   tc.Name,
-		Output: result.Result,
-		Error:  result.Error,
+		Output: subResult.Result,
+		Error:  subResult.Error,
 		TurnID: tc.TurnID,
-	})
+	}
+	if veto, vErr := p.bus.EmitVetoable("before:tool.result", &toolResult); vErr == nil && veto.Vetoed {
+		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		return
+	}
+	_ = p.bus.Emit("tool.result", toolResult)
 }
 
 // runSubagent executes an isolated agent loop and returns the result.

@@ -69,6 +69,7 @@ to `never`.
 | `plan.approval.request` | When planexec's own `approval: always` is set |
 | `llm.request` | Step execution and final synthesis |
 | `before:tool.invoke` / `tool.invoke` | Tool invocation |
+| `before:tool.result` | Before tool result propagation (vetoable) |
 | `agent.plan` | After each step status change |
 | `io.status` | Phase transitions |
 | `thinking.step` | Reasoning steps |

@@ -97,7 +97,7 @@ Quality, safety, and operational gates. Standard plugins subscribing to `before:
 
 Gates use `EmitVetoable()` which wraps payloads in `VetoablePayload{Original, Veto}`. Handlers inspect `Original` (e.g. `*events.LLMRequest`), set `Veto` to block. Priority ordering: gates at 10, agents at 50 — gates always evaluate first.
 
-Hook points: `before:llm.request` (input-side), `before:io.output` (output-side), `before:tool.invoke`, `before:skill.activate`.
+Hook points: `before:llm.request` (input-side), `before:io.output` (output-side), `before:tool.invoke`, `before:tool.result`, `before:skill.activate`.
 
 Resume mechanism: Gates that veto `before:llm.request` temporarily (rate limiter, context window) emit `gate.llm.retry` when the condition clears. All agent plugins (react, planexec, orchestrator) subscribe to this event and re-invoke `sendLLMRequest()` if they have an active turn — no user re-submission needed.
 

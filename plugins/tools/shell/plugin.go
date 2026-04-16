@@ -114,6 +114,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:tool.result",
 		"tool.result",
 		"tool.register",
 		"core.error",
@@ -220,11 +221,16 @@ func (p *Plugin) isCommandAllowed(command string) bool {
 }
 
 func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
-	_ = p.bus.Emit("tool.result", events.ToolResult{
+	result := events.ToolResult{
 		ID:     tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,
 		TurnID: tc.TurnID,
-	})
+	}
+	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
+		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		return
+	}
+	_ = p.bus.Emit("tool.result", result)
 }

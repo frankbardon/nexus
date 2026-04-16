@@ -141,6 +141,7 @@ func (p *Plugin) Emissions() []string {
 		"before:llm.request",
 		"before:tool.invoke",
 		"tool.invoke",
+		"before:tool.result",
 		"tool.result",
 		"before:io.output",
 		"io.output",
@@ -477,12 +478,17 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
 				p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
 				// Emit a synthetic tool result so the agent loop can continue.
-				_ = p.bus.Emit("tool.result", events.ToolResult{
+				syntheticResult := events.ToolResult{
 					ID:     tc.ID,
 					Name:   tc.Name,
 					Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 					TurnID: turnID,
-				})
+				}
+				if rv, rvErr := p.bus.EmitVetoable("before:tool.result", &syntheticResult); rvErr == nil && rv.Vetoed {
+					p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
+					continue
+				}
+				_ = p.bus.Emit("tool.result", syntheticResult)
 				continue
 			}
 
