@@ -37,6 +37,7 @@ import (
 
 	// Provider plugins.
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
+	fallbackplugin "github.com/frankbardon/nexus/plugins/providers/fallback"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 
 	// Skill plugins.
@@ -101,6 +102,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Providers
 	r.Register("nexus.llm.anthropic", anthropic.New)
 	r.Register("nexus.llm.openai", openai.New)
+	r.Register("nexus.provider.fallback", fallbackplugin.New)
 
 	// Skills
 	r.Register("nexus.skills", skills.New)

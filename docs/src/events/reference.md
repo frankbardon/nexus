@@ -38,6 +38,11 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Source` | string | Plugin that reported the error |
 | `Err` | error | The error |
 | `Fatal` | bool | Whether this should trigger shutdown |
+| `Retryable` | bool | Whether this error class is retryable (429, 5xx) |
+| `RetriesExhausted` | bool | Provider's own retry logic gave up |
+| `RequestMeta` | map[string]any | Echo of LLMRequest.Metadata for correlation |
+
+`core.error` is vetoable — providers emit `before:core.error` first. The fallback plugin can veto the error to suppress it and retry with an alternate provider.
 
 ---
 
@@ -49,6 +54,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `io.output` | `AgentOutput` | Agent produced output |
 | `io.output.stream` | `OutputChunk` | Streaming output chunk |
 | `io.output.stream.end` | `StreamRef` | Streaming complete |
+| `io.output.clear` | *(none)* | Clear partial streamed content (used by fallback) |
 | `io.status` | `StatusUpdate` | Agent state changed |
 | `io.approval.request` | `ApprovalRequest` | Approval needed for an action |
 | `io.approval.response` | `ApprovalResponse` | User responded to approval |
@@ -123,6 +129,27 @@ Complete reference for all event types in Nexus, organized by domain.
 |-------|------|-------------|
 | `PromptID` | string | Matches the request |
 | `Answer` | string | User's response |
+
+---
+
+## Provider Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `provider.fallback` | `ProviderFallback` | Provider switch due to failure |
+
+### Payloads
+
+**ProviderFallback**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Role` | string | Model role being resolved |
+| `FailedProvider` | string | Plugin ID of the provider that failed |
+| `FailedModel` | string | Model that failed |
+| `Error` | string | Error description |
+| `NextProvider` | string | Plugin ID of the fallback provider |
+| `NextModel` | string | Model being tried next |
+| `Attempt` | int | 0-based index in the fallback chain |
 
 ---
 

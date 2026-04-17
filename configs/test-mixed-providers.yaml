@@ -41,6 +41,15 @@ core:
       provider: nexus.llm.openai
       model: gpt-4o-mini
       max_tokens: 4096
+    # Provider fallback: balanced with OpenAI fallback.
+    # Requires nexus.provider.fallback in plugins.active.
+    # balanced:
+    #   - provider: nexus.llm.anthropic
+    #     model: claude-sonnet-4-20250514
+    #     max_tokens: 8192
+    #   - provider: nexus.llm.openai
+    #     model: gpt-4o
+    #     max_tokens: 8192
   sessions:
     root: ~/.nexus/sessions
     retention: 30d

@@ -227,6 +227,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamChunkMsg:
 		m.chat.AppendToStream(msg.TurnID, msg.Content)
 
+	case outputClearMsg:
+		m.chat.ClearStream()
+
 	case streamEndMsg:
 		// Apply markdown to the completed stream message
 		if m.markdown != nil {

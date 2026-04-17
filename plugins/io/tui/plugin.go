@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -34,6 +35,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.output", Priority: 50},
 		{EventType: "io.output.stream", Priority: 50},
 		{EventType: "io.output.stream.end", Priority: 50},
+		{EventType: "io.output.clear", Priority: 50},
 		{EventType: "io.status", Priority: 50},
 		{EventType: "io.approval.request", Priority: 50},
 		{EventType: "io.ask", Priority: 50},
@@ -41,6 +43,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "plan.approval.request", Priority: 50},
 		{EventType: "plan.created", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
+		{EventType: "provider.fallback", Priority: 50},
 		{EventType: "session.file.created", Priority: 50},
 		{EventType: "session.file.updated", Priority: 50},
 		{EventType: "io.history.replay", Priority: 50},
@@ -104,6 +107,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output.stream", p.handleStreamChunk, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
+		p.bus.Subscribe("io.output.clear", p.handleOutputClear, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.status", p.handleStatus, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.ask", p.handleAskUser, engine.WithSource(pluginID)),
@@ -111,6 +115,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
+		p.bus.Subscribe("provider.fallback", p.handleProviderFallback, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.created", p.handleFileChanged, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.updated", p.handleFileChanged, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.history.replay", p.handleHistoryReplay, engine.WithSource(pluginID)),
@@ -318,6 +323,25 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 	if cc.Resumable {
 		_ = p.adapter.SendCancelComplete(cc.TurnID, true)
 	}
+}
+
+func (p *Plugin) handleOutputClear(_ engine.Event[any]) {
+	if p.adapter.program != nil {
+		p.adapter.program.Send(outputClearMsg{})
+	}
+}
+
+func (p *Plugin) handleProviderFallback(e engine.Event[any]) {
+	fb, ok := e.Payload.(events.ProviderFallback)
+	if !ok {
+		return
+	}
+	msg := fmt.Sprintf("Provider %s unavailable — switching to %s (%s)",
+		fb.FailedProvider, fb.NextProvider, fb.NextModel)
+	_ = p.adapter.SendOutput(ui.OutputMessage{
+		Content: msg,
+		Role:    "system",
+	})
 }
 
 func (p *Plugin) handleHistoryReplay(e engine.Event[any]) {

@@ -116,6 +116,28 @@ func (c *chatView) EndStream() {
 	c.rebuildViewport()
 }
 
+// ClearStream removes the current partial stream message and any fully
+// rendered content from the active streaming turn. Used by provider
+// fallback to wipe incomplete output before retrying with another model.
+func (c *chatView) ClearStream() {
+	if c.streamTurnID == "" {
+		return
+	}
+	turnID := c.streamTurnID
+	c.streamTurnID = ""
+
+	// Remove the partial stream message for this turn.
+	filtered := c.messages[:0]
+	for _, msg := range c.messages {
+		if msg.TurnID == turnID && msg.IsStream {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	c.messages = filtered
+	c.rebuildViewport()
+}
+
 func (c *chatView) SetStatus(msg statusMsg) {
 	wasWorking := c.isWorking
 	c.status = msg

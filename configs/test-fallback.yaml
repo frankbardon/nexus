@@ -1,0 +1,71 @@
+# Test: Provider fallback chain — primary fails, fallback handles request
+# Validates: fallback chain config parsing, fallback plugin boot, event flow
+#
+# Run (automated):
+#   go test -tags integration ./tests/integration/ -run TestFallback
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env (used by fallback provider)
+#
+# What to test:
+#   1. Boot: Engine starts with fallback chain config + nexus.provider.fallback active.
+#   2. Config parsing: balanced role parsed as 2-entry chain (OpenAI primary, Anthropic fallback).
+#   3. Fallback trigger: Primary (OpenAI with bad base_url) fails → fallback to Anthropic.
+#   4. User notification: provider.fallback event emitted.
+#   5. Response: Agent responds using the fallback provider.
+#
+# Design: OpenAI primary deliberately misconfigured (bogus base_url).
+# Anthropic fallback has valid API key. Fallback plugin intercepts the
+# OpenAI error and re-emits to Anthropic.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.openai
+        model: gpt-4o
+        max_tokens: 4096
+      - provider: nexus.llm.anthropic
+        model: claude-haiku-4-5-20251001
+        max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.provider.fallback
+    - nexus.agent.react
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Hello, respond with exactly: fallback works"
+    input_delay: 500ms
+    approval_mode: approve
+    timeout: 30s
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.llm.openai:
+    api_key: "sk-bogus-key-that-will-fail"
+    base_url: "http://localhost:1/v1/chat/completions"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Follow instructions exactly."
+
+  nexus.memory.conversation:
+    max_messages: 4
+    persist: false
+
+  nexus.observe.logger:
+    output: stderr
+    level: info
