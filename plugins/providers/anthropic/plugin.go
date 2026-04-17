@@ -264,7 +264,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		p.emitErrorInfo(events.ErrorInfo{
 			Err:              fmt.Errorf("anthropic: HTTP request failed: %w", err),
 			Retryable:        true,
-			RetriesExhausted: p.retry.Enabled,
+			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
 		})
 		return
