@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestEmitVetoable_HandlerCanVeto(t *testing.T) {
@@ -158,5 +160,49 @@ func TestEmitVetoable_CanModifyOriginalPayload(t *testing.T) {
 	}
 	if payload.Content != "[REDACTED]" {
 		t.Fatalf("expected redacted content, got %q", payload.Content)
+	}
+}
+
+func TestEmitAsync_RunsHandlerConcurrently(t *testing.T) {
+	bus := NewEventBus()
+
+	var called atomic.Bool
+	bus.Subscribe("test.async", func(e Event[any]) {
+		called.Store(true)
+	})
+
+	ch := bus.EmitAsync("test.async", "hello")
+
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EmitAsync did not complete in time")
+	}
+
+	if !called.Load() {
+		t.Fatal("handler was not called")
+	}
+}
+
+func TestEmitAsync_ChannelCloses(t *testing.T) {
+	bus := NewEventBus()
+
+	ch := bus.EmitAsync("test.noop", nil)
+
+	select {
+	case _, open := <-ch:
+		// First read gets nil error.
+		if open {
+			// Channel should close after.
+			_, open = <-ch
+			if open {
+				t.Fatal("channel should be closed after result")
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EmitAsync channel did not close in time")
 	}
 }

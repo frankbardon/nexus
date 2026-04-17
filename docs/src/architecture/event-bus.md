@@ -8,6 +8,7 @@ The event bus is the central nervous system of Nexus. Every plugin communicates 
 type EventBus interface {
     Emit(eventType string, payload any) error
     EmitEvent(event Event[any]) error
+    EmitAsync(eventType string, payload any) <-chan error
     Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) (unsubscribe func())
     SubscribeAll(handler HandlerFunc) (unsubscribe func())
     EmitVetoable(eventType string, payload any) (VetoResult, error)
@@ -113,6 +114,20 @@ func (p *MyPlugin) Emissions() []string {
     return []string{"tool.result", "tool.register", "core.error"}
 }
 ```
+
+## Async Emit
+
+`EmitAsync()` dispatches an event in a separate goroutine, returning immediately with a channel that receives nil on success or an error:
+
+```go
+ch := ctx.Bus.EmitAsync("llm.request", request)
+// ... do other work ...
+if err := <-ch; err != nil {
+    // handle error
+}
+```
+
+Handlers still run synchronously within the goroutine — `EmitAsync` only makes the *dispatch* non-blocking relative to the caller. Used by the fanout plugin to send parallel requests to multiple providers.
 
 ## Vetoable Events
 

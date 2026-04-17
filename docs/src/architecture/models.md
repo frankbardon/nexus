@@ -81,6 +81,30 @@ Single-map format is backward compatible — parsed as a chain of length 1.
 
 **Streaming partial failure**: If a provider fails mid-stream, the fallback plugin emits `io.output.clear` to wipe partial content, then `provider.fallback` notification, then re-emits `llm.request` targeting the next provider. Clean restart — no spliced output from two models.
 
+## Provider Fanout
+
+Roles with `fanout: true` send requests to all listed providers in parallel instead of sequential fallback. The fanout plugin collects responses and returns them as a single `LLMResponse` with `Alternatives`.
+
+```yaml
+core:
+  models:
+    compare:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-sonnet-4-20250514
+          max_tokens: 4096
+        - provider: nexus.llm.openai
+          model: gpt-4o
+          max_tokens: 4096
+```
+
+**Requires**: `nexus.provider.fanout` in `plugins.active` + all listed provider plugins active.
+
+**Deadline**: Configurable via `nexus.provider.fanout.deadline_ms` (default 30s). If a provider doesn't respond in time, the fanout proceeds with available responses.
+
+**No per-leg fallback**: A fanout provider that fails is simply marked as failed. Fallback chains and fanout are separate concepts — a role is either a fallback chain or a fanout group, not both.
+
 ## API
 
 ```go
@@ -91,11 +115,13 @@ type ModelConfig struct {
 }
 
 type ModelRegistry struct {
-    Resolve(role string) (ModelConfig, bool)       // Primary model for a role (index 0)
+    Resolve(role string) (ModelConfig, bool)              // Primary model for a role (index 0)
     Fallback(role string, attempt int) (ModelConfig, bool) // Model at chain index
-    ChainLen(role string) int                      // Number of entries in fallback chain
-    Default() ModelConfig                          // Get the default model
-    Roles() []string                               // List all registered role names
+    ChainLen(role string) int                             // Number of entries in fallback chain
+    IsFanout(role string) bool                            // Whether a role uses parallel fanout
+    FanoutProviders(role string) []ModelConfig            // All providers in a fanout role
+    Default() ModelConfig                                 // Get the default model
+    Roles() []string                                      // List all registered role names
 }
 ```
 

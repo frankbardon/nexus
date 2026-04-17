@@ -33,6 +33,8 @@
 - [LLM Providers](./plugins/providers/index.md)
   - [Anthropic (Claude)](./plugins/providers/anthropic.md)
   - [OpenAI](./plugins/providers/openai.md)
+  - [Fallback](./plugins/providers/fallback.md)
+  - [Fanout](./plugins/providers/fanout.md)
 - [Tools](./plugins/tools/index.md)
   - [Shell](./plugins/tools/shell.md)
   - [File I/O](./plugins/tools/file.md)

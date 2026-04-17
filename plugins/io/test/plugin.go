@@ -372,13 +372,9 @@ func (p *Plugin) handleMockLLMRequest(e engine.Event[any]) {
 
 	mock := p.nextMockResponse()
 
-	// Propagate _source metadata so retrier can correlate the response.
-	var metadata map[string]any
-	if src, ok := req.Metadata["_source"]; ok {
-		metadata = map[string]any{"_source": src}
-	}
-
-	_ = p.bus.Emit("llm.response", p.buildMockResponse(mock, metadata))
+	// Propagate full request metadata so downstream plugins (fanout, retrier)
+	// can correlate the response. Matches real provider behavior.
+	_ = p.bus.Emit("llm.response", p.buildMockResponse(mock, req.Metadata))
 }
 
 func (p *Plugin) nextMockResponse() MockResponse {
