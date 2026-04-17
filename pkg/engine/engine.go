@@ -27,6 +27,7 @@ type Engine struct {
 	Session   *SessionWorkspace
 	Models    *ModelRegistry
 	Prompts   *PromptRegistry
+	Schemas   *SchemaRegistry
 	System    *SystemInfo
 	Logger    *slog.Logger
 
@@ -89,8 +90,9 @@ func newFromConfig(cfg *Config) *Engine {
 	registry := NewPluginRegistry()
 	models := NewModelRegistry(cfg.Core.ModelsRaw)
 	prompts := NewPromptRegistry()
+	schemas := NewSchemaRegistry(logger)
 	system := DetectSystem()
-	lifecycle := NewLifecycleManager(registry, bus, cfg, logger, models, prompts, system)
+	lifecycle := NewLifecycleManager(registry, bus, cfg, logger, models, prompts, schemas, system)
 	ctxMgr := NewContextManager(bus, logger)
 
 	return &Engine{
@@ -101,6 +103,7 @@ func newFromConfig(cfg *Config) *Engine {
 		Context:   ctxMgr,
 		Models:    models,
 		Prompts:   prompts,
+		Schemas:   schemas,
 		System:    system,
 		Logger:    logger,
 	}
@@ -138,6 +141,9 @@ func (e *Engine) Boot(ctx context.Context) error {
 			e.Logger.Warn("failed to replay conversation history", "error", err)
 		}
 	}
+
+	// Install schema registry bus subscriptions.
+	e.runUnsubs = append(e.runUnsubs, e.Schemas.Install(e.Bus)...)
 
 	// Track token usage from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {

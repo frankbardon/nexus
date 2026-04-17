@@ -29,6 +29,7 @@ Discovers, catalogs, and manages skills — reusable instruction sets that exten
 | `skill.activate` | 50 | Activates a skill by name |
 | `skill.deactivate` | 50 | Deactivates a skill |
 | `skill.resource.read` | 50 | Reads a skill's resource files |
+| `before:llm.request` | 15 | Tags requests with `_expects_schema` for active skills that declare `output_schema` |
 
 ### Emits
 
@@ -38,6 +39,8 @@ Discovers, catalogs, and manages skills — reusable instruction sets that exten
 | `skill.loaded` | Skill content loaded for the agent |
 | `skill.resource.result` | Skill resource content |
 | `before:skill.activate` | Before activation (vetoable for trust checks) |
+| `schema.register` | Skill with `output_schema` activated |
+| `schema.deregister` | Skill with `output_schema` deactivated |
 
 ## Skill Discovery
 

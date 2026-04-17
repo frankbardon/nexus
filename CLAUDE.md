@@ -22,7 +22,7 @@ Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `
 All comms via central typed event bus — plugins never call each other direct.
 
 - **Engine** (`pkg/engine/`) — Event bus, plugin registry, lifecycle, session workspace, config loading. Only "core" code.
-- **Events** (`pkg/events/`) — Typed event payload structs by domain: `core.go`, `llm.go`, `agent.go`, `tool.go`, `io.go`, `memory.go`, `skill.go`, `session.go`.
+- **Events** (`pkg/events/`) — Typed event payload structs by domain: `core.go`, `llm.go`, `agent.go`, `tool.go`, `io.go`, `memory.go`, `skill.go`, `session.go`, `schema.go`.
 - **Plugins** (`plugins/`) — All behavior lives here. Each implements `engine.Plugin`.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
 - **Desktop app** (`cmd/desktop/`) — Reference multi-agent desktop app hosting hello-world + staffing-match agents.
@@ -227,6 +227,41 @@ Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Du
 ### Evaluation order
 
 1. All registered tools → 2. `nexus.gate.tool_filter` (config include/exclude) → 3. `before:llm.request` gate modifications → 4. Resolve tool choice (event override > config sequence > config default) → 5. Validate (named tool filtered out → fall back to required) → 6. Provider maps to native or simulates.
+
+## Structured Output
+
+Optional structured output enforcement for LLM responses. Three-layer design: schema declaration → request tagging → provider execution.
+
+### ResponseFormat on LLMRequest
+
+`ResponseFormat *events.ResponseFormat` — optional field on `LLMRequest`:
+- `Type`: `"text"` | `"json_object"` | `"json_schema"`
+- `Name`: schema name (OpenAI requires this)
+- `Schema`: `map[string]any` JSON Schema
+- `Strict`: enforce strict schema adherence
+
+### Schema Registry (`pkg/engine/schema.go`)
+
+Engine-level registry (like ModelRegistry, PromptRegistry). Passed to plugins via `PluginContext.Schemas`. Subscribes to bus events:
+- `schema.register` / `schema.deregister` — plugins register/remove named schemas
+- `before:llm.request` (priority 5) — attaches `ResponseFormat` when request has `Metadata["_expects_schema"]` tag
+
+### Provider Behavior
+
+| Provider | Native Support | Strategy |
+|----------|---------------|----------|
+| **OpenAI** | Yes | Maps to `response_format` API field |
+| **Anthropic** | No | Simulates via tool-use-as-schema: injects synthetic `_structured_output` tool, forces tool choice, unwraps tool args back into `Content` |
+
+Both providers set `LLMResponse.Metadata["_structured_output"] = true` when enforcement was used.
+
+### Skill Integration
+
+Skills declare `output_schema` (inline) or `output_schema_file` (path relative to skill dir) in SKILL.md frontmatter. On activation, skills plugin emits `schema.register` with name `skill.<name>.output`. During active skill, tags `before:llm.request` with `_expects_schema`. On deactivation, emits `schema.deregister`.
+
+### json_schema Gate Interaction
+
+Gate tracks `_structured_output` from `llm.response` metadata. Skips validation when provider enforced natively. Validates+retries as usual when not.
 
 ## Code Conventions
 

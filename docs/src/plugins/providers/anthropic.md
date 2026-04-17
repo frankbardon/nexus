@@ -60,6 +60,18 @@ Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in
 
 Transient errors (rate limits, server errors) are retried with exponential backoff.
 
+### Structured Output (Simulated)
+
+Anthropic does not natively support `response_format`. When `ResponseFormat` is set with `Type: "json_schema"`, the provider simulates structured output via tool-use-as-schema:
+
+1. A synthetic tool named `_structured_output` is injected alongside any real tools. Its `input_schema` is the output schema from `ResponseFormat.Schema`.
+2. `tool_choice` is forced to `{"type": "tool", "name": "_structured_output"}`, overriding any existing tool choice.
+3. Claude returns the structured data as tool call arguments.
+4. The provider unwraps the tool call arguments back into `LLMResponse.Content`, so downstream consumers see structured output (not a tool call).
+5. `LLMResponse.Metadata["_structured_output"]` is set to `true`.
+
+During streaming, the synthetic tool's `input_json_delta` chunks are emitted as `llm.stream.chunk` content events, so the UI can stream structured output in real time.
+
 ### Debug Mode
 
 When `debug: true`, raw request and response JSON bodies are written to the session's plugin directory for inspection.

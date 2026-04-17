@@ -36,6 +36,7 @@ type PluginContext struct {
 	Session *SessionWorkspace
 	Models  *ModelRegistry
 	Prompts *PromptRegistry
+	Schemas *SchemaRegistry
 	System  *SystemInfo
 
 	// InstanceID is set when a plugin is activated with an instance suffix
