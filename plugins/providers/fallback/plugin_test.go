@@ -246,6 +246,61 @@ func TestFallback_RetriesExhausted_TriggersFallback(t *testing.T) {
 	}
 }
 
+func TestFallback_EmptyRole_UsesDefault(t *testing.T) {
+	bus := engine.NewEventBus()
+	models := makeTestRegistry() // default = "balanced" which has a 2-entry chain
+
+	p := New().(*Plugin)
+	p.bus = bus
+	p.models = models
+	p.logger = slog.Default()
+
+	p.unsubs = append(p.unsubs,
+		bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithSource(pluginID)),
+		bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
+	)
+
+	var gotRetry bool
+	bus.Subscribe("llm.request", func(e engine.Event[any]) {
+		req, ok := e.Payload.(events.LLMRequest)
+		if !ok {
+			return
+		}
+		if req.Model == "gpt-4o" {
+			gotRetry = true
+		}
+	})
+
+	// Empty role — should resolve to default ("balanced") which has fallback.
+	origReq := &events.LLMRequest{
+		Role:     "",
+		Messages: []events.Message{{Role: "user", Content: "hello"}},
+	}
+	_, _ = bus.EmitVetoable("before:llm.request", origReq)
+
+	if origReq.Metadata == nil {
+		t.Fatal("expected fallback tracking metadata on empty-role request")
+	}
+	if _, ok := origReq.Metadata["_fallback_id"]; !ok {
+		t.Fatal("expected _fallback_id in metadata")
+	}
+
+	// Simulate provider failure.
+	errInfo := &events.ErrorInfo{
+		Source:           "nexus.llm.anthropic",
+		Err:              fmt.Errorf("anthropic: error"),
+		Retryable:        false,
+		RequestMeta:      origReq.Metadata,
+	}
+	result, _ := bus.EmitVetoable("before:core.error", errInfo)
+	if !result.Vetoed {
+		t.Fatal("expected error to be vetoed for empty-role fallback")
+	}
+	if !gotRetry {
+		t.Fatal("expected fallback re-emission with gpt-4o")
+	}
+}
+
 func TestFallback_NoChain_NoIntercept(t *testing.T) {
 	bus := engine.NewEventBus()
 	models := makeTestRegistry()
