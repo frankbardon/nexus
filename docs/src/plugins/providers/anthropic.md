@@ -15,6 +15,7 @@ The Anthropic provider calls the Claude API via direct HTTP requests — no SDK 
 |-----|------|---------|-------------|
 | `api_key_env` | string | `ANTHROPIC_API_KEY` | Name of the environment variable containing the API key |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
+| `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
 
 ## Events
 
@@ -71,6 +72,20 @@ Anthropic does not natively support `response_format`. When `ResponseFormat` is 
 5. `LLMResponse.Metadata["_structured_output"]` is set to `true`.
 
 During streaming, the synthetic tool's `input_json_delta` chunks are emitted as `llm.stream.chunk` content events, so the UI can stream structured output in real time.
+
+### Cost Tracking
+
+The provider computes `CostUSD` on every `llm.response` using per-model pricing rates. Embedded defaults cover common Claude models. Override via config for enterprise pricing tiers or new models:
+
+```yaml
+nexus.llm.anthropic:
+  pricing:
+    claude-sonnet-4-6-20250514:
+      input_per_million: 3.0
+      output_per_million: 15.0
+```
+
+Config overrides are merged with embedded defaults — only override the models you need to change. Cost is accumulated into `SessionMeta.CostUSD` by the engine.
 
 ### Debug Mode
 

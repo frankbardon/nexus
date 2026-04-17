@@ -65,6 +65,7 @@ type LLMResponse struct {
 	Content      string
 	ToolCalls    []ToolCallRequest
 	Usage        Usage
+	CostUSD      float64 // provider-computed cost for this request
 	Model        string
 	FinishReason string
 	Metadata     map[string]any

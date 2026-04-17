@@ -25,6 +25,30 @@ const (
 	apiURL     = "https://api.anthropic.com/v1/messages"
 )
 
+// modelPricing holds per-model token rates in USD per million tokens.
+type modelPricing struct {
+	InputPerMillion  float64
+	OutputPerMillion float64
+}
+
+// defaultPricing is the embedded fallback pricing table. Updated via patch
+// releases when providers change rates. Config override always wins.
+var defaultPricing = map[string]modelPricing{
+	"claude-sonnet-4-6-20250514":    {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-sonnet-4-5-20250514":    {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-haiku-4-5-20251001":     {InputPerMillion: 0.80, OutputPerMillion: 4.0},
+	"claude-opus-4-6-20250602":      {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	"claude-3-5-sonnet-20241022":    {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-3-5-haiku-20241022":     {InputPerMillion: 0.80, OutputPerMillion: 4.0},
+	"claude-3-opus-20240229":        {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+}
+
+// calculateCost computes the USD cost for a single LLM call.
+func calculateCost(usage events.Usage, rates modelPricing) float64 {
+	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
+		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
+}
+
 // Plugin implements the Anthropic LLM provider.
 type Plugin struct {
 	bus     engine.EventBus
@@ -38,6 +62,7 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
+	pricing map[string]modelPricing // merged: config overrides + embedded defaults
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
@@ -83,6 +108,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		Timeout: 5 * time.Minute,
 	}
 	p.prompts = ctx.Prompts
+
+	p.pricing = parsePricingConfig(ctx.Config)
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -486,14 +513,17 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		}
 	}
 
+	usage := events.Usage{
+		PromptTokens:     apiResp.Usage.InputTokens,
+		CompletionTokens: apiResp.Usage.OutputTokens,
+		TotalTokens:      apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
+	}
+
 	return events.LLMResponse{
-		Content:   content.String(),
-		ToolCalls: toolCalls,
-		Usage: events.Usage{
-			PromptTokens:     apiResp.Usage.InputTokens,
-			CompletionTokens: apiResp.Usage.OutputTokens,
-			TotalTokens:      apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
-		},
+		Content:      content.String(),
+		ToolCalls:    toolCalls,
+		Usage:        usage,
+		CostUSD:      p.costForModel(apiResp.Model, usage),
 		Model:        apiResp.Model,
 		FinishReason: apiResp.StopReason,
 	}
@@ -551,15 +581,18 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		p.emitError(fmt.Errorf("anthropic: stream read error: %w", err))
 	}
 
+	// Build final usage.
+	finalUsage := events.Usage{
+		PromptTokens:     usage.InputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      usage.InputTokens + usage.OutputTokens,
+	}
+
 	// Emit stream end.
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
 		TurnID:       turnID,
 		FinishReason: finishReason,
-		Usage: events.Usage{
-			PromptTokens:     usage.InputTokens,
-			CompletionTokens: usage.OutputTokens,
-			TotalTokens:      usage.InputTokens + usage.OutputTokens,
-		},
+		Usage:        finalUsage,
 	})
 
 	// Also emit the complete llm.response for downstream consumers.
@@ -568,13 +601,10 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:   fullContent.String(),
-		ToolCalls: toolCalls,
-		Usage: events.Usage{
-			PromptTokens:     usage.InputTokens,
-			CompletionTokens: usage.OutputTokens,
-			TotalTokens:      usage.InputTokens + usage.OutputTokens,
-		},
+		Content:      fullContent.String(),
+		ToolCalls:    toolCalls,
+		Usage:        finalUsage,
+		CostUSD:      p.costForModel(model, finalUsage),
 		Model:        model,
 		FinishReason: finishReason,
 		Metadata:     meta,
@@ -711,6 +741,50 @@ func (p *Plugin) processSSEEvent(
 			p.emitError(fmt.Errorf("anthropic: stream error: %s: %s", data.Error.Type, data.Error.Message))
 		}
 	}
+}
+
+// parsePricingConfig merges embedded defaults with optional config overrides.
+// Config format:
+//
+//	pricing:
+//	  claude-sonnet-4-6-20250514:
+//	    input_per_million: 3.0
+//	    output_per_million: 15.0
+func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
+	merged := make(map[string]modelPricing, len(defaultPricing))
+	for k, v := range defaultPricing {
+		merged[k] = v
+	}
+
+	raw, ok := cfg["pricing"].(map[string]any)
+	if !ok {
+		return merged
+	}
+
+	for model, val := range raw {
+		entry, ok := val.(map[string]any)
+		if !ok {
+			continue
+		}
+		p := merged[model]
+		if v, ok := entry["input_per_million"].(float64); ok {
+			p.InputPerMillion = v
+		}
+		if v, ok := entry["output_per_million"].(float64); ok {
+			p.OutputPerMillion = v
+		}
+		merged[model] = p
+	}
+
+	return merged
+}
+
+// costForModel returns the USD cost for a response from the given model.
+func (p *Plugin) costForModel(model string, usage events.Usage) float64 {
+	if rates, ok := p.pricing[model]; ok {
+		return calculateCost(usage, rates)
+	}
+	return 0
 }
 
 func (p *Plugin) debugLog(label string, data []byte) {

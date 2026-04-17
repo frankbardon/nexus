@@ -210,6 +210,7 @@ Certain metadata keys carry special meaning:
 | `Content` | string | Response text |
 | `ToolCalls` | []ToolCallRequest | Tool calls in the response |
 | `Usage` | Usage | Token usage statistics |
+| `CostUSD` | float64 | Provider-computed cost in USD for this request |
 | `Model` | string | Model that was used |
 | `FinishReason` | string | Why the response ended |
 | `Metadata` | map[string]any | Additional context |
@@ -339,6 +340,7 @@ Certain metadata keys carry special meaning:
 | `Error` | string | Error (if failed) |
 | `Iterations` | int | Number of iterations used |
 | `TokensUsed` | Usage | Token consumption |
+| `CostUSD` | float64 | Accumulated cost in USD |
 | `ParentTurnID` | string | Parent's turn ID |
 
 ---

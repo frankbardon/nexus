@@ -26,15 +26,18 @@ Each session tracks metadata in `metadata/session.json`:
 
 ```go
 type SessionMeta struct {
-    ID         string            // Random hex identifier
-    StartedAt  time.Time         // When the session began
-    EndedAt    *time.Time        // When the session ended (nil if active)
-    Profile    string            // Config profile name
-    Plugins    []string          // Active plugin IDs
-    Labels     map[string]string // User-defined labels
-    TurnCount  int               // Number of conversation turns
-    TokensUsed int               // Total tokens consumed
-    Status     string            // "active" or "ended"
+    ID                   string            // Random hex identifier
+    StartedAt            time.Time         // When the session began
+    EndedAt              *time.Time        // When the session ended (nil if active)
+    Profile              string            // Config profile name
+    Plugins              []string          // Active plugin IDs
+    Labels               map[string]string // User-defined labels
+    TurnCount            int               // Number of conversation turns
+    TokensUsed           int               // Total tokens consumed
+    PromptTokensUsed     int               // Input tokens consumed
+    CompletionTokensUsed int               // Output tokens consumed
+    CostUSD              float64           // Accumulated cost in USD
+    Status               string            // "active" or "ended"
 }
 ```
 

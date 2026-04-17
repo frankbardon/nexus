@@ -251,6 +251,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 	})
 
 	var totalUsage events.Usage
+	var totalCost float64
 
 	// Iteration limiting now handled by nexus.gate.endless_loop plugin.
 	for iteration := 0; ; iteration++ {
@@ -294,12 +295,13 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 		select {
 		case resp = <-respCh:
 		default:
-			return p.completeSubagent(spawnID, parentTurnID, "", "no LLM response received", iteration, totalUsage)
+			return p.completeSubagent(spawnID, parentTurnID, "", "no LLM response received", iteration, totalUsage, totalCost)
 		}
 
 		totalUsage.PromptTokens += resp.Usage.PromptTokens
 		totalUsage.CompletionTokens += resp.Usage.CompletionTokens
 		totalUsage.TotalTokens += resp.Usage.TotalTokens
+		totalCost += resp.CostUSD
 
 		// Add assistant message to history.
 		history = append(history, events.Message{
@@ -318,7 +320,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 
 		// No tool calls means we're done.
 		if len(resp.ToolCalls) == 0 {
-			return p.completeSubagent(spawnID, parentTurnID, resp.Content, "", iteration+1, totalUsage)
+			return p.completeSubagent(spawnID, parentTurnID, resp.Content, "", iteration+1, totalUsage, totalCost)
 		}
 
 		// Execute tool calls and collect results.
@@ -344,7 +346,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			break
 		}
 	}
-	return p.completeSubagent(spawnID, parentTurnID, lastContent, "loop terminated", 0, totalUsage)
+	return p.completeSubagent(spawnID, parentTurnID, lastContent, "loop terminated", 0, totalUsage, totalCost)
 }
 
 // executeToolCalls invokes tools and collects their results.
@@ -408,13 +410,14 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 	return results
 }
 
-func (p *Plugin) completeSubagent(spawnID, parentTurnID, result, errMsg string, iterations int, usage events.Usage) events.SubagentComplete {
+func (p *Plugin) completeSubagent(spawnID, parentTurnID, result, errMsg string, iterations int, usage events.Usage, costUSD float64) events.SubagentComplete {
 	complete := events.SubagentComplete{
 		SpawnID:      spawnID,
 		Result:       result,
 		Error:        errMsg,
 		Iterations:   iterations,
 		TokensUsed:   usage,
+		CostUSD:      costUSD,
 		ParentTurnID: parentTurnID,
 	}
 
@@ -423,6 +426,7 @@ func (p *Plugin) completeSubagent(spawnID, parentTurnID, result, errMsg string, 
 		"spawn_id", spawnID,
 		"iterations", iterations,
 		"tokens", usage.TotalTokens,
+		"cost_usd", costUSD,
 		"has_error", errMsg != "",
 	)
 
