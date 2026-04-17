@@ -19,6 +19,7 @@ import (
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
 	compactionplugin "github.com/frankbardon/nexus/plugins/memory/compaction"
 	"github.com/frankbardon/nexus/plugins/memory/conversation"
+	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	"github.com/frankbardon/nexus/plugins/observe/logger"
 	otelplugin "github.com/frankbardon/nexus/plugins/observe/otel"
 	thinkingplugin "github.com/frankbardon/nexus/plugins/observe/thinking"
@@ -87,6 +88,7 @@ func main() {
 	eng.Registry.Register("nexus.tool.ask", ask.New)
 	eng.Registry.Register("nexus.memory.conversation", conversation.New)
 	eng.Registry.Register("nexus.memory.compaction", compactionplugin.New)
+	eng.Registry.Register("nexus.memory.longterm", longtermplugin.New)
 	eng.Registry.Register("nexus.io.tui", tuiplugin.New)
 	eng.Registry.Register("nexus.io.browser", browserplugin.New)
 	eng.Registry.Register("nexus.io.oneshot", oneshotplugin.New)

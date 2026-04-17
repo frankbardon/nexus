@@ -72,6 +72,7 @@ plugins/
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   memory/conversation/   # Conversation history persistence
+  memory/longterm/       # Cross-session long-term memory (file-per-entry, YAML frontmatter + markdown)
   observe/logger/        # Structured event logging
   observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL)
