@@ -96,21 +96,25 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 // for roles that have fallback chains (len > 1). The metadata flows through
 // the provider and back via ErrorInfo.RequestMeta on failure.
 func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
+	p.logger.Info("handleBeforeRequest: entered", "event_type", event.Type)
+
 	vp, ok := event.Payload.(*engine.VetoablePayload)
 	if !ok {
-		p.logger.Debug("handleBeforeRequest: payload not VetoablePayload")
+		p.logger.Info("handleBeforeRequest: payload not VetoablePayload")
 		return
 	}
 	req, ok := vp.Original.(*events.LLMRequest)
 	if !ok {
-		p.logger.Debug("handleBeforeRequest: original not *LLMRequest")
+		p.logger.Info("handleBeforeRequest: original not *LLMRequest")
 		return
 	}
+
+	p.logger.Info("handleBeforeRequest: request details", "role", req.Role, "model", req.Model, "has_meta", req.Metadata != nil)
 
 	// Skip requests already in a fallback sequence.
 	if req.Metadata != nil {
 		if _, ok := req.Metadata["_fallback_id"]; ok {
-			p.logger.Debug("handleBeforeRequest: already in fallback sequence")
+			p.logger.Info("handleBeforeRequest: already in fallback sequence")
 			return
 		}
 	}
@@ -118,12 +122,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 	// Only track requests for roles with fallback chains.
 	role := req.Role
 	if role == "" {
-		p.logger.Debug("handleBeforeRequest: empty role")
+		p.logger.Info("handleBeforeRequest: empty role")
 		return
 	}
 	chainLen := p.models.ChainLen(role)
 	if chainLen <= 1 {
-		p.logger.Debug("handleBeforeRequest: chain too short", "role", role, "chain_len", chainLen)
+		p.logger.Info("handleBeforeRequest: chain too short", "role", role, "chain_len", chainLen)
 		return
 	}
 	p.logger.Info("handleBeforeRequest: injecting fallback tracking", "role", role, "chain_len", chainLen)
