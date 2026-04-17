@@ -61,7 +61,7 @@ type SessionMeta struct {
 
 // NewSessionWorkspace creates a new session workspace with the standard directory structure.
 func NewSessionWorkspace(rootDir string, bus EventBus) (*SessionWorkspace, error) {
-	id := generateID()
+	id := GenerateID()
 	now := time.Now()
 	sessionDir := filepath.Join(rootDir, id)
 

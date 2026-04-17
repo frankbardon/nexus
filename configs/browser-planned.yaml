@@ -16,6 +16,16 @@ core:
       provider: nexus.llm.anthropic
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
+    # Provider fallback: use an ordered array instead of a single map.
+    # First entry = primary, subsequent entries tried on failure.
+    # Requires nexus.provider.fallback in plugins.active + both provider plugins.
+    # balanced:
+    #   - provider: nexus.llm.anthropic
+    #     model: claude-sonnet-4-20250514
+    #     max_tokens: 8192
+    #   - provider: nexus.llm.openai
+    #     model: gpt-4o
+    #     max_tokens: 8192
   sessions:
     root: ~/.nexus/sessions
     retention: 30d

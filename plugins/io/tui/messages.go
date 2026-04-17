@@ -62,5 +62,8 @@ type cancelCompleteMsg struct {
 	Resumable bool
 }
 
+// outputClearMsg tells the chat view to wipe the current partial stream.
+type outputClearMsg struct{}
+
 // quitMsg tells the program to exit.
 type quitMsg struct{}

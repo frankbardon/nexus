@@ -158,6 +158,7 @@ func (p *Plugin) Emissions() []string {
 		"llm.response",
 		"llm.stream.chunk",
 		"llm.stream.end",
+		"before:core.error",
 		"core.error",
 	}
 }
@@ -188,6 +189,12 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 }
 
 func (p *Plugin) handleRequest(req events.LLMRequest) {
+	// If a specific provider is targeted (e.g. by fallback plugin), skip
+	// if it's not us.
+	if target, ok := req.Metadata["_target_provider"].(string); ok && target != pluginID {
+		return
+	}
+
 	model := req.Model
 	maxTokens := req.MaxTokens
 
@@ -260,14 +267,23 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			p.logger.Info("LLM request cancelled")
 			return
 		}
-		p.emitError(fmt.Errorf("anthropic: HTTP request failed: %w", err))
+		p.emitErrorInfo(events.ErrorInfo{
+			Err:              fmt.Errorf("anthropic: HTTP request failed: %w", err),
+			Retryable:        true,
+			RetriesExhausted: true,
+			RequestMeta:      req.Metadata,
+		})
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitError(fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)))
+		p.emitErrorInfo(events.ErrorInfo{
+			Err:         fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)),
+			Retryable:   false,
+			RequestMeta: req.Metadata,
+		})
 		return
 	}
 
@@ -803,10 +819,26 @@ func (p *Plugin) debugLog(label string, data []byte) {
 }
 
 func (p *Plugin) emitError(err error) {
-	p.logger.Error(err.Error())
-	_ = p.bus.Emit("core.error", events.ErrorInfo{
+	p.emitErrorInfo(events.ErrorInfo{
 		Source: pluginID,
 		Err:    err,
 		Fatal:  false,
 	})
+}
+
+func (p *Plugin) emitErrorInfo(info events.ErrorInfo) {
+	info.Source = pluginID
+	p.logger.Error(info.Err.Error())
+
+	// Vetoable gate: fallback plugin can intercept and suppress.
+	result, vErr := p.bus.EmitVetoable("before:core.error", &info)
+	if vErr != nil {
+		p.logger.Error("failed to emit before:core.error", "error", vErr)
+		return
+	}
+	if result.Vetoed {
+		return
+	}
+
+	_ = p.bus.Emit("core.error", info)
 }

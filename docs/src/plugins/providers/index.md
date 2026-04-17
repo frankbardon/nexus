@@ -8,6 +8,7 @@ LLM provider plugins handle communication with AI model APIs. They receive `llm.
 |--------|----|---------|
 | [Anthropic](./anthropic.md) | `nexus.llm.anthropic` | Claude (direct HTTP, no SDK) |
 | [OpenAI](./openai.md) | `nexus.llm.openai` | GPT / o-series (direct HTTP, no SDK) |
+| [Fallback](./fallback.md) | `nexus.provider.fallback` | Automatic provider failover coordinator |
 
 ## Provider Architecture
 

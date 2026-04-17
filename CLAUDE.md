@@ -73,6 +73,7 @@ plugins/
   apps/helloworld/       # Built-in hello-world placeholder agent
   providers/anthropic/   # Claude LLM provider (direct HTTP, no SDK; supports api_key config or api_key_env env var)
   providers/openai/      # OpenAI LLM provider (direct HTTP, no SDK; supports api_key config, api_key_env env var, base_url override)
+  providers/fallback/    # Automatic provider failover coordinator (config-driven fallback chains in core.models)
   tools/shell/           # Sandboxed shell execution
   tools/fileio/          # File read/write with base dir restriction
   io/tui/                # Terminal UI

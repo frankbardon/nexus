@@ -57,8 +57,8 @@ type VetoablePayload struct {
 	Veto     VetoResult // handlers set this to veto the action
 }
 
-// generateID produces a random hex-encoded UUID-style identifier.
-func generateID() string {
+// GenerateID produces a random hex-encoded UUID-style identifier.
+func GenerateID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)

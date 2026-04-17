@@ -145,7 +145,7 @@ func (b *eventBus) SubscribeAll(handler HandlerFunc) func() {
 func (b *eventBus) Emit(eventType string, payload any) error {
 	event := Event[any]{
 		Type:      eventType,
-		ID:        generateID(),
+		ID:        GenerateID(),
 		Timestamp: time.Now(),
 		Payload:   payload,
 	}
@@ -193,7 +193,7 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	vp := &VetoablePayload{Original: payload}
 	event := Event[any]{
 		Type:      eventType,
-		ID:        generateID(),
+		ID:        GenerateID(),
 		Timestamp: time.Now(),
 		Payload:   vp,
 	}

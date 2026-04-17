@@ -54,6 +54,33 @@ config, found := models.Resolve("reasoning")
 3. If the role is not found but contains a hyphen (e.g., `claude-sonnet-4-20250514`), treat it as a raw model ID for backward compatibility
 4. Otherwise, return not found
 
+## Provider Fallback Chains
+
+Role values can be ordered arrays instead of single maps. First entry = primary, subsequent entries are tried in order when the primary fails with a non-retryable error or exhausts its retry budget.
+
+```yaml
+core:
+  models:
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-20250514
+        max_tokens: 8192
+      - provider: nexus.llm.openai
+        model: gpt-4o
+        max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic    # single entry = no fallback
+      model: claude-haiku-4-5-20251001
+```
+
+Single-map format is backward compatible — parsed as a chain of length 1.
+
+**Requires**: `nexus.provider.fallback` in `plugins.active` + both provider plugins active.
+
+**Trigger conditions**: Fallback occurs when a provider error is non-retryable (4xx except 429, auth failures), or when the provider's own retry logic (429, 5xx backoff) has exhausted `max_retries`.
+
+**Streaming partial failure**: If a provider fails mid-stream, the fallback plugin emits `io.output.clear` to wipe partial content, then `provider.fallback` notification, then re-emits `llm.request` targeting the next provider. Clean restart — no spliced output from two models.
+
 ## API
 
 ```go
@@ -64,9 +91,11 @@ type ModelConfig struct {
 }
 
 type ModelRegistry struct {
-    Resolve(role string) (ModelConfig, bool)  // Look up a role
-    Default() ModelConfig                      // Get the default model
-    Roles() []string                           // List all registered role names
+    Resolve(role string) (ModelConfig, bool)       // Primary model for a role (index 0)
+    Fallback(role string, attempt int) (ModelConfig, bool) // Model at chain index
+    ChainLen(role string) int                      // Number of entries in fallback chain
+    Default() ModelConfig                          // Get the default model
+    Roles() []string                               // List all registered role names
 }
 ```
 

@@ -10,17 +10,38 @@ type ModelConfig struct {
 }
 
 // ModelRegistry resolves model role names to concrete model configurations.
+// Each role maps to an ordered chain of ModelConfigs. The first entry is the
+// primary; subsequent entries are fallbacks tried in order when the primary
+// (or prior fallback) fails with a non-retryable error or exhausts retries.
 type ModelRegistry struct {
-	roles       map[string]ModelConfig
+	chains      map[string][]ModelConfig
 	defaultRole string
 }
 
+// parseModelConfig extracts a ModelConfig from a raw config map.
+func parseModelConfig(m map[string]any) ModelConfig {
+	cfg := ModelConfig{}
+	if v, ok := m["provider"].(string); ok {
+		cfg.Provider = v
+	}
+	if v, ok := m["model"].(string); ok {
+		cfg.Model = v
+	}
+	if v, ok := m["max_tokens"].(int); ok {
+		cfg.MaxTokens = v
+	} else if v, ok := m["max_tokens"].(float64); ok {
+		cfg.MaxTokens = int(v)
+	}
+	return cfg
+}
+
 // NewModelRegistry builds a ModelRegistry from the core.models config section.
-// The modelsRaw map may contain string values (for "default" alias) and
-// map[string]any values (for role definitions).
+// The modelsRaw map may contain string values (for "default" alias),
+// map[string]any values (single model — backward compatible), and
+// []any values (ordered fallback chain).
 func NewModelRegistry(modelsRaw map[string]any) *ModelRegistry {
 	r := &ModelRegistry{
-		roles:       make(map[string]ModelConfig),
+		chains:      make(map[string][]ModelConfig),
 		defaultRole: "balanced",
 	}
 
@@ -36,31 +57,29 @@ func NewModelRegistry(modelsRaw map[string]any) *ModelRegistry {
 			continue
 		}
 
-		m, ok := val.(map[string]any)
-		if !ok {
-			continue
-		}
+		switch v := val.(type) {
+		case map[string]any:
+			// Single model config (backward compatible).
+			r.chains[key] = []ModelConfig{parseModelConfig(v)}
 
-		cfg := ModelConfig{}
-		if v, ok := m["provider"].(string); ok {
-			cfg.Provider = v
+		case []any:
+			// Ordered fallback chain.
+			chain := make([]ModelConfig, 0, len(v))
+			for _, entry := range v {
+				if m, ok := entry.(map[string]any); ok {
+					chain = append(chain, parseModelConfig(m))
+				}
+			}
+			if len(chain) > 0 {
+				r.chains[key] = chain
+			}
 		}
-		if v, ok := m["model"].(string); ok {
-			cfg.Model = v
-		}
-		if v, ok := m["max_tokens"].(int); ok {
-			cfg.MaxTokens = v
-		} else if v, ok := m["max_tokens"].(float64); ok {
-			cfg.MaxTokens = int(v)
-		}
-
-		r.roles[key] = cfg
 	}
 
 	return r
 }
 
-// Resolve returns the ModelConfig for the given role name.
+// Resolve returns the primary ModelConfig for the given role name (index 0).
 // If role is empty, the default role is used.
 // If the role is not found but looks like a raw model ID (contains "-"),
 // it is returned as-is with an empty provider for backward compatibility.
@@ -70,8 +89,8 @@ func (r *ModelRegistry) Resolve(role string) (ModelConfig, bool) {
 		role = r.defaultRole
 	}
 
-	if cfg, ok := r.roles[role]; ok {
-		return cfg, true
+	if chain, ok := r.chains[role]; ok && len(chain) > 0 {
+		return chain[0], true
 	}
 
 	// Backward compat: treat as raw model ID if it contains a hyphen.
@@ -82,6 +101,31 @@ func (r *ModelRegistry) Resolve(role string) (ModelConfig, bool) {
 	return ModelConfig{}, false
 }
 
+// Fallback returns the ModelConfig at the given attempt index in the fallback
+// chain for the specified role. Attempt 0 is the primary (same as Resolve).
+// Returns false if the chain is exhausted or the role doesn't exist.
+func (r *ModelRegistry) Fallback(role string, attempt int) (ModelConfig, bool) {
+	if role == "" {
+		role = r.defaultRole
+	}
+
+	chain, ok := r.chains[role]
+	if !ok || attempt < 0 || attempt >= len(chain) {
+		return ModelConfig{}, false
+	}
+
+	return chain[attempt], true
+}
+
+// ChainLen returns the number of entries in the fallback chain for a role.
+// Returns 0 if the role doesn't exist.
+func (r *ModelRegistry) ChainLen(role string) int {
+	if role == "" {
+		role = r.defaultRole
+	}
+	return len(r.chains[role])
+}
+
 // Default returns the ModelConfig for the default role.
 func (r *ModelRegistry) Default() ModelConfig {
 	cfg, _ := r.Resolve("")
@@ -90,8 +134,8 @@ func (r *ModelRegistry) Default() ModelConfig {
 
 // Roles returns the names of all registered roles.
 func (r *ModelRegistry) Roles() []string {
-	roles := make([]string, 0, len(r.roles))
-	for k := range r.roles {
+	roles := make([]string, 0, len(r.chains))
+	for k := range r.chains {
 		roles = append(roles, k)
 	}
 	return roles
