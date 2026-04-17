@@ -67,6 +67,7 @@ func llmResponseAttrs(r *events.LLMResponse) []attribute.KeyValue {
 		attribute.Int("nexus.llm.usage.prompt_tokens", r.Usage.PromptTokens),
 		attribute.Int("nexus.llm.usage.completion_tokens", r.Usage.CompletionTokens),
 		attribute.Int("nexus.llm.usage.total_tokens", r.Usage.TotalTokens),
+		attribute.Float64("nexus.llm.cost_usd", r.CostUSD),
 		attribute.Int("nexus.llm.tool_call_count", len(r.ToolCalls)),
 	}
 }
@@ -123,7 +124,10 @@ func subagentCompleteAttrs(s *events.SubagentComplete) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		attribute.String("nexus.subagent.spawn_id", s.SpawnID),
 		attribute.Int("nexus.subagent.iterations", s.Iterations),
+		attribute.Int("nexus.subagent.usage.prompt_tokens", s.TokensUsed.PromptTokens),
+		attribute.Int("nexus.subagent.usage.completion_tokens", s.TokensUsed.CompletionTokens),
 		attribute.Int("nexus.subagent.usage.total_tokens", s.TokensUsed.TotalTokens),
+		attribute.Float64("nexus.subagent.cost_usd", s.CostUSD),
 		attribute.String("nexus.subagent.parent_turn_id", s.ParentTurnID),
 		attribute.Bool("nexus.subagent.has_error", s.Error != ""),
 	}

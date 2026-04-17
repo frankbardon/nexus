@@ -139,7 +139,7 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}
 
-	// Track token usage from LLM responses.
+	// Track token usage and cost from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {
 		resp, ok := event.Payload.(events.LLMResponse)
 		if !ok || e.Session == nil {
@@ -150,6 +150,9 @@ func (e *Engine) Boot(ctx context.Context) error {
 			return
 		}
 		meta.TokensUsed += resp.Usage.TotalTokens
+		meta.PromptTokensUsed += resp.Usage.PromptTokens
+		meta.CompletionTokensUsed += resp.Usage.CompletionTokens
+		meta.CostUSD += resp.CostUSD
 		_ = e.Session.SaveMeta(meta)
 	}))
 

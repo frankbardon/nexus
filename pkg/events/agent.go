@@ -59,5 +59,6 @@ type SubagentComplete struct {
 	Error        string
 	Iterations   int
 	TokensUsed   Usage
+	CostUSD      float64
 	ParentTurnID string
 }
