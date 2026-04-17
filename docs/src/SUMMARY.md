@@ -47,6 +47,7 @@
   - [Terminal UI (TUI)](./plugins/io/tui.md)
   - [Browser UI](./plugins/io/browser.md)
   - [Oneshot](./plugins/io/oneshot.md)
+  - [Test IO](./plugins/io/test.md)
   - [Wails Desktop](./plugins/io/wails.md)
 - [Observers](./plugins/observers/index.md)
   - [Event Logger](./plugins/observers/logger.md)
@@ -69,4 +70,5 @@
 
 - [Writing Skills](./skills/authoring.md)
 - [Structured Output](./guides/structured-output.md)
+- [Integration Testing](./guides/integration-testing.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)

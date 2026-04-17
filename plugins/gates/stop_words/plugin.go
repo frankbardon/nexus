@@ -163,9 +163,10 @@ func (p *Plugin) findStopWord(text string) string {
 	}
 
 	// Split on whitespace and punctuation boundaries for word-level matching.
+	// Underscores are kept so compound words like "FORBIDDEN_WORD" match as one token.
 	words := strings.FieldsFunc(check, func(r rune) bool {
 		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '\'' || r == '-')
+			(r >= '0' && r <= '9') || r == '\'' || r == '-' || r == '_')
 	})
 
 	for _, w := range words {

@@ -15,6 +15,8 @@ make lint         # Run staticcheck (includes vet)
 
 Run specific profile: `bin/nexus -config configs/coding.yaml`
 
+Run integration tests: `go test -tags integration ./tests/integration/ -v`
+
 Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 ## Architecture
@@ -27,6 +29,11 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
 - **Desktop app** (`cmd/desktop/`) — Reference multi-agent desktop app hosting hello-world + staffing-match agents.
 - **CLI entry point** (`cmd/nexus/main.go`) — Creates engine, registers plugins, runs with signal handling.
+- **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
+- **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
+- **Integration tests** (`tests/integration/`) — Go tests behind `//go:build integration` tag. Each test config in `configs/test-*.yaml` maps to test functions. Two modes:
+  - **Mock mode** (`mock_responses` set): No LLM calls, no API key, sub-second. Use for gate/plugin behavior tests. Mock intercepts `before:llm.request` at priority 20 (after gates at 10), so gates still fire normally.
+  - **Live mode** (no `mock_responses`): Real LLM calls via provider. Requires `ANTHROPIC_API_KEY`. Use for end-to-end agent behavior and semantic output validation.
 
 **All Claude updates must update relevant docs in `docs/`.**
 **Core system updates should be genericized and treated as reusable, single-use plugins shouldn't in `plugins` folder**
@@ -70,6 +77,7 @@ plugins/
   tools/fileio/          # File read/write with base dir restriction
   io/tui/                # Terminal UI
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
+  io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   memory/conversation/   # Conversation history persistence
   memory/longterm/       # Cross-session long-term memory (file-per-entry, YAML frontmatter + markdown)
