@@ -191,6 +191,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Content` | string | Response text |
 | `ToolCalls` | []ToolCallRequest | Tool calls in the response |
 | `Usage` | Usage | Token usage statistics |
+| `CostUSD` | float64 | Provider-computed cost in USD for this request |
 | `Model` | string | Model that was used |
 | `FinishReason` | string | Why the response ended |
 | `Metadata` | map[string]any | Additional context |
@@ -320,6 +321,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Error` | string | Error (if failed) |
 | `Iterations` | int | Number of iterations used |
 | `TokensUsed` | Usage | Token consumption |
+| `CostUSD` | float64 | Accumulated cost in USD |
 | `ParentTurnID` | string | Parent's turn ID |
 
 ---

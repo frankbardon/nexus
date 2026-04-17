@@ -25,6 +25,34 @@ const (
 	apiURL     = "https://api.openai.com/v1/chat/completions"
 )
 
+// modelPricing holds per-model token rates in USD per million tokens.
+type modelPricing struct {
+	InputPerMillion  float64
+	OutputPerMillion float64
+}
+
+// defaultPricing is the embedded fallback pricing table. Updated via patch
+// releases when providers change rates. Config override always wins.
+var defaultPricing = map[string]modelPricing{
+	"gpt-4o":            {InputPerMillion: 2.50, OutputPerMillion: 10.0},
+	"gpt-4o-mini":       {InputPerMillion: 0.15, OutputPerMillion: 0.60},
+	"gpt-4o-2024-11-20": {InputPerMillion: 2.50, OutputPerMillion: 10.0},
+	"gpt-4-turbo":       {InputPerMillion: 10.0, OutputPerMillion: 30.0},
+	"gpt-4":             {InputPerMillion: 30.0, OutputPerMillion: 60.0},
+	"gpt-3.5-turbo":     {InputPerMillion: 0.50, OutputPerMillion: 1.50},
+	"o1":                {InputPerMillion: 15.0, OutputPerMillion: 60.0},
+	"o1-mini":           {InputPerMillion: 3.0, OutputPerMillion: 12.0},
+	"o3":                {InputPerMillion: 10.0, OutputPerMillion: 40.0},
+	"o3-mini":           {InputPerMillion: 1.10, OutputPerMillion: 4.40},
+	"o4-mini":           {InputPerMillion: 1.10, OutputPerMillion: 4.40},
+}
+
+// calculateCost computes the USD cost for a single LLM call.
+func calculateCost(usage events.Usage, rates modelPricing) float64 {
+	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
+		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
+}
+
 // Plugin implements the OpenAI LLM provider.
 type Plugin struct {
 	bus     engine.EventBus
@@ -39,6 +67,7 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
+	pricing map[string]modelPricing // merged: config overrides + embedded defaults
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
@@ -90,6 +119,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		Timeout: 5 * time.Minute,
 	}
 	p.prompts = ctx.Prompts
+
+	p.pricing = parsePricingConfig(ctx.Config)
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -451,13 +482,16 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 }
 
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
+	usage := events.Usage{
+		PromptTokens:     apiResp.Usage.PromptTokens,
+		CompletionTokens: apiResp.Usage.CompletionTokens,
+		TotalTokens:      apiResp.Usage.TotalTokens,
+	}
+
 	resp := events.LLMResponse{
-		Model: apiResp.Model,
-		Usage: events.Usage{
-			PromptTokens:     apiResp.Usage.PromptTokens,
-			CompletionTokens: apiResp.Usage.CompletionTokens,
-			TotalTokens:      apiResp.Usage.TotalTokens,
-		},
+		Model:   apiResp.Model,
+		Usage:   usage,
+		CostUSD: p.costForModel(apiResp.Model, usage),
 	}
 
 	if len(apiResp.Choices) > 0 {
@@ -619,15 +653,18 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		chunkIndex++
 	}
 
+	// Build final usage.
+	finalUsage := events.Usage{
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+	}
+
 	// Emit stream end.
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
 		TurnID:       turnID,
 		FinishReason: finishReason,
-		Usage: events.Usage{
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			TotalTokens:      usage.TotalTokens,
-		},
+		Usage:        finalUsage,
 	})
 
 	// Also emit the complete llm.response for downstream consumers.
@@ -636,17 +673,52 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:   fullContent.String(),
-		ToolCalls: toolCalls,
-		Usage: events.Usage{
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			TotalTokens:      usage.TotalTokens,
-		},
+		Content:      fullContent.String(),
+		ToolCalls:    toolCalls,
+		Usage:        finalUsage,
+		CostUSD:      p.costForModel(model, finalUsage),
 		Model:        model,
 		FinishReason: finishReason,
 		Metadata:     meta,
 	})
+}
+
+// parsePricingConfig merges embedded defaults with optional config overrides.
+func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
+	merged := make(map[string]modelPricing, len(defaultPricing))
+	for k, v := range defaultPricing {
+		merged[k] = v
+	}
+
+	raw, ok := cfg["pricing"].(map[string]any)
+	if !ok {
+		return merged
+	}
+
+	for model, val := range raw {
+		entry, ok := val.(map[string]any)
+		if !ok {
+			continue
+		}
+		p := merged[model]
+		if v, ok := entry["input_per_million"].(float64); ok {
+			p.InputPerMillion = v
+		}
+		if v, ok := entry["output_per_million"].(float64); ok {
+			p.OutputPerMillion = v
+		}
+		merged[model] = p
+	}
+
+	return merged
+}
+
+// costForModel returns the USD cost for a response from the given model.
+func (p *Plugin) costForModel(model string, usage events.Usage) float64 {
+	if rates, ok := p.pricing[model]; ok {
+		return calculateCost(usage, rates)
+	}
+	return 0
 }
 
 func (p *Plugin) debugLog(label string, data []byte) {

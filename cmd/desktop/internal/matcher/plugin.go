@@ -362,7 +362,7 @@ func (p *Plugin) runMatch(req MatchRequest) {
 			})
 			return
 		}
-		cost := calculateCost(resp.Usage, latencyMs)
+		cost := buildCost(resp, latencyMs)
 		p.logger.Info("match complete",
 			"request_id", req.RequestID,
 			"candidates", len(candidates),

@@ -82,7 +82,7 @@ When a subagent runs, these events are emitted:
 | `subagent.spawn` | SpawnID, Task, ParentTurnID | Subagent created |
 | `subagent.started` | SpawnID, Task, ParentTurnID | Subagent begins execution |
 | `subagent.iteration` | SpawnID, Iteration, Content | Each reasoning iteration |
-| `subagent.complete` | SpawnID, Result, TokensUsed | Subagent finished |
+| `subagent.complete` | SpawnID, Result, TokensUsed, CostUSD | Subagent finished |
 
 ## Example
 

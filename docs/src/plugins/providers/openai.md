@@ -16,6 +16,7 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 | `api_key_env` | string | `OPENAI_API_KEY` | Name of the environment variable containing the API key |
 | `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for Azure, local proxies, etc.) |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
+| `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
 
 ## Events
 
@@ -60,6 +61,20 @@ Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in
 ### Retry Logic
 
 Transient errors (rate limits, server errors) are retried with exponential backoff.
+
+### Cost Tracking
+
+The provider computes `CostUSD` on every `llm.response` using per-model pricing rates. Embedded defaults cover common OpenAI models. Override via config for enterprise pricing tiers or new models:
+
+```yaml
+nexus.llm.openai:
+  pricing:
+    gpt-4o:
+      input_per_million: 2.50
+      output_per_million: 10.0
+```
+
+Config overrides are merged with embedded defaults — only override the models you need to change. Cost is accumulated into `SessionMeta.CostUSD` by the engine.
 
 ### Debug Mode
 

@@ -9,40 +9,17 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// Pricing constants for the model configured in config.yaml. Rates
-// are USD per million tokens, which is how Anthropic publishes
-// their pricing. These MUST be updated when:
-//   - the config.yaml model ID changes,
-//   - Anthropic publishes new rates for the same model,
-//   - a new pricing tier (caching, batch, etc.) is introduced.
-//
-// Kept as plain constants rather than config-driven because this
-// is a PoC with one model and two numbers; YAML-driven pricing
-// would be more machinery than value. Pricing is not a moving
-// target the customer can edit, so baking it into the binary on
-// every build is the right tradeoff.
-//
-// Current: claude-sonnet-4-6 pricing as of the session this was
-// written. The official source is https://www.anthropic.com/pricing
-// — check there before release and before any config.yaml model
-// change.
-const (
-	pricePerMillionInputTokens  = 3.0
-	pricePerMillionOutputTokens = 15.0
-)
-
-// calculateCost converts an Anthropic Usage record into a Cost
-// struct for display. Latency is passed in separately because the
-// Usage struct only knows about tokens, not wall-clock time —
-// latency is measured at the bus round-trip boundary in runMatch.
-func calculateCost(usage events.Usage, latencyMs int64) Cost {
-	inputCost := float64(usage.PromptTokens) / 1_000_000 * pricePerMillionInputTokens
-	outputCost := float64(usage.CompletionTokens) / 1_000_000 * pricePerMillionOutputTokens
+// buildCost assembles a Cost struct from the provider-computed LLM response.
+// CostUSD is sourced from the provider's pricing table — the matcher no
+// longer maintains its own pricing constants. Latency is passed in
+// separately because it is measured at the bus round-trip boundary in
+// runMatch, not by the provider.
+func buildCost(resp events.LLMResponse, latencyMs int64) Cost {
 	return Cost{
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
-		TotalTokens:      usage.TotalTokens,
-		USD:              inputCost + outputCost,
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
+		USD:              resp.CostUSD,
 		LatencyMs:        latencyMs,
 	}
 }

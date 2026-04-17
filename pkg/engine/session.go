@@ -45,15 +45,18 @@ type SessionWorkspace struct {
 
 // SessionMeta holds metadata about a session.
 type SessionMeta struct {
-	ID         string            `json:"id"`
-	StartedAt  time.Time         `json:"started_at"`
-	EndedAt    *time.Time        `json:"ended_at,omitempty"`
-	Profile    string            `json:"profile"`
-	Plugins    []string          `json:"plugins"`
-	Labels     map[string]string `json:"labels"`
-	TurnCount  int               `json:"turn_count"`
-	TokensUsed int               `json:"tokens_used"`
-	Status     string            `json:"status"`
+	ID                   string            `json:"id"`
+	StartedAt            time.Time         `json:"started_at"`
+	EndedAt              *time.Time        `json:"ended_at,omitempty"`
+	Profile              string            `json:"profile"`
+	Plugins              []string          `json:"plugins"`
+	Labels               map[string]string `json:"labels"`
+	TurnCount            int               `json:"turn_count"`
+	TokensUsed           int               `json:"tokens_used"`
+	PromptTokensUsed     int               `json:"prompt_tokens_used"`
+	CompletionTokensUsed int               `json:"completion_tokens_used"`
+	CostUSD              float64           `json:"cost_usd"`
+	Status               string            `json:"status"`
 }
 
 // NewSessionWorkspace creates a new session workspace with the standard directory structure.
