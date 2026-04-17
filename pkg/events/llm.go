@@ -69,6 +69,12 @@ type LLMResponse struct {
 	Model        string
 	FinishReason string
 	Metadata     map[string]any
+
+	// Alternatives holds additional responses from parallel fanout providers.
+	// Nil for normal (non-fanout) requests. When populated, the primary fields
+	// above contain the first successful response (or selected winner), and
+	// Alternatives contains the remaining responses.
+	Alternatives []LLMResponse
 }
 
 // Usage tracks token consumption for an LLM call.

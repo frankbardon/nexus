@@ -181,3 +181,76 @@ func TestModelRegistry_EmptyChain(t *testing.T) {
 		t.Fatal("expected empty chain to not create a role")
 	}
 }
+
+func TestModelRegistry_FanoutRole(t *testing.T) {
+	r := NewModelRegistry(map[string]any{
+		"compare": map[string]any{
+			"fanout": true,
+			"providers": []any{
+				map[string]any{
+					"provider":   "nexus.llm.anthropic",
+					"model":      "claude-sonnet-4-20250514",
+					"max_tokens": 4096,
+				},
+				map[string]any{
+					"provider":   "nexus.llm.openai",
+					"model":      "gpt-4o",
+					"max_tokens": 4096,
+				},
+			},
+		},
+		"balanced": map[string]any{
+			"provider": "nexus.llm.anthropic",
+			"model":    "claude-sonnet-4-20250514",
+		},
+	})
+
+	// Fanout role detected.
+	if !r.IsFanout("compare") {
+		t.Fatal("expected compare to be fanout role")
+	}
+
+	// Non-fanout role.
+	if r.IsFanout("balanced") {
+		t.Fatal("expected balanced to not be fanout role")
+	}
+
+	// FanoutProviders returns all providers.
+	providers := r.FanoutProviders("compare")
+	if len(providers) != 2 {
+		t.Fatalf("expected 2 fanout providers, got %d", len(providers))
+	}
+	if providers[0].Provider != "nexus.llm.anthropic" {
+		t.Fatalf("expected first provider nexus.llm.anthropic, got %s", providers[0].Provider)
+	}
+	if providers[1].Provider != "nexus.llm.openai" {
+		t.Fatalf("expected second provider nexus.llm.openai, got %s", providers[1].Provider)
+	}
+
+	// FanoutProviders returns nil for non-fanout roles.
+	if r.FanoutProviders("balanced") != nil {
+		t.Fatal("expected nil for non-fanout role")
+	}
+
+	// Resolve still works (returns first provider).
+	cfg, ok := r.Resolve("compare")
+	if !ok {
+		t.Fatal("expected compare role to resolve")
+	}
+	if cfg.Provider != "nexus.llm.anthropic" {
+		t.Fatalf("expected primary provider nexus.llm.anthropic, got %s", cfg.Provider)
+	}
+}
+
+func TestModelRegistry_FanoutEmptyProviders(t *testing.T) {
+	r := NewModelRegistry(map[string]any{
+		"compare": map[string]any{
+			"fanout":    true,
+			"providers": []any{},
+		},
+	})
+
+	if r.IsFanout("compare") {
+		t.Fatal("expected empty fanout to not register")
+	}
+}

@@ -1,0 +1,75 @@
+# Test: Provider fanout — send one request to multiple providers in parallel
+# Validates: fanout config parsing, parallel dispatch, response collection, combined response
+#
+# Run (automated):
+#   go test -tags integration ./tests/integration/ -run TestFanout
+#
+# What to test:
+#   1. Boot: Engine starts with fanout role config + nexus.provider.fanout active.
+#   2. Config parsing: compare role parsed as fanout with 2 providers.
+#   3. Parallel dispatch: Both providers receive the request.
+#   4. Response collection: Fanout collects both responses.
+#   5. Combined response: Agent receives single llm.response with Alternatives.
+#   6. Events: provider.fanout.start, provider.fanout.response (x2), provider.fanout.complete emitted.
+#
+# Design: Mock mode — no real LLM calls. Two mock responses simulate two providers.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: compare
+    compare:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-sonnet-4-20250514
+          max_tokens: 4096
+        - provider: nexus.llm.openai
+          model: gpt-4o
+          max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.provider.fanout
+    - nexus.agent.react
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Say hello"
+    input_delay: 500ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - content: "Hello from provider A"
+      - content: "Hello from provider B"
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.llm.openai:
+    api_key: "sk-mock-not-used"
+
+  nexus.provider.fanout:
+    strategy: all
+    deadline_ms: 10000
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Follow instructions exactly."
+
+  nexus.memory.conversation:
+    max_messages: 4
+    persist: false
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

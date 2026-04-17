@@ -13,8 +13,12 @@ type ModelConfig struct {
 // Each role maps to an ordered chain of ModelConfigs. The first entry is the
 // primary; subsequent entries are fallbacks tried in order when the primary
 // (or prior fallback) fails with a non-retryable error or exhausts retries.
+//
+// Roles with fanout: true send requests to all providers in parallel instead
+// of using sequential fallback.
 type ModelRegistry struct {
 	chains      map[string][]ModelConfig
+	fanoutRoles map[string]bool
 	defaultRole string
 }
 
@@ -42,6 +46,7 @@ func parseModelConfig(m map[string]any) ModelConfig {
 func NewModelRegistry(modelsRaw map[string]any) *ModelRegistry {
 	r := &ModelRegistry{
 		chains:      make(map[string][]ModelConfig),
+		fanoutRoles: make(map[string]bool),
 		defaultRole: "balanced",
 	}
 
@@ -59,8 +64,24 @@ func NewModelRegistry(modelsRaw map[string]any) *ModelRegistry {
 
 		switch v := val.(type) {
 		case map[string]any:
-			// Single model config (backward compatible).
-			r.chains[key] = []ModelConfig{parseModelConfig(v)}
+			// Check for fanout role: map with "fanout: true" + "providers" list.
+			if isFanout, _ := v["fanout"].(bool); isFanout {
+				if providers, ok := v["providers"].([]any); ok {
+					chain := make([]ModelConfig, 0, len(providers))
+					for _, entry := range providers {
+						if m, ok := entry.(map[string]any); ok {
+							chain = append(chain, parseModelConfig(m))
+						}
+					}
+					if len(chain) > 0 {
+						r.chains[key] = chain
+						r.fanoutRoles[key] = true
+					}
+				}
+			} else {
+				// Single model config (backward compatible).
+				r.chains[key] = []ModelConfig{parseModelConfig(v)}
+			}
 
 		case []any:
 			// Ordered fallback chain.
@@ -130,6 +151,27 @@ func (r *ModelRegistry) ChainLen(role string) int {
 func (r *ModelRegistry) Default() ModelConfig {
 	cfg, _ := r.Resolve("")
 	return cfg
+}
+
+// IsFanout returns true if the role is configured for parallel fanout
+// rather than sequential fallback.
+func (r *ModelRegistry) IsFanout(role string) bool {
+	if role == "" {
+		role = r.defaultRole
+	}
+	return r.fanoutRoles[role]
+}
+
+// FanoutProviders returns all provider configs for a fanout role.
+// Returns nil if the role is not a fanout role or doesn't exist.
+func (r *ModelRegistry) FanoutProviders(role string) []ModelConfig {
+	if role == "" {
+		role = r.defaultRole
+	}
+	if !r.fanoutRoles[role] {
+		return nil
+	}
+	return r.chains[role]
 }
 
 // Roles returns the names of all registered roles.

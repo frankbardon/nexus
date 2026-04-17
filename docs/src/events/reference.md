@@ -137,6 +137,9 @@ Complete reference for all event types in Nexus, organized by domain.
 | Event Type | Payload | Description |
 |------------|---------|-------------|
 | `provider.fallback` | `ProviderFallback` | Provider switch due to failure |
+| `provider.fanout.start` | `ProviderFanoutStart` | Parallel fanout initiated |
+| `provider.fanout.response` | `ProviderFanoutResponse` | Individual provider responded |
+| `provider.fanout.complete` | `ProviderFanoutComplete` | All fanout responses collected |
 
 ### Payloads
 
@@ -150,6 +153,38 @@ Complete reference for all event types in Nexus, organized by domain.
 | `NextProvider` | string | Plugin ID of the fallback provider |
 | `NextModel` | string | Model being tried next |
 | `Attempt` | int | 0-based index in the fallback chain |
+
+**ProviderFanoutStart**
+| Field | Type | Description |
+|-------|------|-------------|
+| `FanoutID` | string | Unique fanout sequence identifier |
+| `Role` | string | Model role being resolved |
+| `Strategy` | string | Selection strategy (`all`, `llm_judge`, `heuristic`, `user`) |
+| `Targets` | []ProviderFanoutTarget | Providers being dispatched to |
+
+**ProviderFanoutTarget**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Provider` | string | Plugin ID |
+| `Model` | string | Model identifier |
+
+**ProviderFanoutResponse**
+| Field | Type | Description |
+|-------|------|-------------|
+| `FanoutID` | string | Fanout sequence identifier |
+| `Provider` | string | Plugin ID that responded |
+| `Model` | string | Model that responded |
+| `Success` | bool | `false` if provider errored or timed out |
+| `Error` | string | Non-empty on failure |
+
+**ProviderFanoutComplete**
+| Field | Type | Description |
+|-------|------|-------------|
+| `FanoutID` | string | Fanout sequence identifier |
+| `Role` | string | Model role |
+| `Strategy` | string | Selection strategy used |
+| `Succeeded` | int | Number of successful responses |
+| `Failed` | int | Number of errors or timeouts |
 
 ---
 
@@ -241,6 +276,7 @@ Certain metadata keys carry special meaning:
 | `Model` | string | Model that was used |
 | `FinishReason` | string | Why the response ended |
 | `Metadata` | map[string]any | Additional context |
+| `Alternatives` | []LLMResponse | Additional responses from parallel fanout providers (nil for non-fanout) |
 
 **Usage**
 | Field | Type | Description |

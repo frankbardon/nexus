@@ -13,6 +13,10 @@ type EventBus interface {
 	Emit(eventType string, payload any) error
 	// EmitEvent dispatches a pre-built event.
 	EmitEvent(event Event[any]) error
+	// EmitAsync dispatches an event asynchronously, returning immediately.
+	// Handlers run in a separate goroutine. The returned channel receives
+	// nil on success or an error, then is closed.
+	EmitAsync(eventType string, payload any) <-chan error
 	// Subscribe registers a handler for an event type.
 	// Returns an unsubscribe function.
 	Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) (unsubscribe func())
@@ -181,6 +185,15 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 	}
 
 	return nil
+}
+
+func (b *eventBus) EmitAsync(eventType string, payload any) <-chan error {
+	ch := make(chan error, 1)
+	go func() {
+		ch <- b.Emit(eventType, payload)
+		close(ch)
+	}()
+	return ch
 }
 
 func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, error) {
