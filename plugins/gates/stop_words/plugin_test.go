@@ -107,6 +107,23 @@ func TestStopWords_IgnoresSystemMessages(t *testing.T) {
 	}
 }
 
+func TestStopWords_UnderscoreCompoundWord(t *testing.T) {
+	_, bus := newTestPlugin([]string{"forbidden_word"}, false)
+
+	output := events.AgentOutput{Content: "This has FORBIDDEN_WORD in it."}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+	if !result.Vetoed {
+		t.Fatal("underscore compound word should match as single token")
+	}
+
+	// Partial match should not trigger.
+	output2 := events.AgentOutput{Content: "This is just forbidden."}
+	result2, _ := bus.EmitVetoable("before:io.output", &output2)
+	if result2.Vetoed {
+		t.Fatal("partial match of compound word should not veto")
+	}
+}
+
 func TestStopWords_EmptyWordList(t *testing.T) {
 	_, bus := newTestPlugin(nil, false)
 

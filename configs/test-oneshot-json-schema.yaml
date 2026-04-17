@@ -7,6 +7,9 @@
 # Run (argument):
 #   bin/nexus -config configs/test-oneshot-json-schema.yaml -input "The weather is terrible today. Cold and rainy."
 #
+# Run (automated):
+#   go test -tags integration ./tests/integration/ -run TestOneshotJsonSchema
+#
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env
 #
@@ -41,7 +44,7 @@
 #   - persist=false — no session saved (appropriate for oneshot)
 #   - max_messages=10 — minimal memory for oneshot mode
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
@@ -57,19 +60,22 @@ core:
 
 plugins:
   active:
-    - nexus.io.oneshot
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.json_schema
     - nexus.memory.conversation
     - nexus.observe.logger
 
+  nexus.io.test:
+    inputs:
+      - "I love this product! Great quality and fast shipping."
+    input_delay: 500ms
+    approval_mode: approve
+    timeout: 60s
+
   nexus.llm.anthropic:
     api_key_env: ANTHROPIC_API_KEY
-
-  nexus.io.oneshot:
-    pretty: true
-    read_stdin: true
 
   nexus.agent.react:
     system_prompt: "You are a structured data extractor. Always respond with valid JSON matching the required schema."
