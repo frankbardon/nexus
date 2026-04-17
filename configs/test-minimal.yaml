@@ -1,0 +1,56 @@
+# Test: Absolute minimum viable config — no tools, no gates, no observers
+# Validates: bare engine boots cleanly, agent works with zero tools, conversation-only flow
+#
+# Run:
+#   bin/nexus -config configs/test-minimal.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Boot: Engine starts without errors despite no gates, tools, or observers.
+#   2. Conversation: Send a message like "Hello, who are you?" — agent should respond
+#      conversationally with no tool calls.
+#   3. No tools: Ask "list my files" or "run ls" — agent should explain it has no tools,
+#      not error or hang.
+#   4. Multi-turn: Have a 3-4 message conversation. Verify conversation memory keeps context
+#      across turns (reference something from earlier, agent should recall).
+#   5. No persistence: Exit and restart. Previous conversation should NOT be restored
+#      (persist: false).
+#   6. Clean shutdown: Ctrl+C should exit cleanly with no panics or goroutine leaks.
+#
+# What to watch for:
+#   - No error logs on startup (log_level: warn suppresses info)
+#   - Session dir created at ~/.nexus/sessions/ despite no observers
+#   - Only 4 plugins in boot log (tui, anthropic, react, conversation)
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.conversation
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: "You are a helpful assistant. You have no tools available — respond conversationally only."
+
+  nexus.memory.conversation:
+    max_messages: 50
+    persist: false

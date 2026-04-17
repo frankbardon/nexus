@@ -1,0 +1,88 @@
+# Test: Long-term memory plugin with conversation memory
+# Validates: memory index injection, CRUD tools, auto_load, scope resolution, cross-session persistence
+#
+# Run:
+#   bin/nexus -config configs/test-longterm-memory.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#   - Optional: pre-populate ~/.nexus/memory/ with a test memory file to verify auto_load
+#
+# What to test:
+#   SESSION 1 — Writing memories:
+#   1. Boot: Check logs for memory.longterm.loaded event. If ~/.nexus/memory/ is empty,
+#      index should be empty but event still fires.
+#   2. Memory tools: Ask "what memory tools do you have?" — should list memory_write,
+#      memory_read, memory_list, memory_delete.
+#   3. Write memory: Say "Remember that my favorite color is blue." Agent should
+#      proactively call memory_write (auto_save_instructions active). Check
+#      ~/.nexus/memory/ for new .md file with YAML frontmatter.
+#   4. Read memory: Ask "what do you remember about my preferences?" — agent should
+#      call memory_read or memory_list and find the color preference.
+#   5. Write another: Say "I'm working on a project called Nexus." Verify second
+#      memory file created.
+#   6. List memories: Ask "list all memories" — should return both entries with keys,
+#      previews, and tags.
+#   7. Delete memory: Ask "forget my favorite color." Agent should call memory_delete.
+#      Verify file removed from ~/.nexus/memory/.
+#
+#   SESSION 2 — Cross-session persistence:
+#   8. Restart: Exit and run again with same config.
+#   9. Auto-load: On boot, memory index should include the Nexus project memory from
+#      session 1 (color memory was deleted).
+#  10. Recall: Ask "what do you know about me?" — agent should reference the Nexus
+#      project memory WITHOUT being told again.
+#
+# What to watch for:
+#   - scope=global means ~/.nexus/memory/ used (not agent-scoped path)
+#   - Memory files are human-readable markdown with YAML frontmatter
+#   - auto_save_instructions injected into system prompt (agent proactively saves)
+#   - Memory index in system prompt is lightweight (key + preview, not full content)
+#   - Keys sanitized to valid filenames (lowercase, hyphens/underscores only)
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.conversation
+    - nexus.memory.longterm
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/conversationalist.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.memory.longterm:
+    scope: global
+    auto_load: true
+    path: "~/.nexus/memory/"
+    auto_save_instructions: "If the user shares a preference, fact about themselves, or project context that would be useful in future sessions, proactively save it using memory_write."
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

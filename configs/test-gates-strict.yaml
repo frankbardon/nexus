@@ -1,0 +1,101 @@
+# Test: Gates in strict/blocking mode with tight limits
+# Validates: veto behavior under pressure, rate limiter pause+retry, budget cutoff
+#
+# Run:
+#   bin/nexus -config configs/test-gates-strict.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Iteration limit: Ask something requiring multiple tool calls (not possible here
+#      since no tools, but agent may reason internally). After 3 iterations see warning,
+#      after 5 get hard stop.
+#   2. Token budget: With only 5000 token budget and 50% warning, budget warning should
+#      fire after ~2500 tokens (roughly 2-3 exchanges). Full cutoff shortly after.
+#      Verify session ends gracefully when budget exhausted.
+#   3. Rate limiter: Send 5 messages quickly — 6th should trigger pause. Verify the
+#      agent resumes automatically after window resets (not permanent block).
+#   4. Output length: 500 char max with 1 retry. Ask "explain quantum computing in
+#      detail" — first attempt likely too long, retry should produce shorter version.
+#      If still over 500, gate blocks. Verify retry prompt sent to LLM.
+#   5. Content safety (block mode): Ask agent to include an email address in response —
+#      should be blocked entirely (not warned). Response should not reach user.
+#   6. Combined pressure: Use the session normally until multiple gates trigger in
+#      sequence. Verify they compose correctly — rate limit pause doesn't reset token
+#      budget, output retry doesn't count as extra iteration, etc.
+#
+# What to watch for:
+#   - Haiku model (quick role) — cheaper for testing tight budgets
+#   - max_tokens: 2048 on model — small enough to hit budget fast
+#   - Session becomes unusable after budget exhaustion — expected behavior
+#   - gate.llm.retry events from rate_limiter when condition clears
+#   - Reduced conversation memory (20 messages) matches tight resource profile
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.gate.token_budget
+    - nexus.gate.rate_limiter
+    - nexus.gate.output_length
+    - nexus.gate.content_safety
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/conversationalist.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+    warning_at: 3
+
+  nexus.gate.token_budget:
+    max_tokens: 5000
+    warning_threshold: 0.5
+
+  nexus.gate.rate_limiter:
+    requests_per_minute: 5
+    window_seconds: 60
+
+  nexus.gate.output_length:
+    max_chars: 500
+    max_retries: 1
+
+  nexus.gate.content_safety:
+    action: block
+    check_pii_email: true
+    check_pii_phone: true
+    check_pii_ssn: true
+    check_secrets_api_key: true
+    check_secrets_private_key: true
+    check_secrets_password: true
+    check_credit_card: true
+    check_ip_internal: true
+
+  nexus.memory.conversation:
+    max_messages: 20
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

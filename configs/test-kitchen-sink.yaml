@@ -1,0 +1,162 @@
+# Test: Maximum plugin load — everything active at once
+# Validates: boot with all plugins, no init conflicts, dependency resolution, event bus under load
+#
+# Run:
+#   bin/nexus -config configs/test-kitchen-sink.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#   - Optional: skills in ./skills/ directory
+#   - Optional: pre-existing memories in ~/.nexus/memory/
+#
+# What to test:
+#   1. Boot: 21 plugins init in dependency order without errors. Check logs for
+#      full plugin list. Dependency resolution handles subagent→react correctly.
+#   2. Planning + tools: planning=true with dynamic planner. Send a coding task —
+#      plan generated (opus), then executed with tools (sonnet).
+#   3. Subagent: Ask to delegate a subtask — spawn_subagent tool available.
+#   4. All gates active: Normal conversation should pass all gates. Then test each:
+#      - Say "BLOCKED" → stop_words gate triggers
+#      - Send injection-like input → prompt_injection warns
+#      - Ask for long output → output_length retries at 5000 chars
+#      - Include fake email → content_safety warns
+#   5. Long-term memory: memory_write/read/list/delete tools available alongside
+#      conversation memory. Auto-load injects index on boot.
+#   6. Skills: Skill catalog in system prompt. Can activate skills up to max 5.
+#   7. Thinking observer: thinking.jsonl captures reasoning steps in session dir.
+#   8. Token budget: 100k token budget with 80% warning. Monitor across extended session.
+#   9. Rate limiter: 60 req/min — normal usage shouldn't trigger, but rapid-fire will.
+#  10. Context window: 100k token context window at 85% trigger — long conversations
+#      should trigger compaction.
+#  11. Tool filter: exclude=[] — all tools pass. Verify no tools filtered.
+#  12. Stress test: Use the session heavily for 10+ turns with tool use, subagents,
+#      and memory writes. Verify no event bus deadlocks or handler conflicts.
+#
+# What to watch for:
+#   - Boot time — 21 plugins should still init in <2s
+#   - Event bus handles high event volume from all plugins
+#   - No gate conflicts (multiple gates on same before:* events at priority 10)
+#   - Memory footprint stable across turns (no unbounded growth)
+#   - Logger output useful at info level (not too noisy, not too quiet)
+#   - Session dir has plugin data dirs for all stateful plugins
+#   - Clean shutdown tears down all 21 plugins in reverse order
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.subagent
+    - nexus.planner.dynamic
+    - nexus.gate.endless_loop
+    - nexus.gate.stop_words
+    - nexus.gate.token_budget
+    - nexus.gate.rate_limiter
+    - nexus.gate.prompt_injection
+    - nexus.gate.output_length
+    - nexus.gate.content_safety
+    - nexus.gate.context_window
+    - nexus.gate.tool_filter
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.skills
+    - nexus.memory.conversation
+    - nexus.memory.longterm
+    - nexus.observe.logger
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    planning: true
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.agent.subagent:
+    system_prompt: "You are a helpful sub-agent."
+
+  nexus.planner.dynamic:
+    model_role: reasoning
+    max_steps: 10
+    approval: auto
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+    warning_at: 15
+
+  nexus.gate.stop_words:
+    words: ["BLOCKED"]
+    case_sensitive: false
+
+  nexus.gate.token_budget:
+    max_tokens: 100000
+    warning_threshold: 0.8
+
+  nexus.gate.rate_limiter:
+    requests_per_minute: 60
+    window_seconds: 60
+
+  nexus.gate.prompt_injection:
+    action: warn
+
+  nexus.gate.output_length:
+    max_chars: 5000
+    max_retries: 2
+
+  nexus.gate.content_safety:
+    action: warn
+
+  nexus.gate.context_window:
+    max_context_tokens: 100000
+    trigger_ratio: 0.85
+
+  nexus.gate.tool_filter:
+    exclude: []
+
+  nexus.tool.shell:
+    allowed_commands: [go, git, ls, cat, grep, find, mkdir, rm, cp, mv, make]
+    timeout: 30s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.skills:
+    trust_project: ask
+    max_active_skills: 5
+    catalog_in_system_prompt: true
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.memory.longterm:
+    scope: global
+    auto_load: true
+    path: "~/.nexus/memory/"
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

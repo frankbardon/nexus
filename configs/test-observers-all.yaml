@@ -1,0 +1,88 @@
+# Test: All observer plugins active — logger + otel + thinking
+# Validates: observer coexistence, OTel span export, thinking JSONL persistence, no observer conflicts
+#
+# Run:
+#   docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one  # optional: OTel collector
+#   bin/nexus -config configs/test-observers-all.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#   - Optional: OTLP collector on localhost:4317 (Jaeger, Grafana Tempo, etc.)
+#     OTel plugin will warn on connect failure but won't crash.
+#
+# What to test:
+#   1. Boot: All three observers init without conflict. Logger, otel, thinking all active.
+#   2. Debug logging: log_level=debug + logger level=debug. stderr should show ALL bus
+#      events in structured JSON format — very verbose. Verify llm.request, llm.response,
+#      core.tick (excluded from OTel but visible in logger).
+#   3. Thinking persistence: Have a conversation. Check session dir for
+#      plugins/nexus.observe.thinking/thinking.jsonl. Should contain thinking steps
+#      as JSONL entries with timestamps.
+#   4. OTel spans (if collector running): Open Jaeger UI at localhost:16686. Search
+#      for service "nexus-test". Should see spans for each bus event except core.tick
+#      (excluded). Verify span attributes include event payloads.
+#   5. OTel without collector: If no collector running, otel plugin should log connection
+#      error but not crash or block other observers.
+#   6. Observer isolation: All three observers process same events independently.
+#      No event duplication or missing events across observers.
+#   7. Exclude events: core.tick excluded from OTel but NOT from logger. Verify tick
+#      events appear in stderr but not in Jaeger traces.
+#
+# What to watch for:
+#   - Debug logging is VERY verbose — stderr will be noisy
+#   - Thinking JSONL grows per conversation turn (check file size)
+#   - OTel protocol=grpc with insecure=true (no TLS for local testing)
+#   - No performance impact from three observers on same events
+#   - Session dir has plugin data dirs for all three observers
+core:
+  log_level: debug
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.conversation
+    - nexus.observe.logger
+    - nexus.observe.otel
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/conversationalist.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: debug
+
+  nexus.observe.otel:
+    endpoint: "localhost:4317"
+    protocol: grpc
+    insecure: true
+    service_name: nexus-test
+    exclude_events:
+      - core.tick
+
+  # nexus.observe.thinking has no config — just needs to be active

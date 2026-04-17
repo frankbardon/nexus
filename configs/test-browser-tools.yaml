@@ -1,0 +1,89 @@
+# Test: Browser UI with full tool suite
+# Validates: browser IO + tools interaction, WebSocket streaming with tool calls, browser approval flow
+#
+# Run:
+#   bin/nexus -config configs/test-browser-tools.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#   - Port 8080 available (or change port in config)
+#
+# What to test:
+#   1. Auto-open: Browser should open automatically to localhost:8080 (open_browser=true).
+#   2. WebSocket connection: Web UI should show connected status. Check browser console
+#      for WebSocket upgrade handshake.
+#   3. Streaming: Send a message — response should stream in browser, not appear all
+#      at once. Watch for smooth character-by-character rendering.
+#   4. Tool calls in browser: Ask "list files in the current directory" — browser should
+#      show tool invocation (shell or file tool), tool result, then agent response.
+#      Verify tool call/result rendering is clear and distinct from chat messages.
+#   5. Shell tool: Ask "run echo hello world" — shell executes, result shown in browser.
+#      Only allowed commands work: try "run rm -rf /" — should be blocked by allowlist.
+#   6. File tool: Ask "read the contents of go.mod" — file_read tool should work.
+#   7. Multi-step: Ask "find all .go files and count them" — agent should make multiple
+#      tool calls. Browser should render each step.
+#   8. Session persistence: Reload browser page — conversation should reconnect
+#      (conversation memory persist=true).
+#   9. Clean shutdown: Stop server (Ctrl+C) — browser should show disconnected state.
+#
+# What to watch for:
+#   - Browser renders tool call names and arguments readably
+#   - Tool results appear within tool call blocks, not as separate messages
+#   - No WebSocket disconnects during long tool executions (timeout=15s)
+#   - Sandbox mode restricts shell environment (PATH, HOME, LANG only)
+#   - 15 iteration limit prevents runaway tool loops in browser
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.browser
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.io.browser:
+    host: localhost
+    port: 8080
+    open_browser: true
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 15
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, grep, find, echo, pwd]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

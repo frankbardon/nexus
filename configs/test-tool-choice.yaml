@@ -1,0 +1,85 @@
+# Test: Tool choice modes — sequence pattern
+# Validates: tool_choice sequence cycling, forced tool on iteration 1, auto after
+#
+# Run:
+#   bin/nexus -config configs/test-tool-choice.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Iteration 1 (mode: required): Send any message. Agent MUST call a tool on first
+#      iteration — cannot respond with text only. Watch logs for tool_choice in
+#      llm.request. Agent picks whichever tool it wants.
+#   2. Iteration 2 (mode: tool, name: file_read): Second iteration forces file_read
+#      specifically. Even if agent wants to call shell, it must use file_read.
+#      Verify in logs that tool_choice type is "tool" with name "file_read".
+#   3. Iteration 3+ (mode: auto): From iteration 3 onward, agent decides freely.
+#      May call tools or respond with text. Last entry in sequence repeats.
+#   4. New turn resets: Start a new turn (send another message). Sequence should restart
+#      from iteration 1 (required) again.
+#   5. Edge case: Ask a simple question like "What is 2+2?" — agent still forced to
+#      use a tool on iteration 1 despite not needing one. Verify it handles gracefully.
+#
+# What to watch for:
+#   - Logger output shows tool_choice field changing across iterations
+#   - Anthropic API receives correct tool_choice mapping:
+#     required → {"type": "any"}, tool → {"type": "tool", "name": "file_read"}
+#   - Agent doesn't get stuck if forced tool returns empty/error result
+#   - Sequence resets per-turn, not per-session
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/coding-assistant.md
+    tool_choice:
+      sequence:
+        - mode: required
+        - mode: tool
+          name: file_read
+        - mode: auto
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, grep, find]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

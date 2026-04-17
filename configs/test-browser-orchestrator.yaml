@@ -1,0 +1,106 @@
+# Test: Browser UI with orchestrator agent
+# Validates: orchestrator progress display in browser, worker status rendering, synthesis in web UI
+#
+# Run:
+#   bin/nexus -config configs/test-browser-orchestrator.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#   - Port 8080 available (or change port in config)
+#
+# What to test:
+#   1. Auto-open: Browser opens to localhost:8080.
+#   2. Task decomposition: Send a multi-part task like "List the directory structure AND
+#      show the contents of go.mod AND count .go files." Orchestrator should decompose
+#      into subtasks visible in browser.
+#   3. Worker progress: Browser should show worker status — which workers are active,
+#      what they're doing, their progress. Up to 2 workers run concurrently.
+#   4. Worker tool use: Workers have access to shell (ls, cat, grep, find) and file tools.
+#      Each worker's tool calls should be distinguishable in browser.
+#   5. Synthesis display: After workers complete, synthesis step should be visually
+#      distinct from worker outputs. Final merged response should be coherent.
+#   6. Worker failure: Give one impossible subtask — with fail_fast=false, other workers
+#      continue. Browser should show failed worker alongside successful ones.
+#   7. Streaming during parallel work: While 2 workers stream simultaneously, browser
+#      should handle both streams without garbling.
+#
+# What to watch for:
+#   - Orchestrator (balanced=sonnet) vs workers (quick=haiku) model routing visible
+#   - Browser handles multiple concurrent streaming events cleanly
+#   - worker_max_iterations=8 per worker — enough for simple tasks, prevents runaway
+#   - Subtask count capped at 4 (max_subtasks)
+#   - WebSocket handles burst of events from parallel workers
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.browser
+    - nexus.llm.anthropic
+    - nexus.agent.orchestrator
+    - nexus.agent.subagent/main
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.io.browser:
+    host: localhost
+    port: 8080
+    open_browser: true
+
+  nexus.agent.orchestrator:
+    max_workers: 2
+    max_subtasks: 4
+    orchestrator_model_role: balanced
+    worker_model_role: quick
+    synthesis_model_role: balanced
+    fail_fast: false
+    worker_max_iterations: 8
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.agent.subagent/main:
+    max_iterations: 8
+
+  nexus.gate.endless_loop:
+    max_iterations: 15
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, grep, find]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

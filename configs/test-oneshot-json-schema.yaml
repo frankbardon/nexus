@@ -1,0 +1,87 @@
+# Test: One-shot mode with JSON schema gate — structured output enforcement
+# Validates: oneshot + json_schema gate, retry on invalid output, schema validation
+#
+# Run (stdin):
+#   echo "I love this product! Great quality and fast shipping." | bin/nexus -config configs/test-oneshot-json-schema.yaml
+#
+# Run (argument):
+#   bin/nexus -config configs/test-oneshot-json-schema.yaml -input "The weather is terrible today. Cold and rainy."
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# Expected output schema:
+#   {
+#     "summary": "string",
+#     "sentiment": "positive" | "negative" | "neutral" | "mixed",
+#     "topics": ["string", ...]
+#   }
+#
+# What to test:
+#   1. Valid output: Pipe a simple sentence — output should be valid JSON matching the
+#      schema above. All three fields present, sentiment is one of the enum values.
+#   2. Pretty print: pretty=true — JSON should be indented, not single-line.
+#   3. Schema enforcement: The json_schema gate validates output. If LLM returns
+#      non-JSON or missing fields, gate retries (up to 3 times) with error feedback.
+#      Verify final output is always valid JSON.
+#   4. Sentiment values: Test each sentiment:
+#      - Positive: "I love this! Amazing product."
+#      - Negative: "Terrible experience. Worst purchase ever."
+#      - Neutral: "The package arrived on Tuesday."
+#      - Mixed: "Great quality but shipping was slow."
+#   5. Topics extraction: Verify topics array contains relevant keywords from input.
+#   6. One-shot exit: Process exits after single response. No interactive prompt.
+#   7. Stdin mode: read_stdin=true — reads from piped input. No input file needed.
+#   8. Complex input: Pipe a longer paragraph — output should still conform to schema.
+#
+# What to watch for:
+#   - No interactive TUI — oneshot mode reads input, produces output, exits
+#   - json_schema gate operates on before:io.output event (output-side validation)
+#   - If retry happens, logger (stderr) shows retry attempt with schema error
+#   - persist=false — no session saved (appropriate for oneshot)
+#   - max_messages=10 — minimal memory for oneshot mode
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.oneshot
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.json_schema
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.io.oneshot:
+    pretty: true
+    read_stdin: true
+
+  nexus.agent.react:
+    system_prompt: "You are a structured data extractor. Always respond with valid JSON matching the required schema."
+
+  nexus.gate.json_schema:
+    schema: '{"type":"object","required":["summary","sentiment","topics"],"properties":{"summary":{"type":"string"},"sentiment":{"type":"string","enum":["positive","negative","neutral","mixed"]},"topics":{"type":"array","items":{"type":"string"}}}}'
+    max_retries: 3
+
+  nexus.memory.conversation:
+    max_messages: 10
+    persist: false
+
+  nexus.observe.logger:
+    output: stderr
+    level: info
