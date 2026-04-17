@@ -263,6 +263,7 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	newMeta["_fallback_attempt"] = nextAttempt
 	newMeta["_fallback_role"] = role
 	newMeta["_fallback_id"] = fallbackID
+	newMeta["_target_provider"] = nextCfg.Provider
 
 	// Re-emit request targeting the fallback provider.
 	retryReq := origReq

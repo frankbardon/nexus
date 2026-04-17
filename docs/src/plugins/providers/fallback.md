@@ -76,5 +76,6 @@ The fallback plugin injects tracking metadata into requests for roles with fallb
 | `_fallback_id` | string | Unique ID for this fallback sequence |
 | `_fallback_attempt` | int | Current index in the chain (0 = primary) |
 | `_fallback_role` | string | Role name being resolved |
+| `_target_provider` | string | Plugin ID of the target provider (set on re-emission) |
 
 This metadata flows through the provider and back via `ErrorInfo.RequestMeta` on failure, enabling the plugin to correlate errors with their original requests.

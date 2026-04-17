@@ -189,6 +189,12 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 }
 
 func (p *Plugin) handleRequest(req events.LLMRequest) {
+	// If a specific provider is targeted (e.g. by fallback plugin), skip
+	// if it's not us.
+	if target, ok := req.Metadata["_target_provider"].(string); ok && target != pluginID {
+		return
+	}
+
 	model := req.Model
 	maxTokens := req.MaxTokens
 
