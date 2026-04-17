@@ -98,16 +98,19 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 	vp, ok := event.Payload.(*engine.VetoablePayload)
 	if !ok {
+		p.logger.Debug("handleBeforeRequest: payload not VetoablePayload")
 		return
 	}
 	req, ok := vp.Original.(*events.LLMRequest)
 	if !ok {
+		p.logger.Debug("handleBeforeRequest: original not *LLMRequest")
 		return
 	}
 
 	// Skip requests already in a fallback sequence.
 	if req.Metadata != nil {
 		if _, ok := req.Metadata["_fallback_id"]; ok {
+			p.logger.Debug("handleBeforeRequest: already in fallback sequence")
 			return
 		}
 	}
@@ -115,11 +118,15 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 	// Only track requests for roles with fallback chains.
 	role := req.Role
 	if role == "" {
+		p.logger.Debug("handleBeforeRequest: empty role")
 		return
 	}
-	if p.models.ChainLen(role) <= 1 {
+	chainLen := p.models.ChainLen(role)
+	if chainLen <= 1 {
+		p.logger.Debug("handleBeforeRequest: chain too short", "role", role, "chain_len", chainLen)
 		return
 	}
+	p.logger.Info("handleBeforeRequest: injecting fallback tracking", "role", role, "chain_len", chainLen)
 
 	// Inject tracking metadata into the request.
 	fallbackID := engine.GenerateID()
@@ -152,28 +159,43 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 // the error is non-retryable or retries are exhausted and a fallback
 // provider exists in the chain.
 func (p *Plugin) handleBeforeError(event engine.Event[any]) {
+	p.logger.Info("handleBeforeError: entered", "event_type", event.Type)
+
 	vp, ok := event.Payload.(*engine.VetoablePayload)
 	if !ok {
+		p.logger.Info("handleBeforeError: payload not VetoablePayload")
 		return
 	}
 	errInfo, ok := vp.Original.(*events.ErrorInfo)
 	if !ok {
+		p.logger.Info("handleBeforeError: original not *ErrorInfo")
 		return
 	}
 
+	p.logger.Info("handleBeforeError: error details",
+		"source", errInfo.Source,
+		"retryable", errInfo.Retryable,
+		"retries_exhausted", errInfo.RetriesExhausted,
+		"has_meta", errInfo.RequestMeta != nil,
+		"error", errInfo.Err.Error(),
+	)
+
 	// Only intercept provider errors (nexus.llm.* sources).
 	if !strings.HasPrefix(errInfo.Source, "nexus.llm.") {
+		p.logger.Info("handleBeforeError: not a provider error")
 		return
 	}
 
 	// Only intercept when error is non-retryable, or retries are exhausted.
 	if errInfo.Retryable && !errInfo.RetriesExhausted {
+		p.logger.Info("handleBeforeError: retryable but not exhausted, skipping")
 		return
 	}
 
 	// Extract fallback tracking metadata from the original request.
 	meta := errInfo.RequestMeta
 	if meta == nil {
+		p.logger.Info("handleBeforeError: no request meta")
 		return
 	}
 
