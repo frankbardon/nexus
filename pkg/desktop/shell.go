@@ -70,6 +70,8 @@ const (
 	AgentStatusBooting AgentStatus = "booting"
 	AgentStatusRunning AgentStatus = "running"
 	AgentStatusError   AgentStatus = "error"
+
+	longtermPluginID = "nexus.memory.longterm"
 )
 
 // AgentInfo is the serializable projection of Agent for the frontend.
@@ -387,6 +389,12 @@ func (s *Shell) bootAgent(agentID, recallSessionID string) error {
 
 	if recallSessionID != "" {
 		eng.RecallSessionID = recallSessionID
+	}
+
+	// Inject agent_id into longterm memory plugin config so it can
+	// resolve agent-scoped storage paths.
+	if cfg := eng.Config.Plugins.Configs[longtermPluginID]; cfg != nil {
+		cfg["agent_id"] = agentID
 	}
 
 	// Create the nexus.io.wails plugin instance so we can inject the

@@ -42,6 +42,7 @@
 - [Memory](./plugins/memory/index.md)
   - [Conversation History](./plugins/memory/conversation.md)
   - [Context Compaction](./plugins/memory/compaction.md)
+  - [Long-Term Memory](./plugins/memory/longterm.md)
 - [I/O Interfaces](./plugins/io/index.md)
   - [Terminal UI (TUI)](./plugins/io/tui.md)
   - [Browser UI](./plugins/io/browser.md)

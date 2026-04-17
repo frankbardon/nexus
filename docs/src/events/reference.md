@@ -387,6 +387,35 @@ Certain metadata keys carry special meaning:
 | `MessageCount` | int | Messages after compaction |
 | `PrevCount` | int | Messages before compaction |
 
+### Long-Term Memory Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `memory.longterm.loaded` | `LongTermMemoryLoaded` | Memory index injected into system prompt |
+| `memory.longterm.store` | `LongTermMemoryStoreRequest` | Write or update a memory entry |
+| `memory.longterm.stored` | `LongTermMemoryStored` | Write confirmed |
+| `memory.longterm.read` | `LongTermMemoryReadRequest` | Read a memory entry |
+| `memory.longterm.result` | `LongTermMemoryReadResult` | Read result |
+| `memory.longterm.delete` | `LongTermMemoryDeleteRequest` | Delete a memory entry |
+| `memory.longterm.deleted` | `LongTermMemoryDeleted` | Delete confirmed |
+| `memory.longterm.list` | `LongTermMemoryQuery` | List/filter memories |
+| `memory.longterm.list.result` | `LongTermMemoryListResult` | List result |
+
+**LongTermMemoryIndex**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | string | Memory key |
+| `Preview` | string | First line of content |
+| `Tags` | map[string]string | Key-value tags |
+| `Updated` | time.Time | Last update timestamp |
+
+**LongTermMemoryStoreRequest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | string | Memory key |
+| `Content` | string | Markdown content |
+| `Tags` | map[string]string | Optional tags |
+
 ---
 
 ## Plan Events
