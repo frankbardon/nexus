@@ -13,18 +13,29 @@ type ToolFilter struct {
 	Exclude []string `json:"exclude,omitempty"` // remove these tools
 }
 
+// ResponseFormat specifies the desired output format for an LLM request.
+// Providers map this to their native structured output mechanism when supported,
+// or simulate via tool-use-as-schema when not.
+type ResponseFormat struct {
+	Type   string         `json:"type"`             // "text" | "json_object" | "json_schema"
+	Name   string         `json:"name,omitempty"`   // schema name (OpenAI requires this)
+	Schema map[string]any `json:"schema,omitempty"` // JSON Schema
+	Strict bool           `json:"strict,omitempty"` // enforce strict schema adherence
+}
+
 // LLMRequest describes a request to a language model.
 type LLMRequest struct {
-	Role        string // Model role (e.g., "reasoning", "balanced", "quick")
-	Model       string // Explicit model ID override (takes precedence over Role)
-	Messages    []Message
-	Tools       []ToolDef
-	ToolChoice  *ToolChoice  // nil = provider default (auto)
-	ToolFilter  *ToolFilter  // nil = no filtering
-	MaxTokens   int
-	Temperature *float64
-	Stream      bool
-	Metadata    map[string]any
+	Role           string // Model role (e.g., "reasoning", "balanced", "quick")
+	Model          string // Explicit model ID override (takes precedence over Role)
+	Messages       []Message
+	Tools          []ToolDef
+	ToolChoice     *ToolChoice     // nil = provider default (auto)
+	ToolFilter     *ToolFilter     // nil = no filtering
+	ResponseFormat *ResponseFormat // nil = no structured output constraint
+	MaxTokens      int
+	Temperature    *float64
+	Stream         bool
+	Metadata       map[string]any
 }
 
 // Message represents a single message in an LLM conversation.

@@ -67,4 +67,5 @@
 # Guides
 
 - [Writing Skills](./skills/authoring.md)
+- [Structured Output](./guides/structured-output.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)

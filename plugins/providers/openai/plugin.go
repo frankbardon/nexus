@@ -281,8 +281,16 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	// Store request metadata for passthrough to response.
+	// Flag native structured output so downstream consumers know enforcement was used.
+	meta := req.Metadata
+	if req.ResponseFormat != nil && req.ResponseFormat.Type != "text" {
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		meta["_structured_output"] = true
+	}
 	p.mu.Lock()
-	p.currentRequestMeta = req.Metadata
+	p.currentRequestMeta = meta
 	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
@@ -372,6 +380,27 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// Map tool choice to OpenAI API format.
 	if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
 		body["tool_choice"] = tc
+	}
+
+	// Map structured output response format.
+	if rf := req.ResponseFormat; rf != nil {
+		switch rf.Type {
+		case "json_object":
+			body["response_format"] = map[string]any{
+				"type": "json_object",
+			}
+		case "json_schema":
+			schema := map[string]any{
+				"name":   rf.Name,
+				"schema": rf.Schema,
+				"strict": rf.Strict,
+			}
+			body["response_format"] = map[string]any{
+				"type":        "json_schema",
+				"json_schema": schema,
+			}
+		}
+		// "text" is OpenAI default — no field needed.
 	}
 
 	return body

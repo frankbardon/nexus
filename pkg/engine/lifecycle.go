@@ -28,11 +28,12 @@ type LifecycleManager struct {
 	session  *SessionWorkspace
 	models   *ModelRegistry
 	prompts  *PromptRegistry
+	schemas  *SchemaRegistry
 	system   *SystemInfo
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
-func NewLifecycleManager(registry *PluginRegistry, bus EventBus, config *Config, logger *slog.Logger, models *ModelRegistry, prompts *PromptRegistry, system *SystemInfo) *LifecycleManager {
+func NewLifecycleManager(registry *PluginRegistry, bus EventBus, config *Config, logger *slog.Logger, models *ModelRegistry, prompts *PromptRegistry, schemas *SchemaRegistry, system *SystemInfo) *LifecycleManager {
 	return &LifecycleManager{
 		registry: registry,
 		bus:      bus,
@@ -40,6 +41,7 @@ func NewLifecycleManager(registry *PluginRegistry, bus EventBus, config *Config,
 		logger:   logger,
 		models:   models,
 		prompts:  prompts,
+		schemas:  schemas,
 		system:   system,
 	}
 }
@@ -102,6 +104,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Session:    lm.session,
 			Models:     lm.models,
 			Prompts:    lm.prompts,
+			Schemas:    lm.schemas,
 			System:     lm.system,
 			InstanceID: instanceIDs[configuredID],
 		}

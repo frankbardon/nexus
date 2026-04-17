@@ -62,6 +62,16 @@ Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in
 
 Transient errors (rate limits, server errors) are retried with exponential backoff.
 
+### Structured Output (Native)
+
+OpenAI natively supports structured output via the `response_format` API field. When `ResponseFormat` is set on an `LLMRequest`, the provider maps it directly:
+
+- **`json_object`** → `{"type": "json_object"}` — Forces valid JSON output.
+- **`json_schema`** → `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": true}}` — Forces output matching a specific schema. The `Strict` field controls whether OpenAI enforces exact schema adherence.
+- **`text`** → No `response_format` field (OpenAI default).
+
+`LLMResponse.Metadata["_structured_output"]` is set to `true` for `json_object` and `json_schema` types.
+
 ### Cost Tracking
 
 The provider computes `CostUSD` on every `llm.response` using per-model pricing rates. Embedded defaults cover common OpenAI models. Override via config for enterprise pricing tiers or new models:

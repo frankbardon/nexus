@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,8 +22,9 @@ type Plugin struct {
 
 	mu           sync.RWMutex
 	catalog      []SkillRecord
-	activeSkills map[string]bool // name -> active
+	activeSkills map[string]bool   // name -> active
 	skillsByName map[string]*SkillRecord
+	skillSchemas map[string]string // skill name -> schema registry name (only skills with output_schema)
 	unsubs       []func()
 
 	// Config fields.
@@ -38,6 +40,7 @@ func New() engine.Plugin {
 	return &Plugin{
 		activeSkills:       make(map[string]bool),
 		skillsByName:       make(map[string]*SkillRecord),
+		skillSchemas:       make(map[string]string),
 		trustProject:       "ask",
 		maxActiveSkills:    10,
 		catalogInSysPrompt: true,
@@ -56,6 +59,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "skill.activate", Priority: 50},
 		{EventType: "skill.resource.read", Priority: 50},
 		{EventType: "skill.deactivate", Priority: 50},
+		{EventType: "before:llm.request", Priority: 15}, // after schema registry (5), before gates (10 on other events)
 	}
 }
 
@@ -65,6 +69,8 @@ func (p *Plugin) Emissions() []string {
 		"skill.loaded",
 		"skill.resource.result",
 		"before:skill.activate",
+		"schema.register",
+		"schema.deregister",
 	}
 }
 
@@ -107,6 +113,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("skill.activate", p.handleActivate, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.resource.read", p.handleResourceRead, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.deactivate", p.handleDeactivate, engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest, engine.WithPriority(15), engine.WithSource(pluginID)),
 	)
 
 	if p.catalogInSysPrompt && p.prompts != nil {
@@ -214,6 +221,22 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 	p.activeSkills[activation.Name] = true
 	p.mu.Unlock()
 
+	// Load and register output schema if declared.
+	schema := p.resolveOutputSchema(record)
+	if schema != nil {
+		schemaName := "skill." + record.Name + ".output"
+		p.mu.Lock()
+		p.skillSchemas[record.Name] = schemaName
+		p.mu.Unlock()
+
+		_ = p.bus.Emit("schema.register", events.SchemaRegistration{
+			Name:   schemaName,
+			Schema: schema,
+			Source: pluginID,
+		})
+		p.logger.Info("registered output schema for skill", "name", record.Name, "schema", schemaName)
+	}
+
 	// Build content XML and emit skill.loaded.
 	contentXML := BuildSkillContentXML(*record)
 	_ = p.bus.Emit("skill.loaded", events.SkillContent{
@@ -276,9 +299,98 @@ func (p *Plugin) handleDeactivate(e engine.Event[any]) {
 
 	p.mu.Lock()
 	delete(p.activeSkills, ref.Name)
+	schemaName, hasSchema := p.skillSchemas[ref.Name]
+	if hasSchema {
+		delete(p.skillSchemas, ref.Name)
+	}
 	p.mu.Unlock()
 
+	if hasSchema {
+		_ = p.bus.Emit("schema.deregister", events.SchemaDeregistration{
+			Name:   schemaName,
+			Source: pluginID,
+		})
+		p.logger.Info("deregistered output schema for skill", "name", ref.Name)
+	}
+
 	p.logger.Info("skill deactivated", "name", ref.Name)
+}
+
+// handleBeforeLLMRequest tags LLM requests with _expects_schema when an active
+// skill has a registered output schema.
+func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	req, ok := vp.Original.(*events.LLMRequest)
+	if !ok {
+		return
+	}
+
+	// Don't tag if already set.
+	if req.ResponseFormat != nil {
+		return
+	}
+	if _, tagged := req.Metadata["_expects_schema"]; tagged {
+		return
+	}
+
+	// Find active skill with schema. If multiple active, first match wins.
+	p.mu.RLock()
+	var schemaName string
+	for skillName, active := range p.activeSkills {
+		if active {
+			if sn, ok := p.skillSchemas[skillName]; ok {
+				schemaName = sn
+				break
+			}
+		}
+	}
+	p.mu.RUnlock()
+
+	if schemaName == "" {
+		return
+	}
+
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any)
+	}
+	req.Metadata["_expects_schema"] = schemaName
+}
+
+// resolveOutputSchema loads the output schema for a skill record.
+// Inline output_schema takes precedence over output_schema_file.
+func (p *Plugin) resolveOutputSchema(record *SkillRecord) map[string]any {
+	if record.OutputSchema != nil {
+		return record.OutputSchema
+	}
+
+	if record.OutputSchemaFile == "" {
+		return nil
+	}
+
+	// Resolve path relative to skill directory.
+	schemaPath := record.OutputSchemaFile
+	if !filepath.IsAbs(schemaPath) {
+		schemaPath = filepath.Join(record.BaseDir, schemaPath)
+	}
+
+	data, err := os.ReadFile(schemaPath)
+	if err != nil {
+		p.logger.Warn("failed to read output_schema_file",
+			"skill", record.Name, "path", schemaPath, "error", err)
+		return nil
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		p.logger.Warn("failed to parse output_schema_file",
+			"skill", record.Name, "path", schemaPath, "error", err)
+		return nil
+	}
+
+	return schema
 }
 
 func inferMimeType(path string) string {

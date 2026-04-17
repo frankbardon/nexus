@@ -45,8 +45,9 @@ type Plugin struct {
 	maxRetries  int
 	retryPrompt string
 
-	retrier *retry.Handler
-	unsubs  []func()
+	retrier            *retry.Handler
+	unsubs             []func()
+	lastNativeEnforced bool // true when most recent llm.response used native structured output
 }
 
 func (p *Plugin) ID() string             { return pluginID }
@@ -114,6 +115,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:io.output", p.handleBeforeOutput,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.response", p.handleLLMResponse,
+			engine.WithPriority(99), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("json schema gate initialized",
@@ -134,11 +137,22 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "before:io.output", Priority: 10},
+		{EventType: "llm.response", Priority: 99},
 	}
 }
 
 func (p *Plugin) Emissions() []string {
 	return []string{"llm.request", "io.output"}
+}
+
+// handleLLMResponse tracks whether the most recent response used native structured output.
+func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
+	resp, ok := event.Payload.(events.LLMResponse)
+	if !ok {
+		return
+	}
+	enforced, _ := resp.Metadata["_structured_output"].(bool)
+	p.lastNativeEnforced = enforced
 }
 
 func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
@@ -153,6 +167,13 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 
 	// Only validate assistant output.
 	if output.Role != "assistant" {
+		return
+	}
+
+	// Skip validation when provider enforced structured output natively.
+	if p.lastNativeEnforced {
+		p.logger.Debug("skipping json schema validation: native structured output enforced")
+		p.lastNativeEnforced = false
 		return
 	}
 

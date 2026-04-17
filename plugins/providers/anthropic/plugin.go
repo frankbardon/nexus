@@ -272,8 +272,16 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	// Store request metadata for passthrough to response.
+	// Flag simulated structured output so downstream consumers know enforcement was attempted.
+	meta := req.Metadata
+	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_schema" {
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		meta["_structured_output"] = true
+	}
 	p.mu.Lock()
-	p.currentRequestMeta = req.Metadata
+	p.currentRequestMeta = meta
 	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
@@ -353,9 +361,28 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		body["tools"] = tools
 	}
 
-	// Map tool choice to Anthropic API format.
-	if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
-		body["tool_choice"] = tc
+	// Structured output simulation via tool-use-as-schema.
+	// Inject synthetic tool and force tool choice to it.
+	if rf := req.ResponseFormat; rf != nil && rf.Type == "json_schema" && rf.Schema != nil {
+		syntheticTool := map[string]any{
+			"name":         "_structured_output",
+			"description":  "Return structured output matching the required schema.",
+			"input_schema": rf.Schema,
+		}
+		if tools, ok := body["tools"].([]map[string]any); ok {
+			body["tools"] = append(tools, syntheticTool)
+		} else {
+			body["tools"] = []map[string]any{syntheticTool}
+		}
+		body["tool_choice"] = map[string]any{
+			"type": "tool",
+			"name": "_structured_output",
+		}
+	} else {
+		// Map tool choice to Anthropic API format (only when not overridden by structured output).
+		if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
+			body["tool_choice"] = tc
+		}
 	}
 
 	return body
@@ -473,6 +500,11 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 			content.WriteString(block.Text)
 		case "tool_use":
 			args := string(block.Input)
+			// Unwrap synthetic structured output tool — put args into Content.
+			if block.Name == "_structured_output" {
+				content.WriteString(args)
+				continue
+			}
 			toolCalls = append(toolCalls, events.ToolCallRequest{
 				ID:        block.ID,
 				Name:      block.Name,
@@ -644,6 +676,15 @@ func (p *Plugin) processSSEEvent(
 			case "input_json_delta":
 				if *currentToolCall != nil {
 					currentToolInput.WriteString(data.Delta.PartialJSON)
+					// Stream structured output tool input as content chunks.
+					if (*currentToolCall).Name == "_structured_output" {
+						_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
+							Content: data.Delta.PartialJSON,
+							Index:   *chunkIndex,
+							TurnID:  *turnID,
+						})
+						*chunkIndex++
+					}
 				}
 			}
 		}
@@ -651,14 +692,19 @@ func (p *Plugin) processSSEEvent(
 	case "content_block_stop":
 		if *currentToolCall != nil {
 			(*currentToolCall).Arguments = currentToolInput.String()
-			*toolCalls = append(*toolCalls, **currentToolCall)
 
-			_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-				ToolCall: *currentToolCall,
-				Index:    *chunkIndex,
-				TurnID:   *turnID,
-			})
-			*chunkIndex++
+			if (*currentToolCall).Name == "_structured_output" {
+				// Unwrap synthetic tool — accumulate into content, not tool calls.
+				fullContent.WriteString(currentToolInput.String())
+			} else {
+				*toolCalls = append(*toolCalls, **currentToolCall)
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
+					ToolCall: *currentToolCall,
+					Index:    *chunkIndex,
+					TurnID:   *turnID,
+				})
+				*chunkIndex++
+			}
 
 			*currentToolCall = nil
 			currentToolInput.Reset()

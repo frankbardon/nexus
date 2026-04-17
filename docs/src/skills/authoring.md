@@ -45,6 +45,8 @@ Describe the situations where this skill should be activated.
 | `description` | Yes | What the skill does — shown in the catalog. Write this so the agent knows when to use it. |
 | `metadata.author` | No | Who created this skill |
 | `metadata.version` | No | Version string |
+| `output_schema` | No | Inline JSON Schema for structured output (see [Output Schema](#output-schema)) |
+| `output_schema_file` | No | Path to a `.json` schema file, relative to the skill directory |
 
 ### Body Content
 
@@ -119,6 +121,76 @@ When `catalog_in_system_prompt: true` is set on the skills plugin, discovered sk
 ```
 
 The agent can then decide to activate a skill based on the user's request.
+
+## Output Schema
+
+Skills can declare an output schema to enforce structured LLM output when the skill is active. The schema is registered with the Schema Registry on activation and deregistered on deactivation.
+
+### Inline Schema
+
+For simple schemas, define `output_schema` directly in the frontmatter:
+
+```yaml
+---
+name: code-review
+description: Review code for quality and bugs.
+output_schema:
+  type: object
+  required: [summary, issues]
+  properties:
+    summary:
+      type: string
+    issues:
+      type: array
+      items:
+        type: object
+        required: [file, line, severity, message]
+        properties:
+          file: { type: string }
+          line: { type: integer }
+          severity: { type: string, enum: [critical, major, minor, nit] }
+          message: { type: string }
+---
+```
+
+### File-Referenced Schema
+
+For complex schemas, reference a `.json` file:
+
+```yaml
+---
+name: code-review
+description: Review code for quality and bugs.
+output_schema_file: resources/review.schema.json
+---
+```
+
+```
+skills/
+  code-review/
+    SKILL.md
+    resources/
+      review.schema.json
+```
+
+Paths are resolved relative to the skill directory. Absolute paths are also accepted.
+
+### Precedence
+
+If both `output_schema` and `output_schema_file` are present, `output_schema` (inline) wins.
+
+### Lifecycle
+
+1. Skill activates → schema loaded (inline or from file) → `schema.register` emitted
+2. While skill is active, LLM requests are tagged with `_expects_schema` metadata
+3. Schema Registry attaches `ResponseFormat` to tagged requests
+4. Provider maps to native structured output or simulates it
+5. Skill deactivates → `schema.deregister` emitted → tagging stops
+
+### When to Use Inline vs File
+
+- **Inline**: Simple schemas under ~10 fields. Easy to read alongside instructions.
+- **File**: Complex schemas, schemas shared across skills, schemas generated or validated by external tooling.
 
 ## Best Practices
 

@@ -146,6 +146,7 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Tools` | []ToolDef | Available tools |
 | `ToolChoice` | *ToolChoice | Tool choice constraint (nil = provider default) |
 | `ToolFilter` | *ToolFilter | Tool include/exclude filter (nil = no filtering) |
+| `ResponseFormat` | *ResponseFormat | Structured output constraint (nil = no constraint) |
 | `MaxTokens` | int | Max response tokens |
 | `Temperature` | *float64 | Sampling temperature (nil = provider default) |
 | `Stream` | bool | Enable streaming |
@@ -184,6 +185,24 @@ Complete reference for all event types in Nexus, organized by domain.
 |-------|------|-------------|
 | `Include` | []string | Only these tools (empty = all). Takes precedence over Exclude |
 | `Exclude` | []string | Remove these tools |
+
+**ResponseFormat**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Type` | string | `"text"`, `"json_object"`, or `"json_schema"` |
+| `Name` | string | Schema name (required by OpenAI for `json_schema` type) |
+| `Schema` | map[string]any | JSON Schema definition |
+| `Strict` | bool | Enforce strict schema adherence |
+
+### Metadata Conventions
+
+Certain metadata keys carry special meaning:
+
+| Key | On | Type | Description |
+|-----|----|------|-------------|
+| `_source` | LLMRequest / LLMResponse | string | Correlates retry requests with responses (used by gates) |
+| `_expects_schema` | LLMRequest | string | Schema name to attach via the schema registry |
+| `_structured_output` | LLMResponse | bool | `true` when provider enforced structured output (native or simulated) |
 
 **LLMResponse**
 | Field | Type | Description |
@@ -455,6 +474,30 @@ Complete reference for all event types in Nexus, organized by domain.
 | `Resources` | []string | Available resource files |
 | `Scope` | string | Skill scope |
 | `BaseDir` | string | Skill directory |
+
+---
+
+## Schema Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `schema.register` | `SchemaRegistration` | Register an output schema with the registry |
+| `schema.deregister` | `SchemaDeregistration` | Remove a schema from the registry |
+
+### Payloads
+
+**SchemaRegistration**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | string | Schema name (e.g. `"skill.code_review.output"`) |
+| `Schema` | map[string]any | JSON Schema definition |
+| `Source` | string | Plugin ID that registered it |
+
+**SchemaDeregistration**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | string | Schema name to remove |
+| `Source` | string | Plugin ID that registered it |
 
 ---
 

@@ -10,17 +10,19 @@ import (
 
 // SkillRecord holds all parsed data from a SKILL.md file.
 type SkillRecord struct {
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	Location      string            `yaml:"-"`
-	BaseDir       string            `yaml:"-"`
-	License       string            `yaml:"license"`
-	Compatibility string            `yaml:"compatibility"`
-	Metadata      map[string]string `yaml:"metadata"`
-	AllowedTools  []string          `yaml:"allowed_tools"`
-	Body          string            `yaml:"-"`
-	Scope         string            `yaml:"-"` // "project", "user", "builtin", "config"
-	Trusted       bool              `yaml:"-"`
+	Name             string            `yaml:"name"`
+	Description      string            `yaml:"description"`
+	Location         string            `yaml:"-"`
+	BaseDir          string            `yaml:"-"`
+	License          string            `yaml:"license"`
+	Compatibility    string            `yaml:"compatibility"`
+	Metadata         map[string]string `yaml:"metadata"`
+	AllowedTools     []string          `yaml:"allowed_tools"`
+	OutputSchema     map[string]any    `yaml:"output_schema"`      // inline JSON Schema for structured output
+	OutputSchemaFile string            `yaml:"output_schema_file"` // path to .json schema file (relative to skill dir)
+	Body             string            `yaml:"-"`
+	Scope            string            `yaml:"-"` // "project", "user", "builtin", "config"
+	Trusted          bool              `yaml:"-"`
 }
 
 // ParseSkillFile reads and parses a SKILL.md file, extracting YAML
