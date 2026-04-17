@@ -1,0 +1,101 @@
+# Test: Orchestrator with tools, multiple model roles, and gates
+# Validates: orchestrator decomposition, parallel workers, synthesis, model role routing
+#
+# Run:
+#   bin/nexus -config configs/test-orchestrator-full.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Decomposition: Give a multi-part task like "Analyze this Go project: list the
+#      directory structure, count lines of code per file, and identify any TODO comments."
+#      Orchestrator should decompose into 2-3 subtasks.
+#   2. Parallel workers: Watch logs — up to 3 workers should run concurrently (max_workers=3).
+#      Each worker uses "balanced" model role (claude-sonnet).
+#   3. Orchestrator model: Orchestrator itself uses "reasoning" role (claude-opus).
+#      Verify in logs that decomposition request goes to opus.
+#   4. Synthesis: After workers complete, synthesis step combines results using "balanced"
+#      role. Final response should coherently merge worker outputs.
+#   5. Worker iteration limit: Each worker limited to 10 iterations. Give a subtask
+#      complex enough to need multiple tool calls but not exceed 10.
+#   6. fail_fast=false: If one worker errors, others should continue. Test by giving
+#      a task where one subtask is impossible (e.g. "read /nonexistent/file").
+#   7. Subtask cap: max_subtasks=6. Give an extremely broad task — should decompose
+#      into at most 6 subtasks, not more.
+#   8. Tool access: Workers should have access to shell (go, git, ls, etc.) and file tools.
+#
+# What to watch for:
+#   - TUI shows worker progress (which workers active, their status)
+#   - Model role correctly maps: orchestrator→opus, workers→sonnet, synthesis→sonnet
+#   - Workers isolated — one worker's context doesn't bleed into another
+#   - Endless loop gate (20 iterations) applies to orchestrator-level loop, not per-worker
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.orchestrator
+    - nexus.agent.subagent/main
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.orchestrator:
+    max_workers: 3
+    max_subtasks: 6
+    orchestrator_model_role: reasoning
+    worker_model_role: balanced
+    synthesis_model_role: balanced
+    fail_fast: false
+    worker_max_iterations: 10
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.agent.subagent/main:
+    max_iterations: 10
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+
+  nexus.tool.shell:
+    allowed_commands: [go, git, ls, cat, grep, find, mkdir, make]
+    timeout: 30s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

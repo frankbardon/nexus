@@ -1,0 +1,99 @@
+# Test: Static planner with approval required
+# Validates: static plan display, approval gate, step-by-step execution after approval
+#
+# Run:
+#   bin/nexus -config configs/test-static-plan-approval.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Plan display: Send ANY message. Static planner always produces the same 3-step
+#      "Code review workflow" plan regardless of input. Verify plan appears in TUI with:
+#      - Step 1: "Read and understand the codebase"
+#      - Step 2: "Identify issues"
+#      - Step 3: "Propose fixes"
+#   2. Approval required: approval=always. TUI must prompt for approval before execution.
+#      Plan should NOT execute automatically.
+#   3. Approve: Accept the plan. Agent should execute steps sequentially:
+#      - Step 1: Uses shell/file tools to read files (ls, cat, etc.)
+#      - Step 2: Analyzes code for issues using tool results
+#      - Step 3: Proposes specific code changes
+#   4. Reject: On another attempt, reject the plan. No tool calls should happen.
+#      Session should wait for new user input.
+#   5. Step instructions: Each step has detailed instructions. Verify agent follows
+#      them — step 1 actually lists and reads files, step 2 actually looks for bugs.
+#   6. Same plan every time: Send a different message — same 3-step plan appears.
+#      Static planner ignores user input (unlike dynamic planner).
+#   7. No LLM call for planning: Static planner doesn't call LLM to generate the plan.
+#      Plan should appear instantly, no streaming delay.
+#
+# What to watch for:
+#   - plan.created event fires immediately (no LLM call — static plan from config)
+#   - plan.approval.request event triggers TUI approval prompt
+#   - After approval, agent has plan steps in system prompt context
+#   - Shell tools restricted to read-only commands (ls, cat, grep, find)
+#   - Agent follows step instructions, not just step descriptions
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.planner.static
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    planning: true
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.planner.static:
+    approval: always
+    summary: "Code review workflow"
+    steps:
+      - description: "Read and understand the codebase"
+        instructions: "List files and read key source files to understand the project structure."
+      - description: "Identify issues"
+        instructions: "Look for bugs, security issues, and code quality problems."
+      - description: "Propose fixes"
+        instructions: "Suggest specific code changes for each issue found."
+
+  nexus.gate.endless_loop:
+    max_iterations: 15
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, grep, find]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

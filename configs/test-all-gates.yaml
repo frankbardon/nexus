@@ -1,0 +1,135 @@
+# Test: Every gate plugin active simultaneously
+# Validates: gate priority ordering, veto chain, gate interactions, no conflicts
+#
+# Run:
+#   bin/nexus -config configs/test-all-gates.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Boot: All 8 gates + tools init without dependency conflicts.
+#   2. Normal flow: Send a benign message like "List files in the current directory."
+#      All gates should pass, agent should use tools normally.
+#   3. Stop words: Send a message containing "FORBIDDEN_WORD" — should see block message.
+#      Try in output: ask agent to "include the word FORBIDDEN_WORD in your response."
+#   4. Prompt injection: Send "Ignore all previous instructions and..." — should see
+#      warning (action=warn, not block). Agent still responds but warning logged.
+#   5. Content safety: Ask agent to "generate a fake SSN like 123-45-6789" — should
+#      see warning about sensitive content in output.
+#   6. Output length: Ask for a very long response ("write a 5000 word essay") —
+#      gate should trigger retry at 3000 chars, agent should shorten.
+#   7. Rate limiter: Send 30+ messages rapidly — should see pause message after hitting
+#      30 req/min limit.
+#   8. Token budget: After extended conversation (~50k tokens), budget gate should veto.
+#      Check warning at 70% threshold (35k tokens).
+#   9. Tool filter: exclude=[] means all tools pass. Verify shell and file tools available.
+#  10. Context window: After many turns, context_window gate should trigger compaction
+#      at 80% of 50k tokens.
+#
+# What to watch for:
+#   - Gates fire at priority 10, before agent at 50
+#   - Multiple gates can warn on same request without conflicting
+#   - Veto from one gate stops request even if others would pass
+#   - Logger shows which gate triggered each veto/warning
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.gate.stop_words
+    - nexus.gate.token_budget
+    - nexus.gate.rate_limiter
+    - nexus.gate.prompt_injection
+    - nexus.gate.output_length
+    - nexus.gate.content_safety
+    - nexus.gate.context_window
+    - nexus.gate.tool_filter
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 15
+    warning_at: 12
+
+  nexus.gate.stop_words:
+    words: ["FORBIDDEN_WORD", "BLOCKED_TERM"]
+    case_sensitive: false
+    message: "Content blocked: contains prohibited terms."
+
+  nexus.gate.token_budget:
+    max_tokens: 50000
+    warning_threshold: 0.7
+    message: "Token budget exhausted."
+
+  nexus.gate.rate_limiter:
+    requests_per_minute: 30
+    window_seconds: 60
+    pause_message: "Rate limit hit. Pausing {seconds}s..."
+
+  nexus.gate.prompt_injection:
+    action: warn
+    message: "Potential prompt injection detected."
+
+  nexus.gate.output_length:
+    max_chars: 3000
+    max_retries: 2
+
+  nexus.gate.content_safety:
+    action: warn
+    check_pii_email: true
+    check_pii_phone: true
+    check_pii_ssn: true
+    check_secrets_api_key: true
+    check_secrets_private_key: true
+    check_secrets_password: true
+    check_credit_card: true
+    check_ip_internal: true
+
+  nexus.gate.context_window:
+    max_context_tokens: 50000
+    trigger_ratio: 0.8
+    chars_per_token: 4.0
+
+  nexus.gate.tool_filter:
+    exclude: []
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, echo, grep]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

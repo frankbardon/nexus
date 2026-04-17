@@ -1,0 +1,83 @@
+# Test: Tool filter gate — restrict tools available to agent
+# Validates: tool_filter include/exclude, interaction with tool_choice, tools actually hidden from LLM
+#
+# Run:
+#   bin/nexus -config configs/test-tool-filter.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Available tools: Ask "what tools do you have?" — agent should only know about
+#      file tools (file_read, file_read_chunk, file_write, check_file_size, list_files).
+#      Shell tool should NOT appear in tool list sent to LLM.
+#   2. File tools work: Ask "list files in the current directory" — should use list_files
+#      tool successfully.
+#   3. Shell hidden: Ask "run the command ls -la" — agent should say it can't run shell
+#      commands (tool not available), not attempt and fail.
+#   4. Include takes precedence: Shell plugin IS registered and configured, but
+#      tool_filter include list restricts to file tools only. Verify shell tool
+#      registered but filtered out before reaching LLM.
+#   5. Tool registration vs filtering: Check logs — shell plugin should init successfully
+#      (tools registered on bus), but tool_filter gate removes them from llm.request
+#      tool list at priority 10.
+#
+# What to watch for:
+#   - before:llm.request events show tool list AFTER filtering (only file tools)
+#   - Shell plugin boots without error despite its tools being filtered
+#   - No "tool not found" errors — tools are filtered, not missing
+#   - If agent somehow tries to call shell tool, before:tool.invoke should catch it
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_filter
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  # Only allow file tools — shell excluded via filter
+  nexus.gate.tool_filter:
+    include: [file_read, file_read_chunk, file_write, check_file_size, list_files]
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat]
+    timeout: 15s
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info

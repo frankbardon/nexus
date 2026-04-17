@@ -1,0 +1,98 @@
+# Test: PlanExec agent with approval-required dynamic planner
+# Validates: plan generation, approval gate, plan display, execution after approval, replan on failure
+#
+# Run:
+#   bin/nexus -config configs/test-planexec-approval.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Plan generation: Send a task like "Read the Go source files and create a summary
+#      of the project architecture." Planner (reasoning=opus) should generate a multi-step
+#      plan and display it in TUI.
+#   2. Approval prompt: Both planner and planexec agent have approval=always. TUI should
+#      show the plan and ask for approval before execution starts. Verify you can
+#      approve or reject.
+#   3. Approve and execute: Approve the plan. PlanExec agent should execute steps
+#      sequentially using "balanced" model role. Each step should show progress.
+#   4. Reject plan: On another attempt, reject the plan. Agent should stop without
+#      executing. No tool calls after rejection.
+#   5. Replan on failure: replan_on_failure=true. Give a task where a step will fail
+#      (e.g. "read file /nonexistent/path then summarize it"). After step fails,
+#      agent should generate a new plan, not just stop.
+#   6. Plan persistence: Check session dir — plan should be saved to
+#      plugins/nexus.planner.dynamic/<planID>/plan.json.
+#   7. Step count: max_steps=8. Give a very complex task — plan should have at most
+#      8 steps, planner should consolidate if needed.
+#
+# What to watch for:
+#   - Two approval points: planner generates plan (approval), then planexec confirms (approval)
+#   - Plan uses reasoning role (opus), execution uses balanced role (sonnet)
+#   - Replan generates a NEW plan, not a retry of the old one
+#   - Plan JSON persisted in session dir even if rejected
+#   - Endless loop gate (20) is high enough to not interfere with plan execution
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-20250514
+      max_tokens: 16384
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.planexec
+    - nexus.planner.dynamic
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.conversation
+    - nexus.observe.logger
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.planexec:
+    max_iterations: 15
+    execution_model_role: balanced
+    replan_on_failure: true
+    approval: always
+    system_prompt_file: ./prompts/coding-assistant.md
+
+  nexus.planner.dynamic:
+    model_role: reasoning
+    max_steps: 8
+    approval: always
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+
+  nexus.tool.shell:
+    allowed_commands: [go, git, ls, cat, grep, find, make]
+    timeout: 30s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.conversation:
+    max_messages: 100
+    persist: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: info
