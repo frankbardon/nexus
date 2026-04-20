@@ -71,6 +71,12 @@ var defaultAllowedStdlib = []string{
 	// Control-flow / cancellation.
 	"context",
 
+	// Synchronization primitives. Scripts may need these with parallel.*
+	// (Mutex, WaitGroup, Once, atomic counters). Pure-memory, safe under
+	// the sandbox since they can't touch the OS.
+	"sync",
+	"sync/atomic",
+
 	// Stream plumbing (interface-only; safe without *os.File).
 	"io",
 	"bufio",

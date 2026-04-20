@@ -162,6 +162,14 @@ func main() { _ = utf8.RuneCountInString("abc") }`,
 		"unicode/utf16": `package main
 import "unicode/utf16"
 func main() { _ = utf16.Encode([]rune{'a'}) }`,
+
+		"sync": `package main
+import "sync"
+func main() { var mu sync.Mutex; mu.Lock(); mu.Unlock() }`,
+
+		"sync/atomic": `package main
+import "sync/atomic"
+func main() { var x atomic.Int64; x.Add(1) }`,
 	}
 
 	var broken []string

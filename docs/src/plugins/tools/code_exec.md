@@ -16,7 +16,8 @@ Lets the LLM orchestrate multiple tool calls in a single turn by writing a short
 |-----|------|---------|-------------|
 | `timeout_seconds` | int | `30` | Wall-clock limit for a script, propagated via `context.Context` |
 | `max_output_bytes` | int | `65536` | Stdout/stderr cap per script; excess is silently dropped and `truncated=true` is returned |
-| `allowed_packages` | string[] | see below | Go stdlib whitelist. Default covers pure compute: `fmt`, `strings`, `strconv`, `bytes`, `regexp`, `unicode*`, `encoding/*` (json/base64/hex/csv/xml/pem/binary), `crypto/*` (sha/md5/hmac/rand/subtle), `math`, `math/big`, `math/rand`, `math/rand/v2`, `math/bits`, `sort`, `container/*` (heap/list/ring), `hash/*` (crc32/crc64/fnv/adler32), `errors`, `time`, `context`, `io`, `bufio`. Omitted: anything touching filesystem, network, OS processes, reflection, unsafe memory. Also omitted: `slices`/`maps` (Yaegi lacks full generics support). |
+| `max_workers` | int | `runtime.NumCPU()` | Concurrency ceiling for the `parallel.*` primitives — shared across `Map`/`ForEach`/`All` within a single script invocation |
+| `allowed_packages` | string[] | see below | Go stdlib whitelist. Default covers pure compute: `fmt`, `strings`, `strconv`, `bytes`, `regexp`, `unicode*`, `encoding/*` (json/base64/hex/csv/xml/pem/binary), `crypto/*` (sha/md5/hmac/rand/subtle), `math`, `math/big`, `math/rand`, `math/rand/v2`, `math/bits`, `sort`, `container/*` (heap/list/ring), `hash/*` (crc32/crc64/fnv/adler32), `sync`, `sync/atomic`, `errors`, `time`, `context`, `io`, `bufio`. Omitted: anything touching filesystem, network, OS processes, reflection, unsafe memory. Also omitted: `slices`/`maps` (Yaegi lacks full generics support). |
 | `persist_scripts` | bool | `true` | Write `script.go`, `stdout.txt`, `result.json`, `error.txt` to the session workspace |
 | `reject_goroutines` | bool | `true` | Reject scripts containing `go` statements at the AST layer |
 
@@ -48,7 +49,7 @@ Hard rules enforced before Yaegi ever sees the source:
 1. Package must be `main`.
 2. Must declare `func Run(ctx context.Context) (any, error)` exactly.
 3. No `go` statements (phase 1).
-4. Imports restricted to `allowed_packages` plus `tools` plus `skills/<name>` for each currently-active skill.
+4. Imports restricted to `allowed_packages` plus `tools`, `parallel`, and `skills/<name>` for each currently-active skill.
 
 Violations surface as a structured error in the tool result. The script never executes.
 
@@ -124,6 +125,51 @@ func Run(ctx context.Context) (any, error) {
 
 Skills are loaded on `skill.loaded` and removed on `skill.deactivate`. Cross-skill imports are not supported in phase 1.
 
+## Parallel Primitives
+
+Scripts can parallelize work (tool fan-out or pure compute) via the `parallel` package. A host-side worker pool bounded by `max_workers` backs all three primitives; they share the same pool within a single `run_code` call.
+
+```go
+import (
+    "context"
+    "parallel"
+    "tools"
+)
+
+func Run(ctx context.Context) (any, error) {
+    urls := []string{"https://a.example", "https://b.example", "https://c.example"}
+
+    // Map: ordered results, first-error-cancels-the-rest.
+    results, err := parallel.Map(ctx, urls, func(ctx context.Context, u string) (string, error) {
+        r, err := tools.Fetch(tools.FetchArgs{URL: u})
+        if err != nil { return "", err }
+        return r.Body, nil
+    })
+    if err != nil { return nil, err }
+
+    // results is `any` (Yaegi has no generics); cast to the element slice type.
+    bodies := results.([]string)
+    return bodies, nil
+}
+```
+
+**Semantics (all three):**
+
+- First non-nil error wins, cancels the derived `context.Context`, waits for in-flight callbacks to observe cancellation, then returns the wrapped error.
+- `Map` preserves input order in the output slice; `ForEach` discards results but otherwise identical; `All` runs N heterogeneous `func(ctx context.Context) error` values.
+- Worker pool size = `max_workers` (default `runtime.NumCPU()`). Scripts never spawn goroutines directly — the `go` keyword is still rejected at the AST layer.
+- Callback panics are recovered and surface as an error on the outer call.
+
+**Expected signatures:**
+
+| Primitive | Callback shape |
+|---|---|
+| `parallel.Map(ctx, items, fn)` | `func(ctx context.Context, item T) (R, error)` |
+| `parallel.ForEach(ctx, items, fn)` | `func(ctx context.Context, item T) error` |
+| `parallel.All(ctx, fns...)` | `func(ctx context.Context) error` |
+
+**Caveat:** tools invoked from inside parallel callbacks execute concurrently on the bus. Host tool plugins must tolerate concurrent `tool.invoke` delivery. The built-in Nexus tools (`shell`, `file`, etc.) already do since they rely on OS-level isolation or hold no shared mutable state.
+
 ## Events
 
 ### Subscribes To
@@ -191,6 +237,7 @@ plugins:
   nexus.tool.code_exec:
     timeout_seconds: 30
     max_output_bytes: 65536
+    max_workers: 8
     persist_scripts: true
     reject_goroutines: true
 ```

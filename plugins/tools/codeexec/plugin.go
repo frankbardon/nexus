@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type Plugin struct {
 	// Config.
 	timeout          time.Duration
 	maxOutputBytes   int
+	maxWorkers       int      // concurrency ceiling for parallel.* primitives
 	allowedPackages  []string // stdlib whitelist
 	allowedImports   map[string]bool
 	persistScripts   bool
@@ -68,6 +70,7 @@ func New() engine.Plugin {
 	return &Plugin{
 		timeout:          defaultTimeout,
 		maxOutputBytes:   defaultMaxOutputBytes,
+		maxWorkers:       runtime.NumCPU(),
 		allowedPackages:  defaultAllowedStdlib,
 		persistScripts:   true,
 		rejectGoroutines: true,
@@ -97,6 +100,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["max_output_bytes"].(float64); ok && v > 0 {
 		p.maxOutputBytes = int(v)
+	}
+	if v, ok := ctx.Config["max_workers"].(int); ok && v > 0 {
+		p.maxWorkers = v
+	}
+	if v, ok := ctx.Config["max_workers"].(float64); ok && v > 0 {
+		p.maxWorkers = int(v)
 	}
 	if v, ok := ctx.Config["persist_scripts"].(bool); ok {
 		p.persistScripts = v
@@ -188,11 +197,12 @@ func (p *Plugin) Emissions() []string {
 }
 
 func (p *Plugin) rebuildAllowedImports() {
-	out := make(map[string]bool, len(p.allowedPackages)+1)
+	out := make(map[string]bool, len(p.allowedPackages)+2)
 	for _, s := range p.allowedPackages {
 		out[s] = true
 	}
 	out["tools"] = true
+	out["parallel"] = true
 	p.allowedImports = out
 }
 
@@ -371,6 +381,10 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 	}
 	if err := i.Use(toolExports); err != nil {
 		finish("", fmt.Sprintf("install tools package: %v", err), 0)
+		return
+	}
+	if err := i.Use(buildParallelExports(p.maxWorkers)); err != nil {
+		finish("", fmt.Sprintf("install parallel package: %v", err), 0)
 		return
 	}
 
@@ -595,10 +609,15 @@ Its return value is JSON-marshaled back to you. Anything printed to stdout
 is also returned (up to a per-call byte cap).
 
 **Available imports:**
-  - Go stdlib: fmt, strings, strconv, encoding/json, math, sort, errors, time, context
+  - Go stdlib: fmt, strings, strconv, encoding/json, math, sort, errors, time,
+    context, sync, sync/atomic (plus the broader pure-compute whitelist).
   - tools: type-safe bindings for every tool available to you on this turn.
     Call style: tools.ShellExec(tools.ShellExecArgs{Command: "ls"}).
     Result is tools.Result{Output, Error, OutputFile}.
+  - parallel: Map(ctx, items, fn) / ForEach(ctx, items, fn) / All(ctx, fns...).
+    Use these to fan out independent work (tool calls or compute) instead of
+    serializing — first error cancels the rest. Map returns any; cast to the
+    typed slice: results.([]T).
   - skills/<skill_name>: helper functions shipped with currently-active skills.
 
 **Forbidden:** import "os", "net/*", "syscall", "unsafe", "reflect", "runtime";
