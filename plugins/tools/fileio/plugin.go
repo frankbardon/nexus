@@ -103,6 +103,8 @@ func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "read_file",
 		Description: "Read the contents of a file at the given path. Returns the file content as a string.",
+		Class:       "filesystem",
+		Subclass:    "read",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -118,6 +120,8 @@ func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "read_file_chunk",
 		Description: "Read a chunk of a file starting at a byte offset. Returns the chunk content, bytes read, and total file size so the caller can page through large files.",
+		Class:       "filesystem",
+		Subclass:    "read",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -141,6 +145,8 @@ func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "write_file",
 		Description: "Write content to a file at the given path. Creates the file if it doesn't exist, overwrites if it does.",
+		Class:       "filesystem",
+		Subclass:    "write",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -160,6 +166,8 @@ func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "check_file_size",
 		Description: "Get the size of a file in bytes. Works on Windows, macOS, and Linux.",
+		Class:       "filesystem",
+		Subclass:    "read",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -175,6 +183,8 @@ func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "list_files",
 		Description: "List files in a directory, optionally matching a glob pattern.",
+		Class:       "filesystem",
+		Subclass:    "navigate",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

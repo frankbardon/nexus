@@ -11,6 +11,8 @@ type SkillSummary struct {
 	Description string
 	Location    string
 	Scope       string // "project", "user", "builtin", "config"
+	Class       string // Semantic class for progressive discovery.
+	Subclass    string // Optional grouping within class.
 }
 
 // SkillActivation requests activation of a skill.

@@ -99,6 +99,8 @@ func (p *Plugin) Ready() error {
 	_ = p.bus.Emit("tool.register", events.ToolDef{
 		Name:        "read_pdf",
 		Description: "Extract text content from a PDF file. Returns the full text by default, or a specific page range.",
+		Class:       "data",
+		Subclass:    "extract",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

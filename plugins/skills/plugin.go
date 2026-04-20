@@ -163,6 +163,8 @@ func (p *Plugin) handleBoot(_ engine.Event[any]) {
 			Description: r.Description,
 			Location:    r.Location,
 			Scope:       r.Scope,
+			Class:       r.Class,
+			Subclass:    r.Subclass,
 		}
 	}
 	_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: summaries})

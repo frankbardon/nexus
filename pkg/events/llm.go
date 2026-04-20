@@ -58,6 +58,9 @@ type ToolDef struct {
 	Name        string
 	Description string
 	Parameters  map[string]any // JSON Schema
+	Class       string         // Semantic class (e.g. "filesystem", "memory"). Empty = classless.
+	Subclass    string         // Optional grouping within class (e.g. "read", "write").
+	Tags        []string       // Cross-cutting metadata for filtering.
 }
 
 // LLMResponse is the complete response from a language model.

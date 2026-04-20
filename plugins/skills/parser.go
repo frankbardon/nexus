@@ -20,6 +20,9 @@ type SkillRecord struct {
 	AllowedTools     []string          `yaml:"allowed_tools"`
 	OutputSchema     map[string]any    `yaml:"output_schema"`      // inline JSON Schema for structured output
 	OutputSchemaFile string            `yaml:"output_schema_file"` // path to .json schema file (relative to skill dir)
+	Class            string            `yaml:"class"`              // Semantic class for progressive discovery.
+	Subclass         string            `yaml:"subclass"`           // Optional grouping within class.
+	Tags             []string          `yaml:"tags"`               // Cross-cutting metadata for filtering.
 	Body             string            `yaml:"-"`
 	Scope            string            `yaml:"-"` // "project", "user", "builtin", "config"
 	Trusted          bool              `yaml:"-"`
