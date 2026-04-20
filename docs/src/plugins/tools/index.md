@@ -11,6 +11,7 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 | [PDF Reader](./pdf.md) | `nexus.tool.pdf` | `read_pdf` | Extract text from PDF files |
 | [File Opener](./opener.md) | `nexus.tool.opener` | `open_path` | Open files in the OS default app |
 | [Ask User](./ask.md) | `nexus.tool.ask` | `ask_user` | Ask the user a question |
+| [Code Exec](./code_exec.md) | `nexus.tool.code_exec` | `run_code` | Run a Go script that orchestrates multiple tool calls in one turn |
 
 ## How Tools Work
 

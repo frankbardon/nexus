@@ -40,6 +40,7 @@ plugins:
     - nexus.gate.endless_loop
     - nexus.tool.shell
     - nexus.tool.file
+    - nexus.tool.code_exec
     - nexus.memory.conversation
     - nexus.observe.logger
 
@@ -58,6 +59,12 @@ plugins:
     sandbox: true
 
   nexus.tool.file:
+
+  nexus.tool.code_exec:
+    timeout_seconds: 30
+    max_output_bytes: 65536
+    persist_scripts: true
+    reject_goroutines: true
 
   nexus.memory.conversation:
     max_messages: 100

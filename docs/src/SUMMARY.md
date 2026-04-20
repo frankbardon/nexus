@@ -41,6 +41,7 @@
   - [PDF Reader](./plugins/tools/pdf.md)
   - [File Opener](./plugins/tools/opener.md)
   - [Ask User](./plugins/tools/ask.md)
+  - [Code Exec (run_code)](./plugins/tools/code_exec.md)
 - [Memory](./plugins/memory/index.md)
   - [Conversation History](./plugins/memory/conversation.md)
   - [Context Compaction](./plugins/memory/compaction.md)

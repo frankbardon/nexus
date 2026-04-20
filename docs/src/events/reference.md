@@ -333,6 +333,35 @@ Certain metadata keys carry special meaning:
 | `OutputData` | []byte | Binary output data (optional) |
 | `TurnID` | string | Associated turn |
 
+### Code Execution Events
+
+Emitted by `nexus.tool.code_exec` alongside the standard `tool.invoke`/`tool.result` pair. Let other plugins observe programmatic tool-calling scripts without recomputing the run_code envelope from a tool result.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `code.exec.request` | `CodeExecRequest` | Script about to run; carries source, imports, active skills |
+| `code.exec.result` | `CodeExecResult` | Script finished (success, compile error, runtime error, veto, or timeout) |
+
+**CodeExecRequest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `CallID` | string | Matches the outer `run_code` tool call ID |
+| `TurnID` | string | Associated turn |
+| `Script` | string | Full Go source submitted by the LLM |
+| `Imports` | []string | Import paths referenced by the script |
+| `Skills` | []string | Names of currently-active skills whose helpers were staged |
+
+**CodeExecResult**
+| Field | Type | Description |
+|-------|------|-------------|
+| `CallID` | string | Matches the outer `run_code` tool call ID |
+| `TurnID` | string | Associated turn |
+| `Output` | string | Captured stdout (capped at `max_output_bytes`) |
+| `Result` | string | JSON-marshaled `Run()` return value |
+| `Error` | string | First error encountered (AST rejection, compile, runtime, timeout) |
+| `Duration` | int64 | Execution wall time in milliseconds |
+| `Truncated` | bool | Stdout was truncated by the output cap |
+
 ---
 
 ## Agent Events
