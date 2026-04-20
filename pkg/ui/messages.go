@@ -83,6 +83,18 @@ type AskUserResponseMessage struct {
 	Answer   string `json:"answer"`
 }
 
+// CodeExecStdoutMessage streams a chunk of stdout from a run_code script
+// while it is still executing. CallID keys the message so IO plugins can
+// render each script as its own collapsible section. Final=true on the last
+// chunk signals the stream is closed.
+type CodeExecStdoutMessage struct {
+	CallID    string `json:"call_id"`
+	TurnID    string `json:"turn_id"`
+	Chunk     string `json:"chunk"`
+	Final     bool   `json:"final"`
+	Truncated bool   `json:"truncated"`
+}
+
 // ThinkingMessage carries an intermediate reasoning step to the UI.
 type ThinkingMessage struct {
 	Content string `json:"content"`

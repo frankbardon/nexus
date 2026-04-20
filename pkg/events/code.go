@@ -10,6 +10,20 @@ type CodeExecRequest struct {
 	Skills  []string // active skill names whose helpers are loaded
 }
 
+// CodeExecStdout carries a chunk of stdout produced by a run_code script
+// while it is still executing. Emitted incrementally by nexus.tool.code_exec
+// so IO plugins can show live output instead of waiting for the final
+// CodeExecResult. Chunks are flushed on newline or when the buffered output
+// exceeds an internal threshold; the last chunk (possibly empty) carries
+// Final=true so UIs can mark the stream closed.
+type CodeExecStdout struct {
+	CallID    string
+	TurnID    string
+	Chunk     string // UTF-8 text; may contain newlines
+	Final     bool   // true for the last chunk of this call
+	Truncated bool   // true on the final chunk if the total exceeded max_output_bytes
+}
+
 // CodeExecResult reports the outcome of a run_code script.
 // Emitted by nexus.tool.code_exec after the script returns (or errors out).
 type CodeExecResult struct {

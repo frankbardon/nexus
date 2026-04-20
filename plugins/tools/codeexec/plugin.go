@@ -1,12 +1,10 @@
 package codeexec
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -184,6 +182,7 @@ func (p *Plugin) Emissions() []string {
 		"before:tool.result",
 		"tool.result",
 		"code.exec.request",
+		"code.exec.stdout",
 		"code.exec.result",
 	}
 }
@@ -303,7 +302,15 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		Skills:  activeSkills,
 	})
 
-	stdout := &cappedBuffer{max: p.maxOutputBytes}
+	stdout := newStreamingWriter(p.bus, tc.ID, tc.TurnID, p.maxOutputBytes)
+	// finish closes the stdout stream (flushing a Final chunk) and then emits
+	// code.exec.result / tool.result. Ordering matters: consumers expect
+	// code.exec.stdout{Final:true} to land before the result so they can
+	// mark the live-output section closed before showing the summary.
+	finish := func(result, errMsg string, durationMs int64) {
+		stdout.Close()
+		p.emitResult(tc, stdout.String(), result, errMsg, durationMs, stdout.Truncated())
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
@@ -345,7 +352,7 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		GoPath: goPath,
 	})
 	if err := i.Use(filteredStdlibSymbols(p.allowedPackages)); err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("install stdlib: %v", err), 0, stdout.truncated)
+		finish("", fmt.Sprintf("install stdlib: %v", err), 0)
 		return
 	}
 
@@ -359,11 +366,11 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 
 	toolExports, _, err := inv.buildToolsExports(toolDefs, toolName)
 	if err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("build tools package: %v", err), 0, stdout.truncated)
+		finish("", fmt.Sprintf("build tools package: %v", err), 0)
 		return
 	}
 	if err := i.Use(toolExports); err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("install tools package: %v", err), 0, stdout.truncated)
+		finish("", fmt.Sprintf("install tools package: %v", err), 0)
 		return
 	}
 
@@ -371,14 +378,14 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 
 	// Evaluate the user's script. Any parse/type error surfaces here.
 	if _, err := i.Eval(script); err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("compile error: %v", err), elapsedMs(started), stdout.truncated)
+		finish("", fmt.Sprintf("compile error: %v", err), elapsedMs(started))
 		return
 	}
 
 	// Resolve main.Run and invoke it with the timeout ctx.
 	runVal, err := i.Eval("main.Run")
 	if err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("resolve main.Run: %v", err), elapsedMs(started), stdout.truncated)
+		finish("", fmt.Sprintf("resolve main.Run: %v", err), elapsedMs(started))
 		return
 	}
 
@@ -387,21 +394,24 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 	// Surface script panics and errors.
 	if runErr != nil {
 		if errors.Is(runErr, context.DeadlineExceeded) {
-			p.emitResult(tc, stdout.String(), "", fmt.Sprintf("script timed out after %s", p.timeout), elapsedMs(started), stdout.truncated)
+			finish("", fmt.Sprintf("script timed out after %s", p.timeout), elapsedMs(started))
 			return
 		}
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("runtime error: %v", runErr), elapsedMs(started), stdout.truncated)
+		finish("", fmt.Sprintf("runtime error: %v", runErr), elapsedMs(started))
 		return
 	}
 
 	resultJSON, err := marshalReturn(returned)
 	if err != nil {
-		p.emitResult(tc, stdout.String(), "", fmt.Sprintf("marshal return: %v", err), elapsedMs(started), stdout.truncated)
+		finish("", fmt.Sprintf("marshal return: %v", err), elapsedMs(started))
 		return
 	}
 
+	// Persist uses the aggregated stdout — close the writer first so the tail
+	// lands in the buffer before we snapshot it.
+	stdout.Close()
 	p.persist(tc, script, stdout.String(), resultJSON, "")
-	p.emitResult(tc, stdout.String(), resultJSON, "", elapsedMs(started), stdout.truncated)
+	finish(resultJSON, "", elapsedMs(started))
 }
 
 // importsForRun returns the set of allowed import paths for a specific
@@ -567,33 +577,6 @@ func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, d
 	}
 	_ = p.bus.Emit("tool.result", r)
 }
-
-// cappedBuffer is an io.Writer that accepts up to max bytes and silently
-// discards the rest, recording a truncated flag.
-type cappedBuffer struct {
-	bytes.Buffer
-	max       int
-	truncated bool
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.max <= 0 {
-		return c.Buffer.Write(p)
-	}
-	remaining := c.max - c.Buffer.Len()
-	if remaining <= 0 {
-		c.truncated = true
-		return len(p), nil
-	}
-	if len(p) > remaining {
-		_, _ = c.Buffer.Write(p[:remaining])
-		c.truncated = true
-		return len(p), nil
-	}
-	return c.Buffer.Write(p)
-}
-
-var _ io.Writer = (*cappedBuffer)(nil)
 
 // runCodeDescription is the LLM-facing tool description. It is intentionally
 // long — the model needs enough structure to produce a valid script without

@@ -259,6 +259,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			TurnID:  msg.TurnID,
 		})
 
+	case codeExecStdoutMsg:
+		m.chat.AppendCodeExecStdout(msg.CallID, msg.TurnID, msg.Chunk, msg.Final, msg.Truncated)
+
 	case planDisplayMsg:
 		m.rightRail.SetPlan(msg)
 		m.recalcLayout()

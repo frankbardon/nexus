@@ -9,6 +9,7 @@ type streamChunkMsg struct{ ui.StreamChunkMessage }
 type streamEndMsg struct{ ui.StreamEndMessage }
 type statusMsg struct{ ui.StatusMessage }
 type thinkingMsg struct{ ui.ThinkingMessage }
+type codeExecStdoutMsg struct{ ui.CodeExecStdoutMessage }
 type planDisplayMsg struct{ ui.PlanDisplayMessage }
 type approvalRequestMsg struct{ ui.ApprovalRequestMessage }
 type askUserMsg struct{ ui.AskUserMessage }

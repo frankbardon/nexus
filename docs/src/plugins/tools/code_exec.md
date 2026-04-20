@@ -144,7 +144,18 @@ Skills are loaded on `skill.loaded` and removed on `skill.deactivate`. Cross-ski
 | `before:tool.invoke` / `tool.invoke` | For every inner tool call dispatched by a script |
 | `before:tool.result` / `tool.result` | For the outer `run_code` call |
 | `code.exec.request` | Just before script execution (carries the raw script + imports + active skills) |
-| `code.exec.result` | When the script has finished, errored out, or timed out |
+| `code.exec.stdout` | For every flushed stdout chunk while the script runs; the final chunk has `Final=true` and carries the truncation flag if applicable |
+| `code.exec.result` | When the script has finished, errored out, or timed out — always arrives after the final `code.exec.stdout` chunk for the same `CallID` |
+
+## Stdout Streaming
+
+The interpreter's stdout and stderr are wired to a chunking writer that emits `code.exec.stdout` events while the script is still running. Flush triggers:
+
+1. Any newline in the pending buffer — everything up to the newline flushes.
+2. Pending buffer crosses a 512-byte threshold — forces out long lines that would otherwise wait for a newline.
+3. Script finish — any residual tail is flushed as the `Final` chunk.
+
+The aggregated `Output` field on the terminal `code.exec.result` still contains the full stdout (capped at `max_output_bytes`), so non-streaming consumers keep working without changes. IO plugins that want live output subscribe to `code.exec.stdout` instead.
 
 ## Sandboxing Layers
 
@@ -189,6 +200,5 @@ plugins:
 - Goroutines / `go` keyword
 - Provider-native programmatic tool calling (Anthropic `allowed_callers`)
 - Cross-skill imports
-- Live stdout streaming
 - CPU / memory resource limits beyond the wall-clock timeout
 - Script REPL or debugger

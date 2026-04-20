@@ -108,6 +108,14 @@ func (a *Adapter) SendThinking(msg ui.ThinkingMessage) error {
 	return nil
 }
 
+// SendCodeExecStdout streams a chunk of run_code script stdout to the TUI.
+func (a *Adapter) SendCodeExecStdout(msg ui.CodeExecStdoutMessage) error {
+	if a.program != nil {
+		a.program.Send(codeExecStdoutMsg{msg})
+	}
+	return nil
+}
+
 // SendPlanDisplay sends a plan display to the TUI.
 func (a *Adapter) SendPlanDisplay(msg ui.PlanDisplayMessage) error {
 	if a.program != nil {
