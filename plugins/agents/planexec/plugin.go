@@ -388,7 +388,7 @@ func (p *Plugin) handleSkillLoadedEvent(event engine.Event[any]) {
 	if content, ok := event.Payload.(events.SkillContent); ok {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		p.skillContexts = append(p.skillContexts, fmt.Sprintf("## Skill: %s\n\n%s", content.Name, content.Body))
+		p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
 		p.logger.Info("loaded skill context", "name", content.Name)
 	}
 }
@@ -577,38 +577,47 @@ func (p *Plugin) sendStepLLMRequest() {
 
 	step := p.plan[p.currentStepIdx]
 
-	// Build system prompt for step execution.
+	// Build system prompt for step execution with XML boundaries.
 	var systemPrompt strings.Builder
 	if p.systemPrompt != "" {
 		systemPrompt.WriteString(p.systemPrompt)
 		systemPrompt.WriteString("\n\n")
 	}
 	if len(p.skillContexts) > 0 {
-		systemPrompt.WriteString(strings.Join(p.skillContexts, "\n\n---\n\n"))
-		systemPrompt.WriteString("\n\n")
+		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
 	}
 
-	systemPrompt.WriteString("## Current Task\n\n")
-	fmt.Fprintf(&systemPrompt, "You are executing step %d of %d in an execution plan.\n\n", p.currentStepIdx+1, len(p.plan))
-	fmt.Fprintf(&systemPrompt, "**Step:** %s\n\n", step.Description)
+	var taskBody strings.Builder
+	fmt.Fprintf(&taskBody, "You are executing step %d of %d in an execution plan.\n\n", p.currentStepIdx+1, len(p.plan))
+	fmt.Fprintf(&taskBody, "Step: %s\n\n", step.Description)
 	if step.Instructions != "" && step.Instructions != step.Description {
-		fmt.Fprintf(&systemPrompt, "**Instructions:** %s\n\n", step.Instructions)
+		fmt.Fprintf(&taskBody, "Instructions: %s\n\n", step.Instructions)
 	}
-	fmt.Fprintf(&systemPrompt, "**Original user request:** %s\n\n", p.originalInput)
+	taskBody.WriteString("Focus on completing this specific step. Use the available tools as needed. ")
+	taskBody.WriteString("When you have completed the step, provide a brief summary of what was accomplished.\n")
+	systemPrompt.WriteString(engine.XMLWrap("current_task", taskBody.String()))
+
+	systemPrompt.WriteString("\n")
+	systemPrompt.WriteString(engine.XMLWrap("user_request", engine.XMLCDATA(p.originalInput)))
 
 	// Include results from prior steps.
 	if len(p.stepResults) > 0 {
-		systemPrompt.WriteString("## Context from Prior Steps\n\n")
+		var priorBody strings.Builder
 		for i := 0; i < p.currentStepIdx; i++ {
 			prevStep := p.plan[i]
 			if result, ok := p.stepResults[prevStep.ID]; ok {
-				fmt.Fprintf(&systemPrompt, "### Step %d: %s\n%s\n\n", i+1, prevStep.Description, result)
+				priorBody.WriteString(engine.XMLWrap("step_result",
+					engine.XMLCDATA(result),
+					"number", fmt.Sprintf("%d", i+1),
+					"description", prevStep.Description))
 			}
 		}
+		if priorBody.Len() > 0 {
+			systemPrompt.WriteString("\n")
+			systemPrompt.WriteString(engine.XMLWrap("prior_results", priorBody.String()))
+		}
 	}
-
-	systemPrompt.WriteString("Focus on completing this specific step. Use the available tools as needed. " +
-		"When you have completed the step, provide a brief summary of what was accomplished.")
 
 	var messages []events.Message
 	messages = append(messages, events.Message{
@@ -861,25 +870,29 @@ func (p *Plugin) sendSynthesisRequest() {
 		systemPrompt.WriteString("\n\n")
 	}
 	if len(p.skillContexts) > 0 {
-		systemPrompt.WriteString(strings.Join(p.skillContexts, "\n\n---\n\n"))
-		systemPrompt.WriteString("\n\n")
+		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
 	}
 
-	systemPrompt.WriteString("## Synthesis Task\n\n")
 	systemPrompt.WriteString("You have completed a multi-step plan. Synthesize the results into a clear, coherent response for the user.\n\n")
-	fmt.Fprintf(&systemPrompt, "**Original request:** %s\n\n", p.originalInput)
+	systemPrompt.WriteString(engine.XMLWrap("user_request", engine.XMLCDATA(p.originalInput)))
+	systemPrompt.WriteString("\n")
 
-	systemPrompt.WriteString("## Step Results\n\n")
+	var resultsBody strings.Builder
 	for i, step := range p.plan {
-		fmt.Fprintf(&systemPrompt, "### Step %d: %s [%s]\n", i+1, step.Description, step.Status)
-		if step.Result != "" {
-			systemPrompt.WriteString(step.Result)
+		content := step.Result
+		if content == "" {
+			content = "(no output)"
 		}
-		systemPrompt.WriteString("\n\n")
+		resultsBody.WriteString(engine.XMLWrap("step_result",
+			engine.XMLCDATA(content),
+			"number", fmt.Sprintf("%d", i+1),
+			"description", step.Description,
+			"status", step.Status))
 	}
-
-	systemPrompt.WriteString("Provide a comprehensive response that addresses the user's original request, " +
-		"incorporating the results from all completed steps. Be concise but thorough.")
+	systemPrompt.WriteString(engine.XMLWrap("prior_results", resultsBody.String()))
+	systemPrompt.WriteString("\nProvide a comprehensive response that addresses the user's original request, ")
+	systemPrompt.WriteString("incorporating the results from all completed steps. Be concise but thorough.")
 
 	var messages []events.Message
 	messages = append(messages, events.Message{

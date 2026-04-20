@@ -324,7 +324,7 @@ func (p *Plugin) handleSkillLoadedEvent(event engine.Event[any]) {
 	if content, ok := event.Payload.(events.SkillContent); ok {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		p.skillContexts = append(p.skillContexts, fmt.Sprintf("## Skill: %s\n\n%s", content.Name, content.Body))
+		p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
 		p.logger.Info("loaded skill context", "name", content.Name)
 	}
 }
@@ -384,15 +384,15 @@ func (p *Plugin) sendDecomposeRequest() {
 		toolNames[i] = t.Name
 	}
 
-	// Construct system prompt.
+	// Construct system prompt with XML boundaries.
 	var systemPrompt strings.Builder
 	if p.systemPrompt != "" {
 		systemPrompt.WriteString(p.systemPrompt)
 		systemPrompt.WriteString("\n\n")
 	}
 	if len(p.skillContexts) > 0 {
-		systemPrompt.WriteString(strings.Join(p.skillContexts, "\n\n---\n\n"))
-		systemPrompt.WriteString("\n\n")
+		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
 	}
 
 	systemPrompt.WriteString("You are a task decomposition agent. Your role is to break down a user's request " +
@@ -619,7 +619,9 @@ func (p *Plugin) dispatchReadyWorkers() {
 		for _, dep := range p.subtasks[idx].DependsOn {
 			for _, t := range p.subtasks {
 				if t.ID == dep && t.Result != "" {
-					fmt.Fprintf(&depResults, "## Result from %s\n%s\n\n", t.ID, t.Result)
+					depResults.WriteString(engine.XMLWrap("dependency_result",
+						engine.XMLCDATA(t.Result),
+						"task_id", t.ID))
 				}
 			}
 		}
@@ -646,15 +648,15 @@ func (p *Plugin) dispatchReadyWorkers() {
 	// so each spawn blocks until the subagent completes. We emit them and rely
 	// on subagent.complete events to track progress.
 	for _, s := range spawns {
-		// Build a focused system prompt for the worker.
+		// Build a focused system prompt for the worker with XML boundaries.
 		var workerPrompt strings.Builder
 		workerPrompt.WriteString("You are a focused worker agent. Complete the assigned task thoroughly and concisely.\n\n")
-		fmt.Fprintf(&workerPrompt, "**Task:** %s\n\n", s.task)
+		workerPrompt.WriteString(engine.XMLWrap("current_task", s.task))
 		if s.depResults != "" {
-			workerPrompt.WriteString("## Context from Prior Tasks\n\n")
-			workerPrompt.WriteString(s.depResults)
+			workerPrompt.WriteString("\n")
+			workerPrompt.WriteString(engine.XMLWrap("prior_results", s.depResults))
 		}
-		workerPrompt.WriteString("When finished, provide a clear summary of what was accomplished and any relevant results.")
+		workerPrompt.WriteString("\nWhen finished, provide a clear summary of what was accomplished and any relevant results.")
 
 		p.logger.Info("dispatching worker",
 			"spawn_id", s.spawnID,
@@ -756,38 +758,46 @@ func (p *Plugin) sendSynthesizeRequest() {
 		systemPrompt.WriteString("\n\n")
 	}
 	if len(p.skillContexts) > 0 {
-		systemPrompt.WriteString(strings.Join(p.skillContexts, "\n\n---\n\n"))
-		systemPrompt.WriteString("\n\n")
+		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
 	}
 
-	systemPrompt.WriteString("## Synthesis Task\n\n")
 	systemPrompt.WriteString("Multiple worker agents have completed subtasks in parallel. " +
 		"Synthesize their results into a clear, coherent response for the user.\n\n")
-	fmt.Fprintf(&systemPrompt, "**Original request:** %s\n\n", p.originalInput)
+	systemPrompt.WriteString(engine.XMLWrap("user_request", engine.XMLCDATA(p.originalInput)))
+	systemPrompt.WriteString("\n")
 
-	systemPrompt.WriteString("## Worker Results\n\n")
+	var resultsBody strings.Builder
 	for i, t := range p.subtasks {
-		fmt.Fprintf(&systemPrompt, "### Subtask %d: %s [%s]\n", i+1, t.Description, t.Status)
+		var content string
 		switch t.Status {
 		case "completed":
 			if t.Result != "" {
-				systemPrompt.WriteString(t.Result)
+				content = t.Result
+			} else {
+				content = "(no output)"
 			}
 		case "failed":
-			fmt.Fprintf(&systemPrompt, "**Failed:** %s", t.Error)
+			content = "Failed: " + t.Error
 			if t.Result != "" {
-				fmt.Fprintf(&systemPrompt, "\nPartial result: %s", t.Result)
+				content += "\nPartial result: " + t.Result
 			}
 		case "skipped":
-			fmt.Fprintf(&systemPrompt, "**Skipped:** %s", t.Error)
+			content = "Skipped: " + t.Error
+		default:
+			content = "(no output)"
 		}
-		systemPrompt.WriteString("\n\n")
+		resultsBody.WriteString(engine.XMLWrap("subtask_result",
+			engine.XMLCDATA(content),
+			"number", fmt.Sprintf("%d", i+1),
+			"description", t.Description,
+			"status", t.Status))
 	}
-
-	systemPrompt.WriteString("Provide a comprehensive response that addresses the user's original request, " +
-		"incorporating the results from all completed subtasks. " +
-		"If any subtasks failed or were skipped, note what could not be accomplished and why. " +
-		"Be concise but thorough.")
+	systemPrompt.WriteString(engine.XMLWrap("subtask_results", resultsBody.String()))
+	systemPrompt.WriteString("\nProvide a comprehensive response that addresses the user's original request, ")
+	systemPrompt.WriteString("incorporating the results from all completed subtasks. ")
+	systemPrompt.WriteString("If any subtasks failed or were skipped, note what could not be accomplished and why. ")
+	systemPrompt.WriteString("Be concise but thorough.")
 
 	var messages []events.Message
 	messages = append(messages, events.Message{

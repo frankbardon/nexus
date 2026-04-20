@@ -73,7 +73,7 @@ func (r *PromptRegistry) Apply(systemPrompt string) string {
 	for _, s := range r.sections {
 		content := s.fn()
 		if content != "" {
-			parts = append(parts, content)
+			parts = append(parts, XMLWrap("prompt_section", content, "name", s.name))
 		}
 	}
 
@@ -81,10 +81,17 @@ func (r *PromptRegistry) Apply(systemPrompt string) string {
 		return systemPrompt
 	}
 
-	if systemPrompt == "" {
-		return strings.Join(parts, "\n\n")
+	var result strings.Builder
+	if systemPrompt != "" {
+		result.WriteString(XMLWrap("system_instructions", systemPrompt))
 	}
-	return systemPrompt + "\n\n" + strings.Join(parts, "\n\n")
+	for i, wrapped := range parts {
+		if i > 0 || systemPrompt != "" {
+			result.WriteByte('\n')
+		}
+		result.WriteString(wrapped)
+	}
+	return result.String()
 }
 
 func (r *PromptRegistry) sortLocked() {

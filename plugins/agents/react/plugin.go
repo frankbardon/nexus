@@ -612,23 +612,24 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 func (p *Plugin) handleSkillLoaded(content events.SkillContent) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.skillContexts = append(p.skillContexts, fmt.Sprintf("## Skill: %s\n\n%s", content.Name, content.Body))
+	p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
 	p.logger.Info("loaded skill context", "name", content.Name)
 }
 
 func (p *Plugin) sendLLMRequest() {
 	p.mu.Lock()
 
-	// Build system prompt with skill contexts and plan.
-	systemPrompt := p.systemPrompt
+	// Build system prompt with skill contexts and plan using XML boundaries.
+	var sysBuilder strings.Builder
+	sysBuilder.WriteString(p.systemPrompt)
 	if len(p.skillContexts) > 0 {
-		systemPrompt += "\n\n---\n\n" + strings.Join(p.skillContexts, "\n\n---\n\n")
+		sysBuilder.WriteString("\n\n")
+		sysBuilder.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
 	}
 	if p.currentPlan != nil && len(p.currentPlan.Steps) > 0 && p.currentPlanStep >= 0 {
-		var planText strings.Builder
-		planText.WriteString("\n\n## Execution Plan\n\n")
-		planText.WriteString(p.currentPlan.Summary)
-		planText.WriteString("\n\nFull plan:\n")
+		var planBody strings.Builder
+		planBody.WriteString(p.currentPlan.Summary)
+		planBody.WriteString("\n\nFull plan:\n")
 		for i, step := range p.currentPlan.Steps {
 			marker := "  "
 			if i < p.currentPlanStep {
@@ -636,20 +637,25 @@ func (p *Plugin) sendLLMRequest() {
 			} else if i == p.currentPlanStep {
 				marker = "> " // arrow for current
 			}
-			fmt.Fprintf(&planText, "%sStep %d: %s\n", marker, step.Order, step.Description)
+			fmt.Fprintf(&planBody, "%sStep %d: %s\n", marker, step.Order, step.Description)
 		}
+		sysBuilder.WriteString("\n\n")
+		sysBuilder.WriteString(engine.XMLWrap("execution_plan", planBody.String()))
 
 		current := p.currentPlan.Steps[p.currentPlanStep]
 		instructions := current.Instructions
 		if instructions == "" {
 			instructions = current.Description
 		}
-		fmt.Fprintf(&planText, "\n## CURRENT TASK (Step %d of %d)\n\n", current.Order, len(p.currentPlan.Steps))
-		fmt.Fprintf(&planText, "%s\n\n", instructions)
-		planText.WriteString("You MUST focus exclusively on this step. Do not skip ahead or work on other steps. ")
-		planText.WriteString("When this step is complete, respond with your results — do not call any more tools.\n")
-		systemPrompt += planText.String()
+		var taskBody strings.Builder
+		fmt.Fprintf(&taskBody, "Step %d of %d\n\n", current.Order, len(p.currentPlan.Steps))
+		fmt.Fprintf(&taskBody, "%s\n\n", instructions)
+		taskBody.WriteString("You MUST focus exclusively on this step. Do not skip ahead or work on other steps. ")
+		taskBody.WriteString("When this step is complete, respond with your results — do not call any more tools.\n")
+		sysBuilder.WriteString("\n")
+		sysBuilder.WriteString(engine.XMLWrap("current_task", taskBody.String()))
 	}
+	systemPrompt := sysBuilder.String()
 
 	// Build messages: system prompt + conversation history.
 	var messages []events.Message
