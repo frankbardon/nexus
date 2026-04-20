@@ -57,6 +57,7 @@ func (p *Plugin) Ready() error {
 	_ = p.bus.Emit("tool.register", events.ToolDef{
 		Name:        "ask_user",
 		Description: "Ask the user a question and wait for their response. Use this when you need clarification, confirmation, or additional information from the user before proceeding.",
+		Class:       "communication",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

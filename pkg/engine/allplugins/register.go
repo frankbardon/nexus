@@ -41,6 +41,9 @@ import (
 	fanoutplugin "github.com/frankbardon/nexus/plugins/providers/fanout"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 
+	// Discovery plugins.
+	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
+
 	// Skill plugins.
 	"github.com/frankbardon/nexus/plugins/skills"
 
@@ -105,6 +108,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.llm.openai", openai.New)
 	r.Register("nexus.provider.fallback", fallbackplugin.New)
 	r.Register("nexus.provider.fanout", fanoutplugin.New)
+
+	// Discovery
+	r.Register("nexus.discovery.progressive", progressiveplugin.New)
 
 	// Skills
 	r.Register("nexus.skills", skills.New)

@@ -78,6 +78,15 @@ plugins:
   #         name: shell
   #       - mode: auto                # iteration 3+: last entry repeats
 
+  # nexus.discovery.progressive:     # Progressive tool discovery
+  #   scope: session                  # session | turn | hybrid
+  #   idle_prune_turns: 5             # hybrid only: prune after N idle turns
+  #   classless_behavior: include     # include | exclude (unclassified tools)
+  #   always_include:                 # classes always fully revealed
+  #     - communication
+  #     - agents
+  #   default_depth: class            # class (summaries) | full (legacy)
+
   # nexus.gate.tool_filter:          # Tool filtering gate
   #   include: [file_read, file_write]  # allowlist (only these tools)
   #   # or

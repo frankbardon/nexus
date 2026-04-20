@@ -75,6 +75,8 @@ func (p *Plugin) Ready() error {
 	return p.bus.Emit("tool.register", events.ToolDef{
 		Name:        "open_path",
 		Description: "Open a file or folder using the operating system's default handler. Files open in their associated application; folders open in the file manager.",
+		Class:       "filesystem",
+		Subclass:    "navigate",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

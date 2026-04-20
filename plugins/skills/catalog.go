@@ -21,10 +21,17 @@ func BuildCatalogXML(skills []SkillRecord) string {
 	var b strings.Builder
 	b.WriteString("<available_skills>\n")
 	for _, s := range skills {
-		b.WriteString(fmt.Sprintf("  <skill name=%q scope=%q>\n", s.Name, s.Scope))
-		b.WriteString(fmt.Sprintf("    <description>%s</description>\n", xmlEscape(s.Description)))
+		attrs := fmt.Sprintf("name=%q scope=%q", s.Name, s.Scope)
+		if s.Class != "" {
+			attrs += fmt.Sprintf(" class=%q", s.Class)
+		}
+		if s.Subclass != "" {
+			attrs += fmt.Sprintf(" subclass=%q", s.Subclass)
+		}
+		fmt.Fprintf(&b, "  <skill %s>\n", attrs)
+		fmt.Fprintf(&b, "    <description>%s</description>\n", xmlEscape(s.Description))
 		if s.License != "" {
-			b.WriteString(fmt.Sprintf("    <license>%s</license>\n", xmlEscape(s.License)))
+			fmt.Fprintf(&b, "    <license>%s</license>\n", xmlEscape(s.License))
 		}
 		b.WriteString("  </skill>\n")
 	}

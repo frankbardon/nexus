@@ -155,6 +155,8 @@ func (p *Plugin) Ready() error {
 		{
 			Name:        "memory_write",
 			Description: "Create or update a long-term memory entry that persists across sessions.",
+			Class:       "memory",
+			Subclass:    "manage",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -178,6 +180,8 @@ func (p *Plugin) Ready() error {
 		{
 			Name:        "memory_read",
 			Description: "Read the full content of a long-term memory entry by key.",
+			Class:       "memory",
+			Subclass:    "manage",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -192,6 +196,8 @@ func (p *Plugin) Ready() error {
 		{
 			Name:        "memory_list",
 			Description: "List all long-term memories, optionally filtered by tags.",
+			Class:       "memory",
+			Subclass:    "manage",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -206,6 +212,8 @@ func (p *Plugin) Ready() error {
 		{
 			Name:        "memory_delete",
 			Description: "Delete a long-term memory entry by key.",
+			Class:       "memory",
+			Subclass:    "manage",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

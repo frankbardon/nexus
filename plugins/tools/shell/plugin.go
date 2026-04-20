@@ -85,6 +85,8 @@ func (p *Plugin) Ready() error {
 	_ = p.bus.Emit("tool.register", events.ToolDef{
 		Name:        "shell",
 		Description: "Execute shell commands and return their output. Use this to run CLI tools, scripts, and system commands.",
+		Class:       "code",
+		Subclass:    "execute",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

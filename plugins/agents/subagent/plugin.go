@@ -107,6 +107,7 @@ func (p *Plugin) Ready() error {
 	return p.bus.Emit("tool.register", events.ToolDef{
 		Name:        p.toolName,
 		Description: description,
+		Class:       "agents",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
