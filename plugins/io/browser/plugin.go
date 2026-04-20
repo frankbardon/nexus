@@ -49,6 +49,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.approval.request", Priority: 50},
 		{EventType: "io.ask", Priority: 50},
 		{EventType: "thinking.step", Priority: 50},
+		{EventType: "code.exec.stdout", Priority: 50},
 		{EventType: "plan.approval.request", Priority: 50},
 		{EventType: "plan.created", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
@@ -149,6 +150,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.ask", p.handleAskUser, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
+		p.bus.Subscribe("code.exec.stdout", p.handleCodeExecStdout, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
@@ -299,6 +301,20 @@ func (p *Plugin) handleAskUser(e engine.Event[any]) {
 	_ = p.bus.Emit("io.ask.response", events.AskUserResponse{
 		PromptID: resp.PromptID,
 		Answer:   resp.Answer,
+	})
+}
+
+func (p *Plugin) handleCodeExecStdout(e engine.Event[any]) {
+	out, ok := e.Payload.(events.CodeExecStdout)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendCodeExecStdout(ui.CodeExecStdoutMessage{
+		CallID:    out.CallID,
+		TurnID:    out.TurnID,
+		Chunk:     out.Chunk,
+		Final:     out.Final,
+		Truncated: out.Truncated,
 	})
 }
 

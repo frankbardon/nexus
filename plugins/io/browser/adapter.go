@@ -68,6 +68,11 @@ func (a *Adapter) SendThinking(msg ui.ThinkingMessage) error {
 	return a.broadcast("thinking", msg)
 }
 
+// SendCodeExecStdout streams a chunk of run_code script stdout to all clients.
+func (a *Adapter) SendCodeExecStdout(msg ui.CodeExecStdoutMessage) error {
+	return a.broadcast(ui.TypeCodeExecStdout, msg)
+}
+
 // SendPlanDisplay sends a plan overview to all clients.
 func (a *Adapter) SendPlanDisplay(msg ui.PlanDisplayMessage) error {
 	return a.broadcast("plan", msg)

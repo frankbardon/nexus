@@ -192,6 +192,25 @@
                   </div>
                 </template>
 
+                <!-- run_code stdout (collapsible) -->
+                <template x-if="msg.role === 'code_stdout'">
+                  <div class="chat chat-start">
+                    <div class="chat-header opacity-60 text-xs mb-1 flex items-center gap-2">
+                      <button type="button"
+                              class="btn btn-ghost btn-xs p-0 h-auto min-h-0"
+                              @click="msg.collapsed = !msg.collapsed">
+                        <span x-text="msg.collapsed ? '▸' : '▾'"></span>
+                      </button>
+                      <span class="uppercase tracking-wider">run_code ▸ stdout</span>
+                      <span x-show="msg.streaming" class="loading loading-dots loading-xs"></span>
+                      <span x-show="msg.truncated" class="badge badge-warning badge-xs">truncated</span>
+                    </div>
+                    <pre x-show="!msg.collapsed"
+                         class="chat-bubble chat-bubble-neutral text-xs font-mono whitespace-pre-wrap break-words"
+                         x-text="msg.content || '(no output yet)'"></pre>
+                  </div>
+                </template>
+
                 <!-- Error message -->
                 <template x-if="msg.role === 'error'">
                   <div class="chat chat-start">
