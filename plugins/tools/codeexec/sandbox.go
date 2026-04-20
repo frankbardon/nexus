@@ -79,20 +79,20 @@ func validateRunSignature(file *ast.File) error {
 		}
 		// Arg list: (ctx context.Context).
 		if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
-			return fmt.Errorf("Run must accept exactly one parameter of type context.Context")
+			return fmt.Errorf("func Run must accept exactly one parameter of type context.Context")
 		}
 		if !isContextContext(fn.Type.Params.List[0].Type) {
-			return fmt.Errorf("Run's parameter must be context.Context")
+			return fmt.Errorf("func Run's parameter must be context.Context")
 		}
 		// Return list: (any, error).
 		if fn.Type.Results == nil || len(fn.Type.Results.List) != 2 {
-			return fmt.Errorf("Run must return (any, error)")
+			return fmt.Errorf("func Run must return (any, error)")
 		}
 		if !isAny(fn.Type.Results.List[0].Type) {
-			return fmt.Errorf("Run's first return value must be any/interface{}")
+			return fmt.Errorf("func Run's first return value must be any/interface{}")
 		}
 		if !isIdent(fn.Type.Results.List[1].Type, "error") {
-			return fmt.Errorf("Run's second return value must be error")
+			return fmt.Errorf("func Run's second return value must be error")
 		}
 		return nil
 	}

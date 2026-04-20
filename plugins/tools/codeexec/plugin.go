@@ -494,13 +494,13 @@ func invokeRun(runVal reflect.Value, ctx context.Context) (rtn any, rerr error) 
 
 	out := runVal.Call([]reflect.Value{reflect.ValueOf(ctx)})
 	if len(out) != 2 {
-		return nil, fmt.Errorf("Run returned %d values, want 2", len(out))
+		return nil, fmt.Errorf("run returned %d values, want 2", len(out))
 	}
 	if !out[1].IsNil() {
 		if err, ok := out[1].Interface().(error); ok {
 			return nil, err
 		}
-		return nil, fmt.Errorf("Run returned non-error second value: %v", out[1].Interface())
+		return nil, fmt.Errorf("run returned non-error second value: %v", out[1].Interface())
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

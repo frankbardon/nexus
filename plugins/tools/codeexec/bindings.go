@@ -31,20 +31,10 @@ type toolResult struct {
 type invocation struct {
 	ctx    context.Context
 	bus    engine.EventBus
-	logger interface{ Info(string, ...any) }
 	turnID string
 
 	mu      sync.Mutex
 	pending map[string]chan events.ToolResult // keyed by ToolCall.ID
-}
-
-func newInvocation(ctx context.Context, bus engine.EventBus, turnID string) *invocation {
-	return &invocation{
-		ctx:     ctx,
-		bus:     bus,
-		turnID:  turnID,
-		pending: make(map[string]chan events.ToolResult),
-	}
 }
 
 // routeResult delivers a ToolResult to the waiting shim, if any. Called by
