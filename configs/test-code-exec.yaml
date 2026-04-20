@@ -45,7 +45,7 @@ plugins:
       - tool_calls:
           - name: run_code
             arguments: |
-              {"script":"package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"tools\"\n)\n\nfunc Run(ctx context.Context) (any, error) {\n\tr, err := tools.Shell(tools.ShellArgs{Command: \"echo hello\"})\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tfmt.Println(\"script saw:\", r.Output)\n\treturn map[string]string{\"shell_output\": r.Output}, nil\n}\n"}
+              {"script":"package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"tools\"\n)\n\nfunc Run(ctx context.Context) (any, error) {\n\tr, err := tools.Shell(tools.ShellArgs{Command: \"echo hello\"})\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tfmt.Println(\"stdout:\", r.Stdout, \"exit:\", r.ExitCode)\n\treturn map[string]any{\"shell_stdout\": r.Stdout, \"exit\": r.ExitCode}, nil\n}\n"}
       - content: "Done. The script ran `echo hello` and returned the output."
 
   nexus.llm.anthropic:

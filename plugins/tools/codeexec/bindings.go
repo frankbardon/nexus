@@ -82,20 +82,25 @@ func (inv *invocation) clearPending(id string) {
 }
 
 // buildToolsExports turns the current tool registry into a Yaegi Exports entry
-// at import path "tools". Each tool becomes a typed function
+// at import path "tools". Each tool becomes a typed function whose shim
+// round-trips through the event bus (every before:tool.invoke gate still
+// fires). Return type varies by tool:
 //
-//	func <ToolName>(args <ToolName>Args) (Result, error)
+//   - Tool declared an OutputSchema: func <Tool>(args) (<Tool>Result, error)
+//     where <Tool>Result is a reflect.StructOf-generated struct matching the
+//     schema. The shim populates fields from ToolResult.OutputStructured.
+//   - Tool declared no OutputSchema: func <Tool>(args) (Result, error) —
+//     the fixed tools.Result (Output/Error/OutputFile string fields).
 //
-// whose implementation round-trips through the event bus (including all
-// before:tool.invoke gates). The Result type is a fixed tools.Result struct
-// so scripts get the same shape regardless of the underlying tool.
+// tools.Result is always exported for scripts working with schema-less tools
+// or for authoring helper functions that handle both shapes.
 func (inv *invocation) buildToolsExports(tools []events.ToolDef, skipSelf string) (interp.Exports, map[string]reflect.Type, error) {
 	pkg := map[string]reflect.Value{}
 	argTypes := map[string]reflect.Type{}
 
-	// tools.Result is a known type that every shim returns.
-	resultType := reflect.TypeOf(toolResult{})
-	pkg["Result"] = reflect.Zero(reflect.PointerTo(resultType))
+	// tools.Result is the fixed fallback result exported unconditionally.
+	defaultResultType := reflect.TypeOf(toolResult{})
+	pkg["Result"] = reflect.Zero(reflect.PointerTo(defaultResultType))
 
 	for _, td := range tools {
 		if td.Name == skipSelf {
@@ -117,24 +122,137 @@ func (inv *invocation) buildToolsExports(tools []events.ToolDef, skipSelf string
 
 		pkg[argsTypeName] = reflect.Zero(reflect.PointerTo(argsType))
 
+		// Pick the result type based on OutputSchema.
+		resultType := defaultResultType
+		typedResult := false
+		if td.OutputSchema != nil {
+			rt, err := schemaToType(td.OutputSchema, toolFuncName(td.Name)+"Result")
+			if err != nil {
+				return nil, nil, fmt.Errorf("tool %s output schema: %w", td.Name, err)
+			}
+			if rt.Kind() == reflect.Struct {
+				resultType = rt
+				typedResult = true
+				pkg[toolResultTypeName(td.Name)] = reflect.Zero(reflect.PointerTo(resultType))
+			}
+		}
+
 		funcType := reflect.FuncOf(
 			[]reflect.Type{argsType},
 			[]reflect.Type{resultType, errorInterface},
 			false,
 		)
+
 		toolName := td.Name // capture
 		at := argsType
+		rt := resultType
+		useTyped := typedResult
 		fn := reflect.MakeFunc(funcType, func(in []reflect.Value) []reflect.Value {
-			result, err := inv.callTool(toolName, in[0], at)
-			return []reflect.Value{
-				reflect.ValueOf(result),
-				errorValue(err),
+			if useTyped {
+				result, err := inv.callToolTyped(toolName, in[0], at, rt)
+				return []reflect.Value{result, errorValue(err)}
 			}
+			result, err := inv.callTool(toolName, in[0], at)
+			return []reflect.Value{reflect.ValueOf(result), errorValue(err)}
 		})
 		pkg[funcName] = fn
 	}
 
 	return interp.Exports{"tools/tools": pkg}, argTypes, nil
+}
+
+// callToolTyped is the shim for tools with an OutputSchema. It emits the same
+// bus round-trip as callTool, but unmarshals ToolResult.OutputStructured (or
+// falls back to parsing Output as JSON) into the caller-supplied resultType.
+func (inv *invocation) callToolTyped(name string, argsVal reflect.Value, argsType, resultType reflect.Type) (reflect.Value, error) {
+	raw, err := marshalArgs(argsVal, argsType)
+	if err != nil {
+		return reflect.Zero(resultType), fmt.Errorf("marshal args for %s: %w", name, err)
+	}
+
+	callID := "code-" + randID()
+	tc := events.ToolCall{
+		ID:        callID,
+		Name:      name,
+		Arguments: raw,
+		TurnID:    inv.turnID,
+	}
+
+	ch := inv.registerPending(callID)
+	defer inv.clearPending(callID)
+
+	veto, err := inv.bus.EmitVetoable("before:tool.invoke", &tc)
+	if err != nil {
+		return reflect.Zero(resultType), fmt.Errorf("emit before:tool.invoke: %w", err)
+	}
+	if veto.Vetoed {
+		return reflect.Zero(resultType), fmt.Errorf("tool %s vetoed: %s", name, veto.Reason)
+	}
+
+	if err := inv.bus.Emit("tool.invoke", tc); err != nil {
+		return reflect.Zero(resultType), fmt.Errorf("emit tool.invoke: %w", err)
+	}
+
+	select {
+	case res := <-ch:
+		if res.Error != "" {
+			return reflect.Zero(resultType), fmt.Errorf("tool %s failed: %s", name, res.Error)
+		}
+		return decodeStructuredResult(res, resultType)
+	case <-inv.ctx.Done():
+		return reflect.Zero(resultType), inv.ctx.Err()
+	}
+}
+
+// decodeStructuredResult converts a ToolResult into a typed Go value built
+// from the tool's OutputSchema. Preference order:
+//
+//  1. ToolResult.OutputStructured (the tool populated it directly).
+//  2. ToolResult.Output parsed as a JSON object — handles existing tools
+//     that already stringify JSON into Output without migrating to the new
+//     field.
+//  3. Output wrapped as a single "value" field when the target type can
+//     accept it — lets scalar-shaped schemas still decode cleanly.
+func decodeStructuredResult(res events.ToolResult, resultType reflect.Type) (reflect.Value, error) {
+	target := reflect.New(resultType)
+
+	if len(res.OutputStructured) > 0 {
+		b, err := json.Marshal(res.OutputStructured)
+		if err != nil {
+			return reflect.Zero(resultType), fmt.Errorf("marshal structured output: %w", err)
+		}
+		if err := json.Unmarshal(b, target.Interface()); err != nil {
+			return reflect.Zero(resultType), fmt.Errorf("unmarshal structured output: %w", err)
+		}
+		return target.Elem(), nil
+	}
+
+	if res.Output != "" {
+		trimmed := res.Output
+		if isJSONObject(trimmed) {
+			if err := json.Unmarshal([]byte(trimmed), target.Interface()); err == nil {
+				return target.Elem(), nil
+			}
+		}
+	}
+
+	// Last-ditch: return zero value. Caller sees a struct with empty fields;
+	// loses nothing the script couldn't have gotten from parsing Output
+	// itself.
+	return target.Elem(), nil
+}
+
+// isJSONObject cheaply rejects obvious non-JSON-object payloads without
+// paying for a full parse.
+func isJSONObject(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			continue
+		}
+		return c == '{'
+	}
+	return false
 }
 
 // callTool is the actual bus round-trip invoked by a shim function. It

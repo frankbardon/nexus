@@ -55,12 +55,16 @@ type ToolCallRequest struct {
 
 // ToolDef describes a tool available to the LLM.
 type ToolDef struct {
-	Name        string
-	Description string
-	Parameters  map[string]any // JSON Schema
-	Class       string         // Semantic class (e.g. "filesystem", "memory"). Empty = classless.
-	Subclass    string         // Optional grouping within class (e.g. "read", "write").
-	Tags        []string       // Cross-cutting metadata for filtering.
+	Name         string
+	Description  string
+	Parameters   map[string]any // JSON Schema for inputs
+	OutputSchema map[string]any // Optional JSON Schema for structured outputs. When
+	// set, the tool commits to populating ToolResult.OutputStructured with a
+	// value that validates against this schema. Consumers like run_code use
+	// it to generate typed bindings; omit for tools that only produce text.
+	Class    string   // Semantic class (e.g. "filesystem", "memory"). Empty = classless.
+	Subclass string   // Optional grouping within class (e.g. "read", "write").
+	Tags     []string // Cross-cutting metadata for filtering.
 }
 
 // LLMResponse is the complete response from a language model.

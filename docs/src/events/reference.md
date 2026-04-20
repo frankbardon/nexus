@@ -327,11 +327,21 @@ Certain metadata keys carry special meaning:
 |-------|------|-------------|
 | `ID` | string | Matches the call ID |
 | `Name` | string | Tool name |
-| `Output` | string | Result text |
+| `Output` | string | Human-readable result text (what the LLM sees) |
 | `Error` | string | Error message (if failed) |
 | `OutputFile` | string | Path to output file (optional) |
 | `OutputData` | []byte | Binary output data (optional) |
+| `OutputStructured` | map[string]any | Optional structured payload. When the tool's `ToolDef.OutputSchema` is set, this should match that schema. Consumed by typed consumers like `run_code`'s bindings — `Output` stays freeform text for the LLM. |
 | `TurnID` | string | Associated turn |
+
+**ToolDef**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | string | Tool name the LLM will use |
+| `Description` | string | Description shown to the LLM |
+| `Parameters` | map[string]any | JSON Schema for inputs |
+| `OutputSchema` | map[string]any | Optional JSON Schema describing the shape of `ToolResult.OutputStructured`. When set, `run_code` generates a typed Go struct bound to this schema. |
+| `Class` / `Subclass` / `Tags` | string / []string | Semantic metadata for filtering |
 
 ### Code Execution Events
 

@@ -16,5 +16,10 @@ type ToolResult struct {
 	Error      string
 	OutputFile string // optional: file written to session workspace
 	OutputData []byte // optional: binary data
-	TurnID     string
+	// OutputStructured carries typed result data when the tool declared an
+	// OutputSchema in its ToolDef. Consumers that care about types (e.g.
+	// run_code's typed bindings) prefer this over parsing Output.
+	// Content should validate against the tool's declared OutputSchema.
+	OutputStructured map[string]any
+	TurnID           string
 }

@@ -16,7 +16,7 @@ Lets the LLM orchestrate multiple tool calls in a single turn by writing a short
 |-----|------|---------|-------------|
 | `timeout_seconds` | int | `30` | Wall-clock limit for a script, propagated via `context.Context` |
 | `max_output_bytes` | int | `65536` | Stdout/stderr cap per script; excess is silently dropped and `truncated=true` is returned |
-| `allowed_packages` | string[] | `[fmt, strings, strconv, encoding/json, math, sort, errors, time, context]` | Go stdlib whitelist |
+| `allowed_packages` | string[] | see below | Go stdlib whitelist. Default covers pure compute: `fmt`, `strings`, `strconv`, `bytes`, `regexp`, `unicode*`, `encoding/*` (json/base64/hex/csv/xml/pem/binary), `crypto/*` (sha/md5/hmac/rand/subtle), `math`, `math/big`, `math/rand`, `math/rand/v2`, `math/bits`, `sort`, `container/*` (heap/list/ring), `hash/*` (crc32/crc64/fnv/adler32), `errors`, `time`, `context`, `io`, `bufio`. Omitted: anything touching filesystem, network, OS processes, reflection, unsafe memory. Also omitted: `slices`/`maps` (Yaegi lacks full generics support). |
 | `persist_scripts` | bool | `true` | Write `script.go`, `stdout.txt`, `result.json`, `error.txt` to the session workspace |
 | `reject_goroutines` | bool | `true` | Reject scripts containing `go` statements at the AST layer |
 
@@ -57,10 +57,58 @@ Violations surface as a structured error in the tool result. The script never ex
 At every `run_code` invocation the plugin snapshots the current tool registry and builds a fresh `tools` package for Yaegi:
 
 - JSON Schema types map to Go: `string→string`, `integer→int64`, `number→float64`, `boolean→bool`, `array→[]T`, `object→struct`.
-- Each tool `foo_bar` becomes `tools.FooBar(args tools.FooBarArgs) (tools.Result, error)`.
-- `tools.Result` is a fixed `{ Output, Error, OutputFile string }` so the script sees a predictable shape across tools.
+- Each tool `foo_bar` becomes `tools.FooBar(args tools.FooBarArgs) (<Result>, error)`.
+- **Return type depends on whether the tool declared `OutputSchema`:**
+  - With schema → `tools.FooBarResult`, a struct generated from the schema. Fields are populated from `ToolResult.OutputStructured` (preferred) or parsed from JSON in `Output` as a fallback.
+  - Without schema → the fixed `tools.Result` struct (`{Output, Error, OutputFile string}`). Scripts parse `Output` themselves.
+- `tools.Result` is always exported so helper functions can handle both shapes.
 - Gate vetoes (`before:tool.invoke`) surface as a Go `error` on the `tools.*` call.
 - Outer `run_code` call is excluded from the binding — scripts cannot recursively invoke themselves.
+
+### Declaring an OutputSchema
+
+Tool plugins opt in by adding `OutputSchema` to their `ToolDef` and populating `ToolResult.OutputStructured`:
+
+```go
+_ = p.bus.Emit("tool.register", events.ToolDef{
+    Name: "shell",
+    // ...
+    OutputSchema: map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "stdout":    map[string]any{"type": "string"},
+            "stderr":    map[string]any{"type": "string"},
+            "exit_code": map[string]any{"type": "integer"},
+        },
+        "required": []string{"stdout", "stderr", "exit_code"},
+    },
+})
+
+// ...then in the tool's handler:
+result := events.ToolResult{
+    ID:     tc.ID,
+    Name:   tc.Name,
+    Output: humanReadableSummary,
+    OutputStructured: map[string]any{
+        "stdout":    stdoutStr,
+        "stderr":    stderrStr,
+        "exit_code": exitCode,
+    },
+    // ...
+}
+```
+
+Scripts then see the typed shape:
+
+```go
+r, err := tools.Shell(tools.ShellArgs{Command: "ls"})
+if err != nil {
+    return nil, err
+}
+fmt.Println(r.Stdout, r.Stderr, r.ExitCode)
+```
+
+The existing `Output` string still flows through the bus unchanged — non-script consumers (LLM conversation history, logging, etc.) see the same human-readable text as before. Tools without schemas continue to work as they always did.
 
 ## Skill Helpers
 
