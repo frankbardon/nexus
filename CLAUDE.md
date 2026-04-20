@@ -283,6 +283,7 @@ Gate tracks `_structured_output` from `llm.response` metadata. Skips validation 
 - **Config**: YAML, loaded at startup. Plugin config passed as `map[string]any` during init.
 - **No direct plugin-to-plugin calls**: All comms via event bus.
 - **Dependencies**: Minimal — only `gopkg.in/yaml.v3` beyond stdlib. Anthropic API called via raw HTTP. JSON schema gate uses `github.com/santhosh-tekuri/jsonschema/v6`. Desktop shell adds `github.com/wailsapp/wails/v2`, `github.com/zalando/go-keyring`, `github.com/fsnotify/fsnotify`.
+- **Prompt construction**: All content injected into LLM prompts must use XML tag boundaries to separate structural sections. Use semantic tags (`<execution_plan>`, `<current_task>`, `<prior_results>`, `<user_request>`, `<skill_context>`, etc.) not markdown headers or bare concatenation. See `plugins/skills/catalog.go` for reference pattern. Shared XML helpers live in `pkg/engine/`.
 
 ## IO Transport Plugins: `nexus.io.browser` ↔ `nexus.io.wails`
 

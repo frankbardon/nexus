@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 // resourceDirs are the subdirectories within a skill that contain resources.
@@ -72,10 +74,7 @@ func ListResources(baseDir string) ([]string, error) {
 	return resources, nil
 }
 
+// xmlEscape delegates to the shared engine.XMLEscape helper.
 func xmlEscape(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	return s
+	return engine.XMLEscape(s)
 }
