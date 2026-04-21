@@ -612,6 +612,79 @@ func TestDiscoverUnknownClass(t *testing.T) {
 	}
 }
 
+// TestHybrid_ToolUseResetsIdle proves that invoking a tool from a revealed
+// class resets that class's idle counter, preventing mid-use pruning.
+// Without this, the hybrid scope would prune actively-used classes because
+// only `discover` calls refreshed the counter.
+func TestHybrid_ToolUseResetsIdle(t *testing.T) {
+	p := newTestPlugin()
+	p.scope = "hybrid"
+	p.idlePruneTurns = 2
+
+	p.handleToolRegister(engine.Event[any]{
+		Type:    "tool.register",
+		Payload: events.ToolDef{Name: "read_file", Description: "Read file.", Class: "filesystem", Subclass: "read"},
+	})
+
+	// Reveal filesystem class.
+	p.handleToolInvoke(engine.Event[any]{
+		Type:    "tool.invoke",
+		Payload: events.ToolCall{ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
+	})
+	if !p.revealed["filesystem"] {
+		t.Fatal("discover should have revealed filesystem class")
+	}
+
+	// Simulate 5 turns. Each turn: LLM request (increments idle), then tool
+	// use (resets to 0). Class should remain revealed throughout.
+	for turn := 0; turn < 5; turn++ {
+		req := &events.LLMRequest{Tools: []events.ToolDef{{Name: "placeholder"}}}
+		p.handleBeforeLLMRequest(engine.Event[any]{
+			Type:    "before:llm.request",
+			Payload: &engine.VetoablePayload{Original: req},
+		})
+		p.handleToolInvoke(engine.Event[any]{
+			Type:    "tool.invoke",
+			Payload: events.ToolCall{ID: "x", Name: "read_file"},
+		})
+		if !p.revealed["filesystem"] {
+			t.Fatalf("turn %d: class pruned while tool was in active use", turn)
+		}
+	}
+}
+
+// TestHybrid_PrunesAfterIdle confirms the counter still fires when the tool
+// is not being used — i.e. the fix for TestHybrid_ToolUseResetsIdle did not
+// disable pruning altogether.
+func TestHybrid_PrunesAfterIdle(t *testing.T) {
+	p := newTestPlugin()
+	p.scope = "hybrid"
+	p.idlePruneTurns = 2
+
+	p.handleToolRegister(engine.Event[any]{
+		Type:    "tool.register",
+		Payload: events.ToolDef{Name: "read_file", Description: "Read file.", Class: "filesystem", Subclass: "read"},
+	})
+
+	p.handleToolInvoke(engine.Event[any]{
+		Type:    "tool.invoke",
+		Payload: events.ToolCall{ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
+	})
+
+	// 3 LLM requests, no tool use — idleTurns["filesystem"] goes 1→2→3,
+	// prunes on the third because 3 > idle_prune_turns (2).
+	for i := 0; i < 3; i++ {
+		req := &events.LLMRequest{Tools: []events.ToolDef{{Name: "placeholder"}}}
+		p.handleBeforeLLMRequest(engine.Event[any]{
+			Type:    "before:llm.request",
+			Payload: &engine.VetoablePayload{Original: req},
+		})
+	}
+	if p.revealed["filesystem"] {
+		t.Fatal("class should have been pruned after idle_prune_turns exceeded")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

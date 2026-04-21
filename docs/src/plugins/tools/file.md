@@ -24,8 +24,10 @@ Provides file read, write, and listing capabilities with path traversal protecti
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Path to the file to read |
+| `offset` | number | No | Byte offset to start reading from (default `0`) |
+| `length` | number | No | Maximum bytes to read (default `4096`) |
 
-Returns the file contents as text.
+Reads up to `length` bytes starting at `offset`. Returns a JSON object with `content`, `bytes_read`, `offset`, and `total_size` so callers can page through files larger than the chunk size.
 
 ### `write_file`
 

@@ -47,7 +47,7 @@ bin/nexus -config configs/<name>.yaml
 | Plugin | ID | Key Config |
 |--------|----|------------|
 | Shell | `nexus.tool.shell` | `allowed_commands` ([]string), `timeout` (default `30s`), `sandbox` (default `false`) |
-| File IO | `nexus.tool.file` | `base_dir`, `allow_external_writes` (default `false`), `tools` map (`read_file`, `read_file_chunk`, `write_file`, `check_file_size`, `list_files` — all default `true`) |
+| File IO | `nexus.tool.file` | `base_dir`, `allow_external_writes` (default `false`), `tools` map (`read_file`, `write_file`, `check_file_size`, `list_files` — all default `true`) |
 
 ### Memory
 

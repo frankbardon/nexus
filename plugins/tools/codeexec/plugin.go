@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
+	prompts *engine.PromptRegistry
 
 	// Config.
 	timeout          time.Duration
@@ -88,6 +90,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
+	p.prompts = ctx.Prompts
 
 	if v, ok := ctx.Config["timeout_seconds"].(int); ok && v > 0 {
 		p.timeout = time.Duration(v) * time.Second
@@ -144,20 +147,21 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 }
 
 func (p *Plugin) Ready() error {
+	if p.prompts != nil {
+		p.prompts.Register("nexus.tool.code_exec.contract", 30, p.buildContractSection)
+		p.prompts.Register("nexus.tool.code_exec.bindings", 40, p.buildBindingsSection)
+	}
 	_ = p.bus.Emit("tool.register", events.ToolDef{
 		Name:        toolName,
-		Description: runCodeDescription,
+		Description: runCodeShortDescription,
 		Class:       "code",
 		Subclass:    "execute",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"script": map[string]any{
-					"type": "string",
-					"description": "Complete Go source for a `package main` program that declares " +
-						"`func Run(ctx context.Context) (any, error)`. Imports are restricted to " +
-						"the configured stdlib whitelist plus `tools` and `skills/<name>` " +
-						"(for currently-active skills). Return value is JSON-marshaled back to you.",
+					"type":        "string",
+					"description": "Complete Go source for a `package main` program that declares `func Run(ctx context.Context) (any, error)`. See the `nexus.tool.code_exec.contract` and `nexus.tool.code_exec.bindings` prompt sections for the full contract and the live list of available imports.",
 				},
 			},
 			"required": []string{"script"},
@@ -170,7 +174,72 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	for _, u := range p.unsubs {
 		u()
 	}
+	if p.prompts != nil {
+		p.prompts.Unregister("nexus.tool.code_exec.contract")
+		p.prompts.Unregister("nexus.tool.code_exec.bindings")
+	}
 	return nil
+}
+
+// buildContractSection renders the static run_code contract (invocation rules,
+// allowed imports, forbidden imports, error semantics). Kept out of the tool
+// description so the LLM sees it once as a dedicated prompt section instead of
+// bloating the tool schema.
+func (p *Plugin) buildContractSection() string { return runCodeContract }
+
+// buildBindingsSection renders an authoritative map of every `tools.*`,
+// `skills/<name>`, and `parallel.*` symbol currently visible to scripts.
+// Evaluated at every LLM request by PromptRegistry, so tool additions,
+// skill activations, and deactivations show up without re-registering
+// run_code. Exists because the static contract section can't name bindings
+// it hasn't seen — and past LLM hallucinations of `tools.FileRead` (when the
+// tool was `read_file` → `tools.ReadFile`) wasted turns.
+func (p *Plugin) buildBindingsSection() string {
+	p.regMu.RLock()
+	names := make([]string, 0, len(p.tools))
+	for name := range p.tools {
+		if name == toolName {
+			continue
+		}
+		names = append(names, name)
+	}
+	p.regMu.RUnlock()
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("Available `tools.*` bindings (generated from the live registry — trust this list over the general naming rule):\n")
+	if len(names) == 0 {
+		b.WriteString("  (no tools registered yet)\n")
+	}
+	p.regMu.RLock()
+	for _, name := range names {
+		td := p.tools[name]
+		fn := toolFuncName(name)
+		args := toolArgsTypeName(name)
+		resultDesc := "tools.Result{Output, Error, OutputFile}"
+		if td.OutputSchema != nil {
+			resultDesc = "tools." + toolResultTypeName(name) + " (typed from OutputSchema)"
+		}
+		fmt.Fprintf(&b, "  - tools.%s(tools.%s) → %s\n", fn, args, resultDesc)
+	}
+	p.regMu.RUnlock()
+
+	p.skillMu.RLock()
+	skillNames := make([]string, 0, len(p.skills))
+	for name := range p.skills {
+		skillNames = append(skillNames, name)
+	}
+	p.skillMu.RUnlock()
+	sort.Strings(skillNames)
+	if len(skillNames) > 0 {
+		b.WriteString("\nActive skill helper imports:\n")
+		for _, name := range skillNames {
+			fmt.Fprintf(&b, "  - import \"skills/%s\"\n", name)
+		}
+	}
+
+	b.WriteString("\nAlways available: parallel.Map, parallel.ForEach, parallel.All.")
+	return b.String()
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
@@ -325,10 +394,11 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 	defer cancel()
 
 	inv := &invocation{
-		ctx:     ctx,
-		bus:     p.bus,
-		turnID:  tc.TurnID,
-		pending: map[string]chan events.ToolResult{},
+		ctx:          ctx,
+		bus:          p.bus,
+		turnID:       tc.TurnID,
+		parentCallID: tc.ID,
+		pending:      map[string]chan events.ToolResult{},
 	}
 
 	p.invMu.Lock()
@@ -592,38 +662,64 @@ func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, d
 	_ = p.bus.Emit("tool.result", r)
 }
 
-// runCodeDescription is the LLM-facing tool description. It is intentionally
-// long — the model needs enough structure to produce a valid script without
-// multiple round-trips.
-const runCodeDescription = `Run a short Go program that orchestrates multiple tool calls in one turn.
+// runCodeShortDescription is the tool-schema description. Kept tight — the
+// full contract lives in the nexus.tool.code_exec.contract prompt section so
+// it isn't re-tokenized as part of every tool-listing block.
+const runCodeShortDescription = `Run a short Go program to handle a computational or mechanical task in one turn. Prefer this when the answer is produced by computation (chaining tool calls, looping, parsing/transforming data, math, fan-out) rather than judgment. Avoid for prose, summarization, translation, or open-ended reasoning. See the nexus.tool.code_exec.contract and nexus.tool.code_exec.bindings prompt sections for the full contract and the live binding list.`
 
-Use this when you need to combine several tool calls, loop over items, or
-transform results between calls — tasks that would otherwise require many
-sequential tool_use turns.
+// runCodeContract is the detailed contract rendered as a system-prompt
+// section. The LLM needs enough structure to produce a valid script without
+// multiple round-trips, but this does not belong in the tool schema itself.
+const runCodeContract = `The run_code tool runs a short Go program to collapse computational / mechanical work into one turn.
 
-**Contract:** Your script must be valid Go, package main, and declare
+When to use:
+  - Chaining multiple tool calls, looping over items, parsing or transforming
+    structured data, math, hashing, date arithmetic, grouping / aggregation,
+    fan-out across independent work. Collapses many sequential tool_use turns
+    into one and gives deterministic results.
+
+When NOT to use:
+  - Prose, summarization, translation, explanation, or other open-ended
+    reasoning — a script adds latency and a failure surface with no
+    correctness benefit. If the task is "think and write text", answer
+    directly.
+
+Contract — your script must be valid Go, package main, and declare
 
     func Run(ctx context.Context) (any, error)
 
-Its return value is JSON-marshaled back to you. Anything printed to stdout
-is also returned (up to a per-call byte cap).
+Its return value is JSON-marshaled back to you. Anything printed to stdout is
+also returned (up to a per-call byte cap).
 
-**Available imports:**
-  - Go stdlib: fmt, strings, strconv, encoding/json, math, sort, errors, time,
-    context, sync, sync/atomic (plus the broader pure-compute whitelist).
+Available imports:
+  - Go stdlib (pure compute, no filesystem/network): fmt, strings, strconv,
+    bytes, regexp, unicode, unicode/utf8, encoding/json, encoding/base64,
+    encoding/hex, encoding/csv, encoding/xml, crypto/sha256, crypto/md5,
+    crypto/hmac, crypto/rand, math, math/big, math/rand/v2, math/bits, sort,
+    container/heap, container/list, errors, time, context, sync, sync/atomic,
+    io, bufio, hash, hash/crc32, hash/fnv.
   - tools: type-safe bindings for every tool available to you on this turn.
-    Call style: tools.ShellExec(tools.ShellExecArgs{Command: "ls"}).
-    Result is tools.Result{Output, Error, OutputFile}.
+    Names are PascalCased from the tool's snake_case name: "shell" →
+    tools.Shell. The authoritative list for this session is in the
+    nexus.tool.code_exec.bindings prompt section — consult it instead of
+    guessing. Args struct mirrors the tool's parameter schema:
+    tools.Shell(tools.ShellArgs{Command: "ls"}). Return type depends on
+    whether the tool declares an output schema:
+      * Schema-ful tools return a typed struct tools.<Tool>Result with fields
+        from the schema. Example: r, err := tools.Shell(tools.ShellArgs{...});
+        use r.Stdout, r.Stderr, r.ExitCode.
+      * Schema-less tools return tools.Result{Output, Error, OutputFile}
+        where Output is a plain string you parse yourself.
   - parallel: Map(ctx, items, fn) / ForEach(ctx, items, fn) / All(ctx, fns...).
     Use these to fan out independent work (tool calls or compute) instead of
     serializing — first error cancels the rest. Map returns any; cast to the
     typed slice: results.([]T).
   - skills/<skill_name>: helper functions shipped with currently-active skills.
 
-**Forbidden:** import "os", "net/*", "syscall", "unsafe", "reflect", "runtime";
+Forbidden: import "os", "net/*", "syscall", "unsafe", "reflect", "runtime";
 any goroutines (go statement); any filesystem or network access that bypasses
 tools.*.
 
-**Errors:** a non-nil second return value from Run is surfaced verbatim. Tool
+Errors: a non-nil second return value from Run is surfaced verbatim. Tool
 veto, rate-limit, or timeout also surface as errors returned from the tools.*
 call that triggered them.`

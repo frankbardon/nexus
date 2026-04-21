@@ -49,7 +49,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// All tools enabled by default.
 	p.enabled = map[string]bool{
 		"read_file":       true,
-		"read_file_chunk": true,
 		"write_file":      true,
 		"check_file_size": true,
 		"list_files":      true,
@@ -102,32 +101,7 @@ func (p *Plugin) registerTool(def events.ToolDef) {
 func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "read_file",
-		Description: "Read the contents of a file at the given path. Returns the file content as a string.",
-		Class:       "filesystem",
-		Subclass:    "read",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "The file path to read, relative to the base directory",
-				},
-			},
-			"required": []string{"path"},
-		},
-		OutputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"content":    map[string]any{"type": "string"},
-				"bytes_read": map[string]any{"type": "integer"},
-			},
-			"required": []string{"content", "bytes_read"},
-		},
-	})
-
-	p.registerTool(events.ToolDef{
-		Name:        "read_file_chunk",
-		Description: "Read a chunk of a file starting at a byte offset. Returns the chunk content, bytes read, and total file size so the caller can page through large files.",
+		Description: "Read a chunk of a file starting at a byte offset. Returns the chunk content, bytes read, the offset, and the total file size so the caller can page through files.",
 		Class:       "filesystem",
 		Subclass:    "read",
 		Parameters: map[string]any{
@@ -300,8 +274,6 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	switch tc.Name {
 	case "read_file":
 		p.handleReadFile(tc)
-	case "read_file_chunk":
-		p.handleReadFileChunk(tc)
 	case "write_file":
 		p.handleWriteFile(tc)
 	case "check_file_size":
@@ -357,32 +329,6 @@ func (p *Plugin) resolveWritePath(path string) (string, error) {
 }
 
 func (p *Plugin) handleReadFile(tc events.ToolCall) {
-	path, _ := tc.Arguments["path"].(string)
-	if path == "" {
-		p.emitResult(tc, "", "path argument is required", nil)
-		return
-	}
-
-	resolved, err := p.resolvePath(path)
-	if err != nil {
-		p.emitResult(tc, "", err.Error(), nil)
-		return
-	}
-
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to read file: %s", err), nil)
-		return
-	}
-
-	content := string(data)
-	p.emitResult(tc, content, "", map[string]any{
-		"content":    content,
-		"bytes_read": len(data),
-	})
-}
-
-func (p *Plugin) handleReadFileChunk(tc events.ToolCall) {
 	path, _ := tc.Arguments["path"].(string)
 	if path == "" {
 		p.emitResult(tc, "", "path argument is required", nil)

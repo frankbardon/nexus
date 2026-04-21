@@ -29,9 +29,10 @@ type toolResult struct {
 // in-flight inner tool calls and the fresh Yaegi exports built from the
 // current tool registry.
 type invocation struct {
-	ctx    context.Context
-	bus    engine.EventBus
-	turnID string
+	ctx          context.Context
+	bus          engine.EventBus
+	turnID       string
+	parentCallID string // outer run_code tool_use_id; stamped on inner calls
 
 	mu      sync.Mutex
 	pending map[string]chan events.ToolResult // keyed by ToolCall.ID
@@ -162,10 +163,11 @@ func (inv *invocation) callToolTyped(name string, argsVal reflect.Value, argsTyp
 
 	callID := "code-" + randID()
 	tc := events.ToolCall{
-		ID:        callID,
-		Name:      name,
-		Arguments: raw,
-		TurnID:    inv.turnID,
+		ID:           callID,
+		Name:         name,
+		Arguments:    raw,
+		TurnID:       inv.turnID,
+		ParentCallID: inv.parentCallID,
 	}
 
 	ch := inv.registerPending(callID)
@@ -259,10 +261,11 @@ func (inv *invocation) callTool(name string, argsVal reflect.Value, argsType ref
 
 	callID := "code-" + randID()
 	tc := events.ToolCall{
-		ID:        callID,
-		Name:      name,
-		Arguments: raw,
-		TurnID:    inv.turnID,
+		ID:           callID,
+		Name:         name,
+		Arguments:    raw,
+		TurnID:       inv.turnID,
+		ParentCallID: inv.parentCallID,
 	}
 
 	ch := inv.registerPending(callID)

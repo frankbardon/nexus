@@ -11,6 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/traefik/yaegi v0.16.1
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.43.0
@@ -71,7 +72,6 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
-	github.com/traefik/yaegi v0.16.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
