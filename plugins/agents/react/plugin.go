@@ -43,12 +43,20 @@ type Plugin struct {
 	streamed          bool
 	cancelled         bool
 	toolChoiceOverride *toolChoiceOverride
-	unsubs            []func()
+	// internalCallIDs tracks tool_use_ids dispatched from inside another
+	// tool (ToolCall.ParentCallID != ""). Their results must not reach
+	// p.history — otherwise the next LLM request carries tool_use_ids the
+	// provider never generated (run_code's inner script calls are the
+	// canonical example).
+	internalCallIDs map[string]struct{}
+	unsubs          []func()
 }
 
 // New creates a new ReAct agent plugin.
 func New() engine.Plugin {
-	return &Plugin{}
+	return &Plugin{
+		internalCallIDs: make(map[string]struct{}),
+	}
 }
 
 func (p *Plugin) ID() string             { return pluginID }
@@ -86,6 +94,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// Register event handlers.
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInputEvent,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.invoke", p.handleToolInvokeEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.result", p.handleToolResultEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
@@ -128,6 +138,7 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.input", Priority: 50},
+		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "tool.result", Priority: 50},
 		{EventType: "llm.response", Priority: 50},
 		{EventType: "llm.stream.chunk", Priority: 50},
@@ -214,6 +225,19 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 	p.emitPlanProgress()
 	p.emitStatus("thinking", fmt.Sprintf("Plan ready, executing step 1/%d", len(result.Steps)))
 	p.sendLLMRequest()
+}
+
+// handleToolInvokeEvent flags any ToolCall with a non-empty ParentCallID as
+// internal — its matching result will be dropped in handleToolResult so the
+// LLM never sees tool_use_ids it didn't generate.
+func (p *Plugin) handleToolInvokeEvent(event engine.Event[any]) {
+	tc, ok := event.Payload.(events.ToolCall)
+	if !ok || tc.ParentCallID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.internalCallIDs[tc.ID] = struct{}{}
+	p.mu.Unlock()
 }
 
 func (p *Plugin) handleToolResultEvent(event engine.Event[any]) {
@@ -578,6 +602,15 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 func (p *Plugin) handleToolResult(result events.ToolResult) {
 	p.mu.Lock()
+
+	// Drop results for internal sub-calls (e.g. run_code script dispatches)
+	// before they land in history. Their invoke was flagged in
+	// handleToolInvokeEvent via ParentCallID.
+	if _, internal := p.internalCallIDs[result.ID]; internal {
+		delete(p.internalCallIDs, result.ID)
+		p.mu.Unlock()
+		return
+	}
 
 	// Ignore tool results from other turns (e.g. subagent tool calls).
 	if result.TurnID != "" && result.TurnID != p.currentTurnID {

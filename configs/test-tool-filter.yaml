@@ -9,7 +9,7 @@
 #
 # What to test:
 #   1. Available tools: Ask "what tools do you have?" — agent should only know about
-#      file tools (file_read, file_read_chunk, file_write, check_file_size, list_files).
+#      file tools (file_read, file_write, check_file_size, list_files).
 #      Shell tool should NOT appear in tool list sent to LLM.
 #   2. File tools work: Ask "list files in the current directory" — should use list_files
 #      tool successfully.
@@ -65,7 +65,7 @@ plugins:
 
   # Only allow file tools — shell excluded via filter
   nexus.gate.tool_filter:
-    include: [file_read, file_read_chunk, file_write, check_file_size, list_files]
+    include: [file_read, file_write, check_file_size, list_files]
 
   nexus.tool.shell:
     allowed_commands: [ls, cat]

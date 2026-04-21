@@ -1,0 +1,70 @@
+# Test: programmatic tool calling via nexus.tool.code_exec
+# Validates: LLM can dispatch a run_code tool call containing a Go script,
+# the script round-trips through the bus to invoke the `shell` tool, and the
+# result surfaces back as a single tool.result for the outer run_code call.
+#
+# Uses mocked LLM responses — no API key required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestCodeExec
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.tool.code_exec
+    - nexus.memory.conversation
+
+  nexus.io.test:
+    inputs:
+      - "Use run_code to echo hello and report the output."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    # Two mock LLM responses:
+    #   1. Tool call: run_code with a script invoking tools.Shell("echo hello").
+    #   2. Final content message summarizing what the script produced.
+    mock_responses:
+      - tool_calls:
+          - name: run_code
+            arguments: |
+              {"script":"package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"tools\"\n)\n\nfunc Run(ctx context.Context) (any, error) {\n\tr, err := tools.Shell(tools.ShellArgs{Command: \"echo hello\"})\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tfmt.Println(\"stdout:\", r.Stdout, \"exit:\", r.ExitCode)\n\treturn map[string]any{\"shell_stdout\": r.Stdout, \"exit\": r.ExitCode}, nil\n}\n"}
+      - content: "Done. The script ran `echo hello` and returned the output."
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use tools when asked."
+
+  nexus.tool.shell:
+    allowed_commands: ["echo"]
+    timeout: 5s
+    sandbox: true
+
+  nexus.tool.code_exec:
+    timeout_seconds: 10
+    max_output_bytes: 16384
+    persist_scripts: true
+    reject_goroutines: true
+
+  nexus.memory.conversation:
+    max_messages: 10
+    persist: false

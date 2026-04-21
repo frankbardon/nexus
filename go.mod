@@ -11,6 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/traefik/yaegi v0.16.1
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.43.0

@@ -25,4 +25,5 @@ const (
 	TypeSessionReset    = "session_reset"
 	TypeCancelComplete  = "cancel_complete"
 	TypeAskRequest      = "ask_request"
+	TypeCodeExecStdout  = "code_exec_stdout"
 )

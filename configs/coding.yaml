@@ -1,3 +1,11 @@
+# This example is not meant to be a fully working config, but rather to demonstrate
+# how to configure the ReAct agent and code execution tool. Adjust as needed for
+# your use case.
+#
+# It is not clear whether Nexus should ever be used as a true coding assistant when
+# other, excellent, purpose-built coding assistants exist. However, it can be useful
+# for automating tasks related to coding, such as writing commit messages, generating
+# tests, or refactoring code.
 core:
   log_level: info
   tick_interval: 5s
@@ -31,33 +39,43 @@ core:
     retention: 30d
     id_format: datetime_short
 
-# Minimal example demonstrating the ReAct agent with shell and file tools.
 plugins:
   active:
     - nexus.io.tui
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.endless_loop
-    - nexus.tool.shell
+    - nexus.gate.context_window
     - nexus.tool.file
+    - nexus.tool.code_exec
     - nexus.memory.conversation
+    - nexus.memory.compaction
     - nexus.observe.logger
+
+  output: stderr    - nexus.observe.thinking
+    - nexus.system.dynvars
 
   nexus.llm.anthropic:
     api_key_env: ANTHROPIC_API_KEY
+    debug: true
 
   nexus.agent.react:
     system_prompt_file: ./prompts/coding-assistant.md
 
   nexus.gate.endless_loop:
-    max_iterations: 25
+    max_iterations: 15
 
-  nexus.tool.shell:
-    allowed_commands: ["go", "git", "ls", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "make", "docker", "npm", "cargo", "python"]
-    timeout: 30s
-    sandbox: true
+  nexus.gate.context_window:
+    max_context_tokens: 100000
+    trigger_ratio: 0.6
 
   nexus.tool.file:
+
+  nexus.tool.code_exec:
+    timeout_seconds: 30
+    max_output_bytes: 65536
+    persist_scripts: true
+    reject_goroutines: true
 
   nexus.memory.conversation:
     max_messages: 100
@@ -65,4 +83,18 @@ plugins:
 
   nexus.observe.logger:
     output: stderr
-    level: info
+    level: error
+
+  nexus.memory.compaction:
+    strategy: token_estimate
+    token_threshold: 30000
+    model_role: quick
+    protect_recent: 4
+  
+  nexus.system.dynvars:
+    date: true
+    time: false
+    timezone: true
+    cwd: true
+    session_dir: true
+    os: true

@@ -345,10 +345,19 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	req.Tools = tools
 }
 
-// handleToolInvoke handles the "discover" meta-tool.
+// handleToolInvoke handles the "discover" meta-tool and keeps idle counters
+// fresh for hybrid scope. Every non-discover invocation resets the counter
+// for whichever revealed class/subclass owns the tool — otherwise hybrid
+// would prune classes mid-use because only `discover` calls refreshed them.
 func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	tc, ok := event.Payload.(events.ToolCall)
-	if !ok || tc.Name != "discover" {
+	if !ok {
+		return
+	}
+	if tc.Name != "discover" {
+		if p.scope == "hybrid" {
+			p.touchIdleForTool(tc.Name)
+		}
 		return
 	}
 
@@ -545,6 +554,33 @@ func (p *Plugin) hasUndiscoveredClasses() bool {
 		}
 	}
 	return false
+}
+
+// touchIdleForTool resets the idle counter for whatever class/subclass owns
+// the named tool, if that class/subclass is currently revealed. No-op for
+// classless tools, special tools, unknown names, or entries not yet
+// revealed. Called on every non-discover tool.invoke in hybrid scope.
+func (p *Plugin) touchIdleForTool(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, t := range p.allTools {
+		if t.Name != name || t.Class == "" {
+			continue
+		}
+		if p.isAlwaysIncluded(t.Class) {
+			return
+		}
+		if t.Subclass != "" {
+			key := t.Class + "." + t.Subclass
+			if p.revealed[key] {
+				p.idleTurns[key] = 0
+			}
+		}
+		if p.revealed[t.Class] {
+			p.idleTurns[t.Class] = 0
+		}
+		return
+	}
 }
 
 // ensureToolVisible guarantees the named tool is present in the outgoing

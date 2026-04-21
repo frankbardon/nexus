@@ -164,6 +164,10 @@ document.addEventListener('alpine:init', () => {
           });
           break;
 
+        case 'code_exec_stdout':
+          this._handleCodeExecStdout(payload, env);
+          break;
+
         case 'plan':
           if (payload.plan_id) {
             // Plan created by the planner — display it.
@@ -209,6 +213,32 @@ document.addEventListener('alpine:init', () => {
 
         case 'pong':
           break;
+      }
+    },
+
+    _handleCodeExecStdout(payload, env) {
+      const msgId = 'code-' + payload.call_id;
+      let msg = this.messages.find(m => m.id === msgId);
+      if (!msg) {
+        msg = {
+          id: msgId,
+          role: 'code_stdout',
+          content: '',
+          callId: payload.call_id,
+          turnId: payload.turn_id,
+          streaming: !payload.final,
+          truncated: false,
+          collapsed: false,
+          timestamp: env.timestamp,
+        };
+        this.messages.push(msg);
+      }
+      if (payload.chunk) {
+        msg.content += payload.chunk;
+      }
+      if (payload.final) {
+        msg.streaming = false;
+        msg.truncated = !!payload.truncated;
       }
     },
 

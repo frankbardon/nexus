@@ -79,6 +79,11 @@ type Plugin struct {
 	backupCounter      int
 	currentArchiveStem string // filename stem of the in-progress archive cycle
 	unsubs             []func()
+
+	// internalCallIDs tracks ToolCall IDs marked ParentCallID!="" so their
+	// result never reaches the archive. Same invariant as the conversation
+	// plugin: the LLM must only see tool_use_ids it generated.
+	internalCallIDs map[string]struct{}
 }
 
 // New creates a new memory compaction plugin.
@@ -92,6 +97,7 @@ func New() engine.Plugin {
 		modelRole:        "quick",
 		protectRecent:    4,
 		persist:          true,
+		internalCallIDs:  make(map[string]struct{}),
 	}
 }
 
@@ -303,6 +309,12 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if tc.ParentCallID != "" {
+		p.mu.Lock()
+		p.internalCallIDs[tc.ID] = struct{}{}
+		p.mu.Unlock()
+		return
+	}
 	content, _ := json.Marshal(tc.Arguments)
 	p.trackMessage(events.Message{
 		Role:       "tool_invoke",
@@ -316,6 +328,13 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	p.mu.Lock()
+	if _, internal := p.internalCallIDs[result.ID]; internal {
+		delete(p.internalCallIDs, result.ID)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 	content := result.Output
 	if result.Error != "" {
 		content = "Error: " + result.Error

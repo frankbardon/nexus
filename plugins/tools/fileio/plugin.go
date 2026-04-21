@@ -49,7 +49,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// All tools enabled by default.
 	p.enabled = map[string]bool{
 		"read_file":       true,
-		"read_file_chunk": true,
 		"write_file":      true,
 		"check_file_size": true,
 		"list_files":      true,
@@ -102,24 +101,7 @@ func (p *Plugin) registerTool(def events.ToolDef) {
 func (p *Plugin) Ready() error {
 	p.registerTool(events.ToolDef{
 		Name:        "read_file",
-		Description: "Read the contents of a file at the given path. Returns the file content as a string.",
-		Class:       "filesystem",
-		Subclass:    "read",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type":        "string",
-					"description": "The file path to read, relative to the base directory",
-				},
-			},
-			"required": []string{"path"},
-		},
-	})
-
-	p.registerTool(events.ToolDef{
-		Name:        "read_file_chunk",
-		Description: "Read a chunk of a file starting at a byte offset. Returns the chunk content, bytes read, and total file size so the caller can page through large files.",
+		Description: "Read a chunk of a file starting at a byte offset. Returns the chunk content, bytes read, the offset, and the total file size so the caller can page through files.",
 		Class:       "filesystem",
 		Subclass:    "read",
 		Parameters: map[string]any{
@@ -139,6 +121,16 @@ func (p *Plugin) Ready() error {
 				},
 			},
 			"required": []string{"path"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"content":    map[string]any{"type": "string"},
+				"bytes_read": map[string]any{"type": "integer"},
+				"offset":     map[string]any{"type": "integer"},
+				"total_size": map[string]any{"type": "integer"},
+			},
+			"required": []string{"content", "bytes_read", "offset", "total_size"},
 		},
 	})
 
@@ -161,6 +153,15 @@ func (p *Plugin) Ready() error {
 			},
 			"required": []string{"path", "content"},
 		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":          map[string]any{"type": "string"},
+				"bytes_written": map[string]any{"type": "integer"},
+				"created":       map[string]any{"type": "boolean"},
+			},
+			"required": []string{"path", "bytes_written", "created"},
+		},
 	})
 
 	p.registerTool(events.ToolDef{
@@ -177,6 +178,14 @@ func (p *Plugin) Ready() error {
 				},
 			},
 			"required": []string{"path"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+				"size": map[string]any{"type": "integer"},
+			},
+			"required": []string{"path", "size"},
 		},
 	})
 
@@ -198,6 +207,25 @@ func (p *Plugin) Ready() error {
 				},
 			},
 			"required": []string{"path"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string"},
+				"entries": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name":   map[string]any{"type": "string"},
+							"is_dir": map[string]any{"type": "boolean"},
+							"size":   map[string]any{"type": "integer"},
+						},
+						"required": []string{"name", "is_dir"},
+					},
+				},
+			},
+			"required": []string{"path", "entries"},
 		},
 	})
 
@@ -246,8 +274,6 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	switch tc.Name {
 	case "read_file":
 		p.handleReadFile(tc)
-	case "read_file_chunk":
-		p.handleReadFileChunk(tc)
 	case "write_file":
 		p.handleWriteFile(tc)
 	case "check_file_size":
@@ -305,29 +331,7 @@ func (p *Plugin) resolveWritePath(path string) (string, error) {
 func (p *Plugin) handleReadFile(tc events.ToolCall) {
 	path, _ := tc.Arguments["path"].(string)
 	if path == "" {
-		p.emitResult(tc, "", "path argument is required")
-		return
-	}
-
-	resolved, err := p.resolvePath(path)
-	if err != nil {
-		p.emitResult(tc, "", err.Error())
-		return
-	}
-
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to read file: %s", err))
-		return
-	}
-
-	p.emitResult(tc, string(data), "")
-}
-
-func (p *Plugin) handleReadFileChunk(tc events.ToolCall) {
-	path, _ := tc.Arguments["path"].(string)
-	if path == "" {
-		p.emitResult(tc, "", "path argument is required")
+		p.emitResult(tc, "", "path argument is required", nil)
 		return
 	}
 
@@ -342,85 +346,103 @@ func (p *Plugin) handleReadFileChunk(tc events.ToolCall) {
 	}
 
 	if offset < 0 {
-		p.emitResult(tc, "", "offset must not be negative")
+		p.emitResult(tc, "", "offset must not be negative", nil)
 		return
 	}
 	if length <= 0 {
-		p.emitResult(tc, "", "length must be greater than zero")
+		p.emitResult(tc, "", "length must be greater than zero", nil)
 		return
 	}
 
 	resolved, err := p.resolvePath(path)
 	if err != nil {
-		p.emitResult(tc, "", err.Error())
+		p.emitResult(tc, "", err.Error(), nil)
 		return
 	}
 
 	f, err := os.Open(resolved)
 	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to open file: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to open file: %s", err), nil)
 		return
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to stat file: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to stat file: %s", err), nil)
 		return
 	}
 	if info.IsDir() {
-		p.emitResult(tc, "", fmt.Sprintf("%s is a directory, not a file", path))
+		p.emitResult(tc, "", fmt.Sprintf("%s is a directory, not a file", path), nil)
 		return
 	}
 
 	totalSize := info.Size()
 
+	makeResult := func(chunk string, bytesRead int) map[string]any {
+		return map[string]any{
+			"content":    chunk,
+			"bytes_read": bytesRead,
+			"offset":     offset,
+			"total_size": totalSize,
+		}
+	}
+
 	if offset >= totalSize {
-		p.emitResult(tc, fmt.Sprintf("{\"content\":\"\",\"bytes_read\":0,\"offset\":%d,\"total_size\":%d}", offset, totalSize), "")
+		p.emitResult(tc,
+			fmt.Sprintf("{\"content\":\"\",\"bytes_read\":0,\"offset\":%d,\"total_size\":%d}", offset, totalSize),
+			"",
+			makeResult("", 0))
 		return
 	}
 
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to seek: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to seek: %s", err), nil)
 		return
 	}
 
 	buf := make([]byte, length)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
-		p.emitResult(tc, "", fmt.Sprintf("failed to read file: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to read file: %s", err), nil)
 		return
 	}
 
 	chunk := string(buf[:n])
-	p.emitResult(tc, fmt.Sprintf("{\"content\":%q,\"bytes_read\":%d,\"offset\":%d,\"total_size\":%d}", chunk, n, offset, totalSize), "")
+	p.emitResult(tc,
+		fmt.Sprintf("{\"content\":%q,\"bytes_read\":%d,\"offset\":%d,\"total_size\":%d}", chunk, n, offset, totalSize),
+		"",
+		makeResult(chunk, n))
 }
 
 func (p *Plugin) handleCheckFileSize(tc events.ToolCall) {
 	path, _ := tc.Arguments["path"].(string)
 	if path == "" {
-		p.emitResult(tc, "", "path argument is required")
+		p.emitResult(tc, "", "path argument is required", nil)
 		return
 	}
 
 	resolved, err := p.resolvePath(path)
 	if err != nil {
-		p.emitResult(tc, "", err.Error())
+		p.emitResult(tc, "", err.Error(), nil)
 		return
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to stat file: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to stat file: %s", err), nil)
 		return
 	}
 
 	if info.IsDir() {
-		p.emitResult(tc, "", fmt.Sprintf("%s is a directory, not a file", path))
+		p.emitResult(tc, "", fmt.Sprintf("%s is a directory, not a file", path), nil)
 		return
 	}
 
-	p.emitResult(tc, fmt.Sprintf("%d", info.Size()), "")
+	p.emitResult(tc, fmt.Sprintf("%d", info.Size()), "", map[string]any{
+		"path": path,
+		"size": info.Size(),
+	})
 }
 
 func (p *Plugin) handleWriteFile(tc events.ToolCall) {
@@ -428,13 +450,13 @@ func (p *Plugin) handleWriteFile(tc events.ToolCall) {
 	content, _ := tc.Arguments["content"].(string)
 
 	if path == "" {
-		p.emitResult(tc, "", "path argument is required")
+		p.emitResult(tc, "", "path argument is required", nil)
 		return
 	}
 
 	resolved, err := p.resolveWritePath(path)
 	if err != nil {
-		p.emitResult(tc, "", err.Error())
+		p.emitResult(tc, "", err.Error(), nil)
 		return
 	}
 
@@ -445,12 +467,12 @@ func (p *Plugin) handleWriteFile(tc events.ToolCall) {
 	// Ensure parent directory exists.
 	dir := filepath.Dir(resolved)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to create directory: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to create directory: %s", err), nil)
 		return
 	}
 
 	if err := os.WriteFile(resolved, []byte(content), 0o644); err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to write file: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to write file: %s", err), nil)
 		return
 	}
 
@@ -472,7 +494,14 @@ func (p *Plugin) handleWriteFile(tc events.ToolCall) {
 		}
 	}
 
-	p.emitResult(tc, fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path), "")
+	p.emitResult(tc,
+		fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path),
+		"",
+		map[string]any{
+			"path":          path,
+			"bytes_written": len(content),
+			"created":       !existed,
+		})
 }
 
 func (p *Plugin) handleListFiles(tc events.ToolCall) {
@@ -485,7 +514,7 @@ func (p *Plugin) handleListFiles(tc events.ToolCall) {
 
 	resolved, err := p.resolvePath(path)
 	if err != nil {
-		p.emitResult(tc, "", err.Error())
+		p.emitResult(tc, "", err.Error(), nil)
 		return
 	}
 
@@ -494,53 +523,80 @@ func (p *Plugin) handleListFiles(tc events.ToolCall) {
 		globPattern := filepath.Join(resolved, pattern)
 		matches, err := filepath.Glob(globPattern)
 		if err != nil {
-			p.emitResult(tc, "", fmt.Sprintf("invalid glob pattern: %s", err))
+			p.emitResult(tc, "", fmt.Sprintf("invalid glob pattern: %s", err), nil)
 			return
 		}
 
 		var names []string
+		structuredEntries := make([]map[string]any, 0, len(matches))
 		for _, m := range matches {
 			rel, err := filepath.Rel(resolved, m)
 			if err != nil {
 				rel = m
 			}
 			names = append(names, rel)
+			entry := map[string]any{
+				"name":   rel,
+				"is_dir": false,
+			}
+			if info, err := os.Stat(m); err == nil {
+				entry["is_dir"] = info.IsDir()
+				entry["size"] = info.Size()
+			}
+			structuredEntries = append(structuredEntries, entry)
 		}
-		p.emitResult(tc, strings.Join(names, "\n"), "")
+		p.emitResult(tc, strings.Join(names, "\n"), "", map[string]any{
+			"path":    path,
+			"entries": structuredEntries,
+		})
 		return
 	}
 
 	// List all entries in the directory.
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
-		p.emitResult(tc, "", fmt.Sprintf("failed to list directory: %s", err))
+		p.emitResult(tc, "", fmt.Sprintf("failed to list directory: %s", err), nil)
 		return
 	}
 
 	var lines []string
+	structuredEntries := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		suffix := ""
 		if entry.IsDir() {
 			suffix = "/"
 		}
-		info, err := entry.Info()
-		if err != nil {
+		info, infoErr := entry.Info()
+		if infoErr != nil {
 			lines = append(lines, entry.Name()+suffix)
+			structuredEntries = append(structuredEntries, map[string]any{
+				"name":   entry.Name(),
+				"is_dir": entry.IsDir(),
+			})
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("%s%s\t%d bytes", entry.Name(), suffix, info.Size()))
+		structuredEntries = append(structuredEntries, map[string]any{
+			"name":   entry.Name(),
+			"is_dir": entry.IsDir(),
+			"size":   info.Size(),
+		})
 	}
 
-	p.emitResult(tc, strings.Join(lines, "\n"), "")
+	p.emitResult(tc, strings.Join(lines, "\n"), "", map[string]any{
+		"path":    path,
+		"entries": structuredEntries,
+	})
 }
 
-func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
+func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string, structured map[string]any) {
 	result := events.ToolResult{
-		ID:     tc.ID,
-		Name:   tc.Name,
-		Output: output,
-		Error:  errMsg,
-		TurnID: tc.TurnID,
+		ID:               tc.ID,
+		Name:             tc.Name,
+		Output:           output,
+		Error:            errMsg,
+		OutputStructured: structured,
+		TurnID:           tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
 		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)

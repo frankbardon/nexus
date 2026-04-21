@@ -116,6 +116,39 @@ func (c *chatView) EndStream() {
 	c.rebuildViewport()
 }
 
+// AppendCodeExecStdout streams a chunk of run_code stdout into the chat. Each
+// script invocation (CallID) gets its own keyed chat entry so concurrent
+// assistant streaming and script stdout coexist without interfering. When
+// final=true the entry is marked no-longer-streaming; truncated=true appends
+// a trailing notice so the user sees output was dropped.
+func (c *chatView) AppendCodeExecStdout(callID, turnID, chunk string, final, truncated bool) {
+	msgID := "code-" + callID
+	idx := -1
+	for i := range c.messages {
+		if c.messages[i].ID == msgID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		c.messages = append(c.messages, chatMessage{
+			ID:       msgID,
+			Role:     "code_stdout",
+			TurnID:   turnID,
+			IsStream: !final,
+		})
+		idx = len(c.messages) - 1
+	}
+	c.messages[idx].Content += chunk
+	if final {
+		c.messages[idx].IsStream = false
+		if truncated {
+			c.messages[idx].Content += "\n[output truncated — limit reached]"
+		}
+	}
+	c.rebuildViewport()
+}
+
 // ClearStream removes the current partial stream message and any fully
 // rendered content from the active streaming turn. Used by provider
 // fallback to wipe incomplete output before retrying with another model.
@@ -268,6 +301,8 @@ func (c *chatView) styleForRole(role string) (lipgloss.Style, lipgloss.Style) {
 		return c.styles.SystemLabel, c.styles.SystemBubble
 	case "tool":
 		return c.styles.ToolLabel, c.styles.ToolBubble
+	case "code_stdout":
+		return c.styles.ToolLabel, c.styles.ToolBubble
 	case "thinking":
 		return c.styles.Dim, c.styles.ThinkStep
 	case "error":
@@ -287,6 +322,8 @@ func (c *chatView) roleName(role string) string {
 		return "System"
 	case "tool":
 		return "Tool"
+	case "code_stdout":
+		return "run_code ▸ stdout"
 	case "thinking":
 		return "Thinking"
 	case "error":

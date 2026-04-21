@@ -97,6 +97,16 @@ func (p *Plugin) Ready() error {
 			},
 			"required": []string{"command"},
 		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"stdout":    map[string]any{"type": "string", "description": "Standard output"},
+				"stderr":    map[string]any{"type": "string", "description": "Standard error"},
+				"exit_code": map[string]any{"type": "integer", "description": "Process exit code (0 = success)"},
+				"timed_out": map[string]any{"type": "boolean", "description": "True when killed by the configured timeout"},
+			},
+			"required": []string{"stdout", "stderr", "exit_code"},
+		},
 	})
 	return nil
 }
@@ -140,7 +150,7 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 func (p *Plugin) handleInvoke(tc events.ToolCall) {
 	command, _ := tc.Arguments["command"].(string)
 	if command == "" {
-		p.emitResult(tc, "", "command argument is required")
+		p.emitResult(tc, "", "command argument is required", nil)
 		return
 	}
 
@@ -152,7 +162,7 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 
 	// Validate command against allowed list.
 	if !p.isCommandAllowed(command) {
-		p.emitResult(tc, "", fmt.Sprintf("command not allowed: %s", command))
+		p.emitResult(tc, "", fmt.Sprintf("command not allowed: %s", command), nil)
 		return
 	}
 
@@ -177,28 +187,45 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 
 	err := cmd.Run()
 
-	output := stdout.String()
-	if stderr.Len() > 0 {
+	stdoutStr := stdout.String()
+	stderrStr := stderr.String()
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	timedOut := ctx.Err() == context.DeadlineExceeded
+
+	structured := map[string]any{
+		"stdout":    stdoutStr,
+		"stderr":    stderrStr,
+		"exit_code": exitCode,
+		"timed_out": timedOut,
+	}
+
+	// Keep LLM-facing Output human-readable — concatenate stdout and stderr
+	// the same way we always have.
+	output := stdoutStr
+	if stderrStr != "" {
 		if output != "" {
 			output += "\n"
 		}
-		output += "STDERR:\n" + stderr.String()
+		output += "STDERR:\n" + stderrStr
 	}
 
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			p.emitResult(tc, output, fmt.Sprintf("command timed out after %s", p.timeout))
+		if timedOut {
+			p.emitResult(tc, output, fmt.Sprintf("command timed out after %s", p.timeout), structured)
 			return
 		}
 		errMsg := err.Error()
 		if output != "" {
 			errMsg = output + "\n" + errMsg
 		}
-		p.emitResult(tc, "", errMsg)
+		p.emitResult(tc, "", errMsg, structured)
 		return
 	}
 
-	p.emitResult(tc, output, "")
+	p.emitResult(tc, output, "", structured)
 }
 
 // isCommandAllowed checks if a command is permitted.
@@ -222,13 +249,14 @@ func (p *Plugin) isCommandAllowed(command string) bool {
 	return false
 }
 
-func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
+func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string, structured map[string]any) {
 	result := events.ToolResult{
-		ID:     tc.ID,
-		Name:   tc.Name,
-		Output: output,
-		Error:  errMsg,
-		TurnID: tc.TurnID,
+		ID:               tc.ID,
+		Name:             tc.Name,
+		Output:           output,
+		Error:            errMsg,
+		OutputStructured: structured,
+		TurnID:           tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
 		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)

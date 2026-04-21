@@ -24,6 +24,12 @@ type Plugin struct {
 	messages []events.Message
 	unsubs   []func()
 
+	// internalCallIDs tracks ToolCall IDs marked ParentCallID!="" — i.e.
+	// sub-calls fired from inside another tool (e.g. run_code scripts).
+	// Their invoke/result pair is excluded from history so we never send
+	// the LLM tool_use_ids it didn't generate.
+	internalCallIDs map[string]struct{}
+
 	maxMessages int
 	persist     bool
 }
@@ -31,8 +37,9 @@ type Plugin struct {
 // New creates a new conversation memory plugin.
 func New() engine.Plugin {
 	return &Plugin{
-		maxMessages: 100,
-		persist:     true,
+		maxMessages:     100,
+		persist:         true,
+		internalCallIDs: make(map[string]struct{}),
 	}
 }
 
@@ -176,6 +183,12 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if tc.ParentCallID != "" {
+		p.mu.Lock()
+		p.internalCallIDs[tc.ID] = struct{}{}
+		p.mu.Unlock()
+		return
+	}
 	content, _ := json.Marshal(tc.Arguments)
 	msg := events.Message{
 		Role:       "tool_invoke",
@@ -190,6 +203,13 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	p.mu.Lock()
+	if _, internal := p.internalCallIDs[result.ID]; internal {
+		delete(p.internalCallIDs, result.ID)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 	content := result.Output
 	if result.Error != "" {
 		content = "Error: " + result.Error

@@ -327,11 +327,62 @@ Certain metadata keys carry special meaning:
 |-------|------|-------------|
 | `ID` | string | Matches the call ID |
 | `Name` | string | Tool name |
-| `Output` | string | Result text |
+| `Output` | string | Human-readable result text (what the LLM sees) |
 | `Error` | string | Error message (if failed) |
 | `OutputFile` | string | Path to output file (optional) |
 | `OutputData` | []byte | Binary output data (optional) |
+| `OutputStructured` | map[string]any | Optional structured payload. When the tool's `ToolDef.OutputSchema` is set, this should match that schema. Consumed by typed consumers like `run_code`'s bindings — `Output` stays freeform text for the LLM. |
 | `TurnID` | string | Associated turn |
+
+**ToolDef**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | string | Tool name the LLM will use |
+| `Description` | string | Description shown to the LLM |
+| `Parameters` | map[string]any | JSON Schema for inputs |
+| `OutputSchema` | map[string]any | Optional JSON Schema describing the shape of `ToolResult.OutputStructured`. When set, `run_code` generates a typed Go struct bound to this schema. |
+| `Class` / `Subclass` / `Tags` | string / []string | Semantic metadata for filtering |
+
+### Code Execution Events
+
+Emitted by `nexus.tool.code_exec` alongside the standard `tool.invoke`/`tool.result` pair. Let other plugins observe programmatic tool-calling scripts without recomputing the run_code envelope from a tool result.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `code.exec.request` | `CodeExecRequest` | Script about to run; carries source, imports, active skills |
+| `code.exec.stdout` | `CodeExecStdout` | Incremental stdout chunk produced while the script runs; `Final=true` marks the last chunk |
+| `code.exec.result` | `CodeExecResult` | Script finished (success, compile error, runtime error, veto, or timeout) |
+
+**CodeExecRequest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `CallID` | string | Matches the outer `run_code` tool call ID |
+| `TurnID` | string | Associated turn |
+| `Script` | string | Full Go source submitted by the LLM |
+| `Imports` | []string | Import paths referenced by the script |
+| `Skills` | []string | Names of currently-active skills whose helpers were staged |
+
+**CodeExecStdout**
+| Field | Type | Description |
+|-------|------|-------------|
+| `CallID` | string | Matches the outer `run_code` tool call ID |
+| `TurnID` | string | Associated turn |
+| `Chunk` | string | UTF-8 bytes written to stdout since the last emission; may contain newlines |
+| `Final` | bool | True for the closing chunk of this call; `code.exec.result` follows immediately after |
+| `Truncated` | bool | Only meaningful on the final chunk — true when total stdout exceeded `max_output_bytes` |
+
+Chunks are flushed on every newline and on a ~512-byte threshold so long lines without newlines still reach the UI promptly. Consumers should concatenate `Chunk` values across events to reconstruct the full stdout stream; the final `CodeExecResult.Output` also carries the full aggregated string for non-streaming consumers.
+
+**CodeExecResult**
+| Field | Type | Description |
+|-------|------|-------------|
+| `CallID` | string | Matches the outer `run_code` tool call ID |
+| `TurnID` | string | Associated turn |
+| `Output` | string | Captured stdout (capped at `max_output_bytes`) |
+| `Result` | string | JSON-marshaled `Run()` return value |
+| `Error` | string | First error encountered (AST rejection, compile, runtime, timeout) |
+| `Duration` | int64 | Execution wall time in milliseconds |
+| `Truncated` | bool | Stdout was truncated by the output cap |
 
 ---
 
