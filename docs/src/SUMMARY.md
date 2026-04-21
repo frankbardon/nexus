@@ -21,6 +21,8 @@
 - [Overview](./desktop/overview.md)
 - [Building Your App](./desktop/building-your-app.md)
 - [API Reference](./desktop/reference.md)
+- [Design System (Brief)](./desktop/design-system-brief.md)
+- [Design System (Full Reference)](./desktop/design-system.md)
 
 # Plugin Reference
 
