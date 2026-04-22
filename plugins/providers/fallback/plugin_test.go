@@ -287,10 +287,10 @@ func TestFallback_EmptyRole_UsesDefault(t *testing.T) {
 
 	// Simulate provider failure.
 	errInfo := &events.ErrorInfo{
-		Source:           "nexus.llm.anthropic",
-		Err:              fmt.Errorf("anthropic: error"),
-		Retryable:        false,
-		RequestMeta:      origReq.Metadata,
+		Source:      "nexus.llm.anthropic",
+		Err:         fmt.Errorf("anthropic: error"),
+		Retryable:   false,
+		RequestMeta: origReq.Metadata,
 	}
 	result, _ := bus.EmitVetoable("before:core.error", errInfo)
 	if !result.Vetoed {

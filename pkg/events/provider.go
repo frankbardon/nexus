@@ -58,7 +58,7 @@ type ProviderFanoutOption struct {
 	Index    int
 	Provider string
 	Model    string
-	Content  string  // response content preview
+	Content  string // response content preview
 	CostUSD  float64
 }
 

@@ -239,6 +239,35 @@ Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Du
 
 1. All registered tools → 2. `nexus.gate.tool_filter` (config include/exclude) → 3. `before:llm.request` gate modifications → 4. Resolve tool choice (event override > config sequence > config default) → 5. Validate (named tool filtered out → fall back to required) → 6. Provider maps to native or simulates.
 
+## Parallel Tool Dispatch
+
+ReAct agent can fan out multiple tool calls from a single LLM response across bounded goroutines instead of running them one at a time. Opt-in, ReAct-only.
+
+```yaml
+nexus.agent.react:
+  parallel_tools: false   # default: sequential, one-at-a-time
+  max_concurrent: 4       # worker cap when parallel_tools is true
+```
+
+**Flow when enabled (LLM returns N>1 tool calls):**
+
+1. `before:tool.invoke` gates evaluate **serially**, preserving gate state across the batch (priority 10 → 50 ordering).
+2. Vetoed calls emit a synthetic `tool.result` with `Error: "Tool call vetoed: …"` directly — no `before:tool.result` round-trip, since the notice is agent-generated policy, not tool output.
+3. Passing calls dispatch in goroutines guarded by a `max_concurrent` semaphore. Each worker emits `tool.invoke`, which the tool plugin runs inline on that goroutine and which drives a matching `tool.result`.
+4. `handleToolResult` buffers results by `ToolCall.ID` until all N arrive, then flushes to `history` in **LLM-returned order** (not completion order). The next `llm.request` sees `tool_call_id`s in the order the provider expects.
+5. `ToolCall.Sequence` carries the 0-based LLM-returned index so observers can reorder completion-order events (thinking logs, UIs) back into request order.
+
+**Falls back to the sequential path when** `parallel_tools: false`, or when the batch has only one call (fan-out overhead pointless).
+
+**Cancellation.** `turnCtx` (created per parallel batch, cancelled on user interrupt or new turn) gates the semaphore. Not-yet-dispatched workers short-circuit with a synthetic `"tool dispatch cancelled"` error so the barrier fills and the turn can unwind. In-flight tools already executing aren't preempted — tools that honor context (e.g. shell's `exec.CommandContext`) do so via their own internal timeouts, not this cancellation.
+
+**Implementation pointers.**
+- Dispatch branch: `plugins/agents/react/plugin.go` (`handleLLMResponse`, `parallel := p.parallelTools && len(resp.ToolCalls) > 1`)
+- Ordered-flush barrier: `handleToolResult` — uses `expectedToolIDs` + `pendingResults` (non-nil only while a parallel batch is in flight)
+- `ParentCallID`-flagged internal calls (run_code-style sub-calls) bypass the barrier and do not consume a slot.
+
+**Out of scope for v1** (see issue #14): per-tool concurrency caps, batch-wide timeout, cross-turn parallelism, `planexec`/`orchestrator` agents, provider-driven parallelism.
+
 ## Structured Output
 
 Optional structured output enforcement for LLM responses. Three-layer design: schema declaration → request tagging → provider execution.

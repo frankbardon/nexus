@@ -82,8 +82,8 @@ func (r *rightRail) SetSize(w, h int) {
 	}
 }
 
-func (r *rightRail) Focus()   { r.focused = true }
-func (r *rightRail) Blur()    { r.focused = false }
+func (r *rightRail) Focus() { r.focused = true }
+func (r *rightRail) Blur()  { r.focused = false }
 
 func (r *rightRail) SetPlan(msg planDisplayMsg) {
 	steps := make([]planStep, len(msg.Steps))

@@ -46,11 +46,12 @@ func resolveConfig(raw []byte, agentID string, fields []SettingsField, store Set
 		if !found {
 			if f.Required {
 				missing = append(missing, f.Key)
+				continue
 			}
-			// Leave placeholder as-is for non-required unset fields.
-			// The plugin will see the literal "${key}" and can handle
-			// it or ignore it.
-			continue
+			// Replace unset non-required placeholders with empty string
+			// so plugins receive "" (falsy) instead of the literal "${key}".
+			val = ""
+			// fall through to replacement below
 		}
 
 		result = strings.ReplaceAll(result, placeholder, val)

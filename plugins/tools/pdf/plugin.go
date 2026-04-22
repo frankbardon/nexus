@@ -31,8 +31,8 @@ type Plugin struct {
 	pdftotext     string        // resolved path to pdftotext binary
 	pdfinfo       string        // resolved path to pdfinfo binary (optional)
 	timeout       time.Duration // per-command timeout
-	saveToSession bool   // persist extracted text to session files
-	saveFileName  string // custom filename for session save (default: derived from PDF name)
+	saveToSession bool          // persist extracted text to session files
+	saveFileName  string        // custom filename for session save (default: derived from PDF name)
 	unsubs        []func()
 }
 

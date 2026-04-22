@@ -53,13 +53,13 @@ var defaultAssets embed.FS
 // Domain logic flows through the bus via the agent's plugins — the
 // Agent struct is pure registration data.
 type Agent struct {
-	ID          string                            // unique key: "staffing-match", "hello-world"
-	Name        string                            // display: "Staffing Match"
-	Description string                            // short blurb for the agent selector
-	Icon        string                            // Font Awesome class (e.g. "fa-solid fa-handshake")
-	ConfigYAML  []byte                            // embedded Nexus config for this agent's engine
-	Factories   map[string]func() engine.Plugin   // custom plugin factories
-	Settings    []SettingsField                   // user-configurable fields rendered in settings UI
+	ID          string                          // unique key: "staffing-match", "hello-world"
+	Name        string                          // display: "Staffing Match"
+	Description string                          // short blurb for the agent selector
+	Icon        string                          // Font Awesome class (e.g. "fa-solid fa-handshake")
+	ConfigYAML  []byte                          // embedded Nexus config for this agent's engine
+	Factories   map[string]func() engine.Plugin // custom plugin factories
+	Settings    []SettingsField                 // user-configurable fields rendered in settings UI
 }
 
 // AgentStatus represents the lifecycle state of an agent's engine.
@@ -86,11 +86,11 @@ type AgentInfo struct {
 // Shell is the top-level desktop shell orchestrator. It manages
 // per-agent engine lifecycles and provides Wails-bound shell services.
 type Shell struct {
-	Title   string
-	Width   int
-	Height  int
-	Agents  []Agent
-	Assets  embed.FS // custom frontend assets; zero value uses the default base template
+	Title  string
+	Width  int
+	Height int
+	Agents []Agent
+	Assets embed.FS // custom frontend assets; zero value uses the default base template
 
 	// Internal state set during OnStartup.
 	ctx        context.Context

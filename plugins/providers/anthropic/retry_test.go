@@ -75,9 +75,9 @@ func TestBackoffDelay_Linear(t *testing.T) {
 	rc := retryConfig{InitialDelay: 100 * time.Millisecond, MaxDelay: 10 * time.Second, Backoff: BackoffLinear, Multiplier: 2.0}
 
 	expected := []time.Duration{
-		100 * time.Millisecond,  // 100 + 0*2*100
-		300 * time.Millisecond,  // 100 + 1*2*100
-		500 * time.Millisecond,  // 100 + 2*2*100
+		100 * time.Millisecond, // 100 + 0*2*100
+		300 * time.Millisecond, // 100 + 1*2*100
+		500 * time.Millisecond, // 100 + 2*2*100
 	}
 	for i, exp := range expected {
 		d := p.backoffDelay(i, rc)

@@ -472,11 +472,11 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 // OpenAI API response types.
 
 type apiResponse struct {
-	ID      string     `json:"id"`
-	Object  string     `json:"object"`
-	Model   string     `json:"model"`
+	ID      string      `json:"id"`
+	Object  string      `json:"object"`
+	Model   string      `json:"model"`
 	Choices []apiChoice `json:"choices"`
-	Usage   apiUsage   `json:"usage"`
+	Usage   apiUsage    `json:"usage"`
 }
 
 type apiChoice struct {
@@ -560,11 +560,11 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 // Streaming response handling.
 
 type streamChunk struct {
-	ID      string             `json:"id"`
-	Object  string             `json:"object"`
-	Model   string             `json:"model"`
+	ID      string              `json:"id"`
+	Object  string              `json:"object"`
+	Model   string              `json:"model"`
 	Choices []streamChunkChoice `json:"choices"`
-	Usage   *apiUsage          `json:"usage,omitempty"`
+	Usage   *apiUsage           `json:"usage,omitempty"`
 }
 
 type streamChunkChoice struct {

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frankbardon/nexus/pkg/ui"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/frankbardon/nexus/pkg/ui"
 )
 
 // Hub manages WebSocket client connections and broadcasts messages.
@@ -23,12 +23,12 @@ type Hub struct {
 
 // Client represents a single WebSocket connection.
 type Client struct {
-	id        string
-	conn      *websocket.Conn
-	send      chan []byte
-	hub       *Hub
-	done      chan struct{}
-	userAgent string
+	id          string
+	conn        *websocket.Conn
+	send        chan []byte
+	hub         *Hub
+	done        chan struct{}
+	userAgent   string
 	connectedAt time.Time
 }
 

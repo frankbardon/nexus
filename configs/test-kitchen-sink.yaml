@@ -59,7 +59,7 @@ core:
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
   sessions:
-    root: ~/.nexus/sessions
+    root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short
 

@@ -103,7 +103,7 @@ func TestStreamingWriter_HonorsByteCap(t *testing.T) {
 	}, engine.WithPriority(50), engine.WithSource("t"))
 
 	w := newStreamingWriter(bus, "c-cap", "t-cap", 8)
-	_, _ = w.Write([]byte("aaaa\n"))    // 5 bytes accepted, flushed on newline
+	_, _ = w.Write([]byte("aaaa\n"))     // 5 bytes accepted, flushed on newline
 	_, _ = w.Write([]byte("bbbbcccc\n")) // only 3 more fit; rest dropped
 	w.Close()
 

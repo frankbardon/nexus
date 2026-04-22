@@ -40,7 +40,7 @@ func newChatView(styles *Styles) chatView {
 	ta.ShowLineNumbers = false
 	ta.SetHeight(2)
 	ta.KeyMap.InsertNewline.SetEnabled(false) // Enter submits, not newline
-	ta.Blur()                                // Start blurred; Focus() called after first WindowSizeMsg
+	ta.Blur()                                 // Start blurred; Focus() called after first WindowSizeMsg
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot

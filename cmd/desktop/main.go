@@ -11,8 +11,8 @@ import (
 	"github.com/frankbardon/nexus/pkg/desktop"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/plugins/apps/helloworld"
-	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 	wailsio "github.com/frankbardon/nexus/plugins/io/wails"
+	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 )
 
 //go:embed all:frontend/dist
@@ -78,11 +78,11 @@ func main() {
 				},
 				Settings: []desktop.SettingsField{
 					{
-						Key:     "greeting",
-						Display: "Greeting",
+						Key:         "greeting",
+						Display:     "Greeting",
 						Description: "The greeting prefix used by the hello agent",
-						Type:    desktop.FieldString,
-						Default: "Hello",
+						Type:        desktop.FieldString,
+						Default:     "Hello",
 					},
 				},
 			},

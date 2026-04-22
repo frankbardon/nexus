@@ -76,7 +76,7 @@ type Plugin struct {
 
 	mu             sync.Mutex
 	inflight       map[string]*fanoutState // keyed by fanout ID
-	pendingChoices map[string]chan int      // user strategy: fanoutID -> chosen index
+	pendingChoices map[string]chan int     // user strategy: fanoutID -> chosen index
 }
 
 // New creates a new fanout coordinator plugin.

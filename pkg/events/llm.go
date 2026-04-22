@@ -2,7 +2,7 @@ package events
 
 // ToolChoice controls which tools the LLM is allowed or required to use.
 type ToolChoice struct {
-	Mode string `json:"mode"` // "auto" | "required" | "none" | "tool"
+	Mode string `json:"mode"`           // "auto" | "required" | "none" | "tool"
 	Name string `json:"name,omitempty"` // tool name when Mode == "tool"
 }
 

@@ -192,8 +192,8 @@ func Run(ctx context.Context) (any, error) {
 // both shapes should still compile.
 func TestTypedResult_SchemalessStillUsesResult(t *testing.T) {
 	h := newHarness(t, nil)
-	h.registerFakeTool()        // legacy "echo" has no OutputSchema
-	_ = h.registerTypedTool()   // typed "search"
+	h.registerFakeTool()      // legacy "echo" has no OutputSchema
+	_ = h.registerTypedTool() // typed "search"
 
 	script := `package main
 

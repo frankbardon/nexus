@@ -171,9 +171,9 @@ func (idx *sessionIndex) Cleanup(retentionDays int, sessionsRoot string) (int, e
 }
 
 // Reconcile synchronizes the index with what's actually on disk.
-// - Orphaned engine directories (exist on disk, not in index) are
-//   adopted with a generic title if newer than cutoff, or deleted.
-// - Stale index entries (in index, missing from disk) are removed.
+//   - Orphaned engine directories (exist on disk, not in index) are
+//     adopted with a generic title if newer than cutoff, or deleted.
+//   - Stale index entries (in index, missing from disk) are removed.
 func (idx *sessionIndex) Reconcile(sessionsRoot string, agents []Agent, retentionDays int) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
