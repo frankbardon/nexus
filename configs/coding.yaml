@@ -51,8 +51,7 @@ plugins:
     - nexus.memory.conversation
     - nexus.memory.compaction
     - nexus.observe.logger
-
-  output: stderr    - nexus.observe.thinking
+    - nexus.observe.thinking
     - nexus.system.dynvars
 
   nexus.llm.anthropic:
