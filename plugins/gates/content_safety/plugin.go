@@ -21,9 +21,9 @@ type check struct {
 
 // builtinChecks defines all available content safety checks.
 var builtinChecks = []struct {
-	name       string
-	configKey  string
-	pattern    string
+	name      string
+	configKey string
+	pattern   string
 }{
 	{"email", "check_pii_email", `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`},
 	{"phone", "check_pii_phone", `\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b`},
@@ -56,9 +56,9 @@ type Plugin struct {
 	unsubs []func()
 }
 
-func (p *Plugin) ID() string           { return pluginID }
-func (p *Plugin) Name() string         { return "Content Safety Gate" }
-func (p *Plugin) Version() string      { return "0.1.0" }
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return "Content Safety Gate" }
+func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {

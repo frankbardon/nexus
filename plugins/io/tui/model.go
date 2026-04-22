@@ -531,5 +531,3 @@ func (m *model) openFile(path string) tea.Cmd {
 		return fileContentMsg{Path: path, Content: string(data)}
 	}
 }
-
-

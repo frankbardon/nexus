@@ -105,12 +105,12 @@ func TestIsExcluded_Empty(t *testing.T) {
 func TestExtractAttributes_LLMRequest(t *testing.T) {
 	temp := 0.7
 	req := &events.LLMRequest{
-		Role:      "balanced",
-		Model:     "claude-sonnet-4-20250514",
-		MaxTokens: 8192,
-		Stream:    true,
-		Messages:  []events.Message{{Role: "user", Content: "hi"}},
-		Tools:     []events.ToolDef{{Name: "shell"}},
+		Role:        "balanced",
+		Model:       "claude-sonnet-4-20250514",
+		MaxTokens:   8192,
+		Stream:      true,
+		Messages:    []events.Message{{Role: "user", Content: "hi"}},
+		Tools:       []events.ToolDef{{Name: "shell"}},
 		Temperature: &temp,
 	}
 

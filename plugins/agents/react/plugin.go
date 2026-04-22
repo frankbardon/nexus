@@ -30,19 +30,32 @@ type Plugin struct {
 	planningEnabled  bool
 	modelRole        string
 	toolChoiceCfg    toolChoiceConfig
+	parallelTools    bool
+	maxConcurrent    int
 
-	mu                sync.Mutex
-	history           []events.Message
-	registeredTools   []events.ToolDef
-	skillContexts     []string
-	currentTurnID     string
-	currentPlan       *events.PlanResult
-	currentPlanStep   int // index into currentPlan.Steps; -1 when no plan is active
-	iteration         int
-	pendingToolCalls  int
-	streamed          bool
-	cancelled         bool
+	mu                 sync.Mutex
+	history            []events.Message
+	registeredTools    []events.ToolDef
+	skillContexts      []string
+	currentTurnID      string
+	currentPlan        *events.PlanResult
+	currentPlanStep    int // index into currentPlan.Steps; -1 when no plan is active
+	iteration          int
+	pendingToolCalls   int
+	streamed           bool
+	cancelled          bool
 	toolChoiceOverride *toolChoiceOverride
+	// Parallel-dispatch barrier: when parallelTools is true, tool results
+	// buffer here keyed by ToolCall.ID and are flushed to history in the
+	// order given by expectedToolIDs once all arrive. Empty in sequential
+	// mode — that path appends to history as results land.
+	expectedToolIDs []string
+	pendingResults  map[string]events.ToolResult
+	// turnCtx is cancelled on user interrupt or new turn. Workers queued
+	// behind the semaphore check it before emitting tool.invoke so calls
+	// that never got a slot unwind with a synthetic error.
+	turnCtx    context.Context
+	turnCancel context.CancelFunc
 	// internalCallIDs tracks tool_use_ids dispatched from inside another
 	// tool (ToolCall.ParentCallID != ""). Their results must not reach
 	// p.history — otherwise the next LLM request carries tool_use_ids the
@@ -91,6 +104,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.toolChoiceCfg = parseToolChoiceConfig(ctx.Config)
 
+	p.maxConcurrent = 4
+	if v, ok := ctx.Config["parallel_tools"].(bool); ok {
+		p.parallelTools = v
+	}
+	if v, ok := ctx.Config["max_concurrent"].(int); ok && v > 0 {
+		p.maxConcurrent = v
+	} else if v, ok := ctx.Config["max_concurrent"].(float64); ok && v > 0 {
+		p.maxConcurrent = int(v)
+	}
+
 	// Register event handlers.
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInputEvent,
@@ -132,6 +155,13 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	for _, unsub := range p.unsubs {
 		unsub()
 	}
+	p.mu.Lock()
+	if p.turnCancel != nil {
+		p.turnCancel()
+		p.turnCancel = nil
+		p.turnCtx = nil
+	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -315,6 +345,13 @@ func (p *Plugin) handleCancelEvent(event engine.Event[any]) {
 	turnID := p.currentTurnID
 	p.cancelled = true
 	p.pendingToolCalls = 0
+	p.expectedToolIDs = nil
+	p.pendingResults = nil
+	if p.turnCancel != nil {
+		p.turnCancel()
+		p.turnCancel = nil
+		p.turnCtx = nil
+	}
 	p.mu.Unlock()
 
 	p.logger.Info("turn cancelled", "turn_id", turnID)
@@ -439,8 +476,15 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.currentPlanStep = -1
 	p.iteration = 0
 	p.pendingToolCalls = 0
+	p.expectedToolIDs = nil
+	p.pendingResults = nil
 	p.streamed = false
 	p.toolChoiceOverride = nil
+	if p.turnCancel != nil {
+		p.turnCancel()
+		p.turnCancel = nil
+		p.turnCtx = nil
+	}
 
 	// Add user message to history.
 	p.history = append(p.history, events.Message{
@@ -494,6 +538,21 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	if len(resp.ToolCalls) > 0 {
 		// Iteration limiting now handled by nexus.gate.endless_loop plugin.
 		p.pendingToolCalls = len(resp.ToolCalls)
+
+		parallel := p.parallelTools && len(resp.ToolCalls) > 1
+		if parallel {
+			p.expectedToolIDs = make([]string, len(resp.ToolCalls))
+			p.pendingResults = make(map[string]events.ToolResult, len(resp.ToolCalls))
+			for i, tc := range resp.ToolCalls {
+				p.expectedToolIDs[i] = tc.ID
+			}
+			if p.turnCancel != nil {
+				p.turnCancel()
+			}
+			p.turnCtx, p.turnCancel = context.WithCancel(context.Background())
+		}
+		turnCtx := p.turnCtx
+		maxConc := p.maxConcurrent
 		p.mu.Unlock()
 
 		// Emit agent.plan describing the tool calls as plan steps.
@@ -511,38 +570,128 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 		p.emitStatus("tool_running", fmt.Sprintf("Running %d tool(s)", len(resp.ToolCalls)))
 
-		// Invoke each tool call with vetoable before:tool.invoke.
-		for _, tc := range resp.ToolCalls {
+		if !parallel {
+			// Sequential dispatch: emit before:tool.invoke and tool.invoke in
+			// LLM-returned order. Each tool plugin executes inline on this
+			// goroutine before the next iteration.
+			for i, tc := range resp.ToolCalls {
+				var args map[string]any
+				if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+					args = map[string]any{}
+				}
+
+				toolCall := events.ToolCall{
+					ID:        tc.ID,
+					Name:      tc.Name,
+					Arguments: args,
+					TurnID:    turnID,
+					Sequence:  i,
+				}
+
+				if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
+					p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
+					syntheticResult := events.ToolResult{
+						ID:     tc.ID,
+						Name:   tc.Name,
+						Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
+						TurnID: turnID,
+					}
+					if rv, rvErr := p.bus.EmitVetoable("before:tool.result", &syntheticResult); rvErr == nil && rv.Vetoed {
+						p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
+						continue
+					}
+					_ = p.bus.Emit("tool.result", syntheticResult)
+					continue
+				}
+
+				_ = p.bus.Emit("tool.invoke", toolCall)
+			}
+			return
+		}
+
+		// Parallel dispatch: gates evaluate serially first (preserves gate
+		// state per gate priority), then passing calls fan out into bounded
+		// goroutines. Vetoed calls emit synthetic results directly so the
+		// barrier fills.
+		type prepared struct {
+			call       events.ToolCall
+			vetoed     bool
+			vetoReason string
+		}
+		prep := make([]prepared, len(resp.ToolCalls))
+		for i, tc := range resp.ToolCalls {
 			var args map[string]any
 			if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 				args = map[string]any{}
 			}
-
-			toolCall := events.ToolCall{
+			call := events.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Name,
 				Arguments: args,
 				TurnID:    turnID,
+				Sequence:  i,
 			}
-
-			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
+			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &call); err == nil && veto.Vetoed {
 				p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
-				// Emit a synthetic tool result so the agent loop can continue.
-				syntheticResult := events.ToolResult{
-					ID:     tc.ID,
-					Name:   tc.Name,
-					Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
-					TurnID: turnID,
-				}
-				if rv, rvErr := p.bus.EmitVetoable("before:tool.result", &syntheticResult); rvErr == nil && rv.Vetoed {
-					p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
-					continue
-				}
-				_ = p.bus.Emit("tool.result", syntheticResult)
+				prep[i] = prepared{call: call, vetoed: true, vetoReason: veto.Reason}
+			} else {
+				prep[i] = prepared{call: call}
+			}
+		}
+
+		// Emit synthetic results for vetoed calls on this goroutine so the
+		// barrier accounting is deterministic before any worker starts.
+		// Skip the `before:tool.result` vetoable path: these are agent-
+		// generated policy-denial notices, not tool-produced output, so
+		// re-gating them would only risk hanging the barrier.
+		for _, pr := range prep {
+			if !pr.vetoed {
 				continue
 			}
+			_ = p.bus.Emit("tool.result", events.ToolResult{
+				ID:     pr.call.ID,
+				Name:   pr.call.Name,
+				Error:  fmt.Sprintf("Tool call vetoed: %s", pr.vetoReason),
+				TurnID: turnID,
+			})
+		}
 
-			_ = p.bus.Emit("tool.invoke", toolCall)
+		// Dispatch passing calls in bounded goroutines. Each worker emits
+		// `tool.invoke` which the tool plugin handles inline (synchronous
+		// bus), so the tool runs on the worker goroutine and tool.result
+		// lands via handleToolResult's barrier buffer.
+		sem := make(chan struct{}, maxConc)
+		for _, pr := range prep {
+			if pr.vetoed {
+				continue
+			}
+			call := pr.call
+			go func() {
+				select {
+				case sem <- struct{}{}:
+				case <-turnCtx.Done():
+					// Cancelled before we acquired a slot — emit synthetic
+					// error so the barrier fills and the turn can unwind.
+					_ = p.bus.Emit("tool.result", events.ToolResult{
+						ID:     call.ID,
+						Name:   call.Name,
+						Error:  "tool dispatch cancelled",
+						TurnID: turnID,
+					})
+					return
+				}
+				defer func() { <-sem }()
+				if turnCtx.Err() != nil {
+					_ = p.bus.Emit("tool.result", events.ToolResult{
+						ID:     call.ID,
+						Name:   call.Name,
+						Error:  "tool dispatch cancelled",
+						TurnID: turnID,
+					})
+					return
+				}
+				_ = p.bus.Emit("tool.invoke", call)
+			}()
 		}
 		return
 	}
@@ -618,13 +767,49 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 		return
 	}
 
-	// Build content for the tool result message.
+	// Parallel-dispatch path: buffer results and flush to history in
+	// LLM-returned order once all have arrived. expectedToolIDs is non-nil
+	// only while a parallel batch is in flight.
+	if len(p.expectedToolIDs) > 0 {
+		p.pendingResults[result.ID] = result
+		p.pendingToolCalls--
+		allDone := p.pendingToolCalls <= 0
+
+		if !allDone {
+			p.mu.Unlock()
+			return
+		}
+
+		for _, id := range p.expectedToolIDs {
+			r, ok := p.pendingResults[id]
+			if !ok {
+				continue
+			}
+			content := r.Output
+			if r.Error != "" {
+				content = "Error: " + r.Error
+			}
+			p.history = append(p.history, events.Message{
+				Role:       "tool",
+				Content:    content,
+				ToolCallID: r.ID,
+			})
+		}
+		p.expectedToolIDs = nil
+		p.pendingResults = nil
+		p.mu.Unlock()
+
+		p.emitStatus("thinking", "Processing tool results")
+		p.sendLLMRequest()
+		return
+	}
+
+	// Sequential path: append as results arrive (original behavior).
 	content := result.Output
 	if result.Error != "" {
 		content = "Error: " + result.Error
 	}
 
-	// Add tool result to history.
 	p.history = append(p.history, events.Message{
 		Role:       "tool",
 		Content:    content,
@@ -635,7 +820,6 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 	allDone := p.pendingToolCalls <= 0
 	p.mu.Unlock()
 
-	// Only send the next LLM request once all tool results are in.
 	if allDone {
 		p.emitStatus("thinking", "Processing tool results")
 		p.sendLLMRequest()

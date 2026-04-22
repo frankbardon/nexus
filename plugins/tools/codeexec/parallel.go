@@ -26,7 +26,7 @@ func buildParallelExports(workers int) interp.Exports {
 		workers = 1
 	}
 	pkg := map[string]reflect.Value{
-		"Map":     reflect.ValueOf(func(ctx context.Context, items any, fn any) (any, error) {
+		"Map": reflect.ValueOf(func(ctx context.Context, items any, fn any) (any, error) {
 			return parallelMap(ctx, items, fn, workers)
 		}),
 		"ForEach": reflect.ValueOf(func(ctx context.Context, items any, fn any) error {

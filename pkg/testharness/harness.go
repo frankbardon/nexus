@@ -151,6 +151,18 @@ func (h *Harness) Events() []testio.CollectedEvent {
 	return h.testPlugin.Collected()
 }
 
+// Bus returns the engine's event bus. Use this before Run() to subscribe
+// custom handlers for events the test IO plugin's wildcard collector does
+// not observe — notably `before:*` vetoable events, which the bus dispatches
+// only to explicitly-subscribed handlers.
+func (h *Harness) Bus() engine.EventBus {
+	h.t.Helper()
+	if h.eng == nil {
+		h.t.Fatal("testharness: engine not initialized")
+	}
+	return h.eng.Bus
+}
+
 // -- Tier 1: Deterministic assertions ----------------------------------------
 
 // AssertEventEmitted fails if no event of the given type was collected.

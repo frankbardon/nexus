@@ -22,12 +22,12 @@ const (
 	decomposeSource  = "nexus.agent.orchestrator.decompose"
 	synthesizeSource = "nexus.agent.orchestrator.synthesize"
 
-	defaultMaxWorkers        = 5
-	defaultMaxSubtasks       = 8
-	defaultWorkerMaxIter     = 10
-	defaultOrchestratorRole  = "reasoning"
-	defaultWorkerRole        = "balanced"
-	defaultSynthesisRole     = "balanced"
+	defaultMaxWorkers       = 5
+	defaultMaxSubtasks      = 8
+	defaultWorkerMaxIter    = 10
+	defaultOrchestratorRole = "reasoning"
+	defaultWorkerRole       = "balanced"
+	defaultSynthesisRole    = "balanced"
 )
 
 // phase represents the orchestrator's current lifecycle phase.
@@ -75,15 +75,15 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	maxWorkers           int
-	maxSubtasks          int
-	workerMaxIterations  int
-	systemPrompt         string
-	systemPromptFile     string
+	maxWorkers            int
+	maxSubtasks           int
+	workerMaxIterations   int
+	systemPrompt          string
+	systemPromptFile      string
 	orchestratorModelRole string
-	workerModelRole      string
-	synthesisModelRole   string
-	failFast             bool
+	workerModelRole       string
+	synthesisModelRole    string
+	failFast              bool
 
 	mu              sync.Mutex
 	phase           phase
@@ -95,9 +95,9 @@ type Plugin struct {
 	streamed        bool
 
 	// Subtask tracking.
-	subtasks     []subtask
-	spawnToTask  map[string]int // spawnID -> subtask index
-	activeCount  int            // number of currently running workers
+	subtasks    []subtask
+	spawnToTask map[string]int // spawnID -> subtask index
+	activeCount int            // number of currently running workers
 
 	unsubs []func()
 }
@@ -599,11 +599,11 @@ func (p *Plugin) dispatchReadyWorkers() {
 
 	// Build spawn data while holding the lock.
 	type spawnInfo struct {
-		spawnID     string
-		task        string
-		tools       []string
-		idx         int
-		depResults  string
+		spawnID    string
+		task       string
+		tools      []string
+		idx        int
+		depResults string
 	}
 
 	spawns := make([]spawnInfo, len(toDispatch))

@@ -11,6 +11,11 @@ type ToolCall struct {
 	// these so the LLM never sees tool_use_ids it didn't originate — gates
 	// and observers still fire on the bus as usual.
 	ParentCallID string
+	// Sequence is the LLM-returned position of this call within its batch
+	// (0-based). Set by the agent when a single LLM response contains
+	// multiple tool calls; lets observers reorder completion-order events
+	// back into request order under parallel dispatch.
+	Sequence int
 }
 
 // ToolResult carries the outcome of a tool invocation.

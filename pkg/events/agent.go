@@ -40,7 +40,7 @@ type SubagentStarted struct {
 type SubagentIteration struct {
 	SpawnID   string
 	Iteration int
-	Content   string           // assistant text content, if any
+	Content   string            // assistant text content, if any
 	ToolCalls []ToolCallRequest // tool calls made this iteration
 }
 

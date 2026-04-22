@@ -40,7 +40,7 @@ core:
       model: gpt-4o-mini
       max_tokens: 4096
   sessions:
-    root: ~/.nexus/sessions
+    root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short
 

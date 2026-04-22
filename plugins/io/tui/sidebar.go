@@ -52,8 +52,8 @@ func (s *sidebar) SetSize(w, h int) {
 	s.fileViewport.Height = contentHeight
 }
 
-func (s *sidebar) Focus()        { s.focused = true }
-func (s *sidebar) Blur()         { s.focused = false }
+func (s *sidebar) Focus()              { s.focused = true }
+func (s *sidebar) Blur()               { s.focused = false }
 func (s *sidebar) SetTab(t sidebarTab) { s.tab = t }
 
 func (s *sidebar) Update(msg tea.Msg) tea.Cmd {

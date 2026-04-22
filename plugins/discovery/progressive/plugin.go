@@ -443,8 +443,8 @@ func (p *Plugin) discoverToolDef() events.ToolDef {
 func (p *Plugin) buildClassSummaryXML() string {
 	// Collect undiscovered classes.
 	type classSummary struct {
-		name       string
-		info       *classInfo
+		name string
+		info *classInfo
 	}
 
 	var summaries []classSummary

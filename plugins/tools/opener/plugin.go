@@ -24,8 +24,8 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	openCmd  string        // resolved OS command (open, xdg-open, etc.)
-	openArgs []string      // extra args prepended before the path
+	openCmd  string   // resolved OS command (open, xdg-open, etc.)
+	openArgs []string // extra args prepended before the path
 	timeout  time.Duration
 	unsubs   []func()
 }

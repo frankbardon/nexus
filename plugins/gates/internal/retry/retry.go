@@ -70,7 +70,7 @@ type ValidateFunc func(content string) string
 
 // RetryResult is the outcome of a retry attempt.
 type RetryResult struct {
-	Valid    bool
+	Valid   bool
 	Content string // the (possibly corrected) content
 	Error   string // last validation error if not valid
 }

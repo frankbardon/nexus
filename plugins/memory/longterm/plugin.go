@@ -169,8 +169,8 @@ func (p *Plugin) Ready() error {
 						"description": "The memory content (markdown)",
 					},
 					"tags": map[string]any{
-						"type":        "object",
-						"description": "Optional key-value tags for categorization and filtering",
+						"type":                 "object",
+						"description":          "Optional key-value tags for categorization and filtering",
 						"additionalProperties": map[string]any{"type": "string"},
 					},
 				},
@@ -202,8 +202,8 @@ func (p *Plugin) Ready() error {
 				"type": "object",
 				"properties": map[string]any{
 					"tags": map[string]any{
-						"type":        "object",
-						"description": "Optional tag filters (AND semantics — all must match)",
+						"type":                 "object",
+						"description":          "Optional tag filters (AND semantics — all must match)",
 						"additionalProperties": map[string]any{"type": "string"},
 					},
 				},

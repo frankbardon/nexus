@@ -393,7 +393,7 @@ func (p *Plugin) handleAgentPlan(e engine.Event[any]) {
 	_ = p.adapter.SendPlanUpdate(ui.PlanDisplayMessage{
 		Steps:  steps,
 		TurnID: plan.TurnID,
-		Source:  "agent",
+		Source: "agent",
 	})
 }
 
@@ -439,4 +439,3 @@ func (p *Plugin) handleHistoryReplay(e engine.Event[any]) {
 		})
 	}
 }
-

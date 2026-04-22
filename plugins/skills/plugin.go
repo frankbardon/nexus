@@ -22,7 +22,7 @@ type Plugin struct {
 
 	mu           sync.RWMutex
 	catalog      []SkillRecord
-	activeSkills map[string]bool   // name -> active
+	activeSkills map[string]bool // name -> active
 	skillsByName map[string]*SkillRecord
 	skillSchemas map[string]string // skill name -> schema registry name (only skills with output_schema)
 	unsubs       []func()

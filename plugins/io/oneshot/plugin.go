@@ -42,13 +42,13 @@ type Plugin struct {
 	readStdin  bool   // whether to read stdin when no other input source supplied
 
 	// State captured during the run
-	mu          sync.Mutex
-	startedAt   time.Time
-	endedAt     time.Time
-	turnDepth   int  // number of in-flight turns (start - end)
-	turnsSeen   int  // total agent.turn.start events observed after input was sent
-	inputSent   bool // whether we have emitted the initial io.input
-	finalized   bool // whether we have already flushed output + ended the session
+	mu        sync.Mutex
+	startedAt time.Time
+	endedAt   time.Time
+	turnDepth int  // number of in-flight turns (start - end)
+	turnsSeen int  // total agent.turn.start events observed after input was sent
+	inputSent bool // whether we have emitted the initial io.input
+	finalized bool // whether we have already flushed output + ended the session
 
 	finalOutput string
 	plans       []planRecord
@@ -280,11 +280,11 @@ func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 	}
 	p.mu.Lock()
 	p.approvals = append(p.approvals, approvalRecord{
-		Kind:        "tool",
-		PromptID:    req.PromptID,
-		Description: req.Description,
-		ToolCall:    req.ToolCall,
-		Risk:        req.Risk,
+		Kind:         "tool",
+		PromptID:     req.PromptID,
+		Description:  req.Description,
+		ToolCall:     req.ToolCall,
+		Risk:         req.Risk,
 		AutoApproved: true,
 	})
 	p.mu.Unlock()
@@ -303,10 +303,10 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 	}
 	p.mu.Lock()
 	p.approvals = append(p.approvals, approvalRecord{
-		Kind:        "plan",
-		PromptID:    req.PromptID,
-		Description: req.Description,
-		Risk:        req.Risk,
+		Kind:         "plan",
+		PromptID:     req.PromptID,
+		Description:  req.Description,
+		Risk:         req.Risk,
 		AutoApproved: true,
 	})
 	p.mu.Unlock()
@@ -329,9 +329,9 @@ func (p *Plugin) handleAsk(e engine.Event[any]) {
 	}
 	p.mu.Lock()
 	p.approvals = append(p.approvals, approvalRecord{
-		Kind:        "ask",
-		PromptID:    ask.PromptID,
-		Description: ask.Question,
+		Kind:         "ask",
+		PromptID:     ask.PromptID,
+		Description:  ask.Question,
 		AutoApproved: true,
 	})
 	p.mu.Unlock()
@@ -463,10 +463,10 @@ func (p *Plugin) finalize() {
 	p.endedAt = time.Now()
 
 	transcript := oneshotTranscript{
-		Schema:    "nexus.oneshot.transcript/v1",
-		StartedAt: p.startedAt.Format(time.RFC3339Nano),
-		EndedAt:   p.endedAt.Format(time.RFC3339Nano),
-		DurationMS: p.endedAt.Sub(p.startedAt).Milliseconds(),
+		Schema:      "nexus.oneshot.transcript/v1",
+		StartedAt:   p.startedAt.Format(time.RFC3339Nano),
+		EndedAt:     p.endedAt.Format(time.RFC3339Nano),
+		DurationMS:  p.endedAt.Sub(p.startedAt).Milliseconds(),
 		FinalOutput: p.finalOutput,
 		Plans:       cloneSlice(p.plans),
 		PlanUpdates: cloneSlice(p.planUpdates),

@@ -23,8 +23,8 @@ type Plugin struct {
 	logger *slog.Logger
 	unsubs []func()
 
-	mu       sync.Mutex
-	pending  map[string]chan string // promptID -> response channel
+	mu      sync.Mutex
+	pending map[string]chan string // promptID -> response channel
 }
 
 // New creates a new ask user tool plugin.

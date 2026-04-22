@@ -16,7 +16,7 @@ type ShutdownReason struct {
 
 // ErrorInfo describes an error originating from a specific source.
 type ErrorInfo struct {
-	Source           string         // plugin ID
+	Source           string // plugin ID
 	Err              error
 	Fatal            bool
 	Retryable        bool           // whether this error class is retryable (429, 5xx)

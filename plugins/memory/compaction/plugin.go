@@ -34,7 +34,7 @@ const (
 type triggerStrategy string
 
 const (
-	triggerMessageCount triggerStrategy = "message_count"
+	triggerMessageCount  triggerStrategy = "message_count"
 	triggerTokenEstimate triggerStrategy = "token_estimate"
 	triggerTurnCount     triggerStrategy = "turn_count"
 )
