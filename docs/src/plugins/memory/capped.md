@@ -1,12 +1,12 @@
-# Conversation History
+# Capped Conversation History
 
-Maintains a sliding window of conversation messages and persists them to the session as JSONL.
+Maintains a sliding window of conversation messages and persists them to the session as JSONL. Default provider of `memory.history`.
 
 ## Details
 
 | | |
 |---|---|
-| **ID** | `nexus.memory.conversation` |
+| **ID** | `nexus.memory.capped` |
 | **Dependencies** | None |
 
 ## Configuration
@@ -59,7 +59,7 @@ bus.Emit("memory.query", events.MemoryQuery{
 ## Example Configuration
 
 ```yaml
-nexus.memory.conversation:
+nexus.memory.capped:
   max_messages: 200
   persist: true
 ```

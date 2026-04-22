@@ -65,7 +65,7 @@ Triggers when the number of completed turns exceeds `turn_threshold`.
 5. Writes the returned summary as a sidecar next to the archive snapshot
 6. Rotates the live log so it now holds `[summary, ...protected]`
 7. Emits `memory.compacted` with the new message set
-8. The conversation plugin replaces its buffer with the compacted version
+8. The active `memory.history` provider replaces its buffer with the compacted version
 
 ## Persisted Artifacts
 

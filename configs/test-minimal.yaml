@@ -25,7 +25,7 @@
 # What to watch for:
 #   - No error logs on startup (log_level: warn suppresses info)
 #   - Session dir created at ~/.nexus/sessions/ despite no observers
-#   - Only 4 plugins in boot log (tui, anthropic, react, conversation)
+#   - Only 4 plugins in boot log (tui, anthropic, react, capped memory)
 core:
   log_level: warn
   tick_interval: 5s
@@ -46,7 +46,7 @@ plugins:
     - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.io.test:
     inputs:
@@ -63,6 +63,6 @@ plugins:
   nexus.agent.react:
     system_prompt: "You are a helpful assistant. You have no tools available — respond conversationally only."
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 4
     persist: false

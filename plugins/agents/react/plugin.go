@@ -23,7 +23,7 @@ const (
 // Plugin implements the ReAct (Reason + Act) agent loop.
 //
 // Conversation history, tool registration, and streaming display are owned
-// by sibling plugins (nexus.memory.conversation, nexus.tool.catalog, and the
+// by sibling plugins (nexus.memory.capped, nexus.tool.catalog, and the
 // IO plugins respectively); ReAct queries them per-turn via the bus instead
 // of maintaining its own copies. Slash-command parsing is handled by
 // nexus.control.cancel via a before:io.input veto.
@@ -58,7 +58,7 @@ type Plugin struct {
 	// case). Their results share the outer call's TurnID, so the agent's
 	// pendingToolCalls counter would otherwise decrement on inner results
 	// and short-circuit the outer turn. Conversation history filtering is
-	// a separate concern owned by nexus.memory.conversation.
+	// a separate concern owned by nexus.memory.capped.
 	internalCallIDs map[string]struct{}
 	// turnCtx is cancelled on user interrupt or new turn. Workers queued
 	// behind the semaphore check it before emitting tool.invoke so calls
@@ -88,7 +88,7 @@ func (p *Plugin) Dependencies() []string { return nil }
 // queries it via "memory.history.query" rather than maintaining its own
 // p.history. Default config gives the resolved provider a 100-message
 // sliding window with persistence on — the same setup the default profile
-// has used historically (applies to nexus.memory.conversation; other
+// has used historically (applies to nexus.memory.capped; other
 // providers ignore unknown keys).
 //
 // "control.cancel" owns the /resume slash command and cancel turn tracking;
@@ -285,7 +285,7 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 // handleToolInvokeEvent flags any ToolCall with a non-empty ParentCallID as
 // internal so its matching result is ignored by handleToolResult's pending
 // count. Conversation-history filtering is a separate concern owned by
-// nexus.memory.conversation.
+// nexus.memory.capped.
 func (p *Plugin) handleToolInvokeEvent(event engine.Event[any]) {
 	tc, ok := event.Payload.(events.ToolCall)
 	if !ok || tc.ParentCallID == "" {
@@ -541,7 +541,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 		// completion order rather than LLM-returned order. Both Anthropic
 		// and OpenAI tolerate out-of-order tool_result blocks as long as
 		// tool_use_ids match; if a future provider rejects that, the
-		// reorder would belong in nexus.memory.conversation, not here.
+		// reorder would belong in nexus.memory.capped, not here.
 		type prepared struct {
 			call       events.ToolCall
 			vetoed     bool
@@ -640,7 +640,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	p.emitStatus("idle", "")
 
 	// Emit vetoable before:io.output. Content came from llm.response and was
-	// already recorded by nexus.memory.conversation at priority 10.
+	// already recorded by nexus.memory.capped at priority 10.
 	output := events.AgentOutput{
 		Content: resp.Content,
 		Role:    "assistant",

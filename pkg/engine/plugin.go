@@ -82,7 +82,7 @@ type Capability struct {
 // supplied any config for the resolved ID, Default is discarded entirely.
 // This keeps precedence predictable and avoids surprise field merges.
 type Requirement struct {
-	// ID is the plugin ID to auto-activate (e.g. "nexus.memory.conversation").
+	// ID is the plugin ID to auto-activate (e.g. "nexus.memory.capped").
 	// Mutually exclusive with Capability.
 	ID string
 	// Capability is an abstract capability name (e.g. "memory.history") the

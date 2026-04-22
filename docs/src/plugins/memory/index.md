@@ -6,8 +6,10 @@ Memory plugins manage conversation history and context window size. They persist
 
 | Plugin | ID | Purpose |
 |--------|----|---------|
-| [Conversation History](./conversation.md) | `nexus.memory.conversation` | Stores and replays conversation messages |
-| [Context Compaction](./compaction.md) | `nexus.memory.compaction` | Summarizes old messages to free context space |
+| [Simple History](./simple.md) | `nexus.memory.simple` | Unbounded append-only history; reference/test impl |
+| [Capped History](./capped.md) | `nexus.memory.capped` | Sliding window with JSONL persistence (default `memory.history` provider) |
+| [Summary-Buffer History](./summary_buffer.md) | `nexus.memory.summary_buffer` | Keeps recent N verbatim, LLM-summarizes older inline |
+| [Context Compaction](./compaction.md) | `nexus.memory.compaction` | External coordinator that summarizes old messages and emits `memory.compacted` |
 | [Long-Term Memory](./longterm.md) | `nexus.memory.longterm` | Cross-session memory persistence via file-per-entry storage |
 
 ## How Memory Works

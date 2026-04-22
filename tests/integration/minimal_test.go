@@ -15,7 +15,7 @@ func TestMinimal_Boot(t *testing.T) {
 	h := testharness.New(t, "configs/test-minimal.yaml", testharness.WithTimeout(60*time.Second))
 	h.Run()
 
-	h.AssertBooted("nexus.io.test", "nexus.llm.anthropic", "nexus.agent.react", "nexus.memory.conversation")
+	h.AssertBooted("nexus.io.test", "nexus.llm.anthropic", "nexus.agent.react", "nexus.memory.capped")
 	h.AssertEventEmitted("io.session.start")
 	h.AssertEventEmitted("io.session.end")
 }

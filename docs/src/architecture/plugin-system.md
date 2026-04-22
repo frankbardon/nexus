@@ -47,7 +47,7 @@ type Requirement struct {
 **Visibility.** Every auto-activation emits an `INFO` log at boot:
 
 ```
-auto-activating plugin nexus.memory.conversation (required by nexus.agent.react); config_source=default
+auto-activating plugin nexus.memory.capped (required by nexus.agent.react); config_source=default
 ```
 
 After expansion completes, a single `"active plugin set resolved"` line lists every entry annotated `[user]` (declared in config) or `[auto: required-by=X,config=default|user-override]`. Missing optional requirements log `WARN` and boot proceeds.
@@ -58,7 +58,7 @@ After expansion completes, a single `"active plugin set resolved"` line lists ev
 func (p *Plugin) Requires() []engine.Requirement {
     return []engine.Requirement{
         {
-            ID: "nexus.memory.conversation",
+            ID: "nexus.memory.capped",
             Default: map[string]any{"max_messages": 100, "persist": true},
         },
         {ID: "nexus.control.cancel"},
@@ -96,7 +96,7 @@ Plugin IDs use a dotted namespace: `nexus.<category>.<name>`
 | `agent` | `nexus.agent.react`, `nexus.agent.planexec` |
 | `llm` | `nexus.llm.anthropic` |
 | `tool` | `nexus.tool.shell`, `nexus.tool.file` |
-| `memory` | `nexus.memory.conversation`, `nexus.memory.compaction` |
+| `memory` | `nexus.memory.capped`, `nexus.memory.compaction` |
 | `io` | `nexus.io.tui`, `nexus.io.browser` |
 | `observe` | `nexus.observe.logger`, `nexus.observe.thinking` |
 | `planner` | `nexus.planner.dynamic`, `nexus.planner.static` |

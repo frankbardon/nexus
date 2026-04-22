@@ -35,7 +35,7 @@ active:
   - nexus.io.tui
   - nexus.llm.anthropic
   - nexus.agent.react
-  - nexus.memory.conversation
+  - nexus.memory.capped
 ```
 
 ### Coding Assistant
@@ -48,7 +48,7 @@ active:
   - nexus.tool.file
   - nexus.tool.ask
   - nexus.skills
-  - nexus.memory.conversation
+  - nexus.memory.capped
 ```
 
 ### Planned Coding Workflow
@@ -63,7 +63,7 @@ active:
   - nexus.tool.file
   - nexus.tool.ask
   - nexus.skills
-  - nexus.memory.conversation
+  - nexus.memory.capped
   - nexus.memory.compaction
 ```
 
@@ -77,7 +77,7 @@ active:
   - nexus.agent.react
   - nexus.tool.shell
   - nexus.tool.file
-  - nexus.memory.conversation
+  - nexus.memory.capped
   - nexus.control.cancel
 ```
 

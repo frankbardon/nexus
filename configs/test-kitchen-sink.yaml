@@ -82,7 +82,7 @@ plugins:
     - nexus.tool.shell
     - nexus.tool.file
     - nexus.skills
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.memory.longterm
     - nexus.observe.logger
     - nexus.observe.thinking
@@ -148,7 +148,7 @@ plugins:
     max_active_skills: 5
     catalog_in_system_prompt: true
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

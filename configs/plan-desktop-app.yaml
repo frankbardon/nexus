@@ -25,7 +25,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.tool.file
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.agent.react:
     max_iterations: 10
@@ -88,6 +88,6 @@ plugins:
 
   nexus.tool.file:
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true

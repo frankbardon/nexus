@@ -33,7 +33,7 @@ core:
 
 plugins:
   # Some plugins auto-activate others they require (e.g. nexus.agent.react pulls
-  # in nexus.memory.conversation, nexus.control.cancel, and nexus.tool.catalog
+  # in nexus.memory.capped, nexus.control.cancel, and nexus.tool.catalog
   # with sensible defaults). See docs/src/architecture/plugin-system.md for the
   # expansion and merge rules; boot logs show every auto-activation.
   active:
@@ -42,7 +42,7 @@ plugins:
     - nexus.agent.react
     - nexus.agent.subagent
     - nexus.gate.endless_loop
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -57,7 +57,7 @@ plugins:
   nexus.gate.endless_loop:
     max_iterations: 10
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

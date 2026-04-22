@@ -64,7 +64,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.json_schema
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.io.test:
@@ -84,7 +84,7 @@ plugins:
     schema: '{"type":"object","required":["summary","sentiment","topics"],"properties":{"summary":{"type":"string"},"sentiment":{"type":"string","enum":["positive","negative","neutral","mixed"]},"topics":{"type":"array","items":{"type":"string"}}}}'
     max_retries: 3
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 10
     persist: false
 

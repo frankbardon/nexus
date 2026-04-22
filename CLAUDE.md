@@ -66,7 +66,7 @@ Every plugin implements `engine.Plugin` (`pkg/engine/plugin.go`):
 
 `Requires()` lets a plugin declare sibling plugins it needs to function and the default config to use when the user has not configured them. At boot, the lifecycle manager walks `Requires()` transitively starting from the user-declared active list and appends any missing IDs. This is separate from `Dependencies()`: `Dependencies()` only validates boot order, `Requires()` activates.
 
-Each `Requirement` carries **exactly one** of `ID` (concrete plugin ID — e.g. `nexus.memory.conversation`) or `Capability` (abstract capability name — e.g. `memory.history`). Both set on the same `Requirement` fails boot. `Default` and `Optional` apply to whichever form you pick.
+Each `Requirement` carries **exactly one** of `ID` (concrete plugin ID — e.g. `nexus.memory.capped`) or `Capability` (abstract capability name — e.g. `memory.history`). Both set on the same `Requirement` fails boot. `Default` and `Optional` apply to whichever form you pick.
 
 **Merge rule (whole-object replace — no field-level merge).** If the user has supplied **any** config for the resolved ID, the user's config wins entirely and the Requirement's `Default` is discarded. If the user has not supplied a config, `Default` is installed as-is. This keeps precedence predictable.
 
@@ -120,8 +120,8 @@ plugins:
 **Introspection.** `eng.Capabilities() map[string][]string` returns the resolved capability → provider-IDs map after boot. Each plugin receives the same map through `PluginContext.Capabilities` at `Init` — prefer checking `ctx.Capabilities["control.cancel"]` over string-matching specific plugin IDs.
 
 **Currently advertised capabilities:**
-- `memory.history` — `nexus.memory.conversation`
-- `memory.compaction` — `nexus.memory.compaction`
+- `memory.history` — `nexus.memory.simple`, `nexus.memory.capped` (default), `nexus.memory.summary_buffer`
+- `memory.compaction` — `nexus.memory.compaction`, `nexus.memory.summary_buffer` (inline)
 - `memory.longterm` — `nexus.memory.longterm`
 - `control.cancel` — `nexus.control.cancel`
 - `tool.catalog` — `nexus.tool.catalog`
@@ -148,7 +148,10 @@ plugins/
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
-  memory/conversation/   # LLM-native conversation history (roles: user/assistant/tool); serves "memory.history.query"
+  memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
+  memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
+  memory/summary_buffer/ # Inline auto-compacting history; keeps recent N verbatim, LLM-summarizes older (memory.history + memory.compaction)
+  memory/compaction/     # External compaction coordinator; summarizes, emits memory.compacted for history buffers to adopt
   memory/longterm/       # Cross-session long-term memory (file-per-entry, YAML frontmatter + markdown)
   observe/logger/        # Structured event logging
   observe/otel/          # OpenTelemetry trace export via OTLP

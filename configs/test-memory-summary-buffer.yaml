@@ -1,0 +1,66 @@
+# Test: summary_buffer plugin triggers inline summarisation after threshold.
+# Validates: capability resolution selects summary_buffer for memory.history,
+#            message-count threshold fires an llm.request tagged with our
+#            internal _source marker, the summary reply is absorbed and the
+#            history buffer is replaced with [summary, ...recent].
+#
+# Design: Mock mode — four mock responses total:
+#   1. assistant reply to user input 1
+#   2. assistant reply to user input 2
+#   3. assistant reply to user input 3  (threshold trips on append of this msg's tool turn)
+#   4. summary reply (consumed by summary_buffer when it issues its own llm.request)
+#
+# The plugin's threshold is message_count=5, max_recent=2. After 3 user + 3
+# assistant = 6 messages, the trigger fires before the 4th user input. The
+# summary_buffer emits its own llm.request; the mock supplies response #4 as
+# the summary. The plugin's handleLLMResponse notices _source=nexus.memory.summary_buffer
+# and collapses the buffer.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.summary_buffer
+
+  nexus.io.test:
+    inputs:
+      - "msg one"
+      - "msg two"
+      - "msg three"
+      - "msg four"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - content: "reply one"
+      - content: "reply two"
+      - content: "reply three"
+      - content: "SUMMARY OF PRIOR CONTEXT"
+      - content: "reply four"
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Respond literally."
+
+  nexus.memory.summary_buffer:
+    strategy: message_count
+    message_threshold: 5
+    max_recent: 2
+    model_role: quick

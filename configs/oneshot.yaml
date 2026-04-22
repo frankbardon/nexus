@@ -38,7 +38,7 @@ plugins:
     - nexus.io.oneshot
     - nexus.llm.anthropic
     - nexus.agent.react
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.io.oneshot:
@@ -58,7 +58,7 @@ plugins:
     max_iterations: 10
     system_prompt_file: ./prompts/conversationalist.md
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

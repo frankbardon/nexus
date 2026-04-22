@@ -1,4 +1,4 @@
-package conversation
+package capped
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-const pluginID = "nexus.memory.conversation"
+const pluginID = "nexus.memory.capped"
 
 // Plugin maintains a sliding window of LLM-native conversation messages for
 // the active session and exposes them to other plugins (agents, compaction)
@@ -39,7 +39,7 @@ type Plugin struct {
 	persist     bool
 }
 
-// New creates a new conversation memory plugin.
+// New creates a new capped conversation memory plugin.
 func New() engine.Plugin {
 	return &Plugin{
 		maxMessages:     100,
@@ -49,7 +49,7 @@ func New() engine.Plugin {
 }
 
 func (p *Plugin) ID() string                     { return pluginID }
-func (p *Plugin) Name() string                   { return "Conversation Memory" }
+func (p *Plugin) Name() string                   { return "Capped Conversation Memory" }
 func (p *Plugin) Version() string                { return "0.2.0" }
 func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
@@ -331,6 +331,15 @@ func (p *Plugin) appendMessage(msg events.Message) {
 	p.messages = append(p.messages, msg)
 	if len(p.messages) > p.maxMessages {
 		p.messages = p.messages[len(p.messages)-p.maxMessages:]
+		// Pair-safe adjustment: if the cap landed us with leading "tool"
+		// messages, their matching assistant tool_use was in the dropped
+		// prefix. The LLM provider would reject tool results whose
+		// tool_use_id has no preceding declaration, so drop those orphans
+		// too. This undershoots the cap briefly but keeps the buffer
+		// well-formed for the next llm.request.
+		for len(p.messages) > 0 && p.messages[0].Role == "tool" {
+			p.messages = p.messages[1:]
+		}
 	}
 	p.mu.Unlock()
 

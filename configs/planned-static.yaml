@@ -38,7 +38,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.planner.static
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -59,7 +59,7 @@ plugins:
       - description: "Verify correctness"
       - description: "Summarize what was done"
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 
