@@ -21,10 +21,30 @@ type Config struct {
 // CoreConfig holds engine-level settings.
 type CoreConfig struct {
 	LogLevel            string         `yaml:"log_level"`
+	Logging             LoggingConfig  `yaml:"logging"`
 	TickInterval        time.Duration  `yaml:"tick_interval"`
 	MaxConcurrentEvents int            `yaml:"max_concurrent_events"`
 	Sessions            SessionsConfig `yaml:"sessions"`
 	ModelsRaw           map[string]any `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+}
+
+// LoggingConfig controls the engine-wide logging pipeline.
+//
+// The engine logger is a FanoutHandler with a bounded ring buffer and zero or
+// more dynamically-registered sinks. Absent a sink, records live only in the
+// ring until one registers (typically the logger plugin) or they are evicted.
+// This prevents log output from leaking to stdout/stderr when a visual IO
+// plugin owns the terminal.
+type LoggingConfig struct {
+	// BootstrapStderr, when true, registers a stderr sink at engine
+	// construction time so pre-sink records appear on the terminal. Default
+	// false. Rejected by config validation when a known visual transport
+	// plugin (nexus.io.tui, nexus.io.browser, nexus.io.wails) is active,
+	// because interleaving slog output with the UI corrupts the display.
+	BootstrapStderr bool `yaml:"bootstrap_stderr"`
+	// BufferSize is the capacity of the log and event ring buffers. Values
+	// <= 0 default to DefaultLogRingSize.
+	BufferSize int `yaml:"buffer_size"`
 }
 
 // SessionsConfig controls session workspace behavior.
@@ -115,7 +135,44 @@ func LoadConfigFromBytes(data []byte) (*Config, error) {
 		}
 	}
 
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// visualTransportPlugins are base plugin IDs that own the terminal or a
+// webview when active. Writing slog output to stderr while any of these is
+// active corrupts the UI, so BootstrapStderr is rejected in that case.
+var visualTransportPlugins = map[string]bool{
+	"nexus.io.tui":     true,
+	"nexus.io.browser": true,
+	"nexus.io.wails":   true,
+}
+
+// validate is a post-load check. Keep rules narrow: only flag combinations
+// the engine cannot recover from, not stylistic issues.
+func (c *Config) validate() error {
+	if c.Core.Logging.BootstrapStderr {
+		for _, id := range c.Plugins.Active {
+			base := id
+			if i := len(id); i > 0 {
+				// Strip instance suffix ("foo/bar" -> "foo") without pulling
+				// in PluginBaseID to keep this file free of cross-deps.
+				for j := 0; j < i; j++ {
+					if id[j] == '/' {
+						base = id[:j]
+						break
+					}
+				}
+			}
+			if visualTransportPlugins[base] {
+				return fmt.Errorf("invalid config: core.logging.bootstrap_stderr is true but visual transport plugin %q is active; disable bootstrap_stderr or remove the visual plugin", id)
+			}
+		}
+	}
+	return nil
 }
 
 // extractPluginConfigs pulls per-plugin config maps from the plugins section.

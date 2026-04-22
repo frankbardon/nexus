@@ -46,6 +46,10 @@ func (b *mockBus) SubscribeAll(_ engine.HandlerFunc) func() {
 	return func() {}
 }
 
+func (b *mockBus) SubscribeAllReplay(_ engine.HandlerFunc) func() {
+	return func() {}
+}
+
 func (b *mockBus) EmitVetoable(_ string, _ any) (engine.VetoResult, error) {
 	return engine.VetoResult{}, nil
 }

@@ -115,9 +115,28 @@ type PluginContext struct {
 	// specific plugin IDs.
 	Capabilities map[string][]string
 
+	// Logging lets a plugin register itself as a sink for the engine's
+	// structured logger. Intended for the logger plugin (or equivalents);
+	// most plugins should ignore this field. Registration replays buffered
+	// pre-init records, then dispatches live records. See LoggingHost.
+	Logging LoggingHost
+
 	// InstanceID is set when a plugin is activated with an instance suffix
 	// (e.g. "nexus.agent.subagent/researcher"). It contains the full ID
 	// including the suffix. Plugins that support multiple instances should
 	// use this as their identity instead of their hardcoded ID.
 	InstanceID string
+}
+
+// LateShutdown is an optional marker interface. A plugin that implements it
+// and returns true is shut down after every non-late plugin, regardless of
+// its position in dependency order. Late shutdown is intended for observers
+// (loggers, tracers) that must stay active through peer plugins' Shutdown
+// calls so the records emitted during teardown still reach their sink.
+//
+// A late plugin is still initialized in dependency order; only shutdown
+// ordering shifts. Late plugins are shut down among themselves in reverse
+// init order, just like the normal phase.
+type LateShutdown interface {
+	LateShutdown() bool
 }

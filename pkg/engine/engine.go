@@ -30,6 +30,10 @@ type Engine struct {
 	Schemas   *SchemaRegistry
 	System    *SystemInfo
 	Logger    *slog.Logger
+	// Logging is the LoggingHost passed to plugins via PluginContext. It is
+	// the same FanoutHandler that backs Logger — exposed here so embedders
+	// can register their own sinks without waiting for a plugin to do it.
+	Logging LoggingHost
 
 	// RecallSessionID, when set, causes Boot to resume an existing session
 	// instead of creating a new one.
@@ -82,17 +86,27 @@ func NewFromBytes(configBytes []byte) (*Engine, error) {
 // drift on logger setup, bus creation, or lifecycle wiring.
 func newFromConfig(cfg *Config) *Engine {
 	level := parseLogLevel(cfg.Core.LogLevel)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: level,
-	}))
 
-	bus := NewEventBus()
+	// Build the fanout first so every later component (lifecycle, schema
+	// registry, context manager) writes through it from construction time.
+	// Pre-boot records land in the ring until a sink registers.
+	fanout := NewFanoutHandler(cfg.Core.Logging.BufferSize, level)
+	if cfg.Core.Logging.BootstrapStderr {
+		// Config.validate has already rejected the stderr+visual combo, so
+		// it is safe to add the sink here. Callers who want stderr output
+		// during bootstrap (CLI, headless dev) opt in via this flag.
+		fanout.AddLogSink(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	}
+	logger := slog.New(fanout)
+
+	bus := NewEventBusWithRingSize(cfg.Core.Logging.BufferSize)
 	registry := NewPluginRegistry()
 	models := NewModelRegistry(cfg.Core.ModelsRaw)
 	prompts := NewPromptRegistry()
 	schemas := NewSchemaRegistry(logger)
 	system := DetectSystem()
 	lifecycle := NewLifecycleManager(registry, bus, cfg, logger, models, prompts, schemas, system)
+	lifecycle.logging = fanout
 	ctxMgr := NewContextManager(bus, logger)
 
 	return &Engine{
@@ -106,6 +120,7 @@ func newFromConfig(cfg *Config) *Engine {
 		Schemas:   schemas,
 		System:    system,
 		Logger:    logger,
+		Logging:   fanout,
 	}
 }
 
