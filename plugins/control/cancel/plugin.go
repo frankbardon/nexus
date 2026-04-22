@@ -3,6 +3,7 @@ package cancel
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -37,6 +38,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return pluginName }
 func (p *Plugin) Version() string        { return version }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
@@ -51,6 +53,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.resume", p.handleResumeRequest,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
+		// Priority 5 runs before the conversation memory plugin (10) so
+		// "/resume" is translated into a cancel.resume event and the raw
+		// input never lands in history as a user message.
+		p.bus.Subscribe("io.input", p.handleInputCommand,
+			engine.WithPriority(5), engine.WithSource(pluginID)),
 	)
 
 	return nil
@@ -71,13 +78,48 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "agent.turn.end", Priority: 10},
 		{EventType: "cancel.request", Priority: 10},
 		{EventType: "cancel.resume", Priority: 10},
+		{EventType: "before:io.input", Priority: 5},
 	}
 }
 
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"cancel.active",
+		"cancel.resume",
+		"io.output",
 		"io.status",
+	}
+}
+
+// handleInputCommand intercepts the user's raw io.input and translates
+// recognized slash-commands ("/resume" today) into their corresponding
+// control events, vetoing the io.input so the rest of the pipeline —
+// conversation memory, agent history — never records the command as a
+// user message. Unknown commands pass through unchanged.
+func (p *Plugin) handleInputCommand(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	input, ok := vp.Original.(*events.UserInput)
+	if !ok {
+		return
+	}
+	switch strings.TrimSpace(input.Content) {
+	case "/resume":
+		p.mu.Lock()
+		turnID := p.cancelledTurn
+		p.mu.Unlock()
+		if turnID == "" {
+			_ = p.bus.Emit("io.output", events.AgentOutput{
+				Content: "Nothing to resume.",
+				Role:    "system",
+			})
+			vp.Veto = engine.VetoResult{Vetoed: true, Reason: "no cancelled turn to resume"}
+			return
+		}
+		_ = p.bus.Emit("cancel.resume", events.CancelResume{TurnID: turnID})
+		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "consumed /resume command"}
 	}
 }
 

@@ -51,6 +51,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return "Provider Fallback" }
 func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{

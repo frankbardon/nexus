@@ -54,11 +54,27 @@ Nexus embeds in another Go process (e.g. Wails desktop shell) without owning sig
 
 Every plugin implements `engine.Plugin` (`pkg/engine/plugin.go`):
 - `ID() string` — Dotted ID (e.g. `nexus.tool.shell`)
+- `Dependencies() []string` — IDs this plugin needs **already in the active set** for ordering; does NOT activate anything. Boot fails if listed IDs aren't active.
+- `Requires() []Requirement` — IDs this plugin needs to **activate** if absent; engine appends them to the active set at boot. Return `nil` when nothing is required. See Auto-activation below.
 - `Init(ctx PluginContext) error` — Gets config, bus, logger, data dir, session
 - `Ready() error` — Called after all plugins init'd
 - `Shutdown(ctx context.Context) error`
 - `Subscriptions() []EventSubscription` — Events plugin listens to
 - `Emissions() []string` — Event types plugin may emit
+
+### Auto-activation (`Requires()`)
+
+`Requires()` lets a plugin declare sibling plugins it needs to function and the default config to use when the user has not configured them. At boot, the lifecycle manager walks `Requires()` transitively starting from the user-declared active list and appends any missing IDs. This is separate from `Dependencies()`: `Dependencies()` only validates boot order, `Requires()` activates.
+
+**Merge rule (whole-object replace — no field-level merge).** If the user has supplied **any** config for a required ID, the user's config wins entirely and the Requirement's `Default` is discarded. If the user has not supplied a config, `Default` is installed as-is. This keeps precedence predictable.
+
+**Optional requirements.** `Requirement.Optional: true` causes the engine to skip a missing factory with a `WARN` log and continue booting. `Optional: false` (the default) fails boot if the factory is not registered.
+
+**Visibility.** Every auto-activation emits an `INFO` log at boot: `"auto-activating plugin X (required by Y); config source: default|user-override|empty"`. A single `"active plugin set resolved"` line at the end of expansion annotates every entry as `[user]` or `[auto: required-by=Z,config=...]`. Observers (`nexus.observe.logger`, OTel) pick these up through the standard structured fields.
+
+**Currently declared (non-nil) Requires():**
+- `nexus.agent.react` → `nexus.memory.conversation` (default: `max_messages: 100, persist: true`), `nexus.control.cancel`, `nexus.tool.catalog`
+- `nexus.agent.subagent`, `nexus.agent.orchestrator` — still use `Dependencies()`; will migrate as part of the same dedup if their state machines warrant it.
 
 ### Event Flow
 
@@ -77,11 +93,12 @@ plugins/
   providers/fanout/      # Parallel multi-provider dispatch (config-driven fanout roles in core.models)
   tools/shell/           # Sandboxed shell execution
   tools/fileio/          # File read/write with base dir restriction
+  tools/catalog/         # Shared tool registry; agents query via "tool.catalog.query"
   io/tui/                # Terminal UI
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
-  memory/conversation/   # Conversation history persistence
+  memory/conversation/   # LLM-native conversation history (roles: user/assistant/tool); serves "memory.history.query"
   memory/longterm/       # Cross-session long-term memory (file-per-entry, YAML frontmatter + markdown)
   observe/logger/        # Structured event logging
   observe/otel/          # OpenTelemetry trace export via OTLP

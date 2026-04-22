@@ -67,6 +67,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return "Oneshot IO" }
 func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
@@ -86,6 +87,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"io.input",
+		"before:io.input",
 		"io.approval.response",
 		"plan.approval.response",
 		"io.ask.response",
@@ -170,9 +172,11 @@ func (p *Plugin) Ready() error {
 		p.inputSent = true
 		p.mu.Unlock()
 
-		_ = p.bus.Emit("io.input", events.UserInput{
-			Content: prompt,
-		})
+		input := events.UserInput{Content: prompt}
+		if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
+			return
+		}
+		_ = p.bus.Emit("io.input", input)
 	}()
 
 	return nil

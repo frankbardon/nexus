@@ -83,6 +83,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return "Test IO" }
 func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
@@ -104,6 +105,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"io.input",
+		"before:io.input",
 		"io.approval.response",
 		"plan.approval.response",
 		"io.ask.response",
@@ -269,9 +271,11 @@ func (p *Plugin) feedInputs() {
 		p.mu.Unlock()
 
 		p.logger.Info("test IO sending input", "index", i, "content_len", len(input))
-		_ = p.bus.Emit("io.input", events.UserInput{
-			Content: input,
-		})
+		payload := events.UserInput{Content: input}
+		if veto, err := p.bus.EmitVetoable("before:io.input", &payload); err == nil && veto.Vetoed {
+			continue
+		}
+		_ = p.bus.Emit("io.input", payload)
 	}
 
 	p.mu.Lock()

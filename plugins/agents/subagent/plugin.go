@@ -48,6 +48,7 @@ func (p *Plugin) ID() string             { return p.instanceID }
 func (p *Plugin) Name() string           { return pluginName }
 func (p *Plugin) Version() string        { return version }
 func (p *Plugin) Dependencies() []string { return []string{"nexus.agent.react"} }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

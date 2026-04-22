@@ -14,7 +14,12 @@ import (
 
 const pluginID = "nexus.memory.conversation"
 
-// Plugin maintains a sliding window of conversation messages in memory.
+// Plugin maintains a sliding window of LLM-native conversation messages for
+// the active session and exposes them to other plugins (agents, compaction)
+// via a synchronous bus query. Storage format mirrors events.Message exactly
+// — roles are "user", "assistant" (with ToolCalls populated when the model
+// requested tools), and "tool" (with ToolCallID) — so consumers can feed
+// the buffer directly into an LLMRequest without translation.
 type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
@@ -26,8 +31,8 @@ type Plugin struct {
 
 	// internalCallIDs tracks ToolCall IDs marked ParentCallID!="" — i.e.
 	// sub-calls fired from inside another tool (e.g. run_code scripts).
-	// Their invoke/result pair is excluded from history so we never send
-	// the LLM tool_use_ids it didn't generate.
+	// Their result is excluded from history so the LLM never sees
+	// tool_use_ids it didn't generate.
 	internalCallIDs map[string]struct{}
 
 	maxMessages int
@@ -43,19 +48,21 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return "Conversation Memory" }
-func (p *Plugin) Version() string        { return "0.1.0" }
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return "Conversation Memory" }
+func (p *Plugin) Version() string                { return "0.2.0" }
+func (p *Plugin) Dependencies() []string         { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.input", Priority: 10},
-		{EventType: "io.output", Priority: 10},
+		{EventType: "llm.response", Priority: 10},
 		{EventType: "tool.invoke", Priority: 10},
 		{EventType: "tool.result", Priority: 10},
 		{EventType: "memory.store", Priority: 50},
 		{EventType: "memory.query", Priority: 50},
+		{EventType: "memory.history.query", Priority: 50},
 		{EventType: "memory.compacted", Priority: 50},
 	}
 }
@@ -69,7 +76,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.session = ctx.Session
 
-	// Read config.
 	if v, ok := ctx.Config["max_messages"]; ok {
 		if n, ok := v.(int); ok && n > 0 {
 			p.maxMessages = n
@@ -83,11 +89,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInput, engine.WithPriority(10), engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.output", p.handleOutput, engine.WithPriority(10), engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.response", p.handleLLMResponse, engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("memory.store", p.handleStore, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("memory.query", p.handleQuery, engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("memory.history.query", p.handleHistoryQuery, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("memory.compacted", p.handleCompacted, engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
@@ -96,7 +103,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 }
 
 func (p *Plugin) Ready() error {
-	// Preload conversation history if recalling a session with existing data.
 	if p.session != nil && p.session.FileExists("context/conversation.jsonl") {
 		if err := p.loadHistory(); err != nil {
 			p.logger.Warn("failed to preload conversation history", "error", err)
@@ -105,7 +111,6 @@ func (p *Plugin) Ready() error {
 	return nil
 }
 
-// loadHistory reads persisted conversation messages from the session workspace.
 func (p *Plugin) loadHistory() error {
 	data, err := p.session.ReadFile("context/conversation.jsonl")
 	if err != nil {
@@ -129,7 +134,6 @@ func (p *Plugin) loadHistory() error {
 		p.messages = append(p.messages, msg)
 	}
 
-	// Apply sliding window.
 	if len(p.messages) > p.maxMessages {
 		p.messages = p.messages[len(p.messages)-p.maxMessages:]
 	}
@@ -145,7 +149,9 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// GetHistory returns the current message buffer.
+// GetHistory returns a copy of the current message buffer. Retained for
+// in-process callers (tests, embedders) — event-driven consumers should use
+// the "memory.history.query" bus event instead.
 func (p *Plugin) GetHistory() []events.Message {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -159,25 +165,34 @@ func (p *Plugin) handleInput(e engine.Event[any]) {
 	if !ok {
 		return
 	}
-	msg := events.Message{
+	p.appendMessage(events.Message{
 		Role:    "user",
 		Content: input.Content,
-	}
-	p.appendMessage(msg)
+	})
 }
 
-func (p *Plugin) handleOutput(e engine.Event[any]) {
-	out, ok := e.Payload.(events.AgentOutput)
+// handleLLMResponse records the model's assistant message in native form,
+// preserving any ToolCalls so the next request carries a matched tool_use →
+// tool_result pair structure. Skips responses tagged for other plugins (e.g.
+// planner-internal calls that use Metadata["_source"]).
+func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
+	resp, ok := e.Payload.(events.LLMResponse)
 	if !ok {
 		return
 	}
-	msg := events.Message{
-		Role:    out.Role,
-		Content: out.Content,
+	if source, _ := resp.Metadata["_source"].(string); source != "" {
+		return
 	}
-	p.appendMessage(msg)
+	p.appendMessage(events.Message{
+		Role:      "assistant",
+		Content:   resp.Content,
+		ToolCalls: resp.ToolCalls,
+	})
 }
 
+// handleToolInvoke only tracks the internal-call filter; the invocation
+// itself is already represented on the prior assistant message's ToolCalls
+// field, so we don't append anything here.
 func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	tc, ok := e.Payload.(events.ToolCall)
 	if !ok {
@@ -187,15 +202,7 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 		p.mu.Lock()
 		p.internalCallIDs[tc.ID] = struct{}{}
 		p.mu.Unlock()
-		return
 	}
-	content, _ := json.Marshal(tc.Arguments)
-	msg := events.Message{
-		Role:       "tool_invoke",
-		Content:    fmt.Sprintf("[%s] %s", tc.Name, string(content)),
-		ToolCallID: tc.ID,
-	}
-	p.appendMessage(msg)
 }
 
 func (p *Plugin) handleToolResult(e engine.Event[any]) {
@@ -210,16 +217,16 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 		return
 	}
 	p.mu.Unlock()
+
 	content := result.Output
 	if result.Error != "" {
 		content = "Error: " + result.Error
 	}
-	msg := events.Message{
-		Role:       "tool_result",
-		Content:    fmt.Sprintf("[%s] %s", result.Name, content),
+	p.appendMessage(events.Message{
+		Role:       "tool",
+		Content:    content,
 		ToolCallID: result.ID,
-	}
-	p.appendMessage(msg)
+	})
 }
 
 func (p *Plugin) handleStore(e engine.Event[any]) {
@@ -227,11 +234,10 @@ func (p *Plugin) handleStore(e engine.Event[any]) {
 	if !ok {
 		return
 	}
-	msg := events.Message{
+	p.appendMessage(events.Message{
 		Role:    entry.Key,
 		Content: entry.Content,
-	}
-	p.appendMessage(msg)
+	})
 }
 
 func (p *Plugin) handleQuery(e engine.Event[any]) {
@@ -253,7 +259,6 @@ func (p *Plugin) handleQuery(e engine.Event[any]) {
 	}
 	p.mu.RUnlock()
 
-	// Apply limit.
 	if query.Limit > 0 && len(matched) > query.Limit {
 		matched = matched[len(matched)-query.Limit:]
 	}
@@ -262,6 +267,21 @@ func (p *Plugin) handleQuery(e engine.Event[any]) {
 		Entries: matched,
 		Query:   query.Query,
 	})
+}
+
+// handleHistoryQuery satisfies synchronous requests for the LLM-native message
+// list. Handler mutates the HistoryQuery pointer in place; caller reads
+// q.Messages after Emit returns (same pattern as VetoablePayload).
+func (p *Plugin) handleHistoryQuery(e engine.Event[any]) {
+	q, ok := e.Payload.(*events.HistoryQuery)
+	if !ok {
+		return
+	}
+	p.mu.RLock()
+	out := make([]events.Message, len(p.messages))
+	copy(out, p.messages)
+	p.mu.RUnlock()
+	q.Messages = out
 }
 
 func (p *Plugin) handleCompacted(e engine.Event[any]) {
@@ -275,7 +295,6 @@ func (p *Plugin) handleCompacted(e engine.Event[any]) {
 	copy(p.messages, cc.Messages)
 	p.mu.Unlock()
 
-	// Re-persist the compacted conversation, replacing the existing file.
 	if p.persist && p.session != nil {
 		var buf []byte
 		for _, msg := range cc.Messages {
@@ -303,7 +322,6 @@ func (p *Plugin) appendMessage(msg events.Message) {
 	}
 	p.mu.Unlock()
 
-	// Persist to session workspace if enabled.
 	if p.persist && p.session != nil {
 		data, err := json.Marshal(msg)
 		if err != nil {

@@ -8,48 +8,49 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// TestToolResult_SkipsInternalCalls proves that tool.invoke/tool.result
-// pairs marked ParentCallID!="" never land in conversation history. The
+// TestToolResult_SkipsInternalCalls proves that tool.result events for
+// calls marked ParentCallID!="" never land in conversation history. The
 // behaviour exists so run_code scripts can dispatch inner tool calls
 // through the bus (gates still fire) without poisoning the LLM message
-// stack with tool_use_ids the provider never generated.
+// stack with tool_use_ids the provider never generated. Under the native
+// format, the outer call itself is represented on the prior assistant
+// message's ToolCalls field (recorded by handleLLMResponse), so only the
+// outer result appears as a distinct "tool" role message.
 func TestToolResult_SkipsInternalCalls(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
 	p.persist = false
 
-	// Outer call — the LLM-facing run_code invocation. ParentCallID is empty.
+	// Outer call — the LLM-facing run_code invocation. Only the internal
+	// filter state is updated; the call itself is not appended.
 	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
 		ID:   "outer-1",
 		Name: "run_code",
 	}})
-	// Inner call dispatched by the script. ParentCallID is non-empty.
+	// Inner call dispatched by the script. ParentCallID flags it internal.
 	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
 		ID:           "code-inner-1",
 		Name:         "discover",
 		ParentCallID: "outer-1",
 	}})
-	// Inner result.
+	// Inner result — filtered out because its ID was flagged internal.
 	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
 		ID:     "code-inner-1",
 		Name:   "discover",
 		Output: "{}",
 	}})
-	// Outer result.
+	// Outer result — lands in history as a tool-role message.
 	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
 		ID:     "outer-1",
 		Name:   "run_code",
 		Output: "ok",
 	}})
 
-	if n := len(p.messages); n != 2 {
-		t.Fatalf("expected 2 messages (outer invoke + outer result), got %d: %+v", n, p.messages)
+	if n := len(p.messages); n != 1 {
+		t.Fatalf("expected 1 message (outer result only; invocation lives on prior assistant.ToolCalls), got %d: %+v", n, p.messages)
 	}
-	if p.messages[0].ToolCallID != "outer-1" || p.messages[0].Role != "tool_invoke" {
+	if p.messages[0].ToolCallID != "outer-1" || p.messages[0].Role != "tool" || p.messages[0].Content != "ok" {
 		t.Errorf("msg[0] wrong: %+v", p.messages[0])
-	}
-	if p.messages[1].ToolCallID != "outer-1" || p.messages[1].Role != "tool_result" {
-		t.Errorf("msg[1] wrong: %+v", p.messages[1])
 	}
 	if len(p.internalCallIDs) != 0 {
 		t.Errorf("internalCallIDs should be empty after matching result, got %v", p.internalCallIDs)

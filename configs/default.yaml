@@ -32,6 +32,10 @@ core:
     id_format: datetime_short
 
 plugins:
+  # Some plugins auto-activate others they require (e.g. nexus.agent.react pulls
+  # in nexus.memory.conversation, nexus.control.cancel, and nexus.tool.catalog
+  # with sensible defaults). See docs/src/architecture/plugin-system.md for the
+  # expansion and merge rules; boot logs show every auto-activation.
   active:
     - nexus.io.tui
     - nexus.llm.anthropic

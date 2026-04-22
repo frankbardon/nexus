@@ -11,7 +11,8 @@ type Plugin interface {
     ID() string                              // Unique identifier (e.g., "nexus.tool.shell")
     Name() string                            // Human-readable name
     Version() string                         // Version string
-    Dependencies() []string                  // Plugin IDs this depends on
+    Dependencies() []string                  // IDs that must ALREADY be active (orders boot)
+    Requires() []Requirement                 // IDs to auto-activate if absent (see below)
     Init(ctx PluginContext) error             // Initialize with engine services
     Ready() error                            // Called after all plugins initialized
     Shutdown(ctx context.Context) error       // Graceful teardown
@@ -19,6 +20,54 @@ type Plugin interface {
     Emissions() []string                     // Event types this plugin may emit
 }
 ```
+
+### `Dependencies()` vs `Requires()`
+
+Two related but distinct methods:
+
+- **`Dependencies()`** only *validates* that the listed IDs are already active and *orders* boot (topological sort). If an ID in the list is missing, boot fails. It never activates anything.
+- **`Requires()`** *activates* missing siblings with default config. At boot, the lifecycle walks `Requires()` transitively from the user-declared active list and appends any missing IDs before the topological sort runs.
+
+Return `Requires() []Requirement { return nil }` when a plugin has no hard siblings.
+
+### Auto-activation semantics
+
+```go
+type Requirement struct {
+    ID       string            // plugin to auto-activate
+    Default  map[string]any    // config used only when user has not configured ID
+    Optional bool              // true → skip silently with WARN when factory is unregistered
+}
+```
+
+**Merge rule: whole-object replace.** If the user supplies *any* config for the required ID, the user's config wins entirely and `Default` is discarded. There is no field-level merge. This keeps precedence predictable and avoids surprise overrides.
+
+**Cycles.** A cycle in `Requires()` is detected the same way as a `Dependencies()` cycle — boot fails with a clear error.
+
+**Visibility.** Every auto-activation emits an `INFO` log at boot:
+
+```
+auto-activating plugin nexus.memory.conversation (required by nexus.agent.react); config_source=default
+```
+
+After expansion completes, a single `"active plugin set resolved"` line lists every entry annotated `[user]` (declared in config) or `[auto: required-by=X,config=default|user-override]`. Missing optional requirements log `WARN` and boot proceeds.
+
+**Example: ReAct's `Requires()`.**
+
+```go
+func (p *Plugin) Requires() []engine.Requirement {
+    return []engine.Requirement{
+        {
+            ID: "nexus.memory.conversation",
+            Default: map[string]any{"max_messages": 100, "persist": true},
+        },
+        {ID: "nexus.control.cancel"},
+        {ID: "nexus.tool.catalog"},
+    }
+}
+```
+
+When a user's config lists only `nexus.agent.react` in `plugins.active`, the engine automatically brings in the conversation, cancel, and catalog plugins at boot. Users can still override any of them by listing the ID in `plugins.active` with their own config map.
 
 ## Plugin Context
 

@@ -41,6 +41,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return "Output Length Gate" }
 func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

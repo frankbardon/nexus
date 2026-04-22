@@ -17,10 +17,21 @@ import (
 const (
 	pluginID   = "nexus.agent.react"
 	pluginName = "ReAct Agent"
-	version    = "0.1.0"
+	version    = "0.2.0"
 )
 
 // Plugin implements the ReAct (Reason + Act) agent loop.
+//
+// Conversation history, tool registration, and streaming display are owned
+// by sibling plugins (nexus.memory.conversation, nexus.tool.catalog, and the
+// IO plugins respectively); ReAct queries them per-turn via the bus instead
+// of maintaining its own copies. Slash-command parsing is handled by
+// nexus.control.cancel via a before:io.input veto.
+//
+// The plugin declares its hard dependencies via Requires() so the engine
+// auto-activates them with sensible defaults when the user has not listed
+// them explicitly. See docs/plugins/auto-activation.md and CLAUDE.md for
+// the expansion and merge rules.
 type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
@@ -34,35 +45,27 @@ type Plugin struct {
 	maxConcurrent    int
 
 	mu                 sync.Mutex
-	history            []events.Message
-	registeredTools    []events.ToolDef
 	skillContexts      []string
 	currentTurnID      string
 	currentPlan        *events.PlanResult
 	currentPlanStep    int // index into currentPlan.Steps; -1 when no plan is active
 	iteration          int
 	pendingToolCalls   int
-	streamed           bool
 	cancelled          bool
 	toolChoiceOverride *toolChoiceOverride
-	// Parallel-dispatch barrier: when parallelTools is true, tool results
-	// buffer here keyed by ToolCall.ID and are flushed to history in the
-	// order given by expectedToolIDs once all arrive. Empty in sequential
-	// mode — that path appends to history as results land.
-	expectedToolIDs []string
-	pendingResults  map[string]events.ToolResult
+	// internalCallIDs tracks ToolCall.IDs with ParentCallID!="" — sub-calls
+	// dispatched from inside another tool (run_code scripts are the canonical
+	// case). Their results share the outer call's TurnID, so the agent's
+	// pendingToolCalls counter would otherwise decrement on inner results
+	// and short-circuit the outer turn. Conversation history filtering is
+	// a separate concern owned by nexus.memory.conversation.
+	internalCallIDs map[string]struct{}
 	// turnCtx is cancelled on user interrupt or new turn. Workers queued
 	// behind the semaphore check it before emitting tool.invoke so calls
 	// that never got a slot unwind with a synthetic error.
 	turnCtx    context.Context
 	turnCancel context.CancelFunc
-	// internalCallIDs tracks tool_use_ids dispatched from inside another
-	// tool (ToolCall.ParentCallID != ""). Their results must not reach
-	// p.history — otherwise the next LLM request carries tool_use_ids the
-	// provider never generated (run_code's inner script calls are the
-	// canonical example).
-	internalCallIDs map[string]struct{}
-	unsubs          []func()
+	unsubs     []func()
 }
 
 // New creates a new ReAct agent plugin.
@@ -76,6 +79,37 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return pluginName }
 func (p *Plugin) Version() string        { return version }
 func (p *Plugin) Dependencies() []string { return nil }
+
+// Requires declares the sibling plugins ReAct needs to function.
+//
+// nexus.memory.conversation is the source of truth for LLM-native history;
+// ReAct queries it via "memory.history.query" rather than maintaining its
+// own p.history. Default config gives it a 100-message sliding window with
+// persistence on — the same setup the default profile has used historically.
+//
+// nexus.control.cancel owns the /resume slash command and cancel turn
+// tracking; without it, /resume typed by the user would land in history
+// as a literal message.
+//
+// nexus.tool.catalog is the shared tool registry; ReAct queries it via
+// "tool.catalog.query" to build each LLM request's tools list.
+//
+// Auto-activation obeys the merge rule documented in engine.Requirement:
+// if the user has supplied any config for one of these IDs, the user's
+// config wins entirely and Default is discarded.
+func (p *Plugin) Requires() []engine.Requirement {
+	return []engine.Requirement{
+		{
+			ID: "nexus.memory.conversation",
+			Default: map[string]any{
+				"max_messages": 100,
+				"persist":      true,
+			},
+		},
+		{ID: "nexus.control.cancel"},
+		{ID: "nexus.tool.catalog"},
+	}
+}
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
@@ -114,7 +148,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.maxConcurrent = int(v)
 	}
 
-	// Register event handlers.
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInputEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
@@ -124,21 +157,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleLLMResponseEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
-		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunkEvent,
-			engine.WithPriority(50), engine.WithSource(pluginID)),
-		p.bus.Subscribe("llm.stream.end", p.handleStreamEndEvent,
-			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.loaded", p.handleSkillLoadedEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
-		p.bus.Subscribe("tool.register", p.handleToolRegisterEvent,
-			engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.result", p.handlePlanResultEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.active", p.handleCancelEvent,
 			engine.WithPriority(20), engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.resume", p.handleResumeEvent,
-			engine.WithPriority(50), engine.WithSource(pluginID)),
-		p.bus.Subscribe("memory.compacted", p.handleCompactedEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("gate.llm.retry", p.handleGateRetry,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
@@ -171,13 +196,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "tool.result", Priority: 50},
 		{EventType: "llm.response", Priority: 50},
-		{EventType: "llm.stream.chunk", Priority: 50},
-		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "skill.loaded", Priority: 50},
 		{EventType: "plan.result", Priority: 50},
 		{EventType: "cancel.active", Priority: 20},
 		{EventType: "cancel.resume", Priority: 50},
-		{EventType: "memory.compacted", Priority: 50},
 		{EventType: "gate.llm.retry", Priority: 50},
 		{EventType: "agent.tool_choice", Priority: 50},
 	}
@@ -193,8 +215,6 @@ func (p *Plugin) Emissions() []string {
 		"tool.result",
 		"before:io.output",
 		"io.output",
-		"io.output.stream",
-		"io.output.stream.end",
 		"io.status",
 		"agent.turn.start",
 		"agent.turn.end",
@@ -240,7 +260,6 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 	p.mu.Unlock()
 
 	if !result.Approved || len(result.Steps) == 0 {
-		// Plan was rejected or empty — emit output and end turn.
 		_ = p.bus.Emit("io.output", events.AgentOutput{
 			Content: "Plan was not approved. Please try again with a different request.",
 			Role:    "system",
@@ -258,8 +277,9 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 }
 
 // handleToolInvokeEvent flags any ToolCall with a non-empty ParentCallID as
-// internal — its matching result will be dropped in handleToolResult so the
-// LLM never sees tool_use_ids it didn't generate.
+// internal so its matching result is ignored by handleToolResult's pending
+// count. Conversation-history filtering is a separate concern owned by
+// nexus.memory.conversation.
 func (p *Plugin) handleToolInvokeEvent(event engine.Event[any]) {
 	tc, ok := event.Payload.(events.ToolCall)
 	if !ok || tc.ParentCallID == "" {
@@ -276,56 +296,10 @@ func (p *Plugin) handleToolResultEvent(event engine.Event[any]) {
 	}
 }
 
-func (p *Plugin) handleStreamChunkEvent(event engine.Event[any]) {
-	chunk, ok := event.Payload.(events.StreamChunk)
-	if !ok || chunk.Content == "" {
-		return
-	}
-	p.mu.Lock()
-	if p.cancelled {
-		p.mu.Unlock()
-		return
-	}
-	p.streamed = true
-	p.mu.Unlock()
-	_ = p.bus.Emit("io.output.stream", events.OutputChunk{
-		Content: chunk.Content,
-		TurnID:  chunk.TurnID,
-		Index:   chunk.Index,
-	})
-}
-
-func (p *Plugin) handleStreamEndEvent(event engine.Event[any]) {
-	end, ok := event.Payload.(events.StreamEnd)
-	if !ok {
-		return
-	}
-	p.mu.Lock()
-	if p.cancelled {
-		p.mu.Unlock()
-		return
-	}
-	p.mu.Unlock()
-	_ = p.bus.Emit("io.output.stream.end", events.StreamRef{
-		TurnID: end.TurnID,
-	})
-}
-
 func (p *Plugin) handleSkillLoadedEvent(event engine.Event[any]) {
 	if content, ok := event.Payload.(events.SkillContent); ok {
 		p.handleSkillLoaded(content)
 	}
-}
-
-func (p *Plugin) handleToolRegisterEvent(event engine.Event[any]) {
-	td, ok := event.Payload.(events.ToolDef)
-	if !ok {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.registeredTools = append(p.registeredTools, td)
-	p.logger.Info("registered tool", "name", td.Name)
 }
 
 // Cancel/resume handlers.
@@ -345,8 +319,6 @@ func (p *Plugin) handleCancelEvent(event engine.Event[any]) {
 	turnID := p.currentTurnID
 	p.cancelled = true
 	p.pendingToolCalls = 0
-	p.expectedToolIDs = nil
-	p.pendingResults = nil
 	if p.turnCancel != nil {
 		p.turnCancel()
 		p.turnCancel = nil
@@ -401,18 +373,6 @@ func (p *Plugin) handleResumeEvent(event engine.Event[any]) {
 	p.sendLLMRequest()
 }
 
-func (p *Plugin) handleCompactedEvent(event engine.Event[any]) {
-	cc, ok := event.Payload.(events.CompactionComplete)
-	if !ok {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.history = make([]events.Message, len(cc.Messages))
-	copy(p.history, cc.Messages)
-	p.logger.Info("history replaced by compaction", "messages", len(cc.Messages))
-}
-
 // handleToolChoiceEvent processes dynamic tool choice overrides from other plugins.
 func (p *Plugin) handleToolChoiceEvent(event engine.Event[any]) {
 	atc, ok := event.Payload.(events.AgentToolChoice)
@@ -448,26 +408,6 @@ func (p *Plugin) handleGateRetry(_ engine.Event[any]) {
 // Core logic.
 
 func (p *Plugin) handleInput(input events.UserInput) {
-	// Handle /resume command.
-	if strings.TrimSpace(input.Content) == "/resume" {
-		p.mu.Lock()
-		if !p.cancelled {
-			p.mu.Unlock()
-			_ = p.bus.Emit("io.output", events.AgentOutput{
-				Content: "Nothing to resume.",
-				Role:    "system",
-			})
-			return
-		}
-		turnID := p.currentTurnID
-		p.mu.Unlock()
-
-		_ = p.bus.Emit("cancel.resume", events.CancelResume{
-			TurnID: turnID,
-		})
-		return
-	}
-
 	p.mu.Lock()
 
 	// Start a new turn.
@@ -476,9 +416,6 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.currentPlanStep = -1
 	p.iteration = 0
 	p.pendingToolCalls = 0
-	p.expectedToolIDs = nil
-	p.pendingResults = nil
-	p.streamed = false
 	p.toolChoiceOverride = nil
 	if p.turnCancel != nil {
 		p.turnCancel()
@@ -486,16 +423,9 @@ func (p *Plugin) handleInput(input events.UserInput) {
 		p.turnCtx = nil
 	}
 
-	// Add user message to history.
-	p.history = append(p.history, events.Message{
-		Role:    "user",
-		Content: input.Content,
-	})
-
 	turnID := p.currentTurnID
 	p.mu.Unlock()
 
-	// Emit turn start.
 	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{
 		TurnID:    turnID,
 		Iteration: 0,
@@ -523,29 +453,17 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 		return
 	}
 
-	// Add assistant message to history.
-	assistantMsg := events.Message{
-		Role:      "assistant",
-		Content:   resp.Content,
-		ToolCalls: resp.ToolCalls,
-	}
-	p.history = append(p.history, assistantMsg)
 	p.iteration++
 
 	turnID := p.currentTurnID
 	iteration := p.iteration
 
 	if len(resp.ToolCalls) > 0 {
-		// Iteration limiting now handled by nexus.gate.endless_loop plugin.
+		// Iteration limiting handled by nexus.gate.endless_loop plugin.
 		p.pendingToolCalls = len(resp.ToolCalls)
 
 		parallel := p.parallelTools && len(resp.ToolCalls) > 1
 		if parallel {
-			p.expectedToolIDs = make([]string, len(resp.ToolCalls))
-			p.pendingResults = make(map[string]events.ToolResult, len(resp.ToolCalls))
-			for i, tc := range resp.ToolCalls {
-				p.expectedToolIDs[i] = tc.ID
-			}
 			if p.turnCancel != nil {
 				p.turnCancel()
 			}
@@ -611,8 +529,13 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 		// Parallel dispatch: gates evaluate serially first (preserves gate
 		// state per gate priority), then passing calls fan out into bounded
-		// goroutines. Vetoed calls emit synthetic results directly so the
-		// barrier fills.
+		// goroutines. Vetoed calls emit synthetic results directly.
+		//
+		// Unlike the v1 barrier, results land in conversation history in
+		// completion order rather than LLM-returned order. Both Anthropic
+		// and OpenAI tolerate out-of-order tool_result blocks as long as
+		// tool_use_ids match; if a future provider rejects that, the
+		// reorder would belong in nexus.memory.conversation, not here.
 		type prepared struct {
 			call       events.ToolCall
 			vetoed     bool
@@ -639,11 +562,6 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			}
 		}
 
-		// Emit synthetic results for vetoed calls on this goroutine so the
-		// barrier accounting is deterministic before any worker starts.
-		// Skip the `before:tool.result` vetoable path: these are agent-
-		// generated policy-denial notices, not tool-produced output, so
-		// re-gating them would only risk hanging the barrier.
 		for _, pr := range prep {
 			if !pr.vetoed {
 				continue
@@ -656,10 +574,6 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			})
 		}
 
-		// Dispatch passing calls in bounded goroutines. Each worker emits
-		// `tool.invoke` which the tool plugin handles inline (synchronous
-		// bus), so the tool runs on the worker goroutine and tool.result
-		// lands via handleToolResult's barrier buffer.
 		sem := make(chan struct{}, maxConc)
 		for _, pr := range prep {
 			if pr.vetoed {
@@ -670,8 +584,6 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				select {
 				case sem <- struct{}{}:
 				case <-turnCtx.Done():
-					// Cancelled before we acquired a slot — emit synthetic
-					// error so the barrier fills and the turn can unwind.
 					_ = p.bus.Emit("tool.result", events.ToolResult{
 						ID:     call.ID,
 						Name:   call.Name,
@@ -698,14 +610,12 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 	// No tool calls: check if there are remaining plan steps before finishing.
 	if p.currentPlan != nil && p.currentPlanStep >= 0 {
-		// Mark the current step as completed.
 		if p.currentPlanStep < len(p.currentPlan.Steps) {
 			p.currentPlan.Steps[p.currentPlanStep].Status = "completed"
 		}
 
 		p.currentPlanStep++
 		if p.currentPlanStep < len(p.currentPlan.Steps) {
-			// More steps remain — advance and continue the loop.
 			stepIdx := p.currentPlanStep
 			p.mu.Unlock()
 
@@ -714,24 +624,21 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			p.sendLLMRequest()
 			return
 		}
-		// All steps completed — emit final progress update, then fall through to output.
 		p.mu.Unlock()
 		p.emitPlanProgress()
 		p.mu.Lock()
 	}
 
-	streamed := p.streamed
-	p.streamed = false
 	p.mu.Unlock()
 
 	p.emitStatus("idle", "")
 
-	// Emit vetoable before:io.output.
+	// Emit vetoable before:io.output. Content came from llm.response and was
+	// already recorded by nexus.memory.conversation at priority 10.
 	output := events.AgentOutput{
-		Content:  resp.Content,
-		Role:     "assistant",
-		TurnID:   turnID,
-		Metadata: map[string]any{"streamed": streamed},
+		Content: resp.Content,
+		Role:    "assistant",
+		TurnID:  turnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {
 		p.logger.Info("io.output vetoed", "reason", veto.Reason)
@@ -753,8 +660,8 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 	p.mu.Lock()
 
 	// Drop results for internal sub-calls (e.g. run_code script dispatches)
-	// before they land in history. Their invoke was flagged in
-	// handleToolInvokeEvent via ParentCallID.
+	// so the pending count only reflects LLM-requested calls. The invoke
+	// was flagged in handleToolInvokeEvent via ParentCallID.
 	if _, internal := p.internalCallIDs[result.ID]; internal {
 		delete(p.internalCallIDs, result.ID)
 		p.mu.Unlock()
@@ -767,55 +674,8 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 		return
 	}
 
-	// Parallel-dispatch path: buffer results and flush to history in
-	// LLM-returned order once all have arrived. expectedToolIDs is non-nil
-	// only while a parallel batch is in flight.
-	if len(p.expectedToolIDs) > 0 {
-		p.pendingResults[result.ID] = result
-		p.pendingToolCalls--
-		allDone := p.pendingToolCalls <= 0
-
-		if !allDone {
-			p.mu.Unlock()
-			return
-		}
-
-		for _, id := range p.expectedToolIDs {
-			r, ok := p.pendingResults[id]
-			if !ok {
-				continue
-			}
-			content := r.Output
-			if r.Error != "" {
-				content = "Error: " + r.Error
-			}
-			p.history = append(p.history, events.Message{
-				Role:       "tool",
-				Content:    content,
-				ToolCallID: r.ID,
-			})
-		}
-		p.expectedToolIDs = nil
-		p.pendingResults = nil
-		p.mu.Unlock()
-
-		p.emitStatus("thinking", "Processing tool results")
-		p.sendLLMRequest()
-		return
-	}
-
-	// Sequential path: append as results arrive (original behavior).
-	content := result.Output
-	if result.Error != "" {
-		content = "Error: " + result.Error
-	}
-
-	p.history = append(p.history, events.Message{
-		Role:       "tool",
-		Content:    content,
-		ToolCallID: result.ID,
-	})
-
+	// Conversation plugin records the result at priority 10; ReAct at 50
+	// only needs to track the in-flight count so it knows when to proceed.
 	p.pendingToolCalls--
 	allDone := p.pendingToolCalls <= 0
 	p.mu.Unlock()
@@ -874,7 +734,23 @@ func (p *Plugin) sendLLMRequest() {
 	}
 	systemPrompt := sysBuilder.String()
 
-	// Build messages: system prompt + conversation history.
+	// Resolve tool choice for this iteration.
+	tc := resolveToolChoice(p.toolChoiceCfg, p.iteration, &p.toolChoiceOverride)
+
+	p.mu.Unlock()
+
+	// Query conversation history (LLM-native format) from the memory plugin.
+	// The bus dispatches synchronously, so hq.Messages is populated by the
+	// time Emit returns. Nil result means no memory plugin answered —
+	// treated as empty history, which is still a valid request.
+	hq := &events.HistoryQuery{}
+	_ = p.bus.Emit("memory.history.query", hq)
+
+	// Query tool catalog (registered tool definitions) from the catalog
+	// plugin. Same pointer-mutation pattern as HistoryQuery.
+	tq := &events.ToolCatalogQuery{}
+	_ = p.bus.Emit("tool.catalog.query", tq)
+
 	var messages []events.Message
 	if systemPrompt != "" {
 		messages = append(messages, events.Message{
@@ -882,21 +758,12 @@ func (p *Plugin) sendLLMRequest() {
 			Content: systemPrompt,
 		})
 	}
-	messages = append(messages, p.history...)
-
-	// Copy registered tools.
-	tools := make([]events.ToolDef, len(p.registeredTools))
-	copy(tools, p.registeredTools)
-
-	// Resolve tool choice for this iteration.
-	tc := resolveToolChoice(p.toolChoiceCfg, p.iteration, &p.toolChoiceOverride)
-
-	p.mu.Unlock()
+	messages = append(messages, hq.Messages...)
 
 	req := events.LLMRequest{
 		Role:       p.modelRole,
 		Messages:   messages,
-		Tools:      tools,
+		Tools:      tq.Tools,
 		ToolChoice: tc,
 		Stream:     true,
 	}

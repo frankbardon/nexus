@@ -18,6 +18,16 @@ type ToolCall struct {
 	Sequence int
 }
 
+// ToolCatalogQuery is a synchronous request for the currently registered
+// tool definitions. Emitted as a pointer payload on "tool.catalog.query";
+// the handler fills Tools in place before Emit returns. Same pattern as
+// HistoryQuery — no correlation IDs, no round-trip via a response event.
+type ToolCatalogQuery struct {
+	// Tools is filled by the handler. Caller should treat it as nil on
+	// input; a nil result after Emit means no catalog plugin answered.
+	Tools []ToolDef
+}
+
 // ToolResult carries the outcome of a tool invocation.
 type ToolResult struct {
 	ID         string // matches ToolCall.ID
