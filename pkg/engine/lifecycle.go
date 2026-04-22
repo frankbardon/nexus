@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -34,6 +35,10 @@ type LifecycleManager struct {
 	// (empty requiredBy) means the user listed it explicitly; otherwise it
 	// was auto-activated to satisfy the named plugin's Requires().
 	provenance map[string]activationOrigin
+	// capabilities maps capability name to the list of active provider IDs
+	// that advertise it. Populated at the end of Boot; exposed via
+	// Engine.Capabilities() for introspection.
+	capabilities map[string][]string
 }
 
 // activationOrigin records why a plugin appears in the expanded active set.
@@ -100,6 +105,31 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 
 	lm.logActivePlugins(activeIDs)
 
+	// Build final capability → providers map from the fully expanded active
+	// set. Emit one INFO per resolved capability for operator visibility.
+	lm.capabilities = make(map[string][]string)
+	for _, id := range activeIDs {
+		for _, c := range pluginMap[id].Capabilities() {
+			lm.capabilities[c.Name] = append(lm.capabilities[c.Name], id)
+		}
+	}
+	capNames := make([]string, 0, len(lm.capabilities))
+	for name := range lm.capabilities {
+		capNames = append(capNames, name)
+	}
+	sort.Strings(capNames)
+	for _, name := range capNames {
+		providers := lm.capabilities[name]
+		source := "active-list"
+		if pinned, ok := lm.config.Capabilities[name]; ok && pinned != "" && stringsContain(providers, pinned) {
+			source = "explicit-config"
+		}
+		lm.logger.Info("capability resolved",
+			"capability", name,
+			"providers", providers,
+			"source", source)
+	}
+
 	// Topological sort based on dependencies.
 	sortedIDs, err := lm.topoSort(activeIDs, pluginMap)
 	if err != nil {
@@ -121,16 +151,17 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		}
 
 		pctx := PluginContext{
-			Config:     pluginCfg,
-			Bus:        lm.bus,
-			Logger:     lm.logger.With("plugin", configuredID),
-			DataDir:    "",
-			Session:    lm.session,
-			Models:     lm.models,
-			Prompts:    lm.prompts,
-			Schemas:    lm.schemas,
-			System:     lm.system,
-			InstanceID: instanceIDs[configuredID],
+			Config:       pluginCfg,
+			Bus:          lm.bus,
+			Logger:       lm.logger.With("plugin", configuredID),
+			DataDir:      "",
+			Session:      lm.session,
+			Models:       lm.models,
+			Prompts:      lm.prompts,
+			Schemas:      lm.schemas,
+			System:       lm.system,
+			Capabilities: lm.capabilitiesCopy(),
+			InstanceID:   instanceIDs[configuredID],
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())
@@ -195,13 +226,45 @@ func (lm *LifecycleManager) Plugins() []Plugin {
 	return lm.plugins
 }
 
+// Capabilities returns a defensive copy of the capability → provider-IDs map
+// built during Boot. Callers can mutate the returned map safely.
+func (lm *LifecycleManager) Capabilities() map[string][]string {
+	return lm.capabilitiesCopy()
+}
+
+func (lm *LifecycleManager) capabilitiesCopy() map[string][]string {
+	if lm.capabilities == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(lm.capabilities))
+	for k, v := range lm.capabilities {
+		dup := make([]string, len(v))
+		copy(dup, v)
+		out[k] = dup
+	}
+	return out
+}
+
 // expandRequirements walks Requires() transitively on every plugin already in
 // activeIDs, adding missing plugins to the set. It mutates pluginMap and
 // config.Plugins.Configs in place, records provenance, and logs each
 // auto-activation. Returns the expanded active list in a stable order
 // (user-declared IDs first, then auto-activations in discovery order).
 //
-// Merge rule: when a Requirement points at an ID that is already in the
+// Requirements come in two flavors, ID- and Capability-based:
+//
+//   - ID: the Requirement names a concrete plugin ID. If already active (by
+//     exact match or base-of-instance), satisfied; otherwise the registered
+//     factory is used and Default is installed when the user has no config.
+//
+//   - Capability: the Requirement names an abstract capability. Resolution
+//     order is (1) explicit pin in Config.Capabilities, (2) first currently
+//     active provider advertising the capability, (3) auto-activate a
+//     registered provider that advertises it. When more than one registered
+//     candidate exists without an explicit pin, the engine picks
+//     alphabetically and emits a WARN naming every candidate.
+//
+// Merge rule: when a Requirement resolves to an ID that is already in the
 // active set or already has user-supplied config, the user's config wins
 // entirely and the Requirement.Default is discarded. No field-level merge.
 func (lm *LifecycleManager) expandRequirements(
@@ -226,6 +289,42 @@ func (lm *LifecycleManager) expandRequirements(
 		baseActive[PluginBaseID(id)] = true
 	}
 
+	// activeCapProviders maps capability name to active plugin IDs (in
+	// active-list order) that advertise it. Seeded from the user's active
+	// list, then extended as auto-activations resolve more capabilities.
+	activeCapProviders := make(map[string][]string)
+	for _, id := range activeIDs {
+		for _, c := range pluginMap[id].Capabilities() {
+			activeCapProviders[c.Name] = append(activeCapProviders[c.Name], id)
+		}
+	}
+
+	// registryCapProviders lazily maps capability name to every registered
+	// plugin ID that advertises it, alphabetically sorted. Built once on
+	// first need; probing the registry instantiates factories so we only
+	// pay when a capability-based Requirement cannot be satisfied by the
+	// already-active set.
+	var registryCapProviders map[string][]string
+	scanRegistry := func() map[string][]string {
+		if registryCapProviders != nil {
+			return registryCapProviders
+		}
+		registryCapProviders = make(map[string][]string)
+		ids := lm.registry.List()
+		sort.Strings(ids)
+		for _, id := range ids {
+			f, ok := lm.registry.Get(id)
+			if !ok {
+				continue
+			}
+			probe := f()
+			for _, c := range probe.Capabilities() {
+				registryCapProviders[c.Name] = append(registryCapProviders[c.Name], id)
+			}
+		}
+		return registryCapProviders
+	}
+
 	// BFS: process plugins in order; each may pull in more.
 	queue := append([]string(nil), activeIDs...)
 	for len(queue) > 0 {
@@ -234,29 +333,59 @@ func (lm *LifecycleManager) expandRequirements(
 
 		reqs := pluginMap[src].Requires()
 		for _, req := range reqs {
-			if req.ID == "" {
-				continue
+			if req.ID != "" && req.Capability != "" {
+				return nil, fmt.Errorf("plugin %q has a Requirement with both ID=%q and Capability=%q; they are mutually exclusive", src, req.ID, req.Capability)
 			}
-			// Already satisfied? Either by exact ID or by some instance of
-			// the base. User-supplied config wins; nothing else to do.
-			if activeSet[req.ID] || baseActive[PluginBaseID(req.ID)] {
+			if req.ID == "" && req.Capability == "" {
 				continue
 			}
 
-			baseID := PluginBaseID(req.ID)
+			// Resolve Capability → concrete provider ID first.
+			resolvedID := req.ID
+			resolveSource := ""
+			if req.Capability != "" {
+				id, source, err := lm.resolveCapability(req, src, activeCapProviders, scanRegistry)
+				if err != nil {
+					if req.Optional {
+						lm.logger.Warn("optional capability requirement skipped",
+							"required_by", src,
+							"capability", req.Capability,
+							"error", err.Error())
+						continue
+					}
+					return nil, err
+				}
+				resolvedID = id
+				resolveSource = source
+			}
+
+			// Already satisfied? Either by exact ID or by some instance of
+			// the base. User-supplied config wins; nothing else to do.
+			if activeSet[resolvedID] || baseActive[PluginBaseID(resolvedID)] {
+				if req.Capability != "" {
+					lm.logger.Info("capability satisfied",
+						"capability", req.Capability,
+						"provider", resolvedID,
+						"required_by", src,
+						"source", resolveSource)
+				}
+				continue
+			}
+
+			baseID := PluginBaseID(resolvedID)
 			factory, ok := lm.registry.Get(baseID)
 			if !ok {
 				if req.Optional {
 					lm.logger.Warn("optional requirement skipped: factory not registered",
 						"required_by", src,
-						"required_id", req.ID)
+						"required_id", resolvedID)
 					continue
 				}
-				return nil, fmt.Errorf("plugin %q requires %q which has no registered factory", src, req.ID)
+				return nil, fmt.Errorf("plugin %q requires %q which has no registered factory", src, resolvedID)
 			}
 
 			// Activate. Use user config if present, else install Default.
-			userCfg := lm.config.Plugins.Configs[req.ID]
+			userCfg := lm.config.Plugins.Configs[resolvedID]
 			fromDefault := false
 			if userCfg == nil && len(req.Default) > 0 {
 				cfgCopy := make(map[string]any, len(req.Default))
@@ -266,22 +395,26 @@ func (lm *LifecycleManager) expandRequirements(
 				if lm.config.Plugins.Configs == nil {
 					lm.config.Plugins.Configs = make(map[string]map[string]any)
 				}
-				lm.config.Plugins.Configs[req.ID] = cfgCopy
+				lm.config.Plugins.Configs[resolvedID] = cfgCopy
 				fromDefault = true
 			}
 
-			pluginMap[req.ID] = factory()
-			if baseID != req.ID {
-				instanceIDs[req.ID] = req.ID
+			inst := factory()
+			pluginMap[resolvedID] = inst
+			if baseID != resolvedID {
+				instanceIDs[resolvedID] = resolvedID
 			}
-			activeIDs = append(activeIDs, req.ID)
-			activeSet[req.ID] = true
+			activeIDs = append(activeIDs, resolvedID)
+			activeSet[resolvedID] = true
 			baseActive[baseID] = true
-			lm.provenance[req.ID] = activationOrigin{
+			for _, c := range inst.Capabilities() {
+				activeCapProviders[c.Name] = append(activeCapProviders[c.Name], resolvedID)
+			}
+			lm.provenance[resolvedID] = activationOrigin{
 				requiredBy:        src,
 				configFromDefault: fromDefault,
 			}
-			queue = append(queue, req.ID)
+			queue = append(queue, resolvedID)
 
 			configSource := "user-override"
 			if fromDefault {
@@ -289,14 +422,87 @@ func (lm *LifecycleManager) expandRequirements(
 			} else if userCfg == nil {
 				configSource = "empty"
 			}
-			lm.logger.Info("auto-activating plugin",
-				"plugin", req.ID,
-				"required_by", src,
-				"config_source", configSource)
+			if req.Capability != "" {
+				lm.logger.Info("auto-activating plugin",
+					"plugin", resolvedID,
+					"required_by", src,
+					"capability", req.Capability,
+					"capability_source", resolveSource,
+					"config_source", configSource)
+			} else {
+				lm.logger.Info("auto-activating plugin",
+					"plugin", resolvedID,
+					"required_by", src,
+					"config_source", configSource)
+			}
 		}
 	}
 
 	return activeIDs, nil
+}
+
+// resolveCapability returns the provider ID that should satisfy a
+// Capability-based Requirement and a short string describing where the
+// resolution came from ("explicit-config" | "active-list" | "auto-activated").
+// Precedence:
+//  1. Config.Capabilities[cap] pins a provider; must either already be active
+//     or have a registered factory that advertises the capability.
+//  2. The first currently active plugin that advertises the capability wins.
+//  3. Walk the registry; the alphabetically first provider wins. When more
+//     than one provider exists, emit a WARN naming every candidate.
+//
+// Returns an error only when no candidate can be found at all.
+func (lm *LifecycleManager) resolveCapability(
+	req Requirement,
+	src string,
+	activeCapProviders map[string][]string,
+	scanRegistry func() map[string][]string,
+) (string, string, error) {
+	capName := req.Capability
+
+	// 1. Explicit config pin.
+	if pinned, ok := lm.config.Capabilities[capName]; ok && pinned != "" {
+		// Validate the pinned ID can actually satisfy the capability.
+		if providers := activeCapProviders[capName]; stringsContain(providers, pinned) {
+			return pinned, "explicit-config", nil
+		}
+		// Pin may point at a not-yet-active registered provider.
+		candidates := scanRegistry()[capName]
+		if stringsContain(candidates, pinned) {
+			return pinned, "explicit-config", nil
+		}
+		return "", "", fmt.Errorf("plugin %q requires capability %q pinned to %q in config, but no registered provider advertises that capability with that ID", src, capName, pinned)
+	}
+
+	// 2. Active provider (first in active-list order).
+	if providers := activeCapProviders[capName]; len(providers) > 0 {
+		return providers[0], "active-list", nil
+	}
+
+	// 3. Registry scan.
+	candidates := scanRegistry()[capName]
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("plugin %q requires capability %q but no registered plugin advertises it", src, capName)
+	}
+	if len(candidates) > 1 {
+		lm.logger.Warn("capability has multiple candidate providers; picking first alphabetically — pin one explicitly under capabilities: in config to silence",
+			"capability", capName,
+			"required_by", src,
+			"candidates", candidates,
+			"picked", candidates[0])
+	}
+	return candidates[0], "auto-activated", nil
+}
+
+// stringsContain reports whether needle is in haystack. Tiny helper kept
+// local to avoid leaking a generic "contains" into the engine package.
+func stringsContain(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // logActivePlugins emits a single INFO line summarizing the final active

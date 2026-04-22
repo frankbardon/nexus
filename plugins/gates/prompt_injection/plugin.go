@@ -51,11 +51,12 @@ type Plugin struct {
 	unsubs []func()
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return "Prompt Injection Gate" }
-func (p *Plugin) Version() string        { return "0.1.0" }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return pluginID }
+func (p *Plugin) Name() string                      { return "Prompt Injection Gate" }
+func (p *Plugin) Version() string                   { return "0.1.0" }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

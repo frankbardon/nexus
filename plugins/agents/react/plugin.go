@@ -80,36 +80,42 @@ func (p *Plugin) Name() string           { return pluginName }
 func (p *Plugin) Version() string        { return version }
 func (p *Plugin) Dependencies() []string { return nil }
 
-// Requires declares the sibling plugins ReAct needs to function.
+// Requires declares the sibling plugins ReAct needs to function, referenced
+// by capability rather than concrete plugin ID so alternate providers can
+// satisfy them (e.g. a forthcoming nexus.memory.simple for tests).
 //
-// nexus.memory.conversation is the source of truth for LLM-native history;
-// ReAct queries it via "memory.history.query" rather than maintaining its
-// own p.history. Default config gives it a 100-message sliding window with
-// persistence on — the same setup the default profile has used historically.
+// "memory.history" is the source of truth for LLM-native history; ReAct
+// queries it via "memory.history.query" rather than maintaining its own
+// p.history. Default config gives the resolved provider a 100-message
+// sliding window with persistence on — the same setup the default profile
+// has used historically (applies to nexus.memory.conversation; other
+// providers ignore unknown keys).
 //
-// nexus.control.cancel owns the /resume slash command and cancel turn
-// tracking; without it, /resume typed by the user would land in history
-// as a literal message.
+// "control.cancel" owns the /resume slash command and cancel turn tracking;
+// without it, /resume typed by the user would land in history as a literal
+// message.
 //
-// nexus.tool.catalog is the shared tool registry; ReAct queries it via
+// "tool.catalog" is the shared tool registry; ReAct queries it via
 // "tool.catalog.query" to build each LLM request's tools list.
 //
 // Auto-activation obeys the merge rule documented in engine.Requirement:
-// if the user has supplied any config for one of these IDs, the user's
-// config wins entirely and Default is discarded.
+// if the user has supplied any config for the resolved provider ID, the
+// user's config wins entirely and Default is discarded.
 func (p *Plugin) Requires() []engine.Requirement {
 	return []engine.Requirement{
 		{
-			ID: "nexus.memory.conversation",
+			Capability: "memory.history",
 			Default: map[string]any{
 				"max_messages": 100,
 				"persist":      true,
 			},
 		},
-		{ID: "nexus.control.cancel"},
-		{ID: "nexus.tool.catalog"},
+		{Capability: "control.cancel"},
+		{Capability: "tool.catalog"},
 	}
 }
+
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

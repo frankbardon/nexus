@@ -478,9 +478,9 @@ func (m model) loadPlugins() tea.Msg {
 		if strings.HasPrefix(id, "nexus.memory.") {
 			features["memory"] = true
 		}
-		if id == "nexus.control.cancel" {
-			features["cancel"] = true
-		}
+	}
+	if len(m.adapter.capabilities["control.cancel"]) > 0 {
+		features["cancel"] = true
 	}
 	return pluginListMsg{Features: features}
 }

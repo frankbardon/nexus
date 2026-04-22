@@ -15,7 +15,9 @@ type testPlugin struct {
 	id           string
 	deps         []string
 	requires     []Requirement
+	capabilities []Capability
 	observedCfg  map[string]any
+	observedCaps map[string][]string
 	initCalled   bool
 	readyCalled  bool
 	shutdownCall bool
@@ -28,15 +30,17 @@ func (t *testPlugin) Dependencies() []string { return t.deps }
 func (t *testPlugin) Requires() []Requirement {
 	return t.requires
 }
+func (t *testPlugin) Capabilities() []Capability { return t.capabilities }
 func (t *testPlugin) Init(ctx PluginContext) error {
 	t.initCalled = true
 	t.observedCfg = ctx.Config
+	t.observedCaps = ctx.Capabilities
 	return nil
 }
-func (t *testPlugin) Ready() error                    { t.readyCalled = true; return nil }
-func (t *testPlugin) Shutdown(_ context.Context) error { t.shutdownCall = true; return nil }
+func (t *testPlugin) Ready() error                       { t.readyCalled = true; return nil }
+func (t *testPlugin) Shutdown(_ context.Context) error   { t.shutdownCall = true; return nil }
 func (t *testPlugin) Subscriptions() []EventSubscription { return nil }
-func (t *testPlugin) Emissions() []string               { return nil }
+func (t *testPlugin) Emissions() []string                { return nil }
 
 // newTestLifecycle builds a lifecycle manager with the given plugin instances
 // registered in a fresh PluginRegistry. Returns the manager, registry, a
@@ -229,5 +233,253 @@ func TestRequires_AlreadyActiveSkipsDefault(t *testing.T) {
 	}
 	if lm.provenance["b"].requiredBy != "" {
 		t.Error("b provenance should show [user], not [auto]")
+	}
+}
+
+// newCapLifecycle is a variant of newTestLifecycle that also accepts an
+// explicit capabilities pin map so capability-resolution tests can exercise
+// the Config.Capabilities path.
+func newCapLifecycle(t *testing.T, active []string, capPins map[string]string, plugins map[string]func() Plugin, configs map[string]map[string]any) (*LifecycleManager, *PluginRegistry, *strings.Builder) {
+	t.Helper()
+	reg := NewPluginRegistry()
+	for id, f := range plugins {
+		reg.Register(id, f)
+	}
+	cfg := &Config{
+		Capabilities: capPins,
+		Plugins: PluginsConfig{
+			Active:  active,
+			Configs: configs,
+		},
+	}
+	buf := &strings.Builder{}
+	logger := slog.New(slog.NewTextHandler(io.Writer(buf), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	bus := NewEventBus()
+	lm := NewLifecycleManager(reg, bus, cfg, logger, nil, nil, nil, nil)
+	return lm, reg, buf
+}
+
+// TestCapability_ResolvedFromActiveList verifies that when a consumer's
+// Requirement is capability-based and exactly one active plugin advertises
+// the capability, no auto-activation happens — the active provider satisfies
+// the requirement directly.
+func TestCapability_ResolvedFromActiveList(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history"},
+	}}
+	provider := &testPlugin{id: "provider-a", capabilities: []Capability{
+		{Name: "memory.history"},
+	}}
+
+	lm, _, buf := newCapLifecycle(t, []string{"consumer", "provider-a"}, nil,
+		map[string]func() Plugin{
+			"consumer":   func() Plugin { return consumer },
+			"provider-a": func() Plugin { return provider },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	if got := lm.Capabilities()["memory.history"]; len(got) != 1 || got[0] != "provider-a" {
+		t.Errorf("Capabilities[memory.history] = %v, want [provider-a]", got)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "capability satisfied") || !strings.Contains(logs, "source=active-list") {
+		t.Errorf("expected capability-satisfied INFO log from active list, got: %s", logs)
+	}
+}
+
+// TestCapability_AutoActivatesSoleRegisteredProvider covers the implicit
+// fallback: only the consumer is in active, the capability has exactly one
+// registered provider, so it gets auto-activated with source=auto-activated.
+func TestCapability_AutoActivatesSoleRegisteredProvider(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history", Default: map[string]any{"k": "from_default"}},
+	}}
+	provider := &testPlugin{id: "provider-a", capabilities: []Capability{
+		{Name: "memory.history"},
+	}}
+
+	lm, _, buf := newCapLifecycle(t, []string{"consumer"}, nil,
+		map[string]func() Plugin{
+			"consumer":   func() Plugin { return consumer },
+			"provider-a": func() Plugin { return provider },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	if !provider.initCalled {
+		t.Fatal("expected provider-a to be auto-activated via capability")
+	}
+	if got := provider.observedCfg["k"]; got != "from_default" {
+		t.Errorf("provider-a observed config[k] = %v, want from_default", got)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "capability_source=auto-activated") {
+		t.Errorf("expected auto-activated capability_source in INFO log, got: %s", logs)
+	}
+}
+
+// TestCapability_AmbiguityWarnsAndPicksAlphabetically verifies that two
+// registered providers for the same capability without an explicit pin emit
+// a WARN naming both candidates and pick the alphabetically first ID.
+func TestCapability_AmbiguityWarnsAndPicksAlphabetically(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history"},
+	}}
+	provA := &testPlugin{id: "provider-a", capabilities: []Capability{{Name: "memory.history"}}}
+	provB := &testPlugin{id: "provider-b", capabilities: []Capability{{Name: "memory.history"}}}
+
+	lm, _, buf := newCapLifecycle(t, []string{"consumer"}, nil,
+		map[string]func() Plugin{
+			"consumer":   func() Plugin { return consumer },
+			"provider-a": func() Plugin { return provA },
+			"provider-b": func() Plugin { return provB },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	if !provA.initCalled || provB.initCalled {
+		t.Fatalf("expected only provider-a to be auto-activated (alphabetical tie-break); initCalled: a=%v b=%v", provA.initCalled, provB.initCalled)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "multiple candidate providers") {
+		t.Errorf("expected ambiguity WARN, got: %s", logs)
+	}
+	if !strings.Contains(logs, "provider-a") || !strings.Contains(logs, "provider-b") {
+		t.Errorf("ambiguity WARN should name every candidate, got: %s", logs)
+	}
+}
+
+// TestCapability_ExplicitPinOverridesActiveList verifies Config.Capabilities
+// takes precedence over the active-list order when multiple providers are
+// eligible.
+func TestCapability_ExplicitPinOverridesActiveList(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history"},
+	}}
+	provA := &testPlugin{id: "provider-a", capabilities: []Capability{{Name: "memory.history"}}}
+	provB := &testPlugin{id: "provider-b", capabilities: []Capability{{Name: "memory.history"}}}
+
+	// Both active, but pin points at B even though A comes first.
+	lm, _, buf := newCapLifecycle(t,
+		[]string{"consumer", "provider-a", "provider-b"},
+		map[string]string{"memory.history": "provider-b"},
+		map[string]func() Plugin{
+			"consumer":   func() Plugin { return consumer },
+			"provider-a": func() Plugin { return provA },
+			"provider-b": func() Plugin { return provB },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "source=explicit-config") {
+		t.Errorf("expected explicit-config source in capability-resolved log, got: %s", logs)
+	}
+	// Still end up with both providers active (both in active list); the
+	// pin is about which one *satisfies the requirement*, not which is the
+	// only one allowed to run.
+	caps := lm.Capabilities()["memory.history"]
+	if len(caps) != 2 {
+		t.Errorf("expected both providers in capability map, got: %v", caps)
+	}
+}
+
+// TestCapability_MissingProviderFailsBoot verifies a Requirement.Capability
+// with no registered provider fails boot when Optional=false.
+func TestCapability_MissingProviderFailsBoot(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history"},
+	}}
+
+	lm, _, _ := newCapLifecycle(t, []string{"consumer"}, nil,
+		map[string]func() Plugin{
+			"consumer": func() Plugin { return consumer },
+		},
+		nil,
+	)
+
+	err := lm.Boot(context.Background())
+	if err == nil {
+		t.Fatal("expected boot to fail on missing capability provider")
+	}
+	if !strings.Contains(err.Error(), "memory.history") {
+		t.Errorf("error message should name the missing capability, got: %v", err)
+	}
+}
+
+// TestCapability_OptionalMissingLogsWarn verifies Optional=true with a
+// missing capability provider logs a WARN and continues booting.
+func TestCapability_OptionalMissingLogsWarn(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{Capability: "memory.history", Optional: true},
+	}}
+
+	lm, _, buf := newCapLifecycle(t, []string{"consumer"}, nil,
+		map[string]func() Plugin{
+			"consumer": func() Plugin { return consumer },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "optional capability requirement skipped") {
+		t.Errorf("expected optional capability skip WARN, got: %s", logs)
+	}
+}
+
+// TestCapability_MutuallyExclusiveWithID ensures a Requirement with both
+// ID and Capability set fails boot loudly.
+func TestCapability_MutuallyExclusiveWithID(t *testing.T) {
+	consumer := &testPlugin{id: "consumer", requires: []Requirement{
+		{ID: "provider-a", Capability: "memory.history"},
+	}}
+
+	lm, _, _ := newCapLifecycle(t, []string{"consumer"}, nil,
+		map[string]func() Plugin{
+			"consumer": func() Plugin { return consumer },
+		},
+		nil,
+	)
+
+	err := lm.Boot(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually-exclusive error, got: %v", err)
+	}
+}
+
+// TestCapability_PluginContextReceivesMap verifies plugins see the resolved
+// capability map in their PluginContext at Init.
+func TestCapability_PluginContextReceivesMap(t *testing.T) {
+	consumer := &testPlugin{id: "consumer"}
+	provider := &testPlugin{id: "provider-a", capabilities: []Capability{
+		{Name: "memory.history"},
+	}}
+
+	lm, _, _ := newCapLifecycle(t, []string{"consumer", "provider-a"}, nil,
+		map[string]func() Plugin{
+			"consumer":   func() Plugin { return consumer },
+			"provider-a": func() Plugin { return provider },
+		},
+		nil,
+	)
+
+	if err := lm.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot failed: %v", err)
+	}
+	if got := consumer.observedCaps["memory.history"]; len(got) != 1 || got[0] != "provider-a" {
+		t.Errorf("consumer ctx.Capabilities[memory.history] = %v, want [provider-a]", got)
 	}
 }

@@ -101,11 +101,23 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return pluginName }
-func (p *Plugin) Version() string        { return version }
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return pluginName }
+func (p *Plugin) Version() string                { return version }
+func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
+
+// Capabilities advertises this plugin as a provider of "memory.compaction" —
+// it reacts to context-window pressure by summarizing conversation history
+// and emitting memory.compacted for history buffers to adopt.
+func (p *Plugin) Capabilities() []engine.Capability {
+	return []engine.Capability{
+		{
+			Name:        "memory.compaction",
+			Description: "LLM-driven conversation summarization that compresses history when the context window fills.",
+		},
+	}
+}
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{

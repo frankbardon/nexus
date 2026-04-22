@@ -66,15 +66,65 @@ Every plugin implements `engine.Plugin` (`pkg/engine/plugin.go`):
 
 `Requires()` lets a plugin declare sibling plugins it needs to function and the default config to use when the user has not configured them. At boot, the lifecycle manager walks `Requires()` transitively starting from the user-declared active list and appends any missing IDs. This is separate from `Dependencies()`: `Dependencies()` only validates boot order, `Requires()` activates.
 
-**Merge rule (whole-object replace — no field-level merge).** If the user has supplied **any** config for a required ID, the user's config wins entirely and the Requirement's `Default` is discarded. If the user has not supplied a config, `Default` is installed as-is. This keeps precedence predictable.
+Each `Requirement` carries **exactly one** of `ID` (concrete plugin ID — e.g. `nexus.memory.conversation`) or `Capability` (abstract capability name — e.g. `memory.history`). Both set on the same `Requirement` fails boot. `Default` and `Optional` apply to whichever form you pick.
 
-**Optional requirements.** `Requirement.Optional: true` causes the engine to skip a missing factory with a `WARN` log and continue booting. `Optional: false` (the default) fails boot if the factory is not registered.
+**Merge rule (whole-object replace — no field-level merge).** If the user has supplied **any** config for the resolved ID, the user's config wins entirely and the Requirement's `Default` is discarded. If the user has not supplied a config, `Default` is installed as-is. This keeps precedence predictable.
 
-**Visibility.** Every auto-activation emits an `INFO` log at boot: `"auto-activating plugin X (required by Y); config source: default|user-override|empty"`. A single `"active plugin set resolved"` line at the end of expansion annotates every entry as `[user]` or `[auto: required-by=Z,config=...]`. Observers (`nexus.observe.logger`, OTel) pick these up through the standard structured fields.
+**Optional requirements.** `Requirement.Optional: true` causes the engine to skip a missing factory (ID form) or missing capability provider with a `WARN` log and continue booting. `Optional: false` (the default) fails boot.
+
+**Visibility.** Every auto-activation emits an `INFO` log at boot: `"auto-activating plugin X (required by Y); config source: default|user-override|empty"`, with `capability` and `capability_source` fields added when the activation was driven by a capability. A single `"active plugin set resolved"` line at the end of expansion annotates every entry as `[user]` or `[auto: required-by=Z,config=...]`. After expansion, one `"capability resolved"` INFO line is emitted per capability naming the providers and whether the resolution came from explicit config or the active list. Observers (`nexus.observe.logger`, OTel) pick these up through the standard structured fields.
 
 **Currently declared (non-nil) Requires():**
-- `nexus.agent.react` → `nexus.memory.conversation` (default: `max_messages: 100, persist: true`), `nexus.control.cancel`, `nexus.tool.catalog`
+- `nexus.agent.react` → `Capability: memory.history` (default: `max_messages: 100, persist: true`), `Capability: control.cancel`, `Capability: tool.catalog`
 - `nexus.agent.subagent`, `nexus.agent.orchestrator` — still use `Dependencies()`; will migrate as part of the same dedup if their state machines warrant it.
+
+### Capabilities (`Capabilities()`, `Requirement.Capability`)
+
+Plugins advertise abstract capabilities via `Capabilities() []engine.Capability`. Consumers then `Requires()` a capability name rather than a concrete plugin ID, letting the engine resolve an appropriate provider at boot.
+
+```go
+// Provider: advertise what I do.
+func (p *Plugin) Capabilities() []engine.Capability {
+    return []engine.Capability{{
+        Name:        "memory.history",
+        Description: "LLM-native conversation history for the active session.",
+    }}
+}
+
+// Consumer: I need whatever plugin provides memory.history.
+func (p *Plugin) Requires() []engine.Requirement {
+    return []engine.Requirement{{
+        Capability: "memory.history",
+        Default:    map[string]any{"max_messages": 100, "persist": true},
+    }}
+}
+```
+
+**Resolution order** (boot-time, inside `expandRequirements`):
+
+1. **Explicit pin.** Top-level `capabilities:` block in config pins `capability → plugin-ID`. The pinned provider must either be in the active list or have a registered factory that advertises the capability. If neither, boot fails.
+2. **Active list.** First plugin in `plugins.active` that advertises the capability wins.
+3. **Auto-activate.** If no active plugin advertises it, the engine walks the registry and picks the alphabetically first factory that does. When more than one candidate exists, a `WARN` names every candidate so operators know to pin one.
+
+```yaml
+# Pin a specific provider when multiple are registered.
+capabilities:
+  memory.history: nexus.memory.capped
+
+plugins:
+  active:
+    - nexus.agent.react
+    # memory.history provider auto-activates per the pin above.
+```
+
+**Introspection.** `eng.Capabilities() map[string][]string` returns the resolved capability → provider-IDs map after boot. Each plugin receives the same map through `PluginContext.Capabilities` at `Init` — prefer checking `ctx.Capabilities["control.cancel"]` over string-matching specific plugin IDs.
+
+**Currently advertised capabilities:**
+- `memory.history` — `nexus.memory.conversation`
+- `memory.compaction` — `nexus.memory.compaction`
+- `memory.longterm` — `nexus.memory.longterm`
+- `control.cancel` — `nexus.control.cancel`
+- `tool.catalog` — `nexus.tool.catalog`
 
 ### Event Flow
 

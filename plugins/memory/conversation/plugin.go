@@ -54,6 +54,18 @@ func (p *Plugin) Version() string                { return "0.2.0" }
 func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
 
+// Capabilities advertises this plugin as the default provider of
+// "memory.history" — the LLM-native conversation buffer consumed via
+// "memory.history.query" by agents and compactors.
+func (p *Plugin) Capabilities() []engine.Capability {
+	return []engine.Capability{
+		{
+			Name:        "memory.history",
+			Description: "LLM-native conversation history (user/assistant/tool messages) for the active session.",
+		},
+	}
+}
+
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.input", Priority: 10},

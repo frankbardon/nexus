@@ -34,11 +34,12 @@ func New() engine.Plugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return "Browser IO" }
-func (p *Plugin) Version() string        { return "0.1.0" }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return pluginID }
+func (p *Plugin) Name() string                      { return "Browser IO" }
+func (p *Plugin) Version() string                   { return "0.1.0" }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
@@ -104,7 +105,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		sessionID = ctx.Session.ID
 	}
 	p.adapter = NewAdapter(p.hub, sessionID)
-	p.server = NewServer(p.hub, ctx.Session, p.logger, p.host, p.port)
+	p.server = NewServer(p.hub, ctx.Session, p.logger, p.host, p.port, ctx.Capabilities)
 
 	// Wire inbound callbacks (user -> engine).
 	// Input handling must run in a goroutine because the event bus dispatches

@@ -41,11 +41,12 @@ func New() engine.Plugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return pluginName }
-func (p *Plugin) Version() string        { return version }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return pluginID }
+func (p *Plugin) Name() string                      { return pluginName }
+func (p *Plugin) Version() string                   { return version }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription { return nil }
 func (p *Plugin) Emissions() []string                       { return nil }
