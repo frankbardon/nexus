@@ -50,11 +50,12 @@ type Plugin struct {
 	lastNativeEnforced bool // true when most recent llm.response used native structured output
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return "JSON Schema Gate" }
-func (p *Plugin) Version() string        { return "0.1.0" }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return pluginID }
+func (p *Plugin) Name() string                      { return "JSON Schema Gate" }
+func (p *Plugin) Version() string                   { return "0.1.0" }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

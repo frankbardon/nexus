@@ -32,7 +32,7 @@ plugins:
     - nexus.io.oneshot
     - nexus.llm.anthropic
     - nexus.agent.react
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.io.oneshot:

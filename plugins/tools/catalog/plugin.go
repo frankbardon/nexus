@@ -38,6 +38,18 @@ func (p *Plugin) Version() string                { return version }
 func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
 
+// Capabilities advertises this plugin as the provider of "tool.catalog" —
+// the shared registry agents query via "tool.catalog.query" to build each
+// LLM request's tools list.
+func (p *Plugin) Capabilities() []engine.Capability {
+	return []engine.Capability{
+		{
+			Name:        "tool.catalog",
+			Description: "Shared tool registry; agents query it to assemble each LLM request's tool list.",
+		},
+	}
+}
+
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger

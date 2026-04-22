@@ -34,11 +34,23 @@ func New() engine.Plugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return pluginName }
-func (p *Plugin) Version() string        { return version }
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return pluginName }
+func (p *Plugin) Version() string                { return version }
+func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
+
+// Capabilities advertises this plugin as the provider of "control.cancel" —
+// turn cancellation tracking plus the /resume slash command. IO plugins check
+// for this capability to decide whether to surface a cancel affordance.
+func (p *Plugin) Capabilities() []engine.Capability {
+	return []engine.Capability{
+		{
+			Name:        "control.cancel",
+			Description: "Per-turn cancellation and /resume handling; agents and IO plugins consult it to honor user interrupts.",
+		},
+	}
+}
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

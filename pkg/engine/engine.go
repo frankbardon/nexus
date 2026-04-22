@@ -296,6 +296,12 @@ func (e *Engine) SessionEnded() <-chan struct{} {
 	return e.sessionEnd
 }
 
+// Capabilities returns a snapshot of the capability → provider-IDs map
+// resolved at boot. Safe to call after Boot; before Boot it returns nil.
+func (e *Engine) Capabilities() map[string][]string {
+	return e.Lifecycle.Capabilities()
+}
+
 // Run is the CLI convenience wrapper: Boot + wait-for-signal-or-session-end
 // + Stop. It installs SIGINT/SIGTERM handlers and blocks until one of them
 // fires, a plugin emits io.session.end, or the passed context is cancelled.

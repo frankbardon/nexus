@@ -38,7 +38,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.planexec
     - nexus.planner.dynamic
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -56,7 +56,7 @@ plugins:
     max_steps: 6
     approval: never
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

@@ -52,7 +52,7 @@ plugins:
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.skills
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -71,7 +71,7 @@ plugins:
     catalog_in_system_prompt: true
     disabled_skills: []
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

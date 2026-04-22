@@ -25,11 +25,12 @@ type Plugin struct {
 
 func New() engine.Plugin { return &Plugin{} }
 
-func (p *Plugin) ID() string             { return PluginID }
-func (p *Plugin) Name() string           { return "Hello World" }
-func (p *Plugin) Version() string        { return "0.1.0" }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return PluginID }
+func (p *Plugin) Name() string                      { return "Hello World" }
+func (p *Plugin) Version() string                   { return "0.1.0" }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{

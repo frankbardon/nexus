@@ -36,11 +36,12 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return pluginName }
-func (p *Plugin) Version() string        { return version }
-func (p *Plugin) Dependencies() []string { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string                        { return pluginID }
+func (p *Plugin) Name() string                      { return pluginName }
+func (p *Plugin) Version() string                   { return version }
+func (p *Plugin) Dependencies() []string            { return nil }
+func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus

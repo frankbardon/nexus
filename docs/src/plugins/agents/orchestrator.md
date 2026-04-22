@@ -83,7 +83,7 @@ plugins:
     - nexus.agent.react
     - nexus.tool.shell
     - nexus.tool.file
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.control.cancel
 
   nexus.agent.orchestrator:

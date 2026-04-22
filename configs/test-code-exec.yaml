@@ -30,7 +30,7 @@ plugins:
     - nexus.agent.react
     - nexus.tool.shell
     - nexus.tool.code_exec
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.io.test:
     inputs:
@@ -65,6 +65,6 @@ plugins:
     persist_scripts: true
     reject_goroutines: true
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 10
     persist: false

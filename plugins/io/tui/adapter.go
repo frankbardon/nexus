@@ -12,8 +12,9 @@ import (
 
 // Adapter implements ui.UIAdapter using a BubbleTea program.
 type Adapter struct {
-	program *tea.Program
-	session *engine.SessionWorkspace
+	program      *tea.Program
+	session      *engine.SessionWorkspace
+	capabilities map[string][]string
 
 	mu              sync.Mutex
 	inputHandler    func(ui.InputMessage)
@@ -27,13 +28,16 @@ type Adapter struct {
 	done chan struct{}
 }
 
-// NewAdapter creates a TUI adapter backed by BubbleTea.
-func NewAdapter(session *engine.SessionWorkspace) *Adapter {
+// NewAdapter creates a TUI adapter backed by BubbleTea. capabilities is the
+// boot-time capability → provider-IDs map so the TUI can enable affordances
+// (e.g. cancel) by capability rather than by specific plugin ID.
+func NewAdapter(session *engine.SessionWorkspace, capabilities map[string][]string) *Adapter {
 	return &Adapter{
-		session:    session,
-		approvalCh: make(chan ui.ApprovalResponseMessage, 1),
-		askCh:      make(chan ui.AskUserResponseMessage, 1),
-		done:       make(chan struct{}),
+		session:      session,
+		capabilities: capabilities,
+		approvalCh:   make(chan ui.ApprovalResponseMessage, 1),
+		askCh:        make(chan ui.AskUserResponseMessage, 1),
+		done:         make(chan struct{}),
 	}
 }
 

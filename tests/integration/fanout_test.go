@@ -22,7 +22,7 @@ func TestFanout_Boot(t *testing.T) {
 		"nexus.llm.openai",
 		"nexus.provider.fanout",
 		"nexus.agent.react",
-		"nexus.memory.conversation",
+		"nexus.memory.capped",
 	)
 	h.AssertEventEmitted("io.session.start")
 	h.AssertEventEmitted("io.session.end")

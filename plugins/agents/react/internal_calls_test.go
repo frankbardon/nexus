@@ -10,7 +10,7 @@ import (
 // TestHandleToolResult_DropsInternalCalls proves the react agent does not
 // decrement pendingToolCalls on results that belong to script-dispatched
 // sub-calls (run_code's inner `code-*` ids). Conversation-history filtering
-// is tested separately in plugins/memory/conversation/plugin_test.go — this
+// is tested separately in plugins/memory/capped/plugin_test.go — this
 // test only covers the pending-count invariant that keeps an outer turn
 // from short-circuiting when an inner result arrives first.
 func TestHandleToolResult_DropsInternalCalls(t *testing.T) {

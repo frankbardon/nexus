@@ -10,8 +10,12 @@ import (
 
 // Config is the top-level configuration for the engine.
 type Config struct {
-	Core    CoreConfig    `yaml:"core"`
-	Plugins PluginsConfig `yaml:"plugins"`
+	Core CoreConfig `yaml:"core"`
+	// Capabilities pins a capability name to a specific provider plugin ID,
+	// overriding the default resolution (first active provider, else first
+	// registered). Populated from the top-level YAML `capabilities:` block.
+	Capabilities map[string]string `yaml:"capabilities"`
+	Plugins      PluginsConfig     `yaml:"plugins"`
 }
 
 // CoreConfig holds engine-level settings.
@@ -49,6 +53,7 @@ func DefaultConfig() *Config {
 				IDFormat:  "timestamp",
 			},
 		},
+		Capabilities: map[string]string{},
 		Plugins: PluginsConfig{
 			Active:  []string{},
 			Configs: make(map[string]map[string]any),

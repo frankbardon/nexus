@@ -23,21 +23,25 @@ var staticFS embed.FS
 
 // Server handles HTTP requests and WebSocket upgrades for the browser UI.
 type Server struct {
-	hub     *Hub
-	session *engine.SessionWorkspace
-	logger  *slog.Logger
-	server  *http.Server
-	addr    string
+	hub          *Hub
+	session      *engine.SessionWorkspace
+	logger       *slog.Logger
+	server       *http.Server
+	addr         string
+	capabilities map[string][]string
 }
 
-// NewServer creates a new HTTP server for the browser UI.
-func NewServer(hub *Hub, session *engine.SessionWorkspace, logger *slog.Logger, host string, port int) *Server {
+// NewServer creates a new HTTP server for the browser UI. capabilities is the
+// boot-time capability → provider-IDs map, used to answer feature probes
+// without string-matching specific plugin IDs.
+func NewServer(hub *Hub, session *engine.SessionWorkspace, logger *slog.Logger, host string, port int, capabilities map[string][]string) *Server {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	return &Server{
-		hub:     hub,
-		session: session,
-		logger:  logger,
-		addr:    addr,
+		hub:          hub,
+		session:      session,
+		logger:       logger,
+		addr:         addr,
+		capabilities: capabilities,
 	}
 }
 
@@ -163,9 +167,9 @@ func (s *Server) handlePlugins(w http.ResponseWriter, _ *http.Request) {
 					if strings.HasPrefix(id, "nexus.memory.") {
 						resp.Features["memory"] = true
 					}
-					if id == "nexus.control.cancel" {
-						resp.Features["cancel"] = true
-					}
+				}
+				if len(s.capabilities["control.cancel"]) > 0 {
+					resp.Features["cancel"] = true
 				}
 			}
 		}

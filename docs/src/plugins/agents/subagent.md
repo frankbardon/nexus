@@ -95,7 +95,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.agent.subagent
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.agent.react:
     max_iterations: 10

@@ -61,7 +61,7 @@ plugins:
     - nexus.gate.endless_loop
     - nexus.tool.shell
     - nexus.tool.file
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
     - nexus.observe.thinking
 
@@ -88,7 +88,7 @@ plugins:
   nexus.tool.file:
     allow_external_writes: false
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

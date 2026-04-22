@@ -46,7 +46,7 @@ plugins:
     - nexus.llm.openai
     - nexus.agent.react
     - nexus.gate.endless_loop
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.openai:
@@ -59,7 +59,7 @@ plugins:
   nexus.gate.endless_loop:
     max_iterations: 10
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 50
     persist: true
 

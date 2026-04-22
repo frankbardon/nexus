@@ -48,11 +48,23 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string             { return pluginID }
-func (p *Plugin) Name() string           { return pluginName }
-func (p *Plugin) Version() string        { return version }
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return pluginName }
+func (p *Plugin) Version() string                { return version }
+func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
+
+// Capabilities advertises this plugin as a provider of "memory.longterm" —
+// cross-session persistent memory entries (YAML frontmatter + markdown, one
+// file per entry) that survive session boundaries.
+func (p *Plugin) Capabilities() []engine.Capability {
+	return []engine.Capability{
+		{
+			Name:        "memory.longterm",
+			Description: "Cross-session long-term memory store (file-per-entry, YAML + markdown).",
+		},
+	}
+}
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
