@@ -52,6 +52,7 @@ import (
 
 	// Tool plugins.
 	"github.com/frankbardon/nexus/plugins/tools/ask"
+	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
 	codeexecplugin "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
@@ -122,6 +123,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Tools
 	r.Register("nexus.tool.shell", shell.New)
 	r.Register("nexus.tool.file", fileio.New)
+	r.Register("nexus.tool.catalog", catalogplugin.New)
 	r.Register("nexus.tool.pdf", pdfplugin.New)
 	r.Register("nexus.tool.opener", openerplugin.New)
 	r.Register("nexus.tool.ask", ask.New)

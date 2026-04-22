@@ -136,6 +136,7 @@ func (p *Plugin) Version() string { return "0.1.0" }
 // plugin's Init returns. See the comment on LLMProviderID for why
 // this is intentionally narrow.
 func (p *Plugin) Dependencies() []string { return []string{LLMProviderID} }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{

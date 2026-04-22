@@ -23,6 +23,20 @@ type MemoryResult struct {
 	Query   string
 }
 
+// HistoryQuery is a synchronous request for LLM-native conversation history.
+// Emitted as a pointer payload on "memory.history.query"; the handler fills
+// Messages in place before the Emit call returns. This follows the same
+// pointer-mutation pattern as VetoablePayload. Callers consume Messages
+// after Emit returns.
+type HistoryQuery struct {
+	// SessionID scopes the query when multiple sessions share a bus. Empty
+	// means "the current session". Set by caller.
+	SessionID string
+	// Messages is filled by the handler. Caller should treat it as nil on
+	// input; a nil result after Emit means no history plugin answered.
+	Messages []Message
+}
+
 // --- Long-term memory events ---
 
 // LongTermMemoryIndex is a lightweight reference to a memory entry.

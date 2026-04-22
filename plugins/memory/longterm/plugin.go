@@ -52,6 +52,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return pluginName }
 func (p *Plugin) Version() string        { return version }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{

@@ -30,6 +30,20 @@ type LifecycleManager struct {
 	prompts  *PromptRegistry
 	schemas  *SchemaRegistry
 	system   *SystemInfo
+	// provenance records why each configured ID is active: the zero value
+	// (empty requiredBy) means the user listed it explicitly; otherwise it
+	// was auto-activated to satisfy the named plugin's Requires().
+	provenance map[string]activationOrigin
+}
+
+// activationOrigin records why a plugin appears in the expanded active set.
+type activationOrigin struct {
+	// requiredBy is the plugin ID that pulled this one in via Requires().
+	// Empty when the user listed the plugin in config.Plugins.Active.
+	requiredBy string
+	// configFromDefault is true when the plugin's config was installed from
+	// a Requirement.Default rather than supplied by the user.
+	configFromDefault bool
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -75,6 +89,16 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			instanceIDs[id] = id
 		}
 	}
+
+	// Expand the active set with Requires() transitively. Auto-activated
+	// plugins inherit the user-supplied config if present; otherwise they get
+	// the Default from the Requirement (whole-object replace, never merged).
+	activeIDs, err := lm.expandRequirements(activeIDs, pluginMap, instanceIDs)
+	if err != nil {
+		return err
+	}
+
+	lm.logActivePlugins(activeIDs)
 
 	// Topological sort based on dependencies.
 	sortedIDs, err := lm.topoSort(activeIDs, pluginMap)
@@ -169,6 +193,134 @@ func (lm *LifecycleManager) Shutdown(ctx context.Context) error {
 // Plugins returns the ordered list of initialized plugins.
 func (lm *LifecycleManager) Plugins() []Plugin {
 	return lm.plugins
+}
+
+// expandRequirements walks Requires() transitively on every plugin already in
+// activeIDs, adding missing plugins to the set. It mutates pluginMap and
+// config.Plugins.Configs in place, records provenance, and logs each
+// auto-activation. Returns the expanded active list in a stable order
+// (user-declared IDs first, then auto-activations in discovery order).
+//
+// Merge rule: when a Requirement points at an ID that is already in the
+// active set or already has user-supplied config, the user's config wins
+// entirely and the Requirement.Default is discarded. No field-level merge.
+func (lm *LifecycleManager) expandRequirements(
+	activeIDs []string,
+	pluginMap map[string]Plugin,
+	instanceIDs map[string]string,
+) ([]string, error) {
+	lm.provenance = make(map[string]activationOrigin, len(activeIDs))
+	for _, id := range activeIDs {
+		lm.provenance[id] = activationOrigin{} // user-declared
+	}
+
+	activeSet := make(map[string]bool, len(activeIDs))
+	for _, id := range activeIDs {
+		activeSet[id] = true
+	}
+	// baseActive tracks whether any configured ID shares this base ID so a
+	// Requirement on the base can be considered satisfied when an instanced
+	// form is already active (mirrors topoSort's resolveDep behavior).
+	baseActive := make(map[string]bool, len(activeIDs))
+	for _, id := range activeIDs {
+		baseActive[PluginBaseID(id)] = true
+	}
+
+	// BFS: process plugins in order; each may pull in more.
+	queue := append([]string(nil), activeIDs...)
+	for len(queue) > 0 {
+		src := queue[0]
+		queue = queue[1:]
+
+		reqs := pluginMap[src].Requires()
+		for _, req := range reqs {
+			if req.ID == "" {
+				continue
+			}
+			// Already satisfied? Either by exact ID or by some instance of
+			// the base. User-supplied config wins; nothing else to do.
+			if activeSet[req.ID] || baseActive[PluginBaseID(req.ID)] {
+				continue
+			}
+
+			baseID := PluginBaseID(req.ID)
+			factory, ok := lm.registry.Get(baseID)
+			if !ok {
+				if req.Optional {
+					lm.logger.Warn("optional requirement skipped: factory not registered",
+						"required_by", src,
+						"required_id", req.ID)
+					continue
+				}
+				return nil, fmt.Errorf("plugin %q requires %q which has no registered factory", src, req.ID)
+			}
+
+			// Activate. Use user config if present, else install Default.
+			userCfg := lm.config.Plugins.Configs[req.ID]
+			fromDefault := false
+			if userCfg == nil && len(req.Default) > 0 {
+				cfgCopy := make(map[string]any, len(req.Default))
+				for k, v := range req.Default {
+					cfgCopy[k] = v
+				}
+				if lm.config.Plugins.Configs == nil {
+					lm.config.Plugins.Configs = make(map[string]map[string]any)
+				}
+				lm.config.Plugins.Configs[req.ID] = cfgCopy
+				fromDefault = true
+			}
+
+			pluginMap[req.ID] = factory()
+			if baseID != req.ID {
+				instanceIDs[req.ID] = req.ID
+			}
+			activeIDs = append(activeIDs, req.ID)
+			activeSet[req.ID] = true
+			baseActive[baseID] = true
+			lm.provenance[req.ID] = activationOrigin{
+				requiredBy:        src,
+				configFromDefault: fromDefault,
+			}
+			queue = append(queue, req.ID)
+
+			configSource := "user-override"
+			if fromDefault {
+				configSource = "default"
+			} else if userCfg == nil {
+				configSource = "empty"
+			}
+			lm.logger.Info("auto-activating plugin",
+				"plugin", req.ID,
+				"required_by", src,
+				"config_source", configSource)
+		}
+	}
+
+	return activeIDs, nil
+}
+
+// logActivePlugins emits a single INFO line summarizing the final active
+// plugin set with provenance annotations. Makes auto-activation visible at a
+// glance in logs.
+func (lm *LifecycleManager) logActivePlugins(activeIDs []string) {
+	annotated := make([]string, len(activeIDs))
+	for i, id := range activeIDs {
+		origin := lm.provenance[id]
+		if origin.requiredBy == "" {
+			annotated[i] = id + " [user]"
+			continue
+		}
+		tag := "auto: required-by=" + origin.requiredBy
+		if origin.configFromDefault {
+			tag += ",config=default"
+		} else {
+			tag += ",config=user-override"
+		}
+		annotated[i] = id + " [" + tag + "]"
+	}
+	lm.logger.Info("active plugin set resolved",
+		"count", len(activeIDs),
+		"plugins", annotated)
 }
 
 // topoSort performs a topological sort on plugin dependencies.

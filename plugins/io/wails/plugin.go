@@ -56,6 +56,7 @@ func (p *Plugin) ID() string             { return pluginID }
 func (p *Plugin) Name() string           { return "Wails IO" }
 func (p *Plugin) Version() string        { return "0.1.0" }
 func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 
 // Hub exposes the plugin's Hub so the embedder can call SetRuntime on it
 // before engine.Boot. This is the seam the build plan calls out:
@@ -91,8 +92,8 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// are emitted separately and live only in the wails plugin.
 	return []engine.EventSubscription{
 		{EventType: "io.output", Priority: 50},
-		{EventType: "io.output.stream", Priority: 50},
-		{EventType: "io.output.stream.end", Priority: 50},
+		{EventType: "llm.stream.chunk", Priority: 50},
+		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "io.output.clear", Priority: 50},
 		{EventType: "io.status", Priority: 50},
 		{EventType: "io.approval.request", Priority: 50},
@@ -118,6 +119,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"io.input",
+		"before:io.input",
 		"io.approval.response",
 		"io.ask.response",
 		"plan.approval.response",
@@ -232,9 +234,13 @@ func (p *Plugin) initLegacy() {
 			})
 			return
 		}
-		go p.bus.Emit("io.input", events.UserInput{
-			Content: msg.Content,
-		})
+		go func(content string) {
+			input := events.UserInput{Content: content}
+			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
+				return
+			}
+			_ = p.bus.Emit("io.input", input)
+		}(msg.Content)
 	})
 
 	p.adapter.OnApprovalResponse(func(msg ui.ApprovalResponseMessage) {
@@ -259,8 +265,8 @@ func (p *Plugin) initLegacy() {
 	// subscription set one-for-one (parity rule in CLAUDE.md §7a).
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.output.stream", p.handleStreamChunk, engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.output.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output.clear", p.handleOutputClear, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.status", p.handleStatus, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
@@ -329,8 +335,8 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 }
 
 func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
-	chunk, ok := e.Payload.(events.OutputChunk)
-	if !ok {
+	chunk, ok := e.Payload.(events.StreamChunk)
+	if !ok || chunk.Content == "" {
 		return
 	}
 	_ = p.adapter.SendStreamChunk(ui.StreamChunkMessage{
@@ -341,13 +347,12 @@ func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
 }
 
 func (p *Plugin) handleStreamEnd(e engine.Event[any]) {
-	ref, ok := e.Payload.(events.StreamRef)
+	end, ok := e.Payload.(events.StreamEnd)
 	if !ok {
 		return
 	}
 	_ = p.adapter.SendStreamEnd(ui.StreamEndMessage{
-		TurnID:   ref.TurnID,
-		Metadata: ref.Metadata,
+		TurnID: end.TurnID,
 	})
 }
 

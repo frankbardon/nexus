@@ -7,10 +7,12 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// TestHandleToolResult_DropsInternalCalls proves the react agent never
-// stitches script-dispatched tool_use_ids into its history. Without this
-// filter, Anthropic rejects the next request because run_code's inner
-// `code-*` ids have no matching tool_use block in the assistant message.
+// TestHandleToolResult_DropsInternalCalls proves the react agent does not
+// decrement pendingToolCalls on results that belong to script-dispatched
+// sub-calls (run_code's inner `code-*` ids). Conversation-history filtering
+// is tested separately in plugins/memory/conversation/plugin_test.go — this
+// test only covers the pending-count invariant that keeps an outer turn
+// from short-circuiting when an inner result arrives first.
 func TestHandleToolResult_DropsInternalCalls(t *testing.T) {
 	p := New().(*Plugin)
 	p.currentTurnID = "turn-xyz"
@@ -18,7 +20,7 @@ func TestHandleToolResult_DropsInternalCalls(t *testing.T) {
 	// decrement the counter.
 	p.pendingToolCalls = 2
 
-	// Inner call from a run_code script.
+	// Inner call from a run_code script — flagged internal by the agent.
 	p.handleToolInvokeEvent(engine.Event[any]{Payload: events.ToolCall{
 		ID:           "code-1-abc",
 		Name:         "read_file",
@@ -32,14 +34,14 @@ func TestHandleToolResult_DropsInternalCalls(t *testing.T) {
 		TurnID: "turn-xyz",
 	}})
 
-	// Inner result arrives first — must be dropped.
+	// Inner result arrives first — must be dropped without counting.
 	p.handleToolResult(events.ToolResult{
 		ID:     "code-1-abc",
 		Name:   "read_file",
 		Output: "inner payload",
 		TurnID: "turn-xyz",
 	})
-	// Top-level result — must land in history.
+	// Top-level result — counts as one.
 	p.handleToolResult(events.ToolResult{
 		ID:     "toolu_real",
 		Name:   "write_file",
@@ -47,12 +49,6 @@ func TestHandleToolResult_DropsInternalCalls(t *testing.T) {
 		TurnID: "turn-xyz",
 	})
 
-	if len(p.history) != 1 {
-		t.Fatalf("expected exactly 1 history entry (toolu_real), got %d: %+v", len(p.history), p.history)
-	}
-	if got := p.history[0].ToolCallID; got != "toolu_real" {
-		t.Errorf("history[0] ToolCallID = %q, want toolu_real", got)
-	}
 	if p.pendingToolCalls != 1 {
 		t.Errorf("pendingToolCalls = %d, want 1 (inner result must not decrement)", p.pendingToolCalls)
 	}
