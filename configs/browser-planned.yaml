@@ -38,7 +38,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.planner.dynamic
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.io.browser:
@@ -59,7 +59,7 @@ plugins:
     max_steps: 10
     model_role: reasoning
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

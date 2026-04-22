@@ -30,7 +30,7 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.tool.shell
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.io.test:
     inputs:
@@ -61,6 +61,6 @@ plugins:
     timeout: 5s
     sandbox: true
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 20
     persist: false

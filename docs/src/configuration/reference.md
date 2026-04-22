@@ -205,7 +205,7 @@ plugins:
 
 ### Memory
 
-**nexus.memory.conversation**
+**nexus.memory.capped**
 | Key | Type | Default |
 |-----|------|---------|
 | `max_messages` | int | `100` |

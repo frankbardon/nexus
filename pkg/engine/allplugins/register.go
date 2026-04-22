@@ -22,9 +22,11 @@ import (
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
 
 	// Memory plugins.
+	"github.com/frankbardon/nexus/plugins/memory/capped"
 	compactionplugin "github.com/frankbardon/nexus/plugins/memory/compaction"
-	"github.com/frankbardon/nexus/plugins/memory/conversation"
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
+	"github.com/frankbardon/nexus/plugins/memory/simple"
+	"github.com/frankbardon/nexus/plugins/memory/summary_buffer"
 
 	// Observer plugins.
 	"github.com/frankbardon/nexus/plugins/observe/logger"
@@ -92,7 +94,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.io.test", testioplugin.New)
 
 	// Memory
-	r.Register("nexus.memory.conversation", conversation.New)
+	r.Register("nexus.memory.simple", simple.New)
+	r.Register("nexus.memory.capped", capped.New)
+	r.Register("nexus.memory.summary_buffer", summary_buffer.New)
 	r.Register("nexus.memory.compaction", compactionplugin.New)
 	r.Register("nexus.memory.longterm", longtermplugin.New)
 

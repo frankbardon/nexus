@@ -40,7 +40,7 @@ plugins:
     - nexus.llm.openai
     - nexus.provider.fanout
     - nexus.agent.react
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.io.test:
@@ -66,7 +66,7 @@ plugins:
   nexus.agent.react:
     system_prompt: "You are a test assistant. Follow instructions exactly."
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 4
     persist: false
 

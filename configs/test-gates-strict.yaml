@@ -56,7 +56,7 @@ plugins:
     - nexus.gate.rate_limiter
     - nexus.gate.output_length
     - nexus.gate.content_safety
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -92,7 +92,7 @@ plugins:
     check_credit_card: true
     check_ip_internal: true
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 20
     persist: true
 

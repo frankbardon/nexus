@@ -53,7 +53,7 @@ bin/nexus -config configs/<name>.yaml
 
 | Plugin | ID | Key Config |
 |--------|----|------------|
-| Conversation | `nexus.memory.conversation` | `max_messages` (default `100`), `persist` (default `true`) |
+| Conversation | `nexus.memory.capped` | `max_messages` (default `100`), `persist` (default `true`) |
 | Long-term | `nexus.memory.longterm` | `scope` (`agent`/`global`/`both`), `auto_load` (default `true`), `path`, `agent_id`, `auto_save_instructions` |
 
 ### Planners

@@ -21,7 +21,7 @@ func TestFallback_Boot(t *testing.T) {
 		"nexus.llm.openai",
 		"nexus.provider.fallback",
 		"nexus.agent.react",
-		"nexus.memory.conversation",
+		"nexus.memory.capped",
 	)
 	h.AssertEventEmitted("io.session.start")
 	h.AssertEventEmitted("io.session.end")

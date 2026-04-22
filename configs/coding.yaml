@@ -48,7 +48,7 @@ plugins:
     - nexus.gate.context_window
     - nexus.tool.file
     - nexus.tool.code_exec
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.memory.compaction
     - nexus.observe.logger
     - nexus.observe.thinking
@@ -76,7 +76,7 @@ plugins:
     persist_scripts: true
     reject_goroutines: true
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 

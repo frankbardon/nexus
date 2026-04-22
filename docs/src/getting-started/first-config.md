@@ -21,13 +21,13 @@ plugins:
     - nexus.io.tui
     - nexus.llm.anthropic
     - nexus.agent.react
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.agent.react:
     max_iterations: 10
     system_prompt: "You are a helpful assistant."
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 100
     persist: true
 ```
@@ -106,7 +106,7 @@ plugins:
     - nexus.tool.shell          # Shell command execution
     - nexus.tool.file           # File read/write/list
     - nexus.tool.ask            # Ask user questions
-    - nexus.memory.conversation
+    - nexus.memory.capped
 
   nexus.tool.shell:
     allowed_commands: ["go", "git", "ls", "cat", "grep", "make"]

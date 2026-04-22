@@ -39,7 +39,7 @@ plugins:
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.tool.file
-    - nexus.memory.conversation
+    - nexus.memory.capped
     - nexus.observe.logger
 
   nexus.llm.anthropic:
@@ -53,7 +53,7 @@ plugins:
 
   nexus.tool.file:
 
-  nexus.memory.conversation:
+  nexus.memory.capped:
     max_messages: 200
     persist: true
 
