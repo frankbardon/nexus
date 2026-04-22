@@ -26,6 +26,7 @@ type LifecycleManager struct {
 	config   *Config
 	plugins  []Plugin
 	logger   *slog.Logger
+	logging  LoggingHost
 	session  *SessionWorkspace
 	models   *ModelRegistry
 	prompts  *PromptRegistry
@@ -161,6 +162,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Schemas:      lm.schemas,
 			System:       lm.system,
 			Capabilities: lm.capabilitiesCopy(),
+			Logging:      lm.logging,
 			InstanceID:   instanceIDs[configuredID],
 		}
 
@@ -194,7 +196,10 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown tears down plugins in reverse order, drains the bus, and signals completion.
+// Shutdown tears down plugins in reverse order, drains the bus, and signals
+// completion. Plugins that implement LateShutdown and return true are shut
+// down after every non-late plugin, so observers (logger, tracers) can still
+// receive records emitted during peer teardown.
 func (lm *LifecycleManager) Shutdown(ctx context.Context) error {
 	lm.logger.Info("shutting down engine")
 
@@ -204,18 +209,34 @@ func (lm *LifecycleManager) Shutdown(ctx context.Context) error {
 		lm.logger.Warn("drain timed out", "error", err)
 	}
 
-	// Shutdown in reverse dependency order.
+	// Partition plugins into normal and late phases. Preserve init order so
+	// that reverse iteration below mirrors the non-late topological order.
+	normal := make([]Plugin, 0, len(lm.plugins))
+	late := make([]Plugin, 0)
+	for _, p := range lm.plugins {
+		if ls, ok := p.(LateShutdown); ok && ls.LateShutdown() {
+			late = append(late, p)
+			continue
+		}
+		normal = append(normal, p)
+	}
+
 	var firstErr error
-	for i := len(lm.plugins) - 1; i >= 0; i-- {
-		p := lm.plugins[i]
-		lm.logger.Info("shutting down plugin", "plugin", p.ID())
-		if err := p.Shutdown(ctx); err != nil {
-			lm.logger.Error("plugin shutdown error", "plugin", p.ID(), "error", err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("plugin %q shutdown failed: %w", p.ID(), err)
+	shutdown := func(plugins []Plugin, phase string) {
+		for i := len(plugins) - 1; i >= 0; i-- {
+			p := plugins[i]
+			lm.logger.Info("shutting down plugin", "plugin", p.ID(), "phase", phase)
+			if err := p.Shutdown(ctx); err != nil {
+				lm.logger.Error("plugin shutdown error", "plugin", p.ID(), "phase", phase, "error", err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("plugin %q shutdown failed: %w", p.ID(), err)
+				}
 			}
 		}
 	}
+
+	shutdown(normal, "normal")
+	shutdown(late, "late")
 
 	lm.logger.Info("engine shutdown complete")
 	return firstErr

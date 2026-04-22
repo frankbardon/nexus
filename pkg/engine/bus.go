@@ -20,8 +20,16 @@ type EventBus interface {
 	// Subscribe registers a handler for an event type.
 	// Returns an unsubscribe function.
 	Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) (unsubscribe func())
-	// SubscribeAll registers a wildcard handler that receives all events.
+	// SubscribeAll registers a wildcard handler that receives all events
+	// emitted from this point forward. Pre-subscription events are not seen.
 	SubscribeAll(handler HandlerFunc) (unsubscribe func())
+	// SubscribeAllReplay is SubscribeAll plus a replay of every event
+	// currently held in the bus's ring buffer. The replay runs before live
+	// dispatch begins for the new subscriber, so observers that init after
+	// other plugins have already emitted still see those events. Replay and
+	// live dispatch are serialized: no event is delivered twice, none is
+	// dropped at the boundary.
+	SubscribeAllReplay(handler HandlerFunc) (unsubscribe func())
 	// EmitVetoable dispatches a before:* event. Handlers may veto by setting
 	// the VetoResult on the payload. Returns the result.
 	EmitVetoable(eventType string, payload any) (VetoResult, error)
@@ -76,12 +84,24 @@ type eventBus struct {
 	wildcards []*subscription
 	nextID    uint64
 	inflight  sync.WaitGroup
+	ring      *eventRing
 }
 
-// NewEventBus creates a new in-process EventBus.
+// NewEventBus creates a new in-process EventBus with a default-sized ring
+// buffer (DefaultLogRingSize). Pass NewEventBusWithRingSize to override.
 func NewEventBus() EventBus {
+	return NewEventBusWithRingSize(DefaultLogRingSize)
+}
+
+// NewEventBusWithRingSize builds a bus whose replay ring holds up to capacity
+// events. capacity <= 0 falls back to DefaultLogRingSize.
+func NewEventBusWithRingSize(capacity int) EventBus {
+	if capacity <= 0 {
+		capacity = DefaultLogRingSize
+	}
 	return &eventBus{
 		handlers: make(map[string][]*subscription),
+		ring:     newEventRing(capacity),
 	}
 }
 
@@ -146,6 +166,39 @@ func (b *eventBus) SubscribeAll(handler HandlerFunc) func() {
 	}
 }
 
+func (b *eventBus) SubscribeAllReplay(handler HandlerFunc) func() {
+	b.mu.Lock()
+	// Snapshot the ring and append the subscription under the same lock so
+	// no event can slip into the gap between snapshot and registration. See
+	// EmitEvent for the matching half of the protocol.
+	replay := b.ring.snapshot()
+	sub := &subscription{
+		id:      b.nextSubID(),
+		handler: handler,
+	}
+	b.wildcards = append(b.wildcards, sub)
+	subID := sub.id
+	b.mu.Unlock()
+
+	// Replay buffered events outside the lock so a slow handler does not
+	// stall concurrent emitters. Live events emitted from this point already
+	// see the new wildcard and are dispatched normally.
+	for _, e := range replay {
+		handler(e)
+	}
+
+	return func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for i, s := range b.wildcards {
+			if s.id == subID {
+				b.wildcards = append(b.wildcards[:i], b.wildcards[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
 func (b *eventBus) Emit(eventType string, payload any) error {
 	event := Event[any]{
 		Type:      eventType,
@@ -162,13 +215,18 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 
 	meta := event.Meta()
 
-	b.mu.RLock()
-	// Copy handler slices under read lock to allow concurrent emits.
+	// Append to the replay ring and snapshot handlers under a single write
+	// lock. Serializing this block with SubscribeAllReplay is what guarantees
+	// every event is delivered to every subscriber exactly once — either in
+	// the replay snapshot (if it entered the ring before the subscriber was
+	// added to wildcards) or in live dispatch (if it was emitted after).
+	b.mu.Lock()
+	b.ring.append(event)
 	typed := make([]*subscription, len(b.handlers[event.Type]))
 	copy(typed, b.handlers[event.Type])
 	wilds := make([]*subscription, len(b.wildcards))
 	copy(wilds, b.wildcards)
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	for _, sub := range typed {
 		if sub.filter != nil && !sub.filter(meta) {
@@ -212,10 +270,11 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	}
 	meta := event.Meta()
 
-	b.mu.RLock()
+	b.mu.Lock()
+	b.ring.append(event)
 	typed := make([]*subscription, len(b.handlers[eventType]))
 	copy(typed, b.handlers[eventType])
-	b.mu.RUnlock()
+	b.mu.Unlock()
 
 	for _, sub := range typed {
 		if sub.filter != nil && !sub.filter(meta) {
@@ -244,4 +303,39 @@ func (b *eventBus) Drain(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// eventRing is a fixed-capacity ring of Events used to replay pre-subscription
+// events to late-arriving SubscribeAllReplay callers. Not safe for concurrent
+// use; the bus mutex serializes access.
+type eventRing struct {
+	buf  []Event[any]
+	head int
+	size int
+	cap  int
+}
+
+func newEventRing(capacity int) *eventRing {
+	return &eventRing{
+		buf: make([]Event[any], capacity),
+		cap: capacity,
+	}
+}
+
+func (r *eventRing) append(e Event[any]) {
+	if r.size == r.cap {
+		r.head = (r.head + 1) % r.cap
+		r.size--
+	}
+	idx := (r.head + r.size) % r.cap
+	r.buf[idx] = e
+	r.size++
+}
+
+func (r *eventRing) snapshot() []Event[any] {
+	out := make([]Event[any], r.size)
+	for i := 0; i < r.size; i++ {
+		out[i] = r.buf[(r.head+i)%r.cap]
+	}
+	return out
 }

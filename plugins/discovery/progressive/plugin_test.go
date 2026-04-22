@@ -31,6 +31,8 @@ func (b *testBus) Subscribe(eventType string, handler engine.HandlerFunc, _ ...e
 
 func (b *testBus) SubscribeAll(handler engine.HandlerFunc) func() { return func() {} }
 
+func (b *testBus) SubscribeAllReplay(handler engine.HandlerFunc) func() { return func() {} }
+
 func (b *testBus) Emit(eventType string, payload any) error {
 	b.emitted = append(b.emitted, emittedEvent{eventType, payload})
 	return nil
