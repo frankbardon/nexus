@@ -1,0 +1,90 @@
+# Test: web_search via the Anthropic native search adapter
+# Validates: nexus.tool.web registers the tool, nexus.search.anthropic_native
+# answers search.request events, and the agent can invoke web_search live.
+#
+# Live mode — no mock_responses block, so this hits both the Anthropic
+# Messages API (as the agent's LLM) and the server-side web_search tool
+# (via the native search adapter's direct HTTP call).
+#
+# Run (manual, interactive):
+#   bin/nexus -config configs/test-web-search.yaml
+#
+# Run (automated):
+#   go test -tags integration ./tests/integration/ -run TestWebSearch -v
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env (used by BOTH the LLM provider
+#     and the native search adapter).
+#
+# What to test:
+#   1. The LLM picks web_search to answer "what happened today" style prompts.
+#   2. nexus.search.anthropic_native logs a single HTTP round-trip and
+#      returns SearchResults with URLs.
+#   3. web_search tool output contains the Provider tag and at least one URL.
+#   4. No errors from readability (the test doesn't call web_fetch).
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+# Pin the native adapter explicitly. If a user later activates Brave or
+# another search.provider in the same config, this pin keeps the test
+# deterministic.
+capabilities:
+  search.provider: nexus.search.anthropic_native
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+    - nexus.tool.web
+    - nexus.search.anthropic_native
+
+  nexus.io.test:
+    inputs:
+      - "Use the web_search tool to find one recent news story about AI agents this week. Report the headline and URL from the search result verbatim — do not paraphrase."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 90s
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.search.anthropic_native:
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-haiku-4-5-20251001
+    timeout: 45s
+
+  nexus.tool.web:
+    search:
+      count: 5
+      safe_search: moderate
+    fetch:
+      timeout: 20s
+      max_size: 5MB
+      extract_mode: readability
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a research assistant with access to web_search and web_fetch.
+      Always call web_search for questions about current events, recent
+      releases, or time-sensitive information. Never answer such questions
+      from memory. When you receive search results, quote the title and URL
+      of the most relevant hit verbatim.
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: true

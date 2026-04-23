@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Go 1.21+** — Nexus is written in Go and builds with the standard toolchain
-- **An Anthropic API key** — Required for the Claude LLM provider
+- **An API key for at least one LLM provider** — Nexus ships with first-party providers for [Anthropic](../plugins/providers/anthropic.md) (Claude) and [OpenAI](../plugins/providers/openai.md) (GPT / o-series). Bring your own key for whichever provider(s) your config activates. The built-in example profiles in `configs/` use Anthropic by default, so following those examples verbatim requires an `ANTHROPIC_API_KEY`.
 
 Optional:
 - **poppler-utils** — Required only if you use the PDF reader plugin (`pdftotext`, `pdfinfo`)
@@ -31,19 +31,24 @@ This produces a binary at `bin/nexus`.
 
 ## Setting Your API Key
 
-Nexus reads the Anthropic API key from an environment variable. You can set it directly:
+Each provider plugin reads its key from an environment variable. The default names match the upstream convention: `ANTHROPIC_API_KEY` for the Anthropic plugin, `OPENAI_API_KEY` for the OpenAI plugin. Set whichever your active config needs:
 
 ```bash
+# Using Claude (the default in configs/ profiles)
 export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+
+# Or using OpenAI
+export OPENAI_API_KEY="sk-your-key-here"
 ```
 
-Or place it in a `.env` file in the project root:
+Or place them in a `.env` file in the project root:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-your-key-here
+OPENAI_API_KEY=sk-your-key-here
 ```
 
-The environment variable name is configurable per-provider. See the [Anthropic plugin configuration](../plugins/providers/anthropic.md) for details.
+You can also pass the key inline (`api_key:`) or point at a different env var (`api_key_env:`) per-provider. See the [Anthropic](../plugins/providers/anthropic.md) and [OpenAI](../plugins/providers/openai.md) plugin pages for the full options, plus [Fallback](../plugins/providers/fallback.md) and [Fanout](../plugins/providers/fanout.md) for using multiple providers together.
 
 ## Running Nexus
 
