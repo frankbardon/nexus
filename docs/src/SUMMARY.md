@@ -77,5 +77,6 @@
 
 - [Writing Skills](./skills/authoring.md)
 - [Structured Output](./guides/structured-output.md)
+- [Web Search & Fetch](./guides/web-search.md)
 - [Integration Testing](./guides/integration-testing.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)

@@ -43,6 +43,11 @@ import (
 	fanoutplugin "github.com/frankbardon/nexus/plugins/providers/fanout"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 
+	// Search provider plugins (advertise the "search.provider" capability).
+	anthropicnativesearch "github.com/frankbardon/nexus/plugins/search/anthropic_native"
+	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
+	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
+
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
@@ -60,6 +65,7 @@ import (
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
+	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
 	// Gate plugins.
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
@@ -115,6 +121,11 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.provider.fallback", fallbackplugin.New)
 	r.Register("nexus.provider.fanout", fanoutplugin.New)
 
+	// Search providers (capability: search.provider)
+	r.Register("nexus.search.brave", bravesearch.New)
+	r.Register("nexus.search.anthropic_native", anthropicnativesearch.New)
+	r.Register("nexus.search.openai_native", openainativesearch.New)
+
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
 
@@ -132,6 +143,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.opener", openerplugin.New)
 	r.Register("nexus.tool.ask", ask.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
+	r.Register("nexus.tool.web", webplugin.New)
 
 	// Gates
 	r.Register("nexus.gate.content_safety", contentsafetygate.New)

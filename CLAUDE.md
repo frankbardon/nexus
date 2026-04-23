@@ -125,6 +125,7 @@ plugins:
 - `memory.longterm` — `nexus.memory.longterm`
 - `control.cancel` — `nexus.control.cancel`
 - `tool.catalog` — `nexus.tool.catalog`
+- `search.provider` — `nexus.search.brave`, `nexus.search.anthropic_native`, `nexus.search.openai_native` (required by `nexus.tool.web`; pin with `capabilities.search.provider` when multiple are active)
 
 ### Event Flow
 
@@ -144,6 +145,10 @@ plugins/
   tools/shell/           # Sandboxed shell execution
   tools/fileio/          # File read/write with base dir restriction
   tools/catalog/         # Shared tool registry; agents query via "tool.catalog.query"
+  tools/web/             # web_search + web_fetch tools; search routed via search.provider capability, fetch via go-readability
+  search/brave/          # search.provider adapter: Brave Search REST API
+  search/anthropic_native/ # search.provider adapter: Anthropic's server-side web_search tool (direct HTTP)
+  search/openai_native/  # search.provider adapter: OpenAI's server-side web_search via Responses API
   io/tui/                # Terminal UI
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
