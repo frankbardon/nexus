@@ -1,10 +1,10 @@
-// Package retrieve registers the user-facing "retrieve" tool. The tool
-// embeds the query via the embeddings.provider capability and runs a
-// nearest-neighbor lookup against one or more namespaces via the
-// vector.store capability. Namespaces are config-constrained — the LLM
-// can narrow within the configured allow-list but cannot reach into
+// Package knowledge_search registers the user-facing "knowledge_search"
+// tool. The tool embeds the query via the embeddings.provider capability
+// and runs a nearest-neighbor lookup against one or more namespaces via
+// the vector.store capability. Namespaces are config-constrained — the
+// LLM can narrow within the configured allow-list but cannot reach into
 // other stores.
-package retrieve
+package knowledge_search
 
 import (
 	"context"
@@ -19,23 +19,23 @@ import (
 )
 
 const (
-	pluginID   = "nexus.tool.retrieve"
-	pluginName = "RAG Retrieve Tool"
+	pluginID   = "nexus.tool.knowledge_search"
+	pluginName = "Knowledge Search Tool"
 	version    = "0.1.0"
 
-	defaultToolName = "retrieve"
+	defaultToolName = "knowledge_search"
 	defaultTopK     = 5
 	maxTopK         = 50
 )
 
-// retrievedHit pairs a vector-store match with the namespace it came from so
+// hit pairs a vector-store match with the namespace it came from so
 // cross-namespace results can be merged and ranked together.
-type retrievedHit struct {
+type hit struct {
 	namespace string
 	match     events.VectorMatch
 }
 
-// Plugin registers a retrieve tool that queries configured namespaces.
+// Plugin registers a knowledge_search tool that queries configured namespaces.
 type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
@@ -96,7 +96,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.defaultNS = p.allowedNS
 	}
 	if len(p.allowedNS) == 0 {
-		return fmt.Errorf("retrieve: at least one namespace must be configured under 'namespaces'")
+		return fmt.Errorf("knowledge_search: at least one namespace must be configured under 'namespaces'")
 	}
 
 	p.unsubs = append(p.unsubs,
@@ -108,7 +108,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 func (p *Plugin) Ready() error {
 	desc := fmt.Sprintf(
-		"Retrieve relevant chunks from the knowledge base using semantic search. "+
+		"Search the knowledge base for relevant chunks using semantic (vector) "+
+			"search. Returns passages ranked by similarity with source paths for "+
+			"citation. Prefer this over web_search when the user asks about "+
+			"configured knowledge. "+
 			"Available namespaces: %s. Default: %s. Returns top-k chunks ranked by "+
 			"similarity, with source paths for citation.",
 		strings.Join(p.allowedNS, ", "),
@@ -118,7 +121,7 @@ func (p *Plugin) Ready() error {
 		Name:        p.toolName,
 		Description: desc,
 		Class:       "research",
-		Subclass:    "retrieve",
+		Subclass:    "knowledge",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -217,16 +220,16 @@ func (p *Plugin) handle(tc events.ToolCall) {
 	vec := embReq.Vectors[0]
 
 	// Query each namespace, merge by similarity.
-	all := make([]retrievedHit, 0, k*len(namespaces))
+	all := make([]hit, 0, k*len(namespaces))
 	for _, ns := range namespaces {
 		q := &events.VectorQuery{Namespace: ns, Vector: vec, K: k}
 		_ = p.bus.Emit("vector.query", q)
 		if q.Error != "" {
-			p.logger.Warn("retrieve: namespace query failed", "namespace", ns, "err", q.Error)
+			p.logger.Warn("knowledge_search: namespace query failed", "namespace", ns, "err", q.Error)
 			continue
 		}
 		for _, m := range q.Matches {
-			all = append(all, retrievedHit{namespace: ns, match: m})
+			all = append(all, hit{namespace: ns, match: m})
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].match.Similarity > all[j].match.Similarity })
@@ -242,7 +245,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 	p.emit(tc, output, "")
 }
 
-func (p *Plugin) formatOutput(query string, hits []retrievedHit) (string, error) {
+func (p *Plugin) formatOutput(query string, hits []hit) (string, error) {
 	type outItem struct {
 		Rank       int               `json:"rank"`
 		Namespace  string            `json:"namespace"`

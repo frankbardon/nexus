@@ -146,7 +146,7 @@ plugins/
   tools/fileio/          # File read/write with base dir restriction
   tools/catalog/         # Shared tool registry; agents query via "tool.catalog.query"
   tools/web/             # web_search + web_fetch tools; search routed via search.provider capability, fetch via go-readability
-  tools/retrieve/        # LLM-facing "retrieve" tool; queries configured namespaces via vector.store + embeddings.provider, returns top-k with source paths for citation
+  tools/knowledge_search/ # LLM-facing "knowledge_search" tool; queries configured namespaces via vector.store + embeddings.provider, returns top-k with source paths for citation
   search/brave/          # search.provider adapter: Brave Search REST API
   search/anthropic_native/ # search.provider adapter: Anthropic's server-side web_search tool (direct HTTP)
   search/openai_native/  # search.provider adapter: OpenAI's server-side web_search via Responses API
@@ -419,7 +419,7 @@ Chunks use deterministic IDs `<sha256-prefix-of-abspath>-<chunk-idx>` so re-inge
 nexus ingest --namespace=kb --glob="*.md" ./knowledge-base
 ```
 
-**Retrieve tool — `nexus.tool.retrieve`.** LLM-facing tool: embeds query → fans out `vector.query` across selected namespaces → merges + ranks → returns JSON with rank, namespace, similarity, source path, chunk index, content. Namespace access is config-constrained: the plugin declares an allow-list (non-empty, required) and optionally a `default_namespaces` subset. LLM-supplied `namespaces` args are intersected with the allow list.
+**Knowledge-search tool — `nexus.tool.knowledge_search`.** LLM-facing tool: embeds query → fans out `vector.query` across selected namespaces → merges + ranks → returns JSON with rank, namespace, similarity, source path, chunk index, content. Named to parallel `web_search` — the LLM picks it when the user asks about configured knowledge, not the web. Namespace access is config-constrained: the plugin declares an allow-list (non-empty, required) and optionally a `default_namespaces` subset. LLM-supplied `namespaces` args are intersected with the allow list.
 
 **Vector memory — `nexus.memory.vector`.** Advertises `memory.vector`. Runs on every turn:
 
@@ -677,7 +677,7 @@ Six built-in profiles in `configs/`:
 - `research.yaml` — No shell access, larger context window, more iterations
 - `planned.yaml` — Dynamic planner with auto-approval
 - `planned-static.yaml` — Static planner with fixed coding workflow steps
-- `rag.yaml` — RAG primitives + retrieve tool + vector memory, wired to Anthropic LLM + OpenAI embeddings + chromem-go vector store
+- `rag.yaml` — RAG primitives + knowledge_search tool + vector memory, wired to Anthropic LLM + OpenAI embeddings + chromem-go vector store
 
 ## Skills
 

@@ -26,16 +26,16 @@ plugins:
     - nexus.observe.logger
 
     # RAG primitives. Both capabilities auto-activate when required by
-    # nexus.tool.retrieve and nexus.memory.vector, but listing them here
+    # nexus.tool.knowledge_search and nexus.memory.vector, but listing them here
     # lets you tune their config without fighting the merge rules.
     - nexus.embeddings.openai
     - nexus.vectorstore.chromem
     - nexus.rag.ingest
 
-    # RAG consumers. Pick one or both. nexus.tool.retrieve exposes a tool
-    # the LLM calls explicitly; nexus.memory.vector runs automatically on
-    # every user message and after compaction.
-    - nexus.tool.retrieve
+    # RAG consumers. Pick one or both. nexus.tool.knowledge_search exposes
+    # a tool the LLM calls explicitly; nexus.memory.vector runs automatically
+    # on every user message and after compaction.
+    - nexus.tool.knowledge_search
     - nexus.memory.vector
 
   nexus.llm.anthropic:
@@ -44,8 +44,8 @@ plugins:
   nexus.agent.react:
     system_prompt: |
       You are a helpful assistant with access to a knowledge base. When the user
-      asks a factual question, use the retrieve tool first to pull supporting
-      chunks from the knowledge base, then cite sources by file path.
+      asks a factual question, use the knowledge_search tool first to pull
+      supporting chunks from the knowledge base, then cite sources by file path.
 
   nexus.gate.endless_loop:
     max_iterations: 10
@@ -87,9 +87,9 @@ plugins:
     #   - path: ./knowledge-base
     #     namespace: kb
 
-  # Retrieve tool. Allow-list of namespaces the LLM can query; the
-  # default subset is what's used when the LLM doesn't narrow down.
-  nexus.tool.retrieve:
+  # knowledge_search tool. Allow-list of namespaces the LLM can query;
+  # the default subset is what's used when the LLM doesn't narrow down.
+  nexus.tool.knowledge_search:
     namespaces: [kb, project-docs]
     default_namespaces: [kb, project-docs]
     top_k: 5

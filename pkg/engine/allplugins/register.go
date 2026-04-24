@@ -73,9 +73,9 @@ import (
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
 	codeexecplugin "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
+	knowledgesearchplugin "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
-	retrieveplugin "github.com/frankbardon/nexus/plugins/tools/retrieve"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
@@ -167,7 +167,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.ask", ask.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
 	r.Register("nexus.tool.web", webplugin.New)
-	r.Register("nexus.tool.retrieve", retrieveplugin.New)
+	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
 
 	// Gates
 	r.Register("nexus.gate.content_safety", contentsafetygate.New)
