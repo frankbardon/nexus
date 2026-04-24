@@ -1,0 +1,342 @@
+// Package ingest implements a RAG ingestion plugin: chunks files, embeds
+// them via the embeddings.provider capability, and upserts into the
+// vector.store capability. One plugin, two entry points:
+//
+//   - Event mode: any plugin emits *events.RAGIngest on "rag.ingest".
+//   - Watch mode: fsnotify watchers declared in config fire the same code
+//     path on file writes/deletes.
+//
+// The CLI subcommand "nexus ingest" drives event mode from a minimal engine
+// for offline bulk loads.
+package ingest
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
+)
+
+const (
+	pluginID   = "nexus.rag.ingest"
+	pluginName = "RAG Ingest"
+	version    = "0.1.0"
+)
+
+// watchEntry is one configured directory to watch.
+type watchEntry struct {
+	Path      string
+	Glob      string
+	Namespace string
+}
+
+// Plugin handles both event-mode and watch-mode ingestion.
+type Plugin struct {
+	bus    engine.EventBus
+	logger *slog.Logger
+
+	chunker *chunker
+	cache   *embeddingCache
+
+	watches []watchEntry
+	watcher *watcher // lazily started in Ready when len(watches) > 0
+
+	unsubs []func()
+}
+
+func New() engine.Plugin {
+	return &Plugin{}
+}
+
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return pluginName }
+func (p *Plugin) Version() string        { return version }
+func (p *Plugin) Dependencies() []string { return nil }
+
+func (p *Plugin) Requires() []engine.Requirement {
+	return []engine.Requirement{
+		{Capability: "embeddings.provider"},
+		{Capability: "vector.store"},
+	}
+}
+
+func (p *Plugin) Capabilities() []engine.Capability { return nil }
+
+func (p *Plugin) Init(ctx engine.PluginContext) error {
+	p.bus = ctx.Bus
+	p.logger = ctx.Logger
+
+	// Chunker config.
+	size, overlap := 1000, 200
+	if ch, ok := ctx.Config["chunker"].(map[string]any); ok {
+		if v, ok := ch["size"].(int); ok {
+			size = v
+		}
+		if v, ok := ch["overlap"].(int); ok {
+			overlap = v
+		}
+	}
+	p.chunker = newChunker(size, overlap)
+
+	// Embedding cache. Default alongside the vector store at
+	// ~/.nexus/vectors/_cache/; overridable.
+	cacheDir := expandHome("~/.nexus/vectors/_cache")
+	if v, ok := ctx.Config["cache_dir"].(string); ok && v != "" {
+		cacheDir = expandHome(v)
+	}
+	cache, err := newEmbeddingCache(cacheDir)
+	if err != nil {
+		return fmt.Errorf("rag/ingest: cache: %w", err)
+	}
+	p.cache = cache
+
+	// Watch entries.
+	if raw, ok := ctx.Config["watch"].([]any); ok {
+		for _, r := range raw {
+			m, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			e := watchEntry{}
+			if v, ok := m["path"].(string); ok {
+				e.Path = expandHome(v)
+			}
+			if v, ok := m["glob"].(string); ok {
+				e.Glob = v
+			}
+			if v, ok := m["namespace"].(string); ok {
+				e.Namespace = v
+			}
+			if e.Path == "" || e.Namespace == "" {
+				p.logger.Warn("skipping watch entry: path and namespace required", "entry", m)
+				continue
+			}
+			p.watches = append(p.watches, e)
+		}
+	}
+
+	p.unsubs = append(p.unsubs,
+		p.bus.Subscribe("rag.ingest", p.handleIngest,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("rag.ingest.delete", p.handleDelete,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
+	)
+	return nil
+}
+
+func (p *Plugin) Ready() error {
+	if len(p.watches) == 0 {
+		return nil
+	}
+	w, err := newWatcher(p.logger, p.watches, func(path, ns string, removed bool) {
+		if removed {
+			del := &events.RAGIngestDelete{Path: path, Namespace: ns}
+			_ = p.bus.Emit("rag.ingest.delete", del)
+			return
+		}
+		req := &events.RAGIngest{Path: path, Namespace: ns}
+		_ = p.bus.Emit("rag.ingest", req)
+	})
+	if err != nil {
+		return fmt.Errorf("rag/ingest: watcher: %w", err)
+	}
+	p.watcher = w
+	return nil
+}
+
+func (p *Plugin) Shutdown(_ context.Context) error {
+	for _, unsub := range p.unsubs {
+		unsub()
+	}
+	if p.watcher != nil {
+		p.watcher.close()
+	}
+	return nil
+}
+
+func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	return []engine.EventSubscription{
+		{EventType: "rag.ingest", Priority: 50},
+		{EventType: "rag.ingest.delete", Priority: 50},
+	}
+}
+
+func (p *Plugin) Emissions() []string {
+	return []string{
+		"embeddings.request",
+		"vector.upsert",
+		"vector.delete",
+		"rag.ingest",
+		"rag.ingest.delete",
+		"rag.ingest.result",
+	}
+}
+
+func (p *Plugin) handleIngest(event engine.Event[any]) {
+	req, ok := event.Payload.(*events.RAGIngest)
+	if !ok {
+		return
+	}
+	if req.Provider != "" {
+		return
+	}
+	req.Provider = pluginID
+
+	if err := p.ingest(req); err != nil {
+		req.Error = err.Error()
+	}
+
+	// Notification event for observers.
+	_ = p.bus.Emit("rag.ingest.result", req)
+}
+
+func (p *Plugin) handleDelete(event engine.Event[any]) {
+	req, ok := event.Payload.(*events.RAGIngestDelete)
+	if !ok {
+		return
+	}
+	if req.Provider != "" {
+		return
+	}
+	req.Provider = pluginID
+
+	if err := p.delete(req); err != nil {
+		req.Error = err.Error()
+	}
+}
+
+// ingest reads the file, chunks it, embeds uncached chunks via the
+// embeddings.provider capability, and upserts everything into vector.store.
+func (p *Plugin) ingest(req *events.RAGIngest) error {
+	if req.Path == "" {
+		return fmt.Errorf("path required")
+	}
+	if req.Namespace == "" {
+		return fmt.Errorf("namespace required")
+	}
+
+	data, err := os.ReadFile(req.Path)
+	if err != nil {
+		return fmt.Errorf("read %q: %w", req.Path, err)
+	}
+	chunks := p.chunker.chunk(string(data))
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	// Split into cached + uncached.
+	vectors := make([][]float32, len(chunks))
+	missing := make([]int, 0, len(chunks))
+	missingText := make([]string, 0, len(chunks))
+
+	for i, c := range chunks {
+		if v := p.cache.Get(c); v != nil {
+			vectors[i] = v
+			continue
+		}
+		missing = append(missing, i)
+		missingText = append(missingText, c)
+	}
+
+	if len(missing) > 0 {
+		embReq := &events.EmbeddingsRequest{Texts: missingText}
+		_ = p.bus.Emit("embeddings.request", embReq)
+		if embReq.Error != "" {
+			return fmt.Errorf("embed: %s", embReq.Error)
+		}
+		if len(embReq.Vectors) != len(missing) {
+			return fmt.Errorf("embed: expected %d vectors, got %d", len(missing), len(embReq.Vectors))
+		}
+		for j, idx := range missing {
+			vectors[idx] = embReq.Vectors[j]
+			if err := p.cache.Put(missingText[j], embReq.Vectors[j]); err != nil {
+				p.logger.Debug("cache write failed (non-fatal)", "err", err)
+			}
+		}
+	}
+
+	docs := make([]events.VectorDoc, len(chunks))
+	pathHash := pathKey(req.Path)
+	for i, c := range chunks {
+		meta := map[string]string{
+			"source":     req.Path,
+			"path_hash":  pathHash,
+			"chunk_idx":  fmt.Sprintf("%d", i),
+			"chunk_size": fmt.Sprintf("%d", len(c)),
+		}
+		for k, v := range req.Metadata {
+			meta[k] = v
+		}
+		docs[i] = events.VectorDoc{
+			ID:       fmt.Sprintf("%s-%d", pathHash, i),
+			Vector:   vectors[i],
+			Content:  c,
+			Metadata: meta,
+		}
+	}
+
+	up := &events.VectorUpsert{Namespace: req.Namespace, Docs: docs}
+	_ = p.bus.Emit("vector.upsert", up)
+	if up.Error != "" {
+		return fmt.Errorf("upsert: %s", up.Error)
+	}
+	req.Chunks = len(chunks)
+	req.SkippedCached = len(chunks) - len(missing)
+
+	p.logger.Info("ingested",
+		"path", req.Path,
+		"namespace", req.Namespace,
+		"chunks", req.Chunks,
+		"skipped_cached", req.SkippedCached,
+	)
+	return nil
+}
+
+// delete removes every chunk whose ID starts with the path hash for this
+// file, by asking the vector store to drop by the deterministic ID scheme
+// we use on ingest. We don't know how many chunks were stored, so we delete
+// a generous upper bound; chromem ignores unknown IDs.
+func (p *Plugin) delete(req *events.RAGIngestDelete) error {
+	if req.Path == "" || req.Namespace == "" {
+		return fmt.Errorf("path and namespace required")
+	}
+	const maxChunks = 4096
+	pathHash := pathKey(req.Path)
+	ids := make([]string, 0, maxChunks)
+	for i := 0; i < maxChunks; i++ {
+		ids = append(ids, fmt.Sprintf("%s-%d", pathHash, i))
+	}
+	del := &events.VectorDelete{Namespace: req.Namespace, IDs: ids}
+	_ = p.bus.Emit("vector.delete", del)
+	if del.Error != "" {
+		return fmt.Errorf("delete: %s", del.Error)
+	}
+	p.logger.Info("deleted file chunks", "path", req.Path, "namespace", req.Namespace)
+	return nil
+}
+
+func pathKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func expandHome(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+

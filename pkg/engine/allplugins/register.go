@@ -27,6 +27,7 @@ import (
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	"github.com/frankbardon/nexus/plugins/memory/simple"
 	"github.com/frankbardon/nexus/plugins/memory/summary_buffer"
+	vectorplugin "github.com/frankbardon/nexus/plugins/memory/vector"
 
 	// Observer plugins.
 	"github.com/frankbardon/nexus/plugins/observe/logger"
@@ -48,6 +49,16 @@ import (
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
+	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
+	mockembeddings "github.com/frankbardon/nexus/plugins/embeddings/mock"
+	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
+
+	// Vector store plugins (advertise the "vector.store" capability).
+	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
+
+	// RAG plugins.
+	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
+
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
@@ -62,6 +73,7 @@ import (
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
 	codeexecplugin "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
+	knowledgesearchplugin "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
@@ -105,6 +117,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.memory.summary_buffer", summary_buffer.New)
 	r.Register("nexus.memory.compaction", compactionplugin.New)
 	r.Register("nexus.memory.longterm", longtermplugin.New)
+	r.Register("nexus.memory.vector", vectorplugin.New)
 
 	// Observers
 	r.Register("nexus.observe.logger", logger.New)
@@ -126,6 +139,16 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.search.anthropic_native", anthropicnativesearch.New)
 	r.Register("nexus.search.openai_native", openainativesearch.New)
 
+	// Embeddings providers (capability: embeddings.provider)
+	r.Register("nexus.embeddings.openai", openaiembeddings.New)
+	r.Register("nexus.embeddings.mock", mockembeddings.New)
+
+	// Vector stores (capability: vector.store)
+	r.Register("nexus.vectorstore.chromem", chromemvector.New)
+
+	// RAG
+	r.Register("nexus.rag.ingest", ragingest.New)
+
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
 
@@ -144,6 +167,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.ask", ask.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
 	r.Register("nexus.tool.web", webplugin.New)
+	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
 
 	// Gates
 	r.Register("nexus.gate.content_safety", contentsafetygate.New)
