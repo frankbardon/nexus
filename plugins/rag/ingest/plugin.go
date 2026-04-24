@@ -15,12 +15,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -51,7 +49,6 @@ type Plugin struct {
 	watcher *watcher // lazily started in Ready when len(watches) > 0
 
 	unsubs []func()
-	mu     sync.Mutex
 }
 
 func New() engine.Plugin {
@@ -343,47 +340,3 @@ func expandHome(p string) string {
 	return p
 }
 
-// walkPath enumerates files under path matching glob (relative to path).
-// Used by the CLI for bulk directory ingest. Kept here so both the plugin
-// and the CLI share one implementation.
-func walkPath(root, glob string) ([]string, error) {
-	var files []string
-	walker := func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if glob == "" {
-			files = append(files, p)
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			rel = p
-		}
-		ok, matchErr := filepath.Match(glob, rel)
-		if matchErr == nil && ok {
-			files = append(files, p)
-			return nil
-		}
-		// Also try matching on basename so "**/*.md"-style callers get hits.
-		if ok2, _ := filepath.Match(glob, filepath.Base(p)); ok2 {
-			files = append(files, p)
-		}
-		return nil
-	}
-	// Single-file path short-circuit.
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return []string{root}, nil
-	}
-	if err := filepath.WalkDir(root, walker); err != nil {
-		return nil, err
-	}
-	return files, nil
-}
