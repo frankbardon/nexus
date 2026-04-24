@@ -157,7 +157,8 @@ func walkIngestPath(root, glob string) ([]string, error) {
 
 // buildIngestConfig assembles a minimal YAML config for the ingest CLI:
 // embeddings.provider (OpenAI), vector.store (chromem), and the ingest
-// plugin. No agent, no LLM, no IO.
+// plugin. No agent, no LLM, no IO. Per-plugin configs live flat under
+// "plugins:" with the plugin ID as the key (see pkg/engine/config.go).
 func buildIngestConfig(vectorPath, cachePath, model string, chunkSize, chunkOverlap int) []byte {
 	var b []byte
 	b = append(b, "core:\n  log_level: info\n"...)
@@ -166,22 +167,21 @@ func buildIngestConfig(vectorPath, cachePath, model string, chunkSize, chunkOver
 	b = append(b, "    - nexus.embeddings.openai\n"...)
 	b = append(b, "    - nexus.vectorstore.chromem\n"...)
 	b = append(b, "    - nexus.rag.ingest\n"...)
-	b = append(b, "  configs:\n"...)
 
 	if model != "" {
-		b = append(b, "    nexus.embeddings.openai:\n"...)
-		b = append(b, fmt.Sprintf("      model: %q\n", model)...)
+		b = append(b, "  nexus.embeddings.openai:\n"...)
+		b = append(b, fmt.Sprintf("    model: %q\n", model)...)
 	}
 	if vectorPath != "" {
-		b = append(b, "    nexus.vectorstore.chromem:\n"...)
-		b = append(b, fmt.Sprintf("      path: %q\n", vectorPath)...)
+		b = append(b, "  nexus.vectorstore.chromem:\n"...)
+		b = append(b, fmt.Sprintf("    path: %q\n", vectorPath)...)
 	}
-	b = append(b, "    nexus.rag.ingest:\n"...)
-	b = append(b, "      chunker:\n"...)
-	b = append(b, fmt.Sprintf("        size: %d\n", chunkSize)...)
-	b = append(b, fmt.Sprintf("        overlap: %d\n", chunkOverlap)...)
+	b = append(b, "  nexus.rag.ingest:\n"...)
+	b = append(b, "    chunker:\n"...)
+	b = append(b, fmt.Sprintf("      size: %d\n", chunkSize)...)
+	b = append(b, fmt.Sprintf("      overlap: %d\n", chunkOverlap)...)
 	if cachePath != "" {
-		b = append(b, fmt.Sprintf("      cache_dir: %q\n", cachePath)...)
+		b = append(b, fmt.Sprintf("    cache_dir: %q\n", cachePath)...)
 	}
 	return b
 }
