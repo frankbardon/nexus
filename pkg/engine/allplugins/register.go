@@ -48,6 +48,9 @@ import (
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
+	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
+	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
+
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
@@ -125,6 +128,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.search.brave", bravesearch.New)
 	r.Register("nexus.search.anthropic_native", anthropicnativesearch.New)
 	r.Register("nexus.search.openai_native", openainativesearch.New)
+
+	// Embeddings providers (capability: embeddings.provider)
+	r.Register("nexus.embeddings.openai", openaiembeddings.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
