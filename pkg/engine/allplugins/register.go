@@ -27,6 +27,7 @@ import (
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	"github.com/frankbardon/nexus/plugins/memory/simple"
 	"github.com/frankbardon/nexus/plugins/memory/summary_buffer"
+	vectorplugin "github.com/frankbardon/nexus/plugins/memory/vector"
 
 	// Observer plugins.
 	"github.com/frankbardon/nexus/plugins/observe/logger"
@@ -115,6 +116,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.memory.summary_buffer", summary_buffer.New)
 	r.Register("nexus.memory.compaction", compactionplugin.New)
 	r.Register("nexus.memory.longterm", longtermplugin.New)
+	r.Register("nexus.memory.vector", vectorplugin.New)
 
 	// Observers
 	r.Register("nexus.observe.logger", logger.New)
