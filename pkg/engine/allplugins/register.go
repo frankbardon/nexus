@@ -50,6 +50,7 @@ import (
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
 	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
+	mockembeddings "github.com/frankbardon/nexus/plugins/embeddings/mock"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 
 	// Vector store plugins (advertise the "vector.store" capability).
@@ -140,6 +141,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Embeddings providers (capability: embeddings.provider)
 	r.Register("nexus.embeddings.openai", openaiembeddings.New)
+	r.Register("nexus.embeddings.mock", mockembeddings.New)
 
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)

@@ -234,28 +234,13 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		return nil
 	}
 
-	// Resolve model from the embeddings request (filled by the provider).
-	// We issue a tiny probe first to learn the model? Simpler: send all
-	// chunks and let the provider echo back req.Model.
-	//
 	// Split into cached + uncached.
 	vectors := make([][]float32, len(chunks))
 	missing := make([]int, 0, len(chunks))
 	missingText := make([]string, 0, len(chunks))
 
-	// We need the model to key the cache. First pass: we don't know the
-	// model yet. Strategy: use "" as the cache key for the first ingest,
-	// then after the first successful embed switch to the returned model.
-	// Simpler: always ask the embeddings provider for the model, even on
-	// full cache hit, by sending a 1-item probe. But that defeats the cache.
-	//
-	// Pragmatic fix: cache key includes the configured model on the
-	// provider (we don't track it plugin-side). Use a dedicated probe
-	// with a single empty-ish text only when cache is fully cold.
-	model := p.resolveModel()
-
 	for i, c := range chunks {
-		if v := p.cache.Get(model, c); v != nil {
+		if v := p.cache.Get(c); v != nil {
 			vectors[i] = v
 			continue
 		}
@@ -264,7 +249,7 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 	}
 
 	if len(missing) > 0 {
-		embReq := &events.EmbeddingsRequest{Texts: missingText, Model: model}
+		embReq := &events.EmbeddingsRequest{Texts: missingText}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			return fmt.Errorf("embed: %s", embReq.Error)
@@ -272,14 +257,9 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		if len(embReq.Vectors) != len(missing) {
 			return fmt.Errorf("embed: expected %d vectors, got %d", len(missing), len(embReq.Vectors))
 		}
-		// Cache keyed by the actual model the provider used.
-		effectiveModel := embReq.Model
-		if effectiveModel == "" {
-			effectiveModel = model
-		}
 		for j, idx := range missing {
 			vectors[idx] = embReq.Vectors[j]
-			if err := p.cache.Put(effectiveModel, missingText[j], embReq.Vectors[j]); err != nil {
+			if err := p.cache.Put(missingText[j], embReq.Vectors[j]); err != nil {
 				p.logger.Debug("cache write failed (non-fatal)", "err", err)
 			}
 		}
@@ -343,16 +323,6 @@ func (p *Plugin) delete(req *events.RAGIngestDelete) error {
 	}
 	p.logger.Info("deleted file chunks", "path", req.Path, "namespace", req.Namespace)
 	return nil
-}
-
-// resolveModel returns the configured embedding model for cache keying. The
-// authoritative value is echoed back by the provider — this is only used on
-// first ingest before any provider call has happened. Callers are expected
-// to update cache entries after the real model is known.
-func (p *Plugin) resolveModel() string {
-	// Keep it simple: default to empty string, which the cache path maps
-	// to "default". Once a provider answers, we switch to the real model.
-	return ""
 }
 
 func pathKey(path string) string {
