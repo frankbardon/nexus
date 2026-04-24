@@ -51,6 +51,9 @@ import (
 	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 
+	// Vector store plugins (advertise the "vector.store" capability).
+	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
+
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
@@ -131,6 +134,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Embeddings providers (capability: embeddings.provider)
 	r.Register("nexus.embeddings.openai", openaiembeddings.New)
+
+	// Vector stores (capability: vector.store)
+	r.Register("nexus.vectorstore.chromem", chromemvector.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
