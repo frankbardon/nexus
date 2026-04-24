@@ -231,6 +231,30 @@ Best for: Exercising the PlanExec agent's plan-then-execute loop.
 
 ---
 
+## rag.yaml
+
+**RAG-enabled agent** wired with embeddings, vector store, ingest plugin, knowledge-search tool, and vector memory.
+
+```bash
+bin/nexus -config configs/rag.yaml
+```
+
+| Setting | Value |
+|---------|-------|
+| Agent | ReAct (10 iterations) |
+| LLM | Anthropic (default model: balanced) |
+| Embeddings | `nexus.embeddings.openai` (text-embedding-3-small) |
+| Vector store | `nexus.vectorstore.chromem` (default `~/.nexus/vectors/`) |
+| Tools | `knowledge_search` over namespaces `[kb, project-docs]` |
+| Memory | Conversation (100 messages) + per-agent vector recall |
+| Plugins | TUI, Anthropic, ReAct, OpenAI Embeddings, Chromem, RAG Ingest, Knowledge Search Tool, Vector Memory, Logger |
+
+Best for: Q&A grounded in a knowledge base. Pre-populate the vector store with `nexus ingest --namespace=kb ./your-docs` before starting the agent. See the [RAG guide](../guides/rag.md) for the full walkthrough.
+
+Requires both `ANTHROPIC_API_KEY` (LLM) and `OPENAI_API_KEY` (embeddings) — they're independent keys.
+
+---
+
 ## Creating Your Own Profile
 
 Start by copying an existing profile and modifying it:

@@ -12,6 +12,7 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 | [File Opener](./opener.md) | `nexus.tool.opener` | `open_path` | Open files in the OS default app |
 | [Ask User](./ask.md) | `nexus.tool.ask` | `ask_user` | Ask the user a question |
 | [Code Exec](./code_exec.md) | `nexus.tool.code_exec` | `run_code` | Run a Go script that orchestrates multiple tool calls in one turn |
+| [Knowledge Search](./knowledge_search.md) | `nexus.tool.knowledge_search` | `knowledge_search` | Semantic search over configured RAG namespaces; returns top-k chunks with source paths for citation |
 
 ## How Tools Work
 

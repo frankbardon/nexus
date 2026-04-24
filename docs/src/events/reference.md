@@ -677,6 +677,140 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 
 ---
 
+## Embeddings Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `embeddings.request` | `*EmbeddingsRequest` | Embed a batch of texts. Pointer-fill — provider mutates in place. |
+
+### Payloads
+
+**EmbeddingsRequest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Texts` | []string | Batch of strings to embed (input). |
+| `Model` | string | Requested model; provider may echo back actual model used. |
+| `Dimensions` | int | Optional truncation hint. Zero = provider default. |
+| `Vectors` | [][]float32 | Result vectors, in input order (output). |
+| `Provider` | string | Plugin ID of the adapter that answered (output). |
+| `Usage` | EmbeddingsUsage | Token usage when reported by the provider (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**EmbeddingsUsage**
+| Field | Type | Description |
+|-------|------|-------------|
+| `PromptTokens` | int | Tokens consumed by the input. |
+| `TotalTokens` | int | Total billable tokens. |
+
+---
+
+## Vector Store Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `vector.upsert` | `*VectorUpsert` | Insert or replace docs in a namespace. |
+| `vector.query` | `*VectorQuery` | Nearest-neighbor lookup in a namespace. |
+| `vector.delete` | `*VectorDelete` | Remove docs by ID. |
+| `vector.namespace.drop` | `*VectorNamespaceDrop` | Remove an entire namespace (idempotent). |
+
+All four are pointer-fill — adapter sets `Provider` / `Error` (and `Matches` on query) in place.
+
+### Payloads
+
+**VectorDoc**
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | string | Stable identifier; upsert replaces by ID. |
+| `Vector` | []float32 | Embedding. Adapters may require unit-normalized. |
+| `Content` | string | Original text (optional but typically stored for re-ranking / display). |
+| `Metadata` | map[string]string | String-keyed metadata. |
+
+**VectorMatch**
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | string | Doc ID. |
+| `Content` | string | Doc content. |
+| `Metadata` | map[string]string | Doc metadata. |
+| `Similarity` | float32 | Cosine similarity in `[-1, 1]`. |
+
+**VectorUpsert**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Namespace` | string | Target namespace (input). |
+| `Docs` | []VectorDoc | Docs to upsert (input). |
+| `Provider` | string | Adapter plugin ID (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**VectorQuery**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Namespace` | string | Target namespace (input). |
+| `Vector` | []float32 | Query vector (input). |
+| `K` | int | Max results (input). |
+| `Filter` | map[string]string | Exact-match metadata filter (input, optional). |
+| `Matches` | []VectorMatch | Hits sorted by similarity desc (output). |
+| `Provider` | string | Adapter plugin ID (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**VectorDelete**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Namespace` | string | Target namespace (input). |
+| `IDs` | []string | Doc IDs to remove. Unknown IDs are ignored (input). |
+| `Provider` | string | Adapter plugin ID (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**VectorNamespaceDrop**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Namespace` | string | Namespace to drop (input). |
+| `Provider` | string | Adapter plugin ID (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+---
+
+## RAG Events
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `rag.ingest` | `*RAGIngest` | Ingest one file. Pointer-fill. |
+| `rag.ingest.delete` | `*RAGIngestDelete` | Drop a file's chunks. Pointer-fill. |
+| `rag.ingest.result` | `*RAGIngest` | Notification emitted after `rag.ingest` completes (read-only). |
+| `memory.vector.store` | `*VectorMemoryStore` | Explicit store into vector memory. Pointer-fill. |
+
+### Payloads
+
+**RAGIngest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Path` | string | File path (input). |
+| `Namespace` | string | Target namespace (input). |
+| `Metadata` | map[string]string | Optional metadata merged into every chunk (input). |
+| `Provider` | string | Ingest plugin ID (output). |
+| `Chunks` | int | Number of chunks upserted (output). |
+| `SkippedCached` | int | How many of those came from the embedding cache (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**RAGIngestDelete**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Path` | string | File path (input). |
+| `Namespace` | string | Target namespace (input). |
+| `Provider` | string | Ingest plugin ID (output). |
+| `Deleted` | int | Reserved; currently always zero (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+**VectorMemoryStore**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Content` | string | Content to store (input). |
+| `Source` | string | Short label recorded as metadata (e.g. `user`, `agent`, `compaction`) (input). |
+| `Metadata` | map[string]string | Extra metadata merged into the stored doc (input). |
+| `Provider` | string | Plugin ID of the memory.vector plugin (output). |
+| `Error` | string | Non-empty on failure (output). |
+
+---
+
 ## Thinking Events
 
 | Event Type | Payload | Description |
