@@ -11,6 +11,16 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch: if the first positional arg is a known
+	// subcommand, route to it. Otherwise fall through to the default
+	// run-the-config flow so existing invocations stay unchanged.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "ingest":
+			os.Exit(runIngest(os.Args[2:]))
+		}
+	}
+
 	configPath := flag.String("config", "nexus.yaml", "path to config file")
 	recallSession := flag.String("recall", "", "session ID to recall and resume")
 	flag.Parse()

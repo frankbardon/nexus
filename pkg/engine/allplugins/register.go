@@ -54,6 +54,9 @@ import (
 	// Vector store plugins (advertise the "vector.store" capability).
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
 
+	// RAG plugins.
+	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
+
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
@@ -137,6 +140,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)
+
+	// RAG
+	r.Register("nexus.rag.ingest", ragingest.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
