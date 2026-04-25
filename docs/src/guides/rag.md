@@ -13,28 +13,33 @@ This guide walks through the common path: stand up a knowledge base, point an ag
 
 ## Architecture at a glance
 
-```
-                        ┌──────────────────────────────────┐
-                        │        embeddings.provider       │  ← capability
-                        │  (nexus.embeddings.openai/...)   │
-                        └──────────────────────────────────┘
-                                       ▲
-                                       │ embeddings.request
-            ┌──────────────────────────┼──────────────────────────┐
-            │                          │                          │
-┌─────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-│  nexus.rag.ingest   │   │ nexus.tool.          │   │ nexus.memory.vector  │
-│  (chunk + cache +   │   │ knowledge_search     │   │ (per-agent recall)   │
-│   fsnotify watcher) │   │ (LLM-facing tool)    │   │                      │
-└─────────────────────┘   └──────────────────────┘   └──────────────────────┘
-            │                          │                          │
-            │       vector.upsert      │      vector.query        │
-            └──────────────────────────┼──────────────────────────┘
-                                       ▼
-                        ┌──────────────────────────────────┐
-                        │           vector.store           │  ← capability
-                        │  (nexus.vectorstore.chromem/...) │
-                        └──────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Caps["⚡ Capabilities"]
+        direction LR
+        EP["embeddings.provider<br/><sub>nexus.embeddings.openai · …</sub>"]
+        VS["vector.store<br/><sub>nexus.vectorstore.chromem · …</sub>"]
+    end
+
+    subgraph Consumers["🔌 Consumer plugins"]
+        direction LR
+        ING["nexus.rag.ingest<br/><sub>chunk + cache + fsnotify</sub>"]
+        KS["nexus.tool.knowledge_search<br/><sub>LLM-facing tool</sub>"]
+        MV["nexus.memory.vector<br/><sub>per-agent recall</sub>"]
+    end
+
+    ING -- embeddings.request --> EP
+    KS  -- embeddings.request --> EP
+    MV  -- embeddings.request --> EP
+
+    ING -- vector.upsert --> VS
+    KS  -- vector.query  --> VS
+    MV  -- vector.query / upsert --> VS
+
+    classDef cap fill:#1e3a5f,stroke:#4a90e2,stroke-width:2px,color:#fff;
+    classDef consumer fill:#2d4a3e,stroke:#5fb878,stroke-width:1.5px,color:#fff;
+    class EP,VS cap;
+    class ING,KS,MV consumer;
 ```
 
 Everything flows through the bus. No plugin imports another. Adding a new backend means writing one plugin that advertises a capability and subscribes to its events.

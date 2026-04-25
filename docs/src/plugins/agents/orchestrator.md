@@ -53,8 +53,27 @@ The orchestrator implements a manager-worker pattern. It uses an LLM to decompos
 
 ## Phases
 
-```
-idle → decomposing → dispatching → executing → synthesizing → idle
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> idle
+    idle --> decomposing: agent.turn.start
+    decomposing --> dispatching: subtasks ready
+    dispatching --> executing: workers spawned
+    executing --> executing: subtask completed
+    executing --> synthesizing: all subtasks done
+    synthesizing --> idle: agent.turn.end
+    idle --> [*]
+
+    note right of decomposing
+        orchestrator LLM
+        breaks task into
+        subtasks
+    end note
+    note right of executing
+        parallel workers
+        respect max_workers
+    end note
 ```
 
 1. **Decomposing** — The orchestrator LLM breaks the task into subtasks with descriptions and optional dependencies

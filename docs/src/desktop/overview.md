@@ -13,40 +13,52 @@ ships at `cmd/desktop/` to demonstrate the full feature set.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Your Wails App  (cmd/your-app/main.go)                 │
-│                                                         │
-│   desktop.Run(&desktop.Shell{                           │
-│       Agents: []desktop.Agent{...},                     │
-│       Assets: assets,                                   │
-│   })                                                    │
-├─────────────────────────────────────────────────────────┤
-│  pkg/desktop/  (framework)                              │
-│                                                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │  Shell    │  │  Store   │  │ Sessions │              │
-│  │ (orchest.)│  │ (settings│  │ (per-    │              │
-│  │          │  │  +keyring)│  │  agent)  │              │
-│  └────┬─────┘  └──────────┘  └──────────┘              │
-│       │                                                 │
-│  Per-agent engine instances:                            │
-│  ┌─────────────────────┐  ┌─────────────────────┐      │
-│  │ Engine (agent-a)    │  │ Engine (agent-b)    │      │
-│  │  ┌───────────────┐  │  │  ┌───────────────┐  │      │
-│  │  │ nexus.io.wails│  │  │  │ nexus.io.wails│  │      │
-│  │  │ + scopedRT    │  │  │  │ + scopedRT    │  │      │
-│  │  └───────────────┘  │  │  └───────────────┘  │      │
-│  │  ┌───────────────┐  │  │  ┌───────────────┐  │      │
-│  │  │ your plugins  │  │  │  │ your plugins  │  │      │
-│  │  └───────────────┘  │  │  └───────────────┘  │      │
-│  └─────────────────────┘  └─────────────────────┘      │
-├─────────────────────────────────────────────────────────┤
-│  Wails webview  (single process, shared between agents) │
-│                                                         │
-│  Frontend JS receives scoped events:                    │
-│    "agent-a:nexus"  /  "agent-b:nexus"                  │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph App["📦 Your Wails App  (cmd/your-app/main.go)"]
+        direction LR
+        Run["desktop.Run(&desktop.Shell{ Agents, Assets })"]
+    end
+
+    subgraph FW["🧩 pkg/desktop  (framework)"]
+        direction LR
+        Shell["Shell<br/><sub>orchestrator</sub>"]
+        Store["Store<br/><sub>settings + keyring</sub>"]
+        Sess["Sessions<br/><sub>per-agent index</sub>"]
+
+        subgraph EngA["Engine (agent-a)"]
+            direction TB
+            IOA["nexus.io.wails<br/>+ scopedRuntime"]
+            PluginsA["your plugins"]
+        end
+
+        subgraph EngB["Engine (agent-b)"]
+            direction TB
+            IOB["nexus.io.wails<br/>+ scopedRuntime"]
+            PluginsB["your plugins"]
+        end
+
+        Shell --> EngA
+        Shell --> EngB
+    end
+
+    subgraph Web["🖥 Wails webview  (single process, shared)"]
+        Front["Frontend JS<br/>scoped events:<br/><code>agent-a:nexus</code> · <code>agent-b:nexus</code>"]
+    end
+
+    App --> FW
+    FW --> Web
+    EngA <-. namespaced events .-> Front
+    EngB <-. namespaced events .-> Front
+
+    classDef app fill:#3a2d4a,stroke:#9b59b6,stroke-width:2px,color:#fff;
+    classDef framework fill:#1e3a5f,stroke:#4a90e2,stroke-width:1.5px,color:#fff;
+    classDef engine fill:#2d4a3e,stroke:#5fb878,stroke-width:1.5px,color:#fff;
+    classDef web fill:#5f3a1e,stroke:#e2904a,stroke-width:1.5px,color:#fff;
+    class Run app;
+    class Shell,Store,Sess framework;
+    class IOA,IOB,PluginsA,PluginsB engine;
+    class Front web;
 ```
 
 ### Key concepts

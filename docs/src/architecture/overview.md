@@ -6,22 +6,31 @@ Nexus follows a strict event-driven architecture. The engine is intentionally mi
 
 Plugins never call each other directly. Every interaction flows through the central event bus as typed events. This keeps plugins decoupled and makes the system easy to extend or reconfigure.
 
-```
-┌─────────────────────────────────────────────────────┐
-│                      Engine                          │
-│                                                      │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ EventBus │  │ Registry │  │ LifecycleManager  │  │
-│  └────┬─────┘  └──────────┘  └───────────────────┘  │
-│       │                                              │
-│  ┌────┴──────────────────────────────────────────┐   │
-│  │              Event Dispatch                    │   │
-│  └─┬──────┬──────┬──────┬──────┬──────┬────────┘   │
-│    │      │      │      │      │      │             │
-│  ┌─┴──┐┌─┴──┐┌─┴──┐┌─┴──┐┌─┴──┐┌─┴──┐           │
-│  │ IO ││Agent││ LLM ││Tool││Mem ││Obs │  Plugins   │
-│  └────┘└────┘└────┘└────┘└────┘└────┘           │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Engine["🛠 Engine (pkg/engine)"]
+        direction TB
+        EB[EventBus]
+        REG[PluginRegistry]
+        LM[LifecycleManager]
+        EB --- REG --- LM
+        DISPATCH{{Event Dispatch}}
+        EB --> DISPATCH
+    end
+
+    DISPATCH --> IO[IO Plugins<br/>tui · browser · wails]
+    DISPATCH --> AG[Agent Plugins<br/>react · planexec · orchestrator]
+    DISPATCH --> LLM[LLM Providers<br/>anthropic · openai · fallback]
+    DISPATCH --> TL[Tool Plugins<br/>shell · file · web · knowledge_search]
+    DISPATCH --> MEM[Memory Plugins<br/>capped · summary · longterm · vector]
+    DISPATCH --> OBS[Observers<br/>logger · otel · thinking]
+
+    classDef engine fill:#1e3a5f,stroke:#4a90e2,stroke-width:2px,color:#fff;
+    classDef plugin fill:#2d4a3e,stroke:#5fb878,stroke-width:1.5px,color:#fff;
+    classDef dispatch fill:#4a3a5f,stroke:#9b59b6,stroke-width:2px,color:#fff;
+    class EB,REG,LM engine;
+    class IO,AG,LLM,TL,MEM,OBS plugin;
+    class DISPATCH dispatch;
 ```
 
 ## Engine Components
@@ -54,29 +63,62 @@ When `Engine.Run()` is called:
 7. **Event loop** — The engine listens for events until a shutdown signal arrives
 8. **Shutdown** — Plugins shut down in reverse dependency order, `core.shutdown` emitted
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller as Caller<br/>(CLI / Embedder)
+    participant Engine
+    participant Session
+    participant Bus as EventBus
+    participant Plugins
+
+    Caller->>Engine: Run(ctx)
+    Engine->>Engine: Load YAML config
+    Engine->>Session: Create session workspace
+    Engine->>Bus: emit core.boot
+    Bus->>Plugins: Init() in dependency order
+    Plugins-->>Bus: subscriptions registered
+    Engine->>Plugins: Ready() in parallel
+    Engine->>Bus: emit core.ready
+    Note over Bus,Plugins: Event loop —<br/>plugins drive behavior
+    Caller-->>Engine: SIGINT / Stop()
+    Engine->>Plugins: Shutdown() in reverse order
+    Engine->>Bus: emit core.shutdown
+```
+
 ## Event Flow Example
 
 Here's a typical request flow through the system:
 
-```
-User types message
-    → nexus.io.tui emits "io.input"
-    → nexus.agent.react receives "io.input"
-    → Agent builds messages, emits "llm.request"
-    → nexus.llm.anthropic receives "llm.request"
-    → Provider calls Claude API
-    → Provider emits "llm.response" (or streams chunks)
-    → Agent receives response
-    → If tool calls present:
-        → Agent emits "before:tool.invoke" (vetoable)
-        → Agent emits "tool.invoke"
-        → nexus.tool.shell receives "tool.invoke"
-        → Tool executes, emits "before:tool.result" (vetoable)
-        → Tool emits "tool.result"
-        → Agent receives result, loops back to LLM
-    → If no tool calls:
-        → Agent emits "io.output"
-        → nexus.io.tui receives and displays response
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant IO as nexus.io.tui
+    participant Agent as nexus.agent.react
+    participant LLM as nexus.llm.anthropic
+    participant Gates as before:* gates
+    participant Tool as nexus.tool.shell
+
+    User->>IO: types message
+    IO->>Agent: io.input
+    Agent->>LLM: llm.request
+    LLM->>LLM: call Claude API
+    LLM-->>Agent: llm.response
+
+    alt response contains tool calls
+        Agent->>Gates: before:tool.invoke (vetoable)
+        Gates-->>Agent: pass
+        Agent->>Tool: tool.invoke
+        Tool->>Tool: execute
+        Tool->>Gates: before:tool.result (vetoable)
+        Gates-->>Tool: pass
+        Tool-->>Agent: tool.result
+        Agent->>LLM: llm.request (loop)
+    else final answer
+        Agent->>IO: io.output
+        IO-->>User: display response
+    end
 ```
 
 ## Key Design Decisions
