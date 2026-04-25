@@ -123,6 +123,27 @@ Registration makes the plugin available — it won't be instantiated unless it a
 
 ## Lifecycle
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> registered: factory registered
+    registered --> initialized: Init(ctx) — serial
+    initialized --> ready: Ready() — parallel
+    ready --> ready: handle events
+    ready --> shutdown: SIGINT / Stop()
+    shutdown --> [*]: Shutdown() — reverse order
+
+    note left of registered
+        Plugin appears in config
+        active list — factory
+        produces an instance.
+    end note
+    note right of ready
+        Plugins talk only
+        through the event bus.
+    end note
+```
+
 ### Boot Phase
 
 1. The lifecycle manager reads the `active` list from config

@@ -14,6 +14,7 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/frankbardon/nexus"
 edit-url-template = "https://github.com/frankbardon/nexus/edit/main/docs/src/{path}"
 no-section-label = false
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.search]
 enable = true

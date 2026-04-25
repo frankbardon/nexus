@@ -79,8 +79,20 @@ to `never`.
 
 The agent transitions through these phases:
 
-```
-idle → planning → awaiting_approval → executing → synthesizing → idle
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> idle
+    idle --> planning: agent.turn.start
+    planning --> awaiting_approval: approval == always
+    planning --> executing: approval skipped
+    awaiting_approval --> executing: user approves
+    awaiting_approval --> idle: user rejects
+    executing --> executing: next step
+    executing --> planning: step failed + replan_on_failure
+    executing --> synthesizing: all steps complete
+    synthesizing --> idle: agent.turn.end
+    idle --> [*]
 ```
 
 1. **Planning** — Emits `plan.request`; waits for `plan.result` from the
