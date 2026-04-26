@@ -6,12 +6,13 @@
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env
-#   - Skills present in ./skills/ directory (SKILL.md files)
-#   - Optional: skills in ~/.agents/skills/ (global skills)
+#   - Skills present in directories listed under nexus.skills.scan_paths below
+#     (this config uses ./skills/, so SKILL.md files must live there).
+#   - Discovery is gated entirely by scan_paths — no implicit defaults are scanned.
 #
 # What to test:
-#   1. Discovery: On boot, plugin scans ./skills/ for SKILL.md files. Check logs for
-#      discovered skill count.
+#   1. Discovery: On boot, plugin scans every directory in scan_paths for SKILL.md
+#      files. Check logs for discovered skill count.
 #   2. Catalog in prompt: catalog_in_system_prompt=true. Ask "what skills are available?"
 #      — agent should know about discovered skills from system prompt injection.
 #   3. Activate skill: Ask agent to use a specific skill (by name from catalog).

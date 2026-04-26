@@ -111,7 +111,7 @@ eng.Stop(ctx)
 | **Observers** | `logger`, `thinking` | Structured logging and thinking persistence |
 | **Planners** | `dynamic`, `static` | Optional planning phase before agent execution |
 | **Gates** | `endless_loop`, `stop_words`, `token_budget`, `rate_limiter`, `prompt_injection`, `json_schema`, `output_length`, `content_safety`, `context_window` | Quality, safety, and operational guards |
-| **Skills** | `skills` | Skill discovery from `./skills/` and `~/.agents/skills/` |
+| **Skills** | `skills` | Skill discovery from directories listed in `scan_paths` |
 | **System** | `dynvars`, `cancel` | Dynamic variables, cancellation |
 
 ## Project Structure

@@ -273,7 +273,7 @@ plugins:
 **nexus.skills**
 | Key | Type | Default |
 |-----|------|---------|
-| `scan_paths` | string[] | *(none)* |
+| `scan_paths` | string[] | *(none)* — discovery is gated entirely by this list; no implicit defaults |
 | `trust_project` | string | `ask` |
 | `max_active_skills` | int | `10` |
 | `catalog_in_system_prompt` | bool | `true` |

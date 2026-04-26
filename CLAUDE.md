@@ -682,4 +682,4 @@ Six built-in profiles in `configs/`:
 
 ## Skills
 
-Discovered from `./skills/` and `~/.agents/skills/`. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions. System prompts live in `prompts/`.
+Discovered exclusively from directories listed in the `nexus.skills` plugin's `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty, no skills are loaded. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions. System prompts live in `prompts/`.

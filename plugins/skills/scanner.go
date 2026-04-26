@@ -35,23 +35,6 @@ func ScanForSkills(paths []string, logger *slog.Logger) []SkillRecord {
 	return result
 }
 
-// DefaultScanPaths returns the standard skill scan locations.
-func DefaultScanPaths(cwd string) []string {
-	home, _ := os.UserHomeDir()
-
-	paths := []string{
-		filepath.Join(cwd, ".nexus", "skills"),
-		filepath.Join(cwd, ".agents", "skills"),
-	}
-	if home != "" {
-		paths = append(paths,
-			filepath.Join(home, ".nexus", "skills"),
-			filepath.Join(home, ".agents", "skills"),
-		)
-	}
-	return paths
-}
-
 func scanDir(dir string, scope string, depth int, dirsScanned *int, seen map[string]*SkillRecord, result *[]SkillRecord, logger *slog.Logger) {
 	if depth > maxScanDepth || *dirsScanned > maxScanDirs {
 		return

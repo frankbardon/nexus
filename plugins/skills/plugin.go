@@ -166,10 +166,13 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) handleBoot(_ engine.Event[any]) {
-	cwd, _ := os.Getwd()
-	paths := append(DefaultScanPaths(cwd), p.scanPaths...)
+	if len(p.scanPaths) == 0 {
+		p.logger.Info("skills plugin: no scan_paths configured, skipping discovery")
+		_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: nil})
+		return
+	}
 
-	records := ScanForSkills(paths, p.logger)
+	records := ScanForSkills(p.scanPaths, p.logger)
 
 	p.mu.Lock()
 	p.catalog = nil
