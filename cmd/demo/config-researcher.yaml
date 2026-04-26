@@ -1,0 +1,194 @@
+# Researcher — multi-step research across web + KB.
+#
+# Surface area exercised:
+#   - Provider fallback (Anthropic primary, OpenAI fallback) via core.models chain
+#   - Parallel tool dispatch (parallel_tools + max_concurrent)
+#   - Dynamic planner with auto approval mode
+#   - Summary-buffer memory (auto-compaction for long research sessions)
+#   - Vector memory (semantic recall across sessions)
+#   - Web tools (web_search via Brave + web_fetch)
+#   - Knowledge search over Librarian's KB (read-only)
+#   - Gates: rate_limiter, prompt_injection, token_budget, context_window, endless_loop
+#   - search.provider capability resolution (Brave)
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  # Two roles: a balanced workhorse and a fallback chain. The fallback
+  # chain demonstrates that primary failure (rate limit, outage, bad key)
+  # silently re-routes to the secondary provider — visible in the UI as a
+  # provider.fallback event.
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 8192
+      - provider: nexus.llm.openai
+        model: gpt-4o
+        max_tokens: 8192
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+# Pin Brave as the search.provider explicitly so the planner emits the
+# right tool spec without needing the alphabetical-fallback warning.
+capabilities:
+  search.provider: nexus.search.brave
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # LLM providers (referenced by core.models fallback chain; both must
+    # be in active for the fallback orchestrator to dispatch to them).
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+
+    # Agent core
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Provider fallback orchestrator (intercepts llm.request when the
+    # active model role resolves to a chain).
+    - nexus.provider.fallback
+
+    # Memory: summary buffer for long sessions, vector for cross-session recall.
+    - nexus.memory.summary_buffer
+    - nexus.memory.vector
+
+    # RAG primitives — read-only from the perspective of this agent.
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.tool.knowledge_search
+
+    # Web research
+    - nexus.search.brave
+    - nexus.tool.web
+
+    # Planning
+    - nexus.planner.dynamic
+
+    # Gates
+    - nexus.gate.endless_loop
+    - nexus.gate.rate_limiter
+    - nexus.gate.prompt_injection
+    - nexus.gate.token_budget
+    - nexus.gate.context_window
+    - nexus.gate.tool_filter
+
+    # Observability
+    - nexus.observe.logger
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+
+  nexus.llm.openai:
+    api_key: "${shell.openai_api_key}"
+
+  nexus.agent.react:
+    # Parallel tool dispatch — when the LLM returns multiple tool calls in one
+    # turn (typical for "compare these three competitors" prompts), execute
+    # them concurrently rather than serially.
+    parallel_tools: true
+    max_concurrent: 4
+
+    # Planning enabled. Dynamic planner generates a plan, auto-approves,
+    # then ReAct iterates against it.
+    planning: true
+
+    system_prompt: |
+      You are the Researcher for a competitive-intelligence team.
+
+      Your toolkit:
+        - knowledge_search → search the curated competitor knowledge base
+          (the "compete-kb" namespace, maintained by the Librarian).
+        - web_search → fresh web results when KB is missing context.
+        - web_fetch → pull the body of a URL when you need full text.
+
+      Workflow expectations:
+        1. ALWAYS check knowledge_search FIRST. If the KB already has solid
+           coverage of the question, cite it and answer.
+        2. If the KB is thin or stale, supplement with web_search +
+           web_fetch. Be clear about which claims come from KB vs web.
+        3. When asked to compare multiple competitors, fan out parallel
+           tool calls in one turn — the harness will execute them
+           concurrently (parallel_tools is on).
+        4. End each substantial response with a "Sources" section listing
+           file paths (KB) and URLs (web).
+
+      Do not run shell commands. Do not write files. The Drafter agent
+      handles publication-quality output; you produce raw findings.
+
+  nexus.planner.dynamic:
+    approval: auto
+
+  nexus.gate.endless_loop:
+    max_iterations: 25
+    warning_at: 20
+
+  nexus.gate.rate_limiter:
+    requests_per_minute: 30
+    pause_message: "Rate limit reached on the LLM provider. Pausing {seconds}s before continuing the research..."
+
+  nexus.gate.prompt_injection:
+    action: block
+    message: "Aborted: a fetched web page appears to contain a prompt-injection attempt. Try a different source."
+
+  nexus.gate.token_budget:
+    max_tokens: 200000
+    warning_threshold: 0.8
+
+  nexus.gate.context_window:
+    max_context_tokens: 150000
+    trigger_ratio: 0.85
+
+  # Researcher is read-only on the filesystem.
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - file_read
+      - file_write
+
+  nexus.memory.summary_buffer:
+    strategy: message_count
+    message_threshold: 50
+    max_recent: 20
+
+  nexus.embeddings.openai:
+    api_key: "${shell.openai_api_key}"
+
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+    compress: false
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 6
+    include_metadata: true
+
+  nexus.memory.vector:
+    namespace: memory-researcher
+    top_k: 5
+    min_similarity: 0.35
+    auto_store_compaction: true
+    auto_store_user_input: false
+
+  nexus.search.brave:
+    api_key: "${brave_api_key}"
+
+  nexus.tool.web:
+    # Use the search.provider capability (resolves to Brave per `capabilities`
+    # block above). web_fetch uses go-readability internally.
+
+  nexus.observe.logger:
+    output: stderr
+    level: warn

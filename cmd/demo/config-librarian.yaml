@@ -1,0 +1,145 @@
+# Librarian — curates the competitor knowledge base.
+#
+# Surface area exercised:
+#   - RAG ingestion (watch mode on input_dir)
+#   - longterm memory (LLM-managed catalog notes via memory_* tools)
+#   - knowledge_search tool
+#   - content_safety gate (redact mode — strip PII before chunks land in the KB)
+#   - tool_filter gate (no shell, no web — Librarian is read/ingest only)
+#   - capability auto-resolution: memory.history -> capped, embeddings.provider -> openai,
+#     vector.store -> chromem, control.cancel -> cancel
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # LLM provider (referenced by core.models above; must be in active)
+    - nexus.llm.anthropic
+
+    # Agent core
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Memory
+    - nexus.memory.capped
+    - nexus.memory.longterm
+
+    # RAG primitives — chromem path is shared with researcher + drafter
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.rag.ingest
+
+    # Tools the Librarian is allowed to call
+    - nexus.tool.knowledge_search
+    - nexus.tool.file
+
+    # Gates
+    - nexus.gate.endless_loop
+    - nexus.gate.content_safety
+    - nexus.gate.tool_filter
+
+    # Observability
+    - nexus.observe.logger
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+
+  nexus.agent.react:
+    system_prompt: |
+      You are the Librarian for a competitive-intelligence knowledge base.
+
+      Your responsibilities:
+        - Help the user understand what is currently in the "compete-kb" namespace.
+        - Use knowledge_search to answer "what do you have on X?" questions.
+        - Use memory_write to record durable cataloging notes ("acme-corp brief
+          updated 2026-04, primary positioning is X, sources Y").
+        - Use memory_read / memory_list to recall those notes between sessions.
+        - When the user drops files in your watched folder, they auto-ingest —
+          confirm via knowledge_search that the new chunks are queryable.
+
+      You CANNOT browse the web or run shell commands. If the user asks you to
+      research something new, hand them off to the Researcher agent.
+
+      Always cite the source path when referencing a chunk from the KB.
+
+  nexus.gate.endless_loop:
+    max_iterations: 8
+
+  nexus.memory.capped:
+    max_messages: 60
+    persist: true
+
+  nexus.memory.longterm:
+    # Catalog notes go in their own dir so they don't collide with the
+    # Researcher/Drafter agents' notes.
+    path: ~/.nexus/demo/longterm/librarian
+    auto_load: true
+
+  nexus.embeddings.openai:
+    api_key: "${shell.openai_api_key}"
+
+  # Shared chromem path — all three demo agents read from here. See main.go
+  # docstring for the cross-engine eventual-consistency caveat.
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+    compress: false
+
+  nexus.rag.ingest:
+    chunker:
+      size: 1000
+      overlap: 200
+    cache_dir: ~/.nexus/demo/vectors/_cache
+    # The watched folder is the user-configured input_dir. Anything dropped
+    # in here is chunked + embedded + upserted to the "compete-kb" namespace.
+    watch:
+      - path: "${input_dir}"
+        glob: "*.md"
+        namespace: compete-kb
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 5
+    include_metadata: true
+
+  nexus.tool.file:
+    base_dir: "${input_dir}"
+
+  # Strip PII before chunks reach the KB. The Librarian itself shouldn't
+  # paste customer emails into permanent vector storage.
+  nexus.gate.content_safety:
+    action: redact
+    check_pii_email: true
+    check_pii_phone: true
+    check_secrets_api_key: true
+
+  # Librarian is read/ingest only — no shell, no web.
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - web_search
+      - web_fetch
+
+  nexus.observe.logger:
+    output: stderr
+    level: warn

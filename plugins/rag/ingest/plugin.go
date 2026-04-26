@@ -44,8 +44,9 @@ type Plugin struct {
 	chunker *chunker
 	cache   *embeddingCache
 
-	watches []watchEntry
-	watcher *watcher // lazily started in Ready when len(watches) > 0
+	watches  []watchEntry
+	watcher  *watcher // lazily started in Ready when len(watches) > 0
+	backfill bool     // walk + ingest existing files at startup; on by default
 
 	unsubs []func()
 }
@@ -96,6 +97,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.cache = cache
 
+	// Backfill at startup (default true). Set to false when the watched
+	// directories are large enough that re-walking them at every boot is
+	// wasteful — note the embedding cache makes the actual embedding
+	// work a no-op after the first run, so the cost is just the file
+	// walk plus chunking.
+	p.backfill = true
+	if v, ok := ctx.Config["backfill"].(bool); ok {
+		p.backfill = v
+	}
+
 	// Watch entries.
 	if raw, ok := ctx.Config["watch"].([]any); ok {
 		for _, r := range raw {
@@ -134,6 +145,17 @@ func (p *Plugin) Ready() error {
 	if len(p.watches) == 0 {
 		return nil
 	}
+
+	// Backfill: walk each watched directory at startup and ingest any
+	// pre-existing matching files. fsnotify only fires on future events,
+	// so without this a freshly-pointed input_dir full of docs stays
+	// invisible until the user touches each file. The embedding cache
+	// (hash → vector, keyed per model) makes re-ingest at every boot a
+	// no-op after the first run, so default on is safe.
+	if p.backfill {
+		go p.runBackfill()
+	}
+
 	w, err := newWatcher(p.logger, p.watches, func(path, ns string, removed bool) {
 		if removed {
 			del := &events.RAGIngestDelete{Path: path, Namespace: ns}
@@ -148,6 +170,57 @@ func (p *Plugin) Ready() error {
 	}
 	p.watcher = w
 	return nil
+}
+
+// runBackfill walks each watch entry's path and emits rag.ingest for
+// every file that matches the entry's glob. Runs in its own goroutine
+// so it does not block Ready / engine boot. Skips entries whose path
+// does not exist or is not a directory (with a warning) — that's the
+// normal case when the user hasn't configured input_dir yet.
+func (p *Plugin) runBackfill() {
+	for _, e := range p.watches {
+		if e.Path == "" {
+			continue
+		}
+		info, err := os.Stat(e.Path)
+		if err != nil {
+			p.logger.Warn("rag/ingest backfill: skipping path", "path", e.Path, "err", err)
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
+
+		count := 0
+		walkErr := filepath.WalkDir(e.Path, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if e.Glob != "" {
+				rel, err := filepath.Rel(e.Path, path)
+				if err != nil {
+					rel = path
+				}
+				ok1, _ := filepath.Match(e.Glob, rel)
+				ok2, _ := filepath.Match(e.Glob, filepath.Base(path))
+				if !ok1 && !ok2 {
+					return nil
+				}
+			}
+			req := &events.RAGIngest{Path: path, Namespace: e.Namespace}
+			_ = p.bus.Emit("rag.ingest", req)
+			count++
+			return nil
+		})
+		if walkErr != nil {
+			p.logger.Warn("rag/ingest backfill: walk failed", "path", e.Path, "err", walkErr)
+			continue
+		}
+		p.logger.Info("rag/ingest backfill complete", "path", e.Path, "namespace", e.Namespace, "files", count)
+	}
 }
 
 func (p *Plugin) Shutdown(_ context.Context) error {
@@ -329,4 +402,3 @@ func pathKey(path string) string {
 	sum := sha256.Sum256([]byte(path))
 	return hex.EncodeToString(sum[:])[:16]
 }
-

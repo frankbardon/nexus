@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Compete</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Markdown rendering: marked parses, DOMPurify sanitizes the HTML before
+       it lands in the DOM (LLMs can produce arbitrary content, including
+       script tags, so sanitization is non-negotiable). -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { overflow: hidden; }
+    .chat-scroll { scroll-behavior: smooth; }
+    /* Plain user-input bubbles preserve newlines and wrap long lines. */
+    .msg-bubble.plain { white-space: pre-wrap; word-wrap: break-word; }
+
+    /* Markdown bubble styling. We don't pull in @tailwindcss/typography
+       (it isn't bundled with the CDN build), so this is a hand-rolled
+       prose-lite that targets the elements marked actually emits. */
+    .md p { margin: 0 0 0.6em; }
+    .md p:last-child { margin-bottom: 0; }
+    .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.25; margin: 0.8em 0 0.4em; }
+    .md h1 { font-size: 1.4em; }
+    .md h2 { font-size: 1.2em; }
+    .md h3 { font-size: 1.05em; }
+    .md h4 { font-size: 1em; opacity: 0.9; }
+    .md ul, .md ol { margin: 0.4em 0 0.6em; padding-left: 1.4em; }
+    .md ul { list-style: disc; }
+    .md ol { list-style: decimal; }
+    .md li { margin: 0.15em 0; }
+    .md li > p { margin: 0; }
+    .md a { color: hsl(var(--p)); text-decoration: underline; }
+    .md code:not(pre code) {
+      background: rgba(127,127,127,0.18);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.88em;
+    }
+    .md pre {
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(127,127,127,0.25);
+      border-radius: 6px;
+      padding: 0.7em 0.9em;
+      margin: 0.5em 0;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.85em;
+      line-height: 1.45;
+    }
+    .md pre code { background: transparent; padding: 0; }
+    .md blockquote {
+      border-left: 3px solid rgba(127,127,127,0.4);
+      padding-left: 0.8em;
+      margin: 0.5em 0;
+      opacity: 0.85;
+    }
+    .md table {
+      border-collapse: collapse;
+      margin: 0.6em 0;
+      font-size: 0.9em;
+    }
+    .md th, .md td {
+      border: 1px solid rgba(127,127,127,0.3);
+      padding: 0.35em 0.6em;
+      text-align: left;
+    }
+    .md th { background: rgba(127,127,127,0.12); font-weight: 600; }
+    .md hr { border: 0; border-top: 1px solid rgba(127,127,127,0.3); margin: 1em 0; }
+    .md strong { font-weight: 600; }
+    .md em { font-style: italic; }
+  </style>
+</head>
+<body class="bg-base-100 text-base-content">
+
+<!--
+  Nexus Compete — competitive-intelligence demo. Three agent personas
+  (Librarian, Researcher, Drafter) sharing a vector knowledge base.
+
+  Each agent uses the standard Nexus chat envelope protocol exposed by
+  nexus.io.wails in legacy mode. The frontend emits {type: "input",
+  payload: {content}} envelopes on the {agentID}:nexus.input channel and
+  receives output/stream/status/thinking envelopes on {agentID}:nexus.
+
+  Architecture mirrors cmd/desktop: createBus(agentID) handles envelope
+  marshaling, Alpine stores hold per-agent chat state, and shell chrome
+  (settings, agent picker) wraps the per-agent chat views.
+-->
+
+<div x-data class="h-screen flex flex-col" x-init="$store.shell.init()">
+
+  <!-- ── Top Bar ───────────────────────────────────────────────── -->
+  <header class="flex-shrink-0 bg-base-200 border-b border-base-300 px-4 py-2 flex items-center gap-3">
+    <button class="flex items-center gap-2 hover:opacity-80 transition-opacity"
+            @click="$store.shell.goHome()"
+            title="Home">
+      <i class="fa-solid fa-bolt text-primary"></i>
+      <span class="font-semibold text-sm">Nexus Compete</span>
+      <span class="text-xs opacity-40">·</span>
+      <span class="text-xs opacity-50">competitive-intelligence demo</span>
+    </button>
+
+    <div class="flex-1"></div>
+
+    <!-- Agent picker — always visible, including from the settings page so
+         the user has a way out once required settings are filled in. -->
+    <div class="join">
+      <template x-for="agent in $store.shell.agents" :key="agent.id">
+        <button class="join-item btn btn-sm gap-2"
+                :class="$store.shell.activeAgentID === agent.id && $store.shell.activeView === 'agent'
+                  ? 'btn-primary'
+                  : 'btn-ghost'"
+                @click="$store.shell.selectAgent(agent.id)"
+                :title="agent.description">
+          <i :class="agent.icon"></i>
+          <span x-text="agent.name"></span>
+          <span x-show="agent.status === 'running'"
+                class="w-2 h-2 rounded-full bg-success"></span>
+          <span x-show="agent.status === 'booting'"
+                class="w-2 h-2 rounded-full bg-warning animate-pulse"></span>
+          <span x-show="agent.status === 'error'"
+                class="w-2 h-2 rounded-full bg-error"></span>
+          <span x-show="$store.ingest.activeCount(agent.id) > 0"
+                class="badge badge-warning badge-xs gap-1"
+                :title="$store.ingest.activeCount(agent.id) + ' file(s) being ingested'">
+            <i class="fa-solid fa-database fa-xs"></i>
+            <span x-text="$store.ingest.activeCount(agent.id)"></span>
+          </span>
+        </button>
+      </template>
+    </div>
+
+    <button class="btn btn-ghost btn-sm gap-2"
+            :class="$store.shell.activeView === 'settings' ? 'btn-active' : ''"
+            @click="$store.shell.showSettings()">
+      <i class="fa-solid fa-gear"></i>
+      <span class="text-xs">Settings</span>
+    </button>
+  </header>
+
+  <!-- ── Main Content ──────────────────────────────────────────── -->
+  <main class="flex-1 overflow-hidden">
+
+    <!-- Home view (no agent picked) -->
+    <div x-show="$store.shell.activeView === 'home'"
+         class="h-full flex items-center justify-center px-6">
+      <div class="max-w-2xl text-center space-y-6">
+        <div class="text-5xl text-primary/30">
+          <i class="fa-solid fa-network-wired"></i>
+        </div>
+        <h1 class="text-3xl font-semibold">Nexus Compete</h1>
+        <p class="opacity-70">
+          A competitive-intelligence workbench with three specialized agents
+          sharing one knowledge base. Pick an agent above to get started.
+        </p>
+        <div class="grid grid-cols-3 gap-4 text-left">
+          <template x-for="agent in $store.shell.agents" :key="agent.id">
+            <div class="card bg-base-200 border border-base-300 cursor-pointer hover:border-primary"
+                 @click="$store.shell.selectAgent(agent.id)">
+              <div class="card-body p-4">
+                <div class="flex items-center gap-2">
+                  <i :class="agent.icon" class="text-primary"></i>
+                  <h3 class="font-semibold text-sm" x-text="agent.name"></h3>
+                </div>
+                <p class="text-xs opacity-60" x-text="agent.description"></p>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent chat view -->
+    <template x-for="agent in $store.shell.agents" :key="'view-' + agent.id">
+      <div x-show="$store.shell.activeView === 'agent' && $store.shell.activeAgentID === agent.id"
+           class="h-full flex flex-col">
+        <div x-data="chatView(agent.id)" x-init="init()" class="h-full flex flex-col">
+
+          <!-- Ingestion panel — collapsible. Renders only when there is
+               ingest activity (active or historical) for this agent. -->
+          <div x-show="$store.ingest.hasActivity(agent.id)"
+               x-data="{ open: $store.ingest.activeCount(agent.id) > 0 }"
+               class="flex-shrink-0 border-b border-base-300 bg-base-200/40">
+            <button class="w-full px-4 py-2 flex items-center gap-2 hover:bg-base-200 text-left"
+                    @click="open = !open">
+              <i class="fa-solid fa-database text-sm opacity-60"></i>
+              <span class="text-sm font-medium">Knowledge base ingestion</span>
+              <span x-show="$store.ingest.activeCount(agent.id) > 0"
+                    class="badge badge-warning badge-sm gap-1">
+                <i class="fa-solid fa-spinner fa-spin"></i>
+                <span x-text="$store.ingest.activeCount(agent.id) + ' active'"></span>
+              </span>
+              <span x-show="$store.ingest.activeCount(agent.id) === 0 && $store.ingest.recentCount(agent.id) > 0"
+                    class="badge badge-ghost badge-sm"
+                    x-text="$store.ingest.recentSummary(agent.id)"></span>
+              <span class="flex-1"></span>
+              <i class="fa-solid text-xs opacity-50"
+                 :class="open ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+            </button>
+            <div x-show="open"
+                 x-transition.opacity
+                 class="px-4 pb-3 max-h-64 overflow-y-auto space-y-1">
+              <template x-for="entry in $store.ingest.get(agent.id).active" :key="entry.id">
+                <div class="flex items-center gap-2 text-xs px-2 py-1 rounded bg-warning/10 border border-warning/30">
+                  <i class="fa-solid fa-spinner fa-spin text-warning flex-shrink-0"></i>
+                  <span class="font-mono opacity-80 truncate flex-1" :title="entry.path"
+                        x-text="$store.ingest.shortPath(entry.path)"></span>
+                  <span class="opacity-60 flex-shrink-0" x-text="entry.namespace"></span>
+                </div>
+              </template>
+              <template x-for="entry in $store.ingest.get(agent.id).recent" :key="entry.id">
+                <div class="flex items-center gap-2 text-xs px-2 py-1 rounded"
+                     :class="entry.status === 'failed'
+                       ? 'bg-error/10 border border-error/30'
+                       : 'bg-base-200 border border-base-300'">
+                  <i class="fa-solid flex-shrink-0"
+                     :class="entry.status === 'failed' ? 'fa-circle-xmark text-error' : 'fa-circle-check text-success'"></i>
+                  <span class="font-mono opacity-80 truncate flex-1" :title="entry.path"
+                        x-text="$store.ingest.shortPath(entry.path)"></span>
+                  <span x-show="entry.status === 'completed'" class="opacity-60 flex-shrink-0"
+                        x-text="$store.ingest.chunkSummary(entry)"></span>
+                  <span x-show="entry.status === 'failed'"
+                        class="text-error truncate max-w-xs flex-shrink-0"
+                        :title="entry.error" x-text="entry.error"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Chat scrollback -->
+          <div class="flex-1 overflow-y-auto chat-scroll px-6 py-4 space-y-3"
+               x-ref="scrollback">
+
+            <!-- Empty state -->
+            <div x-show="messages.length === 0 && !streaming"
+                 class="text-center opacity-50 py-12 space-y-2">
+              <i :class="agent.icon" class="text-4xl text-primary/40"></i>
+              <p class="text-sm" x-text="emptyHint(agent.id)"></p>
+            </div>
+
+            <!-- Messages -->
+            <template x-for="(msg, idx) in messages" :key="idx">
+              <div class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
+                <div class="max-w-3xl">
+                  <!-- Role label -->
+                  <div class="text-xs opacity-40 mb-1 px-1"
+                       x-text="msg.role === 'user' ? 'You' : (msg.role === 'system' ? 'System' : agent.name)"></div>
+                  <!-- Bubble: user input renders verbatim (preserves what the
+                       user typed); other roles render markdown (sanitized). -->
+                  <template x-if="msg.role === 'user'">
+                    <div class="msg-bubble plain rounded-lg px-4 py-3 bg-primary text-primary-content"
+                         x-text="msg.content"></div>
+                  </template>
+                  <template x-if="msg.role !== 'user'">
+                    <div class="msg-bubble md rounded-lg px-4 py-3"
+                         :class="{
+                           'bg-base-200 border border-base-300': msg.role === 'assistant',
+                           'bg-warning/10 border border-warning/30 text-warning text-sm': msg.role === 'system',
+                           'bg-error/10 border border-error/30 text-error text-sm': msg.role === 'error',
+                         }"
+                         x-html="renderMd(msg.content)"></div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- Live stream bubble -->
+            <div x-show="streaming && streamBuffer" class="flex justify-start">
+              <div class="max-w-3xl">
+                <div class="text-xs opacity-40 mb-1 px-1" x-text="agent.name"></div>
+                <div class="msg-bubble md rounded-lg px-4 py-3 bg-base-200 border border-base-300">
+                  <span x-html="renderMd(streamBuffer)"></span><span class="opacity-60 animate-pulse">▌</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status indicator -->
+            <div x-show="status" class="text-xs opacity-50 italic px-1" x-text="status"></div>
+          </div>
+
+          <!-- Input bar -->
+          <div class="flex-shrink-0 border-t border-base-300 px-4 py-3 bg-base-200/50">
+            <div class="flex gap-2 max-w-5xl mx-auto">
+              <textarea x-model="input"
+                        @keydown.enter.prevent="$event.shiftKey ? input += '\n' : send()"
+                        rows="1"
+                        class="textarea textarea-bordered flex-1 resize-none min-h-[2.5rem]"
+                        :placeholder="placeholderFor(agent.id)"
+                        :disabled="agent.status !== 'running' || streaming"></textarea>
+              <button class="btn btn-primary"
+                      @click="send()"
+                      :disabled="!input.trim() || agent.status !== 'running' || streaming">
+                <i class="fa-solid fa-paper-plane" x-show="!streaming"></i>
+                <i class="fa-solid fa-spinner fa-spin" x-show="streaming"></i>
+              </button>
+              <button class="btn btn-ghost btn-square"
+                      @click="confirmClear = true"
+                      :disabled="streaming || clearing"
+                      title="Clear chat (start a new session)">
+                <i class="fa-solid fa-broom"></i>
+              </button>
+            </div>
+            <div class="text-xs opacity-30 mt-1 text-center">
+              <kbd class="kbd kbd-xs">Enter</kbd> to send · <kbd class="kbd kbd-xs">Shift+Enter</kbd> for newline
+            </div>
+          </div>
+
+          <!-- Clear-chat confirmation modal. Plain Alpine overlay (not the
+               native <dialog> element) so backdrop styling and focus
+               handling live in one place. -->
+          <div x-show="confirmClear"
+               x-transition.opacity
+               class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+               @click.self="confirmClear = false"
+               @keydown.escape.window="confirmClear = false">
+            <div class="bg-base-100 border border-base-300 rounded-lg shadow-xl w-full max-w-md p-6 space-y-4">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full bg-warning/15 text-warning flex items-center justify-center flex-shrink-0">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                </div>
+                <div>
+                  <h3 class="font-semibold">Clear this conversation?</h3>
+                  <p class="text-sm opacity-70">
+                    A new session will be started for <span x-text="agent.name"></span>.
+                  </p>
+                </div>
+              </div>
+              <p class="text-sm opacity-80">
+                The current conversation history will be forgotten — the agent
+                will not remember anything you've discussed in this session.
+                The previous session is preserved on disk but is no longer
+                the auto-resumed one.
+              </p>
+              <div class="flex justify-end gap-2 pt-2">
+                <button class="btn btn-ghost btn-sm"
+                        @click="confirmClear = false"
+                        :disabled="clearing">
+                  Cancel
+                </button>
+                <button class="btn btn-warning btn-sm gap-2"
+                        @click="startFreshSession()"
+                        :disabled="clearing">
+                  <i class="fa-solid fa-rotate" x-show="!clearing"></i>
+                  <i class="fa-solid fa-spinner fa-spin" x-show="clearing"></i>
+                  <span x-text="clearing ? 'Starting…' : 'Clear and start over'"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Settings view -->
+    <div x-show="$store.shell.activeView === 'settings'"
+         class="h-full overflow-y-auto px-6 py-5">
+      <div class="max-w-2xl mx-auto space-y-6">
+
+        <div x-show="Object.keys($store.settings.missingRequired).length > 0"
+             class="alert alert-warning">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+          <div>
+            <div class="font-semibold">Required settings missing</div>
+            <div class="text-sm opacity-80">Configure the highlighted fields below before starting agents.</div>
+          </div>
+        </div>
+
+        <!-- Shared section: framework's shellSettings + every "shell.*" field
+             declared by an agent, deduplicated. All persist to the "shell"
+             scope. -->
+        <div class="collapse collapse-arrow bg-base-200 border border-base-300">
+          <input type="checkbox" checked>
+          <div class="collapse-title font-semibold flex items-center gap-2">
+            <i class="fa-solid fa-sliders text-sm opacity-60"></i>
+            Shared (all agents)
+          </div>
+          <div class="collapse-content space-y-4">
+            <template x-for="field in $store.settings.sharedFields()" :key="field._effectiveKey">
+              <div x-data="settingsField(field)">
+                <label class="block text-sm font-medium mb-1" x-text="field.display"></label>
+                <div class="text-xs opacity-50 mb-2" x-show="field.description" x-text="field.description"></div>
+
+                <template x-if="field.type === 'path'">
+                  <div class="flex gap-2">
+                    <input type="text" class="input input-bordered input-sm flex-1"
+                           :value="currentValue()" @change="save($event.target.value)">
+                    <button class="btn btn-ghost btn-sm" @click="browse()">
+                      <i class="fa-solid fa-folder-open text-xs"></i> Browse
+                    </button>
+                  </div>
+                </template>
+
+                <template x-if="field.type === 'string' && !field.secret">
+                  <input type="text" class="input input-bordered input-sm w-full"
+                         :value="currentValue()" @change="save($event.target.value)">
+                </template>
+
+                <template x-if="field.type === 'number'">
+                  <input type="number" class="input input-bordered input-sm w-full"
+                         :min="field.validation?.min" :max="field.validation?.max"
+                         :value="currentValue()" @change="save(Number($event.target.value))">
+                </template>
+
+                <template x-if="field.secret">
+                  <div class="flex gap-2">
+                    <input :type="showSecret ? 'text' : 'password'"
+                           class="input input-bordered input-sm flex-1"
+                           :class="field.required && !hasValue() ? 'input-warning' : ''"
+                           :placeholder="hasValue() ? '********' : 'Enter value...'"
+                           @change="saveSecret($event.target.value); $event.target.value = ''">
+                    <button class="btn btn-ghost btn-sm btn-square" @click="showSecret = !showSecret">
+                      <i class="fa-solid text-xs" :class="showSecret ? 'fa-eye-slash' : 'fa-eye'"></i>
+                    </button>
+                    <button x-show="hasValue()" class="btn btn-ghost btn-sm text-error"
+                            @click="deleteValue()" title="Remove">
+                      <i class="fa-solid fa-trash-can text-xs"></i>
+                    </button>
+                  </div>
+                </template>
+
+                <div x-show="field.required && !hasValue()" class="text-xs text-warning mt-1">
+                  <i class="fa-solid fa-circle-exclamation"></i> Required
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Per-agent panel: only non-shell-scoped fields. shell.* fields are
+             promoted to the Shared section above. -->
+        <template x-for="agent in $store.shell.agents" :key="'settings-' + agent.id">
+          <div x-show="$store.settings.agentFields(agent.id).length > 0"
+               class="collapse collapse-arrow bg-base-200 border border-base-300"
+               :class="$store.settings.missingRequired[agent.id] ? 'border-warning' : ''">
+            <input type="checkbox" checked>
+            <div class="collapse-title font-semibold flex items-center gap-2">
+              <i :class="agent.icon" class="text-sm opacity-60"></i>
+              <span x-text="agent.name"></span>
+              <template x-if="agent.status === 'running' && $store.settings.dirtyAgents[agent.id]">
+                <div class="flex items-center gap-2 ml-2"
+                     @click.stop>
+                  <span class="badge badge-warning badge-xs">restart required</span>
+                  <button class="btn btn-warning btn-xs"
+                          @click="$store.settings.restartAgent(agent.id)">
+                    <i class="fa-solid fa-rotate text-xs"></i> Restart
+                  </button>
+                </div>
+              </template>
+            </div>
+            <div class="collapse-content space-y-4">
+              <template x-for="field in $store.settings.agentFields(agent.id)" :key="field._effectiveKey">
+                <div x-data="settingsField(field)">
+                  <label class="block text-sm font-medium mb-1" x-text="field.display"></label>
+                  <div class="text-xs opacity-50 mb-2" x-show="field.description" x-text="field.description"></div>
+
+                  <template x-if="field.type === 'path'">
+                    <div class="flex gap-2">
+                      <input type="text" class="input input-bordered input-sm flex-1"
+                             :class="field.required && !hasValue() ? 'input-warning' : ''"
+                             :value="currentValue()" @change="save($event.target.value)">
+                      <button class="btn btn-ghost btn-sm" @click="browse()">
+                        <i class="fa-solid fa-folder-open text-xs"></i> Browse
+                      </button>
+                    </div>
+                  </template>
+
+                  <template x-if="field.type === 'string' && !field.secret">
+                    <input type="text" class="input input-bordered input-sm w-full"
+                           :class="field.required && !hasValue() ? 'input-warning' : ''"
+                           :value="currentValue()" @change="save($event.target.value)">
+                  </template>
+
+                  <template x-if="field.secret">
+                    <div class="flex gap-2">
+                      <input :type="showSecret ? 'text' : 'password'"
+                             class="input input-bordered input-sm flex-1"
+                             :class="field.required && !hasValue() ? 'input-warning' : ''"
+                             :placeholder="hasValue() ? '********' : 'Enter value...'"
+                             @change="saveSecret($event.target.value); $event.target.value = ''">
+                      <button class="btn btn-ghost btn-sm btn-square" @click="showSecret = !showSecret">
+                        <i class="fa-solid text-xs" :class="showSecret ? 'fa-eye-slash' : 'fa-eye'"></i>
+                      </button>
+                      <button x-show="hasValue()" class="btn btn-ghost btn-sm text-error"
+                              @click="deleteValue()" title="Remove">
+                        <i class="fa-solid fa-trash-can text-xs"></i>
+                      </button>
+                    </div>
+                  </template>
+
+                  <div x-show="field.required && !hasValue()" class="text-xs text-warning mt-1">
+                    <i class="fa-solid fa-circle-exclamation"></i> Required
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ── Bus helper ────────────────────────────────────────────────── -->
+<script>
+function createBus(agentID) {
+  const listeners = {};
+
+  window.runtime.EventsOn(`${agentID}:nexus`, (raw) => {
+    let env;
+    if (typeof raw === 'string') {
+      try { env = JSON.parse(raw); } catch { return; }
+    } else {
+      env = raw;
+    }
+    const handlers = listeners[env.type] || [];
+    let payload = env.payload;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch {}
+    }
+    handlers.forEach(fn => fn(payload, env));
+  });
+
+  return {
+    emit(eventType, payload) {
+      const env = JSON.stringify({
+        type: eventType,
+        payload: payload || {},
+        timestamp: new Date().toISOString(),
+      });
+      window.runtime.EventsEmit(`${agentID}:nexus.input`, env);
+    },
+    on(eventType, handler) {
+      if (!listeners[eventType]) listeners[eventType] = [];
+      listeners[eventType].push(handler);
+    },
+    off(eventType, handler) {
+      if (!listeners[eventType]) return;
+      listeners[eventType] = listeners[eventType].filter(fn => fn !== handler);
+    },
+  };
+}
+window.createBus = createBus;
+window._agentBuses = {};
+
+// renderMd parses markdown and returns sanitized HTML safe for x-html.
+// LLM output is treated as untrusted: marked produces HTML, DOMPurify
+// strips any <script>, on-handlers, javascript: URLs, etc. Falls back
+// to a plain-text escape if the libraries failed to load (e.g. offline).
+window.renderMd = function(text) {
+  if (!text) return '';
+  try {
+    if (window.marked && window.DOMPurify) {
+      // Configure marked once (idempotent — repeated calls overwrite).
+      // GFM enables tables, autolinks, fenced code, strikethrough.
+      // breaks=true converts single newlines to <br>, which matches how
+      // chat users expect their text to flow.
+      marked.setOptions({ gfm: true, breaks: true });
+      const raw = marked.parse(String(text));
+      return DOMPurify.sanitize(raw);
+    }
+  } catch (err) {
+    console.warn('renderMd failed, falling back to plain text:', err);
+  }
+  // Fallback: HTML-escape and preserve newlines.
+  const div = document.createElement('div');
+  div.textContent = String(text);
+  return div.innerHTML.replace(/\n/g, '<br>');
+};
+</script>
+
+<!-- ── Shell store (top-bar nav state + agent lifecycle) ────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('shell', {
+    agents: [],
+    activeAgentID: null,
+    activeView: 'home',
+
+    async init() {
+      try {
+        const agents = await window.go.desktop.Shell.ListAgents();
+        this.agents = agents || [];
+      } catch (err) {
+        console.error('Failed to list agents:', err);
+      }
+
+      // Wire ingestion bridges for every agent so the top-bar
+      // "ingesting" badge stays live regardless of whether the user
+      // has opened that agent's chat view yet.
+      for (const a of this.agents) {
+        Alpine.store('ingest').wire(a.id);
+      }
+
+      try {
+        const missing = await window.go.desktop.Shell.HasMissingRequired();
+        if (missing && Object.keys(missing).length > 0) {
+          Alpine.store('settings').missingRequired = missing;
+          this.activeView = 'settings';
+          await Alpine.store('settings').load();
+        }
+      } catch (err) {
+        console.error('Failed to check required settings:', err);
+      }
+    },
+
+    showSettings() {
+      this.activeView = 'settings';
+      Alpine.store('settings').load();
+    },
+
+    goHome() {
+      this.activeView = 'home';
+      this.activeAgentID = null;
+    },
+
+    async selectAgent(id) {
+      if (this.activeAgentID === id && this.activeView === 'agent') return;
+      this.activeView = 'agent';
+      this.activeAgentID = id;
+
+      const agent = this.agents.find(a => a.id === id);
+      if (!agent) return;
+      // Already booted in some session — do not stomp on it. New-session /
+      // restart paths exist for the user to deliberately wipe state.
+      if (agent.status === 'running') return;
+
+      agent.status = 'booting';
+      try {
+        // Auto-recall the most recent prior session if one exists.
+        // Default behavior across launches: opening an agent resumes
+        // where you left off. Clearing the chat (NewSession below) is
+        // the explicit way to start fresh.
+        let recallID = '';
+        try {
+          const sessions = await window.go.desktop.Shell.ListSessions(id);
+          if (sessions && sessions.length > 0 && sessions[0].id) {
+            recallID = sessions[0].id;
+          }
+        } catch (err) {
+          console.warn(`ListSessions(${id}) failed, falling back to fresh session:`, err);
+        }
+
+        if (recallID) {
+          await window.go.desktop.Shell.RecallSession(id, recallID);
+        } else {
+          await window.go.desktop.Shell.EnsureAgentRunning(id);
+        }
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) this.agents = updated;
+      } catch (err) {
+        console.error(`Failed to start agent ${id}:`, err);
+        if (err && String(err).includes('missing required settings')) {
+          agent.status = 'error';
+          this.showSettings();
+          return;
+        }
+        agent.status = 'error';
+      }
+    },
+  });
+});
+</script>
+
+<!-- ── Settings store + field helper ─────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('settings', {
+    // Schema as returned by Shell.GetSettingsSchema(): { shell: [], agents: {agentID: []} }
+    schema: { shell: [], agents: {} },
+    // Values as returned by Shell.GetSettings(): { shell: {...}, agentID: {...} } — flat top-level scopes.
+    values: {},
+    missingRequired: {},
+    dirtyAgents: {},
+
+    async load() {
+      try {
+        const [schema, values, missing] = await Promise.all([
+          window.go.desktop.Shell.GetSettingsSchema(),
+          window.go.desktop.Shell.GetSettings(),
+          window.go.desktop.Shell.HasMissingRequired(),
+        ]);
+        this.schema = schema || { shell: [], agents: {} };
+        this.values = values || {};
+        this.missingRequired = missing || {};
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+      }
+    },
+
+    // sharedFields returns the deduplicated list of shell-scoped fields:
+    // the framework's built-in shellSettings PLUS every "shell.*" field
+    // declared by any agent. Agents declare shell-prefixed fields when
+    // they want a shared setting (e.g. shell.anthropic_api_key) — those
+    // persist to the "shell" scope but are otherwise just regular fields.
+    sharedFields() {
+      const out = [];
+      const seen = new Set();
+      for (const f of (this.schema.shell || [])) {
+        if (seen.has(f.key)) continue;
+        seen.add(f.key);
+        out.push({ ...f, _scope: 'shell', _effectiveKey: f.key });
+      }
+      for (const agentID of Object.keys(this.schema.agents || {})) {
+        for (const f of this.schema.agents[agentID]) {
+          if (!f.key || !f.key.startsWith('shell.')) continue;
+          const effKey = f.key.slice(6);
+          if (seen.has(effKey)) continue;
+          seen.add(effKey);
+          out.push({ ...f, _scope: 'shell', _effectiveKey: effKey });
+        }
+      }
+      return out;
+    },
+
+    // agentFields returns the per-agent fields that are NOT shell-scoped
+    // (those are promoted to sharedFields above). Used by the per-agent
+    // section so we don't double-render shell.* fields.
+    agentFields(agentID) {
+      const fields = this.schema.agents?.[agentID] || [];
+      return fields
+        .filter(f => f.key && !f.key.startsWith('shell.'))
+        .map(f => ({ ...f, _scope: agentID, _effectiveKey: f.key }));
+    },
+
+    getValue(scope, key) {
+      const scopeVals = this.values[scope];
+      if (!scopeVals) return undefined;
+      return scopeVals[key];
+    },
+
+    async setValue(scope, key, value) {
+      await window.go.desktop.Shell.UpdateSetting(scope, key, value);
+      if (!this.values[scope]) this.values[scope] = {};
+      this.values[scope][key] = value;
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    async setSecret(scope, key, value) {
+      await window.go.desktop.Shell.UpdateSecret(scope, key, value);
+      if (!this.values[scope]) this.values[scope] = {};
+      this.values[scope][key] = '__keychain__';
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    async deleteValue(scope, key, secret) {
+      await window.go.desktop.Shell.DeleteSetting(scope, key, secret);
+      if (this.values[scope]) delete this.values[scope][key];
+      this._markDirty(scope);
+      this._refreshMissing();
+    },
+
+    _markDirty(scope) {
+      if (scope === 'shell') return;
+      const agent = Alpine.store('shell').agents.find(a => a.id === scope);
+      if (agent && agent.status === 'running') {
+        this.dirtyAgents[scope] = true;
+      }
+    },
+
+    async _refreshMissing() {
+      try {
+        this.missingRequired = await window.go.desktop.Shell.HasMissingRequired() || {};
+      } catch {}
+    },
+
+    async restartAgent(agentID) {
+      try {
+        await window.go.desktop.Shell.StopAgent(agentID);
+        await window.go.desktop.Shell.EnsureAgentRunning(agentID);
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) Alpine.store('shell').agents = updated;
+        delete this.dirtyAgents[agentID];
+      } catch (err) {
+        console.error(`Failed to restart agent ${agentID}:`, err);
+      }
+    },
+  });
+
+  // settingsField wraps a single SettingsFieldInfo for rendering. The
+  // augmented field carries _scope ("shell" or agentID) and _effectiveKey
+  // (the shell.-stripped key when applicable) so this helper doesn't have
+  // to know about the prefix conversion.
+  window.settingsField = function(field) {
+    const scope = field._scope;
+    const key = field._effectiveKey;
+
+    return {
+      showSecret: false,
+
+      currentValue() {
+        const v = Alpine.store('settings').getValue(scope, key);
+        if (v === undefined) return field.default || '';
+        if (v === '__keychain__') return '';
+        return v;
+      },
+
+      hasValue() {
+        const v = Alpine.store('settings').getValue(scope, key);
+        return v !== undefined && v !== null && v !== '';
+      },
+
+      async save(value) {
+        try {
+          await Alpine.store('settings').setValue(scope, key, value);
+        } catch (err) {
+          console.error('save failed:', err);
+        }
+      },
+
+      async saveSecret(value) {
+        if (!value) return;
+        try {
+          await Alpine.store('settings').setSecret(scope, key, value);
+        } catch (err) {
+          console.error('saveSecret failed:', err);
+        }
+      },
+
+      async deleteValue() {
+        try {
+          await Alpine.store('settings').deleteValue(scope, key, !!field.secret);
+        } catch (err) {
+          console.error('delete failed:', err);
+        }
+      },
+
+      async browse() {
+        try {
+          // PickFolder takes (agentID, title); shell-scoped picks pass
+          // empty agentID — the shell uses shared_data_dir / Documents
+          // as the default directory in that case.
+          const path = await window.go.desktop.Shell.PickFolder(
+            scope === 'shell' ? '' : scope,
+            field.display,
+          );
+          if (path) await this.save(path);
+        } catch (err) {
+          console.error('browse failed:', err);
+        }
+      },
+    };
+  };
+});
+</script>
+
+<!-- ── Ingest store (RAG ingestion activity per agent) ───────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('ingest', {
+    // states[agentID] = { active: [...], recent: [...] }
+    states: {},
+    _wired: {},
+
+    // wire registers the {agentID}:ingest.updated listener and seeds
+    // initial state via GetIngestState. Called from chatView.init for
+    // each agent the user opens; idempotent per agent.
+    async wire(agentID) {
+      if (this._wired[agentID]) return;
+      this._wired[agentID] = true;
+      try {
+        const initial = await window.go.desktop.Shell.GetIngestState(agentID);
+        this.states[agentID] = this._normalize(initial);
+      } catch (err) {
+        console.warn(`GetIngestState(${agentID}) failed:`, err);
+        this.states[agentID] = { active: [], recent: [] };
+      }
+      window.runtime.EventsOn(`${agentID}:ingest.updated`, (raw) => {
+        let s = raw;
+        if (typeof raw === 'string') {
+          try { s = JSON.parse(raw); } catch { return; }
+        }
+        this.states[agentID] = this._normalize(s);
+      });
+    },
+
+    _normalize(s) {
+      return {
+        active: (s && s.active) || [],
+        recent: (s && s.recent) || [],
+      };
+    },
+
+    get(agentID) {
+      return this.states[agentID] || { active: [], recent: [] };
+    },
+
+    activeCount(agentID) {
+      return this.get(agentID).active.length;
+    },
+
+    recentCount(agentID) {
+      return this.get(agentID).recent.length;
+    },
+
+    hasActivity(agentID) {
+      const s = this.get(agentID);
+      return s.active.length > 0 || s.recent.length > 0;
+    },
+
+    // recentSummary is the ghost-badge text shown when nothing is in
+    // flight: "N ingested · M failed" (failed clause only when nonzero).
+    recentSummary(agentID) {
+      const recent = this.get(agentID).recent;
+      const failed = recent.filter(e => e.status === 'failed').length;
+      const ok = recent.length - failed;
+      let s = `${ok} ingested`;
+      if (failed > 0) s += ` · ${failed} failed`;
+      return s;
+    },
+
+    // shortPath collapses long paths so the row stays readable. We keep
+    // the file basename plus its parent directory — that's usually
+    // enough disambiguation for files inside the watched input_dir.
+    shortPath(path) {
+      if (!path) return '';
+      const parts = path.split('/');
+      if (parts.length <= 2) return path;
+      return '…/' + parts.slice(-2).join('/');
+    },
+
+    chunkSummary(entry) {
+      let s = `${entry.chunks} chunk${entry.chunks === 1 ? '' : 's'}`;
+      if (entry.skipped_cached > 0) {
+        s += ` (${entry.skipped_cached} cached)`;
+      }
+      return s;
+    },
+  });
+});
+</script>
+
+<!-- ── Generic chat view (shared by all three agents) ────────────── -->
+<script>
+window.chatView = function(agentID) {
+  return {
+    agentID,
+    bus: null,
+    messages: [],
+    input: '',
+    streaming: false,
+    streamBuffer: '',
+    streamTurnID: null,
+    status: '',
+    confirmClear: false, // confirm-clear modal visibility
+    clearing: false,     // true while NewSession is in flight
+
+    init() {
+      // Create bus on first activation, reuse on re-activation.
+      if (!window._agentBuses[agentID]) {
+        window._agentBuses[agentID] = createBus(agentID);
+      }
+      this.bus = window._agentBuses[agentID];
+
+      // Listen for chat-protocol events. Each handler is registered ONCE
+      // per agent on first init; subsequent inits skip wiring (Alpine
+      // re-runs init on x-show transitions but the bus listeners persist).
+      if (this.bus._wired) return;
+      this.bus._wired = true;
+
+      // Capture this agent's chat-state-mutating closures so the bus
+      // listeners (which are wired once per agent, not per Alpine instance)
+      // operate on the live store data even after view re-mounts.
+      const state = this;
+      this.bus._appendMessage = (msg) => state.appendMessage(msg);
+      this.bus._beginStream = (turnID) => state.beginStream(turnID);
+      this.bus._appendChunk = (turnID, chunk) => state.appendChunk(turnID, chunk);
+      this.bus._endStream = (turnID) => state.endStream(turnID);
+      this.bus._setStatus = (s) => state.setStatusText(s);
+
+      this.bus.on('output', (data) => {
+        if (data && data.metadata && data.metadata.streamed) return;
+        this.bus._appendMessage({
+          role: data.role || 'assistant',
+          content: data.content || '',
+        });
+      });
+
+      this.bus.on('stream_chunk', (data) => {
+        if (!data) return;
+        if (this.bus._currentStream !== data.turn_id) {
+          this.bus._beginStream(data.turn_id);
+        }
+        this.bus._appendChunk(data.turn_id, data.content || '');
+      });
+
+      this.bus.on('stream_end', (data) => {
+        this.bus._endStream(data && data.turn_id);
+      });
+
+      this.bus.on('status', (data) => {
+        if (!data) return;
+        const detail = data.detail ? ` — ${data.detail}` : '';
+        this.bus._setStatus(`${data.state || 'working'}${detail}`);
+      });
+
+      this.bus.on('thinking', (data) => {
+        // Quietly logged; not rendered in chat to avoid clutter.
+        console.debug('[thinking]', data && data.content);
+      });
+
+      this.bus.on('provider_fallback', (data) => {
+        this.bus._appendMessage({
+          role: 'system',
+          content: `Provider fallback triggered: ${data && data.from} → ${data && data.to}.`,
+        });
+      });
+
+      this.bus.on('plan', (data) => {
+        if (!data) return;
+        const lines = (data.steps || []).map(s => `• ${s.description}`).join('\n');
+        this.bus._appendMessage({
+          role: 'system',
+          content: `Plan generated (${data.steps?.length || 0} steps):\n${lines}`,
+        });
+      });
+
+      this.bus.on('session.file.created', (data) => {
+        if (!data || !data.path) return;
+        this.bus._appendMessage({
+          role: 'system',
+          content: `File written: ${data.path}`,
+        });
+      });
+    },
+
+    appendMessage(msg) {
+      this.messages.push(msg);
+      this.status = '';
+      // Clear the spinner on any final assistant/system/error message.
+      // Stream-end clears it for streamed responses; this covers the
+      // non-streamed path (most providers, most turns).
+      if (msg.role !== 'user') {
+        this.streaming = false;
+      }
+      this.scrollToBottom();
+    },
+
+    beginStream(turnID) {
+      this.bus._currentStream = turnID;
+      this.streaming = true;
+      this.streamBuffer = '';
+      this.streamTurnID = turnID;
+      this.status = '';
+    },
+
+    appendChunk(turnID, chunk) {
+      if (this.streamTurnID !== turnID) return;
+      this.streamBuffer += chunk;
+      this.scrollToBottom();
+    },
+
+    endStream(turnID) {
+      if (this.streamTurnID !== turnID && turnID) return;
+      if (this.streamBuffer) {
+        this.messages.push({ role: 'assistant', content: this.streamBuffer });
+      }
+      this.streaming = false;
+      this.streamBuffer = '';
+      this.streamTurnID = null;
+      this.bus._currentStream = null;
+      this.scrollToBottom();
+    },
+
+    setStatusText(s) {
+      this.status = s;
+    },
+
+    send() {
+      const content = this.input.trim();
+      if (!content) return;
+      this.appendMessage({ role: 'user', content });
+      this.input = '';
+      this.bus.emit('input', { content, files: [] });
+      this.streaming = true;
+      this.status = 'thinking…';
+    },
+
+    // startFreshSession is the confirm-modal callback. It tears down the
+    // current engine + boots a brand-new session for this agent, and
+    // clears the local message buffer to match. The previous session
+    // remains on disk (so the user can recover it via session list, if
+    // we ever add one) but is no longer the auto-resumed one — the
+    // newer empty session takes that slot.
+    async startFreshSession() {
+      if (this.clearing) return;
+      this.clearing = true;
+      try {
+        await window.go.desktop.Shell.NewSession(this.agentID);
+        // Refresh agent status (NewSession boots a new engine).
+        const updated = await window.go.desktop.Shell.ListAgents();
+        if (updated) Alpine.store('shell').agents = updated;
+        // Local buffer reset. The new engine has no history to replay.
+        this.messages = [];
+        this.streamBuffer = '';
+        this.streaming = false;
+        this.streamTurnID = null;
+        this.status = '';
+        this.bus._currentStream = null;
+        this.confirmClear = false;
+      } catch (err) {
+        console.error('startFreshSession failed:', err);
+        this.appendMessage({
+          role: 'error',
+          content: `Failed to start a fresh session: ${err && err.message ? err.message : err}`,
+        });
+        this.confirmClear = false;
+      } finally {
+        this.clearing = false;
+      }
+    },
+
+    scrollToBottom() {
+      this.$nextTick(() => {
+        const el = this.$refs.scrollback;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    placeholderFor(id) {
+      switch (id) {
+        case 'librarian':
+          return 'Ask "what do you have on Vortex?" or drop new docs in the watched folder.';
+        case 'researcher':
+          return 'Ask "compare ACME, Vortex, and Loom on pricing" — multi-step research.';
+        case 'drafter':
+          return 'Try "write a brief on Vortex AI" to invoke the competitor-brief skill.';
+        default:
+          return 'Type a message…';
+      }
+    },
+
+    emptyHint(id) {
+      switch (id) {
+        case 'librarian':
+          return 'No conversation yet. Ask the Librarian what is in the knowledge base, or point its watched folder at the cmd/demo/seed/competitors directory to ingest the seed docs.';
+        case 'researcher':
+          return 'No conversation yet. The Researcher fans out parallel knowledge_search + web_search calls, with a planner overseeing multi-step tasks.';
+        case 'drafter':
+          return 'No conversation yet. The Drafter activates the competitor-brief skill (output_schema-enforced JSON), runs through the schema gate, and writes finished briefs to your output folder.';
+        default:
+          return 'No conversation yet.';
+      }
+    },
+  };
+};
+</script>
+
+</body>
+</html>

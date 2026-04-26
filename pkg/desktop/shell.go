@@ -92,6 +92,20 @@ type Shell struct {
 	Agents []Agent
 	Assets embed.FS // custom frontend assets; zero value uses the default base template
 
+	// DataDir controls where the shell persists settings, the session
+	// metadata index, and engine session workspaces. Set this when an
+	// embedder wants to keep its data isolated from other Nexus desktop
+	// apps (e.g. "~/.nexus/myapp"). The leading "~" is expanded.
+	//
+	// When DataDir is empty (the cmd/desktop default), the shell uses the
+	// legacy split layout: settings + session index at ~/.nexus/desktop/,
+	// engine sessions at ~/.nexus/sessions/. When DataDir is set, both
+	// move under it (settings at <DataDir>/settings.json, sessions at
+	// <DataDir>/sessions/). Embedders that want the new unified layout
+	// must also set "core.sessions.root: <DataDir>/sessions" in each
+	// agent's YAML so engines write to the same root the shell expects.
+	DataDir string
+
 	// Internal state set during OnStartup.
 	ctx        context.Context
 	mu         sync.Mutex
@@ -99,6 +113,28 @@ type Shell struct {
 	store      *fileStore
 	sessionIdx *sessionIndex
 	watcher    *fileWatcher
+	ingest     *ingestTracker
+}
+
+// resolvedDataDir returns the directory used for shell persistence
+// (settings + session index). Honors DataDir when set, falls back to
+// the legacy ~/.nexus/desktop path for backwards compatibility.
+func (s *Shell) resolvedDataDir(home string) string {
+	if s.DataDir != "" {
+		return engine.ExpandPath(s.DataDir)
+	}
+	return filepath.Join(home, ".nexus", "desktop")
+}
+
+// resolvedSessionsRoot returns the engine session storage root the
+// shell uses for maintenance and deletion. When DataDir is set, this is
+// <DataDir>/sessions; otherwise it falls back to the legacy
+// ~/.nexus/sessions path.
+func (s *Shell) resolvedSessionsRoot(home string) string {
+	if s.DataDir != "" {
+		return filepath.Join(engine.ExpandPath(s.DataDir), "sessions")
+	}
+	return filepath.Join(home, ".nexus", "sessions")
 }
 
 // FileInfo describes a single file entry returned by ListFiles.
@@ -161,7 +197,7 @@ func (s *Shell) onStartup(ctx context.Context) {
 	if err != nil {
 		log.Printf("warning: cannot determine home dir, settings/sessions disabled: %v", err)
 	} else {
-		desktopDir := filepath.Join(home, ".nexus", "desktop")
+		desktopDir := s.resolvedDataDir(home)
 
 		// Initialize settings store.
 		store, err := newFileStore(desktopDir)
@@ -177,8 +213,7 @@ func (s *Shell) onStartup(ctx context.Context) {
 			log.Printf("warning: cannot load session index: %v", err)
 		} else {
 			s.sessionIdx = idx
-			sessionsRoot := filepath.Join(home, ".nexus", "sessions")
-			s.runSessionMaintenance(sessionsRoot)
+			s.runSessionMaintenance(s.resolvedSessionsRoot(home))
 		}
 	}
 
@@ -204,6 +239,11 @@ func (s *Shell) onStartup(ctx context.Context) {
 	} else {
 		s.watcher = fw
 	}
+
+	// Track RAG ingestion activity per agent so the frontend can render
+	// an "active / recent ingestion" panel. In-memory only — recent
+	// history resets every shell launch.
+	s.ingest = newIngestTracker()
 
 	// Initialize agent state entries so ListAgents can report status
 	// before any agent is started. Engine boot is on-demand via
@@ -346,7 +386,7 @@ func (s *Shell) DeleteSession(agentID, sessionID string) error {
 	// Aggressively remove the engine session directory.
 	home, err := os.UserHomeDir()
 	if err == nil {
-		dir := filepath.Join(home, ".nexus", "sessions", sessionID)
+		dir := filepath.Join(s.resolvedSessionsRoot(home), sessionID)
 		_ = os.RemoveAll(dir)
 	}
 
@@ -509,6 +549,14 @@ func (s *Shell) StopAgent(agentID string) error {
 	s.mu.Unlock()
 
 	err := eng.Stop(context.Background())
+
+	// In-flight ingestions are killed by Shutdown; their result events
+	// will never arrive, so drop the active entries to avoid ghost
+	// spinners. The completed history is preserved.
+	if s.ingest != nil {
+		s.ingest.clearActive(agentID)
+		emitIngestUpdated(s.ctx, agentID, s.ingest.state(agentID))
+	}
 
 	// Mark the session as completed in the index.
 	if s.sessionIdx != nil && sessionID != "" {
@@ -840,6 +888,16 @@ func (s *Shell) HasMissingRequired() map[string][]string {
 	return result
 }
 
+// GetIngestState returns the current ingestion projection (active +
+// recent) for an agent. Frontends use this on initial load and then
+// subscribe to {agentID}:ingest.updated for incremental pushes.
+func (s *Shell) GetIngestState(agentID string) IngestState {
+	if s.ingest == nil {
+		return IngestState{Active: []IngestEntry{}, Recent: []IngestEntry{}}
+	}
+	return s.ingest.state(agentID)
+}
+
 // installSessionSubscriptions subscribes to session metadata events on
 // the engine's bus. Returns unsub functions for cleanup on stop.
 func (s *Shell) installSessionSubscriptions(eng *engine.Engine, agentID, sessionID string) []func() {
@@ -910,6 +968,13 @@ func (s *Shell) installSessionSubscriptions(eng *engine.Engine, agentID, session
 		}
 		_ = eng.Session.WriteFile("ui-state.json", data)
 	}))
+
+	// RAG ingestion activity — start (priority 10) + result, surfaced
+	// to the frontend as {agentID}:ingest.updated. Harmless when the
+	// engine has no nexus.rag.ingest plugin (no events ever fire).
+	if s.ingest != nil {
+		unsubs = append(unsubs, s.ingest.install(s.ctx, eng, agentID)...)
+	}
 
 	// io.file.output_dir.request — plugin asks where to write outputs.
 	unsubs = append(unsubs, eng.Bus.Subscribe("io.file.output_dir.request", func(event engine.Event[any]) {
