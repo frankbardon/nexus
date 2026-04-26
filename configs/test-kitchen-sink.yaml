@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env
-#   - Optional: skills in ./skills/ directory
+#   - Optional: skills in ./skills/ directory (must also be listed in nexus.skills.scan_paths)
 #   - Optional: pre-existing memories in ~/.nexus/memory/
 #
 # What to test:
@@ -144,6 +144,7 @@ plugins:
     allow_external_writes: false
 
   nexus.skills:
+    scan_paths: ["./skills/"]
     trust_project: ask
     max_active_skills: 5
     catalog_in_system_prompt: true

@@ -81,10 +81,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.prompts = ctx.Prompts
 
-	// Read config.
+	// Read config. YAML decoding lands list values as []any, not []string,
+	// so we coerce element-by-element here. The shorter v.([]string) form
+	// silently drops the value at every active config and was a subtle
+	// boot-time footgun.
 	if v, ok := ctx.Config["scan_paths"]; ok {
-		if paths, ok := v.([]string); ok {
-			p.scanPaths = paths
+		raw := coerceStringSlice(v)
+		p.scanPaths = make([]string, 0, len(raw))
+		for _, path := range raw {
+			p.scanPaths = append(p.scanPaths, engine.ExpandPath(path))
 		}
 	}
 	if v, ok := ctx.Config["trust_project"]; ok {
@@ -103,10 +108,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		}
 	}
 	if v, ok := ctx.Config["disabled_skills"]; ok {
-		if list, ok := v.([]string); ok {
-			for _, name := range list {
-				p.disabledSkills[name] = true
-			}
+		for _, name := range coerceStringSlice(v) {
+			p.disabledSkills[name] = true
 		}
 	}
 
@@ -126,6 +129,30 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	return nil
 }
 
+// coerceStringSlice handles the YAML→map[string]any quirk: a YAML list of
+// strings decodes to []any, not []string. Accepts either form (or a single
+// string) and silently skips non-string elements.
+func coerceStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	}
+	return nil
+}
+
 func (p *Plugin) Ready() error { return nil }
 
 func (p *Plugin) Shutdown(_ context.Context) error {
@@ -139,10 +166,13 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) handleBoot(_ engine.Event[any]) {
-	cwd, _ := os.Getwd()
-	paths := append(DefaultScanPaths(cwd), p.scanPaths...)
+	if len(p.scanPaths) == 0 {
+		p.logger.Info("skills plugin: no scan_paths configured, skipping discovery")
+		_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: nil})
+		return
+	}
 
-	records := ScanForSkills(paths, p.logger)
+	records := ScanForSkills(p.scanPaths, p.logger)
 
 	p.mu.Lock()
 	p.catalog = nil

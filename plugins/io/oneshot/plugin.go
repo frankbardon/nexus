@@ -108,10 +108,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.input = v
 	}
 	if v, ok := ctx.Config["input_file"].(string); ok {
-		p.inputFile = v
+		p.inputFile = engine.ExpandPath(v)
 	}
 	if v, ok := ctx.Config["output_file"].(string); ok {
-		p.outputFile = v
+		p.outputFile = engine.ExpandPath(v)
 	}
 	p.pretty = true
 	if v, ok := ctx.Config["pretty"].(bool); ok {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/plugins/io/wails"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -74,10 +75,10 @@ func (r *scopedRuntime) OpenFileDialog(opts wails.FileDialogOptions) (string, er
 func (r *scopedRuntime) resolveDefaultDir() string {
 	if r.store != nil {
 		if val, ok := r.store.Resolve(r.agentID, "input_dir", false); ok && val != "" {
-			return val
+			return engine.ExpandPath(val)
 		}
 		if val, ok := r.store.Resolve("shell", "shared_data_dir", false); ok && val != "" {
-			return val
+			return engine.ExpandPath(val)
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "nexus-demo",
+  "outputfilename": "nexus-demo",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "Frank Bardon"
+  },
+  "info": {
+    "companyName": "Nerds, Rescue Me!",
+    "productName": "Nexus Compete",
+    "productVersion": "0.1.0",
+    "copyright": "",
+    "comments": "Competitive-intelligence demo showcasing Nexus features"
+  }
+}

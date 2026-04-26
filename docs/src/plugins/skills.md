@@ -13,7 +13,7 @@ Discovers, catalogs, and manages skills — reusable instruction sets that exten
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `scan_paths` | string[] | *(none)* | Additional directories to scan for skills |
+| `scan_paths` | string[] | *(none)* | Directories to scan for skills. **Required** — no implicit defaults. If empty, no skills are loaded. |
 | `trust_project` | string | `ask` | Trust level for project-scoped skills: `ask` (prompt user), `always`, `never` |
 | `max_active_skills` | int | `10` | Maximum number of concurrently active skills |
 | `catalog_in_system_prompt` | bool | `true` | Include skill catalog in the system prompt |
@@ -44,13 +44,19 @@ Discovers, catalogs, and manages skills — reusable instruction sets that exten
 
 ## Skill Discovery
 
-At boot, the plugin scans these directories:
+At boot, the plugin scans only the directories listed in the `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty or unset, no skills are loaded.
 
-1. `./skills/` — Project-scoped skills
-2. `~/.agents/skills/` — User-scoped skills
-3. Any paths in `scan_paths` config
+Each directory containing a `SKILL.md` file under a configured scan path is recognized as a skill. Scope is inferred from the resolved path: directories under the user's home `.nexus` or `.agents` trees are treated as `user` scope; everything else is treated as `project` scope.
 
-Each directory containing a `SKILL.md` file is recognized as a skill.
+Tilde paths (`~`, `~/...`) are expanded to the user's home directory automatically.
+
+```yaml
+nexus.skills:
+  scan_paths:
+    - ./skills              # project skills, relative to cwd
+    - ~/.agents/skills      # user-scope skills (tilde is expanded)
+    - /shared/team-skills   # any other directory you want to include
+```
 
 ## System Prompt Catalog
 
@@ -67,7 +73,7 @@ This lets the agent know which skills exist and can request activation when appr
 
 ## Trust Levels
 
-Project-scoped skills (from `./skills/`) may be untrusted. The `trust_project` setting controls behavior:
+Project-scoped skills may be untrusted. The `trust_project` setting controls behavior:
 
 | Mode | Behavior |
 |------|----------|
@@ -75,7 +81,7 @@ Project-scoped skills (from `./skills/`) may be untrusted. The `trust_project` s
 | `always` | Trust all project skills automatically |
 | `never` | Block all project skill activation |
 
-User-scoped skills (from `~/.agents/skills/`) are always trusted.
+User-scoped skills (paths under the user's home `.nexus` or `.agents` trees) are always trusted.
 
 ## Example Configuration
 
@@ -85,6 +91,7 @@ nexus.skills:
   max_active_skills: 5
   catalog_in_system_prompt: true
   scan_paths:
+    - ./skills
     - /shared/team-skills
   disabled_skills:
     - experimental-skill

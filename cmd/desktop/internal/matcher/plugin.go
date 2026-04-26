@@ -167,7 +167,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	if dir, ok := ctx.Config["output_dir"].(string); ok {
-		p.outputDir = dir
+		p.outputDir = engine.ExpandPath(dir)
 	}
 
 	if p.inflight == nil {

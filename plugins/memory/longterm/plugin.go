@@ -114,7 +114,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["path"].(string); ok {
 		basePath = v
 	}
-	basePath = expandHome(basePath)
+	basePath = engine.ExpandPath(basePath)
 
 	switch p.scope {
 	case "global":
@@ -609,21 +609,9 @@ func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
 
 func (p *Plugin) agentMemoryPath() string {
 	if p.agentID != "" {
-		return expandHome(filepath.Join("~/.nexus/agents", p.agentID, "memory"))
+		return engine.ExpandPath(filepath.Join("~/.nexus/agents", p.agentID, "memory"))
 	}
-	return expandHome("~/.nexus/memory/")
-}
-
-// expandHome replaces a leading ~ with the user's home directory.
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") || path == "~" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-		return filepath.Join(home, path[1:])
-	}
-	return path
+	return engine.ExpandPath("~/.nexus/memory/")
 }
 
 // extractStringMap extracts a map[string]string from an any value (JSON-decoded map).

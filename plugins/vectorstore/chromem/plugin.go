@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	chromemgo "github.com/philippgille/chromem-go"
@@ -67,7 +65,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["path"].(string); ok && v != "" {
 		p.path = v
 	}
-	p.path = expandHome(p.path)
+	p.path = engine.ExpandPath(p.path)
 
 	if v, ok := ctx.Config["compress"].(bool); ok {
 		p.compress = v
@@ -256,13 +254,4 @@ func (p *Plugin) handleDropNamespace(event engine.Event[any]) {
 	if err := p.db.DeleteCollection(req.Namespace); err != nil {
 		req.Error = fmt.Errorf("drop namespace: %w", err).Error()
 	}
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
 }

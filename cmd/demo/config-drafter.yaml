@@ -1,0 +1,153 @@
+# Drafter — writes structured competitor briefs.
+#
+# Surface area exercised:
+#   - Skills with output_schema (competitor-brief)
+#   - Structured output (JSON enforcement; on Anthropic this uses the
+#     synthetic-tool simulation path)
+#   - json_schema gate (catches non-conforming output and retries via LLM)
+#   - output_length gate (briefs must stay slide-sized)
+#   - content_safety gate (block before publishing)
+#   - file_write tool (publish to output_dir)
+#   - knowledge_search (read-only over the shared KB)
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # LLM provider (referenced by core.models above; must be in active)
+    - nexus.llm.anthropic
+
+    # Agent core
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Memory
+    - nexus.memory.capped
+
+    # RAG read-only
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.tool.knowledge_search
+
+    # File output
+    - nexus.tool.file
+
+    # Skills (competitor-brief lives in cmd/demo/skills)
+    - nexus.skills
+
+    # Gates. The competitor-brief skill's output_schema is enforced by the
+    # provider directly (Anthropic via tool-sim, OpenAI via response_format),
+    # so the standalone json_schema gate isn't needed here — it would
+    # require its own fallback schema at boot just to satisfy its config.
+    - nexus.gate.endless_loop
+    - nexus.gate.output_length
+    - nexus.gate.content_safety
+    - nexus.gate.tool_filter
+
+    # Observability
+    - nexus.observe.logger
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+
+  nexus.agent.react:
+    system_prompt: |
+      You are the Drafter for a competitive-intelligence team.
+
+      You produce publication-ready deliverables — competitor briefs,
+      comparison tables, exec summaries — by composing facts from the
+      shared KB into clean structured output.
+
+      Available skills:
+        - competitor-brief → structured JSON one-pager. Activate when the
+          user asks for a "brief", "summary", or "overview" of a single
+          competitor.
+
+      Your tools:
+        - knowledge_search → pull facts from the "compete-kb" namespace.
+        - file_write → save finished deliverables to the configured
+          output folder.
+
+      Rules of engagement:
+        - Always source claims from the KB. If the KB is thin, say so
+          explicitly and stop — do NOT invent facts.
+        - When a skill is active, follow its output_schema exactly. The
+          schema gate will block non-conforming output and ask you to
+          retry; treat retries as a normal part of the loop.
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.gate.output_length:
+    max_chars: 8000
+    max_retries: 2
+    retry_prompt: "The brief is {length} chars but the limit is {limit}. Tighten it without dropping any required schema fields."
+
+  nexus.gate.content_safety:
+    action: block
+    check_pii_email: true
+    check_pii_phone: true
+    check_secrets_api_key: true
+    check_secrets_private_key: true
+
+  # Drafter has file_write but nothing else dangerous.
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - web_search
+      - web_fetch
+
+  nexus.memory.capped:
+    max_messages: 60
+    persist: true
+
+  nexus.embeddings.openai:
+    api_key: "${shell.openai_api_key}"
+
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+    compress: false
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 8
+    include_metadata: true
+
+  # Constrain writes to the user-configured output folder.
+  nexus.tool.file:
+    base_dir: "${output_dir}"
+    allow_external_writes: false
+
+  # Skills scan path. `wails dev` runs with cwd=cmd/demo, so the relative
+  # path resolves to cmd/demo/skills/. For a packaged binary we'd want to
+  # walk the executable's dir, but that's out of scope here.
+  nexus.skills:
+    scan_paths:
+      - ./skills
+    trust_project: true
+    catalog_in_system_prompt: true
+
+  nexus.observe.logger:
+    output: stderr
+    level: warn

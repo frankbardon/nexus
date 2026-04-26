@@ -54,13 +54,23 @@ The markdown body is loaded into the agent's context when the skill is activated
 
 ## Skill Locations
 
-Skills are discovered from these directories:
+Skills are discovered **only** from directories listed in the `nexus.skills` plugin's `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty, no skills are loaded.
 
-| Location | Scope | Trust Level |
-|----------|-------|-------------|
-| `./skills/` | Project | Configurable (`ask`/`always`/`never`) |
-| `~/.agents/skills/` | User | Always trusted |
-| Custom paths in `scan_paths` | Config | Configurable |
+Scope is inferred from each scan path:
+
+| Path Pattern | Scope | Trust Level |
+|--------------|-------|-------------|
+| Under user's home `.nexus/` or `.agents/` tree | User | Always trusted |
+| Anywhere else | Project | Configurable (`ask`/`always`/`never`) via `trust_project` |
+
+Configure scan paths explicitly. Tilde paths (`~`, `~/...`) are expanded to the user's home directory:
+
+```yaml
+nexus.skills:
+  scan_paths:
+    - ./skills                      # project skills, relative to cwd
+    - ~/.agents/skills              # user-scope skills (tilde is expanded)
+```
 
 ## Example: Code Review Skill
 

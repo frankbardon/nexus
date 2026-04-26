@@ -210,6 +210,7 @@ func (p *Plugin) loadWordFiles(v any) {
 	}
 
 	for _, path := range files {
+		path = engine.ExpandPath(path)
 		f, err := os.Open(path)
 		if err != nil {
 			p.logger.Error("failed to open word file", "path", path, "error", err)

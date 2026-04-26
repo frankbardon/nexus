@@ -49,7 +49,7 @@ func runIngest(args []string) int {
 		return 2
 	}
 
-	cfg := buildIngestConfig(*vectorPath, *cachePath, *embeddingsModel, *chunkSize, *chunkOverlap)
+	cfg := buildIngestConfig(engine.ExpandPath(*vectorPath), engine.ExpandPath(*cachePath), *embeddingsModel, *chunkSize, *chunkOverlap)
 	eng, err := engine.NewFromBytes(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create engine: %v\n", err)
@@ -72,9 +72,10 @@ func runIngest(args []string) int {
 	// Enumerate all files matching the glob.
 	var files []string
 	for _, p := range paths {
-		got, err := walkIngestPath(p, *glob)
+		expanded := engine.ExpandPath(p)
+		got, err := walkIngestPath(expanded, *glob)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "walk %q: %v\n", p, err)
+			fmt.Fprintf(os.Stderr, "walk %q: %v\n", expanded, err)
 			return 1
 		}
 		files = append(files, got...)

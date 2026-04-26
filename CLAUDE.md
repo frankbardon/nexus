@@ -448,6 +448,7 @@ Salience is conservative by default: no per-message auto-writing (`auto_store_us
 - **No direct plugin-to-plugin calls**: All comms via event bus.
 - **Dependencies**: Minimal — only `gopkg.in/yaml.v3` beyond stdlib. Anthropic API called via raw HTTP. JSON schema gate uses `github.com/santhosh-tekuri/jsonschema/v6`. Vector store uses `github.com/philippgille/chromem-go` (pure Go, no CGO). Desktop shell adds `github.com/wailsapp/wails/v2`, `github.com/zalando/go-keyring`, `github.com/fsnotify/fsnotify`.
 - **Prompt construction**: All content injected into LLM prompts must use XML tag boundaries to separate structural sections. Use semantic tags (`<execution_plan>`, `<current_task>`, `<prior_results>`, `<user_request>`, `<skill_context>`, etc.) not markdown headers or bare concatenation. See `plugins/skills/catalog.go` for reference pattern. Shared XML helpers live in `pkg/engine/`.
+- **Path expansion**: Every config-supplied filesystem path must be funneled through `engine.ExpandPath` (`pkg/engine/paths.go`) at the read site so users can write `~` or `~/...` anywhere a path is accepted (sessions root, plugin `path`/`base_dir`/`scan_paths`/`*_file`/`output_dir`, desktop settings of type `FieldPath`, ingest CLI flags + walk paths). There is exactly one helper — do not add new local `expandHome` copies. `~` is expanded only on read; values stored in settings or YAML may stay tilded so they remain portable across home directories.
 
 ## IO Transport Plugins: `nexus.io.browser` ↔ `nexus.io.wails`
 
@@ -681,4 +682,4 @@ Six built-in profiles in `configs/`:
 
 ## Skills
 
-Discovered from `./skills/` and `~/.agents/skills/`. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions. System prompts live in `prompts/`.
+Discovered exclusively from directories listed in the `nexus.skills` plugin's `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty, no skills are loaded. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions. System prompts live in `prompts/`.

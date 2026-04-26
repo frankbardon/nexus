@@ -215,6 +215,20 @@ Call them from JavaScript as `go.desktop.Shell.MethodName(args)`.
 | `WriteFileToInputDir` | `(agentID, name, base64Data string) (string, error)` | Write base64-encoded file to `input_dir` (webview fallback for drag-and-drop) |
 | `WatchInputDir` | `(agentID string)` | Start fsnotify watcher on `input_dir`. Emits `{agentID}:files.changed` on changes |
 
+### RAG ingestion
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `GetIngestState` | `(agentID string) IngestState` | Active + recent ingestion entries for an agent. Frontends call this on load, then subscribe to `{agentID}:ingest.updated` for pushes |
+
+`IngestState` has `Active []IngestEntry` and `Recent []IngestEntry`.
+Each `IngestEntry` carries `Path`, `Namespace`, `Status` (`active` /
+`completed` / `failed`), `Chunks`, `SkippedCached`, and `Error`. The
+shell tracks ingest activity by subscribing to `rag.ingest` (priority
+10, before the ingest plugin runs the synchronous work) and
+`rag.ingest.result`. In-memory only — recent history resets on shell
+restart.
+
 ### Settings
 
 | Method | Signature | Description |
@@ -270,6 +284,7 @@ bypassing the bus bridge. Listen with `window.runtime.EventsOn`.
 |-------|---------|---------|
 | `{agentID}:sessions.updated` | JSON string of `[]SessionMeta` | Session list changed for agent |
 | `{agentID}:files.changed` | — | Files added/removed in watched `input_dir` |
+| `{agentID}:ingest.updated` | JSON string of `IngestState` | RAG ingestion started or completed (active + recent history) |
 
 ## Settings store
 

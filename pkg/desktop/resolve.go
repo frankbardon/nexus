@@ -3,6 +3,8 @@ package desktop
 import (
 	"fmt"
 	"strings"
+
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 // resolveConfig performs template substitution on raw config YAML bytes.
@@ -52,6 +54,12 @@ func resolveConfig(raw []byte, agentID string, fields []SettingsField, store Set
 			// so plugins receive "" (falsy) instead of the literal "${key}".
 			val = ""
 			// fall through to replacement below
+		}
+
+		// Tilde-expand path-typed fields so plugins receive an absolute path
+		// even when the user typed "~/Work/foo" in settings.
+		if f.Type == FieldPath && val != "" {
+			val = engine.ExpandPath(val)
 		}
 
 		result = strings.ReplaceAll(result, placeholder, val)

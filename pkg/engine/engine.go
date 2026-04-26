@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -354,7 +353,7 @@ func (e *Engine) Run(ctx context.Context) error {
 // ResumeSession loads an existing session workspace for recall.
 // It restores the session workspace and emits a session recall event.
 func (e *Engine) ResumeSession(sessionID string) error {
-	root := expandHome(e.Config.Core.Sessions.Root)
+	root := ExpandPath(e.Config.Core.Sessions.Root)
 
 	session, err := LoadSessionWorkspace(root, sessionID, e.Bus)
 	if err != nil {
@@ -425,7 +424,7 @@ func (e *Engine) EndSession() {
 
 // StartSession creates a new session workspace and emits the session start event.
 func (e *Engine) StartSession() error {
-	root := expandHome(e.Config.Core.Sessions.Root)
+	root := ExpandPath(e.Config.Core.Sessions.Root)
 
 	session, err := NewSessionWorkspace(root, e.Bus)
 	if err != nil {
@@ -460,16 +459,6 @@ func (e *Engine) StartSession() error {
 		"session_id": session.ID,
 		"root_dir":   session.RootDir,
 	})
-}
-
-// expandHome replaces a leading ~ with the user's home directory.
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
 }
 
 // parseLogLevel converts a string log level to slog.Level.

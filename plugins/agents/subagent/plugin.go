@@ -70,6 +70,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if spf, ok := ctx.Config["system_prompt_file"].(string); ok {
+		spf = engine.ExpandPath(spf)
 		data, err := os.ReadFile(spf)
 		if err != nil {
 			return fmt.Errorf("subagent: failed to read system prompt file %s: %w", spf, err)

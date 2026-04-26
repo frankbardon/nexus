@@ -130,6 +130,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if spf, ok := ctx.Config["system_prompt_file"].(string); ok {
+		spf = engine.ExpandPath(spf)
 		p.systemPromptFile = spf
 		data, err := os.ReadFile(spf)
 		if err != nil {
