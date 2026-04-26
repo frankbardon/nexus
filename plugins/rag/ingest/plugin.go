@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -87,9 +86,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	// Embedding cache. Default alongside the vector store at
 	// ~/.nexus/vectors/_cache/; overridable.
-	cacheDir := expandHome("~/.nexus/vectors/_cache")
+	cacheDir := engine.ExpandPath("~/.nexus/vectors/_cache")
 	if v, ok := ctx.Config["cache_dir"].(string); ok && v != "" {
-		cacheDir = expandHome(v)
+		cacheDir = engine.ExpandPath(v)
 	}
 	cache, err := newEmbeddingCache(cacheDir)
 	if err != nil {
@@ -106,7 +105,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			}
 			e := watchEntry{}
 			if v, ok := m["path"].(string); ok {
-				e.Path = expandHome(v)
+				e.Path = engine.ExpandPath(v)
 			}
 			if v, ok := m["glob"].(string); ok {
 				e.Glob = v
@@ -329,14 +328,5 @@ func pathKey(path string) string {
 	}
 	sum := sha256.Sum256([]byte(path))
 	return hex.EncodeToString(sum[:])[:16]
-}
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
 }
 

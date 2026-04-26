@@ -718,16 +718,17 @@ func (s *Shell) WatchInputDir(agentID string) {
 }
 
 // resolveInputDir returns the agent's input_dir setting, falling back
-// to shell.shared_data_dir, then to the user's Documents folder.
+// to shell.shared_data_dir, then to the user's Documents folder. All
+// returned paths are tilde-expanded so users can configure "~/Work/foo".
 func (s *Shell) resolveInputDir(agentID string) string {
 	if s.store != nil {
 		// Agent-scoped input_dir.
 		if val, ok := s.store.Resolve(agentID, "input_dir", false); ok && val != "" {
-			return val
+			return engine.ExpandPath(val)
 		}
 		// Shell-scoped shared_data_dir.
 		if val, ok := s.store.Resolve("shell", "shared_data_dir", false); ok && val != "" {
-			return val
+			return engine.ExpandPath(val)
 		}
 	}
 	// Fallback to user's home/Documents.
@@ -740,14 +741,14 @@ func (s *Shell) resolveInputDir(agentID string) string {
 	return ""
 }
 
-// resolveOutputDir returns the agent's output_dir setting.
+// resolveOutputDir returns the agent's output_dir setting (tilde-expanded).
 func (s *Shell) resolveOutputDir(agentID string) string {
 	if s.store == nil {
 		return ""
 	}
 	val, ok := s.store.Resolve(agentID, "output_dir", false)
 	if ok && val != "" {
-		return val
+		return engine.ExpandPath(val)
 	}
 	return ""
 }

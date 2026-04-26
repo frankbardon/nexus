@@ -2,6 +2,10 @@
 
 Complete reference for all YAML configuration options.
 
+## Path Expansion
+
+Every filesystem path supplied via configuration — engine sessions root, plugin path/dir/file fields (`scan_paths`, `system_prompt_file`, `schema_file`, `patterns_file`, `word_files`, `base_dir`, `path`, `cache_dir`, `input_file`, `output_file`, `output_dir`, ingest watch entries, etc.) — is tilde-expanded automatically. Bare `~` resolves to the user's home directory; `~/foo` resolves to `<home>/foo`. Relative paths are interpreted against the engine's working directory and not modified.
+
 ## File Structure
 
 ```yaml

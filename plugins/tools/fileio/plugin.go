@@ -70,7 +70,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if bd, ok := ctx.Config["base_dir"].(string); ok {
-		p.baseDir = bd
+		p.baseDir = engine.ExpandPath(bd)
 	}
 
 	if v, ok := ctx.Config["allow_external_writes"].(bool); ok {

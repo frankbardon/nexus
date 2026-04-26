@@ -86,7 +86,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	// Load patterns from file.
 	if v, ok := ctx.Config["patterns_file"].(string); ok && v != "" {
-		p.loadPatternsFile(v)
+		p.loadPatternsFile(engine.ExpandPath(v))
 	}
 
 	p.unsubs = append(p.unsubs,

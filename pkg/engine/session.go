@@ -25,7 +25,7 @@ func SessionConfigSnapshotPath(configPath string, sessionID string) (string, err
 		}
 	}
 
-	root = expandHome(root)
+	root = ExpandPath(root)
 	snapshotPath := filepath.Join(root, sessionID, "metadata", "config-snapshot.yaml")
 
 	if _, err := os.Stat(snapshotPath); err != nil {

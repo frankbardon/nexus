@@ -65,6 +65,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	// Load schema from file or inline.
 	if v, ok := ctx.Config["schema_file"].(string); ok && v != "" {
+		v = engine.ExpandPath(v)
 		data, err := os.ReadFile(v)
 		if err != nil {
 			return fmt.Errorf("json_schema gate: failed to read schema file %s: %w", v, err)

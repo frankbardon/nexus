@@ -161,6 +161,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if v, ok := ctx.Config["system_prompt_file"].(string); ok && v != "" {
+		v = engine.ExpandPath(v)
 		p.systemPromptFile = v
 		data, err := os.ReadFile(v)
 		if err != nil {
