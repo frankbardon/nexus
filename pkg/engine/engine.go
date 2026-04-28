@@ -339,10 +339,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	select {
 	case sig := <-sigCh:
 		e.Logger.Info("received signal", "signal", sig)
+		// Cancel the active agent turn so in-flight LLM requests abort immediately.
+		_ = e.Bus.Emit("cancel.request", events.CancelRequest{Source: "signal:" + sig.String()})
 	case <-e.SessionEnded():
 		e.Logger.Info("session ended")
 	case <-ctx.Done():
 		e.Logger.Info("context cancelled")
+		_ = e.Bus.Emit("cancel.request", events.CancelRequest{Source: "context"})
 	}
 
 	// Use a fresh background context for shutdown so plugin Shutdown calls

@@ -57,7 +57,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "core.boot", Priority: 10},
+		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "skill.activate", Priority: 50},
 		{EventType: "skill.resource.read", Priority: 50},
 		{EventType: "skill.deactivate", Priority: 50},
@@ -71,6 +71,9 @@ func (p *Plugin) Emissions() []string {
 		"skill.loaded",
 		"skill.resource.result",
 		"before:skill.activate",
+		"before:tool.result",
+		"tool.result",
+		"tool.register",
 		"schema.register",
 		"schema.deregister",
 	}
@@ -114,7 +117,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	p.unsubs = append(p.unsubs,
-		p.bus.Subscribe("core.boot", p.handleBoot, engine.WithPriority(10), engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.activate", p.handleActivate, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.resource.read", p.handleResourceRead, engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("skill.deactivate", p.handleDeactivate, engine.WithPriority(50), engine.WithSource(pluginID)),
@@ -153,7 +156,14 @@ func coerceStringSlice(v any) []string {
 	return nil
 }
 
-func (p *Plugin) Ready() error { return nil }
+func (p *Plugin) Ready() error {
+	// Scan for skills in Ready (not core.boot) so that other plugins like
+	// nexus.tool.pulse can write SKILL.md files during their Init phase
+	// before we scan.
+	p.discoverSkills()
+	p.registerTool()
+	return nil
+}
 
 func (p *Plugin) Shutdown(_ context.Context) error {
 	for _, unsub := range p.unsubs {
@@ -165,7 +175,82 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	return nil
 }
 
-func (p *Plugin) handleBoot(_ engine.Event[any]) {
+func (p *Plugin) registerTool() {
+	// Build skill name enum from current catalog.
+	p.mu.RLock()
+	names := make([]string, len(p.catalog))
+	for i, r := range p.catalog {
+		names[i] = r.Name
+	}
+	p.mu.RUnlock()
+
+	if len(names) == 0 {
+		return
+	}
+
+	_ = p.bus.Emit("tool.register", events.ToolDef{
+		Name:        "activate_skill",
+		Description: "Load a skill guide into the conversation context. Skills provide domain knowledge and best practices for specific tasks. Check <available_skills> in the system prompt to see what's available.",
+		Class:       "reference",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Name of the skill to activate.",
+					"enum":        names,
+				},
+			},
+			"required": []string{"name"},
+		},
+	})
+}
+
+func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
+	tc, ok := event.Payload.(events.ToolCall)
+	if !ok || tc.Name != "activate_skill" {
+		return
+	}
+
+	name, _ := tc.Arguments["name"].(string)
+	if name == "" {
+		p.emitToolResult(tc, "", "name argument required")
+		return
+	}
+
+	p.mu.RLock()
+	record, ok := p.skillsByName[name]
+	p.mu.RUnlock()
+	if !ok {
+		p.emitToolResult(tc, "", "skill not found: "+name)
+		return
+	}
+
+	// Emit activation event (triggers handleActivate which loads into context).
+	_ = p.bus.Emit("skill.activate", events.SkillActivation{
+		Name:        name,
+		RequestedBy: "agent",
+	})
+
+	// Return skill body as tool result so the agent sees it immediately.
+	p.emitToolResult(tc, BuildSkillContentXML(*record), "")
+}
+
+func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
+	result := events.ToolResult{
+		ID:     tc.ID,
+		Name:   tc.Name,
+		Output: output,
+		Error:  errMsg,
+		TurnID: tc.TurnID,
+	}
+	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
+		return
+	}
+	_ = p.bus.Emit("tool.result", result)
+}
+
+func (p *Plugin) discoverSkills() {
 	if len(p.scanPaths) == 0 {
 		p.logger.Info("skills plugin: no scan_paths configured, skipping discovery")
 		_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: nil})
