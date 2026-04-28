@@ -50,7 +50,7 @@ func main() {
 
 	// Run handles SIGINT/SIGTERM internally; embedders call Boot/Stop directly.
 	if err := eng.Run(context.Background()); err != nil {
-		eng.Logger.Error("engine error", "error", err)
+		fmt.Fprintf(os.Stderr, "engine error: %v\n", err)
 		os.Exit(1)
 	}
 }

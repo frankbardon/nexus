@@ -26,6 +26,8 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 
 	allowedCommands []string
+	workingDir      string
+	pathDirs        []string // directories prepended to PATH
 	timeout         time.Duration
 	sandbox         bool
 	unsubs          []func()
@@ -55,6 +57,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		for _, cmd := range ac {
 			if s, ok := cmd.(string); ok {
 				p.allowedCommands = append(p.allowedCommands, s)
+			}
+		}
+	}
+
+	// Parse working directory. Default to session files dir so shell commands
+	// and the file_io plugin see the same filesystem location.
+	if wd, ok := ctx.Config["working_dir"].(string); ok && wd != "" {
+		p.workingDir = engine.ExpandPath(wd)
+	} else if p.session != nil {
+		p.workingDir = p.session.FilesDir()
+	}
+
+	// Parse extra PATH directories (prepended to PATH for command resolution).
+	if dirs, ok := ctx.Config["path_dirs"].([]any); ok {
+		for _, entry := range dirs {
+			if s, ok := entry.(string); ok && s != "" {
+				p.pathDirs = append(p.pathDirs, engine.ExpandPath(s))
 			}
 		}
 	}
@@ -174,12 +193,30 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 
+	if p.workingDir != "" {
+		cmd.Dir = p.workingDir
+	}
+
 	// If sandbox mode, restrict the environment.
 	if p.sandbox {
 		cmd.Env = []string{
 			"PATH=/usr/bin:/bin",
 			"HOME=/tmp",
 			"LANG=en_US.UTF-8",
+		}
+	}
+
+	// Prepend extra directories to PATH.
+	if len(p.pathDirs) > 0 {
+		if cmd.Env == nil {
+			cmd.Env = cmd.Environ()
+		}
+		extra := strings.Join(p.pathDirs, ":")
+		for i, env := range cmd.Env {
+			if strings.HasPrefix(env, "PATH=") {
+				cmd.Env[i] = "PATH=" + extra + ":" + env[5:]
+				break
+			}
 		}
 	}
 

@@ -34,9 +34,10 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 	logging engine.LoggingHost
 
-	logMessages bool
-	logEvents   bool
-	level       slog.Level
+	logMessages   bool
+	logEvents     bool
+	level         slog.Level
+	excludeEvents map[string]bool
 
 	messagesPath string // absolute override; empty = session default
 	eventsPath   string // absolute override; empty = session default
@@ -172,6 +173,16 @@ func (p *Plugin) applyConfig(cfg map[string]any) {
 			p.eventsPath = s
 		}
 	}
+	if v, ok := cfg["exclude_events"]; ok {
+		if list, ok := v.([]any); ok {
+			p.excludeEvents = make(map[string]bool, len(list))
+			for _, entry := range list {
+				if s, ok := entry.(string); ok && s != "" {
+					p.excludeEvents[s] = true
+				}
+			}
+		}
+	}
 }
 
 func (p *Plugin) startMessagesSink() error {
@@ -234,6 +245,9 @@ func (p *Plugin) startEventsSink() error {
 }
 
 func (p *Plugin) handleEvent(e engine.Event[any]) {
+	if p.excludeEvents[e.Type] {
+		return
+	}
 	entry := eventLogEntry{
 		Type:      e.Type,
 		ID:        e.ID,

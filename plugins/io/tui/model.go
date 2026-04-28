@@ -143,6 +143,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+c":
+			if m.agentBusy {
+				m.agentBusy = false
+				handler := m.adapter.cancelHandler
+				if handler != nil {
+					return m, tea.Sequence(func() tea.Msg {
+						handler()
+						return nil
+					}, tea.Quit)
+				}
+			}
 			return m, tea.Quit
 		case "tab":
 			m.cyclePanel()
