@@ -760,7 +760,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	p.mu.Unlock()
 	if resp.Metadata == nil {
 		resp.Metadata = meta
-	} else if meta != nil {
+	} else {
 		for k, v := range meta {
 			resp.Metadata[k] = v
 		}
