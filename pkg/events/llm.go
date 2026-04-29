@@ -107,6 +107,7 @@ type Usage struct {
 	TotalTokens      int
 	ReasoningTokens  int // thinking/reasoning tokens (Gemini 2.5 thoughtTokenCount, etc.)
 	CachedTokens     int // tokens served from a prompt cache (billed at a discount)
+	CacheWriteTokens int // tokens written into a prompt cache (billed at a premium over plain input)
 }
 
 // StreamChunk is a single chunk from a streaming LLM response.

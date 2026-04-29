@@ -26,9 +26,16 @@ const (
 )
 
 // modelPricing holds per-model token rates in USD per million tokens.
+//
+// Cache rates are optional: when zero, calculateCost falls back to derived
+// multiples of InputPerMillion (read = 0.10×, write_5m = 1.25×, write_1h = 2.0×)
+// per Anthropic's published cache pricing.
 type modelPricing struct {
-	InputPerMillion  float64
-	OutputPerMillion float64
+	InputPerMillion        float64
+	OutputPerMillion       float64
+	CacheReadPerMillion    float64 // 0 → InputPerMillion * 0.10
+	CacheWrite5mPerMillion float64 // 0 → InputPerMillion * 1.25
+	CacheWrite1hPerMillion float64 // 0 → InputPerMillion * 2.0
 }
 
 // defaultPricing is the embedded fallback pricing table. Updated via patch
@@ -44,8 +51,25 @@ var defaultPricing = map[string]modelPricing{
 }
 
 // calculateCost computes the USD cost for a single LLM call.
+//
+// Anthropic's `input_tokens` already excludes cache-creation and cache-read
+// portions, so usage.PromptTokens is the cache-miss (plain input) count and
+// CachedTokens / CacheWriteTokens are billed separately at their own rates.
+//
+// We currently treat all CacheWriteTokens as 5-minute-TTL writes; per-request
+// TTL selection (cf. plan 01) will route writes to the 1h rate when needed.
 func calculateCost(usage events.Usage, rates modelPricing) float64 {
+	cacheReadRate := rates.CacheReadPerMillion
+	if cacheReadRate == 0 {
+		cacheReadRate = rates.InputPerMillion * 0.10
+	}
+	cacheWriteRate := rates.CacheWrite5mPerMillion
+	if cacheWriteRate == 0 {
+		cacheWriteRate = rates.InputPerMillion * 1.25
+	}
 	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
+		float64(usage.CacheWriteTokens)/1_000_000*cacheWriteRate +
+		float64(usage.CachedTokens)/1_000_000*cacheReadRate +
 		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
 }
 
@@ -486,8 +510,10 @@ type apiContentBlock struct {
 }
 
 type apiUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 func (p *Plugin) handleSyncResponse(body io.Reader) {
@@ -534,7 +560,10 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 	usage := events.Usage{
 		PromptTokens:     apiResp.Usage.InputTokens,
 		CompletionTokens: apiResp.Usage.OutputTokens,
-		TotalTokens:      apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens,
+		CachedTokens:     apiResp.Usage.CacheReadInputTokens,
+		CacheWriteTokens: apiResp.Usage.CacheCreationInputTokens,
+		TotalTokens: apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens +
+			apiResp.Usage.CacheReadInputTokens + apiResp.Usage.CacheCreationInputTokens,
 	}
 
 	return events.LLMResponse{
@@ -603,7 +632,10 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	finalUsage := events.Usage{
 		PromptTokens:     usage.InputTokens,
 		CompletionTokens: usage.OutputTokens,
-		TotalTokens:      usage.InputTokens + usage.OutputTokens,
+		CachedTokens:     usage.CacheReadInputTokens,
+		CacheWriteTokens: usage.CacheCreationInputTokens,
+		TotalTokens: usage.InputTokens + usage.OutputTokens +
+			usage.CacheReadInputTokens + usage.CacheCreationInputTokens,
 	}
 
 	// Emit stream end.
@@ -654,6 +686,8 @@ func (p *Plugin) processSSEEvent(
 			*turnID = data.Message.ID
 			*model = data.Message.Model
 			usage.InputTokens = data.Message.Usage.InputTokens
+			usage.CacheCreationInputTokens = data.Message.Usage.CacheCreationInputTokens
+			usage.CacheReadInputTokens = data.Message.Usage.CacheReadInputTokens
 		}
 
 	case "content_block_start":
@@ -740,6 +774,15 @@ func (p *Plugin) processSSEEvent(
 			if data.Usage.OutputTokens > 0 {
 				usage.OutputTokens = data.Usage.OutputTokens
 			}
+			// message_delta may carry an updated cache snapshot (Anthropic
+			// sometimes finalizes counts here). Prefer the larger value so
+			// we don't regress message_start totals.
+			if data.Usage.CacheCreationInputTokens > usage.CacheCreationInputTokens {
+				usage.CacheCreationInputTokens = data.Usage.CacheCreationInputTokens
+			}
+			if data.Usage.CacheReadInputTokens > usage.CacheReadInputTokens {
+				usage.CacheReadInputTokens = data.Usage.CacheReadInputTokens
+			}
 		}
 
 	case "message_stop":
@@ -768,6 +811,12 @@ func (p *Plugin) processSSEEvent(
 //	  claude-sonnet-4-6-20250514:
 //	    input_per_million: 3.0
 //	    output_per_million: 15.0
+//	    cache_read_per_million: 0.30
+//	    cache_write_5m_per_million: 3.75
+//	    cache_write_1h_per_million: 6.0
+//
+// Cache rates are optional; calculateCost derives them from input rate when
+// unset (read = 0.10×, write 5m = 1.25×, write 1h = 2.0×).
 func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
 	merged := make(map[string]modelPricing, len(defaultPricing))
 	for k, v := range defaultPricing {
@@ -790,6 +839,15 @@ func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
 		}
 		if v, ok := entry["output_per_million"].(float64); ok {
 			p.OutputPerMillion = v
+		}
+		if v, ok := entry["cache_read_per_million"].(float64); ok {
+			p.CacheReadPerMillion = v
+		}
+		if v, ok := entry["cache_write_5m_per_million"].(float64); ok {
+			p.CacheWrite5mPerMillion = v
+		}
+		if v, ok := entry["cache_write_1h_per_million"].(float64); ok {
+			p.CacheWrite1hPerMillion = v
 		}
 		merged[model] = p
 	}
