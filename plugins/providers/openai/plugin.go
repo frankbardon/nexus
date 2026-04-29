@@ -88,6 +88,8 @@ type Plugin struct {
 	reasoning       reasoningConfig
 	forceReasoning  bool
 
+	multimodal multimodalConfig
+
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
 	cancelFunc         context.CancelFunc
@@ -147,6 +149,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
 		p.forceReasoning = v
 	}
+
+	p.multimodal = parseMultimodalConfig(ctx.Config)
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -455,13 +459,25 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 }
 
 // convertMessage converts an events.Message to the OpenAI API format.
+//
+// When the message carries multimodal Parts, the content is serialized as
+// OpenAI's content-array form (text/image_url/input_audio/file blocks). On
+// any conversion error the provider logs and falls back to the bare-string
+// Content path so a malformed image part doesn't kill the whole turn.
 func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 	switch msg.Role {
 	case "assistant":
 		m := map[string]any{
 			"role": "assistant",
 		}
-		if msg.Content != "" {
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build assistant content parts; falling back to text", "error", err)
+			if msg.Content != "" {
+				m["content"] = msg.Content
+			}
+		} else if parts != nil {
+			m["content"] = parts
+		} else if msg.Content != "" {
 			m["content"] = msg.Content
 		}
 		if len(msg.ToolCalls) > 0 {
@@ -481,17 +497,33 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 		return m
 
 	case "tool":
-		return map[string]any{
+		m := map[string]any{
 			"role":         "tool",
 			"tool_call_id": msg.ToolCallID,
-			"content":      msg.Content,
 		}
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build tool content parts; falling back to text", "error", err)
+			m["content"] = msg.Content
+		} else if parts != nil {
+			m["content"] = parts
+		} else {
+			m["content"] = msg.Content
+		}
+		return m
 
 	case "user":
-		return map[string]any{
-			"role":    "user",
-			"content": msg.Content,
+		m := map[string]any{
+			"role": "user",
 		}
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build user content parts; falling back to text", "error", err)
+			m["content"] = msg.Content
+		} else if parts != nil {
+			m["content"] = parts
+		} else {
+			m["content"] = msg.Content
+		}
+		return m
 
 	default:
 		return map[string]any{
