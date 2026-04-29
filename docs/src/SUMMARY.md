@@ -35,6 +35,7 @@
 - [LLM Providers](./plugins/providers/index.md)
   - [Anthropic (Claude)](./plugins/providers/anthropic.md)
   - [OpenAI](./plugins/providers/openai.md)
+  - [Gemini (Google)](./plugins/providers/gemini.md)
   - [Fallback](./plugins/providers/fallback.md)
   - [Fanout](./plugins/providers/fanout.md)
 - [Tools](./plugins/tools/index.md)

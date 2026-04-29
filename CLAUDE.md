@@ -63,6 +63,7 @@ plugins/
   apps/helloworld/       # Built-in hello-world placeholder agent
   providers/anthropic/   # Claude LLM provider (direct HTTP, no SDK; supports api_key config or api_key_env env var)
   providers/openai/      # OpenAI LLM provider (direct HTTP, no SDK; supports api_key config, api_key_env env var, base_url override)
+  providers/gemini/      # Google Gemini LLM provider (direct HTTP, no SDK; api-key + Vertex AI auth, thinking, code execution, multimodal, prompt caching)
   providers/fallback/    # Automatic provider failover coordinator (config-driven fallback chains in core.models)
   providers/fanout/      # Parallel multi-provider dispatch (config-driven fanout roles in core.models)
   tools/shell/           # Sandboxed shell execution (supports working_dir, allowed_commands, timeout, sandbox config)
@@ -74,6 +75,7 @@ plugins/
   search/brave/          # search.provider adapter: Brave Search REST API
   search/anthropic_native/ # search.provider adapter: Anthropic's server-side web_search tool (direct HTTP)
   search/openai_native/  # search.provider adapter: OpenAI's server-side web_search via Responses API
+  search/gemini_native/  # search.provider adapter: Gemini's google_search grounding tool
   io/tui/                # Terminal UI
   io/browser/            # Browser IO (HTTP/WS transport for the Nexus web UI)
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
