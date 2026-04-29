@@ -35,7 +35,9 @@ type LLMRequest struct {
 	MaxTokens      int
 	Temperature    *float64
 	Stream         bool
-	Metadata       map[string]any
+	Prediction     string // OpenAI-only: known-content prediction for low-latency edits.
+	// Other providers ignore this field. Empty = no prediction.
+	Metadata map[string]any
 }
 
 // Message represents a single message in an LLM conversation.

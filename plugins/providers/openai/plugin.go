@@ -496,6 +496,18 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		// "text" is OpenAI default — no field needed.
 	}
 
+	// Predicted outputs (OpenAI-only): when the agent has a known-content
+	// guess (rewrite this paragraph, fix this line), pass it through as
+	// prediction.content so the model returns near-instantly for unchanged
+	// portions. applyReasoning strips this for o-series / gpt-5-thinking
+	// models since they reject the field.
+	if req.Prediction != "" {
+		body["prediction"] = map[string]any{
+			"type":    "content",
+			"content": req.Prediction,
+		}
+	}
+
 	// Reasoning-model handling runs last so any fields about to be stripped
 	// (temperature, top_p, etc.) have already been written. NOTE: this stays
 	// on /v1/chat/completions; the /v1/responses endpoint exposes richer
@@ -638,13 +650,32 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 
 	resp := p.convertAPIResponse(apiResp)
 
+	// Merge request-passthrough metadata (e.g. _structured_output) onto any
+	// metadata convertAPIResponse already attached (e.g. prediction_acceptance).
 	p.mu.Lock()
-	resp.Metadata = p.currentRequestMeta
+	resp.Metadata = mergeMetadata(resp.Metadata, p.currentRequestMeta)
 	p.mu.Unlock()
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
 		p.logger.Error("failed to emit llm.response", "error", err)
 	}
+}
+
+// mergeMetadata returns a map containing all keys from `into` plus all keys
+// from `from`. Either input may be nil. Keys in `from` overwrite duplicates
+// in `into`. Returns nil only when both inputs are nil/empty.
+func mergeMetadata(into, from map[string]any) map[string]any {
+	if len(into) == 0 && len(from) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(into)+len(from))
+	for k, v := range into {
+		out[k] = v
+	}
+	for k, v := range from {
+		out[k] = v
+	}
+	return out
 }
 
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
@@ -677,6 +708,20 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 				Name:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
 			})
+		}
+	}
+
+	// Surface prediction acceptance counts when the request used the
+	// prediction field. Lets callers tune their hit rates — accepted tokens
+	// bill at the input rate, rejected at the output rate.
+	if apiResp.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 ||
+		apiResp.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+		if resp.Metadata == nil {
+			resp.Metadata = make(map[string]any)
+		}
+		resp.Metadata["prediction_acceptance"] = map[string]any{
+			"accepted": apiResp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
+			"rejected": apiResp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		}
 	}
 
@@ -843,8 +888,20 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	})
 
 	// Also emit the complete llm.response for downstream consumers.
+	// Surface prediction acceptance the same way the sync path does.
+	var streamMeta map[string]any
+	if usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 ||
+		usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+		streamMeta = map[string]any{
+			"prediction_acceptance": map[string]any{
+				"accepted": usage.CompletionTokensDetails.AcceptedPredictionTokens,
+				"rejected": usage.CompletionTokensDetails.RejectedPredictionTokens,
+			},
+		}
+	}
+
 	p.mu.Lock()
-	meta := p.currentRequestMeta
+	mergedMeta := mergeMetadata(streamMeta, p.currentRequestMeta)
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
@@ -854,7 +911,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		CostUSD:      p.costForModel(model, finalUsage),
 		Model:        model,
 		FinishReason: finishReason,
-		Metadata:     meta,
+		Metadata:     mergedMeta,
 	})
 }
 
