@@ -47,6 +47,17 @@ type Message struct {
 	// Providers without multimodal support fall back to Content (text-only path).
 	ToolCallID string            // for tool result messages
 	ToolCalls  []ToolCallRequest // for assistant messages with tool calls
+
+	// Metadata carries provider-specific round-trip data that must survive a
+	// turn boundary. Example: Anthropic extended-thinking emits opaque
+	// `thinking` and `redacted_thinking` blocks (with cryptographic signatures)
+	// that MUST be echoed back verbatim on the next assistant turn after a
+	// tool result, otherwise the API rejects the request with HTTP 400.
+	// Providers stash these as Metadata["thinking_blocks"] on the assistant
+	// Message and read them back when serializing the next request body.
+	// Keys are namespaced informally per-provider; consumers other than the
+	// owning provider should treat this map as opaque.
+	Metadata map[string]any
 }
 
 // MessagePart carries a single piece of multimodal content. Providers that

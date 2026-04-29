@@ -123,7 +123,23 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 		Role:      "assistant",
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
+		Metadata:  forwardMessageMetadata(resp.Metadata),
 	})
+}
+
+// forwardMessageMetadata extracts the subset of LLMResponse.Metadata that
+// should travel with a stored Message — currently just thinking_blocks, which
+// Anthropic requires echoed back on the next assistant turn after a
+// tool_result. Engine-internal routing flags are intentionally dropped.
+func forwardMessageMetadata(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	var out map[string]any
+	if v, ok := src["thinking_blocks"]; ok {
+		out = map[string]any{"thinking_blocks": v}
+	}
+	return out
 }
 
 func (p *Plugin) handleToolInvoke(e engine.Event[any]) {

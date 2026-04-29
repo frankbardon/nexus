@@ -80,14 +80,15 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	apiKey  string
-	client  *http.Client
-	prompts *engine.PromptRegistry
-	unsubs  []func()
-	debug   bool
-	retry   retryConfig
-	cache   cacheConfig
-	pricing map[string]modelPricing // merged: config overrides + embedded defaults
+	apiKey   string
+	client   *http.Client
+	prompts  *engine.PromptRegistry
+	unsubs   []func()
+	debug    bool
+	retry    retryConfig
+	cache    cacheConfig
+	thinking thinkingConfig
+	pricing  map[string]modelPricing // merged: config overrides + embedded defaults
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
@@ -148,6 +149,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
+	p.thinking = parseThinkingConfig(ctx.Config)
+	if p.thinking.Enabled {
+		p.logger.Info("extended thinking enabled",
+			"budget_tokens", p.thinking.BudgetTokens,
+			"include_thoughts", p.thinking.IncludeThoughts,
+		)
+	}
+
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
 		p.logger.Info("retry enabled",
@@ -195,6 +204,7 @@ func (p *Plugin) Emissions() []string {
 		"llm.response",
 		"llm.stream.chunk",
 		"llm.stream.end",
+		"thinking.step",
 		"before:core.error",
 		"core.error",
 	}
@@ -377,6 +387,10 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		body["temperature"] = *req.Temperature
 	}
 
+	// Extended thinking. When enabled this strips any non-1 temperature
+	// (Anthropic requires temp=1) and adds the thinking object to body.
+	applyThinking(body, p.thinking, p.logger)
+
 	// Extract system prompt and build messages.
 	var systemPrompt string
 	var apiMessages []map[string]any
@@ -457,6 +471,14 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 	case "assistant":
 		if len(msg.ToolCalls) > 0 {
 			var content []map[string]any
+
+			// Round-trip preservation: when extended thinking emitted blocks
+			// on the response that produced these tool calls, those blocks
+			// (with their cryptographic signatures) MUST be echoed back as
+			// the leading content on this assistant turn. Anthropic rejects
+			// the next request with HTTP 400 otherwise.
+			content = append(content, prependThinkingBlocks(msg.Metadata)...)
+
 			if msg.Content != "" {
 				content = append(content, map[string]any{
 					"type": "text",
@@ -528,6 +550,16 @@ type apiContentBlock struct {
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
+
+	// Extended thinking fields. Populated when Type is "thinking" or
+	// "redacted_thinking". The cryptographic Signature MUST be preserved and
+	// echoed back verbatim on the next assistant turn after a tool result, or
+	// the API rejects the request with HTTP 400. Data carries the encrypted
+	// payload of redacted_thinking blocks (the unencrypted Thinking field is
+	// empty in that case).
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 type apiUsage struct {
@@ -546,9 +578,20 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 
 	resp := p.convertAPIResponse(apiResp)
 
+	// Merge passthrough request metadata with any provider-attached fields
+	// (e.g. thinking_blocks). Passthrough wins on key collision so
+	// upstream-set flags like _structured_output aren't masked, but
+	// provider-attached keys are preserved.
 	p.mu.Lock()
-	resp.Metadata = p.currentRequestMeta
+	meta := p.currentRequestMeta
 	p.mu.Unlock()
+	if resp.Metadata == nil {
+		resp.Metadata = meta
+	} else if meta != nil {
+		for k, v := range meta {
+			resp.Metadata[k] = v
+		}
+	}
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
 		p.logger.Error("failed to emit llm.response", "error", err)
@@ -558,11 +601,46 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 	var content strings.Builder
 	var toolCalls []events.ToolCallRequest
+	var thinkingBlocks []map[string]any
+	thinkingIdx := 0
 
 	for _, block := range apiResp.Content {
 		switch block.Type {
 		case "text":
 			content.WriteString(block.Text)
+
+		case "thinking":
+			// Preserve the block verbatim (with signature) so the next
+			// assistant turn after a tool result can echo it back — Anthropic
+			// requires this or rejects with HTTP 400.
+			tb := map[string]any{
+				"type":      "thinking",
+				"thinking":  block.Thinking,
+				"signature": block.Signature,
+			}
+			thinkingBlocks = append(thinkingBlocks, tb)
+			if p.thinking.IncludeThoughts && block.Thinking != "" {
+				_ = p.bus.Emit("thinking.step", events.ThinkingStep{
+					TurnID:    apiResp.ID,
+					Source:    pluginID,
+					Content:   block.Thinking,
+					Phase:     "reasoning",
+					Timestamp: time.Now(),
+					Index:     thinkingIdx,
+				})
+				thinkingIdx++
+			}
+
+		case "redacted_thinking":
+			// Encrypted/redacted thinking. Pass through opaquely; we never
+			// surface contents on the bus but the block still has to be
+			// echoed back on tool-use turns.
+			tb := map[string]any{
+				"type": "redacted_thinking",
+				"data": block.Data,
+			}
+			thinkingBlocks = append(thinkingBlocks, tb)
+
 		case "tool_use":
 			args := string(block.Input)
 			// Unwrap synthetic structured output tool — put args into Content.
@@ -586,8 +664,13 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		TotalTokens: apiResp.Usage.InputTokens + apiResp.Usage.OutputTokens +
 			apiResp.Usage.CacheReadInputTokens + apiResp.Usage.CacheCreationInputTokens,
 	}
+	// Anthropic bills thinking tokens as part of output_tokens; we surface a
+	// best-effort accounting via ReasoningTokens. The API doesn't (yet)
+	// separate the thinking portion from the visible output, so this stays at
+	// 0 for now — billing impact is captured in CompletionTokens. Plan 02
+	// reserves the field for when Anthropic exposes it.
 
-	return events.LLMResponse{
+	resp := events.LLMResponse{
 		Content:      content.String(),
 		ToolCalls:    toolCalls,
 		Usage:        usage,
@@ -595,6 +678,12 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		Model:        apiResp.Model,
 		FinishReason: apiResp.StopReason,
 	}
+	if len(thinkingBlocks) > 0 {
+		resp.Metadata = map[string]any{
+			"thinking_blocks": thinkingBlocks,
+		}
+	}
+	return resp
 }
 
 // SSE streaming response handling.
@@ -604,20 +693,40 @@ type sseEvent struct {
 	Data  string
 }
 
+// streamState carries the mutable bookkeeping for a single SSE response. It
+// replaces a long parameter list on processSSEEvent and gives thinking-block
+// accumulation a natural home (one builder + signature per active block,
+// finalized into thinkingBlocks at content_block_stop).
+type streamState struct {
+	fullContent      strings.Builder
+	toolCalls        []events.ToolCallRequest
+	currentToolCall  *events.ToolCallRequest
+	currentToolInput strings.Builder
+
+	// Active thinking block (one at a time; Anthropic sends them serially).
+	// blockType is "thinking" or "redacted_thinking" when a thinking block is
+	// open, empty otherwise. signature/data fields are populated by
+	// signature_delta and the content_block_start event respectively.
+	thinkingBlockType string
+	thinkingBuilder   strings.Builder
+	thinkingSignature string
+	thinkingData      string
+	thinkingIdx       int
+	thinkingBlocks    []map[string]any
+
+	usage        apiUsage
+	model        string
+	finishReason string
+	turnID       string
+	chunkIndex   int
+}
+
 func (p *Plugin) handleStreamResponse(body io.Reader) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var currentEvent sseEvent
-	var fullContent strings.Builder
-	var toolCalls []events.ToolCallRequest
-	var currentToolCall *events.ToolCallRequest
-	var currentToolInput strings.Builder
-	var usage apiUsage
-	var model string
-	var finishReason string
-	turnID := ""
-	chunkIndex := 0
+	st := &streamState{}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -625,8 +734,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		if line == "" {
 			// Empty line means end of SSE event; process it.
 			if currentEvent.Event != "" {
-				p.processSSEEvent(currentEvent, &fullContent, &toolCalls, &currentToolCall,
-					&currentToolInput, &usage, &model, &finishReason, &turnID, &chunkIndex)
+				p.processSSEEvent(currentEvent, st)
 			}
 			currentEvent = sseEvent{}
 			continue
@@ -641,8 +749,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 
 	// Process any remaining event.
 	if currentEvent.Event != "" {
-		p.processSSEEvent(currentEvent, &fullContent, &toolCalls, &currentToolCall,
-			&currentToolInput, &usage, &model, &finishReason, &turnID, &chunkIndex)
+		p.processSSEEvent(currentEvent, st)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -651,49 +758,49 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 
 	// Build final usage.
 	finalUsage := events.Usage{
-		PromptTokens:     usage.InputTokens,
-		CompletionTokens: usage.OutputTokens,
-		CachedTokens:     usage.CacheReadInputTokens,
-		CacheWriteTokens: usage.CacheCreationInputTokens,
-		TotalTokens: usage.InputTokens + usage.OutputTokens +
-			usage.CacheReadInputTokens + usage.CacheCreationInputTokens,
+		PromptTokens:     st.usage.InputTokens,
+		CompletionTokens: st.usage.OutputTokens,
+		CachedTokens:     st.usage.CacheReadInputTokens,
+		CacheWriteTokens: st.usage.CacheCreationInputTokens,
+		TotalTokens: st.usage.InputTokens + st.usage.OutputTokens +
+			st.usage.CacheReadInputTokens + st.usage.CacheCreationInputTokens,
 	}
 
 	// Emit stream end.
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
-		TurnID:       turnID,
-		FinishReason: finishReason,
+		TurnID:       st.turnID,
+		FinishReason: st.finishReason,
 		Usage:        finalUsage,
 	})
 
-	// Also emit the complete llm.response for downstream consumers.
+	// Also emit the complete llm.response for downstream consumers. Merge
+	// passthrough request metadata with thinking_blocks captured from the
+	// stream — round-trip preservation requires both to coexist.
 	p.mu.Lock()
 	meta := p.currentRequestMeta
 	p.mu.Unlock()
 
+	respMeta := meta
+	if len(st.thinkingBlocks) > 0 {
+		respMeta = make(map[string]any, len(meta)+1)
+		for k, v := range meta {
+			respMeta[k] = v
+		}
+		respMeta["thinking_blocks"] = st.thinkingBlocks
+	}
+
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:      fullContent.String(),
-		ToolCalls:    toolCalls,
+		Content:      st.fullContent.String(),
+		ToolCalls:    st.toolCalls,
 		Usage:        finalUsage,
-		CostUSD:      p.costForModel(model, finalUsage),
-		Model:        model,
-		FinishReason: finishReason,
-		Metadata:     meta,
+		CostUSD:      p.costForModel(st.model, finalUsage),
+		Model:        st.model,
+		FinishReason: st.finishReason,
+		Metadata:     respMeta,
 	})
 }
 
-func (p *Plugin) processSSEEvent(
-	sse sseEvent,
-	fullContent *strings.Builder,
-	toolCalls *[]events.ToolCallRequest,
-	currentToolCall **events.ToolCallRequest,
-	currentToolInput *strings.Builder,
-	usage *apiUsage,
-	model *string,
-	finishReason *string,
-	turnID *string,
-	chunkIndex *int,
-) {
+func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 	switch sse.Event {
 	case "message_start":
 		var data struct {
@@ -704,11 +811,11 @@ func (p *Plugin) processSSEEvent(
 			} `json:"message"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
-			*turnID = data.Message.ID
-			*model = data.Message.Model
-			usage.InputTokens = data.Message.Usage.InputTokens
-			usage.CacheCreationInputTokens = data.Message.Usage.CacheCreationInputTokens
-			usage.CacheReadInputTokens = data.Message.Usage.CacheReadInputTokens
+			st.turnID = data.Message.ID
+			st.model = data.Message.Model
+			st.usage.InputTokens = data.Message.Usage.InputTokens
+			st.usage.CacheCreationInputTokens = data.Message.Usage.CacheCreationInputTokens
+			st.usage.CacheReadInputTokens = data.Message.Usage.CacheReadInputTokens
 		}
 
 	case "content_block_start":
@@ -717,12 +824,27 @@ func (p *Plugin) processSSEEvent(
 			ContentBlock apiContentBlock `json:"content_block"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
-			if data.ContentBlock.Type == "tool_use" {
-				*currentToolCall = &events.ToolCallRequest{
+			switch data.ContentBlock.Type {
+			case "tool_use":
+				st.currentToolCall = &events.ToolCallRequest{
 					ID:   data.ContentBlock.ID,
 					Name: data.ContentBlock.Name,
 				}
-				currentToolInput.Reset()
+				st.currentToolInput.Reset()
+			case "thinking", "redacted_thinking":
+				st.thinkingBlockType = data.ContentBlock.Type
+				st.thinkingBuilder.Reset()
+				st.thinkingSignature = ""
+				// redacted_thinking arrives with its full encrypted payload on
+				// content_block_start (no deltas); thinking gets streamed via
+				// thinking_delta + signature_delta until content_block_stop.
+				st.thinkingData = data.ContentBlock.Data
+				if data.ContentBlock.Thinking != "" {
+					st.thinkingBuilder.WriteString(data.ContentBlock.Thinking)
+				}
+				if data.ContentBlock.Signature != "" {
+					st.thinkingSignature = data.ContentBlock.Signature
+				}
 			}
 		}
 
@@ -733,54 +855,94 @@ func (p *Plugin) processSSEEvent(
 				Type        string `json:"type"`
 				Text        string `json:"text,omitempty"`
 				PartialJSON string `json:"partial_json,omitempty"`
+				Thinking    string `json:"thinking,omitempty"`
+				Signature   string `json:"signature,omitempty"`
 			} `json:"delta"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
 			switch data.Delta.Type {
 			case "text_delta":
-				fullContent.WriteString(data.Delta.Text)
+				st.fullContent.WriteString(data.Delta.Text)
 				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
 					Content: data.Delta.Text,
-					Index:   *chunkIndex,
-					TurnID:  *turnID,
+					Index:   st.chunkIndex,
+					TurnID:  st.turnID,
 				})
-				*chunkIndex++
+				st.chunkIndex++
+
+			case "thinking_delta":
+				st.thinkingBuilder.WriteString(data.Delta.Thinking)
+				if p.thinking.IncludeThoughts && data.Delta.Thinking != "" {
+					_ = p.bus.Emit("thinking.step", events.ThinkingStep{
+						TurnID:    st.turnID,
+						Source:    pluginID,
+						Content:   data.Delta.Thinking,
+						Phase:     "reasoning",
+						Timestamp: time.Now(),
+						Index:     st.thinkingIdx,
+					})
+					st.thinkingIdx++
+				}
+
+			case "signature_delta":
+				// Signatures aren't chunked semantically (a single delta
+				// carries the full signature for the active block) but
+				// concatenate defensively in case Anthropic ever splits them.
+				st.thinkingSignature += data.Delta.Signature
 
 			case "input_json_delta":
-				if *currentToolCall != nil {
-					currentToolInput.WriteString(data.Delta.PartialJSON)
+				if st.currentToolCall != nil {
+					st.currentToolInput.WriteString(data.Delta.PartialJSON)
 					// Stream structured output tool input as content chunks.
-					if (*currentToolCall).Name == "_structured_output" {
+					if st.currentToolCall.Name == "_structured_output" {
 						_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
 							Content: data.Delta.PartialJSON,
-							Index:   *chunkIndex,
-							TurnID:  *turnID,
+							Index:   st.chunkIndex,
+							TurnID:  st.turnID,
 						})
-						*chunkIndex++
+						st.chunkIndex++
 					}
 				}
 			}
 		}
 
 	case "content_block_stop":
-		if *currentToolCall != nil {
-			(*currentToolCall).Arguments = currentToolInput.String()
+		switch {
+		case st.currentToolCall != nil:
+			st.currentToolCall.Arguments = st.currentToolInput.String()
 
-			if (*currentToolCall).Name == "_structured_output" {
+			if st.currentToolCall.Name == "_structured_output" {
 				// Unwrap synthetic tool — accumulate into content, not tool calls.
-				fullContent.WriteString(currentToolInput.String())
+				st.fullContent.WriteString(st.currentToolInput.String())
 			} else {
-				*toolCalls = append(*toolCalls, **currentToolCall)
+				st.toolCalls = append(st.toolCalls, *st.currentToolCall)
 				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					ToolCall: *currentToolCall,
-					Index:    *chunkIndex,
-					TurnID:   *turnID,
+					ToolCall: st.currentToolCall,
+					Index:    st.chunkIndex,
+					TurnID:   st.turnID,
 				})
-				*chunkIndex++
+				st.chunkIndex++
 			}
 
-			*currentToolCall = nil
-			currentToolInput.Reset()
+			st.currentToolCall = nil
+			st.currentToolInput.Reset()
+
+		case st.thinkingBlockType != "":
+			// Finalize the active thinking block. We retain the signature
+			// verbatim — Anthropic rejects HTTP 400 on the next assistant
+			// turn (after a tool result) if it's missing or modified.
+			block := map[string]any{"type": st.thinkingBlockType}
+			if st.thinkingBlockType == "redacted_thinking" {
+				block["data"] = st.thinkingData
+			} else {
+				block["thinking"] = st.thinkingBuilder.String()
+				block["signature"] = st.thinkingSignature
+			}
+			st.thinkingBlocks = append(st.thinkingBlocks, block)
+			st.thinkingBlockType = ""
+			st.thinkingBuilder.Reset()
+			st.thinkingSignature = ""
+			st.thinkingData = ""
 		}
 
 	case "message_delta":
@@ -791,18 +953,18 @@ func (p *Plugin) processSSEEvent(
 			Usage apiUsage `json:"usage"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
-			*finishReason = data.Delta.StopReason
+			st.finishReason = data.Delta.StopReason
 			if data.Usage.OutputTokens > 0 {
-				usage.OutputTokens = data.Usage.OutputTokens
+				st.usage.OutputTokens = data.Usage.OutputTokens
 			}
 			// message_delta may carry an updated cache snapshot (Anthropic
 			// sometimes finalizes counts here). Prefer the larger value so
 			// we don't regress message_start totals.
-			if data.Usage.CacheCreationInputTokens > usage.CacheCreationInputTokens {
-				usage.CacheCreationInputTokens = data.Usage.CacheCreationInputTokens
+			if data.Usage.CacheCreationInputTokens > st.usage.CacheCreationInputTokens {
+				st.usage.CacheCreationInputTokens = data.Usage.CacheCreationInputTokens
 			}
-			if data.Usage.CacheReadInputTokens > usage.CacheReadInputTokens {
-				usage.CacheReadInputTokens = data.Usage.CacheReadInputTokens
+			if data.Usage.CacheReadInputTokens > st.usage.CacheReadInputTokens {
+				st.usage.CacheReadInputTokens = data.Usage.CacheReadInputTokens
 			}
 		}
 
