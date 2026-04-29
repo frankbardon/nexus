@@ -164,3 +164,60 @@ type StreamEnd struct {
 	Usage        Usage
 	FinishReason string
 }
+
+// BatchSubmit is published by callers (CLI subcommand, agent tool, etc.) to
+// request that a slice of LLMRequests be sent to a provider's batch endpoint
+// rather than the synchronous llm.request path. The coordinator plugin
+// (`nexus.llm.batch`) handles dispatch, polling, and result aggregation.
+//
+// Bus event type: "llm.batch.submit".
+type BatchSubmit struct {
+	Provider string // "anthropic" | "openai"
+	Requests []BatchRequest
+	Metadata map[string]any
+}
+
+// BatchRequest pairs a stable caller-defined id with an LLMRequest. The
+// CustomID is how the caller correlates results (per-request) when the
+// batch returns out of order.
+type BatchRequest struct {
+	CustomID string
+	Request  LLMRequest
+}
+
+// BatchStatus is emitted periodically by the coordinator while the batch is
+// in flight. Counts are best-effort — providers report different shapes.
+//
+// Bus event type: "llm.batch.status".
+type BatchStatus struct {
+	Provider string
+	BatchID  string
+	Status   string // "submitted" | "in_progress" | "completed" | "failed" | "cancelled"
+	Counts   BatchCounts
+}
+
+// BatchCounts is a best-effort snapshot of per-request progress in a batch.
+type BatchCounts struct {
+	Total     int
+	Completed int
+	Failed    int
+}
+
+// BatchResults is emitted once at the end of a batch, carrying all per-request
+// results.
+//
+// Bus event type: "llm.batch.results".
+type BatchResults struct {
+	Provider string
+	BatchID  string
+	Results  []BatchResult
+}
+
+// BatchResult is a single per-request entry in a BatchResults payload. Either
+// Response is non-nil (success) or Error is non-empty (this individual request
+// failed); callers must check both.
+type BatchResult struct {
+	CustomID string
+	Response *LLMResponse // nil when Error is set
+	Error    string       // non-empty when this individual request failed
+}
