@@ -91,10 +91,20 @@ func buildContentBlocks(msg events.Message) ([]map[string]any, error) {
 }
 
 // buildImageBlock emits an Anthropic `image` content block from a MessagePart.
-// Prefers URI sources (no inline cap). Inline Data must be <=5MB and carry a
-// MimeType. Future plans (04) may add a file_id source via MessagePart.FileID;
-// not handled here.
+// Source-selection order: FileID > URI > inline Data. FileID maps to the
+// Files API file source (no inline cap, no token cost beyond the reference);
+// URI maps to a remote URL source; inline Data must be <=5MB and carry a
+// MimeType.
 func buildImageBlock(part events.MessagePart) (map[string]any, error) {
+	if part.FileID != "" {
+		return map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":    "file",
+				"file_id": part.FileID,
+			},
+		}, nil
+	}
 	if part.URI != "" {
 		return map[string]any{
 			"type": "image",
@@ -124,10 +134,20 @@ func buildImageBlock(part events.MessagePart) (map[string]any, error) {
 }
 
 // buildDocumentBlock emits an Anthropic `document` content block from a
-// MessagePart. Same source-selection rules as buildImageBlock but with a 32MB
-// inline cap. Plan 05 will add `citations: {enabled: true}` here behind a
-// config flag — not handled in this commit.
+// MessagePart. Same source-selection rules as buildImageBlock (FileID > URI >
+// inline Data) but with a 32MB inline cap. Plan 05 will add
+// `citations: {enabled: true}` here behind a config flag — not handled in
+// this commit.
 func buildDocumentBlock(part events.MessagePart) (map[string]any, error) {
+	if part.FileID != "" {
+		return map[string]any{
+			"type": "document",
+			"source": map[string]any{
+				"type":    "file",
+				"file_id": part.FileID,
+			},
+		}, nil
+	}
 	if part.URI != "" {
 		return map[string]any{
 			"type": "document",

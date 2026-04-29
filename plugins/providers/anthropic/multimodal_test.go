@@ -97,6 +97,42 @@ func TestBuildContentBlocks_ImageURI(t *testing.T) {
 	}
 }
 
+// TestBuildContentBlocks_ImageFileID verifies that a FileID-bearing part
+// emits a `file` source block (Files API path) and takes precedence over URI
+// and Data when set.
+func TestBuildContentBlocks_ImageFileID(t *testing.T) {
+	msg := events.Message{
+		Role: "user",
+		Parts: []events.MessagePart{
+			{Type: "image", FileID: "file_abc123", URI: "https://example.com/ignored.png", Data: []byte{0xFF}},
+		},
+	}
+	blocks, err := buildContentBlocks(msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if blocks[0]["type"] != "image" {
+		t.Fatalf("expected image block, got %v", blocks[0]["type"])
+	}
+	source, ok := blocks[0]["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected source map, got %T", blocks[0]["source"])
+	}
+	if source["type"] != "file" {
+		t.Fatalf("expected file source type, got %v", source["type"])
+	}
+	if source["file_id"] != "file_abc123" {
+		t.Fatalf("file_id mismatch: %v", source["file_id"])
+	}
+	// FileID precedence: URI/Data should be ignored on this path.
+	if _, hasURL := source["url"]; hasURL {
+		t.Fatalf("expected no url field when FileID set, got %v", source)
+	}
+	if _, hasData := source["data"]; hasData {
+		t.Fatalf("expected no inline data when FileID set, got %v", source)
+	}
+}
+
 // TestBuildContentBlocks_ImageOversize confirms that an image >5MB without a
 // URI errors out (caller is expected to upload via Files API).
 func TestBuildContentBlocks_ImageOversize(t *testing.T) {
@@ -178,6 +214,31 @@ func TestBuildContentBlocks_PDFURI(t *testing.T) {
 	source := blocks[0]["source"].(map[string]any)
 	if source["type"] != "url" || source["url"] != "https://example.com/report.pdf" {
 		t.Fatalf("unexpected source: %v", source)
+	}
+}
+
+// TestBuildContentBlocks_PDFFileID verifies the document branch honors FileID
+// and emits a `file` source block.
+func TestBuildContentBlocks_PDFFileID(t *testing.T) {
+	msg := events.Message{
+		Role: "user",
+		Parts: []events.MessagePart{
+			{Type: "file", FileID: "file_pdf999", MimeType: "application/pdf"},
+		},
+	}
+	blocks, err := buildContentBlocks(msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if blocks[0]["type"] != "document" {
+		t.Fatalf("expected document block, got %v", blocks[0]["type"])
+	}
+	source := blocks[0]["source"].(map[string]any)
+	if source["type"] != "file" {
+		t.Fatalf("expected file source, got %v", source["type"])
+	}
+	if source["file_id"] != "file_pdf999" {
+		t.Fatalf("file_id mismatch: %v", source["file_id"])
 	}
 }
 

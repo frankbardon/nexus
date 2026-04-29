@@ -71,6 +71,12 @@ type MessagePart struct {
 	MimeType string // e.g. "image/png", "application/pdf"; required when Data or URI set
 	Data     []byte // inline bytes
 	URI      string // provider-hosted reference (e.g. Gemini Files API URI)
+	FileID   string // provider-issued file id (e.g. Anthropic file_..., OpenAI file-...).
+	// When set, providers reference the file by id rather than re-uploading or
+	// inlining bytes. Takes precedence over Data if both are set; takes
+	// precedence over URI for providers that have a native file_id source type
+	// (Anthropic Files API, OpenAI plan 14). Cross-provider field — Anthropic
+	// owns it first, OpenAI will reuse on plan 14.
 }
 
 // ToolCallRequest represents a tool invocation requested by the LLM.
