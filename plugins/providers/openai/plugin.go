@@ -85,6 +85,9 @@ type Plugin struct {
 	retry   retryConfig
 	pricing map[string]modelPricing // merged: config overrides + embedded defaults
 
+	reasoning       reasoningConfig
+	forceReasoning  bool
+
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
 	cancelFunc         context.CancelFunc
@@ -139,6 +142,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.prompts = ctx.Prompts
 
 	p.pricing = parsePricingConfig(ctx.Config)
+
+	p.reasoning = parseReasoningConfig(ctx.Config)
+	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
+		p.forceReasoning = v
+	}
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -437,6 +445,12 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		// "text" is OpenAI default — no field needed.
 	}
 
+	// Reasoning-model handling runs last so any fields about to be stripped
+	// (temperature, top_p, etc.) have already been written. NOTE: this stays
+	// on /v1/chat/completions; the /v1/responses endpoint exposes richer
+	// reasoning controls (summary streaming) and is left for a future plan.
+	applyReasoning(body, model, p.reasoning, p.forceReasoning, p.logger)
+
 	return body
 }
 
@@ -555,11 +569,15 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 }
 
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
+	// Reasoning tokens (o-series, gpt-5-thinking) are billed by OpenAI as
+	// output and are already counted inside completion_tokens — no separate
+	// pricing field needed; they roll into the existing OutputPerMillion rate.
 	usage := events.Usage{
 		PromptTokens:     apiResp.Usage.PromptTokens,
 		CompletionTokens: apiResp.Usage.CompletionTokens,
 		TotalTokens:      apiResp.Usage.TotalTokens,
 		CachedTokens:     apiResp.Usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:  apiResp.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 
 	resp := events.LLMResponse{
@@ -727,12 +745,15 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		chunkIndex++
 	}
 
-	// Build final usage.
+	// Build final usage. Reasoning tokens arrive in the final usage chunk
+	// when stream_options.include_usage is set (already enabled above).
+	// They're billed as output by OpenAI — already inside CompletionTokens.
 	finalUsage := events.Usage{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
 		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
 	}
 
 	// Emit stream end.
