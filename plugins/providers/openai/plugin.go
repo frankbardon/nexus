@@ -27,8 +27,9 @@ const (
 
 // modelPricing holds per-model token rates in USD per million tokens.
 type modelPricing struct {
-	InputPerMillion  float64
-	OutputPerMillion float64
+	InputPerMillion     float64
+	OutputPerMillion    float64
+	CacheReadPerMillion float64 // 0 → derived as InputPerMillion * 0.5
 }
 
 // defaultPricing is the embedded fallback pricing table. Updated via patch
@@ -48,8 +49,23 @@ var defaultPricing = map[string]modelPricing{
 }
 
 // calculateCost computes the USD cost for a single LLM call.
+//
+// OpenAI auto-caches eligible prompt prefixes (≥1024 tokens) and bills the
+// cached portion at half the input rate. We split prompt tokens into the
+// plain (cache miss) and cached portions and bill each at its own rate.
 func calculateCost(usage events.Usage, rates modelPricing) float64 {
-	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
+	cachedRate := rates.CacheReadPerMillion
+	if cachedRate == 0 {
+		cachedRate = rates.InputPerMillion * 0.5
+	}
+
+	plainInput := usage.PromptTokens - usage.CachedTokens
+	if plainInput < 0 {
+		plainInput = 0
+	}
+
+	return float64(plainInput)/1_000_000*rates.InputPerMillion +
+		float64(usage.CachedTokens)/1_000_000*cachedRate +
 		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
 }
 
@@ -505,9 +521,19 @@ type apiFunction struct {
 }
 
 type apiUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+		AudioTokens  int `json:"audio_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens          int `json:"reasoning_tokens"`
+		AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
+		RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
+		AudioTokens              int `json:"audio_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 func (p *Plugin) handleSyncResponse(body io.Reader) {
@@ -533,6 +559,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		PromptTokens:     apiResp.Usage.PromptTokens,
 		CompletionTokens: apiResp.Usage.CompletionTokens,
 		TotalTokens:      apiResp.Usage.TotalTokens,
+		CachedTokens:     apiResp.Usage.PromptTokensDetails.CachedTokens,
 	}
 
 	resp := events.LLMResponse{
@@ -705,6 +732,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
+		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
 	}
 
 	// Emit stream end.
@@ -753,6 +781,9 @@ func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
 		}
 		if v, ok := entry["output_per_million"].(float64); ok {
 			p.OutputPerMillion = v
+		}
+		if v, ok := entry["cache_read_per_million"].(float64); ok {
+			p.CacheReadPerMillion = v
 		}
 		merged[model] = p
 	}
