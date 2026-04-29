@@ -21,6 +21,9 @@ import (
 	testioplugin "github.com/frankbardon/nexus/plugins/io/test"
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
 
+	// LLM coordination plugins.
+	batchplugin "github.com/frankbardon/nexus/plugins/llm/batch"
+
 	// Memory plugins.
 	"github.com/frankbardon/nexus/plugins/memory/capped"
 	compactionplugin "github.com/frankbardon/nexus/plugins/memory/compaction"
@@ -112,6 +115,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.io.browser", browserplugin.New)
 	r.Register("nexus.io.oneshot", oneshotplugin.New)
 	r.Register("nexus.io.test", testioplugin.New)
+
+	// LLM coordination
+	r.Register("nexus.llm.batch", batchplugin.New)
 
 	// Memory
 	r.Register("nexus.memory.simple", simple.New)

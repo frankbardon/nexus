@@ -187,6 +187,12 @@ func (p *Plugin) handleInput(e engine.Event[any]) {
 // preserving any ToolCalls so the next request carries a matched tool_use →
 // tool_result pair structure. Skips responses tagged for other plugins (e.g.
 // planner-internal calls that use Metadata["_source"]).
+//
+// Provider-specific round-trip data (e.g. Anthropic extended-thinking blocks
+// with cryptographic signatures) is forwarded via Message.Metadata so the
+// next request can echo them back verbatim. Anthropic returns HTTP 400 if
+// thinking_blocks aren't preserved on the assistant turn that follows a
+// tool_result.
 func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	resp, ok := e.Payload.(events.LLMResponse)
 	if !ok {
@@ -199,7 +205,24 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 		Role:      "assistant",
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
+		Metadata:  forwardMessageMetadata(resp.Metadata),
 	})
+}
+
+// forwardMessageMetadata extracts the subset of LLMResponse.Metadata that
+// should travel with a stored Message. We deliberately do NOT copy the whole
+// map — engine-internal flags like _source / _structured_output / _target_*
+// are request-scoped routing hints, not message-scoped state. Only keys that
+// providers identify as required for round-trip continuity are preserved.
+func forwardMessageMetadata(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	var out map[string]any
+	if v, ok := src["thinking_blocks"]; ok {
+		out = map[string]any{"thinking_blocks": v}
+	}
+	return out
 }
 
 // handleToolInvoke only tracks the internal-call filter; the invocation

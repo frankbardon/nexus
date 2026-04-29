@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,8 +26,9 @@ const (
 
 // modelPricing holds per-model token rates in USD per million tokens.
 type modelPricing struct {
-	InputPerMillion  float64
-	OutputPerMillion float64
+	InputPerMillion     float64
+	OutputPerMillion    float64
+	CacheReadPerMillion float64 // 0 → derived as InputPerMillion * 0.5
 }
 
 // defaultPricing is the embedded fallback pricing table. Updated via patch
@@ -48,8 +48,23 @@ var defaultPricing = map[string]modelPricing{
 }
 
 // calculateCost computes the USD cost for a single LLM call.
+//
+// OpenAI auto-caches eligible prompt prefixes (≥1024 tokens) and bills the
+// cached portion at half the input rate. We split prompt tokens into the
+// plain (cache miss) and cached portions and bill each at its own rate.
 func calculateCost(usage events.Usage, rates modelPricing) float64 {
-	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
+	cachedRate := rates.CacheReadPerMillion
+	if cachedRate == 0 {
+		cachedRate = rates.InputPerMillion * 0.5
+	}
+
+	plainInput := usage.PromptTokens - usage.CachedTokens
+	if plainInput < 0 {
+		plainInput = 0
+	}
+
+	return float64(plainInput)/1_000_000*rates.InputPerMillion +
+		float64(usage.CachedTokens)/1_000_000*cachedRate +
 		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
 }
 
@@ -60,8 +75,7 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	apiKey  string
-	baseURL string
+	auth    *authState
 	client  *http.Client
 	prompts *engine.PromptRegistry
 	unsubs  []func()
@@ -69,10 +83,20 @@ type Plugin struct {
 	retry   retryConfig
 	pricing map[string]modelPricing // merged: config overrides + embedded defaults
 
+	reasoning       reasoningConfig
+	forceReasoning  bool
+
+	multimodal multimodalConfig
+
+	files       filesConfig
+	filesAPIURL string
+	fileCache   *fileCache
+
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
 	cancelFunc         context.CancelFunc
 	requestSeq         int
+	sessionFileIDs     []string // file_ids uploaded this session (for delete_on_shutdown)
 }
 
 // New creates a new OpenAI provider plugin.
@@ -97,24 +121,21 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.debug = debug
 	}
 
-	// API base URL: allows pointing at compatible endpoints (Azure, local proxies).
-	p.baseURL = apiURL
-	if base, ok := ctx.Config["base_url"].(string); ok && base != "" {
-		p.baseURL = strings.TrimRight(base, "/")
+	// Auth: openai (default), azure_key, or azure_aad. parseAuthConfig is
+	// backwards compatible — when auth_mode is unset, the legacy
+	// api_key / api_key_env / base_url top-level keys keep working.
+	auth, err := parseAuthConfig(ctx.Config)
+	if err != nil {
+		return err
 	}
+	p.auth = auth
 
-	// Read API key: direct config value takes priority over env var.
-	if key, ok := ctx.Config["api_key"].(string); ok && key != "" {
-		p.apiKey = key
-	} else {
-		apiKeyEnv, _ := ctx.Config["api_key_env"].(string)
-		if apiKeyEnv == "" {
-			apiKeyEnv = "OPENAI_API_KEY"
-		}
-		p.apiKey = os.Getenv(apiKeyEnv)
-	}
-	if p.apiKey == "" {
-		return fmt.Errorf("openai: no API key configured (set api_key in config or %s env var)", "OPENAI_API_KEY")
+	// Files API stays on the public OpenAI endpoint regardless of mode (Azure
+	// has a different Files API surface and not all plugins need it). When
+	// running in Azure mode, we still need an OpenAI api_key for Files; warn
+	// once if the Files API is enabled but no key is available.
+	if (p.auth.mode == authModeAzureKey || p.auth.mode == authModeAzureAAD) && p.auth.apiKey == "" {
+		ctx.Logger.Warn("openai: Files API will be unavailable in Azure mode without a top-level api_key (Files API stays on api.openai.com)")
 	}
 
 	p.client = &http.Client{
@@ -123,6 +144,25 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.prompts = ctx.Prompts
 
 	p.pricing = parsePricingConfig(ctx.Config)
+
+	p.reasoning = parseReasoningConfig(ctx.Config)
+	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
+		p.forceReasoning = v
+	}
+
+	p.multimodal = parseMultimodalConfig(ctx.Config)
+
+	p.files = parseFilesConfig(ctx.Config)
+	p.filesAPIURL = filesAPIBaseURL
+	if p.files.Enabled {
+		p.fileCache = newFileCache()
+		p.logger.Info("files API enabled",
+			"purpose", p.files.Purpose,
+			"upload_threshold", p.files.UploadThreshold,
+			"cache_uploads", p.files.CacheUploads,
+			"delete_on_shutdown", p.files.DeleteOnShutdown,
+		)
+	}
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -151,9 +191,19 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 func (p *Plugin) Ready() error { return nil }
 
-func (p *Plugin) Shutdown(_ context.Context) error {
+func (p *Plugin) Shutdown(ctx context.Context) error {
 	for _, unsub := range p.unsubs {
 		unsub()
+	}
+	if p.files.Enabled && p.files.DeleteOnShutdown {
+		ids := p.snapshotSessionFileIDs()
+		for _, id := range ids {
+			if err := p.deleteFile(ctx, id); err != nil {
+				// Best-effort: log and continue. A leaked file_id is a soft
+				// cost (org storage), not a correctness issue.
+				p.logger.Warn("openai: failed to delete session file", "file_id", id, "error", err)
+			}
+		}
 	}
 	p.client.CloseIdleConnections()
 	return nil
@@ -239,6 +289,26 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
+	// Files API preflight: when enabled, upload file-type Data parts and
+	// swap in the returned file_id before serializing the request body. We
+	// replace req.Messages locally (not via mutation) — the caller's slice
+	// stays untouched.
+	preflightCtx, preflightCancel := context.WithCancel(context.Background())
+	if p.files.Enabled {
+		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
+		if err != nil {
+			preflightCancel()
+			p.emitErrorInfo(events.ErrorInfo{
+				Err:         fmt.Errorf("openai: files preflight failed: %w", err),
+				Retryable:   false,
+				RequestMeta: req.Metadata,
+			})
+			return
+		}
+		req.Messages = newMsgs
+	}
+	preflightCancel()
+
 	body := p.buildRequestBody(model, maxTokens, req)
 
 	jsonBody, err := json.Marshal(body)
@@ -260,11 +330,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.baseURL, bytes.NewReader(jsonBody))
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.auth.buildURL(), bytes.NewReader(jsonBody))
 		if err != nil {
 			return nil, err
 		}
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		if err := p.auth.applyAuth(reqCtx, httpReq, p.client); err != nil {
+			return nil, err
+		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		return httpReq, nil
 	}
@@ -336,9 +408,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 // buildRequestBody constructs the OpenAI Chat Completions API request body.
 func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
 	body := map[string]any{
-		"model":      model,
 		"max_tokens": maxTokens,
 		"stream":     req.Stream,
+	}
+	// Azure encodes the deployment in the URL; including model in the body
+	// is redundant (and rejected by some api-versions). Public OpenAI
+	// requires it.
+	if p.auth == nil || !p.auth.stripModelFromBody() {
+		body["model"] = model
 	}
 
 	if req.Temperature != nil {
@@ -421,17 +498,47 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		// "text" is OpenAI default — no field needed.
 	}
 
+	// Predicted outputs (OpenAI-only): when the agent has a known-content
+	// guess (rewrite this paragraph, fix this line), pass it through as
+	// prediction.content so the model returns near-instantly for unchanged
+	// portions. applyReasoning strips this for o-series / gpt-5-thinking
+	// models since they reject the field.
+	if req.Prediction != "" {
+		body["prediction"] = map[string]any{
+			"type":    "content",
+			"content": req.Prediction,
+		}
+	}
+
+	// Reasoning-model handling runs last so any fields about to be stripped
+	// (temperature, top_p, etc.) have already been written. NOTE: this stays
+	// on /v1/chat/completions; the /v1/responses endpoint exposes richer
+	// reasoning controls (summary streaming) and is left for a future plan.
+	applyReasoning(body, model, p.reasoning, p.forceReasoning, p.logger)
+
 	return body
 }
 
 // convertMessage converts an events.Message to the OpenAI API format.
+//
+// When the message carries multimodal Parts, the content is serialized as
+// OpenAI's content-array form (text/image_url/input_audio/file blocks). On
+// any conversion error the provider logs and falls back to the bare-string
+// Content path so a malformed image part doesn't kill the whole turn.
 func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 	switch msg.Role {
 	case "assistant":
 		m := map[string]any{
 			"role": "assistant",
 		}
-		if msg.Content != "" {
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build assistant content parts; falling back to text", "error", err)
+			if msg.Content != "" {
+				m["content"] = msg.Content
+			}
+		} else if parts != nil {
+			m["content"] = parts
+		} else if msg.Content != "" {
 			m["content"] = msg.Content
 		}
 		if len(msg.ToolCalls) > 0 {
@@ -451,17 +558,33 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 		return m
 
 	case "tool":
-		return map[string]any{
+		m := map[string]any{
 			"role":         "tool",
 			"tool_call_id": msg.ToolCallID,
-			"content":      msg.Content,
 		}
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build tool content parts; falling back to text", "error", err)
+			m["content"] = msg.Content
+		} else if parts != nil {
+			m["content"] = parts
+		} else {
+			m["content"] = msg.Content
+		}
+		return m
 
 	case "user":
-		return map[string]any{
-			"role":    "user",
-			"content": msg.Content,
+		m := map[string]any{
+			"role": "user",
 		}
+		if parts, err := buildContentParts(msg, p.multimodal); err != nil {
+			p.logger.Warn("openai: failed to build user content parts; falling back to text", "error", err)
+			m["content"] = msg.Content
+		} else if parts != nil {
+			m["content"] = parts
+		} else {
+			m["content"] = msg.Content
+		}
+		return m
 
 	default:
 		return map[string]any{
@@ -505,9 +628,19 @@ type apiFunction struct {
 }
 
 type apiUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+		AudioTokens  int `json:"audio_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens          int `json:"reasoning_tokens"`
+		AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
+		RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
+		AudioTokens              int `json:"audio_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 func (p *Plugin) handleSyncResponse(body io.Reader) {
@@ -519,8 +652,10 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 
 	resp := p.convertAPIResponse(apiResp)
 
+	// Merge request-passthrough metadata (e.g. _structured_output) onto any
+	// metadata convertAPIResponse already attached (e.g. prediction_acceptance).
 	p.mu.Lock()
-	resp.Metadata = p.currentRequestMeta
+	resp.Metadata = mergeMetadata(resp.Metadata, p.currentRequestMeta)
 	p.mu.Unlock()
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
@@ -528,11 +663,33 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	}
 }
 
+// mergeMetadata returns a map containing all keys from `into` plus all keys
+// from `from`. Either input may be nil. Keys in `from` overwrite duplicates
+// in `into`. Returns nil only when both inputs are nil/empty.
+func mergeMetadata(into, from map[string]any) map[string]any {
+	if len(into) == 0 && len(from) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(into)+len(from))
+	for k, v := range into {
+		out[k] = v
+	}
+	for k, v := range from {
+		out[k] = v
+	}
+	return out
+}
+
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
+	// Reasoning tokens (o-series, gpt-5-thinking) are billed by OpenAI as
+	// output and are already counted inside completion_tokens — no separate
+	// pricing field needed; they roll into the existing OutputPerMillion rate.
 	usage := events.Usage{
 		PromptTokens:     apiResp.Usage.PromptTokens,
 		CompletionTokens: apiResp.Usage.CompletionTokens,
 		TotalTokens:      apiResp.Usage.TotalTokens,
+		CachedTokens:     apiResp.Usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:  apiResp.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 
 	resp := events.LLMResponse{
@@ -553,6 +710,20 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 				Name:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
 			})
+		}
+	}
+
+	// Surface prediction acceptance counts when the request used the
+	// prediction field. Lets callers tune their hit rates — accepted tokens
+	// bill at the input rate, rejected at the output rate.
+	if apiResp.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 ||
+		apiResp.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+		if resp.Metadata == nil {
+			resp.Metadata = make(map[string]any)
+		}
+		resp.Metadata["prediction_acceptance"] = map[string]any{
+			"accepted": apiResp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
+			"rejected": apiResp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		}
 	}
 
@@ -700,11 +871,15 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		chunkIndex++
 	}
 
-	// Build final usage.
+	// Build final usage. Reasoning tokens arrive in the final usage chunk
+	// when stream_options.include_usage is set (already enabled above).
+	// They're billed as output by OpenAI — already inside CompletionTokens.
 	finalUsage := events.Usage{
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
+		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
+		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
 	}
 
 	// Emit stream end.
@@ -715,8 +890,20 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	})
 
 	// Also emit the complete llm.response for downstream consumers.
+	// Surface prediction acceptance the same way the sync path does.
+	var streamMeta map[string]any
+	if usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 ||
+		usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+		streamMeta = map[string]any{
+			"prediction_acceptance": map[string]any{
+				"accepted": usage.CompletionTokensDetails.AcceptedPredictionTokens,
+				"rejected": usage.CompletionTokensDetails.RejectedPredictionTokens,
+			},
+		}
+	}
+
 	p.mu.Lock()
-	meta := p.currentRequestMeta
+	mergedMeta := mergeMetadata(streamMeta, p.currentRequestMeta)
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
@@ -726,7 +913,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		CostUSD:      p.costForModel(model, finalUsage),
 		Model:        model,
 		FinishReason: finishReason,
-		Metadata:     meta,
+		Metadata:     mergedMeta,
 	})
 }
 
@@ -753,6 +940,9 @@ func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
 		}
 		if v, ok := entry["output_per_million"].(float64); ok {
 			p.OutputPerMillion = v
+		}
+		if v, ok := entry["cache_read_per_million"].(float64); ok {
+			p.CacheReadPerMillion = v
 		}
 		merged[model] = p
 	}
