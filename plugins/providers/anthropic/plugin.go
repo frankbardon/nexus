@@ -90,6 +90,7 @@ type Plugin struct {
 	thinking   thinkingConfig
 	multimodal multimodalConfig
 	files      filesConfig
+	citations  citationsConfig
 	pricing    map[string]modelPricing // merged: config overrides + embedded defaults
 
 	// filesAPIURL is the production endpoint by default; tests override.
@@ -167,6 +168,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 	if p.multimodal.PDFBeta {
 		p.logger.Info("multimodal pdf_beta header enabled (pdfs-2024-09-25)")
+	}
+
+	p.citations = parseCitationsConfig(ctx.Config)
+	if p.citations.Enabled {
+		p.logger.Info("native citations enabled (document blocks will request citations)")
 	}
 
 	p.files = parseFilesConfig(ctx.Config)
@@ -579,7 +585,7 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 		// On error we log and fall back to the text Content.
 		var toolResultContent any = msg.Content
 		if len(msg.Parts) > 0 {
-			blocks, err := buildContentBlocks(msg)
+			blocks, err := buildContentBlocks(msg, p.citations.Enabled)
 			if err != nil {
 				p.logger.Error("anthropic: dropping tool-result multimodal parts", "error", err)
 			} else {
@@ -599,7 +605,7 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 
 	case "user":
 		if len(msg.Parts) > 0 {
-			blocks, err := buildContentBlocks(msg)
+			blocks, err := buildContentBlocks(msg, p.citations.Enabled)
 			if err != nil {
 				// Multimodal serialization failed (e.g. oversize image, audio
 				// part). Surface the failure via slog and fall back to the
@@ -656,6 +662,10 @@ type apiContentBlock struct {
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
 	Data      string `json:"data,omitempty"`
+
+	// Native citations. Anthropic populates this on `text` blocks when the
+	// originating request included document blocks with citations enabled.
+	Citations []apiCitation `json:"citations,omitempty"`
 }
 
 type apiUsage struct {
@@ -698,12 +708,16 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 	var content strings.Builder
 	var toolCalls []events.ToolCallRequest
 	var thinkingBlocks []map[string]any
+	var citations []events.Citation
 	thinkingIdx := 0
 
 	for _, block := range apiResp.Content {
 		switch block.Type {
 		case "text":
 			content.WriteString(block.Text)
+			for _, c := range block.Citations {
+				citations = append(citations, c.toEvent())
+			}
 
 		case "thinking":
 			// Preserve the block verbatim (with signature) so the next
@@ -773,6 +787,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		CostUSD:      p.costForModel(apiResp.Model, usage),
 		Model:        apiResp.Model,
 		FinishReason: apiResp.StopReason,
+		Citations:    citations,
 	}
 	if len(thinkingBlocks) > 0 {
 		resp.Metadata = map[string]any{
@@ -809,6 +824,13 @@ type streamState struct {
 	thinkingData      string
 	thinkingIdx       int
 	thinkingBlocks    []map[string]any
+
+	// Citations accumulated during the active text block (flushed to
+	// citations on content_block_stop) and the running list across all
+	// blocks for the response. Anthropic emits citations only on `text`
+	// blocks via citations_delta deltas.
+	currentCitations []apiCitation
+	citations        []events.Citation
 
 	usage        apiUsage
 	model        string
@@ -892,6 +914,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		CostUSD:      p.costForModel(st.model, finalUsage),
 		Model:        st.model,
 		FinishReason: st.finishReason,
+		Citations:    st.citations,
 		Metadata:     respMeta,
 	})
 }
@@ -948,11 +971,12 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 		var data struct {
 			Index int `json:"index"`
 			Delta struct {
-				Type        string `json:"type"`
-				Text        string `json:"text,omitempty"`
-				PartialJSON string `json:"partial_json,omitempty"`
-				Thinking    string `json:"thinking,omitempty"`
-				Signature   string `json:"signature,omitempty"`
+				Type        string      `json:"type"`
+				Text        string      `json:"text,omitempty"`
+				PartialJSON string      `json:"partial_json,omitempty"`
+				Thinking    string      `json:"thinking,omitempty"`
+				Signature   string      `json:"signature,omitempty"`
+				Citation    apiCitation `json:"citation,omitempty"`
 			} `json:"delta"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
@@ -965,6 +989,12 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 					TurnID:  st.turnID,
 				})
 				st.chunkIndex++
+
+			case "citations_delta":
+				// Accumulate per-block; flushed into st.citations at
+				// content_block_stop so ordering across multiple text
+				// blocks is preserved.
+				st.currentCitations = append(st.currentCitations, data.Delta.Citation)
 
 			case "thinking_delta":
 				st.thinkingBuilder.WriteString(data.Delta.Thinking)
@@ -1039,6 +1069,16 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 			st.thinkingBuilder.Reset()
 			st.thinkingSignature = ""
 			st.thinkingData = ""
+
+		default:
+			// Text block (or any other non-tool, non-thinking block): flush
+			// any citations accumulated during its content_block_delta runs.
+			if len(st.currentCitations) > 0 {
+				for _, c := range st.currentCitations {
+					st.citations = append(st.citations, c.toEvent())
+				}
+				st.currentCitations = nil
+			}
 		}
 
 	case "message_delta":

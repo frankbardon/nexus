@@ -110,11 +110,32 @@ type LLMResponse struct {
 	FinishReason string
 	Metadata     map[string]any
 
+	// Citations carries native source attributions emitted by providers that
+	// support them (currently Anthropic). Nil when the provider doesn't emit
+	// citations or the request didn't include citation-enabled documents.
+	Citations []Citation
+
 	// Alternatives holds additional responses from parallel fanout providers.
 	// Nil for normal (non-fanout) requests. When populated, the primary fields
 	// above contain the first successful response (or selected winner), and
 	// Alternatives contains the remaining responses.
 	Alternatives []LLMResponse
+}
+
+// Citation is a single source attribution returned by a provider that supports
+// native citation tracking (currently Anthropic). Other providers leave the
+// LLMResponse.Citations slice nil.
+type Citation struct {
+	Type            string // "char_location" | "page_location" | "content_block_location"
+	CitedText       string
+	DocumentIndex   int
+	DocumentTitle   string
+	StartCharIndex  int
+	EndCharIndex    int
+	StartPageNumber int
+	EndPageNumber   int
+	StartBlockIndex int
+	EndBlockIndex   int
 }
 
 // Usage tracks token consumption for an LLM call.

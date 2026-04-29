@@ -11,7 +11,7 @@ import (
 // TestBuildContentBlocks_EmptyParts confirms that messages without Parts fall
 // through to the legacy string-content path (caller checks for nil to decide).
 func TestBuildContentBlocks_EmptyParts(t *testing.T) {
-	blocks, err := buildContentBlocks(events.Message{Role: "user", Content: "hello"})
+	blocks, err := buildContentBlocks(events.Message{Role: "user", Content: "hello"}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestBuildContentBlocks_TextPart(t *testing.T) {
 		Role:  "user",
 		Parts: []events.MessagePart{{Type: "text", Text: "describe this"}},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestBuildContentBlocks_ImageInline(t *testing.T) {
 			{Type: "image", MimeType: "image/png", Data: raw},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestBuildContentBlocks_ImageURI(t *testing.T) {
 			{Type: "image", URI: "https://example.com/cat.png"},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBuildContentBlocks_ImageFileID(t *testing.T) {
 			{Type: "image", FileID: "file_abc123", URI: "https://example.com/ignored.png", Data: []byte{0xFF}},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestBuildContentBlocks_ImageOversize(t *testing.T) {
 			{Type: "image", MimeType: "image/png", Data: huge},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for oversize image")
 	}
@@ -161,7 +161,7 @@ func TestBuildContentBlocks_ImageMissingMimeType(t *testing.T) {
 			{Type: "image", Data: []byte{0x01, 0x02}},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for missing mime_type")
 	}
@@ -180,7 +180,7 @@ func TestBuildContentBlocks_PDFInline(t *testing.T) {
 			{Type: "file", MimeType: "application/pdf", Data: raw},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestBuildContentBlocks_PDFURI(t *testing.T) {
 			{Type: "file", URI: "https://example.com/report.pdf"},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestBuildContentBlocks_PDFFileID(t *testing.T) {
 			{Type: "file", FileID: "file_pdf999", MimeType: "application/pdf"},
 		},
 	}
-	blocks, err := buildContentBlocks(msg)
+	blocks, err := buildContentBlocks(msg, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestBuildContentBlocks_PDFOversize(t *testing.T) {
 			{Type: "file", MimeType: "application/pdf", Data: huge},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for oversize PDF")
 	}
@@ -270,7 +270,7 @@ func TestBuildContentBlocks_AudioRejected(t *testing.T) {
 			{Type: "audio", MimeType: "audio/wav", Data: []byte{0x00}},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for audio part")
 	}
@@ -287,7 +287,7 @@ func TestBuildContentBlocks_VideoRejected(t *testing.T) {
 			{Type: "video", MimeType: "video/mp4", Data: []byte{0x00}},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for video part")
 	}
@@ -304,7 +304,7 @@ func TestBuildContentBlocks_UnknownTypeRejected(t *testing.T) {
 			{Type: "hologram"},
 		},
 	}
-	_, err := buildContentBlocks(msg)
+	_, err := buildContentBlocks(msg, false)
 	if err == nil {
 		t.Fatal("expected error for unknown type")
 	}

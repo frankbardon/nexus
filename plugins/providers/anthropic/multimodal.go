@@ -49,7 +49,10 @@ func parseMultimodalConfig(cfg map[string]any) multimodalConfig {
 //
 // When msg.Content is non-empty, it leads as a text block before any Parts —
 // matches the convention already used in Gemini's buildParts.
-func buildContentBlocks(msg events.Message) ([]map[string]any, error) {
+//
+// citationsEnabled toggles per-document `citations: {enabled: true}` markers
+// on outgoing document blocks; threaded from the plugin's citations config.
+func buildContentBlocks(msg events.Message, citationsEnabled bool) ([]map[string]any, error) {
 	if len(msg.Parts) == 0 {
 		return nil, nil
 	}
@@ -74,7 +77,7 @@ func buildContentBlocks(msg events.Message) ([]map[string]any, error) {
 		case "file":
 			// Treat any non-image binary part as a document. mime_type drives
 			// whether Anthropic interprets it as a PDF or another doc format.
-			block, err := buildDocumentBlock(part)
+			block, err := buildDocumentBlock(part, citationsEnabled)
 			if err != nil {
 				return nil, err
 			}
@@ -135,43 +138,51 @@ func buildImageBlock(part events.MessagePart) (map[string]any, error) {
 
 // buildDocumentBlock emits an Anthropic `document` content block from a
 // MessagePart. Same source-selection rules as buildImageBlock (FileID > URI >
-// inline Data) but with a 32MB inline cap. Plan 05 will add
-// `citations: {enabled: true}` here behind a config flag — not handled in
-// this commit.
-func buildDocumentBlock(part events.MessagePart) (map[string]any, error) {
-	if part.FileID != "" {
-		return map[string]any{
+// inline Data) but with a 32MB inline cap.
+//
+// When citationsEnabled is true the block carries a `citations:{enabled:true}`
+// marker so Anthropic returns char/page/block-level source attributions on the
+// generated text blocks.
+func buildDocumentBlock(part events.MessagePart, citationsEnabled bool) (map[string]any, error) {
+	var block map[string]any
+	switch {
+	case part.FileID != "":
+		block = map[string]any{
 			"type": "document",
 			"source": map[string]any{
 				"type":    "file",
 				"file_id": part.FileID,
 			},
-		}, nil
-	}
-	if part.URI != "" {
-		return map[string]any{
+		}
+	case part.URI != "":
+		block = map[string]any{
 			"type": "document",
 			"source": map[string]any{
 				"type": "url",
 				"url":  part.URI,
 			},
-		}, nil
+		}
+	default:
+		if len(part.Data) == 0 {
+			return nil, fmt.Errorf("anthropic: document part has neither URI nor Data")
+		}
+		if part.MimeType == "" {
+			return nil, fmt.Errorf("anthropic: document part requires mime_type")
+		}
+		if len(part.Data) > inlinePDFLimit {
+			return nil, fmt.Errorf("anthropic: document part (%d bytes) exceeds inline limit; upload via Files API and set URI", len(part.Data))
+		}
+		block = map[string]any{
+			"type": "document",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": part.MimeType,
+				"data":       base64.StdEncoding.EncodeToString(part.Data),
+			},
+		}
 	}
-	if len(part.Data) == 0 {
-		return nil, fmt.Errorf("anthropic: document part has neither URI nor Data")
+	if citationsEnabled {
+		block["citations"] = map[string]any{"enabled": true}
 	}
-	if part.MimeType == "" {
-		return nil, fmt.Errorf("anthropic: document part requires mime_type")
-	}
-	if len(part.Data) > inlinePDFLimit {
-		return nil, fmt.Errorf("anthropic: document part (%d bytes) exceeds inline limit; upload via Files API and set URI", len(part.Data))
-	}
-	return map[string]any{
-		"type": "document",
-		"source": map[string]any{
-			"type":       "base64",
-			"media_type": part.MimeType,
-			"data":       base64.StdEncoding.EncodeToString(part.Data),
-		},
-	}, nil
+	return block, nil
 }
