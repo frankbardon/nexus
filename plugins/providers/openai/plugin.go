@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -76,8 +75,7 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	apiKey  string
-	baseURL string
+	auth    *authState
 	client  *http.Client
 	prompts *engine.PromptRegistry
 	unsubs  []func()
@@ -123,24 +121,21 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.debug = debug
 	}
 
-	// API base URL: allows pointing at compatible endpoints (Azure, local proxies).
-	p.baseURL = apiURL
-	if base, ok := ctx.Config["base_url"].(string); ok && base != "" {
-		p.baseURL = strings.TrimRight(base, "/")
+	// Auth: openai (default), azure_key, or azure_aad. parseAuthConfig is
+	// backwards compatible — when auth_mode is unset, the legacy
+	// api_key / api_key_env / base_url top-level keys keep working.
+	auth, err := parseAuthConfig(ctx.Config)
+	if err != nil {
+		return err
 	}
+	p.auth = auth
 
-	// Read API key: direct config value takes priority over env var.
-	if key, ok := ctx.Config["api_key"].(string); ok && key != "" {
-		p.apiKey = key
-	} else {
-		apiKeyEnv, _ := ctx.Config["api_key_env"].(string)
-		if apiKeyEnv == "" {
-			apiKeyEnv = "OPENAI_API_KEY"
-		}
-		p.apiKey = os.Getenv(apiKeyEnv)
-	}
-	if p.apiKey == "" {
-		return fmt.Errorf("openai: no API key configured (set api_key in config or %s env var)", "OPENAI_API_KEY")
+	// Files API stays on the public OpenAI endpoint regardless of mode (Azure
+	// has a different Files API surface and not all plugins need it). When
+	// running in Azure mode, we still need an OpenAI api_key for Files; warn
+	// once if the Files API is enabled but no key is available.
+	if (p.auth.mode == authModeAzureKey || p.auth.mode == authModeAzureAAD) && p.auth.apiKey == "" {
+		ctx.Logger.Warn("openai: Files API will be unavailable in Azure mode without a top-level api_key (Files API stays on api.openai.com)")
 	}
 
 	p.client = &http.Client{
@@ -335,11 +330,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.baseURL, bytes.NewReader(jsonBody))
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.auth.buildURL(), bytes.NewReader(jsonBody))
 		if err != nil {
 			return nil, err
 		}
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		if err := p.auth.applyAuth(reqCtx, httpReq, p.client); err != nil {
+			return nil, err
+		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		return httpReq, nil
 	}
@@ -411,9 +408,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 // buildRequestBody constructs the OpenAI Chat Completions API request body.
 func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
 	body := map[string]any{
-		"model":      model,
 		"max_tokens": maxTokens,
 		"stream":     req.Stream,
+	}
+	// Azure encodes the deployment in the URL; including model in the body
+	// is redundant (and rejected by some api-versions). Public OpenAI
+	// requires it.
+	if p.auth == nil || !p.auth.stripModelFromBody() {
+		body["model"] = model
 	}
 
 	if req.Temperature != nil {

@@ -174,7 +174,14 @@ func (p *Plugin) uploadFile(ctx context.Context, data []byte, mimeType, filename
 	if err != nil {
 		return "", fmt.Errorf("openai: build files request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	// Files API stays on the public OpenAI endpoint regardless of auth mode
+	// (Azure exposes a different Files surface). p.auth.apiKey is the
+	// public-OpenAI key — populated by the legacy top-level api_key /
+	// api_key_env config keys, which survive in all modes.
+	if p.auth == nil || p.auth.apiKey == "" {
+		return "", fmt.Errorf("openai: Files API requires a public-OpenAI api_key (set api_key or OPENAI_API_KEY)")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.auth.apiKey)
 	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
 	httpReq.Header.Set("Content-Length", strconv.Itoa(buf.Len()))
 
@@ -219,7 +226,10 @@ func (p *Plugin) deleteFile(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("openai: build delete request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if p.auth == nil || p.auth.apiKey == "" {
+		return fmt.Errorf("openai: Files API delete requires a public-OpenAI api_key")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.auth.apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {

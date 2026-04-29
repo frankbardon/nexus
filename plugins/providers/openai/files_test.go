@@ -87,7 +87,7 @@ func newFilesTestPlugin(t *testing.T, handler http.Handler) (*Plugin, *httptest.
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	p := &Plugin{
-		apiKey:      "test-key",
+		auth:        &authState{mode: authModeOpenAI, apiKey: "test-key"},
 		client:      srv.Client(),
 		logger:      silentLogger(),
 		filesAPIURL: srv.URL,
