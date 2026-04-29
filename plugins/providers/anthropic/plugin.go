@@ -360,25 +360,11 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		httpReq.Header.Set("x-api-key", p.apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 		httpReq.Header.Set("content-type", "application/json")
-		// Beta-flag aggregation. Plan 06 will hoist this into a metadata-driven
-		// builder; for now it joins the small set of flags the plugin emits.
-		var betaFlags []string
-		if p.cache.Enabled && p.cache.TTL == "1h" {
-			betaFlags = append(betaFlags, "extended-cache-ttl-2025-04-11")
-		}
-		if p.multimodal.PDFBeta {
-			betaFlags = append(betaFlags, "pdfs-2024-09-25")
-		}
-		// Always send the files beta header when the feature is enabled —
-		// Anthropic accepts it regardless of whether a file_id is referenced
-		// on this particular request, and tracking per-request use would
-		// require threading state through buildRequestBody for a one-byte
-		// header savings that doesn't matter.
-		if p.files.Enabled {
-			betaFlags = append(betaFlags, filesAPIBetaHeader)
-		}
-		if len(betaFlags) > 0 {
-			httpReq.Header.Set("anthropic-beta", strings.Join(betaFlags, ","))
+		// Beta-flag aggregation merges the plugin's standing flags (cache 1h,
+		// files API, pdf_beta) with any per-request flags stamped by
+		// server-tool plugins via req.Metadata["_anthropic_beta_headers"].
+		if flags := p.betaFlags(req.Metadata); flags != "" {
+			httpReq.Header.Set("anthropic-beta", flags)
 		}
 		return httpReq, nil
 	}
@@ -505,6 +491,13 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		}
 		body["tools"] = tools
 	}
+
+	// Server-tool injection hook. Plugins like nexus.tool.anthropic_native.bash
+	// stamp `req.Metadata["_anthropic_extra_tools"]` with already-Anthropic-shaped
+	// tool entries (e.g. {"type":"bash_20250124","name":"bash"}). They're
+	// passed through verbatim — no schema conversion. Coexists with both
+	// client-defined tools and the structured-output synthetic tool below.
+	p.appendExtraTools(body, req.Metadata)
 
 	// Structured output simulation via tool-use-as-schema.
 	// Inject synthetic tool and force tool choice to it.
@@ -666,6 +659,28 @@ type apiContentBlock struct {
 	// Native citations. Anthropic populates this on `text` blocks when the
 	// originating request included document blocks with citations enabled.
 	Citations []apiCitation `json:"citations,omitempty"`
+
+	// Server-side tool result blocks (e.g. `code_execution_tool_result`). These
+	// are tool _results_ embedded in the assistant message — Anthropic ran the
+	// tool server-side, so there's no client-side execution required. ToolUseID
+	// references the matching server-side tool_use ID; Content carries the
+	// inner result block (e.g. {"type":"code_execution_result","stdout":"…",
+	// "stderr":"…","return_code":0}) as raw JSON so we don't have to model
+	// every server-tool's inner shape exhaustively.
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+}
+
+// isServerToolResultBlock reports whether the block type is a server-side
+// tool result (currently only `code_execution_tool_result`, but Anthropic
+// will likely add more — keep this central so we surface them uniformly).
+func isServerToolResultBlock(blockType string) bool {
+	switch blockType {
+	case "code_execution_tool_result":
+		return true
+	default:
+		return false
+	}
 }
 
 type apiUsage struct {
@@ -709,9 +724,23 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 	var toolCalls []events.ToolCallRequest
 	var thinkingBlocks []map[string]any
 	var citations []events.Citation
+	var serverResults []map[string]any
 	thinkingIdx := 0
 
 	for _, block := range apiResp.Content {
+		if isServerToolResultBlock(block.Type) {
+			// Preserve content verbatim — downstream consumers (e.g. the
+			// per-server-tool plugins) decode the inner shape themselves so
+			// we don't have to track every Anthropic server tool's wire format
+			// here.
+			serverResults = append(serverResults, map[string]any{
+				"type":        block.Type,
+				"tool_use_id": block.ToolUseID,
+				"content":     json.RawMessage(block.Content),
+			})
+			continue
+		}
+
 		switch block.Type {
 		case "text":
 			content.WriteString(block.Text)
@@ -789,9 +818,13 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		FinishReason: apiResp.StopReason,
 		Citations:    citations,
 	}
-	if len(thinkingBlocks) > 0 {
-		resp.Metadata = map[string]any{
-			"thinking_blocks": thinkingBlocks,
+	if len(thinkingBlocks) > 0 || len(serverResults) > 0 {
+		resp.Metadata = map[string]any{}
+		if len(thinkingBlocks) > 0 {
+			resp.Metadata["thinking_blocks"] = thinkingBlocks
+		}
+		if len(serverResults) > 0 {
+			resp.Metadata["server_tool_results"] = serverResults
 		}
 	}
 	return resp
@@ -831,6 +864,18 @@ type streamState struct {
 	// blocks via citations_delta deltas.
 	currentCitations []apiCitation
 	citations        []events.Citation
+
+	// Active server-side tool result block (e.g. code_execution_tool_result).
+	// serverToolBlockType is set when one is open, empty otherwise. Anthropic's
+	// streaming wire shape for these blocks is still in flux at the time of
+	// writing (the plugin parses defensively): content_block_start carries
+	// type + tool_use_id, deltas accumulate the inner content as raw JSON
+	// (likely via input_json_delta or a similarly-shaped delta), and
+	// content_block_stop finalizes the entry into serverToolResults.
+	serverToolBlockType string
+	serverToolUseID     string
+	serverToolBuffer    strings.Builder
+	serverToolResults   []map[string]any
 
 	usage        apiUsage
 	model        string
@@ -899,12 +944,17 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	p.mu.Unlock()
 
 	respMeta := meta
-	if len(st.thinkingBlocks) > 0 {
-		respMeta = make(map[string]any, len(meta)+1)
+	if len(st.thinkingBlocks) > 0 || len(st.serverToolResults) > 0 {
+		respMeta = make(map[string]any, len(meta)+2)
 		for k, v := range meta {
 			respMeta[k] = v
 		}
-		respMeta["thinking_blocks"] = st.thinkingBlocks
+		if len(st.thinkingBlocks) > 0 {
+			respMeta["thinking_blocks"] = st.thinkingBlocks
+		}
+		if len(st.serverToolResults) > 0 {
+			respMeta["server_tool_results"] = st.serverToolResults
+		}
 	}
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
@@ -943,14 +993,25 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 			ContentBlock apiContentBlock `json:"content_block"`
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
-			switch data.ContentBlock.Type {
-			case "tool_use":
+			switch {
+			case data.ContentBlock.Type == "tool_use":
 				st.currentToolCall = &events.ToolCallRequest{
 					ID:   data.ContentBlock.ID,
 					Name: data.ContentBlock.Name,
 				}
 				st.currentToolInput.Reset()
-			case "thinking", "redacted_thinking":
+			case isServerToolResultBlock(data.ContentBlock.Type):
+				// Anthropic may include the full inner content on the
+				// content_block_start event itself, or stream it via deltas.
+				// Capture whatever's already present and let deltas append to
+				// the buffer until content_block_stop.
+				st.serverToolBlockType = data.ContentBlock.Type
+				st.serverToolUseID = data.ContentBlock.ToolUseID
+				st.serverToolBuffer.Reset()
+				if len(data.ContentBlock.Content) > 0 {
+					st.serverToolBuffer.Write(data.ContentBlock.Content)
+				}
+			case data.ContentBlock.Type == "thinking" || data.ContentBlock.Type == "redacted_thinking":
 				st.thinkingBlockType = data.ContentBlock.Type
 				st.thinkingBuilder.Reset()
 				st.thinkingSignature = ""
@@ -1017,7 +1078,8 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 				st.thinkingSignature += data.Delta.Signature
 
 			case "input_json_delta":
-				if st.currentToolCall != nil {
+				switch {
+				case st.currentToolCall != nil:
 					st.currentToolInput.WriteString(data.Delta.PartialJSON)
 					// Stream structured output tool input as content chunks.
 					if st.currentToolCall.Name == "_structured_output" {
@@ -1028,6 +1090,12 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 						})
 						st.chunkIndex++
 					}
+				case st.serverToolBlockType != "":
+					// Best-effort accumulation: Anthropic's exact streaming
+					// shape for server-tool result blocks is still in flux.
+					// We assume input_json_delta-style chunks until proven
+					// otherwise; the inner content is preserved verbatim.
+					st.serverToolBuffer.WriteString(data.Delta.PartialJSON)
 				}
 			}
 		}
@@ -1069,6 +1137,21 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 			st.thinkingBuilder.Reset()
 			st.thinkingSignature = ""
 			st.thinkingData = ""
+
+		case st.serverToolBlockType != "":
+			// Finalize the server-side tool result block. Content is preserved
+			// as raw JSON for downstream consumers (per-server-tool plugins
+			// decode it). The buffer holds whatever shape Anthropic streamed
+			// — we don't validate inner fields here.
+			buf := []byte(st.serverToolBuffer.String())
+			st.serverToolResults = append(st.serverToolResults, map[string]any{
+				"type":        st.serverToolBlockType,
+				"tool_use_id": st.serverToolUseID,
+				"content":     json.RawMessage(buf),
+			})
+			st.serverToolBlockType = ""
+			st.serverToolUseID = ""
+			st.serverToolBuffer.Reset()
 
 		default:
 			// Text block (or any other non-tool, non-thinking block): flush
