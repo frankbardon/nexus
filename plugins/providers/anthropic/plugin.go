@@ -86,6 +86,7 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
+	cache   cacheConfig
 	pricing map[string]modelPricing // merged: config overrides + embedded defaults
 
 	mu                 sync.Mutex
@@ -136,6 +137,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.prompts = ctx.Prompts
 
 	p.pricing = parsePricingConfig(ctx.Config)
+
+	p.cache = parseCacheConfig(ctx.Config)
+	if p.cache.Enabled {
+		p.logger.Info("prompt caching enabled",
+			"system", p.cache.System,
+			"tools", p.cache.Tools,
+			"message_prefix", p.cache.MessagePrefix,
+			"ttl", p.cache.TTL,
+		)
+	}
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
@@ -281,6 +292,12 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		httpReq.Header.Set("x-api-key", p.apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 		httpReq.Header.Set("content-type", "application/json")
+		// 1h TTL caching is gated behind a beta header. Plan 06 will introduce
+		// a metadata-driven multi-header builder; for now this is the only
+		// beta flag the plugin emits, so a single Set is fine.
+		if p.cache.Enabled && p.cache.TTL == "1h" {
+			httpReq.Header.Set("anthropic-beta", "extended-cache-ttl-2025-04-11")
+		}
 		return httpReq, nil
 	}
 
@@ -426,6 +443,10 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 			body["tool_choice"] = tc
 		}
 	}
+
+	// Mark cacheable prefix segments (system, last tool, leading user msgs) per
+	// configured policy. No-op when caching is disabled.
+	applyCacheControl(body, p.cache, p.logger)
 
 	return body
 }
