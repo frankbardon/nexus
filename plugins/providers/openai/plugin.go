@@ -90,10 +90,15 @@ type Plugin struct {
 
 	multimodal multimodalConfig
 
+	files       filesConfig
+	filesAPIURL string
+	fileCache   *fileCache
+
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
 	cancelFunc         context.CancelFunc
 	requestSeq         int
+	sessionFileIDs     []string // file_ids uploaded this session (for delete_on_shutdown)
 }
 
 // New creates a new OpenAI provider plugin.
@@ -152,6 +157,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
+	p.files = parseFilesConfig(ctx.Config)
+	p.filesAPIURL = filesAPIBaseURL
+	if p.files.Enabled {
+		p.fileCache = newFileCache()
+		p.logger.Info("files API enabled",
+			"purpose", p.files.Purpose,
+			"upload_threshold", p.files.UploadThreshold,
+			"cache_uploads", p.files.CacheUploads,
+			"delete_on_shutdown", p.files.DeleteOnShutdown,
+		)
+	}
+
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
 		p.logger.Info("retry enabled",
@@ -179,9 +196,19 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 func (p *Plugin) Ready() error { return nil }
 
-func (p *Plugin) Shutdown(_ context.Context) error {
+func (p *Plugin) Shutdown(ctx context.Context) error {
 	for _, unsub := range p.unsubs {
 		unsub()
+	}
+	if p.files.Enabled && p.files.DeleteOnShutdown {
+		ids := p.snapshotSessionFileIDs()
+		for _, id := range ids {
+			if err := p.deleteFile(ctx, id); err != nil {
+				// Best-effort: log and continue. A leaked file_id is a soft
+				// cost (org storage), not a correctness issue.
+				p.logger.Warn("openai: failed to delete session file", "file_id", id, "error", err)
+			}
+		}
 	}
 	p.client.CloseIdleConnections()
 	return nil
@@ -266,6 +293,26 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+
+	// Files API preflight: when enabled, upload file-type Data parts and
+	// swap in the returned file_id before serializing the request body. We
+	// replace req.Messages locally (not via mutation) — the caller's slice
+	// stays untouched.
+	preflightCtx, preflightCancel := context.WithCancel(context.Background())
+	if p.files.Enabled {
+		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
+		if err != nil {
+			preflightCancel()
+			p.emitErrorInfo(events.ErrorInfo{
+				Err:         fmt.Errorf("openai: files preflight failed: %w", err),
+				Retryable:   false,
+				RequestMeta: req.Metadata,
+			})
+			return
+		}
+		req.Messages = newMsgs
+	}
+	preflightCancel()
 
 	body := p.buildRequestBody(model, maxTokens, req)
 
