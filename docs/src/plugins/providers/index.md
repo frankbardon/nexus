@@ -8,6 +8,7 @@ LLM provider plugins handle communication with AI model APIs. They receive `llm.
 |--------|----|---------|
 | [Anthropic](./anthropic.md) | `nexus.llm.anthropic` | Claude (direct HTTP, no SDK) |
 | [OpenAI](./openai.md) | `nexus.llm.openai` | GPT / o-series (direct HTTP, no SDK) |
+| [Gemini](./gemini.md) | `nexus.llm.gemini` | Google Gemini — public api-key + Vertex AI; thinking, multimodal, code execution, prompt caching |
 | [Fallback](./fallback.md) | `nexus.provider.fallback` | Automatic provider failover coordinator |
 | [Fanout](./fanout.md) | `nexus.provider.fanout` | Parallel multi-provider dispatch |
 
@@ -33,6 +34,7 @@ When `ResponseFormat` is set on an `LLMRequest`, providers map it to their nativ
 |----------|---------------|----------|
 | **OpenAI** | Yes | Maps directly to `response_format` in the API payload |
 | **Anthropic** | No | Simulates via tool-use-as-schema: injects synthetic tool, forces tool choice, unwraps tool call arguments as structured response |
+| **Gemini** | Yes | Maps to `generationConfig.responseMimeType` + `responseSchema` (incompatible JSON Schema keywords stripped) |
 | **Other/unknown** | No | Ignores the field; `json_schema` gate handles validation downstream |
 
 ### Metadata Flag

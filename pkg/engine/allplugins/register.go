@@ -42,11 +42,13 @@ import (
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 	fallbackplugin "github.com/frankbardon/nexus/plugins/providers/fallback"
 	fanoutplugin "github.com/frankbardon/nexus/plugins/providers/fanout"
+	"github.com/frankbardon/nexus/plugins/providers/gemini"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 
 	// Search provider plugins (advertise the "search.provider" capability).
 	anthropicnativesearch "github.com/frankbardon/nexus/plugins/search/anthropic_native"
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
+	geminativesearch "github.com/frankbardon/nexus/plugins/search/gemini_native"
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
 	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
@@ -131,6 +133,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Providers
 	r.Register("nexus.llm.anthropic", anthropic.New)
 	r.Register("nexus.llm.openai", openai.New)
+	r.Register("nexus.llm.gemini", gemini.New)
 	r.Register("nexus.provider.fallback", fallbackplugin.New)
 	r.Register("nexus.provider.fanout", fanoutplugin.New)
 
@@ -138,6 +141,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.search.brave", bravesearch.New)
 	r.Register("nexus.search.anthropic_native", anthropicnativesearch.New)
 	r.Register("nexus.search.openai_native", openainativesearch.New)
+	r.Register("nexus.search.gemini_native", geminativesearch.New)
 
 	// Embeddings providers (capability: embeddings.provider)
 	r.Register("nexus.embeddings.openai", openaiembeddings.New)

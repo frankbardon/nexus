@@ -40,10 +40,26 @@ type LLMRequest struct {
 
 // Message represents a single message in an LLM conversation.
 type Message struct {
-	Role       string // "system", "user", "assistant", "tool"
-	Content    string
+	Role    string // "system", "user", "assistant", "tool"
+	Content string
+	Parts   []MessagePart // optional multimodal parts; when non-empty, providers
+	// that support multimodal serialize these alongside or instead of Content.
+	// Providers without multimodal support fall back to Content (text-only path).
 	ToolCallID string            // for tool result messages
 	ToolCalls  []ToolCallRequest // for assistant messages with tool calls
+}
+
+// MessagePart carries a single piece of multimodal content. Providers that
+// don't support a given Type should skip the part (or concatenate Text parts).
+// Either Data (inline bytes) or URI (provider-hosted reference) is set, never
+// both. Inline payloads beyond a provider-specific size limit are uploaded by
+// the provider and replaced with a URI on send.
+type MessagePart struct {
+	Type     string // "text" | "image" | "audio" | "video" | "file"
+	Text     string // when Type == "text"
+	MimeType string // e.g. "image/png", "application/pdf"; required when Data or URI set
+	Data     []byte // inline bytes
+	URI      string // provider-hosted reference (e.g. Gemini Files API URI)
 }
 
 // ToolCallRequest represents a tool invocation requested by the LLM.
@@ -89,6 +105,8 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	ReasoningTokens  int // thinking/reasoning tokens (Gemini 2.5 thoughtTokenCount, etc.)
+	CachedTokens     int // tokens served from a prompt cache (billed at a discount)
 }
 
 // StreamChunk is a single chunk from a streaming LLM response.
