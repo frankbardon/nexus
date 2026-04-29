@@ -1,4 +1,36 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(env)",
+      "Bash(gh issue:*)",
+      "Bash(go build:*)",
+      "Bash(go doc *)",
+      "Bash(go get:*)",
+      "Bash(go mod:*)",
+      "Bash(go test:*)",
+      "Bash(go tool:*)",
+      "Bash(go version:*)",
+      "Bash(go vet:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(make build:*)",
+      "Bash(make fmt:*)",
+      "Bash(make lint:*)",
+      "Bash(make test:*)",
+      "Bash(make vet:*)",
+      "Bash(staticcheck:*)",
+      "Bash(wails build:*)",
+      "Bash(wc:*)",
+      "Bash(./bin/pulse)",
+      "Bash(./bin/pulse --help)",
+      "Bash(./bin/pulse api:*)",
+      "Bash(./bin/pulse cohort:*)",
+      "Bash(./bin/pulse import:*)",
+      "Bash(./bin/pulse skills:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.anthropic.com)"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {
