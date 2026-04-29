@@ -78,18 +78,19 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	auth       *authState
-	client     *http.Client
-	prompts    *engine.PromptRegistry
-	unsubs     []func()
-	debug      bool
-	retry      retryConfig
-	cache      cacheConfig
-	thinking   thinkingConfig
-	multimodal multimodalConfig
-	files      filesConfig
-	citations  citationsConfig
-	pricing    map[string]modelPricing // merged: config overrides + embedded defaults
+	auth              *authState
+	client            *http.Client
+	prompts           *engine.PromptRegistry
+	unsubs            []func()
+	debug             bool
+	retry             retryConfig
+	cache             cacheConfig
+	thinking          thinkingConfig
+	multimodal        multimodalConfig
+	files             filesConfig
+	citations         citationsConfig
+	structuredOutputs structuredOutputsConfig
+	pricing           map[string]modelPricing // merged: config overrides + embedded defaults
 
 	// filesAPIURL is the production endpoint by default; tests override.
 	filesAPIURL string
@@ -168,6 +169,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.citations = parseCitationsConfig(ctx.Config)
 	if p.citations.Enabled {
 		p.logger.Info("native citations enabled (document blocks will request citations)")
+	}
+
+	p.structuredOutputs = parseStructuredOutputsConfig(ctx.Config)
+	if p.structuredOutputs.Mode == "native" {
+		p.logger.Info("structured outputs using native response_format mode",
+			"beta_header", p.structuredOutputs.BetaHeader,
+		)
 	}
 
 	p.files = parseFilesConfig(ctx.Config)
@@ -505,9 +513,34 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// client-defined tools and the structured-output synthetic tool below.
 	p.appendExtraTools(body, req.Metadata)
 
-	// Structured output simulation via tool-use-as-schema.
-	// Inject synthetic tool and force tool choice to it.
-	if rf := req.ResponseFormat; rf != nil && rf.Type == "json_schema" && rf.Schema != nil {
+	// Structured output handling. Two modes:
+	//
+	//   - "tool" (default): simulate via a synthetic `_structured_output` tool
+	//     and force tool_choice on it. Compatible with every Claude model that
+	//     supports tool use, but clobbers the agent's tool_choice.
+	//   - "native": use Anthropic's top-level `response_format` field. The
+	//     model returns the JSON value as plain text, so tool_choice is left
+	//     untouched and parallel tool use stays available.
+	//
+	// When no json_schema response_format is set, both modes fall through to
+	// the normal tool_choice mapping below.
+	rf := req.ResponseFormat
+	hasJSONSchema := rf != nil && rf.Type == "json_schema" && rf.Schema != nil
+
+	switch {
+	case hasJSONSchema && p.structuredOutputs.Mode == "native":
+		body["response_format"] = map[string]any{
+			"type":   "json_schema",
+			"schema": rf.Schema,
+		}
+		// Native mode does not override tool_choice — preserve whatever the
+		// caller asked for so real tools remain usable in parallel.
+		if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
+			body["tool_choice"] = tc
+		}
+
+	case hasJSONSchema:
+		// Tool-as-schema simulation (default).
 		syntheticTool := map[string]any{
 			"name":         "_structured_output",
 			"description":  "Return structured output matching the required schema.",
@@ -522,7 +555,8 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 			"type": "tool",
 			"name": "_structured_output",
 		}
-	} else {
+
+	default:
 		// Map tool choice to Anthropic API format (only when not overridden by structured output).
 		if tc := resolveToolChoice(req.ToolChoice, filteredTools); tc != nil {
 			body["tool_choice"] = tc

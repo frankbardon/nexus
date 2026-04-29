@@ -111,6 +111,13 @@ func (p *Plugin) betaFlags(reqMeta map[string]any) string {
 	if p.multimodal.PDFBeta {
 		add("pdfs-2024-09-25")
 	}
+	// Native structured outputs may still be beta-gated. Operators opt into
+	// the published beta string via `structured_outputs.beta_header` once
+	// Anthropic announces one — we don't ship a guess. Only emitted when
+	// native mode is active so tool-mode requests stay clean.
+	if p.structuredOutputs.Mode == "native" && p.structuredOutputs.BetaHeader != "" {
+		add(p.structuredOutputs.BetaHeader)
+	}
 
 	// Per-request additions from metadata. Server-tool plugins set this on
 	// the outgoing llm.request to opt into the right beta gate
