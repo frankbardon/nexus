@@ -80,15 +80,16 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	apiKey   string
-	client   *http.Client
-	prompts  *engine.PromptRegistry
-	unsubs   []func()
-	debug    bool
-	retry    retryConfig
-	cache    cacheConfig
-	thinking thinkingConfig
-	pricing  map[string]modelPricing // merged: config overrides + embedded defaults
+	apiKey     string
+	client     *http.Client
+	prompts    *engine.PromptRegistry
+	unsubs     []func()
+	debug      bool
+	retry      retryConfig
+	cache      cacheConfig
+	thinking   thinkingConfig
+	multimodal multimodalConfig
+	pricing    map[string]modelPricing // merged: config overrides + embedded defaults
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
@@ -155,6 +156,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
+	}
+
+	p.multimodal = parseMultimodalConfig(ctx.Config)
+	if p.multimodal.PDFBeta {
+		p.logger.Info("multimodal pdf_beta header enabled (pdfs-2024-09-25)")
 	}
 
 	p.retry = parseRetryConfig(ctx.Config)
@@ -302,11 +308,17 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		httpReq.Header.Set("x-api-key", p.apiKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 		httpReq.Header.Set("content-type", "application/json")
-		// 1h TTL caching is gated behind a beta header. Plan 06 will introduce
-		// a metadata-driven multi-header builder; for now this is the only
-		// beta flag the plugin emits, so a single Set is fine.
+		// Beta-flag aggregation. Plan 06 will hoist this into a metadata-driven
+		// builder; for now it joins the small set of flags the plugin emits.
+		var betaFlags []string
 		if p.cache.Enabled && p.cache.TTL == "1h" {
-			httpReq.Header.Set("anthropic-beta", "extended-cache-ttl-2025-04-11")
+			betaFlags = append(betaFlags, "extended-cache-ttl-2025-04-11")
+		}
+		if p.multimodal.PDFBeta {
+			betaFlags = append(betaFlags, "pdfs-2024-09-25")
+		}
+		if len(betaFlags) > 0 {
+			httpReq.Header.Set("anthropic-beta", strings.Join(betaFlags, ","))
 		}
 		return httpReq, nil
 	}
@@ -508,18 +520,48 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 		}
 
 	case "tool":
+		// Anthropic accepts content blocks inside tool_result.content, so a
+		// tool that produced an image (e.g. a screenshot) can pass it inline.
+		// On error we log and fall back to the text Content.
+		var toolResultContent any = msg.Content
+		if len(msg.Parts) > 0 {
+			blocks, err := buildContentBlocks(msg)
+			if err != nil {
+				p.logger.Error("anthropic: dropping tool-result multimodal parts", "error", err)
+			} else {
+				toolResultContent = blocks
+			}
+		}
 		return map[string]any{
 			"role": "user",
 			"content": []map[string]any{
 				{
 					"type":        "tool_result",
 					"tool_use_id": msg.ToolCallID,
-					"content":     msg.Content,
+					"content":     toolResultContent,
 				},
 			},
 		}
 
 	case "user":
+		if len(msg.Parts) > 0 {
+			blocks, err := buildContentBlocks(msg)
+			if err != nil {
+				// Multimodal serialization failed (e.g. oversize image, audio
+				// part). Surface the failure via slog and fall back to the
+				// text-only path so the request still goes out — silently
+				// dropping is worse than a partial send the user can debug.
+				p.logger.Error("anthropic: dropping multimodal parts", "error", err)
+				return map[string]any{
+					"role":    "user",
+					"content": msg.Content,
+				}
+			}
+			return map[string]any{
+				"role":    "user",
+				"content": blocks,
+			}
+		}
 		return map[string]any{
 			"role":    "user",
 			"content": msg.Content,
