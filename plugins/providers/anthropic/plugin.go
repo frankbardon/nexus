@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +21,6 @@ const (
 	pluginID   = "nexus.llm.anthropic"
 	pluginName = "Anthropic LLM Provider"
 	version    = "0.1.0"
-	apiURL     = "https://api.anthropic.com/v1/messages"
 )
 
 // modelPricing holds per-model token rates in USD per million tokens.
@@ -80,7 +78,7 @@ type Plugin struct {
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
 
-	apiKey     string
+	auth       *authState
 	client     *http.Client
 	prompts    *engine.PromptRegistry
 	unsubs     []func()
@@ -126,19 +124,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.debug = debug
 	}
 
-	// Read API key: direct config value takes priority over env var.
-	if key, ok := ctx.Config["api_key"].(string); ok && key != "" {
-		p.apiKey = key
-	} else {
-		apiKeyEnv, _ := ctx.Config["api_key_env"].(string)
-		if apiKeyEnv == "" {
-			apiKeyEnv = "ANTHROPIC_API_KEY"
-		}
-		p.apiKey = os.Getenv(apiKeyEnv)
+	// Resolve auth mode: api_key (default), bedrock, or vertex. Backwards
+	// compatible with the legacy api_key / api_key_env top-level keys; the
+	// authState struct centralizes URL construction, body version markers,
+	// and per-request signing.
+	auth, err := parseAuthConfig(ctx.Config)
+	if err != nil {
+		return err
 	}
-	if p.apiKey == "" {
-		return fmt.Errorf("anthropic: no API key configured (set api_key in config or %s env var)", "ANTHROPIC_API_KEY")
-	}
+	p.auth = auth
+	p.logger.Info("anthropic auth resolved", "mode", string(auth.mode))
 
 	p.client = &http.Client{
 		Timeout: 5 * time.Minute,
@@ -352,17 +347,28 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.cancelFunc = cancel
 	p.mu.Unlock()
 
+	requestURL := p.auth.buildURL(model, req.Stream)
+
 	makeReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", apiURL, bytes.NewReader(jsonBody))
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", requestURL, bytes.NewReader(jsonBody))
 		if err != nil {
 			return nil, err
 		}
-		httpReq.Header.Set("x-api-key", p.apiKey)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
 		httpReq.Header.Set("content-type", "application/json")
+		// applyAuth attaches the right credential headers per mode (and signs
+		// the body for Bedrock SigV4). Bedrock signatures depend on the
+		// timestamp, so the closure recomputes them on every retry.
+		if err := p.auth.applyAuth(reqCtx, httpReq, jsonBody, p.client); err != nil {
+			return nil, err
+		}
 		// Beta-flag aggregation merges the plugin's standing flags (cache 1h,
 		// files API, pdf_beta) with any per-request flags stamped by
 		// server-tool plugins via req.Metadata["_anthropic_beta_headers"].
+		// Sent verbatim regardless of mode — Bedrock and Vertex gate beta
+		// features independently of the direct API, so a flag this plugin
+		// considers active may be rejected (or silently ignored) by the
+		// chosen backend. Surface those mismatches as explicit 400s rather
+		// than trying to predict per-feature parity here.
 		if flags := p.betaFlags(req.Metadata); flags != "" {
 			httpReq.Header.Set("anthropic-beta", flags)
 		}
@@ -526,6 +532,18 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// Mark cacheable prefix segments (system, last tool, leading user msgs) per
 	// configured policy. No-op when caching is disabled.
 	applyCacheControl(body, p.cache, p.logger)
+
+	// Bedrock/Vertex want anthropic_version inside the body (the direct API
+	// uses an HTTP header instead). Bedrock additionally rejects bodies that
+	// carry the model field — the model id lives in the URL path there.
+	if p.auth != nil {
+		if v := p.auth.bodyVersionField(); v != "" {
+			body["anthropic_version"] = v
+		}
+		if p.auth.stripModelFromBody() {
+			delete(body, "model")
+		}
+	}
 
 	return body
 }

@@ -151,7 +151,7 @@ func (p *Plugin) uploadFile(ctx context.Context, data []byte, mimeType, filename
 	if err != nil {
 		return "", fmt.Errorf("anthropic: build files request: %w", err)
 	}
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("x-api-key", p.auth.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("anthropic-beta", filesAPIBetaHeader)
 	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
@@ -197,7 +197,7 @@ func (p *Plugin) deleteFile(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("anthropic: build delete request: %w", err)
 	}
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("x-api-key", p.auth.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("anthropic-beta", filesAPIBetaHeader)
 

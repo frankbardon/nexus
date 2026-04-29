@@ -79,7 +79,7 @@ func newTestPlugin(t *testing.T, handler http.Handler) (*Plugin, *httptest.Serve
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	p := &Plugin{
-		apiKey:      "test-key",
+		auth:        &authState{mode: authModeAPIKey, apiKey: "test-key"},
 		client:      srv.Client(),
 		logger:      silentLogger(),
 		filesAPIURL: srv.URL,
