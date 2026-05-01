@@ -1,0 +1,50 @@
+# Test: OpenAI provider live boot + smoke conversation
+# Validates: provider abstraction works with OpenAI, streaming response shape,
+# basic role mapping. Test gates on OPENAI_API_KEY via t.Skip.
+#
+# Uses gpt-4o-mini for cost minimisation (~$0.0001 per run).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestOpenAI
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.openai
+      model: gpt-4o-mini
+      max_tokens: 256
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.openai
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Reply with exactly: OPENAI OK"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 60s
+
+  nexus.llm.openai:
+    api_key_env: OPENAI_API_KEY
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Follow instructions exactly."
+
+  nexus.gate.endless_loop:
+    max_iterations: 3
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

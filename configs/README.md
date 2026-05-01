@@ -123,6 +123,11 @@ go test -tags integration ./tests/integration/ -v
 | `test-orchestrator-full.yaml` | `orchestrator_test.go` | live (skip) | Orchestrator decomposes, spawns workers, synthesises |
 | `test-planexec-approval.yaml` | `planexec_approval_test.go` | live (skip) | PlanExec + dynamic planner approve/deny paths |
 | `test-planned-react-tools.yaml` | `planned_react_test.go` | live (skip) | ReAct + dynamic planner + thinking observer |
+| `test-openai.yaml` | `openai_test.go` | live (skip) | OpenAI provider live boot + smoke conversation |
+| `test-gemini.yaml` | `gemini_test.go` | live (skip) | Gemini provider live boot + smoke conversation |
+| `test-gemini-thinking.yaml` | `gemini_thinking_test.go` | live (skip) | Gemini 2.5 thinking emits reasoning steps + tokens |
+| `test-openai-compat.yaml` | `openai_compat_test.go` | mock (httptest) | base_url override routes to non-OpenAI server |
+| `test-observers-all.yaml` | `observers_all_test.go` | mock | Logger + OTel + thinking coexist; OTel survives unreachable collector |
 | `test-kitchen-sink.yaml` | `kitchen_sink_test.go` | mock | All 20 plugins boot together without conflicts |
 | `test-longterm-memory.yaml` | `longterm_memory_test.go` | mock | Boot, CRUD tool registration, memory_write artifact creation |
 | `test-mixed-providers.yaml` | `mixed_providers_test.go` | mock | Anthropic + OpenAI providers boot side by side |
@@ -141,10 +146,6 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 
 | Config | What it shows | Prereqs |
 |--------|---------------|---------|
-| `demo-openai.yaml` | OpenAI provider — streaming, tool use mapping | `OPENAI_API_KEY` |
-| `demo-openai-compat.yaml` | OpenAI-compatible endpoint via `base_url` (Ollama, LM Studio, vLLM) | local LLM running |
-| `demo-gemini.yaml` | Gemini api-key auth | `GEMINI_API_KEY` |
-| `demo-gemini-thinking.yaml` | Gemini 2.5 thinking parts + thinking observer JSONL | `GEMINI_API_KEY` |
 | `demo-gemini-vertex.yaml` | Gemini via Vertex AI service-account auth | `GOOGLE_APPLICATION_CREDENTIALS` |
 
 ### IO / Browser
@@ -159,5 +160,4 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 | Config | What it shows |
 |--------|---------------|
 | `demo-gates-strict.yaml` | Tight gate limits, manual veto exploration |
-| `demo-rag.yaml` | RAG primitives (embeddings + vector store + ingest + knowledge_search) |
-| `demo-observers-all.yaml` | Logger + OTel + thinking observers together (optional Jaeger collector) |
+| `demo-rag.yaml` | RAG primitives walkthrough (embeddings + vector store + ingest + knowledge_search) |

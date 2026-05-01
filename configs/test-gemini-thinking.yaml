@@ -1,0 +1,57 @@
+# Test: Gemini 2.5 thinking (reasoning) parts
+# Validates: gemini provider emits thinking.step events sourced from itself
+# (Source=nexus.llm.gemini, Phase=reasoning), reasoning tokens > 0 in usage,
+# final response Content does not contain raw chain-of-thought.
+#
+# Test gates on GEMINI_API_KEY via t.Skip. Uses gemini-2.5-flash for thinking
+# support.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestGeminiThinking
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: reasoning
+    reasoning:
+      provider: nexus.llm.gemini
+      model: gemini-2.5-flash
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.gemini
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.observe.thinking
+
+  nexus.io.test:
+    inputs:
+      - "Compute the sum of the first 10 prime numbers, showing your reasoning briefly."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 90s
+
+  nexus.llm.gemini:
+    api_key_env: GEMINI_API_KEY
+    thinking:
+      enabled: true
+      budget_tokens: 4096
+      include_thoughts: true
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Reason carefully then provide a final numeric answer."
+
+  nexus.gate.endless_loop:
+    max_iterations: 3
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
