@@ -40,6 +40,10 @@ type Engine struct {
 	// dispatch feeds it via a writer goroutine, so handler latency does not
 	// block I/O.
 	Journal *journal.Writer
+	// Replay is the engine-wide replay coordination point. Always non-nil
+	// after construction; idle until a replay coordinator activates it.
+	// Plugins inspect Replay.Active() to short-circuit side effects.
+	Replay *ReplayState
 
 	// RecallSessionID, when set, causes Boot to resume an existing session
 	// instead of creating a new one.
@@ -114,6 +118,8 @@ func newFromConfig(cfg *Config) *Engine {
 	lifecycle := NewLifecycleManager(registry, bus, cfg, logger, models, prompts, schemas, system)
 	lifecycle.logging = fanout
 	ctxMgr := NewContextManager(bus, logger)
+	replay := NewReplayState()
+	lifecycle.replay = replay
 
 	return &Engine{
 		Config:    cfg,
@@ -127,6 +133,7 @@ func newFromConfig(cfg *Config) *Engine {
 		System:    system,
 		Logger:    logger,
 		Logging:   fanout,
+		Replay:    replay,
 	}
 }
 
@@ -308,6 +315,73 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}()
 
+	return nil
+}
+
+// replayPayloadConverter rehydrates a journal-deserialized payload (a
+// map[string]any after JSON round-trip) into the typed struct that live
+// subscribers expect. Centralized here because the journal package cannot
+// import the events package, and per-call type switches in the coordinator
+// would scatter event-type knowledge across both packages.
+func replayPayloadConverter(eventType string, payload any) (any, error) {
+	switch eventType {
+	case "io.input":
+		return journal.PayloadAs[events.UserInput](payload)
+	case "llm.response":
+		return journal.PayloadAs[events.LLMResponse](payload)
+	case "tool.result":
+		return journal.PayloadAs[events.ToolResult](payload)
+	default:
+		return payload, nil
+	}
+}
+
+// ReplaySession runs deterministic replay against a previously-journaled
+// session. The engine must already be booted; the caller is responsible
+// for Stop afterward.
+//
+// Replay opens the source session's journal at <sessions.root>/<id>/journal,
+// seeds the engine's ReplayState with journaled responses, and re-emits
+// io.input events in seq order. Side-effecting plugins (LLM providers,
+// tools) detect engine.Replay.Active() and pop stashed responses instead
+// of calling out. The current session (the one this engine booted) writes
+// its own fresh journal — the source is read-only.
+//
+// For Phase 2, replay produces functional equivalence (same final
+// assistant outputs) rather than byte-identical event re-emission. Phase 3
+// will extend this to crash-resume, where partial-turn detection picks up
+// the live mode after replay completes.
+func (e *Engine) ReplaySession(ctx context.Context, sourceSessionID string) error {
+	if e.Session == nil {
+		return fmt.Errorf("engine not booted")
+	}
+	if e.Replay == nil {
+		return fmt.Errorf("replay state missing")
+	}
+
+	root := ExpandPath(e.Config.Core.Sessions.Root)
+	sourceJournal := filepath.Join(root, sourceSessionID, "journal")
+
+	coord, err := journal.NewCoordinator(sourceJournal, e.Bus, e.Replay, journal.CoordinatorOptions{
+		TurnTimeout:      30 * time.Second,
+		Logger:           e.Logger.With("subsystem", "replay"),
+		PayloadConverter: replayPayloadConverter,
+	})
+	if err != nil {
+		return fmt.Errorf("coordinator: %w", err)
+	}
+
+	// Wire turn-end synchronization so the coordinator waits for the live
+	// agent to finish each turn before re-emitting the next io.input.
+	coord.AttachTurnSync(func(handler func(seq uint64)) func() {
+		return e.Bus.Subscribe("agent.turn.end", func(_ Event[any]) {
+			handler(0)
+		})
+	})
+
+	if err := coord.Run(ctx); err != nil {
+		return fmt.Errorf("replay run: %w", err)
+	}
 	return nil
 }
 

@@ -126,6 +126,12 @@ type PluginContext struct {
 	// including the suffix. Plugins that support multiple instances should
 	// use this as their identity instead of their hardcoded ID.
 	InstanceID string
+
+	// Replay is the engine-wide replay coordination point. Always non-nil.
+	// Side-effecting plugins (LLM providers, tools) check Replay.Active()
+	// in their event handlers and pop a journaled response from the queue
+	// instead of calling out. Idle outside of a replay run.
+	Replay *ReplayState
 }
 
 // LateShutdown is an optional marker interface. A plugin that implements it

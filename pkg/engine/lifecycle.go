@@ -32,6 +32,7 @@ type LifecycleManager struct {
 	prompts  *PromptRegistry
 	schemas  *SchemaRegistry
 	system   *SystemInfo
+	replay   *ReplayState
 	// provenance records why each configured ID is active: the zero value
 	// (empty requiredBy) means the user listed it explicitly; otherwise it
 	// was auto-activated to satisfy the named plugin's Requires().
@@ -164,6 +165,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Capabilities: lm.capabilitiesCopy(),
 			Logging:      lm.logging,
 			InstanceID:   instanceIDs[configuredID],
+			Replay:       lm.replay,
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())

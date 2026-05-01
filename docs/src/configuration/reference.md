@@ -144,6 +144,19 @@ journal:
   events-002.jsonl.zst
 ```
 
+### Deterministic replay
+
+`bin/nexus -config <path> -replay <session-id>` re-runs a journaled session
+without external calls. The Anthropic / OpenAI / Gemini providers detect
+replay mode and emit the next journaled `llm.response` from a FIFO stash
+seeded from the source journal in seq order. The replay coordinator drives
+`io.input` events; the live agent loop reacts as if the inputs were fresh.
+
+Phase 2 produces functional equivalence (same final assistant outputs,
+same memory state) rather than byte-identical event re-emission. Crash-
+resume from a partial-turn journal is Phase 3; the coordinator already
+detects partial turns via `IsPartialTurn()`.
+
 ## Plugin activation
 
 ```yaml
