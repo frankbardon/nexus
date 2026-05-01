@@ -13,12 +13,16 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_iterations` | int | `25` | Maximum number of reason-act cycles before stopping |
 | `planning` | bool | `false` | Enable planning phase before iteration starts |
 | `model_role` | string | *(default)* | Model role to use (e.g., `reasoning`, `balanced`, `quick`) |
 | `system_prompt` | string | *(none)* | Inline system prompt text |
 | `system_prompt_file` | string | *(none)* | Path to a system prompt markdown file |
+| `parallel_tools` | bool | `false` | Run multiple tool calls from a single LLM response in parallel |
+| `max_concurrent` | int | `4` | Concurrency cap when `parallel_tools: true` |
 | `tool_choice` | string/object | *(none)* | Tool choice mode — shorthand string or object with `mode`/`name`/`sequence` |
+
+> Iteration limits are not an agent setting — enforce them with
+> `nexus.gate.endless_loop` (default cap: 25 LLM calls per turn).
 
 ## Events
 
@@ -69,7 +73,7 @@ The ReAct (Reason + Act) agent is the default and most commonly used agent strat
    - Waits for `tool.result` events
    - Loops back to step 2 with tool results appended
 5. If no tool calls, the LLM's response is the final answer → `io.output`
-6. Stops if `max_iterations` is reached
+6. Stops when `nexus.gate.endless_loop` vetoes the next `llm.request` (default: 25 calls per turn)
 
 ## Planning Integration
 
@@ -118,7 +122,6 @@ Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Du
 
 ```yaml
 nexus.agent.react:
-  max_iterations: 15
   planning: true
   model_role: balanced
   system_prompt: |

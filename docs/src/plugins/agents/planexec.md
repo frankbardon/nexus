@@ -21,12 +21,15 @@ agent.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `max_iterations` | int | `15` | Maximum LLM iterations per step during execution |
 | `execution_model_role` | string | `balanced` | Model role used for step execution and synthesis |
 | `replan_on_failure` | bool | `true` | Request a fresh plan if a step fails (up to 2 replans per turn) |
 | `approval` | string | `never` | When planexec requires approval after the planner returns a plan: `always`, `never` |
 | `system_prompt` | string | *(none)* | Inline system prompt for execution/synthesis |
 | `system_prompt_file` | string | *(none)* | Path to system prompt file |
+
+> Per-step iteration limits are enforced by `nexus.gate.endless_loop`, not by
+> planexec itself. Plan-step counts are managed by the planner that produces
+> `plan.result`.
 
 Plan-generation options (model, prompt, max steps, planner-side approval) now
 live on the planner plugin itself. See the planner docs.
@@ -126,7 +129,6 @@ plugins:
     # ...
 
   nexus.agent.planexec:
-    max_iterations: 15
     execution_model_role: balanced
     replan_on_failure: true
     approval: never
