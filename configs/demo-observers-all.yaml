@@ -1,9 +1,9 @@
-# Test: All observer plugins active — logger + otel + thinking
+# Demo: All observer plugins active — logger + otel + thinking
 # Validates: observer coexistence, OTel span export, thinking JSONL persistence, no observer conflicts
 #
 # Run:
 #   docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one  # optional: OTel collector
-#   bin/nexus -config configs/test-observers-all.yaml
+#   bin/nexus -config configs/demo-observers-all.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

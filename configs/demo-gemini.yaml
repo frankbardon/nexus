@@ -1,8 +1,8 @@
-# Test: Gemini provider (api-key auth)
+# Demo: Gemini provider (api-key auth)
 # Validates: gemini sync + streaming, tool calls, role-mapping (assistant→model)
 #
 # Run:
-#   bin/nexus -config configs/test-gemini.yaml
+#   bin/nexus -config configs/demo-gemini.yaml
 #
 # Prerequisites:
 #   - GEMINI_API_KEY (or GOOGLE_API_KEY) set in env or .env

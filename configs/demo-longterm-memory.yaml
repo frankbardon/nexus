@@ -1,8 +1,8 @@
-# Test: Long-term memory plugin with conversation memory
+# Demo: Long-term memory plugin with conversation memory
 # Validates: memory index injection, CRUD tools, auto_load, scope resolution, cross-session persistence
 #
 # Run:
-#   bin/nexus -config configs/test-longterm-memory.yaml
+#   bin/nexus -config configs/demo-longterm-memory.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

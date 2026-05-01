@@ -1,8 +1,8 @@
-# Test: Skills plugin with various config options
+# Demo: Skills plugin with various config options
 # Validates: skill discovery, catalog injection, activation, max_active limit, disabled list
 #
 # Run:
-#   bin/nexus -config configs/test-skills.yaml
+#   bin/nexus -config configs/demo-skills.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

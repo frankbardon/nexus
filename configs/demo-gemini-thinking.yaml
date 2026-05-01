@@ -1,9 +1,9 @@
-# Test: Gemini 2.5 thinking (reasoning) parts
+# Demo: Gemini 2.5 thinking (reasoning) parts
 # Validates: thinkingConfig request shape, thought-part filtering from Content,
 #            thinking.step events feeding nexus.observe.thinking JSONL.
 #
 # Run:
-#   bin/nexus -config configs/test-gemini-thinking.yaml
+#   bin/nexus -config configs/demo-gemini-thinking.yaml
 #
 # What to watch for:
 #   - Session dir contains plugins/nexus.observe.thinking/thinking.jsonl with

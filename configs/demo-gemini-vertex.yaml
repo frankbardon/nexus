@@ -1,7 +1,7 @@
-# Test: Gemini provider via Vertex AI (service-account auth)
+# Demo: Gemini provider via Vertex AI (service-account auth)
 #
 # Run:
-#   bin/nexus -config configs/test-gemini-vertex.yaml
+#   bin/nexus -config configs/demo-gemini-vertex.yaml
 #
 # Prerequisites:
 #   - GOOGLE_CLOUD_PROJECT set, or override project_id below.

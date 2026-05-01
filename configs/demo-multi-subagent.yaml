@@ -1,8 +1,8 @@
-# Test: Multiple named subagent instances with different roles
+# Demo: Multiple named subagent instances with different roles
 # Validates: instanced plugin IDs, per-instance config, different system prompts per subagent
 #
 # Run:
-#   bin/nexus -config configs/test-multi-subagent.yaml
+#   bin/nexus -config configs/demo-multi-subagent.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

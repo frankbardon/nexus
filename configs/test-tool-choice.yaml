@@ -1,42 +1,22 @@
-# Test: Tool choice modes — sequence pattern
-# Validates: tool_choice sequence cycling, forced tool on iteration 1, auto after
+# Test: Tool choice sequence pattern across iterations
+# Validates: ReAct agent rotates ToolChoice through the configured sequence —
+# iteration 1 sets mode=required, iteration 2 forces tool=file_read, iteration 3+
+# falls back to mode=auto (last entry repeats).
+#
+# Uses mocked LLM responses — no API key required.
 #
 # Run:
-#   bin/nexus -config configs/test-tool-choice.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in env or .env
-#
-# What to test:
-#   1. Iteration 1 (mode: required): Send any message. Agent MUST call a tool on first
-#      iteration — cannot respond with text only. Watch logs for tool_choice in
-#      llm.request. Agent picks whichever tool it wants.
-#   2. Iteration 2 (mode: tool, name: file_read): Second iteration forces file_read
-#      specifically. Even if agent wants to call shell, it must use file_read.
-#      Verify in logs that tool_choice type is "tool" with name "file_read".
-#   3. Iteration 3+ (mode: auto): From iteration 3 onward, agent decides freely.
-#      May call tools or respond with text. Last entry in sequence repeats.
-#   4. New turn resets: Start a new turn (send another message). Sequence should restart
-#      from iteration 1 (required) again.
-#   5. Edge case: Ask a simple question like "What is 2+2?" — agent still forced to
-#      use a tool on iteration 1 despite not needing one. Verify it handles gracefully.
-#
-# What to watch for:
-#   - Logger output shows tool_choice field changing across iterations
-#   - Anthropic API receives correct tool_choice mapping:
-#     required → {"type": "any"}, tool → {"type": "tool", "name": "file_read"}
-#   - Agent doesn't get stuck if forced tool returns empty/error result
-#   - Sequence resets per-turn, not per-session
+#   go test -tags integration ./tests/integration/ -run TestToolChoice
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
-    default: balanced
-    balanced:
+    default: mock
+    mock:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
+      model: mock
+      max_tokens: 4096
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -44,39 +24,47 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.tool.shell
     - nexus.tool.file
     - nexus.memory.capped
-    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Find go.mod and explain it."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 30s
+    # Three iterations exercise the full sequence:
+    #   #1: tool call (any tool) — covers mode=required
+    #   #2: tool call (file_read) — covers mode=tool/name=file_read
+    #   #3: final content — covers mode=auto with no further tool use
+    mock_responses:
+      - tool_calls:
+          - name: list_files
+            arguments: '{"path":"."}'
+      - tool_calls:
+          - name: list_files
+            arguments: '{"path":"."}'
+      - content: "Done exploring."
 
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
-    system_prompt: |
-      You are a coding assistant powered by Nexus. You help users write, debug, refactor, and understand code.
-
-      ## Guidelines
-
-      1. Always explain your reasoning before making changes
-      2. Run tests after modifications to verify correctness
-      3. Prefer minimal, targeted changes over broad refactors
-      4. Ask for clarification when requirements are ambiguous
-      5. Read files in chunks 16kb or less
-      6. Follow the existing code style and conventions of the project
+    system_prompt: "You are a test assistant. Follow the tool_choice rotation."
     tool_choice:
       sequence:
         - mode: required
         - mode: tool
-          name: file_read
+          name: read_file
         - mode: auto
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 5
 
   nexus.tool.shell:
     allowed_commands: [ls, cat, grep, find]
@@ -87,9 +75,5 @@ plugins:
     allow_external_writes: false
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    max_messages: 10
+    persist: false

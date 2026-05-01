@@ -1,8 +1,8 @@
-# Test: Maximum plugin load — everything active at once
+# Demo: Maximum plugin load — everything active at once
 # Validates: boot with all plugins, no init conflicts, dependency resolution, event bus under load
 #
 # Run:
-#   bin/nexus -config configs/test-kitchen-sink.yaml
+#   bin/nexus -config configs/demo-kitchen-sink.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

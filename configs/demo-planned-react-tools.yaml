@@ -1,8 +1,8 @@
-# Test: ReAct agent with dynamic planning + full tool suite
+# Demo: ReAct agent with dynamic planning + full tool suite
 # Validates: planning → execution handoff, plan steps as context during tool use, plan persistence
 #
 # Run:
-#   bin/nexus -config configs/test-planned-react-tools.yaml
+#   bin/nexus -config configs/demo-planned-react-tools.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

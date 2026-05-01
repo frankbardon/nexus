@@ -1,8 +1,8 @@
-# Test: Both providers active — Anthropic for reasoning, OpenAI for quick tasks
+# Demo: Both providers active — Anthropic for reasoning, OpenAI for quick tasks
 # Validates: multi-provider routing, model role → provider mapping, provider coexistence
 #
 # Run:
-#   bin/nexus -config configs/test-mixed-providers.yaml
+#   bin/nexus -config configs/demo-mixed-providers.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

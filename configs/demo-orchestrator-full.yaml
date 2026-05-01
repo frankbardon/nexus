@@ -1,8 +1,8 @@
-# Test: Orchestrator with tools, multiple model roles, and gates
+# Demo: Orchestrator with tools, multiple model roles, and gates
 # Validates: orchestrator decomposition, parallel workers, synthesis, model role routing
 #
 # Run:
-#   bin/nexus -config configs/test-orchestrator-full.yaml
+#   bin/nexus -config configs/demo-orchestrator-full.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

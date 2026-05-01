@@ -1,42 +1,21 @@
-# Test: Tool filter gate — restrict tools available to agent
-# Validates: tool_filter include/exclude, interaction with tool_choice, tools actually hidden from LLM
+# Test: Tool filter gate sets ToolFilter struct on LLM request
+# Validates: tool_filter gate runs at priority 10, populates req.ToolFilter
+# with the configured include list before mock interception.
+#
+# Uses mocked LLM responses — no API key required.
 #
 # Run:
-#   bin/nexus -config configs/test-tool-filter.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in env or .env
-#
-# What to test:
-#   1. Available tools: Ask "what tools do you have?" — agent should only know about
-#      file tools (file_read, file_write, check_file_size, list_files).
-#      Shell tool should NOT appear in tool list sent to LLM.
-#   2. File tools work: Ask "list files in the current directory" — should use list_files
-#      tool successfully.
-#   3. Shell hidden: Ask "run the command ls -la" — agent should say it can't run shell
-#      commands (tool not available), not attempt and fail.
-#   4. Include takes precedence: Shell plugin IS registered and configured, but
-#      tool_filter include list restricts to file tools only. Verify shell tool
-#      registered but filtered out before reaching LLM.
-#   5. Tool registration vs filtering: Check logs — shell plugin should init successfully
-#      (tools registered on bus), but tool_filter gate removes them from llm.request
-#      tool list at priority 10.
-#
-# What to watch for:
-#   - before:llm.request events show tool list AFTER filtering (only file tools)
-#   - Shell plugin boots without error despite its tools being filtered
-#   - No "tool not found" errors — tools are filtered, not missing
-#   - If agent somehow tries to call shell tool, before:tool.invoke should catch it
+#   go test -tags integration ./tests/integration/ -run TestToolFilter
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
-    default: balanced
-    balanced:
+    default: mock
+    mock:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
+      model: mock
+      max_tokens: 4096
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -44,7 +23,7 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.endless_loop
@@ -52,30 +31,33 @@ plugins:
     - nexus.tool.shell
     - nexus.tool.file
     - nexus.memory.capped
-    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "List files in the current directory."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    # Mock #1: tool call to list_files (which IS in the include list).
+    # Mock #2: final assistant content closes the turn.
+    mock_responses:
+      - tool_calls:
+          - name: list_files
+            arguments: '{"path":"."}'
+      - content: "Listed files."
 
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
-    system_prompt: |
-      You are a coding assistant powered by Nexus. You help users write, debug, refactor, and understand code.
-
-      ## Guidelines
-
-      1. Always explain your reasoning before making changes
-      2. Run tests after modifications to verify correctness
-      3. Prefer minimal, targeted changes over broad refactors
-      4. Ask for clarification when requirements are ambiguous
-      5. Read files in chunks 16kb or less
-      6. Follow the existing code style and conventions of the project
+    system_prompt: "You are a test assistant. Use the tools provided."
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 5
 
-  # Only allow file tools — shell excluded via filter
+  # Only allow file tools — shell excluded via filter.
   nexus.gate.tool_filter:
-    include: [file_read, file_write, check_file_size, list_files]
+    include: [read_file, write_file, check_file_size, list_files]
 
   nexus.tool.shell:
     allowed_commands: [ls, cat]
@@ -85,9 +67,5 @@ plugins:
     allow_external_writes: false
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    max_messages: 10
+    persist: false

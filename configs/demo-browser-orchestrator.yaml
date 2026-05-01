@@ -1,8 +1,8 @@
-# Test: Browser UI with orchestrator agent
+# Demo: Browser UI with orchestrator agent
 # Validates: orchestrator progress display in browser, worker status rendering, synthesis in web UI
 #
 # Run:
-#   bin/nexus -config configs/test-browser-orchestrator.yaml
+#   bin/nexus -config configs/demo-browser-orchestrator.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

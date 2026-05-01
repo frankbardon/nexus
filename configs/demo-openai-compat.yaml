@@ -1,10 +1,10 @@
-# Test: OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM)
+# Demo: OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM)
 # Validates: base_url override, local model support, no-auth path
 #
 # Run:
 #   ollama serve                                          # start Ollama first
 #   ollama pull llama3                                    # ensure model available
-#   bin/nexus -config configs/test-openai-compat.yaml
+#   bin/nexus -config configs/demo-openai-compat.yaml
 #
 # Prerequisites:
 #   - Ollama running on localhost:11434 (or adjust base_url)

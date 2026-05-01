@@ -1,8 +1,8 @@
-# Test: OpenAI provider instead of Anthropic
+# Demo: OpenAI provider instead of Anthropic
 # Validates: provider abstraction, OpenAI streaming, tool use mapping
 #
 # Run:
-#   bin/nexus -config configs/test-openai.yaml
+#   bin/nexus -config configs/demo-openai.yaml
 #
 # Prerequisites:
 #   - OPENAI_API_KEY set in env or .env

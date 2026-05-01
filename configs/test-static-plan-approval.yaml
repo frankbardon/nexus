@@ -1,49 +1,22 @@
-# Test: Static planner with approval required
-# Validates: static plan display, approval gate, step-by-step execution after approval
+# Test: Static planner with approval-required flow
+# Validates: plan.created emits with config-defined steps, plan.approval.request
+# blocks execution until io.test responds, approve/deny paths produce different
+# downstream behavior (plan.result.Approved true vs false).
+#
+# Uses mocked LLM responses — no API key required.
 #
 # Run:
-#   bin/nexus -config configs/test-static-plan-approval.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in env or .env
-#
-# What to test:
-#   1. Plan display: Send ANY message. Static planner always produces the same 3-step
-#      "Code review workflow" plan regardless of input. Verify plan appears in TUI with:
-#      - Step 1: "Read and understand the codebase"
-#      - Step 2: "Identify issues"
-#      - Step 3: "Propose fixes"
-#   2. Approval required: approval=always. TUI must prompt for approval before execution.
-#      Plan should NOT execute automatically.
-#   3. Approve: Accept the plan. Agent should execute steps sequentially:
-#      - Step 1: Uses shell/file tools to read files (ls, cat, etc.)
-#      - Step 2: Analyzes code for issues using tool results
-#      - Step 3: Proposes specific code changes
-#   4. Reject: On another attempt, reject the plan. No tool calls should happen.
-#      Session should wait for new user input.
-#   5. Step instructions: Each step has detailed instructions. Verify agent follows
-#      them — step 1 actually lists and reads files, step 2 actually looks for bugs.
-#   6. Same plan every time: Send a different message — same 3-step plan appears.
-#      Static planner ignores user input (unlike dynamic planner).
-#   7. No LLM call for planning: Static planner doesn't call LLM to generate the plan.
-#      Plan should appear instantly, no streaming delay.
-#
-# What to watch for:
-#   - plan.created event fires immediately (no LLM call — static plan from config)
-#   - plan.approval.request event triggers TUI approval prompt
-#   - After approval, agent has plan steps in system prompt context
-#   - Shell tools restricted to read-only commands (ls, cat, grep, find)
-#   - Agent follows step instructions, not just step descriptions
+#   go test -tags integration ./tests/integration/ -run TestStaticPlanApproval
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
-    default: balanced
-    balanced:
+    default: mock
+    mock:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
+      model: mock
+      max_tokens: 4096
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -51,7 +24,7 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.planner.static
@@ -59,24 +32,22 @@ plugins:
     - nexus.tool.shell
     - nexus.tool.file
     - nexus.memory.capped
-    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Please review the codebase."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Plan acknowledged. Review complete."
 
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
     planning: true
-    system_prompt: |
-      You are a coding assistant powered by Nexus. You help users write, debug, refactor, and understand code.
-
-      ## Guidelines
-
-      1. Always explain your reasoning before making changes
-      2. Run tests after modifications to verify correctness
-      3. Prefer minimal, targeted changes over broad refactors
-      4. Ask for clarification when requirements are ambiguous
-      5. Read files in chunks 16kb or less
-      6. Follow the existing code style and conventions of the project
+    system_prompt: "You are a test assistant. Execute the plan provided."
 
   nexus.planner.static:
     approval: always
@@ -90,7 +61,7 @@ plugins:
         instructions: "Suggest specific code changes for each issue found."
 
   nexus.gate.endless_loop:
-    max_iterations: 15
+    max_iterations: 5
 
   nexus.tool.shell:
     allowed_commands: [ls, cat, grep, find]
@@ -101,9 +72,5 @@ plugins:
     allow_external_writes: false
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    max_messages: 10
+    persist: false

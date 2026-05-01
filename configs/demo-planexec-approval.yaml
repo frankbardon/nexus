@@ -1,8 +1,8 @@
-# Test: PlanExec agent with approval-required dynamic planner
+# Demo: PlanExec agent with approval-required dynamic planner
 # Validates: plan generation, approval gate, plan display, execution after approval, replan on failure
 #
 # Run:
-#   bin/nexus -config configs/test-planexec-approval.yaml
+#   bin/nexus -config configs/demo-planexec-approval.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env
