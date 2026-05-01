@@ -1,0 +1,18 @@
+name: react-planner-handoff
+description: |
+  ReAct agent with planning enabled, backed by the static planner. The
+  agent emits plan.request on the first turn; the planner replies with
+  plan.created and plan.result (auto-approved). The agent then runs a
+  single LLM round-trip and finishes the turn.
+
+  The static planner is deterministic — its plan.created/plan.result
+  events are not side-effecting, so they re-fire live during replay.
+  Mock provider config means no API key is needed.
+tags:
+  - react
+  - planner
+  - mock
+owner: nexus-eval@example.com
+freshness_days: 365
+model_baseline: mock
+recorded_at: 2026-05-01T12:00:00Z

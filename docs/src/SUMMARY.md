@@ -83,6 +83,11 @@
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
 
+# Eval Harness
+
+- [Overview](./eval/overview.md)
+- [Case Format](./eval/case-format.md)
+
 # Guides
 
 - [Writing Skills](./skills/authoring.md)

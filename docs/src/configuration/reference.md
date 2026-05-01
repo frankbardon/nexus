@@ -1098,6 +1098,49 @@ Source: `plugins/gates/tool_filter/plugin.go`. Modifies `request.ToolFilter` on
 
 ---
 
+## Eval harness
+
+The `eval:` block configures the offline eval harness invoked via the
+`nexus eval` subcommand. The engine itself ignores this block — only
+`cmd/nexus/eval.go` reads it. Per-flag overrides on the CLI take precedence
+over config values, which take precedence over built-in defaults.
+
+```yaml
+eval:
+  cases_dir: tests/eval/cases
+  reports_dir: tests/eval/reports
+  judge:
+    model: claude-haiku-4-5
+    temperature: 0
+    n_samples: 1
+    cache: true
+  baseline:
+    fail_on_score_drop: 0.05
+    fail_on_latency_p95_drop: 0.20
+```
+
+| Key                                 | Type    | Default                  | Description |
+|-------------------------------------|---------|--------------------------|-------------|
+| `cases_dir`                         | string  | `tests/eval/cases`       | Directory containing case bundles (`<id>/case.yaml`, `input/`, `journal/`, `assertions.yaml`). Path expansion via `engine.ExpandPath`. |
+| `reports_dir`                       | string  | `tests/eval/reports`     | Directory where `nexus eval run` writes per-run report directories (`<run-id>/report.json`, `<run-id>/summary.txt`, `<run-id>/_sessions/`). Path expansion via `engine.ExpandPath`. |
+| `judge.model`                       | string  | `claude-haiku-4-5`       | Model used by the LLM judge for `--full` semantic assertions. **Declared in v1; consumed in Phase 5.** |
+| `judge.temperature`                 | float   | `0`                      | Judge sampling temperature. **Declared in v1; consumed in Phase 5.** |
+| `judge.n_samples`                   | int     | `1`                      | Number of judge samples per assertion; majority-threshold kicks in at `>=3`. **Declared in v1; consumed in Phase 5.** |
+| `judge.cache`                       | bool    | `true`                   | Enable provider prompt cache for judge calls. **Declared in v1; consumed in Phase 5.** |
+| `baseline.fail_on_score_drop`       | float   | `0`                      | Absolute pass-rate drop (0–1) that fails `nexus eval baseline`. `0` disables the gate. CLI flag: `--fail-on-score-drop`. |
+| `baseline.fail_on_latency_p95_drop` | float   | `0`                      | Relative latency p95 increase (per case) that fails `nexus eval baseline`. `0` disables the gate. CLI flag: `--fail-on-latency-p95-drop`. |
+
+### Subcommand overview
+
+| Command | Description |
+|--------|-------------|
+| `nexus eval run [--case <id>] [--cases-dir <path>] [--tags <csv>] [--model <role>] [--deterministic] [--full] [--parallel <n>] [--report-dir <path>] [--config <path>]` | Run one or all cases under the cases dir; writes a JSON report. Exits 0 on all-pass, 1 if any case failed. |
+| `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. |
+| `nexus eval record / promote` | Phase 3 — currently stubbed; exits 2 with a not-implemented message. |
+| `nexus eval --inspect-mode` | Phase 5 — currently stubbed; exits 2 with a not-implemented message. |
+
+---
+
 ## Cross-references
 
 - [Plugin System](../../../.claude/docs/plugin-system.md) — plugin lifecycle,

@@ -1,0 +1,5 @@
+{"seq":1,"ts":"2026-05-01T12:00:00Z","type":"io.session.start","payload":{"session_id":"multi-subagent-fanout-golden"}}
+{"seq":2,"ts":"2026-05-01T12:00:00.01Z","type":"io.input","payload":{"Content":"Spawn the researcher subagent to look up Go modules best practices.","Files":null,"SessionID":""}}
+{"seq":3,"ts":"2026-05-01T12:00:00.02Z","type":"agent.turn.start"}
+{"seq":4,"ts":"2026-05-01T12:00:00.03Z","type":"llm.response","payload":{"Content":"I would delegate to the researcher subagent here, but this is a mock test turn.","ToolCalls":null,"Usage":{"PromptTokens":130,"CompletionTokens":50,"TotalTokens":180,"ReasoningTokens":0,"CachedTokens":0,"CacheWriteTokens":0},"CostUSD":0,"Model":"mock","FinishReason":"end_turn","Metadata":null,"Citations":null,"Alternatives":null}}
+{"seq":5,"ts":"2026-05-01T12:00:00.04Z","type":"agent.turn.end"}

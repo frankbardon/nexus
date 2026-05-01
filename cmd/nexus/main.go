@@ -18,6 +18,8 @@ func main() {
 		switch os.Args[1] {
 		case "ingest":
 			os.Exit(runIngest(os.Args[2:]))
+		case "eval":
+			os.Exit(runEval(os.Args[2:]))
 		}
 	}
 

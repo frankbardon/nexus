@@ -1,0 +1,40 @@
+# Assertions for provider-fallback. Replay short-circuit means the primary
+# never errors, so no provider.fallback event fires. The case validates
+# config parsing + boot + a clean turn with the fallback plugin in the
+# active set.
+deterministic:
+  # Single user input drove a single turn.
+  - kind: event_emitted
+    type: io.input
+    count: { min: 1, max: 1 }
+
+  # Mocked llm.response popped from the stash (primary chain entry).
+  - kind: event_emitted
+    type: llm.response
+    count: { min: 1, max: 1 }
+
+  # Confirm the chain DID NOT advance — no fallback fired in mock mode.
+  - kind: event_emitted
+    type: provider.fallback
+    count: { min: 0, max: 0 }
+
+  # Strict event-type sequence on the primary trace.
+  - kind: event_sequence_strict
+    filter:
+      - io.input
+      - agent.turn.start
+      - agent.turn.end
+      - llm.response
+    pattern:
+      - io.input
+      - agent.turn.start
+      - llm.response
+      - agent.turn.end
+
+  # Token budget within the recorded usage.
+  - kind: token_budget
+    max_input_tokens: 500
+    max_output_tokens: 200
+    per_turn: false
+
+semantic: []

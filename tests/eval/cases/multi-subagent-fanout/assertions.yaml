@@ -1,0 +1,44 @@
+# Assertions for multi-subagent-fanout. Each subagent instance emits a
+# tool.register event during Ready() with its instance-suffixed spawn name.
+# Those emissions fire live during boot — they're not stashed for replay.
+deterministic:
+  # Each instance registers its own spawn_<name> tool. The catalog plugin
+  # (nexus.tool.catalog) re-emits tool.register for every tool it sees,
+  # which inflates the count beyond three — assert at least 3, no upper.
+  - kind: event_emitted
+    type: tool.register
+    where:
+      Name: spawn_researcher
+    count: { min: 1 }
+
+  - kind: event_emitted
+    type: tool.register
+    where:
+      Name: spawn_coder
+    count: { min: 1 }
+
+  - kind: event_emitted
+    type: tool.register
+    where:
+      Name: spawn_reviewer
+    count: { min: 1 }
+
+  # One ReAct turn ran end-to-end.
+  - kind: event_count_bounds
+    bounds:
+      io.input: { min: 1, max: 1 }
+      agent.turn.start: { min: 1, max: 1 }
+      agent.turn.end: { min: 1, max: 1 }
+
+  # Tool catalog assertion: parity with golden (count tolerance for the
+  # known catalog re-broadcast amplification).
+  - kind: tool_invocation_parity
+    count_tolerance: 5
+    arg_keys: false
+
+  # Latency p95 ceiling — replay should be sub-second per turn.
+  - kind: latency
+    p50_ms: 500
+    p95_ms: 2000
+
+semantic: []

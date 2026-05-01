@@ -1,0 +1,51 @@
+# Eval case: react-planner-handoff
+#
+# ReAct + static planner. Static planner approves automatically (approval:
+# never), so plan.result fires immediately after plan.created.
+core:
+  log_level: warn
+  tick_interval: 1h
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: timestamp
+
+journal:
+  fsync: none
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.planner.static
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    planning: true
+    system_prompt: "You are a test assistant; execute the provided plan."
+
+  nexus.planner.static:
+    approval: never
+    summary: "Three-step review workflow"
+    steps:
+      - description: "Read the codebase"
+        instructions: "List files and read key sources."
+      - description: "Identify issues"
+        instructions: "Flag bugs and quality problems."
+      - description: "Propose fixes"
+        instructions: "Suggest concrete code changes."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

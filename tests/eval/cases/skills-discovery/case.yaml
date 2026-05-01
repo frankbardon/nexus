@@ -1,0 +1,15 @@
+name: skills-discovery
+description: |
+  Skills plugin scans the bundled fixture skill directory at boot and emits a
+  skill.discover event with the discovered catalog. The case journals a
+  single-turn ReAct dialogue so the runner has an io.input to drive replay;
+  every interesting event (skill.discover, the catalog summaries) fires
+  during the live boot regardless of replay short-circuiting.
+tags:
+  - skills
+  - mock
+  - boot
+owner: nexus-eval@example.com
+freshness_days: 365
+model_baseline: mock
+recorded_at: 2026-05-01T12:00:00Z

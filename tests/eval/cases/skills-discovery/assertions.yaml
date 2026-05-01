@@ -1,0 +1,31 @@
+# Assertions for skills-discovery. The skills plugin scans scan_paths at
+# Ready() and emits skill.discover live during boot — those events fire on
+# every replay regardless of stash short-circuit, so they appear in the
+# observed (live) journal.
+deterministic:
+  # Skill discovery fires at boot (Ready callback). Single emission with
+  # the catalog projected from tests/fixtures/skills/.
+  - kind: event_emitted
+    type: skill.discover
+    count: { min: 1, max: 1 }
+
+  # Single user input drove a single ReAct turn.
+  - kind: event_count_bounds
+    bounds:
+      io.input: { min: 1, max: 1 }
+      agent.turn.start: { min: 1, max: 1 }
+      agent.turn.end: { min: 1, max: 1 }
+      skill.discover: { min: 1, max: 1 }
+
+  # Single LLM round-trip per the journal.
+  - kind: event_emitted
+    type: llm.response
+    count: { min: 1, max: 1 }
+
+  # Token budget is well under the recorded usage; cap session-wide.
+  - kind: token_budget
+    max_input_tokens: 500
+    max_output_tokens: 200
+    per_turn: false
+
+semantic: []
