@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"gopkg.in/yaml.v3"
@@ -93,10 +94,7 @@ func observe(envs []journal.Envelope) observed {
 			}
 			start := turnStarts[len(turnStarts)-1]
 			turnStarts = turnStarts[:len(turnStarts)-1]
-			delta := e.Ts.UnixNano() - start
-			if delta < 0 {
-				delta = 0
-			}
+			delta := max(e.Ts.UnixNano()-start, 0)
 			o.TurnDurationsMs = append(o.TurnDurationsMs, int(delta/1_000_000))
 		}
 	}
@@ -378,10 +376,7 @@ func withSlack(v int, pct float64) int {
 	if v <= 0 {
 		return 0
 	}
-	slack := int(float64(v) * pct)
-	if slack < 1 {
-		slack = 1
-	}
+	slack := max(int(float64(v)*pct), 1)
 	return v + slack
 }
 
@@ -394,9 +389,7 @@ func percentile(xs []int, p float64) int {
 	cp := append([]int(nil), xs...)
 	sort.Ints(cp)
 	idx := int(p * float64(len(cp)-1))
-	if idx < 0 {
-		idx = 0
-	}
+	idx = max(idx, 0)
 	if idx >= len(cp) {
 		idx = len(cp) - 1
 	}
@@ -430,12 +423,5 @@ func appendKVBool(parent *yaml.Node, key string, value bool) {
 }
 
 func commaJoin(xs []string) string {
-	out := ""
-	for i, s := range xs {
-		if i > 0 {
-			out += ", "
-		}
-		out += s
-	}
-	return out
+	return strings.Join(xs, ", ")
 }
