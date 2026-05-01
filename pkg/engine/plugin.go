@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"log/slog"
+
+	"github.com/frankbardon/nexus/pkg/engine/journal"
 )
 
 // Plugin is the interface that all Nexus plugins must implement.
@@ -132,6 +134,13 @@ type PluginContext struct {
 	// in their event handlers and pop a journaled response from the queue
 	// instead of calling out. Idle outside of a replay run.
 	Replay *ReplayState
+
+	// Journal is the per-session durable event log. Non-nil after
+	// startJournal — i.e. always populated when plugin Init runs. Plugins
+	// that observe events post-journal (rather than via the live bus)
+	// register via Journal.SubscribeProjection so their derived files are
+	// driven by durable envelopes instead of live dispatch.
+	Journal *journal.Writer
 }
 
 // LateShutdown is an optional marker interface. A plugin that implements it

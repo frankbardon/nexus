@@ -64,8 +64,10 @@ type LoggingConfig struct {
 	// plugin (nexus.io.tui, nexus.io.browser, nexus.io.wails) is active,
 	// because interleaving slog output with the UI corrupts the display.
 	BootstrapStderr bool `yaml:"bootstrap_stderr"`
-	// BufferSize is the capacity of the log and event ring buffers. Values
-	// <= 0 default to DefaultLogRingSize.
+	// BufferSize is the capacity of the slog log ring buffer. Values <= 0
+	// default to DefaultLogRingSize. The bus event ring is sized
+	// independently (DefaultEventRingSize) — durable event history lives
+	// in the journal, not the bus ring.
 	BufferSize int `yaml:"buffer_size"`
 }
 

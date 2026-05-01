@@ -36,14 +36,17 @@ func IsReplay(ctx context.Context) bool {
 //
 // During replay, side-effecting plugins (LLM providers, tools) check
 // Active() and pop the next journaled response from the per-event-type FIFO
-// queue instead of calling out. Order-based lookup (Nth request consumes
-// Nth response) keeps the surface area small — only emitting plugins whose
-// outputs were originally journaled need replay awareness.
+// queue. The ToolCache, when attached, gives tool short-circuits an
+// args-keyed lookup that beats FIFO order — order-independent and survives
+// memory-state divergence between original and replay runs.
 type ReplayState struct {
 	active atomic.Bool
 
 	mu     sync.Mutex
 	queues map[string][]any
+
+	cacheMu sync.RWMutex
+	cache   *ToolCache
 }
 
 // NewReplayState constructs an idle ReplayState. The coordinator activates
@@ -113,7 +116,8 @@ func (r *ReplayState) Remaining(eventType string) int {
 
 // Reset clears all queues and deactivates. Coordinator calls this before
 // each replay run so prior state cannot leak across runs in the same
-// engine instance.
+// engine instance. The ToolCache is left attached — it is bound to the
+// session journal directory and survives across replays.
 func (r *ReplayState) Reset() {
 	if r == nil {
 		return
@@ -122,4 +126,27 @@ func (r *ReplayState) Reset() {
 	defer r.mu.Unlock()
 	r.queues = make(map[string][]any)
 	r.active.Store(false)
+}
+
+// SetToolCache attaches an args-keyed disk cache that short-circuit
+// helpers consult before falling back to the FIFO stash. Engine wires
+// this at boot once the journal directory is known.
+func (r *ReplayState) SetToolCache(c *ToolCache) {
+	if r == nil {
+		return
+	}
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	r.cache = c
+}
+
+// ToolCache returns the attached args-keyed cache, or nil when none is
+// installed. Callers that hit nil fall through to the FIFO stash.
+func (r *ReplayState) ToolCache() *ToolCache {
+	if r == nil {
+		return nil
+	}
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+	return r.cache
 }

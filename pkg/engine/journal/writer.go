@@ -45,6 +45,19 @@ type Writer struct {
 	// indicates a turn boundary and the active segment is over rotateBytes.
 	// Stubbed — the real rotation logic lives in rotate.go.
 	rotateCb func(w *Writer) error
+
+	// projMu guards projs. Held briefly under SubscribeProjection /
+	// unsubscribe and a snapshot copy under fireProjections so the drain
+	// goroutine never invokes a user handler while holding the lock.
+	projMu sync.RWMutex
+	projs  []*projectionSub
+}
+
+// projectionSub binds an event-type filter to a synchronous handler called
+// from the writer's drain goroutine after each envelope lands on disk.
+type projectionSub struct {
+	types   map[string]bool // empty set = match all types
+	handler func(Envelope)
 }
 
 // WriterOptions tune the writer.
@@ -272,9 +285,20 @@ func (w *Writer) drain() {
 	}
 }
 
-// writeOne marshals one envelope and appends it. Honors fsync policy and
-// triggers rotation when an agent.turn.end pushes the segment past its cap.
+// writeOne marshals one envelope, appends it under the file mutex, then
+// fires projections without holding the lock so a slow projection handler
+// does not stall subsequent writes.
 func (w *Writer) writeOne(env *Envelope) error {
+	if err := w.writeToFile(env); err != nil {
+		return err
+	}
+	w.fireProjections(env)
+	return nil
+}
+
+// writeToFile is the file-mutex-scoped half of writeOne: marshal, append,
+// honor fsync policy, trigger rotation. No projection invocation here.
+func (w *Writer) writeToFile(env *Envelope) error {
 	data, err := json.Marshal(env)
 	if err != nil {
 		// Replace payload with a marker so the slot is still recorded.
@@ -323,3 +347,63 @@ func (w *Writer) writeOne(env *Envelope) error {
 // JournalDir returns the directory passed to NewWriter. Used by Coordinator
 // (Phase 2) and by tests.
 func (w *Writer) JournalDir() string { return w.dir }
+
+// SubscribeProjection registers a handler that fires synchronously on the
+// writer's drain goroutine after each envelope lands on disk. Pass an empty
+// types slice to receive every envelope; otherwise the handler only fires
+// when env.Type is in the filter set.
+//
+// Projections run AFTER the disk write, so a handler observing an envelope
+// can rely on it being durable. The trade-off is that a slow handler
+// stalls the drain — keep handlers cheap (append-to-file is fine) and
+// offload anything heavier to a goroutine the handler launches.
+//
+// Returns an unsubscribe function. Safe to call from any goroutine.
+func (w *Writer) SubscribeProjection(types []string, handler func(Envelope)) func() {
+	if w == nil || handler == nil {
+		return func() {}
+	}
+	sub := &projectionSub{
+		types:   make(map[string]bool, len(types)),
+		handler: handler,
+	}
+	for _, t := range types {
+		sub.types[t] = true
+	}
+
+	w.projMu.Lock()
+	w.projs = append(w.projs, sub)
+	w.projMu.Unlock()
+
+	return func() {
+		w.projMu.Lock()
+		defer w.projMu.Unlock()
+		for i, s := range w.projs {
+			if s == sub {
+				w.projs = append(w.projs[:i], w.projs[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// fireProjections is called by writeOne after a successful disk write.
+// Snapshots the subscriber list under the lock so handlers run without
+// holding it, mirroring the bus's wildcard dispatch pattern.
+func (w *Writer) fireProjections(env *Envelope) {
+	w.projMu.RLock()
+	if len(w.projs) == 0 {
+		w.projMu.RUnlock()
+		return
+	}
+	snap := make([]*projectionSub, len(w.projs))
+	copy(snap, w.projs)
+	w.projMu.RUnlock()
+
+	for _, sub := range snap {
+		if len(sub.types) > 0 && !sub.types[env.Type] {
+			continue
+		}
+		sub.handler(*env)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/frankbardon/nexus/pkg/engine/journal"
 )
 
 // PluginBaseID extracts the base plugin ID from a potentially instanced ID.
@@ -33,6 +35,7 @@ type LifecycleManager struct {
 	schemas  *SchemaRegistry
 	system   *SystemInfo
 	replay   *ReplayState
+	journal  *journal.Writer
 	// provenance records why each configured ID is active: the zero value
 	// (empty requiredBy) means the user listed it explicitly; otherwise it
 	// was auto-activated to satisfy the named plugin's Requires().
@@ -166,6 +169,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Logging:      lm.logging,
 			InstanceID:   instanceIDs[configuredID],
 			Replay:       lm.replay,
+			Journal:      lm.journal,
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())

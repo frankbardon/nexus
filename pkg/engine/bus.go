@@ -107,17 +107,28 @@ type eventBus struct {
 	dispatchStacks map[int64][]uint64
 }
 
-// NewEventBus creates a new in-process EventBus with a default-sized ring
-// buffer (DefaultLogRingSize). Pass NewEventBusWithRingSize to override.
+// DefaultEventRingSize is the default capacity of the bus's in-memory
+// replay ring. Sized for the boot-time pre-subscription gap only — durable
+// event history lives in the per-session journal at
+// <session>/journal/events.jsonl. Pre-Phase-1 callers used the bus ring as
+// a poor-man's event log; that role is gone.
+//
+// Bumping this does not buy you more durable history — use the journal or
+// register a SubscribeAll handler at engine construction time.
+const DefaultEventRingSize = 64
+
+// NewEventBus creates a new in-process EventBus with the default-sized
+// replay ring (DefaultEventRingSize). Pass NewEventBusWithRingSize to
+// override — typical callers do not.
 func NewEventBus() EventBus {
-	return NewEventBusWithRingSize(DefaultLogRingSize)
+	return NewEventBusWithRingSize(DefaultEventRingSize)
 }
 
 // NewEventBusWithRingSize builds a bus whose replay ring holds up to capacity
-// events. capacity <= 0 falls back to DefaultLogRingSize.
+// events. capacity <= 0 falls back to DefaultEventRingSize.
 func NewEventBusWithRingSize(capacity int) EventBus {
 	if capacity <= 0 {
-		capacity = DefaultLogRingSize
+		capacity = DefaultEventRingSize
 	}
 	return &eventBus{
 		handlers:       make(map[string][]*subscription),

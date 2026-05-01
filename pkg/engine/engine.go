@@ -109,7 +109,11 @@ func newFromConfig(cfg *Config) *Engine {
 	}
 	logger := slog.New(fanout)
 
-	bus := NewEventBusWithRingSize(cfg.Core.Logging.BufferSize)
+	// The bus ring is sized for the boot-time pre-subscription gap only;
+	// LoggingConfig.BufferSize sizes the slog fanout above and is not
+	// shared with the bus ring anymore — durable event history lives in
+	// the journal.
+	bus := NewEventBus()
 	registry := NewPluginRegistry()
 	models := NewModelRegistry(cfg.Core.ModelsRaw)
 	prompts := NewPromptRegistry()
@@ -522,6 +526,16 @@ func (e *Engine) startJournal() error {
 		return err
 	}
 	e.Journal = w
+	e.Lifecycle.journal = w
+
+	// Tool result cache: args-keyed disk cache rooted at journal/cache/.
+	// Bus subscriptions auto-populate it on every tool.invoke / tool.result
+	// pair, so live tools require no per-plugin wiring. Replay short-
+	// circuits look up here before the FIFO stash.
+	cacheDir := filepath.Join(journalDir, "cache")
+	toolCache := NewToolCache(cacheDir, e.Logger.With("subsystem", "toolcache"))
+	e.Replay.SetToolCache(toolCache)
+	e.runUnsubs = append(e.runUnsubs, toolCache.Install(e.Bus)...)
 
 	// Wildcard handler builds an envelope for every dispatched event. Seq
 	// + ParentSeq are pulled from the bus's per-goroutine dispatch stack

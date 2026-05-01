@@ -206,3 +206,28 @@ func TestEmitAsync_ChannelCloses(t *testing.T) {
 		t.Fatal("EmitAsync channel did not close in time")
 	}
 }
+
+func TestNewEventBus_DefaultsToEventRingSize(t *testing.T) {
+	bus := NewEventBus().(*eventBus)
+	if bus.ring.cap != DefaultEventRingSize {
+		t.Errorf("ring cap = %d, want %d", bus.ring.cap, DefaultEventRingSize)
+	}
+	if DefaultEventRingSize >= DefaultLogRingSize {
+		t.Errorf("DefaultEventRingSize (%d) should be smaller than DefaultLogRingSize (%d) — ring is for boot gap only",
+			DefaultEventRingSize, DefaultLogRingSize)
+	}
+}
+
+func TestNewEventBusWithRingSize_HonorsExplicitCap(t *testing.T) {
+	bus := NewEventBusWithRingSize(128).(*eventBus)
+	if bus.ring.cap != 128 {
+		t.Errorf("ring cap = %d, want 128", bus.ring.cap)
+	}
+}
+
+func TestNewEventBusWithRingSize_FallsBackOnZero(t *testing.T) {
+	bus := NewEventBusWithRingSize(0).(*eventBus)
+	if bus.ring.cap != DefaultEventRingSize {
+		t.Errorf("ring cap = %d, want default %d", bus.ring.cap, DefaultEventRingSize)
+	}
+}

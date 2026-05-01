@@ -142,7 +142,35 @@ journal:
   events.jsonl                # active segment (append-only)
   events-001.jsonl.zst        # rotated, zstd-compressed
   events-002.jsonl.zst
+  cache/                      # args-keyed tool result cache
+    <tool_id>/
+      <sha256>.json           # one file per (tool, canonical_args) pair
 ```
+
+### Tool result cache
+
+Every `tool.invoke` / `tool.result` pair is recorded under `journal/cache/`
+keyed by `sha256(tool_id || canonical_args)`. During replay, the
+short-circuit helper consults the cache first — same args produce the
+same result regardless of dispatch order, so replay survives memory-state
+divergence between the original and replay runs. On cache miss, the
+helper falls back to the FIFO stash seeded by the coordinator from the
+journal's `tool.result` events.
+
+The canonical args hash sorts keys recursively, so two semantically
+equivalent argument maps with different key iteration order map to the
+same cache file.
+
+### Journal projections
+
+Plugins that derive files from event streams (e.g. `nexus.observe.thinking`)
+register a projection via `Journal.SubscribeProjection(types, handler)`.
+The handler fires on the writer's drain goroutine after the envelope
+lands on disk, so derived files always lag the durable record by zero
+envelopes. Projections also drive post-mortem regeneration:
+`journal.ProjectFile(dir, types, handler)` walks an existing journal
+and feeds the same handler — a thinking plugin whose JSONL files were
+deleted will rebuild them from the journal at the next boot.
 
 ### Deterministic replay
 
