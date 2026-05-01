@@ -87,6 +87,7 @@
 
 - [Overview](./eval/overview.md)
 - [Case Format](./eval/case-format.md)
+- [Promoting a Session](./eval/promotion.md)
 
 # Guides
 

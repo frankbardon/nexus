@@ -1136,7 +1136,8 @@ eval:
 |--------|-------------|
 | `nexus eval run [--case <id>] [--cases-dir <path>] [--tags <csv>] [--model <role>] [--deterministic] [--full] [--parallel <n>] [--report-dir <path>] [--config <path>]` | Run one or all cases under the cases dir; writes a JSON report. Exits 0 on all-pass, 1 if any case failed. |
 | `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. |
-| `nexus eval record / promote` | Phase 3 — currently stubbed; exits 2 with a not-implemented message. |
+| `nexus eval promote --session <id-or-path> --case <new-id> [--cases-dir <path>] [--owner <name>] [--tags <csv>] [--description <text>] [--no-edit] [--force] [--config <path>]` | Convert a real session under `~/.nexus/sessions/` into a deterministic eval case. See [`docs/src/eval/promotion.md`](../eval/promotion.md). |
+| `nexus eval record --from-session <id-or-path> --case <new-id> [...]` | Alias of `eval promote` — same flag set, same behaviour. |
 | `nexus eval --inspect-mode` | Phase 5 — currently stubbed; exits 2 with a not-implemented message. |
 
 ---

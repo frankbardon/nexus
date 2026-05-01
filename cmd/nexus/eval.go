@@ -16,6 +16,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/eval/baseline"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
+	"github.com/frankbardon/nexus/pkg/eval/promote"
 	"github.com/frankbardon/nexus/pkg/eval/report"
 	"github.com/frankbardon/nexus/pkg/eval/runner"
 	"gopkg.in/yaml.v3"
@@ -55,9 +56,8 @@ func runEval(args []string) int {
 		return runEvalRun(args[1:])
 	case "baseline":
 		return runEvalBaseline(args[1:])
-	case "record", "promote":
-		fmt.Fprintf(os.Stderr, "nexus eval %s: not implemented in this phase (Phase 3)\n", args[0])
-		return 2
+	case "promote", "record":
+		return runEvalPromote(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "nexus eval: unknown subcommand %q\n", args[0])
 		printEvalHelp()
@@ -71,8 +71,8 @@ func printEvalHelp() {
 Subcommands:
   run        Run one or more eval cases and emit a JSON report.
   baseline   Diff a fresh report against a stored baseline; gate on thresholds.
-  record     Promote a session into an eval case (Phase 3 — stub).
-  promote    Alias for record (Phase 3 — stub).
+  promote    Convert a real session into a deterministic eval case.
+  record     Alias for promote (--from-session selects the source).
 
 Top-level flags:
   --inspect-mode   JSON-on-stdin/stdout protocol mode (Phase 5 — stub).
@@ -283,6 +283,138 @@ func runEvalBaseline(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// -- promote subcommand ------------------------------------------------------
+
+// runEvalPromote handles `nexus eval promote` and its `record` alias. The
+// flag set is shared so the alias is a true alias — no behavioral drift.
+//
+// Source resolution: --session and --from-session are aliases. The value
+// can be either a bare session ID (resolved under the configured sessions
+// root) or an absolute / tilde-prefixed path. ExpandPath is applied last
+// so users can write `~/.nexus/sessions/<id>` if they prefer.
+func runEvalPromote(args []string) int {
+	fs := flag.NewFlagSet("eval promote", flag.ExitOnError)
+	session := fs.String("session", "", "session ID (looked up under core.sessions.root) or absolute path to a session dir")
+	fromSession := fs.String("from-session", "", "alias of --session; convenience for `nexus eval record`")
+	caseID := fs.String("case", "", "new case identifier (becomes the case directory's basename)")
+	casesDir := fs.String("cases-dir", "", "directory to write the case under (default: from eval.cases_dir, else tests/eval/cases)")
+	owner := fs.String("owner", "", "owner string recorded in case.yaml; falls back to $USER")
+	tagsCSV := fs.String("tags", "", "comma-separated tags recorded in case.yaml")
+	description := fs.String("description", "", "description recorded in case.yaml; defaults to a synthesized stub")
+	noEdit := fs.Bool("no-edit", false, "skip the post-write $EDITOR launch on assertions.yaml")
+	force := fs.Bool("force", false, "overwrite an existing case directory")
+	configPath := fs.String("config", "", "config file used to resolve eval.cases_dir and core.sessions.root")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: nexus eval promote --session <id-or-path> --case <new-id> [flags]
+       nexus eval record  --from-session <id-or-path> --case <new-id> [flags]`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	src := firstNonEmpty(*session, *fromSession)
+	if src == "" {
+		fs.Usage()
+		fmt.Fprintln(os.Stderr, "\nerror: --session (or --from-session) is required")
+		return 2
+	}
+	if *caseID == "" {
+		fs.Usage()
+		fmt.Fprintln(os.Stderr, "\nerror: --case is required")
+		return 2
+	}
+
+	cfg := loadEvalConfig(*configPath)
+	resolvedCasesDir := firstNonEmpty(engine.ExpandPath(*casesDir), engine.ExpandPath(cfg.CasesDir), engine.ExpandPath("tests/eval/cases"))
+	if absDir, err := filepath.Abs(resolvedCasesDir); err == nil {
+		resolvedCasesDir = absDir
+	}
+
+	sessionDir, err := resolveSessionDir(src, *configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve session: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	res, err := promote.Promote(ctx, promote.PromoteOptions{
+		SessionDir:  sessionDir,
+		CaseID:      *caseID,
+		CasesDir:    resolvedCasesDir,
+		Owner:       *owner,
+		Tags:        splitCSV(*tagsCSV),
+		Description: *description,
+		OpenEditor:  !*noEdit,
+		Force:       *force,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "promote: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stdout, "promoted session %s -> %s\n", filepath.Base(sessionDir), res.CaseDir)
+	fmt.Fprintf(os.Stdout, "  events copied:  %d\n", res.EventCount)
+	fmt.Fprintf(os.Stdout, "  inputs scripted: %d\n", res.InputCount)
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	if !*noEdit {
+		fmt.Fprintln(os.Stdout, "  $EDITOR launched on assertions.yaml")
+	} else {
+		fmt.Fprintln(os.Stdout, "  next step: edit assertions.yaml — see docs/src/eval/promotion.md")
+	}
+	return 0
+}
+
+// resolveSessionDir takes a user-provided session reference and returns the
+// absolute path to the session directory.
+//
+// The reference may be:
+//   - an absolute or tilde-prefixed path that already names the dir;
+//   - a bare ID, in which case it resolves under
+//     `<core.sessions.root>/<id>` from the supplied config file (or the
+//     default ~/.nexus/sessions when no config is given).
+//
+// A path-like input that does not exist falls back to the ID-resolution
+// branch — useful when a user copies a session ID off a log line and pastes
+// it raw.
+func resolveSessionDir(ref, configPath string) (string, error) {
+	expanded := engine.ExpandPath(ref)
+	if filepath.IsAbs(expanded) {
+		if _, err := os.Stat(expanded); err == nil {
+			return expanded, nil
+		}
+	}
+	root := engine.ExpandPath(sessionsRoot(configPath))
+	candidate := filepath.Join(root, ref)
+	if _, err := os.Stat(candidate); err == nil {
+		abs, _ := filepath.Abs(candidate)
+		return abs, nil
+	}
+	if filepath.IsAbs(expanded) {
+		return "", fmt.Errorf("no session directory at %q", expanded)
+	}
+	return "", fmt.Errorf("no session directory at %q nor %q", expanded, candidate)
+}
+
+// sessionsRoot returns the configured core.sessions.root, falling back to
+// the engine default. It honors a user-supplied config file but never
+// fails: a missing or unparseable config yields the default.
+func sessionsRoot(configPath string) string {
+	if configPath == "" {
+		return engine.DefaultConfig().Core.Sessions.Root
+	}
+	cfg, err := engine.LoadConfig(engine.ExpandPath(configPath))
+	if err != nil || cfg == nil {
+		return engine.DefaultConfig().Core.Sessions.Root
+	}
+	return cfg.Core.Sessions.Root
 }
 
 // -- helpers -----------------------------------------------------------------

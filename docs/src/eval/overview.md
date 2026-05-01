@@ -136,8 +136,8 @@ error path is covered by the integration test under `tests/integration/`.
 | Phase | Adds | Status |
 |-------|------|--------|
 | 1 | Core runner, 7 deterministic assertions, 1 seed case | Shipped |
-| 2 | CLI, multi-case, baseline diff, 5 seed cases | This commit |
-| 3 | `nexus eval record / promote` (failure → case in one command) | Stubbed |
+| 2 | CLI, multi-case, baseline diff, 5 seed cases | Shipped |
+| 3 | `nexus eval record / promote` (failure → case in one command) | Shipped — see [`promotion.md`](./promotion.md) |
 | 4 | `plugins/observe/sampler/` (online sample capture) | Pending |
 | 5 | `--full` LLM judge, `--inspect-mode` JSON-RPC protocol | Stubbed |
 

@@ -231,6 +231,28 @@ wall-clock). A turn = `agent.turn.start` … `agent.turn.end`.
 
 Reference: `pkg/eval/case/assertions.go:92-95`.
 
+## Generating a case
+
+For new cases, prefer `nexus eval promote` (alias `nexus eval record`) over
+hand-crafting the directory. The promoter copies an existing session's
+journal verbatim, projects the journaled `io.input` events into
+`inputs.yaml`, and synthesizes a starter `assertions.yaml` you can tighten
+afterwards.
+
+```sh
+nexus eval promote \
+  --session <session-id-or-path> \
+  --case   <new-case-id> \
+  [--no-edit] [--force] [--tags ...] [--description "..."]
+```
+
+See [`promotion.md`](./promotion.md) for the full workflow, including
+warnings (failed-session, non-replayable event types) and the
+`assertions.yaml` editing checklist. The hand-crafted `_record/main.go`
+recorder under `tests/eval/cases/<id>/` remains supported for synthetic
+mock-mode cases that have no source session, but real sessions should go
+through `promote`.
+
 ## Authoring tips
 
 - **Start broad, tighten over time.** The first version of a case typically
