@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -21,11 +22,19 @@ const (
 type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
+	replay *engine.ReplayState
 	unsubs []func()
 
 	mu      sync.Mutex
 	pending map[string]chan string // promptID -> response channel
+
+	liveCalls atomic.Uint64
 }
+
+// LiveCalls returns the count of ask_user invocations that survived the
+// replay short-circuit. Tests assert zero during replay — the user is
+// never re-prompted; the journaled answer is replayed.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 // New creates a new ask user tool plugin.
 func New() engine.Plugin {
@@ -44,6 +53,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.replay = ctx.Replay
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("tool.invoke", p.handleToolInvoke,
@@ -102,6 +112,14 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	if !ok || tc.Name != "ask_user" {
 		return
 	}
+
+	// Replay short-circuit: pop the next journaled tool.result. The user is
+	// never re-prompted during replay — io.ask would emit to a UI that may
+	// not exist (or worse, prompt the live user with stale questions).
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
 
 	question, _ := tc.Arguments["question"].(string)
 	if question == "" {

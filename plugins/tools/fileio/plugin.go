@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -24,12 +25,19 @@ type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
+	replay  *engine.ReplayState
 
 	baseDir             string
 	allowExternalWrites bool
 	enabled             map[string]bool
 	unsubs              []func()
+
+	liveCalls atomic.Uint64
 }
+
+// LiveCalls returns the count of tool.invoke handlers that survived the
+// replay short-circuit. Tests assert zero during replay.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 // New creates a new file I/O tool plugin.
 func New() engine.Plugin {
@@ -47,6 +55,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
+	p.replay = ctx.Replay
 
 	// All tools enabled by default.
 	p.enabled = map[string]bool{
@@ -272,6 +281,11 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	if !p.enabled[tc.Name] {
 		return
 	}
+
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
 
 	switch tc.Name {
 	case "read_file":

@@ -183,6 +183,40 @@ func (c *Coordinator) LastTurnBoundary() (uint64, bool) {
 // uses this to decide whether to replay-then-continue or just replay.
 func (c *Coordinator) IsPartialTurn() bool { return c.hasUnfinishedTurn }
 
+// PartialInput returns the io.input envelope that started the unfinished
+// turn — i.e. the input with seq greater than LastTurnBoundary. Returns
+// (Envelope{}, false) when no partial turn exists or no io.input above
+// the boundary was journaled (the crash happened before the input was
+// recorded — nothing to re-fire).
+func (c *Coordinator) PartialInput() (Envelope, bool) {
+	if !c.hasUnfinishedTurn {
+		return Envelope{}, false
+	}
+	for _, in := range c.inputs {
+		if in.Seq > c.lastTurnEnd {
+			return in, true
+		}
+	}
+	return Envelope{}, false
+}
+
+// CompletedInputs returns inputs whose enclosing turn ended — i.e. input
+// envelopes with seq <= LastTurnBoundary. The Phase 2 / 3 replay path
+// uses this when it wants to replay the well-formed prefix of a journal
+// without spilling into the partial-turn tail.
+func (c *Coordinator) CompletedInputs() []Envelope {
+	if !c.hasUnfinishedTurn {
+		return c.inputs
+	}
+	out := make([]Envelope, 0, len(c.inputs))
+	for _, in := range c.inputs {
+		if in.Seq <= c.lastTurnEnd {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
 // LastSeq returns the highest seq seen in the source journal.
 func (c *Coordinator) LastSeq() uint64 { return c.lastSeq }
 

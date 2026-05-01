@@ -91,9 +91,12 @@ All gates subscribe to `before:*` vetoable events at priority 10.
 
 | Plugin | ID | Key Config |
 |--------|----|------------|
-| Logger | `nexus.observe.logger` | `output` (`stdout`/`stderr`/`file`), `file_path`, `level` |
 | OpenTelemetry | `nexus.observe.otel` | `endpoint`, `protocol` (`grpc`/`http`), `service_name`, `exclude_events` (supports `prefix.*` wildcards) |
 | Thinking | `nexus.observe.thinking` | (none — persists thinking steps to session JSONL) |
+
+The legacy `nexus.observe.logger` plugin was removed in #66 / Phase 3. Its
+`events.jsonl` is now subsumed by the always-on engine journal at
+`<session>/journal/events.jsonl`.
 
 ### Skills
 

@@ -147,15 +147,33 @@ journal:
 ### Deterministic replay
 
 `bin/nexus -config <path> -replay <session-id>` re-runs a journaled session
-without external calls. The Anthropic / OpenAI / Gemini providers detect
-replay mode and emit the next journaled `llm.response` from a FIFO stash
-seeded from the source journal in seq order. The replay coordinator drives
-`io.input` events; the live agent loop reacts as if the inputs were fresh.
+without external calls. The Anthropic / OpenAI / Gemini providers and the
+side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`)
+detect replay mode and emit the next journaled `llm.response` /
+`tool.result` from a FIFO stash seeded from the source journal in seq
+order. The replay coordinator drives `io.input` events; the live agent
+loop reacts as if the inputs were fresh.
 
-Phase 2 produces functional equivalence (same final assistant outputs,
-same memory state) rather than byte-identical event re-emission. Crash-
-resume from a partial-turn journal is Phase 3; the coordinator already
-detects partial turns via `IsPartialTurn()`.
+Replay produces functional equivalence (same final assistant outputs,
+same memory state) rather than byte-identical event re-emission. Side-
+effecting plugins expose a `LiveCalls()` counter that stays at zero
+during replay — tests assert this to catch regressions.
+
+### Crash recovery
+
+`bin/nexus -config <path> -recall <session-id>` resumes a session whose
+journal ended mid-turn. The engine detects the partial turn via
+`coord.IsPartialTurn()`, restores conversational memory from
+`context/conversation.jsonl`, and re-emits the `io.input` that started
+the unfinished turn so the live ReAct loop restarts it.
+
+Phase 3 minimum: the partial turn restarts from scratch rather than
+mid-step resume. Mid-step resume (replay-stash-short-circuit the
+completed prefix, then live-fire the unanswered `tool.invoke`) is a
+future PR. Re-firing the input after a crash mints fresh seqs that
+append to the same journal alongside the orphaned partial-turn events;
+a subsequent `--replay` of a crash-resumed session sees both the
+orphaned and the re-fired `io.input`.
 
 ## Plugin activation
 
@@ -764,20 +782,6 @@ Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file
 ---
 
 ## Observers
-
-### `nexus.observe.logger`
-
-Source: `plugins/observe/logger/plugin.go`. Acts as a sink on the engine's
-`LoggingHost` plus a bus event recorder.
-
-| Key                   | Type   | Default     | Description |
-|-----------------------|--------|-------------|-------------|
-| `log_messages`        | bool   | `true`      | Capture slog records to `messages.jsonl`. |
-| `log_events`          | bool   | `true`      | Capture bus events to `events.jsonl`. |
-| `level`               | string | `info`      | Minimum log level. |
-| `messages_file_path`  | string | *(none)*    | Override `messages.jsonl` location (otherwise per-session). |
-| `events_file_path`    | string | *(none)*    | Override `events.jsonl` location. |
-| `exclude_events`      | list   | *(none)*    | Event types to skip. |
 
 ### `nexus.observe.thinking`
 

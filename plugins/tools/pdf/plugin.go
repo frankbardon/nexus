@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -27,6 +28,7 @@ type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
+	replay  *engine.ReplayState
 
 	pdftotext     string        // resolved path to pdftotext binary
 	pdfinfo       string        // resolved path to pdfinfo binary (optional)
@@ -34,7 +36,13 @@ type Plugin struct {
 	saveToSession bool          // persist extracted text to session files
 	saveFileName  string        // custom filename for session save (default: derived from PDF name)
 	unsubs        []func()
+
+	liveCalls atomic.Uint64
 }
+
+// LiveCalls returns the count of read_pdf invocations that survived the
+// replay short-circuit. Tests assert zero during replay.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 func New() engine.Plugin {
 	return &Plugin{
@@ -53,6 +61,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
+	p.replay = ctx.Replay
 
 	if ts, ok := ctx.Config["timeout"].(string); ok {
 		d, err := time.ParseDuration(ts)
@@ -156,6 +165,10 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	if !ok || tc.Name != "read_pdf" {
 		return
 	}
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
 	p.handleReadPDF(tc)
 }
 

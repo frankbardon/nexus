@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/traefik/yaegi/interp"
@@ -41,6 +42,9 @@ type Plugin struct {
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
 	prompts *engine.PromptRegistry
+	replay  *engine.ReplayState
+
+	liveCalls atomic.Uint64
 
 	// Config.
 	timeout          time.Duration
@@ -93,6 +97,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.session = ctx.Session
 	p.prompts = ctx.Prompts
+	p.replay = ctx.Replay
 
 	if v, ok := ctx.Config["timeout_seconds"].(int); ok && v > 0 {
 		p.timeout = time.Duration(v) * time.Second
@@ -284,8 +289,16 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	if !ok || tc.Name != toolName {
 		return
 	}
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
 	p.runScript(tc)
 }
+
+// LiveCalls returns the count of run_code invocations that survived the
+// replay short-circuit. Tests assert zero during replay.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	res, ok := e.Payload.(events.ToolResult)

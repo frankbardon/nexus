@@ -31,7 +31,6 @@ plugins:
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.llm.gemini:
     auth: vertex
@@ -49,6 +48,3 @@ plugins:
     max_messages: 100
     persist: true
 
-  nexus.observe.logger:
-    output: stderr
-    level: info

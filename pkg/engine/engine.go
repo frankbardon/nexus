@@ -193,6 +193,14 @@ func (e *Engine) Boot(ctx context.Context) error {
 		if err := e.replayHistory(); err != nil {
 			e.Logger.Warn("failed to replay conversation history", "error", err)
 		}
+		// Crash recovery: if the recalled session's journal ends mid-turn,
+		// re-fire the io.input that started the unfinished turn so the
+		// agent restarts and completes it. The agent's memory has already
+		// been restored from conversation.jsonl; re-emitting the input is
+		// what kicks the live ReAct loop back into motion.
+		if err := e.crashResumeIfPartial(); err != nil {
+			e.Logger.Warn("crash resume failed", "error", err)
+		}
 	}
 
 	// Install schema registry bus subscriptions.
@@ -316,6 +324,57 @@ func (e *Engine) Boot(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// crashResumeIfPartial inspects the current session's journal for an
+// unfinished turn and, if present, re-emits the io.input that started it
+// so the live agent restarts the turn from scratch. Idempotent — a
+// well-formed journal (no partial turn) is a no-op.
+//
+// Phase 3 minimum: restart the partial turn rather than mid-step resume.
+// The agent's memory has already been restored via replayHistory; the
+// only missing piece is the in-flight bus state, which is reconstructed
+// by re-firing the input. Mid-step resume (re-emit the in-flight
+// tool.invoke after replay-stash short-circuits the completed prefix) is
+// a future PR.
+//
+// Caveat: re-firing the input mints fresh seqs that append to the same
+// journal alongside the orphaned partial-turn events. A subsequent
+// --replay against this session will see both the orphaned io.input and
+// the re-fired one. Document but do not fix in this pass.
+func (e *Engine) crashResumeIfPartial() error {
+	if e.Session == nil {
+		return nil
+	}
+	journalDir := filepath.Join(e.Session.RootDir, "journal")
+	coord, err := journal.NewCoordinator(journalDir, e.Bus, e.Replay, journal.CoordinatorOptions{
+		Logger:           e.Logger.With("subsystem", "crash-resume"),
+		PayloadConverter: replayPayloadConverter,
+	})
+	if err != nil {
+		// Missing journal is fine — older sessions predate Phase 1.
+		return nil
+	}
+	if !coord.IsPartialTurn() {
+		return nil
+	}
+	partial, ok := coord.PartialInput()
+	if !ok {
+		e.Logger.Info("crash resume: partial turn detected but no io.input above the boundary",
+			"last_turn_end_seq", func() uint64 {
+				s, _ := coord.LastTurnBoundary()
+				return s
+			}())
+		return nil
+	}
+	payload, _ := replayPayloadConverter("io.input", partial.Payload)
+	e.Logger.Info("crash resume: re-emitting partial io.input",
+		"original_seq", partial.Seq,
+		"last_turn_end_seq", func() uint64 {
+			s, _ := coord.LastTurnBoundary()
+			return s
+		}())
+	return e.Bus.Emit("io.input", payload)
 }
 
 // replayPayloadConverter rehydrates a journal-deserialized payload (a

@@ -98,7 +98,7 @@ Plugin IDs use a dotted namespace: `nexus.<category>.<name>`
 | `tool` | `nexus.tool.shell`, `nexus.tool.file` |
 | `memory` | `nexus.memory.capped`, `nexus.memory.compaction` |
 | `io` | `nexus.io.tui`, `nexus.io.browser` |
-| `observe` | `nexus.observe.logger`, `nexus.observe.thinking` |
+| `observe` | `nexus.observe.thinking`, `nexus.observe.otel` |
 | `planner` | `nexus.planner.dynamic`, `nexus.planner.static` |
 | `skills` | `nexus.skills` |
 | `system` | `nexus.system.dynvars` |

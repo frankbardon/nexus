@@ -64,7 +64,6 @@ plugins:
     - nexus.gate.tool_filter
 
     # Observability
-    - nexus.observe.logger
     - nexus.observe.thinking
 
   nexus.llm.anthropic:
@@ -148,6 +147,3 @@ plugins:
     trust_project: true
     catalog_in_system_prompt: true
 
-  nexus.observe.logger:
-    output: stderr
-    level: warn

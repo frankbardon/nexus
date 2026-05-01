@@ -43,7 +43,6 @@ plugins:
     - nexus.skills
     - nexus.memory.capped
     - nexus.memory.longterm
-    - nexus.observe.logger
     - nexus.observe.thinking
 
   nexus.io.test:
@@ -113,6 +112,3 @@ plugins:
     auto_load: false
     path: "~/.nexus/test-sessions/memory/"
 
-  nexus.observe.logger:
-    output: stderr
-    level: warn
