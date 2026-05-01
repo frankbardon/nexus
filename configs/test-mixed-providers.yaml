@@ -1,0 +1,60 @@
+# Test: Multi-provider model role routing (Anthropic + OpenAI)
+# Validates: both provider plugins boot side by side, model role config parses
+# correctly with different providers per role, neither provider blocks the other.
+#
+# Uses mocked LLM responses for both providers — no API keys required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestMixedProviders
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 4096
+    quick:
+      provider: nexus.llm.openai
+      model: gpt-4o-mini
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Hello."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Hi."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.llm.openai:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

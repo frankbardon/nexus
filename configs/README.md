@@ -120,6 +120,11 @@ go test -tags integration ./tests/integration/ -v
 | `test-memory-simple.yaml` | `memory_test.go` | mock | Unbounded `memory.simple` provider |
 | `test-memory-summary-buffer.yaml` | `memory_test.go` | mock | Inline summarisation trigger + buffer collapse |
 | `test-oneshot-json-schema.yaml` | `oneshot_json_schema_test.go` | live | One-shot + JSON schema validation gate retry |
+| `test-kitchen-sink.yaml` | `kitchen_sink_test.go` | mock | All 20 plugins boot together without conflicts |
+| `test-longterm-memory.yaml` | `longterm_memory_test.go` | mock | Boot, CRUD tool registration, memory_write artifact creation |
+| `test-mixed-providers.yaml` | `mixed_providers_test.go` | mock | Anthropic + OpenAI providers boot side by side |
+| `test-multi-subagent.yaml` | `multi_subagent_test.go` | mock | Three named subagent instances register distinct `spawn_*` tools |
+| `test-skills.yaml` | `skills_test.go` | mock | Skill discovery scans fixture path and emits `skill.discover` |
 | `test-static-plan-approval.yaml` | `static_plan_approval_test.go` | mock | Static planner approve/deny paths |
 | `test-tool-choice.yaml` | `tool_choice_test.go` | mock | ReAct rotates ToolChoice across iterations |
 | `test-tool-filter.yaml` | `tool_filter_test.go` | mock | Tool filter gate populates `req.ToolFilter` |
@@ -138,7 +143,6 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 | `demo-gemini.yaml` | Gemini api-key auth | `GEMINI_API_KEY` |
 | `demo-gemini-thinking.yaml` | Gemini 2.5 thinking parts + thinking observer JSONL | `GEMINI_API_KEY` |
 | `demo-gemini-vertex.yaml` | Gemini via Vertex AI service-account auth | `GOOGLE_APPLICATION_CREDENTIALS` |
-| `demo-mixed-providers.yaml` | Anthropic + OpenAI together, model role routing | both keys |
 
 ### Agent architectures
 
@@ -146,7 +150,6 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 |--------|---------------|
 | `demo-orchestrator-full.yaml` | Orchestrator decomposition + parallel workers + synthesis |
 | `demo-planexec-approval.yaml` | PlanExec with approval-required dynamic planner |
-| `demo-multi-subagent.yaml` | 3 named subagent instances with different roles + prompts |
 | `demo-planned-react-tools.yaml` | ReAct + dynamic planner + tools + thinking observer |
 
 ### IO / Browser
@@ -160,9 +163,6 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 
 | Config | What it shows |
 |--------|---------------|
-| `demo-kitchen-sink.yaml` | Every plugin active simultaneously — boot stress test |
 | `demo-gates-strict.yaml` | Tight gate limits, manual veto exploration |
-| `demo-longterm-memory.yaml` | Cross-session memory CRUD walkthrough |
 | `demo-rag.yaml` | RAG primitives (embeddings + vector store + ingest + knowledge_search) |
-| `demo-skills.yaml` | Skill discovery + catalog injection + activation |
 | `demo-observers-all.yaml` | Logger + OTel + thinking observers together (optional Jaeger collector) |

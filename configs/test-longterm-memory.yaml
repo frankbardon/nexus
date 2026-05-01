@@ -1,0 +1,66 @@
+# Test: Long-term memory plugin registers CRUD tools and emits load event
+# Validates: memory.longterm.loaded fires on boot, memory_write/read/list/delete
+# tools register with the catalog, mock-driven memory_write call produces a
+# memory.longterm.stored event and writes a markdown file under the configured
+# path (validated by the test cleanup verifying file artifact).
+#
+# Uses mocked LLM responses — no API key required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestLongtermMemory
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.memory.longterm
+
+  nexus.io.test:
+    inputs:
+      - "Remember that my favorite color is blue."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    # Mock #1: tool call to memory_write storing the user's preference.
+    # Mock #2: final assistant content closing the turn.
+    mock_responses:
+      - tool_calls:
+          - name: memory_write
+            arguments: '{"key":"favorite-color","content":"blue","tags":["preferences"]}'
+      - content: "I will remember that."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Use memory tools to persist user preferences."
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
+
+  nexus.memory.longterm:
+    scope: global
+    auto_load: true
+    # Path is per-test-run; the harness cleans the session dir afterwards.
+    path: "~/.nexus/test-sessions/longterm-memory/"

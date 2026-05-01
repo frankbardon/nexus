@@ -1,0 +1,61 @@
+# Test: Skill discovery + catalog injection
+# Validates: nexus.skills scans configured paths, emits skill.discover with
+# the catalog summaries, and registers per-skill resources.
+#
+# Uses mocked LLM responses — no API key required. The skill fixtures live
+# in tests/fixtures/skills/ and ship with the repo.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestSkills
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.skills
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "What skills are available?"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Skills listed."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.skills:
+    scan_paths: ["./tests/fixtures/skills/"]
+    trust_project: never
+    max_active_skills: 3
+    catalog_in_system_prompt: true
+    disabled_skills: []
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

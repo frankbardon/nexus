@@ -1,0 +1,68 @@
+# Test: Multiple named subagent instances register distinct spawn_* tools
+# Validates: instanced plugin IDs (`nexus.agent.subagent/<name>`) boot in
+# isolation, each instance registers a tool named "spawn_<suffix>", per-instance
+# config (model_role, system_prompt) is parsed independently.
+#
+# Uses mocked LLM responses — no API key required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestMultiSubagent
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.subagent/researcher
+    - nexus.agent.subagent/coder
+    - nexus.agent.subagent/reviewer
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Hello."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Done."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test orchestrator with subagent helpers available."
+
+  nexus.agent.subagent/researcher:
+    model_role: mock
+    system_prompt: "Research specialist."
+
+  nexus.agent.subagent/coder:
+    model_role: mock
+    system_prompt: "Coding specialist."
+
+  nexus.agent.subagent/reviewer:
+    model_role: mock
+    system_prompt: "Code reviewer."
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
