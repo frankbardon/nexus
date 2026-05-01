@@ -9,16 +9,24 @@ Sessions are stored under the configured root directory (default: `~/.nexus/sess
 ```
 ~/.nexus/sessions/<session-id>/
 ├── context/
-│   ├── conversation.jsonl    # Conversation history (from memory plugin)
-│   ├── thinking.jsonl        # Thinking steps (from thinking observer)
-│   └── plans.jsonl           # Plan progress (from thinking observer)
+│   └── conversation.jsonl    # Conversation history (from memory plugin)
 ├── files/                    # Files created during the session
+├── journal/
+│   ├── active.jsonl          # Live event journal (every bus event,
+│   │                         #   including thinking.step + plan.progress)
+│   └── *.jsonl.zst           # Rotated, zstd-compressed segments
 ├── metadata/
 │   ├── session.json          # Session metadata
 │   └── config-snapshot.yaml  # Config used for this session
 └── plugins/
     └── <plugin-id>/          # Per-plugin data directories
 ```
+
+Thinking steps and plan progress are no longer kept in dedicated
+`thinking.jsonl` / `plans.jsonl` files — they live in the journal
+alongside every other event. Read them via
+`journal.Writer.SubscribeProjection` (live) or `journal.ProjectFile`
+(post-mortem).
 
 ## Session Metadata
 

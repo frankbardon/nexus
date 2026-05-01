@@ -163,14 +163,21 @@ same cache file.
 
 ### Journal projections
 
-Plugins that derive files from event streams (e.g. `nexus.observe.thinking`)
-register a projection via `Journal.SubscribeProjection(types, handler)`.
-The handler fires on the writer's drain goroutine after the envelope
-lands on disk, so derived files always lag the durable record by zero
+Plugins that need to derive files from event streams register a
+projection via `Journal.SubscribeProjection(types, handler)`. The
+handler fires on the writer's drain goroutine after the envelope lands
+on disk, so derived files always lag the durable record by zero
 envelopes. Projections also drive post-mortem regeneration:
 `journal.ProjectFile(dir, types, handler)` walks an existing journal
-and feeds the same handler — a thinking plugin whose JSONL files were
-deleted will rebuild them from the journal at the next boot.
+and feeds the same handler — a derived file deleted between runs will
+rebuild from the journal at the next boot.
+
+The shipped `nexus.observe.thinking` plugin no longer uses this hook
+itself: its `thinking.step` and `plan.progress` events are already in
+the journal alongside every other event, so the plugin acts purely as
+a UI feature flag for shells that want to surface thinking. Custom
+plugins that need their own derived view should adopt the projection
+pattern.
 
 ### Deterministic replay
 
@@ -813,8 +820,11 @@ Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file
 
 ### `nexus.observe.thinking`
 
-Source: `plugins/observe/thinking/plugin.go`. **No configuration.** Persists
-`thinking.step` and `plan.progress` events to JSONL files.
+Source: `plugins/observe/thinking/plugin.go`. **No configuration.** Marker
+plugin: presence in `plugins.active` lets terminal and browser shells
+enable thinking-related UI. The events themselves are journaled
+automatically and can be read live via `journal.Writer.SubscribeProjection`
+or post-mortem via `journal.ProjectFile`.
 
 ### `nexus.observe.otel`
 

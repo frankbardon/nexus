@@ -1,7 +1,8 @@
 # Test: ReAct + dynamic planner with thinking observer (live)
 # Validates: planning=true triggers plan.request before tool execution, dynamic
-# planner emits plan.created, react agent consumes plan.result then iterates,
-# thinking observer persists steps to session JSONL.
+# planner emits plan.created, react agent consumes plan.result then iterates.
+# thinking.step events flow on the bus and land in the session journal; the
+# nexus.observe.thinking plugin is a marker for shells that surface thinking UI.
 #
 # Live mode — calls Anthropic API. Test gates on ANTHROPIC_API_KEY via t.Skip.
 # Uses Haiku for both planner and execution to keep cost minimal.
