@@ -56,7 +56,7 @@ plugins:
 
   nexus.agent.react:
     max_iterations: 10
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.memory.capped:
     max_messages: 100

@@ -60,7 +60,7 @@ plugins:
     api_key_env: ANTHROPIC_API_KEY
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.gate.endless_loop:
     max_iterations: 15

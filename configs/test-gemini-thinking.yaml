@@ -39,7 +39,7 @@ plugins:
       include_thoughts: true
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.gate.endless_loop:
     max_iterations: 5

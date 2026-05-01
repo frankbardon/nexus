@@ -49,7 +49,7 @@ plugins:
     api_key_env: ANTHROPIC_API_KEY
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.agent.subagent:
     system_prompt: "Take in the user input and summarize the problem. Speak like a pirate."
@@ -69,7 +69,6 @@ plugins:
   #   model_role: quick           # LLM role for the compaction call
   #   protect_recent: 4           # keep N most recent messages verbatim
   #   # prompt: "custom compaction prompt inline"
-  #   # prompt_file: ./prompts/compaction.md
 
   # nexus.agent.react tool_choice examples:
   #   tool_choice: required           # shorthand: force tool use every iteration

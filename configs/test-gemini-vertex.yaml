@@ -40,7 +40,7 @@ plugins:
     # service_account_json: /path/to/sa.json  # falls back to GOOGLE_APPLICATION_CREDENTIALS
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.gate.endless_loop:
     max_iterations: 10

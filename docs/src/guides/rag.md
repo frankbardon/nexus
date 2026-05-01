@@ -174,7 +174,7 @@ nexus.rag.ingest:
 
 ### Both: tool + memory + watcher
 
-The default `configs/rag.yaml` profile activates everything. Tune namespaces and salience knobs to taste. See [Built-in Profiles](../configuration/profiles.md#ragyaml) for the full file.
+The `configs/rag.yaml` example activates everything. Tune namespaces and salience knobs to taste.
 
 ## Embedding provider
 

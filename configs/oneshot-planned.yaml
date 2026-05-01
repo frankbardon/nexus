@@ -31,7 +31,7 @@ core:
     retention: 30d
     id_format: datetime_short
 
-# Oneshot profile with a dynamic planner. Any plan that would normally
+# Oneshot config with a dynamic planner. Any plan that would normally
 # require approval is auto-approved by the oneshot IO plugin, so `approval`
 # can safely be set to `always` here for end-to-end testing of the approval
 # path.
@@ -53,7 +53,7 @@ plugins:
 
   nexus.agent.react:
     max_iterations: 10
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
     planning: true
 
   nexus.planner.dynamic:

@@ -127,20 +127,9 @@ Optional planning phase runs before ReAct agent iterates. Enabled via `planning:
 
 Approval modes: `always` (user must approve), `never` (skip), `auto` (LLM decides — dynamic only, static defaults to never).
 
-## Configuration Profiles
-
-Seven built-in profiles in `configs/`:
-- `default.yaml` — General purpose, limited shell commands
-- `coding.yaml` — Extended shell access (make, docker, npm, cargo, python)
-- `research.yaml` — No shell access, larger context window, more iterations
-- `planned.yaml` — Dynamic planner with auto-approval
-- `planned-static.yaml` — Static planner with fixed coding workflow steps
-- `rag.yaml` — RAG primitives + knowledge_search tool + vector memory, wired to Anthropic LLM + OpenAI embeddings + chromem-go vector store
-- `pulse.yaml` — Pulse data processing tools with auto-predict
-
 ## Skills
 
-Discovered exclusively from directories listed in the `nexus.skills` plugin's `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty, no skills are loaded. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions. System prompts live in `prompts/`.
+Discovered exclusively from directories listed in the `nexus.skills` plugin's `scan_paths` config — there are no implicit defaults. If `scan_paths` is empty, no skills are loaded. Each skill = dir with `SKILL.md` file containing YAML frontmatter + markdown instructions.
 
 ## Code Conventions
 
