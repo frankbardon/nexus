@@ -138,7 +138,6 @@ plugins/
   skills/               Skill discovery and catalog
   apps/helloworld/      Built-in hello-world example agent
 configs/                YAML configuration files
-skills/                 Skill definitions (SKILL.md files)
 docs/                   Full documentation (mdBook)
 ```
 
