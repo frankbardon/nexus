@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/eval/baseline"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 	"github.com/frankbardon/nexus/pkg/eval/promote"
+	"github.com/frankbardon/nexus/pkg/eval/protocol"
 	"github.com/frankbardon/nexus/pkg/eval/report"
 	"github.com/frankbardon/nexus/pkg/eval/runner"
 	"gopkg.in/yaml.v3"
@@ -33,19 +33,20 @@ func jsonEncoder(w io.Writer) *json.Encoder { return json.NewEncoder(w) }
 //
 // Top-level layout:
 //
-//	nexus eval [--inspect-mode] <subcommand> [flags]
+//	nexus eval [--inspect-mode [--timeout=...]] | <subcommand> [flags]
 //
-// `--inspect-mode` is a Phase 5 stub. Subcommands `record` and `promote`
-// are Phase 3 stubs.
+// `--inspect-mode` is mutually exclusive with subcommands and reads a
+// single JSON request from stdin, writing one JSON response to stdout.
 func runEval(args []string) int {
 	if len(args) == 0 {
 		printEvalHelp()
 		return 0
 	}
-	// Early sniff for --inspect-mode at the top level (Phase 5).
-	if slices.Contains(args, "--inspect-mode") {
-		fmt.Fprintln(os.Stderr, "nexus eval --inspect-mode: not implemented in this phase (Phase 5)")
-		return 2
+	// Early sniff for --inspect-mode at the top level (Phase 5). The flag
+	// is mutually exclusive with subcommands; combining them surfaces as
+	// INVALID_REQUEST so the harness sees a structured error.
+	if hasInspectMode(args) {
+		return runEvalInspect(args)
 	}
 
 	switch args[0] {
@@ -75,7 +76,8 @@ Subcommands:
   record     Alias for promote (--from-session selects the source).
 
 Top-level flags:
-  --inspect-mode   JSON-on-stdin/stdout protocol mode (Phase 5 — stub).
+  --inspect-mode             JSON-on-stdin/stdout protocol mode for external harnesses.
+  --timeout=DURATION         Inspect-mode only: per-request deadline (default 60s, env NEXUS_EVAL_INSPECT_TIMEOUT).
 
 Use 'nexus eval <subcommand> -h' for subcommand-specific flags.`)
 }
@@ -415,6 +417,133 @@ func sessionsRoot(configPath string) string {
 		return engine.DefaultConfig().Core.Sessions.Root
 	}
 	return cfg.Core.Sessions.Root
+}
+
+// -- inspect-mode subcommand -------------------------------------------------
+
+// hasInspectMode reports whether --inspect-mode (or --inspect-mode=anything)
+// appears anywhere in args. Used as the gate before flag parsing so we
+// can build a dedicated FlagSet when present.
+func hasInspectMode(args []string) bool {
+	for _, a := range args {
+		if a == "--inspect-mode" || strings.HasPrefix(a, "--inspect-mode=") {
+			return true
+		}
+	}
+	return false
+}
+
+// runEvalInspect implements the JSON stdin/stdout protocol described in
+// docs/src/eval/inspect-protocol.md. The function:
+//
+//  1. Parses --inspect-mode and --timeout out of args. Any positional
+//     argument or unrelated flag is rejected as INVALID_REQUEST — the
+//     mode is mutually exclusive with subcommands.
+//  2. Reads exactly one JSON object from stdin (strict — unknown fields
+//     rejected by the protocol parser).
+//  3. Calls protocol.Run with a deadline derived from --timeout > env
+//     NEXUS_EVAL_INSPECT_TIMEOUT > the 60s default.
+//  4. Writes the protocol.Response to stdout. Errors are surfaced both
+//     as a non-zero exit code AND in the response's Error field so the
+//     external harness can rely on whichever it prefers.
+func runEvalInspect(args []string) int {
+	fs := flag.NewFlagSet("eval --inspect-mode", flag.ContinueOnError)
+	// Discard fs's default error output; we route everything through the
+	// protocol Response.
+	fs.SetOutput(io.Discard)
+	inspect := fs.Bool("inspect-mode", false, "")
+	timeoutFlag := fs.String("timeout", "", "per-request deadline (e.g. 60s, 5m); env NEXUS_EVAL_INSPECT_TIMEOUT also honored")
+	if err := fs.Parse(args); err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(fmt.Sprintf("flag parse: %v", err)), nil)
+		return 2
+	}
+	if !*inspect {
+		// Defensive — hasInspectMode returned true but flag parsing didn't
+		// see it. Should be unreachable.
+		writeInspectError(protocol.ErrInvalidRequest("--inspect-mode required"), nil)
+		return 2
+	}
+	if rest := fs.Args(); len(rest) > 0 {
+		writeInspectError(protocol.ErrInvalidRequest(fmt.Sprintf(
+			"--inspect-mode is mutually exclusive with subcommands or positional args; got %v", rest)), nil)
+		return 2
+	}
+
+	timeout, err := resolveInspectTimeout(*timeoutFlag)
+	if err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(err.Error()), nil)
+		return 2
+	}
+
+	// Read and parse the request envelope. Strict parsing surfaces typos
+	// as INVALID_REQUEST instead of silently defaulted fields.
+	req, err := protocol.ParseRequest(os.Stdin)
+	if err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(err.Error()), nil)
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	resp, runErr := protocol.Run(ctx, req)
+	if runErr != nil {
+		writeInspectError(runErr, req.Metadata)
+		return 1
+	}
+	if err := protocol.WriteResponse(os.Stdout, resp); err != nil {
+		// Last-ditch: stdout already mid-write, surface to stderr.
+		fmt.Fprintf(os.Stderr, "nexus eval --inspect-mode: write response: %v\n", err)
+		return 1
+	}
+	if resp.Error != nil {
+		return 1
+	}
+	return 0
+}
+
+// resolveInspectTimeout picks the per-request deadline:
+//
+//  1. --timeout flag (parsed as time.Duration)
+//  2. NEXUS_EVAL_INSPECT_TIMEOUT env var
+//  3. 60s default
+//
+// Empty inputs at any level fall through to the next. Non-empty but
+// unparseable inputs surface as INVALID_REQUEST (caller's fault, not a
+// silent fallback).
+func resolveInspectTimeout(flagVal string) (time.Duration, error) {
+	const def = 60 * time.Second
+	if flagVal != "" {
+		d, err := time.ParseDuration(flagVal)
+		if err != nil {
+			return 0, fmt.Errorf("--timeout=%q: %v", flagVal, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("--timeout=%q must be positive", flagVal)
+		}
+		return d, nil
+	}
+	if envVal := os.Getenv("NEXUS_EVAL_INSPECT_TIMEOUT"); envVal != "" {
+		d, err := time.ParseDuration(envVal)
+		if err != nil {
+			return 0, fmt.Errorf("NEXUS_EVAL_INSPECT_TIMEOUT=%q: %v", envVal, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("NEXUS_EVAL_INSPECT_TIMEOUT=%q must be positive", envVal)
+		}
+		return d, nil
+	}
+	return def, nil
+}
+
+// writeInspectError serializes an error as a protocol Response on stdout.
+// Best-effort: if writing to stdout fails we fall through to stderr so a
+// caller piping nexus into a broken consumer still sees the diagnosis.
+func writeInspectError(err error, metadata map[string]any) {
+	resp := protocol.ResponseFromError(err, metadata)
+	if werr := protocol.WriteResponse(os.Stdout, resp); werr != nil {
+		fmt.Fprintf(os.Stderr, "nexus eval --inspect-mode: %v (write failed: %v)\n", err, werr)
+	}
 }
 
 // -- helpers -----------------------------------------------------------------

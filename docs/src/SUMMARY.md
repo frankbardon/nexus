@@ -89,6 +89,7 @@
 - [Overview](./eval/overview.md)
 - [Case Format](./eval/case-format.md)
 - [Promoting a Session](./eval/promotion.md)
+- [Inspect-Mode Protocol](./eval/inspect-protocol.md)
 
 # Guides
 

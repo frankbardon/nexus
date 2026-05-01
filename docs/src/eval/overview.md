@@ -139,7 +139,7 @@ error path is covered by the integration test under `tests/integration/`.
 | 2 | CLI, multi-case, baseline diff, 5 seed cases | Shipped |
 | 3 | `nexus eval record / promote` (failure → case in one command) | Shipped — see [`promotion.md`](./promotion.md) |
 | 4 | `plugins/observe/sampler/` (online sample capture) | Shipped — see [Online sampling](#online-sampling) |
-| 5 | `--full` LLM judge, `--inspect-mode` JSON-RPC protocol | Stubbed |
+| 5 | `--inspect-mode` JSON protocol for external harnesses | Shipped — see [External harness integration](#external-harness-integration). `--full` LLM judge remains stubbed. |
 
 The case directory layout finalized in Phase 2 is forward-compatible with
 Phase 3 promotion — `record` writes the same shape that Phase 2 reads. The
@@ -173,3 +173,28 @@ See [the sampler plugin doc](../plugins/observers/sampler.md) for the
 capture-decision rules, the `eval.candidate` event contract, the
 pluggable redactor hook, and the integration story with
 `nexus eval promote`.
+
+## External harness integration
+
+Phase 5 adds `nexus eval --inspect-mode`: a single-shot, headless,
+stdin/stdout JSON protocol that lets external eval harnesses (AISI
+Inspect AI, Braintrust, custom CI tooling) drive Nexus from any
+language. Pipe a JSON request in, parse a JSON response out, exit code
+indicates success.
+
+```bash
+echo '{"schema":1,"config_path":"configs/coding.yaml","user_input":"hello"}' \
+  | nexus eval --inspect-mode
+```
+
+The wire format is the durable contract. Schema-stability snapshot tests
+in `pkg/eval/protocol/` enforce that the byte layout cannot drift
+silently — every change requires updating the snapshot deliberately, and
+the version field (`schema: 1`) is the migration marker external shims
+pin against.
+
+Nexus does **not** ship a Python or Node shim. The protocol is the
+contract; any out-of-tree integration is a thin subprocess wrapper. See
+[`inspect-protocol.md`](./inspect-protocol.md) for the full reference,
+field-by-field documentation, error code table, and a worked Python
+shim example you can copy into your harness.

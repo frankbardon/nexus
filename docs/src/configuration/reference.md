@@ -1183,7 +1183,7 @@ eval:
 | `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. |
 | `nexus eval promote --session <id-or-path> --case <new-id> [--cases-dir <path>] [--owner <name>] [--tags <csv>] [--description <text>] [--no-edit] [--force] [--config <path>]` | Convert a real session under `~/.nexus/sessions/` into a deterministic eval case. See [`docs/src/eval/promotion.md`](../eval/promotion.md). |
 | `nexus eval record --from-session <id-or-path> --case <new-id> [...]` | Alias of `eval promote` — same flag set, same behaviour. |
-| `nexus eval --inspect-mode` | Phase 5 — currently stubbed; exits 2 with a not-implemented message. |
+| `nexus eval --inspect-mode [--timeout=DURATION]` | Single-shot JSON-on-stdin/stdout protocol for external harnesses (Inspect AI, Braintrust, custom CI). Reads one request from stdin, writes one response to stdout. Mutually exclusive with subcommands. Deadline via `--timeout` flag, `NEXUS_EVAL_INSPECT_TIMEOUT` env, or 60s default. Wire format documented at [`docs/src/eval/inspect-protocol.md`](../eval/inspect-protocol.md). |
 
 ---
 
