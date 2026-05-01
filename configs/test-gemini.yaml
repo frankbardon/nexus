@@ -52,7 +52,7 @@ plugins:
     api_key_env: GEMINI_API_KEY
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.tool.shell:
     allowed_commands: [ls, pwd, cat, echo]

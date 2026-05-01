@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Go 1.21+** — Nexus is written in Go and builds with the standard toolchain
-- **An API key for at least one LLM provider** — Nexus ships with first-party providers for [Anthropic](../plugins/providers/anthropic.md) (Claude) and [OpenAI](../plugins/providers/openai.md) (GPT / o-series). Bring your own key for whichever provider(s) your config activates. The built-in example profiles in `configs/` use Anthropic by default, so following those examples verbatim requires an `ANTHROPIC_API_KEY`.
+- **An API key for at least one LLM provider** — Nexus ships with first-party providers for [Anthropic](../plugins/providers/anthropic.md) (Claude) and [OpenAI](../plugins/providers/openai.md) (GPT / o-series). Bring your own key for whichever provider(s) your config activates.
 
 Optional:
 - **poppler-utils** — Required only if you use the PDF reader plugin (`pdftotext`, `pdfinfo`)
@@ -34,7 +34,7 @@ This produces a binary at `bin/nexus`.
 Each provider plugin reads its key from an environment variable. The default names match the upstream convention: `ANTHROPIC_API_KEY` for the Anthropic plugin, `OPENAI_API_KEY` for the OpenAI plugin. Set whichever your active config needs:
 
 ```bash
-# Using Claude (the default in configs/ profiles)
+# Using Claude
 export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 
 # Or using OpenAI
@@ -52,13 +52,11 @@ You can also pass the key inline (`api_key:`) or point at a different env var (`
 
 ## Running Nexus
 
-Run with a specific configuration profile:
+Run with a specific configuration file:
 
 ```bash
 bin/nexus -config configs/default.yaml
 ```
-
-Nexus ships with several built-in profiles — see [Built-in Profiles](../configuration/profiles.md) for the full list.
 
 ### CLI Flags
 

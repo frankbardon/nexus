@@ -81,7 +81,6 @@
 
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
-- [Built-in Profiles](./configuration/profiles.md)
 
 # Guides
 

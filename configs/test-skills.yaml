@@ -7,7 +7,7 @@
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env
 #   - Skills present in directories listed under nexus.skills.scan_paths below
-#     (this config uses ./skills/, so SKILL.md files must live there).
+#     (this config uses ./tests/fixtures/skills/ for the bundled test fixtures).
 #   - Discovery is gated entirely by scan_paths — no implicit defaults are scanned.
 #
 # What to test:
@@ -60,13 +60,13 @@ plugins:
     api_key_env: ANTHROPIC_API_KEY
 
   nexus.agent.react:
-    system_prompt_file: ./prompts/conversationalist.md
+    system_prompt: You are a conversationalist, always respond in a helpful manner.
 
   nexus.gate.endless_loop:
     max_iterations: 15
 
   nexus.skills:
-    scan_paths: ["./skills/"]
+    scan_paths: ["./tests/fixtures/skills/"]
     trust_project: ask
     max_active_skills: 3
     catalog_in_system_prompt: true

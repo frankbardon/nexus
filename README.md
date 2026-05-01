@@ -137,9 +137,7 @@ plugins/
   gates/                Quality/safety/operational gates
   skills/               Skill discovery and catalog
   apps/helloworld/      Built-in hello-world example agent
-configs/                YAML configuration profiles
-prompts/                System prompts for agent personas
-skills/                 Skill definitions (SKILL.md files)
+configs/                YAML configuration files
 docs/                   Full documentation (mdBook)
 ```
 

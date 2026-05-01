@@ -115,5 +115,7 @@ nexus.memory.compaction:
   message_threshold: 40
   model_role: quick
   protect_recent: 4
-  prompt_file: ./prompts/compaction.md
+  prompt: |
+    Summarize the conversation so far in 200 words or less, preserving any
+    decisions, code changes, and unresolved questions.
 ```

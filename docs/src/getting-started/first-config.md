@@ -133,7 +133,17 @@ plugins:
   nexus.agent.react:
     max_iterations: 10
     planning: true
-    system_prompt_file: ./prompts/coding-assistant.md
+    system_prompt: |
+      You are a coding assistant powered by Nexus. You help users write, debug, refactor, and understand code.
+
+      ## Guidelines
+
+      1. Always explain your reasoning before making changes
+      2. Run tests after modifications to verify correctness
+      3. Prefer minimal, targeted changes over broad refactors
+      4. Ask for clarification when requirements are ambiguous
+      5. Read files in chunks 16kb or less
+      6. Follow the existing code style and conventions of the project
 
   nexus.planner.dynamic:
     approval: auto          # always | never | auto
@@ -154,21 +164,20 @@ nexus.agent.react:
 
 # From file
 nexus.agent.react:
-  system_prompt_file: ./prompts/coding-assistant.md
+  system_prompt: |
+      You are a coding assistant powered by Nexus. You help users write, debug, refactor, and understand code.
+
+      ## Guidelines
+
+      1. Always explain your reasoning before making changes
+      2. Run tests after modifications to verify correctness
+      3. Prefer minimal, targeted changes over broad refactors
+      4. Ask for clarification when requirements are ambiguous
+      5. Read files in chunks 16kb or less
+      6. Follow the existing code style and conventions of the project
 ```
-
-Nexus ships with several prompt files in `prompts/`:
-
-| File | Purpose |
-|------|---------|
-| `conversationalist.md` | General conversation |
-| `coding-assistant.md` | Code-focused tasks |
-| `research-assistant.md` | Research and analysis |
-| `document-reader.md` | Document comprehension |
-| `invoice-analyst.md` | Invoice/financial document analysis |
 
 ## Next Steps
 
 - Learn about the [architecture](../architecture/overview.md) to understand how plugins communicate
 - Browse the [plugin reference](../plugins/overview.md) to see what's available
-- Check out the [built-in profiles](../configuration/profiles.md) for ready-made configurations
