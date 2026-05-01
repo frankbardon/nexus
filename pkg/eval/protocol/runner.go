@@ -352,10 +352,7 @@ func projectJournal(journalDir string) (*Response, error) {
 		},
 	}
 	if !firstTs.IsZero() && !lastTs.IsZero() {
-		resp.LatencyMs = lastTs.Sub(firstTs).Milliseconds()
-		if resp.LatencyMs < 0 {
-			resp.LatencyMs = 0
-		}
+		resp.LatencyMs = max(lastTs.Sub(firstTs).Milliseconds(), 0)
 	}
 	return resp, nil
 }
