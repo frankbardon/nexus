@@ -1,49 +1,22 @@
-# Test: All observer plugins active — logger + otel + thinking
-# Validates: observer coexistence, OTel span export, thinking JSONL persistence, no observer conflicts
+# Test: All three observer plugins boot and coexist (logger + otel + thinking)
+# Validates: observer plugins do not conflict on shared event bus subscriptions.
+# OTel collector connection failure must not crash the engine — the plugin
+# should log the failure and keep running.
+#
+# Uses mocked LLM responses — no API key required.
 #
 # Run:
-#   docker run -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one  # optional: OTel collector
-#   bin/nexus -config configs/test-observers-all.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in env or .env
-#   - Optional: OTLP collector on localhost:4317 (Jaeger, Grafana Tempo, etc.)
-#     OTel plugin will warn on connect failure but won't crash.
-#
-# What to test:
-#   1. Boot: All three observers init without conflict. Logger, otel, thinking all active.
-#   2. Debug logging: log_level=debug + logger level=debug. stderr should show ALL bus
-#      events in structured JSON format — very verbose. Verify llm.request, llm.response,
-#      core.tick (excluded from OTel but visible in logger).
-#   3. Thinking persistence: Have a conversation. Check session dir for
-#      plugins/nexus.observe.thinking/thinking.jsonl. Should contain thinking steps
-#      as JSONL entries with timestamps.
-#   4. OTel spans (if collector running): Open Jaeger UI at localhost:16686. Search
-#      for service "nexus-test". Should see spans for each bus event except core.tick
-#      (excluded). Verify span attributes include event payloads.
-#   5. OTel without collector: If no collector running, otel plugin should log connection
-#      error but not crash or block other observers.
-#   6. Observer isolation: All three observers process same events independently.
-#      No event duplication or missing events across observers.
-#   7. Exclude events: core.tick excluded from OTel but NOT from logger. Verify tick
-#      events appear in stderr but not in Jaeger traces.
-#
-# What to watch for:
-#   - Debug logging is VERY verbose — stderr will be noisy
-#   - Thinking JSONL grows per conversation turn (check file size)
-#   - OTel protocol=grpc with insecure=true (no TLS for local testing)
-#   - No performance impact from three observers on same events
-#   - Session dir has plugin data dirs for all three observers
+#   go test -tags integration ./tests/integration/ -run TestObserversAll
 core:
-  log_level: debug
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
-    default: balanced
-    balanced:
+    default: mock
+    mock:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
+      model: mock
+      max_tokens: 4096
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -51,7 +24,7 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.endless_loop
@@ -60,29 +33,38 @@ plugins:
     - nexus.observe.otel
     - nexus.observe.thinking
 
+  nexus.io.test:
+    inputs:
+      - "Hello."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Hi."
+
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
-    system_prompt: You are a conversationalist, always respond in a helpful manner.
+    system_prompt: "You are a test assistant."
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 3
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
+    max_messages: 10
+    persist: false
 
   nexus.observe.logger:
     output: stderr
-    level: debug
+    level: warn
 
+  # Point at a port that should never have a collector listening — connection
+  # failure is the expected case. Plugin must not crash on this.
   nexus.observe.otel:
-    endpoint: "localhost:4317"
+    endpoint: "localhost:14317"
     protocol: grpc
     insecure: true
     service_name: nexus-test
     exclude_events:
       - core.tick
-
-  # nexus.observe.thinking has no config — just needs to be active

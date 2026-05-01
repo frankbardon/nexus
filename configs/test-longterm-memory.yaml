@@ -1,54 +1,23 @@
-# Test: Long-term memory plugin with conversation memory
-# Validates: memory index injection, CRUD tools, auto_load, scope resolution, cross-session persistence
+# Test: Long-term memory plugin registers CRUD tools and emits load event
+# Validates: memory.longterm.loaded fires on boot, memory_write/read/list/delete
+# tools register with the catalog, mock-driven memory_write call produces a
+# memory.longterm.stored event and writes a markdown file under the configured
+# path (validated by the test cleanup verifying file artifact).
+#
+# Uses mocked LLM responses — no API key required.
 #
 # Run:
-#   bin/nexus -config configs/test-longterm-memory.yaml
-#
-# Prerequisites:
-#   - ANTHROPIC_API_KEY set in env or .env
-#   - Optional: pre-populate ~/.nexus/memory/ with a test memory file to verify auto_load
-#
-# What to test:
-#   SESSION 1 — Writing memories:
-#   1. Boot: Check logs for memory.longterm.loaded event. If ~/.nexus/memory/ is empty,
-#      index should be empty but event still fires.
-#   2. Memory tools: Ask "what memory tools do you have?" — should list memory_write,
-#      memory_read, memory_list, memory_delete.
-#   3. Write memory: Say "Remember that my favorite color is blue." Agent should
-#      proactively call memory_write (auto_save_instructions active). Check
-#      ~/.nexus/memory/ for new .md file with YAML frontmatter.
-#   4. Read memory: Ask "what do you remember about my preferences?" — agent should
-#      call memory_read or memory_list and find the color preference.
-#   5. Write another: Say "I'm working on a project called Nexus." Verify second
-#      memory file created.
-#   6. List memories: Ask "list all memories" — should return both entries with keys,
-#      previews, and tags.
-#   7. Delete memory: Ask "forget my favorite color." Agent should call memory_delete.
-#      Verify file removed from ~/.nexus/memory/.
-#
-#   SESSION 2 — Cross-session persistence:
-#   8. Restart: Exit and run again with same config.
-#   9. Auto-load: On boot, memory index should include the Nexus project memory from
-#      session 1 (color memory was deleted).
-#  10. Recall: Ask "what do you know about me?" — agent should reference the Nexus
-#      project memory WITHOUT being told again.
-#
-# What to watch for:
-#   - scope=global means ~/.nexus/memory/ used (not agent-scoped path)
-#   - Memory files are human-readable markdown with YAML frontmatter
-#   - auto_save_instructions injected into system prompt (agent proactively saves)
-#   - Memory index in system prompt is lightweight (key + preview, not full content)
-#   - Keys sanitized to valid filenames (lowercase, hyphens/underscores only)
+#   go test -tags integration ./tests/integration/ -run TestLongtermMemory
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
-    default: balanced
-    balanced:
+    default: mock
+    mock:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
+      model: mock
+      max_tokens: 4096
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -56,33 +25,42 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
     - nexus.memory.longterm
-    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Remember that my favorite color is blue."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    # Mock #1: tool call to memory_write storing the user's preference.
+    # Mock #2: final assistant content closing the turn.
+    mock_responses:
+      - tool_calls:
+          - name: memory_write
+            arguments: '{"key":"favorite-color","content":"blue","tags":["preferences"]}'
+      - content: "I will remember that."
 
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
-    system_prompt: You are a conversationalist, always respond in a helpful manner.
+    system_prompt: "You are a test assistant. Use memory tools to persist user preferences."
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 5
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
+    max_messages: 10
+    persist: false
 
   nexus.memory.longterm:
     scope: global
     auto_load: true
-    path: "~/.nexus/memory/"
-    auto_save_instructions: "If the user shares a preference, fact about themselves, or project context that would be useful in future sessions, proactively save it using memory_write."
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    # Path is per-test-run; the harness cleans the session dir afterwards.
+    path: "~/.nexus/test-sessions/longterm-memory/"

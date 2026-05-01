@@ -1,53 +1,57 @@
 # Test: Gemini 2.5 thinking (reasoning) parts
-# Validates: thinkingConfig request shape, thought-part filtering from Content,
-#            thinking.step events feeding nexus.observe.thinking JSONL.
+# Validates: gemini provider emits thinking.step events sourced from itself
+# (Source=nexus.llm.gemini, Phase=reasoning), reasoning tokens > 0 in usage,
+# final response Content does not contain raw chain-of-thought.
+#
+# Test gates on GEMINI_API_KEY via t.Skip. Uses gemini-2.5-flash for thinking
+# support.
 #
 # Run:
-#   bin/nexus -config configs/test-gemini-thinking.yaml
-#
-# What to watch for:
-#   - Session dir contains plugins/nexus.observe.thinking/thinking.jsonl with
-#     entries authored by Source=nexus.llm.gemini, Phase=reasoning.
-#   - Final response Content is the answer only — no chain-of-thought leakage.
-#   - usage.ReasoningTokens > 0 for non-trivial prompts.
+#   go test -tags integration ./tests/integration/ -run TestGeminiThinking
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
     default: reasoning
     reasoning:
       provider: nexus.llm.gemini
-      model: gemini-2.5-pro
-      max_tokens: 16384
+      model: gemini-2.5-flash
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.gemini
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
     - nexus.observe.thinking
+
+  nexus.io.test:
+    inputs:
+      - "Compute the sum of the first 10 prime numbers, showing your reasoning briefly."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 90s
 
   nexus.llm.gemini:
     api_key_env: GEMINI_API_KEY
     thinking:
       enabled: true
-      budget_tokens: 8192
+      budget_tokens: 4096
       include_thoughts: true
 
   nexus.agent.react:
-    system_prompt: You are a conversationalist, always respond in a helpful manner.
+    system_prompt: "You are a test assistant. Reason carefully then provide a final numeric answer."
 
   nexus.gate.endless_loop:
-    max_iterations: 5
+    max_iterations: 3
 
   nexus.memory.capped:
-    max_messages: 50
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    max_messages: 10
+    persist: false

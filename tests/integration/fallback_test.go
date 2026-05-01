@@ -12,6 +12,7 @@ import (
 // TestFallback_Boot validates that the engine boots cleanly with a fallback
 // chain config and the fallback coordinator plugin active.
 func TestFallback_Boot(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-fallback.yaml", testharness.WithTimeout(30*time.Second))
 	h.Run()
 
@@ -31,6 +32,7 @@ func TestFallback_Boot(t *testing.T) {
 // provider fails (OpenAI with bogus base_url), the fallback plugin
 // intercepts the error and re-routes to the secondary provider (Anthropic).
 func TestFallback_TriggersOnPrimaryFailure(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-fallback.yaml", testharness.WithTimeout(30*time.Second))
 	h.Run()
 

@@ -1,0 +1,163 @@
+# Nexus Configuration Guide
+
+The `configs/` directory holds two kinds of YAML profiles, distinguished by filename prefix:
+
+- **`test-*.yaml`** — wired into the integration test harness (`pkg/testharness/`). Each
+  has a matching test in `tests/integration/`. Most use `nexus.io.test` with mocked LLM
+  responses, so they run with no API key. The "live (skip)" entries below call the real
+  Anthropic API and `t.Skip` cleanly when `ANTHROPIC_API_KEY` is unset.
+- **`demo-*.yaml`** — manual exploration profiles. Use `nexus.io.tui` or
+  `nexus.io.browser` for interactive use. Run with `bin/nexus -config configs/<name>.yaml`.
+  Not exercised by CI; surface for hands-on testing of features that are hard to assert
+  in code (visual UI, cross-session persistence, third-party services).
+
+`default.yaml` keeps its name as the bundled default for `make run`.
+
+## Core System Functionalities
+
+| Area | Key Knobs |
+|------|-----------|
+| Engine | `log_level`, `tick_interval`, `max_concurrent_events` |
+| Models | `default` role, named roles (`reasoning`/`balanced`/`quick`), provider routing per role |
+| Sessions | `root`, `retention`, `id_format` |
+| Plugin lifecycle | `plugins.active` list, dependency ordering, instanced IDs (`plugin/name`) |
+
+## Plugin Inventory (28 plugins)
+
+### Agents
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| ReAct | `nexus.agent.react` | `planning`, `model_role`, `system_prompt`/`system_prompt_file`, `tool_choice` (shorthand, static, or sequence) |
+| Orchestrator | `nexus.agent.orchestrator` | `max_workers`, `max_subtasks`, `worker_max_iterations`, `orchestrator_model_role`, `worker_model_role`, `synthesis_model_role`, `fail_fast` |
+| PlanExec | `nexus.agent.planexec` | `execution_model_role`, `replan_on_failure`, `approval` (always/never) |
+| Subagent | `nexus.agent.subagent` | `model_role`, `tool_name`, `tool_description`, `system_prompt`. Supports instanced IDs: `nexus.agent.subagent/name` |
+
+### Providers
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Anthropic | `nexus.llm.anthropic` | `api_key`, `api_key_env` (default `ANTHROPIC_API_KEY`), `debug`, `pricing` |
+| OpenAI | `nexus.llm.openai` | `api_key`, `api_key_env` (default `OPENAI_API_KEY`), `base_url` (for compatible endpoints), `debug`, `pricing` |
+
+### IO Transports
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| TUI | `nexus.io.tui` | (none) |
+| Browser | `nexus.io.browser` | `host` (default `localhost`), `port` (default `8080`), `open_browser` (default `true`) |
+| One-shot | `nexus.io.oneshot` | `input`, `pretty`, `read_stdin` |
+| Wails | `nexus.io.wails` | `subscribe` (bus→frontend), `accept` (frontend→bus) — config-driven event bridging |
+
+### Tools
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Shell | `nexus.tool.shell` | `allowed_commands` ([]string), `timeout` (default `30s`), `sandbox` (default `false`) |
+| File IO | `nexus.tool.file` | `base_dir`, `allow_external_writes` (default `false`), `tools` map (`read_file`, `write_file`, `check_file_size`, `list_files` — all default `true`) |
+
+### Memory
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Conversation | `nexus.memory.capped` | `max_messages` (default `100`), `persist` (default `true`) |
+| Long-term | `nexus.memory.longterm` | `scope` (`agent`/`global`/`both`), `auto_load` (default `true`), `path`, `agent_id`, `auto_save_instructions` |
+
+### Planners
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Dynamic | `nexus.planner.dynamic` | `approval` (`auto`/`always`/`never`), `max_steps` (default `10`), `model_role`, `plan_prompt`/`plan_prompt_file` |
+| Static | `nexus.planner.static` | `approval` (`always`/`never`), `summary`, `steps` ([]map with `description` + `instructions`) |
+
+### Gates
+
+All gates subscribe to `before:*` vetoable events at priority 10.
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Endless Loop | `nexus.gate.endless_loop` | `max_iterations` (default `25`), `warning_at` (default `0`) |
+| Stop Words | `nexus.gate.stop_words` | `words`, `word_files`, `case_sensitive` (default `false`) |
+| Token Budget | `nexus.gate.token_budget` | `max_tokens` (default `100000`), `warning_threshold` (default `0.8`) |
+| Rate Limiter | `nexus.gate.rate_limiter` | `requests_per_minute` (default `60`), `window_seconds` (default `60`), `pause_message` |
+| Prompt Injection | `nexus.gate.prompt_injection` | `action` (`block`/`warn`), `patterns`, `patterns_file` |
+| JSON Schema | `nexus.gate.json_schema` | `schema`/`schema_file`, `max_retries` (default `3`), `retry_prompt` |
+| Output Length | `nexus.gate.output_length` | `max_chars` (default `5000`), `max_retries` (default `2`) |
+| Content Safety | `nexus.gate.content_safety` | `action` (`block`/`redact`), `check_pii_*`, `check_secrets_*`, `check_credit_card`, `check_ip_internal`, `custom_patterns` |
+| Context Window | `nexus.gate.context_window` | `max_context_tokens` (default `100000`), `trigger_ratio` (default `0.85`), `chars_per_token` (default `4.0`) |
+| Tool Filter | `nexus.gate.tool_filter` | `include` (allowlist, takes precedence), `exclude` (blocklist) |
+
+### Observers
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Logger | `nexus.observe.logger` | `output` (`stdout`/`stderr`/`file`), `file_path`, `level` |
+| OpenTelemetry | `nexus.observe.otel` | `endpoint`, `protocol` (`grpc`/`http`), `service_name`, `exclude_events` (supports `prefix.*` wildcards) |
+| Thinking | `nexus.observe.thinking` | (none — persists thinking steps to session JSONL) |
+
+### Skills
+
+| Plugin | ID | Key Config |
+|--------|----|------------|
+| Skills Manager | `nexus.skills` | `scan_paths`, `trust_project` (`ask`/`always`/`never`), `max_active_skills` (default `10`), `catalog_in_system_prompt` (default `true`), `disabled_skills` |
+
+## Test Configurations
+
+Each `test-*.yaml` is consumed by an integration test in `tests/integration/`. Run the
+suite with:
+
+```bash
+go test -tags integration ./tests/integration/ -v
+```
+
+| Config | Test file | Mode | What it covers |
+|--------|-----------|------|----------------|
+| `test-minimal.yaml` | `minimal_test.go` | live (Anthropic) | Bare-engine boot, no tools/gates/observers |
+| `test-all-gates.yaml` | `all_gates_test.go` | live + mock variants | All 8 gates active, veto chain, gate interactions |
+| `test-code-exec.yaml` | `code_exec_test.go` | mock | `run_code` tool dispatching shell via in-process Yaegi |
+| `test-fallback.yaml` | `fallback_test.go` | live | Provider fallback chain (primary fails → fallback responds) |
+| `test-fanout.yaml` | `fanout_test.go` | mock | Parallel multi-provider dispatch + collection |
+| `test-memory-simple.yaml` | `memory_test.go` | mock | Unbounded `memory.simple` provider |
+| `test-memory-summary-buffer.yaml` | `memory_test.go` | mock | Inline summarisation trigger + buffer collapse |
+| `test-oneshot-json-schema.yaml` | `oneshot_json_schema_test.go` | live | One-shot + JSON schema validation gate retry |
+| `test-orchestrator-full.yaml` | `orchestrator_test.go` | live (skip) | Orchestrator decomposes, spawns workers, synthesises |
+| `test-planexec-approval.yaml` | `planexec_approval_test.go` | live (skip) | PlanExec + dynamic planner approve/deny paths |
+| `test-planned-react-tools.yaml` | `planned_react_test.go` | live (skip) | ReAct + dynamic planner + thinking observer |
+| `test-openai.yaml` | `openai_test.go` | live (skip) | OpenAI provider live boot + smoke conversation |
+| `test-gemini.yaml` | `gemini_test.go` | live (skip) | Gemini provider live boot + smoke conversation |
+| `test-gemini-thinking.yaml` | `gemini_thinking_test.go` | live (skip) | Gemini 2.5 thinking emits reasoning steps + tokens |
+| `test-openai-compat.yaml` | `openai_compat_test.go` | mock (httptest) | base_url override routes to non-OpenAI server |
+| `test-observers-all.yaml` | `observers_all_test.go` | mock | Logger + OTel + thinking coexist; OTel survives unreachable collector |
+| `test-kitchen-sink.yaml` | `kitchen_sink_test.go` | mock | All 20 plugins boot together without conflicts |
+| `test-longterm-memory.yaml` | `longterm_memory_test.go` | mock | Boot, CRUD tool registration, memory_write artifact creation |
+| `test-mixed-providers.yaml` | `mixed_providers_test.go` | mock | Anthropic + OpenAI providers boot side by side |
+| `test-multi-subagent.yaml` | `multi_subagent_test.go` | mock | Three named subagent instances register distinct `spawn_*` tools |
+| `test-skills.yaml` | `skills_test.go` | mock | Skill discovery scans fixture path and emits `skill.discover` |
+| `test-static-plan-approval.yaml` | `static_plan_approval_test.go` | mock | Static planner approve/deny paths |
+| `test-tool-choice.yaml` | `tool_choice_test.go` | mock | ReAct rotates ToolChoice across iterations |
+| `test-tool-filter.yaml` | `tool_filter_test.go` | mock | Tool filter gate populates `req.ToolFilter` |
+| `test-web-search.yaml` | `web_search_test.go` | live | `web_search` tool via Anthropic native search adapter |
+
+## Demo Configurations
+
+Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not in CI.
+
+### Provider variations
+
+| Config | What it shows | Prereqs |
+|--------|---------------|---------|
+| `demo-gemini-vertex.yaml` | Gemini via Vertex AI service-account auth | `GOOGLE_APPLICATION_CREDENTIALS` |
+
+### IO / Browser
+
+| Config | What it shows |
+|--------|---------------|
+| `demo-browser-tools.yaml` | Browser UI + tool call rendering, WebSocket streaming |
+| `demo-browser-orchestrator.yaml` | Browser UI + orchestrator worker progress display |
+
+### Other
+
+| Config | What it shows |
+|--------|---------------|
+| `demo-gates-strict.yaml` | Tight gate limits, manual veto exploration |
+| `demo-rag.yaml` | RAG primitives walkthrough (embeddings + vector store + ingest + knowledge_search) |

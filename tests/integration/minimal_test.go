@@ -3,15 +3,26 @@
 package integration
 
 import (
+	"os"
 	"testing"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/testharness"
 )
 
+// requireAnthropic skips the test when ANTHROPIC_API_KEY is not set in the
+// environment. Used by live-mode tests that call the real Anthropic API.
+func requireAnthropic(t *testing.T) {
+	t.Helper()
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		t.Skip("ANTHROPIC_API_KEY not set")
+	}
+}
+
 // TestMinimal_Boot validates that the engine boots cleanly with the absolute
 // minimum config — no tools, no gates, no observers.
 func TestMinimal_Boot(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-minimal.yaml", testharness.WithTimeout(60*time.Second))
 	h.Run()
 
@@ -22,6 +33,7 @@ func TestMinimal_Boot(t *testing.T) {
 
 // TestMinimal_Conversation validates basic conversational flow with no tools.
 func TestMinimal_Conversation(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-minimal.yaml", testharness.WithTimeout(60*time.Second))
 	h.Run()
 
@@ -38,6 +50,7 @@ func TestMinimal_Conversation(t *testing.T) {
 
 // TestMinimal_MultiTurn validates that conversation memory works across turns.
 func TestMinimal_MultiTurn(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-minimal.yaml", testharness.WithTimeout(60*time.Second))
 	h.Run()
 

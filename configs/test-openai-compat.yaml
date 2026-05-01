@@ -1,32 +1,14 @@
-# Test: OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM)
-# Validates: base_url override, local model support, no-auth path
+# Test: OpenAI-compatible endpoint via base_url override
+# Validates: nexus.llm.openai talks to a non-OpenAI server when base_url is
+# overridden. The integration test stands up a httptest.NewServer that returns
+# OpenAI-shaped JSON, then injects its URL via copyConfig.
+#
+# No live API key — the test fakes the upstream entirely.
 #
 # Run:
-#   ollama serve                                          # start Ollama first
-#   ollama pull llama3                                    # ensure model available
-#   bin/nexus -config configs/test-openai-compat.yaml
-#
-# Prerequisites:
-#   - Ollama running on localhost:11434 (or adjust base_url)
-#   - Model "llama3" pulled (or change model name to match your local model)
-#   - No real API key needed — api_key is placeholder
-#
-# What to test:
-#   1. Boot: Engine starts, connects to local endpoint without TLS or auth errors.
-#   2. Basic chat: Send "Hello" — local model responds. May be slower than cloud.
-#   3. Streaming: Verify response streams (debug logs show individual chunks).
-#   4. Debug logging: log_level=debug — verify full request/response payloads in stderr.
-#      Check that the base_url appears in HTTP request logs.
-#   5. Error case: Stop Ollama mid-conversation — should get connection error, not panic.
-#   6. Wrong model: Change model to "nonexistent" — verify clear error about model not found.
-#
-# What to watch for:
-#   - base_url correctly used (not OpenAI's default endpoint)
-#   - api_key "not-needed" sent but not rejected by Ollama
-#   - Debug logs show full HTTP exchange for diagnosing compat issues
-#   - Reduced max_messages (50) appropriate for local models with smaller context
+#   go test -tags integration ./tests/integration/ -run TestOpenAICompat
 core:
-  log_level: debug
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
@@ -34,7 +16,7 @@ core:
     balanced:
       provider: nexus.llm.openai
       model: llama3
-      max_tokens: 4096
+      max_tokens: 256
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -42,27 +24,31 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.openai
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
 
+  nexus.io.test:
+    inputs:
+      - "Reply with: COMPAT OK"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+
+  # Test injects base_url via copyConfig at runtime. api_key is a placeholder
+  # for OpenAI-compatible servers that don't require auth (Ollama, etc).
   nexus.llm.openai:
-    base_url: "http://localhost:11434/v1/chat/completions"
     api_key: "not-needed"
+    base_url: "http://invalid.placeholder.example/v1/chat/completions"
 
   nexus.agent.react:
-    system_prompt: You are a conversationalist, always respond in a helpful manner.
+    system_prompt: "You are a test assistant."
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 3
 
   nexus.memory.capped:
-    max_messages: 50
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: debug
+    max_messages: 10
+    persist: false

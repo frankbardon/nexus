@@ -1,8 +1,8 @@
-# Test: Gates in strict/blocking mode with tight limits
+# Demo: Gates in strict/blocking mode with tight limits
 # Validates: veto behavior under pressure, rate limiter pause+retry, budget cutoff
 #
 # Run:
-#   bin/nexus -config configs/test-gates-strict.yaml
+#   bin/nexus -config configs/demo-gates-strict.yaml
 #
 # Prerequisites:
 #   - ANTHROPIC_API_KEY set in env or .env

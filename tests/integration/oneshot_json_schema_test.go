@@ -15,6 +15,7 @@ import (
 // TestOneshotJsonSchema_ValidOutput validates that the agent produces valid
 // JSON matching the required schema when the json_schema gate is active.
 func TestOneshotJsonSchema_ValidOutput(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-oneshot-json-schema.yaml", testharness.WithTimeout(60*time.Second))
 	h.Run()
 
@@ -58,6 +59,7 @@ func TestOneshotJsonSchema_ValidSchemaPassthrough(t *testing.T) {
 	validJSON := `{"summary":"Great product review","sentiment":"positive","topics":["quality","shipping"]}`
 
 	cfg := copyConfig(t, "configs/test-oneshot-json-schema.yaml", map[string]any{
+		"nexus.llm.anthropic": map[string]any{"api_key": "sk-mock-not-used"},
 		"nexus.io.test": map[string]any{
 			"inputs":        []string{"I love this! Amazing product."},
 			"approval_mode": "approve",
@@ -96,6 +98,7 @@ func TestOneshotJsonSchema_InvalidSchemaRetry(t *testing.T) {
 	validJSON := `{"summary":"Fixed response","sentiment":"negative","topics":["test"]}`
 
 	cfg := copyConfig(t, "configs/test-oneshot-json-schema.yaml", map[string]any{
+		"nexus.llm.anthropic": map[string]any{"api_key": "sk-mock-not-used"},
 		"nexus.io.test": map[string]any{
 			"inputs":        []string{"Terrible experience."},
 			"approval_mode": "approve",

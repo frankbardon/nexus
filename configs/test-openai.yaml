@@ -1,44 +1,21 @@
-# Test: OpenAI provider instead of Anthropic
-# Validates: provider abstraction, OpenAI streaming, tool use mapping
+# Test: OpenAI provider live boot + smoke conversation
+# Validates: provider abstraction works with OpenAI, streaming response shape,
+# basic role mapping. Test gates on OPENAI_API_KEY via t.Skip.
+#
+# Uses gpt-4o-mini for cost minimisation (~$0.0001 per run).
 #
 # Run:
-#   bin/nexus -config configs/test-openai.yaml
-#
-# Prerequisites:
-#   - OPENAI_API_KEY set in env or .env
-#
-# What to test:
-#   1. Boot: Engine starts with OpenAI provider, no Anthropic references in logs.
-#   2. Streaming: Send a message — response should stream token-by-token in TUI,
-#      not arrive as a single block.
-#   3. Conversation: Multi-turn chat works. Ask a follow-up referencing prior answer.
-#   4. Model roles: All three roles (reasoning=o3, balanced=gpt-4o, quick=gpt-4o-mini)
-#      route correctly. Default role is "balanced" so gpt-4o should be used.
-#   5. Error handling: Temporarily set invalid API key — should get clear error message,
-#      not a panic.
-#
-# What to watch for:
-#   - Streaming renders smoothly (no long pauses then dump)
-#   - Token counts in session metadata reflect OpenAI usage
-#   - Logger output at info level shows LLM request/response events
+#   go test -tags integration ./tests/integration/ -run TestOpenAI
 core:
-  log_level: info
+  log_level: warn
   tick_interval: 5s
   max_concurrent_events: 100
   models:
     default: balanced
-    reasoning:
-      provider: nexus.llm.openai
-      model: o3
-      max_tokens: 16384
     balanced:
       provider: nexus.llm.openai
-      model: gpt-4o
-      max_tokens: 8192
-    quick:
-      provider: nexus.llm.openai
       model: gpt-4o-mini
-      max_tokens: 4096
+      max_tokens: 256
   sessions:
     root: ~/.nexus/test-sessions
     retention: 30d
@@ -46,26 +23,28 @@ core:
 
 plugins:
   active:
-    - nexus.io.tui
+    - nexus.io.test
     - nexus.llm.openai
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
+
+  nexus.io.test:
+    inputs:
+      - "Reply with exactly: OPENAI OK"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 60s
 
   nexus.llm.openai:
     api_key_env: OPENAI_API_KEY
 
   nexus.agent.react:
-    system_prompt: You are a conversationalist, always respond in a helpful manner.
+    system_prompt: "You are a test assistant. Follow instructions exactly."
 
   nexus.gate.endless_loop:
-    max_iterations: 10
+    max_iterations: 3
 
   nexus.memory.capped:
-    max_messages: 100
-    persist: true
-
-  nexus.observe.logger:
-    output: stderr
-    level: info
+    max_messages: 10
+    persist: false
