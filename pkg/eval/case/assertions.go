@@ -331,10 +331,7 @@ func evalEventSequenceDistance(spec EventSequenceDistanceSpec, observed, golden 
 	o := projectTypes(observed, spec.Filter)
 	g := projectTypes(golden, spec.Filter)
 	dist := levenshtein(o, g)
-	maxLen := len(o)
-	if len(g) > maxLen {
-		maxLen = len(g)
-	}
+	maxLen := max(len(o), len(g))
 	ratio := 0.0
 	if maxLen > 0 {
 		ratio = float64(dist) / float64(maxLen)
@@ -614,10 +611,7 @@ func turnDurationsMs(events []ObservedEvent) []int {
 			}
 			start := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			d := e.Timestamp.Sub(start)
-			if d < 0 {
-				d = 0
-			}
+			d := max(e.Timestamp.Sub(start), 0)
 			out = append(out, int(d/time.Millisecond))
 		}
 	}
@@ -629,9 +623,7 @@ func percentile(sorted []int, p float64) int {
 		return 0
 	}
 	idx := int(p * float64(len(sorted)-1))
-	if idx < 0 {
-		idx = 0
-	}
+	idx = max(idx, 0)
 	if idx >= len(sorted) {
 		idx = len(sorted) - 1
 	}
@@ -686,13 +678,7 @@ func levenshtein(a, b []string) int {
 			del := prev[j] + 1
 			ins := curr[j-1] + 1
 			sub := prev[j-1] + cost
-			curr[j] = del
-			if ins < curr[j] {
-				curr[j] = ins
-			}
-			if sub < curr[j] {
-				curr[j] = sub
-			}
+			curr[j] = min(del, ins, sub)
 		}
 		prev, curr = curr, prev
 	}
