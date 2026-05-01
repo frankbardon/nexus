@@ -49,7 +49,7 @@ plugins:
       - content: "Done. The script ran `echo hello` and returned the output."
 
   nexus.llm.anthropic:
-    api_key_env: ANTHROPIC_API_KEY
+    api_key: "sk-mock-not-used"
 
   nexus.agent.react:
     system_prompt: "You are a test agent. Use tools when asked."

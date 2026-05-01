@@ -15,6 +15,7 @@ import (
 // emits search.request → adapter calls Anthropic → results flow back through
 // tool.result. No mocking; requires ANTHROPIC_API_KEY.
 func TestWebSearch_AnthropicNative(t *testing.T) {
+	requireAnthropic(t)
 	h := testharness.New(t, "configs/test-web-search.yaml",
 		testharness.WithTimeout(2*time.Minute))
 	h.Run()
