@@ -52,11 +52,10 @@ type colorizer struct {
 
 const (
 	ansiReset  = "\033[0m"
-	ansiBold   = "\033[1m"
-	ansiDim    = "\033[2m"
-	ansiRed    = "\033[31m"
-	ansiGreen  = "\033[32m"
-	ansiYellow = "\033[33m"
+	ansiBold  = "\033[1m"
+	ansiDim   = "\033[2m"
+	ansiRed   = "\033[31m"
+	ansiGreen = "\033[32m"
 )
 
 func newColorizer(w io.Writer) colorizer {
@@ -89,8 +88,7 @@ func (c colorizer) wrap(prefix, s string) string {
 	return prefix + s + ansiReset
 }
 
-func (c colorizer) bold(s string) string   { return c.wrap(ansiBold, s) }
-func (c colorizer) dim(s string) string    { return c.wrap(ansiDim, s) }
-func (c colorizer) red(s string) string    { return c.wrap(ansiRed, s) }
-func (c colorizer) green(s string) string  { return c.wrap(ansiGreen, s) }
-func (c colorizer) yellow(s string) string { return c.wrap(ansiYellow, s) }
+func (c colorizer) bold(s string) string  { return c.wrap(ansiBold, s) }
+func (c colorizer) dim(s string) string   { return c.wrap(ansiDim, s) }
+func (c colorizer) red(s string) string   { return c.wrap(ansiRed, s) }
+func (c colorizer) green(s string) string { return c.wrap(ansiGreen, s) }

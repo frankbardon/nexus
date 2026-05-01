@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -41,11 +42,9 @@ func runEval(args []string) int {
 		return 0
 	}
 	// Early sniff for --inspect-mode at the top level (Phase 5).
-	for _, a := range args {
-		if a == "--inspect-mode" {
-			fmt.Fprintln(os.Stderr, "nexus eval --inspect-mode: not implemented in this phase (Phase 5)")
-			return 2
-		}
+	if slices.Contains(args, "--inspect-mode") {
+		fmt.Fprintln(os.Stderr, "nexus eval --inspect-mode: not implemented in this phase (Phase 5)")
+		return 2
 	}
 
 	switch args[0] {
