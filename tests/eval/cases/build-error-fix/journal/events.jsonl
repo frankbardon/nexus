@@ -1,0 +1,12 @@
+{"seq":1,"ts":"2026-05-01T12:00:00Z","type":"io.session.start","payload":{"session_id":"build-error-fix-golden"}}
+{"seq":2,"ts":"2026-05-01T12:00:00.01Z","type":"io.input","payload":{"Content":"Why won't main.go build?","Files":null,"SessionID":""}}
+{"seq":3,"ts":"2026-05-01T12:00:00.02Z","type":"agent.turn.start"}
+{"seq":4,"ts":"2026-05-01T12:00:00.03Z","type":"llm.response","payload":{"Content":"","ToolCalls":[{"ID":"tc_1","Name":"read_file","Arguments":"{\"path\":\"main.go\"}"}],"Usage":{"PromptTokens":80,"CompletionTokens":40,"TotalTokens":120,"ReasoningTokens":0,"CachedTokens":0,"CacheWriteTokens":0},"CostUSD":0,"Model":"mock","FinishReason":"tool_use","Metadata":null,"Citations":null,"Alternatives":null}}
+{"seq":5,"ts":"2026-05-01T12:00:00.04Z","type":"tool.invoke","payload":{"ID":"tc_1","Name":"read_file","Arguments":{"path":"main.go"},"TurnID":"","ParentCallID":"","Sequence":0}}
+{"seq":6,"ts":"2026-05-01T12:00:00.05Z","type":"tool.result","payload":{"ID":"tc_1","Name":"read_file","Output":"package main\n\nfunc main() {\n\treturn 0\n}\n","Error":"","OutputFile":"","OutputData":null,"OutputStructured":null,"TurnID":""}}
+{"seq":7,"ts":"2026-05-01T12:00:00.06Z","type":"llm.response","payload":{"Content":"main() returns 0 but its declared type is void; remove the return value or change the signature.","ToolCalls":null,"Usage":{"PromptTokens":140,"CompletionTokens":70,"TotalTokens":210,"ReasoningTokens":0,"CachedTokens":0,"CacheWriteTokens":0},"CostUSD":0,"Model":"mock","FinishReason":"end_turn","Metadata":null,"Citations":null,"Alternatives":null}}
+{"seq":8,"ts":"2026-05-01T12:00:00.07Z","type":"agent.turn.end"}
+{"seq":9,"ts":"2026-05-01T12:00:00.08Z","type":"io.input","payload":{"Content":"Show me the fixed version.","Files":null,"SessionID":""}}
+{"seq":10,"ts":"2026-05-01T12:00:00.09Z","type":"agent.turn.start"}
+{"seq":11,"ts":"2026-05-01T12:00:00.1Z","type":"llm.response","payload":{"Content":"package main\n\nfunc main() {}\n","ToolCalls":null,"Usage":{"PromptTokens":160,"CompletionTokens":50,"TotalTokens":210,"ReasoningTokens":0,"CachedTokens":0,"CacheWriteTokens":0},"CostUSD":0,"Model":"mock","FinishReason":"end_turn","Metadata":null,"Citations":null,"Alternatives":null}}
+{"seq":12,"ts":"2026-05-01T12:00:00.11Z","type":"agent.turn.end"}
