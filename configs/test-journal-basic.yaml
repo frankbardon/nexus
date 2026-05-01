@@ -1,0 +1,54 @@
+# Test: basic durable journal — every dispatched event lands in
+# <session>/journal/events.jsonl with monotonic seq + parent_seq.
+#
+# Mock mode (no API key required).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestJournalBasic
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+journal:
+  fsync: every-event
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "first message"
+      - "second message"
+    input_delay: 100ms
+    approval_mode: approve
+    timeout: 15s
+    mock_responses:
+      - content: "first reply"
+      - content: "second reply"
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

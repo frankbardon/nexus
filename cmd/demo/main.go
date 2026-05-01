@@ -41,7 +41,6 @@ import (
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	summarybuffer "github.com/frankbardon/nexus/plugins/memory/summary_buffer"
 	vectormemory "github.com/frankbardon/nexus/plugins/memory/vector"
-	loggerobs "github.com/frankbardon/nexus/plugins/observe/logger"
 	thinkingobs "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
@@ -111,7 +110,6 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.skills": skills.New,
 
 		// Observers
-		"nexus.observe.logger":   loggerobs.New,
 		"nexus.observe.thinking": thinkingobs.New,
 
 		// Gates

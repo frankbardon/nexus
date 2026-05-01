@@ -29,7 +29,6 @@ plugins:
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
     - nexus.observe.otel
     - nexus.observe.thinking
 
@@ -54,10 +53,6 @@ plugins:
   nexus.memory.capped:
     max_messages: 10
     persist: false
-
-  nexus.observe.logger:
-    output: stderr
-    level: warn
 
   # Point at a port that should never have a collector listening — connection
   # failure is the expected case. Plugin must not crash on this.

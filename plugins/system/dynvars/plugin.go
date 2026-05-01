@@ -24,6 +24,7 @@ type Plugin struct {
 	prompts *engine.PromptRegistry
 	session *engine.SessionWorkspace
 	system  *engine.SystemInfo
+	replay  *engine.ReplayState
 	config  varConfig
 }
 
@@ -56,6 +57,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.prompts = ctx.Prompts
 	p.session = ctx.Session
 	p.system = ctx.System
+	p.replay = ctx.Replay
 
 	if v, ok := ctx.Config["date"].(bool); ok {
 		p.config.Date = v
@@ -95,6 +97,14 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 
 func (p *Plugin) buildSection() string {
 	var lines []string
+
+	// Replay caveat: time.Now() and os.Getwd() are non-deterministic. The
+	// llm.response is served from the journaled stash so the output is
+	// stable, but the system prompt diverges from the original run. Warn
+	// once so it shows up in replay diagnostics.
+	if p.replay != nil && p.replay.Active() {
+		engine.NondeterministicWarn(p.logger, "dynvars: time.Now / os.Getwd during replay")
+	}
 
 	now := time.Now()
 

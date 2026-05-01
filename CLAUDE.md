@@ -104,9 +104,8 @@ plugins/
   embeddings/mock/       # embeddings.provider adapter: deterministic hash-based vectors; no network, opt-in via plugins.active
   vectorstore/chromem/   # vector.store adapter: philippgille/chromem-go, pure Go, JSON on-disk persistence; namespaces map to collections
   rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand
-  observe/logger/        # Structured event logging
   observe/otel/          # OpenTelemetry trace export via OTLP
-  observe/thinking/      # Thinking step persistence (JSONL)
+  observe/thinking/      # Thinking step persistence (JSONL) — bus-driven, also visible in journal
   planners/dynamic/      # LLM-generated execution plans
   planners/static/       # Config-defined fixed execution plans
   skills/                # Skill discovery and catalog

@@ -33,7 +33,6 @@ import (
 	vectorplugin "github.com/frankbardon/nexus/plugins/memory/vector"
 
 	// Observer plugins.
-	"github.com/frankbardon/nexus/plugins/observe/logger"
 	otelplugin "github.com/frankbardon/nexus/plugins/observe/otel"
 	thinkingplugin "github.com/frankbardon/nexus/plugins/observe/thinking"
 
@@ -128,7 +127,6 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.memory.vector", vectorplugin.New)
 
 	// Observers
-	r.Register("nexus.observe.logger", logger.New)
 	r.Register("nexus.observe.thinking", thinkingplugin.New)
 	r.Register("nexus.observe.otel", otelplugin.New)
 

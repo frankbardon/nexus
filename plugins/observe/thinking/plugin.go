@@ -2,27 +2,31 @@ package thinking
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
-	"github.com/frankbardon/nexus/pkg/events"
 )
 
 const (
 	pluginID   = "nexus.observe.thinking"
 	pluginName = "Thinking Observer"
-	version    = "0.1.0"
+	version    = "0.2.0"
 )
 
-// Plugin persists thinking steps and plan progress events to session JSONL files.
+// Plugin is a marker observer for thinking.step and plan.progress events.
+// The journal is the single source of truth for these events — every
+// envelope on the bus lands in the per-session journal, so anything that
+// needs the thinking history reads it from there (live via
+// journal.Writer.SubscribeProjection, or post-mortem via
+// journal.ProjectFile).
+//
+// This plugin no longer writes derived JSONL files; its presence in
+// plugins.active acts as a UI feature flag that TUI / browser shells use
+// to enable thinking-related UI affordances. The Subscriptions() entries
+// are retained so the plugin shows up in registry / manifest tooling that
+// inventories which event types each plugin attends to.
 type Plugin struct {
-	bus     engine.EventBus
-	logger  *slog.Logger
-	session *engine.SessionWorkspace
-	unsubs  []func()
+	logger *slog.Logger
 }
 
 // New creates a new thinking observer plugin.
@@ -38,30 +42,14 @@ func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
-	p.bus = ctx.Bus
 	p.logger = ctx.Logger
-	p.session = ctx.Session
-
-	// Low priority (90) — observer role, runs after primary handlers.
-	p.unsubs = append(p.unsubs,
-		p.bus.Subscribe("thinking.step", p.handleThinkingStepEvent,
-			engine.WithPriority(90), engine.WithSource(pluginID)),
-		p.bus.Subscribe("plan.progress", p.handlePlanProgressEvent,
-			engine.WithPriority(90), engine.WithSource(pluginID)),
-	)
-
-	p.logger.Info("thinking observer initialized")
+	p.logger.Info("thinking observer initialized — journal is source of truth for thinking.step + plan.progress")
 	return nil
 }
 
 func (p *Plugin) Ready() error { return nil }
 
-func (p *Plugin) Shutdown(_ context.Context) error {
-	for _, unsub := range p.unsubs {
-		unsub()
-	}
-	return nil
-}
+func (p *Plugin) Shutdown(_ context.Context) error { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
@@ -70,72 +58,4 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	}
 }
 
-func (p *Plugin) Emissions() []string {
-	return nil
-}
-
-func (p *Plugin) handleThinkingStepEvent(event engine.Event[any]) {
-	step, ok := event.Payload.(events.ThinkingStep)
-	if !ok {
-		return
-	}
-	p.persistThinkingStep(step)
-}
-
-func (p *Plugin) handlePlanProgressEvent(event engine.Event[any]) {
-	progress, ok := event.Payload.(events.PlanProgress)
-	if !ok {
-		return
-	}
-	p.persistPlanProgress(progress)
-}
-
-func (p *Plugin) persistThinkingStep(step events.ThinkingStep) {
-	ts := step.Timestamp
-	if ts.IsZero() {
-		ts = time.Now()
-	}
-
-	entry := map[string]any{
-		"turn_id":   step.TurnID,
-		"source":    step.Source,
-		"content":   step.Content,
-		"phase":     step.Phase,
-		"timestamp": ts.Format(time.RFC3339),
-	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		p.logger.Error("failed to marshal thinking step", "error", err)
-		return
-	}
-	data = append(data, '\n')
-
-	path := fmt.Sprintf("plugins/%s/thinking.jsonl", pluginID)
-	if err := p.session.AppendFile(path, data); err != nil {
-		p.logger.Error("failed to persist thinking step", "error", err)
-	}
-}
-
-func (p *Plugin) persistPlanProgress(progress events.PlanProgress) {
-	entry := map[string]any{
-		"turn_id":   progress.TurnID,
-		"plan_id":   progress.PlanID,
-		"step_id":   progress.StepID,
-		"status":    progress.Status,
-		"detail":    progress.Detail,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		p.logger.Error("failed to marshal plan progress", "error", err)
-		return
-	}
-	data = append(data, '\n')
-
-	path := fmt.Sprintf("plugins/%s/progress.jsonl", pluginID)
-	if err := p.session.AppendFile(path, data); err != nil {
-		p.logger.Error("failed to persist plan progress", "error", err)
-	}
-}
+func (p *Plugin) Emissions() []string { return nil }

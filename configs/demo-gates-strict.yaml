@@ -57,7 +57,6 @@ plugins:
     - nexus.gate.output_length
     - nexus.gate.content_safety
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.llm.anthropic:
     api_key_env: ANTHROPIC_API_KEY
@@ -96,6 +95,3 @@ plugins:
     max_messages: 20
     persist: true
 
-  nexus.observe.logger:
-    output: stderr
-    level: info

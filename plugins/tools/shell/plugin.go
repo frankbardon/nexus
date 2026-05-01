@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -24,6 +25,7 @@ type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
+	replay  *engine.ReplayState
 
 	allowedCommands []string
 	workingDir      string
@@ -31,7 +33,13 @@ type Plugin struct {
 	timeout         time.Duration
 	sandbox         bool
 	unsubs          []func()
+
+	liveCalls atomic.Uint64
 }
+
+// LiveCalls returns the count of tool.invoke handlers that survived the
+// replay short-circuit. Tests assert zero during replay.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 // New creates a new shell tool plugin.
 func New() engine.Plugin {
@@ -51,6 +59,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
+	p.replay = ctx.Replay
 
 	// Parse allowed commands.
 	if ac, ok := ctx.Config["allowed_commands"].([]any); ok {
@@ -169,6 +178,11 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 }
 
 func (p *Plugin) handleInvoke(tc events.ToolCall) {
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
+
 	command, _ := tc.Arguments["command"].(string)
 	if command == "" {
 		p.emitResult(tc, "", "command argument is required", nil)

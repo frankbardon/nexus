@@ -31,6 +31,7 @@ source, update this page in the same commit.
 ```yaml
 core:           # engine-level settings
 capabilities:   # capability → plugin-ID pinning (optional)
+journal:        # durable per-session event log (always on; tunables only)
 plugins:
   active: []    # plugin IDs (with optional /instance suffix)
   <plugin.id>:  # per-plugin config map
@@ -41,6 +42,7 @@ plugins:
 |----------------|--------|---------|-----------------------------------------------------------------------------|
 | `core`         | map    | *(see core section)* | Engine-level settings (logging, sessions, models). |
 | `capabilities` | map    | *(empty)* | Pin capability names to specific provider plugin IDs (e.g. `search.provider: nexus.search.brave`). Overrides default resolution (first active provider). |
+| `journal`      | map    | *(see journal section)* | Tuning knobs for the always-on event journal. The journal cannot be disabled. |
 | `plugins.active` | list | `[]`    | Plugin IDs to activate. Order doesn't matter — `Requires()` and `Dependencies()` are resolved automatically. Multi-instance plugins use a slash suffix: `nexus.agent.subagent/researcher`. |
 | `plugins.<id>` | map    | *(none)* | Per-plugin configuration. Keys other than `active` are treated as plugin IDs. |
 
@@ -108,6 +110,105 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+## Journal
+
+The journal is the engine's always-on durable event log. Every dispatched
+bus event lands as a JSONL envelope at
+`<sessions.root>/<session_id>/journal/events.jsonl` with a monotonic per-
+session sequence number, the parent dispatch's seq (best-effort), and the
+veto outcome for `before:*` events. The journal cannot be disabled — it is
+core infrastructure underpinning crash recovery, deterministic replay, and
+observability projections.
+
+```yaml
+journal:
+  fsync: turn-boundary       # turn-boundary | every-event | none
+  retain_days: 30
+  rotate_size_mb: 4
+```
+
+| Key              | Type   | Default          | Description |
+|------------------|--------|------------------|-------------|
+| `fsync`          | string | `turn-boundary`  | Disk-flush policy. `turn-boundary` fsyncs once per `agent.turn.end` (good throughput, recovers to last completed turn). `every-event` fsyncs after every envelope (strongest crash guarantee). `none` skips explicit fsync (test-only). |
+| `retain_days`    | int    | `30`             | Age in days past which a session's journal directory is removed on engine boot. `0` disables sweeping. In-flight sessions are never touched. |
+| `rotate_size_mb` | int    | `4`              | Active segment size threshold (MiB). When `agent.turn.end` lands and the active segment exceeds this, it is compressed into `events-NNN.jsonl.zst` and the active segment is truncated. |
+
+### Disk layout
+
+```
+~/.nexus/sessions/<id>/journal/
+  header.json                 # schema_version, created_at, fsync_mode, session_id
+  events.jsonl                # active segment (append-only)
+  events-001.jsonl.zst        # rotated, zstd-compressed
+  events-002.jsonl.zst
+  cache/                      # args-keyed tool result cache
+    <tool_id>/
+      <sha256>.json           # one file per (tool, canonical_args) pair
+```
+
+### Tool result cache
+
+Every `tool.invoke` / `tool.result` pair is recorded under `journal/cache/`
+keyed by `sha256(tool_id || canonical_args)`. During replay, the
+short-circuit helper consults the cache first — same args produce the
+same result regardless of dispatch order, so replay survives memory-state
+divergence between the original and replay runs. On cache miss, the
+helper falls back to the FIFO stash seeded by the coordinator from the
+journal's `tool.result` events.
+
+The canonical args hash sorts keys recursively, so two semantically
+equivalent argument maps with different key iteration order map to the
+same cache file.
+
+### Journal projections
+
+Plugins that need to derive files from event streams register a
+projection via `Journal.SubscribeProjection(types, handler)`. The
+handler fires on the writer's drain goroutine after the envelope lands
+on disk, so derived files always lag the durable record by zero
+envelopes. Projections also drive post-mortem regeneration:
+`journal.ProjectFile(dir, types, handler)` walks an existing journal
+and feeds the same handler — a derived file deleted between runs will
+rebuild from the journal at the next boot.
+
+The shipped `nexus.observe.thinking` plugin no longer uses this hook
+itself: its `thinking.step` and `plan.progress` events are already in
+the journal alongside every other event, so the plugin acts purely as
+a UI feature flag for shells that want to surface thinking. Custom
+plugins that need their own derived view should adopt the projection
+pattern.
+
+### Deterministic replay
+
+`bin/nexus -config <path> -replay <session-id>` re-runs a journaled session
+without external calls. The Anthropic / OpenAI / Gemini providers and the
+side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`)
+detect replay mode and emit the next journaled `llm.response` /
+`tool.result` from a FIFO stash seeded from the source journal in seq
+order. The replay coordinator drives `io.input` events; the live agent
+loop reacts as if the inputs were fresh.
+
+Replay produces functional equivalence (same final assistant outputs,
+same memory state) rather than byte-identical event re-emission. Side-
+effecting plugins expose a `LiveCalls()` counter that stays at zero
+during replay — tests assert this to catch regressions.
+
+### Crash recovery
+
+`bin/nexus -config <path> -recall <session-id>` resumes a session whose
+journal ended mid-turn. The engine detects the partial turn via
+`coord.IsPartialTurn()`, restores conversational memory from
+`context/conversation.jsonl`, and re-emits the `io.input` that started
+the unfinished turn so the live ReAct loop restarts it.
+
+Phase 3 minimum: the partial turn restarts from scratch rather than
+mid-step resume. Mid-step resume (replay-stash-short-circuit the
+completed prefix, then live-fire the unanswered `tool.invoke`) is a
+future PR. Re-firing the input after a crash mints fresh seqs that
+append to the same journal alongside the orphaned partial-turn events;
+a subsequent `--replay` of a crash-resumed session sees both the
+orphaned and the re-fired `io.input`.
 
 ## Plugin activation
 
@@ -717,24 +818,13 @@ Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file
 
 ## Observers
 
-### `nexus.observe.logger`
-
-Source: `plugins/observe/logger/plugin.go`. Acts as a sink on the engine's
-`LoggingHost` plus a bus event recorder.
-
-| Key                   | Type   | Default     | Description |
-|-----------------------|--------|-------------|-------------|
-| `log_messages`        | bool   | `true`      | Capture slog records to `messages.jsonl`. |
-| `log_events`          | bool   | `true`      | Capture bus events to `events.jsonl`. |
-| `level`               | string | `info`      | Minimum log level. |
-| `messages_file_path`  | string | *(none)*    | Override `messages.jsonl` location (otherwise per-session). |
-| `events_file_path`    | string | *(none)*    | Override `events.jsonl` location. |
-| `exclude_events`      | list   | *(none)*    | Event types to skip. |
-
 ### `nexus.observe.thinking`
 
-Source: `plugins/observe/thinking/plugin.go`. **No configuration.** Persists
-`thinking.step` and `plan.progress` events to JSONL files.
+Source: `plugins/observe/thinking/plugin.go`. **No configuration.** Marker
+plugin: presence in `plugins.active` lets terminal and browser shells
+enable thinking-related UI. The events themselves are journaled
+automatically and can be read live via `journal.Writer.SubscribeProjection`
+or post-mortem via `journal.ProjectFile`.
 
 ### `nexus.observe.otel`
 

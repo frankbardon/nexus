@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -34,10 +35,13 @@ type Plugin struct {
 	bus     engine.EventBus
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
+	replay  *engine.ReplayState
 
 	client *http.Client
 	cache  *urlCache
 	unsubs []func()
+
+	liveCalls atomic.Uint64
 
 	// search config
 	defaultCount      int
@@ -88,6 +92,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
+	p.replay = ctx.Replay
 
 	if err := p.loadConfig(ctx.Config); err != nil {
 		return err
@@ -207,6 +212,13 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if tc.Name != "web_search" && tc.Name != "web_fetch" {
+		return
+	}
+	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
+		return
+	}
+	p.liveCalls.Add(1)
 	switch tc.Name {
 	case "web_search":
 		p.handleSearch(tc)
@@ -214,6 +226,10 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 		p.handleFetch(tc)
 	}
 }
+
+// LiveCalls returns the count of web_search/web_fetch invocations that
+// survived the replay short-circuit. Tests assert zero during replay.
+func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 func (p *Plugin) handleSessionEnd(_ engine.Event[any]) {
 	if p.cache != nil {

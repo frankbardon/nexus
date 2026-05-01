@@ -23,7 +23,6 @@ plugins:
     - nexus.agent.react
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
 
     # RAG primitives. Both capabilities auto-activate when required by
     # nexus.tool.knowledge_search and nexus.memory.vector, but listing them here
@@ -105,6 +104,3 @@ plugins:
     auto_store_compaction: true
     auto_store_user_input: false
 
-  nexus.observe.logger:
-    output: stderr
-    level: warn

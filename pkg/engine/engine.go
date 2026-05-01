@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/events"
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +35,15 @@ type Engine struct {
 	// the same FanoutHandler that backs Logger — exposed here so embedders
 	// can register their own sinks without waiting for a plugin to do it.
 	Logging LoggingHost
+	// Journal is the durable per-session event log. Always non-nil after
+	// Boot (or ResumeSession) succeeds; closed by Stop. The bus's wildcard
+	// dispatch feeds it via a writer goroutine, so handler latency does not
+	// block I/O.
+	Journal *journal.Writer
+	// Replay is the engine-wide replay coordination point. Always non-nil
+	// after construction; idle until a replay coordinator activates it.
+	// Plugins inspect Replay.Active() to short-circuit side effects.
+	Replay *ReplayState
 
 	// RecallSessionID, when set, causes Boot to resume an existing session
 	// instead of creating a new one.
@@ -98,7 +109,11 @@ func newFromConfig(cfg *Config) *Engine {
 	}
 	logger := slog.New(fanout)
 
-	bus := NewEventBusWithRingSize(cfg.Core.Logging.BufferSize)
+	// The bus ring is sized for the boot-time pre-subscription gap only;
+	// LoggingConfig.BufferSize sizes the slog fanout above and is not
+	// shared with the bus ring anymore — durable event history lives in
+	// the journal.
+	bus := NewEventBus()
 	registry := NewPluginRegistry()
 	models := NewModelRegistry(cfg.Core.ModelsRaw)
 	prompts := NewPromptRegistry()
@@ -107,6 +122,8 @@ func newFromConfig(cfg *Config) *Engine {
 	lifecycle := NewLifecycleManager(registry, bus, cfg, logger, models, prompts, schemas, system)
 	lifecycle.logging = fanout
 	ctxMgr := NewContextManager(bus, logger)
+	replay := NewReplayState()
+	lifecycle.replay = replay
 
 	return &Engine{
 		Config:    cfg,
@@ -120,6 +137,7 @@ func newFromConfig(cfg *Config) *Engine {
 		System:    system,
 		Logger:    logger,
 		Logging:   fanout,
+		Replay:    replay,
 	}
 }
 
@@ -135,8 +153,26 @@ func newFromConfig(cfg *Config) *Engine {
 // The CLI convenience wrapper Run calls Boot + wait-for-signal-or-session-end
 // + Stop in a single blocking call.
 func (e *Engine) Boot(ctx context.Context) error {
+	// Two-phase session startup: create the workspace directory first so
+	// the journal writer has a place to land its files, subscribe the
+	// writer, then publish the session-start metadata + event so they are
+	// the first entries the journal records (seq=1+).
 	if e.RecallSessionID != "" {
-		if err := e.ResumeSession(e.RecallSessionID); err != nil {
+		if err := e.prepareResumeSession(e.RecallSessionID); err != nil {
+			return fmt.Errorf("session recall failed: %w", err)
+		}
+	} else {
+		if err := e.prepareSession(); err != nil {
+			return fmt.Errorf("session start failed: %w", err)
+		}
+	}
+
+	if err := e.startJournal(); err != nil {
+		return fmt.Errorf("starting journal: %w", err)
+	}
+
+	if e.RecallSessionID != "" {
+		if err := e.announceResume(); err != nil {
 			return fmt.Errorf("session recall failed: %w", err)
 		}
 	} else {
@@ -144,6 +180,13 @@ func (e *Engine) Boot(ctx context.Context) error {
 			return fmt.Errorf("session start failed: %w", err)
 		}
 	}
+
+	// Sweep aged journals from prior sessions in the background — a slow
+	// filesystem must not delay the active session's boot.
+	go func() {
+		root := ExpandPath(e.Config.Core.Sessions.Root)
+		_ = journal.Sweep(root, e.Config.Journal.RetainDays)
+	}()
 
 	if err := e.Lifecycle.Boot(ctx); err != nil {
 		return fmt.Errorf("boot failed: %w", err)
@@ -153,6 +196,14 @@ func (e *Engine) Boot(ctx context.Context) error {
 	if e.RecallSessionID != "" {
 		if err := e.replayHistory(); err != nil {
 			e.Logger.Warn("failed to replay conversation history", "error", err)
+		}
+		// Crash recovery: if the recalled session's journal ends mid-turn,
+		// re-fire the io.input that started the unfinished turn so the
+		// agent restarts and completes it. The agent's memory has already
+		// been restored from conversation.jsonl; re-emitting the input is
+		// what kicks the live ReAct loop back into motion.
+		if err := e.crashResumeIfPartial(); err != nil {
+			e.Logger.Warn("crash resume failed", "error", err)
 		}
 	}
 
@@ -279,6 +330,124 @@ func (e *Engine) Boot(ctx context.Context) error {
 	return nil
 }
 
+// crashResumeIfPartial inspects the current session's journal for an
+// unfinished turn and, if present, re-emits the io.input that started it
+// so the live agent restarts the turn from scratch. Idempotent — a
+// well-formed journal (no partial turn) is a no-op.
+//
+// Phase 3 minimum: restart the partial turn rather than mid-step resume.
+// The agent's memory has already been restored via replayHistory; the
+// only missing piece is the in-flight bus state, which is reconstructed
+// by re-firing the input. Mid-step resume (re-emit the in-flight
+// tool.invoke after replay-stash short-circuits the completed prefix) is
+// a future PR.
+//
+// Caveat: re-firing the input mints fresh seqs that append to the same
+// journal alongside the orphaned partial-turn events. A subsequent
+// --replay against this session will see both the orphaned io.input and
+// the re-fired one. Document but do not fix in this pass.
+func (e *Engine) crashResumeIfPartial() error {
+	if e.Session == nil {
+		return nil
+	}
+	journalDir := filepath.Join(e.Session.RootDir, "journal")
+	coord, err := journal.NewCoordinator(journalDir, e.Bus, e.Replay, journal.CoordinatorOptions{
+		Logger:           e.Logger.With("subsystem", "crash-resume"),
+		PayloadConverter: replayPayloadConverter,
+	})
+	if err != nil {
+		// Missing journal is fine — older sessions predate Phase 1.
+		return nil
+	}
+	if !coord.IsPartialTurn() {
+		return nil
+	}
+	partial, ok := coord.PartialInput()
+	if !ok {
+		e.Logger.Info("crash resume: partial turn detected but no io.input above the boundary",
+			"last_turn_end_seq", func() uint64 {
+				s, _ := coord.LastTurnBoundary()
+				return s
+			}())
+		return nil
+	}
+	payload, _ := replayPayloadConverter("io.input", partial.Payload)
+	e.Logger.Info("crash resume: re-emitting partial io.input",
+		"original_seq", partial.Seq,
+		"last_turn_end_seq", func() uint64 {
+			s, _ := coord.LastTurnBoundary()
+			return s
+		}())
+	return e.Bus.Emit("io.input", payload)
+}
+
+// replayPayloadConverter rehydrates a journal-deserialized payload (a
+// map[string]any after JSON round-trip) into the typed struct that live
+// subscribers expect. Centralized here because the journal package cannot
+// import the events package, and per-call type switches in the coordinator
+// would scatter event-type knowledge across both packages.
+func replayPayloadConverter(eventType string, payload any) (any, error) {
+	switch eventType {
+	case "io.input":
+		return journal.PayloadAs[events.UserInput](payload)
+	case "llm.response":
+		return journal.PayloadAs[events.LLMResponse](payload)
+	case "tool.result":
+		return journal.PayloadAs[events.ToolResult](payload)
+	default:
+		return payload, nil
+	}
+}
+
+// ReplaySession runs deterministic replay against a previously-journaled
+// session. The engine must already be booted; the caller is responsible
+// for Stop afterward.
+//
+// Replay opens the source session's journal at <sessions.root>/<id>/journal,
+// seeds the engine's ReplayState with journaled responses, and re-emits
+// io.input events in seq order. Side-effecting plugins (LLM providers,
+// tools) detect engine.Replay.Active() and pop stashed responses instead
+// of calling out. The current session (the one this engine booted) writes
+// its own fresh journal — the source is read-only.
+//
+// For Phase 2, replay produces functional equivalence (same final
+// assistant outputs) rather than byte-identical event re-emission. Phase 3
+// will extend this to crash-resume, where partial-turn detection picks up
+// the live mode after replay completes.
+func (e *Engine) ReplaySession(ctx context.Context, sourceSessionID string) error {
+	if e.Session == nil {
+		return fmt.Errorf("engine not booted")
+	}
+	if e.Replay == nil {
+		return fmt.Errorf("replay state missing")
+	}
+
+	root := ExpandPath(e.Config.Core.Sessions.Root)
+	sourceJournal := filepath.Join(root, sourceSessionID, "journal")
+
+	coord, err := journal.NewCoordinator(sourceJournal, e.Bus, e.Replay, journal.CoordinatorOptions{
+		TurnTimeout:      30 * time.Second,
+		Logger:           e.Logger.With("subsystem", "replay"),
+		PayloadConverter: replayPayloadConverter,
+	})
+	if err != nil {
+		return fmt.Errorf("coordinator: %w", err)
+	}
+
+	// Wire turn-end synchronization so the coordinator waits for the live
+	// agent to finish each turn before re-emitting the next io.input.
+	coord.AttachTurnSync(func(handler func(seq uint64)) func() {
+		return e.Bus.Subscribe("agent.turn.end", func(_ Event[any]) {
+			handler(0)
+		})
+	})
+
+	if err := coord.Run(ctx); err != nil {
+		return fmt.Errorf("replay run: %w", err)
+	}
+	return nil
+}
+
 // Stop tears down the run-scoped state installed by Boot: the tick heartbeat,
 // run-scoped bus subscriptions, session metadata finalization, and plugin
 // shutdown in reverse dependency order. Stop is safe to call from a host's
@@ -300,7 +469,105 @@ func (e *Engine) Stop(ctx context.Context) error {
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
 
+	// Close the journal last so any teardown events (plugin Shutdown,
+	// session.end finalization) reach disk. Use a short-deadline context
+	// so a stuck drain cannot block engine shutdown indefinitely.
+	if e.Journal != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = e.Journal.Close(closeCtx)
+		cancel()
+		e.Journal = nil
+	}
+
 	return nil
+}
+
+// startJournal constructs the per-session journal writer and installs the
+// bus wildcard handler that feeds it. Called from Boot after the session
+// workspace exists and before any plugin Init runs.
+func (e *Engine) startJournal() error {
+	if e.Session == nil {
+		return fmt.Errorf("no session workspace")
+	}
+	bus, ok := e.Bus.(journal.SeqSource)
+	if !ok {
+		return fmt.Errorf("bus does not implement journal.SeqSource")
+	}
+
+	journalDir := filepath.Join(e.Session.RootDir, "journal")
+	rotateBytes := int64(e.Config.Journal.RotateSizeMB) << 20
+	if rotateBytes <= 0 {
+		rotateBytes = 4 << 20
+	}
+
+	// On session recall the journal dir already exists with prior seqs.
+	// Prime both the bus counter and the writer's drain so freshly-
+	// dispatched events continue monotonically and the writer's reorder
+	// buffer does not stall waiting for a seq the new run will not produce.
+	var initialSeq uint64 = 1
+	if existing, err := journal.Open(journalDir); err == nil {
+		if last, lerr := existing.LastSeq(); lerr == nil && last > 0 {
+			if ctrl, ok := e.Bus.(SeqController); ok {
+				ctrl.SetSeqFloor(last)
+			}
+			initialSeq = last + 1
+		}
+	}
+
+	w, err := journal.NewWriter(journalDir, journal.WriterOptions{
+		FsyncMode:     journal.ParseFsyncMode(e.Config.Journal.Fsync),
+		RotateBytes:   rotateBytes,
+		BufferSize:    1024,
+		SchemaVersion: journal.SchemaVersion,
+		SessionID:     e.Session.ID,
+		InitialSeq:    initialSeq,
+	})
+	if err != nil {
+		return err
+	}
+	e.Journal = w
+	e.Lifecycle.journal = w
+
+	// Tool result cache: args-keyed disk cache rooted at journal/cache/.
+	// Bus subscriptions auto-populate it on every tool.invoke / tool.result
+	// pair, so live tools require no per-plugin wiring. Replay short-
+	// circuits look up here before the FIFO stash.
+	cacheDir := filepath.Join(journalDir, "cache")
+	toolCache := NewToolCache(cacheDir, e.Logger.With("subsystem", "toolcache"))
+	e.Replay.SetToolCache(toolCache)
+	e.runUnsubs = append(e.runUnsubs, toolCache.Install(e.Bus)...)
+
+	// Wildcard handler builds an envelope for every dispatched event. Seq
+	// + ParentSeq are pulled from the bus's per-goroutine dispatch stack
+	// (assigned at EmitEvent / EmitVetoable entry, before typed handlers).
+	unsub := e.Bus.SubscribeAll(func(ev Event[any]) {
+		env := buildEnvelope(ev, bus.CurrentSeq(), bus.ParentSeq())
+		w.Append(env)
+	})
+	e.runUnsubs = append(e.runUnsubs, unsub)
+	return nil
+}
+
+// buildEnvelope materializes the on-disk record from an in-flight event.
+// Detects vetoable events via the *VetoablePayload wrapper so the journal
+// records the veto outcome without a separate envelope.
+func buildEnvelope(ev Event[any], seq, parentSeq uint64) *journal.Envelope {
+	env := &journal.Envelope{
+		Seq:        seq,
+		ParentSeq:  parentSeq,
+		Ts:         ev.Timestamp,
+		Type:       ev.Type,
+		EventID:    ev.ID,
+		Source:     ev.Source,
+		SideEffect: journal.IsSideEffect(ev.Type),
+		Payload:    ev.Payload,
+	}
+	if vp, ok := ev.Payload.(*VetoablePayload); ok {
+		env.Vetoed = vp.Veto.Vetoed
+		env.VetoReason = vp.Veto.Reason
+		env.Payload = vp.Original
+	}
+	return env
 }
 
 // SessionEnded returns a channel that is signalled when a plugin emits
@@ -353,9 +620,21 @@ func (e *Engine) Run(ctx context.Context) error {
 	return e.Stop(context.Background())
 }
 
-// ResumeSession loads an existing session workspace for recall.
-// It restores the session workspace and emits a session recall event.
+// ResumeSession loads an existing session workspace for recall and emits
+// the session-start event. Like StartSession, it is split into a workspace-
+// load phase (no events) and an announce phase (the io.session.start emit)
+// so the journal writer can subscribe between them.
 func (e *Engine) ResumeSession(sessionID string) error {
+	if e.Session == nil {
+		if err := e.prepareResumeSession(sessionID); err != nil {
+			return err
+		}
+	}
+	return e.announceResume()
+}
+
+// prepareResumeSession loads the workspace without emitting any bus events.
+func (e *Engine) prepareResumeSession(sessionID string) error {
 	root := ExpandPath(e.Config.Core.Sessions.Root)
 
 	session, err := LoadSessionWorkspace(root, sessionID, e.Bus)
@@ -364,12 +643,18 @@ func (e *Engine) ResumeSession(sessionID string) error {
 	}
 	e.Session = session
 	e.Lifecycle.session = session
+	return nil
+}
 
-	e.Logger.Info("session recalled", "session_id", session.ID, "root", session.RootDir)
-
+// announceResume emits the io.session.start event for a resumed session.
+func (e *Engine) announceResume() error {
+	if e.Session == nil {
+		return fmt.Errorf("no session to announce")
+	}
+	e.Logger.Info("session recalled", "session_id", e.Session.ID, "root", e.Session.RootDir)
 	return e.Bus.Emit("io.session.start", map[string]any{
-		"session_id": session.ID,
-		"root_dir":   session.RootDir,
+		"session_id": e.Session.ID,
+		"root_dir":   e.Session.RootDir,
 		"recalled":   true,
 	})
 }
@@ -425,16 +710,19 @@ func (e *Engine) EndSession() {
 	_ = e.Session.SaveMeta(meta)
 }
 
-// StartSession creates a new session workspace and emits the session start event.
+// StartSession creates a new session workspace, writes its initial metadata
+// artifacts, and emits the session start event. The artifact writes go via
+// SessionWorkspace.WriteFile, which dispatches session.file.created on the
+// bus — so the journal must be running before this is called for those
+// events to be captured. Boot enforces that ordering.
 func (e *Engine) StartSession() error {
-	root := ExpandPath(e.Config.Core.Sessions.Root)
-
-	session, err := NewSessionWorkspace(root, e.Bus)
-	if err != nil {
-		return fmt.Errorf("creating session workspace: %w", err)
+	if e.Session == nil {
+		if err := e.prepareSession(); err != nil {
+			return err
+		}
 	}
-	e.Session = session
-	e.Lifecycle.session = session
+
+	session := e.Session
 
 	// Write config snapshot to metadata.
 	if cfgData, err := yaml.Marshal(e.Config); err == nil {
@@ -462,6 +750,23 @@ func (e *Engine) StartSession() error {
 		"session_id": session.ID,
 		"root_dir":   session.RootDir,
 	})
+}
+
+// prepareSession creates the session workspace directory without emitting
+// any bus events. Boot calls this before startJournal so the workspace
+// exists for the writer to land its files in, while io.session.start and
+// the metadata-artifact writes are deferred until after the writer is
+// subscribed.
+func (e *Engine) prepareSession() error {
+	root := ExpandPath(e.Config.Core.Sessions.Root)
+
+	session, err := NewSessionWorkspace(root, e.Bus)
+	if err != nil {
+		return fmt.Errorf("creating session workspace: %w", err)
+	}
+	e.Session = session
+	e.Lifecycle.session = session
+	return nil
 }
 
 // parseLogLevel converts a string log level to slog.Level.

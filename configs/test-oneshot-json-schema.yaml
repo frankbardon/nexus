@@ -65,7 +65,6 @@ plugins:
     - nexus.agent.react
     - nexus.gate.json_schema
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.io.test:
     inputs:
@@ -88,6 +87,3 @@ plugins:
     max_messages: 10
     persist: false
 
-  nexus.observe.logger:
-    output: stderr
-    level: info

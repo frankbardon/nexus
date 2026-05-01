@@ -87,7 +87,7 @@ nexus.llm.gemini:
     include_thoughts: true   # surface thought parts to the bus
 ```
 
-Response parts with `thought: true` are emitted as `thinking.step` events (`Source: nexus.llm.gemini`, `Phase: reasoning`) and are excluded from `LLMResponse.Content`. The `nexus.observe.thinking` plugin persists them to `plugins/nexus.observe.thinking/thinking.jsonl` automatically. `usageMetadata.thoughtsTokenCount` is mirrored into `events.Usage.ReasoningTokens`.
+Response parts with `thought: true` are emitted as `thinking.step` events (`Source: nexus.llm.gemini`, `Phase: reasoning`) and are excluded from `LLMResponse.Content`. Every `thinking.step` event lands in the per-session journal automatically — read it via `journal.Writer.SubscribeProjection` (live) or `journal.ProjectFile` (post-mortem). `usageMetadata.thoughtsTokenCount` is mirrored into `events.Usage.ReasoningTokens`.
 
 ### Multimodal
 

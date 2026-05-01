@@ -58,7 +58,6 @@ plugins:
     - nexus.gate.tool_filter
 
     # Observability
-    - nexus.observe.logger
     - nexus.observe.thinking
 
   nexus.llm.anthropic:
@@ -140,6 +139,3 @@ plugins:
       - web_search
       - web_fetch
 
-  nexus.observe.logger:
-    output: stderr
-    level: warn

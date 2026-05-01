@@ -34,7 +34,6 @@ func TestKitchenSink_Boot(t *testing.T) {
 		"nexus.skills",
 		"nexus.memory.capped",
 		"nexus.memory.longterm",
-		"nexus.observe.logger",
 		"nexus.observe.thinking",
 	)
 	h.AssertEventEmitted("io.session.start")

@@ -33,7 +33,6 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.io.oneshot:
     input: ""             # inline prompt, or leave empty to use another source

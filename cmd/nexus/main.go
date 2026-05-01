@@ -23,12 +23,18 @@ func main() {
 
 	configPath := flag.String("config", "nexus.yaml", "path to config file")
 	recallSession := flag.String("recall", "", "session ID to recall and resume")
+	replaySession := flag.String("replay", "", "session ID to replay deterministically (no external calls)")
 	flag.Parse()
 
-	// When recalling, load config from the session's snapshot.
+	// When recalling or replaying, load config from the source session's
+	// snapshot so the replay matches the original plugin set.
 	effectiveConfig := *configPath
-	if *recallSession != "" {
-		snapshotPath, err := engine.SessionConfigSnapshotPath(*configPath, *recallSession)
+	sourceForSnapshot := *recallSession
+	if *replaySession != "" {
+		sourceForSnapshot = *replaySession
+	}
+	if sourceForSnapshot != "" {
+		snapshotPath, err := engine.SessionConfigSnapshotPath(*configPath, sourceForSnapshot)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to locate session config: %v\n", err)
 			os.Exit(1)
@@ -47,6 +53,24 @@ func main() {
 
 	// Register all built-in plugins.
 	allplugins.RegisterAll(eng.Registry)
+
+	if *replaySession != "" {
+		ctx := context.Background()
+		if err := eng.Boot(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "engine boot failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := eng.ReplaySession(ctx, *replaySession); err != nil {
+			fmt.Fprintf(os.Stderr, "replay error: %v\n", err)
+			_ = eng.Stop(context.Background())
+			os.Exit(1)
+		}
+		if err := eng.Stop(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "engine stop error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Run handles SIGINT/SIGTERM internally; embedders call Boot/Stop directly.
 	if err := eng.Run(context.Background()); err != nil {

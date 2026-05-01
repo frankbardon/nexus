@@ -43,7 +43,6 @@ plugins:
     - nexus.agent.subagent
     - nexus.gate.endless_loop
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.llm.anthropic:
     api_key_env: ANTHROPIC_API_KEY
@@ -94,10 +93,6 @@ plugins:
   #   include: [file_read, file_write]  # allowlist (only these tools)
   #   # or
   #   exclude: [shell]                  # blocklist (remove these tools)
-
-  nexus.observe.logger:
-    output: stderr
-    level: warn
 
   # nexus.observe.otel:
   #   endpoint: "localhost:4317"    # OTLP collector endpoint

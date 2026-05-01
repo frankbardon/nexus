@@ -19,9 +19,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -37,6 +39,9 @@ type Plugin struct {
 	logger  *slog.Logger
 	models  *engine.ModelRegistry
 	session *engine.SessionWorkspace
+	replay  *engine.ReplayState
+	// liveCalls counts API calls that survived the replay short-circuit.
+	liveCalls atomic.Uint64
 
 	auth    *authState
 	client  *http.Client
@@ -61,6 +66,12 @@ func New() engine.Plugin {
 	return &Plugin{}
 }
 
+// LiveCalls returns the number of llm.request handler invocations that
+// passed the replay short-circuit.
+func (p *Plugin) LiveCalls() uint64 {
+	return p.liveCalls.Load()
+}
+
 func (p *Plugin) ID() string                        { return pluginID }
 func (p *Plugin) Name() string                      { return pluginName }
 func (p *Plugin) Version() string                   { return version }
@@ -74,6 +85,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.models = ctx.Models
 	p.session = ctx.Session
 	p.prompts = ctx.Prompts
+	p.replay = ctx.Replay
 
 	if debug, ok := ctx.Config["debug"].(bool); ok {
 		p.debug = debug
@@ -193,6 +205,24 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if target, ok := req.Metadata["_target_provider"].(string); ok && target != pluginID {
 		return
 	}
+
+	if p.replay != nil && p.replay.Active() {
+		raw, ok := p.replay.Pop("llm.response")
+		if !ok {
+			p.logger.Warn("gemini: replay stash empty for llm.request — emitting empty response")
+			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			return
+		}
+		resp, err := journal.PayloadAs[events.LLMResponse](raw)
+		if err != nil {
+			p.logger.Warn("gemini: replay payload decode failed", "error", err)
+			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			return
+		}
+		_ = p.bus.Emit("llm.response", resp)
+		return
+	}
+	p.liveCalls.Add(1)
 
 	model := req.Model
 	maxTokens := req.MaxTokens

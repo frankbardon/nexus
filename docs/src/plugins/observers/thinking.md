@@ -1,6 +1,14 @@
-# Thinking Persistence
+# Thinking Observer
 
-Persists thinking steps and plan progress to the session as JSONL files. This creates an audit trail of the agent's reasoning process.
+Marker observer for `thinking.step` and `plan.progress` events. The
+plugin no longer writes derived JSONL files — the per-session
+**[journal](../../architecture/sessions.md)** is the single source of
+truth for both event types, alongside every other event on the bus.
+
+When this plugin is in `plugins.active`, terminal and browser shells
+turn on thinking-related UI affordances (e.g. dedicated "thinking"
+message styling). Without it, the events still flow on the bus and
+land in the journal — only the optional UI surface differs.
 
 ## Details
 
@@ -19,25 +27,28 @@ No configuration options.
 
 | Event | Priority | Purpose |
 |-------|----------|---------|
-| `thinking.step` | 90 | Persists thinking steps |
-| `plan.progress` | 90 | Persists plan step updates |
+| `thinking.step` | 90 | Marker subscription (no side effects) |
+| `plan.progress` | 90 | Marker subscription (no side effects) |
 
 ### Emits
 
 None.
 
-## Output Files
+## Reading the thinking history
 
-| File | Content |
-|------|---------|
-| `context/thinking.jsonl` | One JSON object per thinking step |
-| `context/plans.jsonl` | One JSON object per plan progress update |
+Thinking steps and plan progress live in
+`<session>/journal/active.jsonl` (and rotated `*.jsonl.zst` segments)
+exactly like every other event. Two ways to consume them:
 
-Both files are appended to throughout the session.
+- **Live**, in-process: subscribe to envelopes via
+  `journal.Writer.SubscribeProjection(["thinking.step", "plan.progress"], handler)`.
+  Handlers fire synchronously after the writer has flushed each
+  envelope to disk.
+- **Post-mortem**, walking the journal directory:
+  `journal.ProjectFile(journalDir, []string{"thinking.step", "plan.progress"}, handler)`.
+  Useful for regenerating derived views after a recall or crash.
 
-## Thinking Step Format
-
-Each thinking step includes:
+## Thinking Step Payload
 
 ```json
 {
@@ -49,7 +60,7 @@ Each thinking step includes:
 }
 ```
 
-Phases: `planning`, `executing`, `reasoning`
+Phases: `planning`, `executing`, `reasoning`.
 
 ## Example Configuration
 

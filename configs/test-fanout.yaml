@@ -41,7 +41,6 @@ plugins:
     - nexus.provider.fanout
     - nexus.agent.react
     - nexus.memory.capped
-    - nexus.observe.logger
 
   nexus.io.test:
     inputs:
@@ -70,6 +69,3 @@ plugins:
     max_messages: 4
     persist: false
 
-  nexus.observe.logger:
-    output: stderr
-    level: info
