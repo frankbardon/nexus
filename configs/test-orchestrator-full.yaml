@@ -1,0 +1,68 @@
+# Test: Orchestrator decomposes task, spawns workers, synthesises (live)
+# Validates: orchestrator boots with subagent dependency, decomposition emits
+# subagent.spawn events for workers, synthesis runs after workers complete.
+#
+# Live mode — calls Anthropic API. Test gates on ANTHROPIC_API_KEY via t.Skip.
+# Uses Haiku across orchestrator/worker/synthesis roles to minimise cost.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestOrchestrator
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react       # required by nexus.agent.subagent dependency
+    - nexus.agent.orchestrator
+    - nexus.agent.subagent/main
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "List two pros and two cons of static type systems. Decompose into separate subtasks for pros and cons, then merge."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 120s
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.orchestrator:
+    max_workers: 2
+    max_subtasks: 2
+    orchestrator_model_role: balanced
+    worker_model_role: quick
+    synthesis_model_role: balanced
+    fail_fast: false
+    worker_max_iterations: 4
+    system_prompt: "You are a test orchestrator. Decompose the request into 2 subtasks, spawn workers for each, then synthesise."
+
+  nexus.agent.subagent/main:
+    max_iterations: 4
+    model_role: quick
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

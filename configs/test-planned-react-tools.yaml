@@ -1,0 +1,64 @@
+# Test: ReAct + dynamic planner with thinking observer (live)
+# Validates: planning=true triggers plan.request before tool execution, dynamic
+# planner emits plan.created, react agent consumes plan.result then iterates,
+# thinking observer persists steps to session JSONL.
+#
+# Live mode — calls Anthropic API. Test gates on ANTHROPIC_API_KEY via t.Skip.
+# Uses Haiku for both planner and execution to keep cost minimal.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestPlannedReact
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.planner.dynamic
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.observe.thinking
+
+  nexus.io.test:
+    inputs:
+      - "Compute 2 plus 2 and explain the answer in one sentence."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 90s
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    planning: true
+    system_prompt: "You are a test assistant. Follow the plan provided."
+
+  nexus.planner.dynamic:
+    model_role: reasoning
+    max_steps: 3
+    approval: never
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

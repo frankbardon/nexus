@@ -4,8 +4,8 @@ The `configs/` directory holds two kinds of YAML profiles, distinguished by file
 
 - **`test-*.yaml`** — wired into the integration test harness (`pkg/testharness/`). Each
   has a matching test in `tests/integration/`. Most use `nexus.io.test` with mocked LLM
-  responses, so they run with no API key. The few that hit real providers gate on
-  `ANTHROPIC_API_KEY` (Anthropic-only tests) or `t.Skip` on missing keys.
+  responses, so they run with no API key. The "live (skip)" entries below call the real
+  Anthropic API and `t.Skip` cleanly when `ANTHROPIC_API_KEY` is unset.
 - **`demo-*.yaml`** — manual exploration profiles. Use `nexus.io.tui` or
   `nexus.io.browser` for interactive use. Run with `bin/nexus -config configs/<name>.yaml`.
   Not exercised by CI; surface for hands-on testing of features that are hard to assert
@@ -120,6 +120,9 @@ go test -tags integration ./tests/integration/ -v
 | `test-memory-simple.yaml` | `memory_test.go` | mock | Unbounded `memory.simple` provider |
 | `test-memory-summary-buffer.yaml` | `memory_test.go` | mock | Inline summarisation trigger + buffer collapse |
 | `test-oneshot-json-schema.yaml` | `oneshot_json_schema_test.go` | live | One-shot + JSON schema validation gate retry |
+| `test-orchestrator-full.yaml` | `orchestrator_test.go` | live (skip) | Orchestrator decomposes, spawns workers, synthesises |
+| `test-planexec-approval.yaml` | `planexec_approval_test.go` | live (skip) | PlanExec + dynamic planner approve/deny paths |
+| `test-planned-react-tools.yaml` | `planned_react_test.go` | live (skip) | ReAct + dynamic planner + thinking observer |
 | `test-kitchen-sink.yaml` | `kitchen_sink_test.go` | mock | All 20 plugins boot together without conflicts |
 | `test-longterm-memory.yaml` | `longterm_memory_test.go` | mock | Boot, CRUD tool registration, memory_write artifact creation |
 | `test-mixed-providers.yaml` | `mixed_providers_test.go` | mock | Anthropic + OpenAI providers boot side by side |
@@ -143,14 +146,6 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 | `demo-gemini.yaml` | Gemini api-key auth | `GEMINI_API_KEY` |
 | `demo-gemini-thinking.yaml` | Gemini 2.5 thinking parts + thinking observer JSONL | `GEMINI_API_KEY` |
 | `demo-gemini-vertex.yaml` | Gemini via Vertex AI service-account auth | `GOOGLE_APPLICATION_CREDENTIALS` |
-
-### Agent architectures
-
-| Config | What it shows |
-|--------|---------------|
-| `demo-orchestrator-full.yaml` | Orchestrator decomposition + parallel workers + synthesis |
-| `demo-planexec-approval.yaml` | PlanExec with approval-required dynamic planner |
-| `demo-planned-react-tools.yaml` | ReAct + dynamic planner + tools + thinking observer |
 
 ### IO / Browser
 
