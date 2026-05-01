@@ -1,64 +1,86 @@
 # Configuration Reference
 
-Complete reference for all YAML configuration options.
+Authoritative reference for every YAML configuration key recognized by the Nexus
+engine and its plugins. Tables are derived from each plugin's `Init()` (and any
+parser helpers it calls) — not from prose docs. If you change a config key in
+source, update this page in the same commit.
 
-## Path Expansion
+> **Maintenance rule.** Any addition, removal, rename, default change, or type
+> change to a configuration key — at the engine level or in any plugin —
+> **must** be reflected in this file. Per-plugin pages may add narrative, but
+> this page is the single source of truth.
 
-Every filesystem path supplied via configuration — engine sessions root, plugin path/dir/file fields (`scan_paths`, `system_prompt_file`, `schema_file`, `patterns_file`, `word_files`, `base_dir`, `path`, `cache_dir`, `input_file`, `output_file`, `output_dir`, ingest watch entries, etc.) — is tilde-expanded automatically. Bare `~` resolves to the user's home directory; `~/foo` resolves to `<home>/foo`. Relative paths are interpreted against the engine's working directory and not modified.
+## Conventions
 
-## File Structure
+- **Type column** uses YAML-native names (`string`, `int`, `bool`, `float`,
+  `duration`, `list`, `map`). `duration` is parsed by Go's `time.ParseDuration`
+  (e.g. `30s`, `1m`, `5m`).
+- **Default column** shows the value used when the key is absent. `*(none)*`
+  means no value is set; `*(required)*` means the plugin will fail to start
+  without it; `*(env)*` means the value is read from an environment variable.
+- **Path expansion.** Every filesystem path supplied via configuration —
+  engine `sessions.root`, plugin `path`, `dir`, `file`, `cache_dir`,
+  `scan_paths`, `system_prompt_file`, `schema_file`, `patterns_file`,
+  `word_files`, `base_dir`, `working_dir`, `path_dirs`, ingest `watch[].path`,
+  etc. — is funneled through `engine.ExpandPath`. Bare `~` resolves to the
+  user's home directory; `~/foo` resolves to `<home>/foo`. Relative paths are
+  resolved against the engine's working directory and not modified.
+
+## Top-level structure
 
 ```yaml
-core:
-  # Engine-level settings
-  ...
-
+core:           # engine-level settings
+capabilities:   # capability → plugin-ID pinning (optional)
 plugins:
-  active:
-    # List of plugin IDs to load
-    - nexus.io.tui
-    - nexus.llm.anthropic
-    - ...
-
-  # Per-plugin configuration
-  nexus.plugin.id:
+  active: []    # plugin IDs (with optional /instance suffix)
+  <plugin.id>:  # per-plugin config map
     key: value
 ```
 
-## Core Settings
+| Key            | Type   | Default | Description                                                                 |
+|----------------|--------|---------|-----------------------------------------------------------------------------|
+| `core`         | map    | *(see core section)* | Engine-level settings (logging, sessions, models). |
+| `capabilities` | map    | *(empty)* | Pin capability names to specific provider plugin IDs (e.g. `search.provider: nexus.search.brave`). Overrides default resolution (first active provider). |
+| `plugins.active` | list | `[]`    | Plugin IDs to activate. Order doesn't matter — `Requires()` and `Dependencies()` are resolved automatically. Multi-instance plugins use a slash suffix: `nexus.agent.subagent/researcher`. |
+| `plugins.<id>` | map    | *(none)* | Per-plugin configuration. Keys other than `active` are treated as plugin IDs. |
+
+## Core engine
 
 ### `core`
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `log_level` | string | `info` | Global log level: `debug`, `info`, `warn`, `error` |
-| `tick_interval` | duration | `1s` | Interval for `core.tick` heartbeat events |
-| `max_concurrent_events` | int | `100` | Maximum concurrent event dispatches |
-
-### `core.sessions`
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `root` | string | `~/.nexus/sessions` | Base directory for session storage |
-| `retention` | string | `30d` | How long to keep old sessions |
-| `id_format` | string | `timestamp` | Session ID format: `timestamp`, `datetime_short` |
+| Key                            | Type     | Default                | Description |
+|--------------------------------|----------|------------------------|-------------|
+| `log_level`                    | string   | `info`                 | Global log level: `debug`, `info`, `warn`, `error`. |
+| `tick_interval`                | duration | `1s`                   | Interval for the internal `core.tick` heartbeat. |
+| `max_concurrent_events`        | int      | `100`                  | Maximum concurrent event handlers across the bus. |
+| `logging.bootstrap_stderr`     | bool     | `false`                | Register a stderr sink at engine construction so pre-sink slog records appear on the terminal. **Rejected** at validation time when any of `nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails` is active. |
+| `logging.buffer_size`          | int      | `DefaultLogRingSize`   | Capacity of the log/event ring buffers. Values `<= 0` use the default. |
+| `sessions.root`                | string   | `~/.nexus/sessions`    | Base directory for session workspaces. |
+| `sessions.retention`           | string   | `30d`                  | Retention policy for old sessions. |
+| `sessions.id_format`           | string   | `timestamp`            | Session ID format: `timestamp`, `datetime_short`. |
+| `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
 
 ### `core.models`
 
-Defines model roles. Each role maps to a provider, model ID, and token limit.
+Maps role names → model configurations. Roles can be:
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `default` | string | Name of the default role (e.g., `balanced`) |
-| `<role_name>` | object | Model configuration for this role |
+- **single model** — map with `provider`, `model`, `max_tokens`,
+- **fallback chain** — list of single-model maps (tried in order on
+  non-retryable error or exhausted retries; coordinated by
+  `nexus.provider.fallback`),
+- **fanout role** — map with `fanout: true` and a `providers:` list (dispatched
+  in parallel by `nexus.provider.fanout`).
 
-**Role object:**
+| Key (per role)         | Type   | Default | Description |
+|------------------------|--------|---------|-------------|
+| `default`              | string | `balanced` | Name of the role used when a request specifies no role. |
+| `<role>.provider`      | string | *(required)* | Plugin ID of the LLM provider (e.g. `nexus.llm.anthropic`). |
+| `<role>.model`         | string | *(required)* | Model identifier as understood by the provider. |
+| `<role>.max_tokens`    | int    | *(provider default)* | Maximum response tokens. |
+| `<role>.fanout`        | bool   | `false` | If `true`, treat as fanout role; `providers:` list is dispatched in parallel. |
+| `<role>.providers`     | list   | *(required if `fanout: true`)* | List of model configs for fanout dispatch. |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `provider` | string | Plugin ID of the LLM provider |
-| `model` | string | Model identifier |
-| `max_tokens` | int | Maximum tokens for responses |
+Example:
 
 ```yaml
 core:
@@ -66,23 +88,28 @@ core:
     default: balanced
     reasoning:
       provider: nexus.llm.anthropic
-      model: claude-opus-4-20250514
+      model: claude-opus-4-7
       max_tokens: 16384
     balanced:
-      provider: nexus.llm.anthropic
-      model: claude-sonnet-4-20250514
-      max_tokens: 8192
-    quick:
-      provider: nexus.llm.anthropic
-      model: claude-haiku-4-5-20251001
-      max_tokens: 4096
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 8192
+      - provider: nexus.llm.openai           # fallback
+        model: gpt-4o
+        max_tokens: 8192
+    panel:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-sonnet-4-6
+        - provider: nexus.llm.gemini
+          model: gemini-2.5-pro
 ```
 
-## Plugin Settings
+A role missing from `core.models` whose name contains a hyphen is treated as a
+raw model ID with no provider (backward-compat). Otherwise resolution fails.
 
-### `plugins.active`
-
-A list of plugin IDs to activate. Order doesn't matter — dependencies are resolved automatically.
+## Plugin activation
 
 ```yaml
 plugins:
@@ -90,29 +117,23 @@ plugins:
     - nexus.io.tui
     - nexus.llm.anthropic
     - nexus.agent.react
-```
-
-Multi-instance plugins use a slash suffix:
-
-```yaml
-plugins:
-  active:
-    - nexus.agent.subagent/researcher
+    - nexus.agent.subagent/researcher   # multi-instance suffix
     - nexus.agent.subagent/writer
 ```
 
-### Per-Plugin Configuration
-
-Each plugin ID in the config (other than `active`) provides that plugin's settings:
+Each entry in `active` may be followed by `/<instance>` to register a second
+copy of a multi-instance plugin (e.g. subagents). The base plugin ID + instance
+suffix forms the full ID used for per-plugin config:
 
 ```yaml
 plugins:
-  nexus.tool.shell:
-    allowed_commands: ["ls", "git"]
-    timeout: 30s
+  nexus.agent.subagent/researcher:
+    model_role: reasoning
+    tool_name: spawn_researcher
 ```
 
-Plugins with no configuration still need an entry if you want to be explicit:
+A plugin with no configuration still parses cleanly without an explicit entry,
+but you may declare an empty map for clarity:
 
 ```yaml
 plugins:
@@ -120,177 +141,882 @@ plugins:
   nexus.observe.thinking: {}
 ```
 
-## All Plugin Config Options
+---
 
-### Agents
+## Agents
 
-**nexus.agent.react**
-| Key | Type | Default |
-|-----|------|---------|
-| `max_iterations` | int | `25` |
-| `planning` | bool | `false` |
-| `model_role` | string | *(default)* |
-| `system_prompt` | string | *(none)* |
-| `system_prompt_file` | string | *(none)* |
+### `nexus.agent.react`
 
-**nexus.agent.planexec**
-| Key | Type | Default |
-|-----|------|---------|
-| `max_iterations` | int | `15` |
-| `max_steps` | int | `10` |
-| `planning_model_role` | string | `reasoning` |
-| `execution_model_role` | string | `balanced` |
-| `replan_on_failure` | bool | `true` |
-| `approval` | string | `always` |
-| `system_prompt` | string | *(none)* |
-| `system_prompt_file` | string | *(none)* |
+Source: `plugins/agents/react/plugin.go`.
 
-**nexus.agent.subagent**
-| Key | Type | Default |
-|-----|------|---------|
-| `max_iterations` | int | `10` |
-| `model_role` | string | *(default)* |
-| `system_prompt` | string | *(none)* |
-| `system_prompt_file` | string | *(none)* |
-| `tool_name` | string | `spawn_subagent` |
-| `tool_description` | string | *(auto)* |
+| Key                      | Type     | Default     | Description |
+|--------------------------|----------|-------------|-------------|
+| `planning`               | bool     | `false`     | Emit `plan.request` before iterating; defers to a planner plugin. |
+| `model_role`             | string   | *(default)* | Role name from `core.models`. |
+| `system_prompt`          | string   | *(none)*    | Inline system prompt (overrides `system_prompt_file`). |
+| `system_prompt_file`     | string   | *(none)*    | Path to file containing the system prompt. |
+| `parallel_tools`         | bool     | `false`     | Run multiple tool calls from a single LLM response in parallel. |
+| `max_concurrent`         | int      | `4`         | Concurrency ceiling when `parallel_tools: true`. |
+| `tool_choice`            | string \| map | *(none)* | Constrain tool selection. See "Tool choice" below. |
 
-**nexus.agent.orchestrator**
-| Key | Type | Default |
-|-----|------|---------|
-| `max_workers` | int | `5` |
-| `max_subtasks` | int | `8` |
-| `worker_max_iterations` | int | `10` |
-| `orchestrator_model_role` | string | `reasoning` |
-| `worker_model_role` | string | `balanced` |
-| `synthesis_model_role` | string | `balanced` |
-| `fail_fast` | bool | `false` |
-| `system_prompt` | string | *(none)* |
-| `system_prompt_file` | string | *(none)* |
+Iteration limits are **not** an agent setting — enforce them with
+`nexus.gate.endless_loop`. ReAct's required capabilities (`memory.history`,
+`control.cancel`, `tool.catalog`) are auto-activated by `Requires()` when no
+provider for those capabilities is already in `plugins.active`.
 
-### LLM Providers
+#### Tool choice
 
-**nexus.llm.anthropic**
-| Key | Type | Default |
-|-----|------|---------|
-| `api_key_env` | string | `ANTHROPIC_API_KEY` |
-| `debug` | bool | `false` |
+`tool_choice` accepts:
 
-### Tools
+- a string shorthand — `tool_choice: required` (or `auto`, `any`, `none`),
+- a map — `tool_choice: { mode: tool, name: read_file }`,
+- a sequence — `tool_choice: { sequence: [{ mode: required }, { mode: auto }] }`
+  applied per iteration; the last entry sticks.
 
-**nexus.tool.shell**
-| Key | Type | Default |
-|-----|------|---------|
-| `allowed_commands` | string[] | *(none — all allowed)* |
-| `timeout` | duration | `30s` |
-| `sandbox` | bool | `false` |
+Dynamic overrides arrive via `agent.tool_choice` events with `duration: once`
+(consumed after one iteration) or `sticky` (until cleared).
 
-**nexus.tool.file**
-| Key | Type | Default |
-|-----|------|---------|
-| `base_dir` | string | *(session files dir)* |
+### `nexus.agent.planexec`
 
-**nexus.tool.pdf**
-| Key | Type | Default |
-|-----|------|---------|
-| `timeout` | duration | `30s` |
-| `pdftotext_bin` | string | `pdftotext` |
-| `pdfinfo_bin` | string | `pdfinfo` |
-| `save_to_session` | bool | `false` |
-| `save_file_name` | string | *(auto)* |
+Source: `plugins/agents/planexec/plugin.go`.
 
-**nexus.tool.opener**
-| Key | Type | Default |
-|-----|------|---------|
-| `open_cmd` | string | *(auto-detected)* |
-| `timeout` | duration | `10s` |
+| Key                    | Type   | Default      | Description |
+|------------------------|--------|--------------|-------------|
+| `execution_model_role` | string | `balanced`   | Role used to execute each step. |
+| `replan_on_failure`    | bool   | `true`       | Re-plan remaining work when a step fails (max 2 replans). |
+| `approval`             | string | `never`      | Plan approval mode: `always` (block until user approves) or `never`. |
+| `system_prompt`        | string | *(none)*     | Inline system prompt. |
+| `system_prompt_file`   | string | *(none)*     | Path to file containing the system prompt. |
 
-**nexus.tool.ask** — No configuration options.
+Step iteration and step counts are managed internally by the planner plugin
+that emits `plan.result`; they are not configured here.
 
-### Memory
+### `nexus.agent.subagent`
 
-**nexus.memory.capped**
-| Key | Type | Default |
-|-----|------|---------|
-| `max_messages` | int | `100` |
-| `persist` | bool | `true` |
+Source: `plugins/agents/subagent/plugin.go`. Multi-instance: register multiple
+copies via `nexus.agent.subagent/<suffix>`.
 
-**nexus.memory.compaction**
-| Key | Type | Default |
-|-----|------|---------|
-| `strategy` | string | `message_count` |
-| `message_threshold` | int | `50` |
-| `token_threshold` | int | `30000` |
-| `turn_threshold` | int | `10` |
-| `chars_per_token` | float | `4.0` |
-| `model_role` | string | `quick` |
-| `protect_recent` | int | `4` |
-| `compaction_prompt` | string | *(built-in)* |
-| `prompt_file` | string | *(none)* |
+| Key                   | Type   | Default                                | Description |
+|-----------------------|--------|----------------------------------------|-------------|
+| `model_role`          | string | *(default)*                            | Role used for the subagent's LLM calls. |
+| `system_prompt`       | string | *(none)*                               | Inline system prompt. |
+| `system_prompt_file`  | string | *(none)*                               | Path to file containing the system prompt. |
+| `tool_name`           | string | `spawn_<suffix>` or `spawn_subagent`   | Name of the spawn tool registered with the catalog. |
+| `tool_description`    | string | *(auto)*                               | Description shown to the parent agent. |
 
-### I/O
+Depends on `nexus.agent.react`.
 
-**nexus.io.tui** — No configuration options.
+### `nexus.agent.orchestrator`
 
-**nexus.io.browser**
-| Key | Type | Default |
-|-----|------|---------|
-| `host` | string | `localhost` |
-| `port` | int | `8080` |
-| `open_browser` | bool | `true` |
+Source: `plugins/agents/orchestrator/plugin.go`.
 
-### Observers
+| Key                        | Type   | Default      | Description |
+|----------------------------|--------|--------------|-------------|
+| `max_workers`              | int    | `5`          | Concurrency cap for worker subagents. |
+| `max_subtasks`             | int    | `8`          | Hard cap on subtasks (excess truncated). |
+| `worker_max_iterations`    | int    | `10`         | Iteration limit per worker (enforced via `gate.endless_loop`). |
+| `orchestrator_model_role`  | string | `reasoning`  | Role used for decomposition. |
+| `worker_model_role`        | string | `balanced`   | Role used by workers. |
+| `synthesis_model_role`     | string | `balanced`   | Role used for the final synthesis. |
+| `fail_fast`                | bool   | `false`      | Cancel remaining workers on the first failure. |
+| `system_prompt`            | string | *(none)*     | Inline system prompt. |
+| `system_prompt_file`       | string | *(none)*     | Path to file containing the system prompt. |
 
-**nexus.observe.logger**
-| Key | Type | Default |
-|-----|------|---------|
-| `output` | string | `stdout` |
-| `file_path` | string | *(none)* |
-| `level` | string | `info` |
+Depends on `nexus.agent.subagent`.
 
-**nexus.observe.thinking** — No configuration options.
+---
 
-### Planners
+## LLM providers
 
-**nexus.planner.dynamic**
-| Key | Type | Default |
-|-----|------|---------|
-| `approval` | string | `always` |
-| `model_role` | string | *(default)* |
-| `max_steps` | int | `10` |
-| `plan_prompt` | string | *(built-in)* |
-| `plan_prompt_file` | string | *(none)* |
+All providers share the same retry block schema (see "Retry" subtable below).
 
-**nexus.planner.static**
-| Key | Type | Default |
-|-----|------|---------|
-| `approval` | string | `never` |
-| `summary` | string | *(none)* |
-| `steps` | list | *(required)* |
+### `nexus.llm.anthropic`
 
-### Skills
+Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
+`cache.go`, `thinking.go`, `multimodal.go`, `citations.go`,
+`structured_outputs.go`, `files.go`, `retry.go`.
 
-**nexus.skills**
-| Key | Type | Default |
-|-----|------|---------|
-| `scan_paths` | string[] | *(none)* — discovery is gated entirely by this list; no implicit defaults |
-| `trust_project` | string | `ask` |
-| `max_active_skills` | int | `10` |
-| `catalog_in_system_prompt` | bool | `true` |
-| `disabled_skills` | string[] | *(none)* |
+| Key                                | Type   | Default             | Description |
+|------------------------------------|--------|---------------------|-------------|
+| `debug`                            | bool   | `false`             | Persist request/response bodies to the session for debugging. |
+| `auth_mode`                        | string | `api_key`           | One of `api_key`, `bedrock`, `vertex`. |
+| `api_key`                          | string | *(env)*             | Direct API key (used when `auth_mode: api_key`). |
+| `api_key_env`                      | string | `ANTHROPIC_API_KEY` | Environment variable to read the API key from. |
+| `bedrock.region`                   | string | *(env `AWS_REGION`)* | AWS region for Bedrock. |
+| `bedrock.access_key_id`            | string | *(env `AWS_ACCESS_KEY_ID`)*     | AWS access key. |
+| `bedrock.access_key_id_env`        | string | `AWS_ACCESS_KEY_ID` | Override the env var name. |
+| `bedrock.secret_access_key`        | string | *(env `AWS_SECRET_ACCESS_KEY`)* | AWS secret. |
+| `bedrock.secret_access_key_env`    | string | `AWS_SECRET_ACCESS_KEY` | Override the env var name. |
+| `bedrock.session_token`            | string | *(env `AWS_SESSION_TOKEN`)*     | Optional STS session token. |
+| `bedrock.session_token_env`        | string | `AWS_SESSION_TOKEN` | Override the env var name. |
+| `vertex.project` / `project_id`    | string | *(env `GOOGLE_CLOUD_PROJECT`)*  | GCP project. |
+| `vertex.region` / `location`       | string | `us-east5`          | Vertex region. |
+| `vertex.sa_key_file` / `service_account_json` | string | *(env `GOOGLE_APPLICATION_CREDENTIALS`)* | Path to the service-account JSON. |
+| `vertex.sa_key_file_env` / `service_account_json_env` | string | `GOOGLE_APPLICATION_CREDENTIALS` | Override the env var name. |
+| `cache.enabled`                    | bool   | `false`             | Enable prompt caching. |
+| `cache.system`                     | bool   | `true`              | Mark the system prompt for caching when enabled. |
+| `cache.tools`                      | bool   | `true`              | Mark the tools array for caching when enabled. |
+| `cache.message_prefix`             | int    | `0`                 | Number of leading user messages to mark for caching. |
+| `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). |
+| `thinking.enabled`                 | bool   | `false`             | Enable extended thinking (Sonnet 4+, Opus 4+). |
+| `thinking.budget_tokens`           | int    | `8192`              | Thinking token budget; `-1` for dynamic, `0` to disable, `1024+` fixed. |
+| `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
+| `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
+| `citations.enabled`                | bool   | `false`             | Enable citations on document blocks. |
+| `structured_outputs.mode`          | string | `tool`              | `tool` (synthetic tool) or `native` (`response_format`). |
+| `structured_outputs.beta_header`   | string | *(none)*            | Optional beta header when `mode: native`. |
+| `files.enabled`                    | bool   | `false`             | Use the Anthropic Files API for oversize attachments. |
+| `files.upload_threshold`           | int    | `40960`             | Minimum bytes before a file is uploaded; smaller files are inlined. |
+| `files.cache_uploads`              | bool   | `true`              | Deduplicate identical uploads within a session. |
+| `files.delete_on_shutdown`         | bool   | `false`             | Delete uploaded files when the engine shuts down. |
+| `retry.*`                          | —      | *(see Retry block)* | Backoff configuration. |
+| `pricing.<model>.*`                | map    | *(embedded table)*  | Override per-model token pricing — see "Pricing override". |
 
-### System
+#### Retry block (shared by all providers)
 
-**nexus.system.dynvars**
-| Key | Type | Default |
-|-----|------|---------|
-| `date` | bool | `true` |
-| `time` | bool | `true` |
-| `timezone` | bool | `true` |
-| `cwd` | bool | `true` |
-| `session_dir` | bool | `true` |
-| `os` | bool | `true` |
+| Key                    | Type     | Default                                  | Description |
+|------------------------|----------|------------------------------------------|-------------|
+| `retry.enabled`        | bool     | `true`                                   | Enable retry on 5xx / 429. |
+| `retry.max_retries`    | int      | `3`                                      | Maximum attempts. |
+| `retry.initial_delay`  | duration | `1s`                                     | First backoff delay. |
+| `retry.max_delay`      | duration | `60s`                                    | Maximum delay between retries. |
+| `retry.backoff`        | string   | `exponential`                            | `constant`, `linear`, `exponential`, or `jitter`. |
+| `retry.multiplier`     | float    | `2.0`                                    | Multiplier for `linear`/`exponential`. |
+| `retry.statuses`       | int list | Anthropic: `[429, 500, 502, 503, 529]`<br/>OpenAI/Gemini: `[429, 500, 502, 503]` | HTTP statuses to retry. |
 
-### Control
+#### Pricing override
 
-**nexus.control.cancel** — No configuration options.
+| Key                                       | Type  | Default                 | Description |
+|-------------------------------------------|-------|-------------------------|-------------|
+| `pricing.<model>.input_per_million`       | float | *(embedded default)*    | Cost per million input tokens. |
+| `pricing.<model>.output_per_million`      | float | *(embedded default)*    | Cost per million output tokens. |
+| `pricing.<model>.cache_read_per_million`  | float | *(derived from input)*  | Anthropic: `0.10×input`; OpenAI: `0.5×input`. |
+| `pricing.<model>.cache_write_5m_per_million` | float | *(derived: `1.25×input`)* | Anthropic only. |
+| `pricing.<model>.cache_write_1h_per_million` | float | *(derived: `2.0×input`)*  | Anthropic only. |
+
+### `nexus.llm.openai`
+
+Source: `plugins/providers/openai/plugin.go`.
+
+| Key                          | Type   | Default                              | Description |
+|------------------------------|--------|--------------------------------------|-------------|
+| `debug`                      | bool   | `false`                              | Persist request/response bodies to the session. |
+| `auth_mode`                  | string | `openai`                             | `openai`, `azure_key`, or `azure_aad`. |
+| `api_key`                    | string | *(env)*                              | Direct API key (`auth_mode: openai`, also fallback for Azure Files API). |
+| `api_key_env`                | string | `OPENAI_API_KEY`                     | Environment variable for the key. |
+| `base_url`                   | string | `https://api.openai.com/v1`          | Override for proxies / OpenAI-compatible endpoints. |
+| `azure.endpoint`             | string | *(required for Azure)*               | Azure OpenAI endpoint URL. |
+| `azure.api_key`              | string | *(env `AZURE_OPENAI_API_KEY`)*       | Azure key (when `auth_mode: azure_key`). |
+| `azure.api_key_env`          | string | `AZURE_OPENAI_API_KEY`               | Override the env var name. |
+| `azure.api_version`          | string | `2024-12-01-preview`                 | Azure OpenAI API version. |
+| `azure.use_msi`              | bool   | `false`                              | Use Managed Service Identity (`auth_mode: azure_aad`); otherwise falls back to Azure CLI auth. |
+| `files.enabled`              | bool   | `false`                              | Use the Files API. |
+| `files.purpose`              | string | `assistants`                         | File purpose category. |
+| `files.upload_threshold`     | int    | `40960`                              | Minimum bytes to upload. |
+| `files.cache_uploads`        | bool   | `true`                               | Deduplicate within a session. |
+| `files.delete_on_shutdown`   | bool   | `false`                              | Delete on shutdown. |
+| `reasoning.enabled`          | bool   | `false`                              | Enable o-series reasoning. |
+| `reasoning.budget_tokens`    | int    | `10000`                              | Reasoning token budget. |
+| `force_reasoning`            | bool   | `false`                              | Force reasoning even for non-o-series models (experimental). |
+| `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
+| `retry.*`                    | —      | *(shared Retry block)*               | Backoff configuration. |
+| `pricing.<model>.*`          | map    | *(embedded table)*                   | Override per-model pricing. |
+
+### `nexus.llm.gemini`
+
+Source: `plugins/providers/gemini/plugin.go`.
+
+| Key                          | Type   | Default                                          | Description |
+|------------------------------|--------|--------------------------------------------------|-------------|
+| `debug`                      | bool   | `false`                                          | Persist request/response bodies. |
+| `api_key`                    | string | *(env `GEMINI_API_KEY` or `GOOGLE_API_KEY`)*     | Public Generative Language API key. |
+| `api_key_env`                | string | *(tries both env vars above)*                    | Override the env var name. |
+| `vertex.project`             | string | *(env `GOOGLE_CLOUD_PROJECT`)*                   | Project ID for Vertex AI. |
+| `vertex.region` / `location` | string | `us-central1`                                    | Vertex region. |
+| `vertex.sa_key_file`         | string | *(env `GOOGLE_APPLICATION_CREDENTIALS`)*         | Service-account JSON path. |
+| `vertex.sa_key_file_env`     | string | `GOOGLE_APPLICATION_CREDENTIALS`                 | Override the env var name. |
+| `thinking.enabled`           | bool   | `false`                                          | Enable thinking on Gemini 2.5+. |
+| `thinking.budget_tokens`     | int    | `8000`                                           | Thinking token budget. |
+| `thinking.include_thoughts`  | bool   | `true`                                           | Surface thinking via `thinking.step`. |
+| `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
+| `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). |
+| `cache.min_tokens`           | int    | `1000`                                           | Minimum tokens required for caching. |
+| `cache.ttl`                  | string | `5m`                                             | Cache TTL: `5m` or `1h`. |
+| `retry.*`                    | —      | *(shared Retry block)*                           | Backoff configuration. |
+| `pricing.<model>.*`          | map    | *(embedded table)*                               | Override per-model pricing. |
+
+### `nexus.provider.fallback`
+
+Source: `plugins/providers/fallback/plugin.go`. **No plugin-level config** — the
+fallback chain is defined by listing multiple providers under a single role in
+`core.models`. This plugin coordinates the re-emission to the next provider on
+non-retryable errors.
+
+### `nexus.provider.fanout`
+
+Source: `plugins/providers/fanout/plugin.go`.
+
+| Key                       | Type    | Default | Description |
+|---------------------------|---------|---------|-------------|
+| `strategy`                | string  | `all`   | Selection strategy: `all` (return first to arrive), `llm_judge`, `heuristic`, `user`. |
+| `deadline_ms`             | int     | `30000` | Milliseconds to wait before forcing selection. |
+| `heuristic.prefer`        | string  | `longest` | Used when `strategy: heuristic`: `longest`, `shortest`, `fastest`, `cheapest`. |
+| `heuristic.require_finish`| bool    | `false` | Only consider responses with `finish_reason: end_turn`. |
+| `judge.role`              | string  | *(none)* | Model role for the judge LLM call when `strategy: llm_judge`. |
+
+A role becomes a fanout role when its `core.models` entry sets `fanout: true`;
+the fanout plugin watches `before:llm.request` for those roles. For
+`strategy: user`, the plugin emits `provider.fanout.choose` and waits for
+`provider.fanout.chosen` from the IO layer.
+
+### Search providers (`search.provider` capability)
+
+Each search-provider plugin handles `search.request` events and writes results
+back into the payload. They share the same shape:
+
+| Plugin                              | Source                                              |
+|-------------------------------------|-----------------------------------------------------|
+| `nexus.search.brave`                | `plugins/search/brave/plugin.go`                    |
+| `nexus.search.anthropic_native`     | `plugins/search/anthropic_native/plugin.go`         |
+| `nexus.search.openai_native`        | `plugins/search/openai_native/plugin.go`            |
+| `nexus.search.gemini_native`        | `plugins/search/gemini_native/plugin.go`            |
+
+| Key            | Type     | Default                            | Notes                                                 |
+|----------------|----------|------------------------------------|-------------------------------------------------------|
+| `api_key`      | string   | *(env, see below)*                 | Direct API key.                                       |
+| `api_key_env`  | string   | provider default (see below)       | Override the env var name.                            |
+| `model`        | string   | provider default (see below)       | Only on native search providers.                      |
+| `base_url`     | string   | `https://api.openai.com/v1/responses` | Only on `openai_native`.                              |
+| `timeout`      | duration | `15s` (Brave), `30s` (others)      | HTTP request timeout.                                 |
+
+Provider defaults:
+
+| Provider                          | `api_key_env`                        | `model`                          |
+|-----------------------------------|--------------------------------------|----------------------------------|
+| `nexus.search.brave`              | `BRAVE_API_KEY`                      | n/a                              |
+| `nexus.search.anthropic_native`   | `ANTHROPIC_API_KEY`                  | `claude-haiku-4-5-20251001`      |
+| `nexus.search.openai_native`      | `OPENAI_API_KEY`                     | `gpt-4o-mini`                    |
+| `nexus.search.gemini_native`      | `GEMINI_API_KEY` / `GOOGLE_API_KEY`  | `gemini-2.5-flash`               |
+
+If multiple providers register the `search.provider` capability, pin one
+explicitly via the top-level `capabilities:` block.
+
+---
+
+## Tools
+
+### `nexus.tool.shell`
+
+Source: `plugins/tools/shell/plugin.go`.
+
+| Key                | Type     | Default                  | Description |
+|--------------------|----------|--------------------------|-------------|
+| `allowed_commands` | list     | *(none — all allowed)*   | Whitelist of command names (exact match only, despite a misleading code comment). |
+| `working_dir`      | string   | *(session files dir)*    | Working directory for executions. |
+| `path_dirs`        | list     | *(none)*                 | Directories prepended to `PATH` for command resolution. |
+| `timeout`          | duration | `30s`                    | Per-command timeout. |
+| `sandbox`          | bool     | `false`                  | Strip sensitive env vars (AWS, Google, Azure, Anthropic API keys) before execution. |
+
+### `nexus.tool.file`
+
+Source: `plugins/tools/fileio/plugin.go`. Registers `read_file`, `write_file`,
+`check_file_size`, `list_files`.
+
+| Key                     | Type | Default                 | Description |
+|-------------------------|------|-------------------------|-------------|
+| `base_dir`              | string | *(session files dir)* | Base directory for file operations. |
+| `allow_external_writes` | bool   | `false`               | Permit reads/writes outside `base_dir`. |
+| `tools.<tool_name>`     | bool   | `true` for each       | Per-tool enable/disable: `read_file`, `write_file`, `check_file_size`, `list_files`. |
+
+### `nexus.tool.catalog`
+
+Source: `plugins/tools/catalog/plugin.go`. **No configuration.** Provides the
+`tool.catalog` capability — a shared registry queried via
+`tool.catalog.query`. Required by `nexus.agent.react`.
+
+### `nexus.tool.web`
+
+Source: `plugins/tools/web/plugin.go`. Registers `web_search` and `web_fetch`.
+Requires the `search.provider` capability for `web_search`.
+
+| Key                          | Type     | Default                                | Description |
+|------------------------------|----------|----------------------------------------|-------------|
+| `search.default_count`       | int      | `10`                                   | Default result count for `web_search`. |
+| `search.default_safe_search` | string   | `moderate`                             | `off`, `moderate`, `strict`. |
+| `search.default_language`    | string   | *(none)*                               | BCP-47 language tag (e.g. `en`, `es-MX`). |
+| `fetch.user_agent`           | string   | `Nexus/0.1 (+https://...)`             | User-Agent header for `web_fetch`. |
+| `fetch.timeout`              | duration | `20s`                                  | HTTP timeout. |
+| `fetch.max_size`             | int      | `5242880` (5 MB)                       | Maximum response body size. |
+| `fetch.default_extract`      | string   | `readability`                          | `readability` or `raw`. |
+| `fetch.allowed_domains`      | list     | *(none — allow all)*                   | Allowlist of domains. |
+| `fetch.blocked_domains`      | list     | *(none)*                               | Blocklist of domains. |
+| `fetch.follow_redirects`     | bool     | `true`                                 | Follow HTTP redirects. |
+| `fetch.max_redirects`        | int      | `5`                                    | Maximum redirect chain length. |
+
+### `nexus.tool.knowledge_search`
+
+Source: `plugins/tools/knowledge_search/plugin.go`. Requires
+`embeddings.provider` and `vector.store`.
+
+| Key                  | Type   | Default            | Description |
+|----------------------|--------|--------------------|-------------|
+| `tool_name`          | string | `knowledge_search` | Name of the registered tool. |
+| `top_k`              | int    | `5`                | Default chunks to return (LLM may override; capped at 50). |
+| `include_metadata`   | bool   | `true`             | Include vector metadata alongside chunks. |
+| `embedding_model`    | string | *(none)*           | Override the default embedding model. |
+| `namespaces`         | list   | *(required)*       | Allowed vector store namespaces. |
+| `default_namespaces` | list   | *(required)*       | Namespaces searched when the LLM doesn't specify. |
+
+### `nexus.tool.pdf`
+
+Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
+`pdftotext` (poppler-utils) on `PATH`.
+
+| Key               | Type     | Default                | Description |
+|-------------------|----------|------------------------|-------------|
+| `pdftotext_bin`   | string   | `pdftotext`            | Path or name of the `pdftotext` binary. |
+| `pdfinfo_bin`     | string   | `pdfinfo`              | Path or name of `pdfinfo` (optional). |
+| `timeout`         | duration | `30s`                  | Per-extraction timeout. |
+| `save_to_session` | bool     | `false`                | Persist extracted text to session files. |
+| `save_file_name`  | string   | *(derived from PDF)*   | Custom filename for the saved text. |
+
+### `nexus.tool.opener`
+
+Source: `plugins/tools/opener/plugin.go`. Registers `open_path`.
+
+| Key        | Type     | Default                                                         | Description |
+|------------|----------|-----------------------------------------------------------------|-------------|
+| `open_cmd` | string   | platform default (`open` macOS, `xdg-open` Linux, `start` Win)  | Override the platform "open" command. |
+| `timeout`  | duration | `10s`                                                           | Per-open timeout. |
+
+### `nexus.tool.ask`
+
+Source: `plugins/tools/ask/plugin.go`. **No configuration.** Registers
+`ask_user`; emits `io.ask` and waits for `io.ask.response`.
+
+### `nexus.tool.code_exec`
+
+Source: `plugins/tools/codeexec/plugin.go`. Registers `run_code` (Go via Yaegi).
+
+| Key                 | Type | Default                    | Description |
+|---------------------|------|----------------------------|-------------|
+| `timeout_seconds`   | int  | `30`                       | Script timeout in seconds. |
+| `max_output_bytes`  | int  | `65536`                    | Maximum captured output. |
+| `max_workers`       | int  | `runtime.NumCPU()`         | Concurrency cap for `parallel.*` constructs. |
+| `persist_scripts`   | bool | `true`                     | Write executed scripts to session files. |
+| `reject_goroutines` | bool | `true`                     | Reject scripts that spawn goroutines. |
+| `allowed_packages`  | list | *(stdlib whitelist)*       | Additional importable packages (must be in stdlib). |
+
+---
+
+## Memory
+
+### `nexus.memory.simple`
+
+Source: `plugins/memory/simple/plugin.go`. **No configuration.** Provides
+`memory.history`. Unbounded, in-memory, no persistence.
+
+### `nexus.memory.capped`
+
+Source: `plugins/memory/capped/plugin.go`. Provides `memory.history`. This is
+the default `memory.history` provider auto-activated by `nexus.agent.react`.
+
+| Key            | Type | Default | Description |
+|----------------|------|---------|-------------|
+| `max_messages` | int  | `100`   | Sliding window size; older messages dropped (with tool-pair safety). |
+| `persist`      | bool | `true`  | Persist to `context/conversation.jsonl` in the session workspace. |
+
+### `nexus.memory.summary_buffer`
+
+Source: `plugins/memory/summary_buffer/plugin.go`. Provides both
+`memory.history` and `memory.compaction`.
+
+| Key                 | Type   | Default          | Description |
+|---------------------|--------|------------------|-------------|
+| `strategy`          | string | `message_count`  | Trigger: `message_count`, `token_estimate`, `turn_count`. |
+| `message_threshold` | int    | `50`             | Used when `strategy: message_count`. |
+| `token_threshold`   | int    | `30000`          | Used when `strategy: token_estimate`. |
+| `turn_threshold`    | int    | `10`             | Used when `strategy: turn_count`. |
+| `chars_per_token`   | float  | `4.0`            | Token estimation ratio. |
+| `max_recent`        | int    | `8`              | Messages kept verbatim; older messages are summarized. |
+| `model_role`        | string | `quick`          | Role used for the summary call. |
+| `model`             | string | *(none)*         | Explicit model ID (ignored if `model_role` is set). |
+| `prompt`            | string | *(default)*      | Inline summary prompt. |
+| `prompt_file`       | string | *(none)*         | Path to a summary prompt file (overrides `prompt`). |
+
+### `nexus.memory.compaction`
+
+Source: `plugins/memory/compaction/plugin.go`. Provides `memory.compaction` as
+an external coordinator (separate from history buffers).
+
+| Key                 | Type   | Default          | Description |
+|---------------------|--------|------------------|-------------|
+| `strategy`          | string | `message_count`  | Trigger: `message_count`, `token_estimate`, `turn_count`. |
+| `message_threshold` | int    | `50`             | Used when `strategy: message_count`. |
+| `token_threshold`   | int    | `30000`          | Used when `strategy: token_estimate`. |
+| `turn_threshold`    | int    | `10`             | Used when `strategy: turn_count`. |
+| `chars_per_token`   | float  | `4.0`            | Token estimation ratio. |
+| `model_role`        | string | `quick`          | Role used for the compaction LLM call. |
+| `model`             | string | *(none)*         | Explicit model ID. |
+| `prompt`            | string | *(default)*      | Inline compaction prompt. |
+| `prompt_file`       | string | *(none)*         | Path to a prompt file. |
+| `protect_recent`    | int    | `4`              | Recent messages exempt from compaction. |
+| `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
+
+### `nexus.memory.longterm`
+
+Source: `plugins/memory/longterm/plugin.go`. Provides `memory.longterm`.
+Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
+`memory_delete`.
+
+| Key                     | Type   | Default            | Description |
+|-------------------------|--------|--------------------|-------------|
+| `scope`                 | string | `agent`            | `agent`, `global`, or `both`. |
+| `path`                  | string | `~/.nexus/memory/` | Base directory for memory files. |
+| `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
+| `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
+| `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
+
+### `nexus.memory.vector`
+
+Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
+`embeddings.provider` and `vector.store`.
+
+| Key                     | Type   | Default                | Description |
+|-------------------------|--------|------------------------|-------------|
+| `namespace`             | string | `memory-{instanceID}`  | Vector store namespace. |
+| `top_k`                 | int    | `5`                    | Recalled matches per query. |
+| `min_similarity`        | float  | `0.0`                  | Minimum cosine similarity (0 disables filtering). |
+| `embedding_model`       | string | *(none)*               | Override the embedding model. |
+| `auto_store_compaction` | bool   | `true`                 | Store summaries when `memory.compacted` fires. |
+| `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
+| `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
+
+---
+
+## Embeddings
+
+### `nexus.embeddings.openai`
+
+Source: `plugins/embeddings/openai/plugin.go`. Provides `embeddings.provider`.
+
+| Key            | Type     | Default                                  | Description |
+|----------------|----------|------------------------------------------|-------------|
+| `api_key`      | string   | *(required, or via env)*                 | OpenAI API key. |
+| `api_key_env`  | string   | `OPENAI_API_KEY`                         | Override env var name. |
+| `base_url`     | string   | `https://api.openai.com/v1/embeddings`   | Endpoint (Azure / OpenAI-compatible proxies). |
+| `model`        | string   | `text-embedding-3-small`                 | Default model. |
+| `timeout`      | duration | `30s`                                    | HTTP timeout. |
+
+### `nexus.embeddings.mock`
+
+Source: `plugins/embeddings/mock/plugin.go`. Provides `embeddings.provider`.
+Deterministic hash-based vectors; opt-in via `plugins.active`.
+
+| Key          | Type   | Default          | Description |
+|--------------|--------|------------------|-------------|
+| `dimensions` | int    | `128`            | Vector dimensionality. |
+| `model`      | string | `mock-embedding` | Model ID string returned to callers. |
+
+---
+
+## Vector store
+
+### `nexus.vectorstore.chromem`
+
+Source: `plugins/vectorstore/chromem/plugin.go`. Provides `vector.store`.
+
+| Key        | Type   | Default          | Description |
+|------------|--------|------------------|-------------|
+| `path`     | string | `~/.nexus/vectors` | Directory for persistent storage (one subdir per namespace). |
+| `compress` | bool   | `false`          | Gzip-compress JSON on disk. |
+
+---
+
+## RAG
+
+### `nexus.rag.ingest`
+
+Source: `plugins/rag/ingest/plugin.go`. Backs the `nexus ingest` CLI subcommand
+and the `rag.ingest` event handler.
+
+| Key                   | Type | Default                    | Description |
+|-----------------------|------|----------------------------|-------------|
+| `chunker.size`        | int  | `1000`                     | Characters per chunk. |
+| `chunker.overlap`     | int  | `200`                      | Character overlap between chunks. |
+| `cache_dir`           | string | `~/.nexus/vectors/_cache` | Embedding cache directory (hash → vector). |
+| `backfill`            | bool | `true`                     | Walk watched directories at startup and ingest pre-existing files. |
+| `watch`               | list | *(empty)*                  | File watch entries; each is `{path, glob, namespace}`. |
+| `watch[].path`        | string | *(required)*             | Directory to watch. |
+| `watch[].glob`        | string | *(empty — match all)*    | Glob pattern for files to ingest. |
+| `watch[].namespace`   | string | *(required)*             | Vector store namespace. |
+
+Requires `embeddings.provider` and `vector.store`.
+
+---
+
+## I/O
+
+### `nexus.io.tui`
+
+Source: `plugins/io/tui/plugin.go`. **No configuration.** Bubble Tea terminal UI.
+
+### `nexus.io.browser`
+
+Source: `plugins/io/browser/plugin.go`.
+
+| Key            | Type   | Default     | Description |
+|----------------|--------|-------------|-------------|
+| `host`         | string | `localhost` | HTTP listen address. |
+| `port`         | int    | `8080`      | HTTP listen port. |
+| `open_browser` | bool   | `true`      | Auto-open the browser tab on startup (no-op when the OS lacks an opener). |
+
+### `nexus.io.test`
+
+Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
+
+| Key                      | Type     | Default     | Description |
+|--------------------------|----------|-------------|-------------|
+| `inputs`                 | list     | *(empty)*   | Scripted user inputs (fed sequentially). |
+| `input_delay`            | duration | `500ms`     | Delay between inputs. |
+| `approval_mode`          | string   | `approve`   | `approve`, `deny`, `per-prompt`. |
+| `approval_rules`         | list     | *(empty)*   | Per-prompt rules: each `{match: <substring>, action: <approve|deny>}`. |
+| `ask_responses`          | list     | *(empty)*   | Responses to `io.ask` events. |
+| `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
+| `timeout`                | duration | `60s`       | Session timeout. |
+| `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
+
+### `nexus.io.wails`
+
+Source: `plugins/io/wails/plugin.go`. Wails-native transport. The runtime is
+installed by the embedder via `Hub().SetRuntime()` before `engine.Boot`; this
+plugin only configures event bridging.
+
+| Key         | Type | Default     | Description |
+|-------------|------|-------------|-------------|
+| `subscribe` | list | *(empty)*   | Event types to bridge bus → frontend. Empty triggers legacy hardcoded chat-event subscriptions for parity with `nexus.io.browser`. |
+| `accept`    | list | *(empty)*   | Event types accepted from the frontend → bus. |
+
+### `nexus.io.oneshot`
+
+Source: `plugins/io/oneshot/plugin.go`. Scripting/batch mode with JSON
+transcript output.
+
+| Key           | Type   | Default | Description |
+|---------------|--------|---------|-------------|
+| `input`       | string | *(none)* | Inline prompt (lowest precedence). |
+| `input_file`  | string | *(none)* | Path to a prompt file. |
+| `output_file` | string | *(none)* | Path to write the JSON transcript. |
+| `pretty`      | bool   | `true`  | Pretty-print JSON output. |
+| `read_stdin`  | bool   | `true`  | Read stdin when available. |
+
+Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file`
+> stdin.
+
+---
+
+## Observers
+
+### `nexus.observe.logger`
+
+Source: `plugins/observe/logger/plugin.go`. Acts as a sink on the engine's
+`LoggingHost` plus a bus event recorder.
+
+| Key                   | Type   | Default     | Description |
+|-----------------------|--------|-------------|-------------|
+| `log_messages`        | bool   | `true`      | Capture slog records to `messages.jsonl`. |
+| `log_events`          | bool   | `true`      | Capture bus events to `events.jsonl`. |
+| `level`               | string | `info`      | Minimum log level. |
+| `messages_file_path`  | string | *(none)*    | Override `messages.jsonl` location (otherwise per-session). |
+| `events_file_path`    | string | *(none)*    | Override `events.jsonl` location. |
+| `exclude_events`      | list   | *(none)*    | Event types to skip. |
+
+### `nexus.observe.thinking`
+
+Source: `plugins/observe/thinking/plugin.go`. **No configuration.** Persists
+`thinking.step` and `plan.progress` events to JSONL files.
+
+### `nexus.observe.otel`
+
+Source: `plugins/observe/otel/plugin.go`. OTLP exporter (one root span per
+session, one span per event).
+
+| Key             | Type   | Default | Description |
+|-----------------|--------|---------|-------------|
+| `endpoint`      | string | *(none)* | OTLP endpoint, e.g. `http://localhost:4317`. |
+| `protocol`      | string | `grpc`  | `grpc` or `http/protobuf`. |
+| `service_name`  | string | `nexus` | OpenTelemetry service name. |
+| `exclude_events`| list   | *(empty)* | Event types to skip; supports prefix wildcards (`llm.stream.*`). |
+
+---
+
+## Planners
+
+### `nexus.planner.dynamic`
+
+Source: `plugins/planners/dynamic/plugin.go`.
+
+| Key                 | Type   | Default      | Description |
+|---------------------|--------|--------------|-------------|
+| `approval`          | string | `auto`       | `always` (block until user approves), `never` (auto-execute), `auto` (LLM decides). |
+| `plan_prompt`       | string | *(default)*  | Inline planning prompt. |
+| `plan_prompt_file`  | string | *(none)*     | Path to a planning prompt file. |
+| `model_role`        | string | *(default)*  | Role used for plan generation. |
+| `model`             | string | *(none)*     | Explicit model ID (backward-compat; prefer `model_role`). |
+| `max_steps`         | int    | `10`         | Hard cap; excess steps from the LLM are truncated. |
+
+### `nexus.planner.static`
+
+Source: `plugins/planners/static/plugin.go`. Approval auto-defaults to `never`
+(static plans don't call an LLM).
+
+| Key                       | Type   | Default                  | Description |
+|---------------------------|--------|--------------------------|-------------|
+| `approval`                | string | `never`                  | `always` or `never`. |
+| `summary`                 | string | `Static execution plan`  | Free-form plan summary. |
+| `steps`                   | list   | *(required)*             | Step list. |
+| `steps[].description`     | string | *(required)*             | Step description. |
+| `steps[].instructions`    | string | *(none)*                 | Step-specific instructions. |
+
+---
+
+## Skills
+
+### `nexus.skills`
+
+Source: `plugins/skills/plugin.go`. Registers the `activate_skill` LLM tool.
+
+| Key                        | Type | Default | Description |
+|----------------------------|------|---------|-------------|
+| `scan_paths`               | list | *(empty)* | Directories scanned for `SKILL.md` files. **No implicit defaults — discovery is gated entirely by this list.** |
+| `trust_project`            | string | `ask` | Trust level for project skills: `ask`, `always`, `never`. |
+| `max_active_skills`        | int    | `10`  | Hard cap on concurrently active skills. |
+| `catalog_in_system_prompt` | bool   | `true`| Inject the skill catalog into the system prompt at priority 50. |
+| `disabled_skills`          | list   | *(empty)* | Skill names to disable even if discovered. |
+
+---
+
+## System
+
+### `nexus.system.dynvars`
+
+Source: `plugins/system/dynvars/plugin.go`. Registers a system-prompt section at
+priority 100 that lists runtime variables. Each flag defaults to `false` —
+opt-in only.
+
+| Key           | Type | Default | Description |
+|---------------|------|---------|-------------|
+| `date`        | bool | `false` | Include `Current date: YYYY-MM-DD`. |
+| `time`        | bool | `false` | Include `Current time: HH:MM:SS`. |
+| `timezone`    | bool | `false` | Include the local timezone abbreviation. |
+| `cwd`         | bool | `false` | Include the engine working directory. |
+| `session_dir` | bool | `false` | Include the session workspace root. |
+| `os`          | bool | `false` | Include `os/arch`. |
+
+---
+
+## Control
+
+### `nexus.control.cancel`
+
+Source: `plugins/control/cancel/plugin.go`. **No configuration.** Provides the
+`control.cancel` capability used by ReAct and other agents to interrupt
+in-flight work; also handles the `/resume` slash command via `io.input` at
+priority 5 (ahead of memory plugins).
+
+---
+
+## Discovery
+
+### `nexus.discovery.progressive`
+
+Source: `plugins/discovery/progressive/plugin.go`. Hierarchical tool discovery
+— the LLM sees class-level summaries and drills into specific classes via a
+`discover` meta-tool. Intercepts `before:llm.request` (priority 8) and
+`tool.invoke` (priority 40).
+
+| Key                  | Type   | Default     | Description |
+|----------------------|--------|-------------|-------------|
+| `scope`              | string | `session`   | `session`, `turn`, or `hybrid`. |
+| `idle_prune_turns`   | int    | `5`         | Turns of inactivity before a class is pruned (`scope: hybrid` only). |
+| `classless_behavior` | string | `include`   | `include` (always reveal classless tools) or `exclude`. |
+| `always_include`     | list   | *(empty)*   | Class names that are always fully revealed. |
+| `default_depth`      | string | `class`     | `class` (summaries only) or `full` (all tools). |
+
+---
+
+## LLM batch
+
+### `nexus.llm.batch`
+
+Source: `plugins/llm/batch/plugin.go`. Cross-provider batch coordinator
+(Anthropic Messages Batches, OpenAI Batch API). Subscribes
+`llm.batch.submit`; emits `llm.batch.status` and `llm.batch.results`.
+
+| Key                              | Type     | Default            | Description |
+|----------------------------------|----------|--------------------|-------------|
+| `poll_interval`                  | duration | `5m`               | How often to poll provider batch status. |
+| `data_dir`                       | string   | `~/.nexus/batches` | Directory for persisted batch state (resumed across restarts). |
+| `default_max_tokens`             | int      | `1024`             | Default `max_tokens` applied when a batched request didn't pin one. |
+| `providers.anthropic.api_key`    | string   | *(env)*            | Anthropic API key. |
+| `providers.anthropic.api_key_env`| string   | `ANTHROPIC_API_KEY`| Env var to read the Anthropic key from. |
+| `providers.openai.api_key`       | string   | *(env)*            | OpenAI API key. |
+| `providers.openai.api_key_env`   | string   | `OPENAI_API_KEY`   | Env var to read the OpenAI key from. |
+| `anthropic_api_key_env`          | string   | *(none)*           | Backward-compat: flat top-level Anthropic key env var. |
+| `openai_api_key_env`             | string   | *(none)*           | Backward-compat: flat top-level OpenAI key env var. |
+
+v1 limitations (intentional): direct-API auth only (no Bedrock/Vertex/Azure);
+text-only requests (no multimodal/thinking/caching/citations); single-provider
+per submit; no cancellation API.
+
+---
+
+## Apps
+
+### `nexus.app.helloworld`
+
+Source: `plugins/apps/helloworld/plugin.go`. Built-in placeholder agent /
+proof-of-concept for the bus-bridge pattern.
+
+| Key        | Type   | Default | Description |
+|------------|--------|---------|-------------|
+| `greeting` | string | `Hello` | Greeting prefix used when responding to `hello.request` events. |
+
+---
+
+## Gates
+
+Gates are vetoable handlers that subscribe to `before:*` events and may block
+or transform them. See [`.claude/docs/gates.md`](../../../.claude/docs/gates.md)
+for the underlying veto mechanics.
+
+### `nexus.gate.endless_loop`
+
+Source: `plugins/gates/endless_loop/plugin.go`.
+
+| Key              | Type | Default | Description |
+|------------------|------|---------|-------------|
+| `max_iterations` | int  | `25`    | Maximum LLM calls per turn (gate-/planner-sourced calls excluded). |
+| `warning_at`     | int  | `0`     | Emit a warning when this count is reached (`0` disables). |
+
+### `nexus.gate.stop_words`
+
+Source: `plugins/gates/stop_words/plugin.go`. Gates both `before:llm.request`
+(user messages) and `before:io.output`.
+
+| Key              | Type | Default                                          | Description |
+|------------------|------|--------------------------------------------------|-------------|
+| `words`          | list | *(empty)*                                        | Inline banned words. |
+| `word_files`     | list | *(empty)*                                        | Files of newline-separated words. |
+| `case_sensitive` | bool | `false`                                          | Case-sensitive matching. |
+| `message`        | string | `Content blocked: contains prohibited terms.`  | Veto message. |
+
+### `nexus.gate.token_budget`
+
+Source: `plugins/gates/token_budget/plugin.go`.
+
+| Key                 | Type  | Default                                     | Description |
+|---------------------|-------|---------------------------------------------|-------------|
+| `max_tokens`        | int   | `100000`                                    | Session token ceiling. |
+| `warning_threshold` | float | `0.8`                                       | Warn when usage reaches this fraction. |
+| `message`           | string | `Token budget exhausted for this session.` | Veto message. |
+
+### `nexus.gate.rate_limiter`
+
+Source: `plugins/gates/rate_limiter/plugin.go`. Pauses (re-emits via
+`gate.llm.retry` after a wait) rather than rejecting.
+
+| Key                   | Type   | Default                                                     | Description |
+|-----------------------|--------|-------------------------------------------------------------|-------------|
+| `requests_per_minute` | int    | `60`                                                        | Requests allowed per `window_seconds`. |
+| `window_seconds`      | int    | `60`                                                        | Sliding window length. |
+| `pause_message`       | string | `Rate limit reached. Pausing for {seconds}s...`             | Output template; `{seconds}` is interpolated. |
+
+### `nexus.gate.prompt_injection`
+
+Source: `plugins/gates/prompt_injection/plugin.go`. Regex-only — no LLM.
+
+| Key             | Type   | Default                                                       | Description |
+|-----------------|--------|---------------------------------------------------------------|-------------|
+| `action`        | string | `block`                                                       | `block` or `warn`. |
+| `patterns`      | list   | *(default set)*                                               | Inline regex patterns added to defaults. |
+| `patterns_file` | string | *(none)*                                                      | File of newline-separated regexes. |
+| `message`       | string | `Input blocked: potential prompt injection detected.`         | Block message. |
+
+### `nexus.gate.json_schema`
+
+Source: `plugins/gates/json_schema/plugin.go`. Validates `before:io.output`
+against a JSON Schema; on failure, asks the LLM to retry.
+
+| Key             | Type            | Default     | Description |
+|-----------------|-----------------|-------------|-------------|
+| `schema`        | string \| object | *(required)* | JSON Schema as inline object or string. |
+| `schema_file`   | string          | *(none)*    | Path to a schema file (takes precedence over `schema`). |
+| `max_retries`   | int             | `3`         | Retry attempts. |
+| `retry_prompt`  | string          | *(default)* | Retry instruction; supports `{schema}` and `{error}` templates. |
+
+### `nexus.gate.output_length`
+
+Source: `plugins/gates/output_length/plugin.go`. Asks the LLM to retry with a
+shorter response; allows through after exhausted retries (with a warning).
+
+| Key            | Type   | Default     | Description |
+|----------------|--------|-------------|-------------|
+| `max_chars`    | int    | `5000`      | Maximum response length. |
+| `max_retries`  | int    | `2`         | Retry attempts. |
+| `retry_prompt` | string | *(default)* | Retry prompt; supports `{length}` and `{limit}` templates. |
+
+### `nexus.gate.content_safety`
+
+Source: `plugins/gates/content_safety/plugin.go`. Built-in checks all default
+to enabled.
+
+| Key                          | Type | Default                                                       | Description |
+|------------------------------|------|---------------------------------------------------------------|-------------|
+| `action`                     | string | `block`                                                     | `block` or `redact`. |
+| `message`                    | string | `Content blocked: contains sensitive information ({checks}).` | Block/redact message; `{checks}` lists triggered checks. |
+| `check_pii_email`            | bool | `true`                                                        | Detect email addresses. |
+| `check_pii_phone`            | bool | `true`                                                        | Detect phone numbers. |
+| `check_pii_ssn`              | bool | `true`                                                        | Detect US SSNs. |
+| `check_secrets_api_key`      | bool | `true`                                                        | Detect API-key-like strings. |
+| `check_secrets_private_key`  | bool | `true`                                                        | Detect private-key blocks. |
+| `check_secrets_password`     | bool | `true`                                                        | Detect password-shaped fields. |
+| `check_credit_card`          | bool | `true`                                                        | Detect credit-card numbers. |
+| `check_ip_internal`          | bool | `true`                                                        | Detect RFC1918 / internal IPs. |
+| `custom_patterns`            | list | *(empty)*                                                     | Each `{name, pattern}`. |
+
+### `nexus.gate.context_window`
+
+Source: `plugins/gates/context_window/plugin.go`. Triggers compaction via
+`memory.compact.request` when the estimated context approaches the limit.
+
+| Key                  | Type  | Default  | Description |
+|----------------------|-------|----------|-------------|
+| `max_context_tokens` | int   | `100000` | Provider context window limit. |
+| `trigger_ratio`      | float | `0.85`   | Trigger compaction at this fraction (0.0–1.0). |
+| `chars_per_token`    | float | `4.0`    | Token estimation ratio. |
+
+### `nexus.gate.tool_filter`
+
+Source: `plugins/gates/tool_filter/plugin.go`. Modifies `request.ToolFilter` on
+`before:llm.request`. `include` takes precedence over `exclude`.
+
+| Key       | Type | Default     | Description |
+|-----------|------|-------------|-------------|
+| `include` | list | *(empty)*   | Allowlist of tool names. |
+| `exclude` | list | *(empty)*   | Blocklist of tool names. |
+
+---
+
+## Cross-references
+
+- [Plugin System](../../../.claude/docs/plugin-system.md) — plugin lifecycle,
+  `Requires()` vs `Dependencies()`, capability resolution.
+- [Gates](../../../.claude/docs/gates.md) — vetoable event mechanics shared by
+  every gate plugin.
+- [Tool System](../../../.claude/docs/tool-system.md) — tool choice, parallel
+  dispatch, structured output.
+- [RAG](../../../.claude/docs/rag.md) — embeddings, vector store, ingestion.
+- [I/O Transport](../../../.claude/docs/io-transport.md) — browser vs Wails,
+  parity rule.
+- [Desktop Shell](../../../.claude/docs/desktop-shell.md) — embedder API.

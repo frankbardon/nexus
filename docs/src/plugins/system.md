@@ -11,16 +11,17 @@ Injects dynamic system information (date, time, OS, working directory) into the 
 
 ## Configuration
 
-Each variable can be individually enabled or disabled:
+Each variable is **opt-in** — defaults to `false` and must be explicitly
+enabled:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `date` | bool | `true` | Include current date |
-| `time` | bool | `true` | Include current time |
-| `timezone` | bool | `true` | Include timezone |
-| `cwd` | bool | `true` | Include current working directory |
-| `session_dir` | bool | `true` | Include session directory path |
-| `os` | bool | `true` | Include operating system |
+| `date` | bool | `false` | Include current date |
+| `time` | bool | `false` | Include current time |
+| `timezone` | bool | `false` | Include timezone |
+| `cwd` | bool | `false` | Include current working directory |
+| `session_dir` | bool | `false` | Include session directory path |
+| `os` | bool | `false` | Include operating system |
 
 ## Events
 
@@ -43,15 +44,11 @@ The plugin appends a section like this to the system prompt:
 ## Example Configuration
 
 ```yaml
-# All variables enabled (default)
+# Empty config → no variables emitted (every flag defaults to false).
 nexus.system.dynvars: {}
 
-# Only date and CWD
+# Enable only the variables you want.
 nexus.system.dynvars:
   date: true
-  time: false
-  timezone: false
   cwd: true
-  session_dir: false
-  os: false
 ```

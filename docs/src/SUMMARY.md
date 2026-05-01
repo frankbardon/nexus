@@ -73,6 +73,7 @@
 - [Planners](./plugins/planners/index.md)
   - [Dynamic Planner](./plugins/planners/dynamic.md)
   - [Static Planner](./plugins/planners/static.md)
+- [Gates](./plugins/gates/index.md)
 - [Skills](./plugins/skills.md)
 - [System](./plugins/system.md)
 - [Control](./plugins/control.md)
