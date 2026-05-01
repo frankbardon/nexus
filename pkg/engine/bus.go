@@ -4,8 +4,16 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// SeqController is implemented by buses that expose their dispatch seq
+// counter. The engine uses it on session recall to continue numbering past
+// the existing journal's LastSeq instead of resetting to 1.
+type SeqController interface {
+	SetSeqFloor(seq uint64)
+}
 
 // EventBus is the central event dispatch system.
 type EventBus interface {
@@ -85,6 +93,18 @@ type eventBus struct {
 	nextID    uint64
 	inflight  sync.WaitGroup
 	ring      *eventRing
+
+	// seqCounter is the per-bus monotonic dispatch counter. Assigned at
+	// EmitEvent / EmitVetoable entry, before typed handlers run, so a
+	// nested emit always gets a higher seq than the event whose handler
+	// triggered it. The journal writer reads this via CurrentSeq.
+	seqCounter atomic.Uint64
+
+	// dispatchMu guards dispatchStacks. Held only briefly during push/pop;
+	// not the same lock as mu so dispatch stack reads don't contend with
+	// handler-snapshot reads.
+	dispatchMu     sync.Mutex
+	dispatchStacks map[int64][]uint64
 }
 
 // NewEventBus creates a new in-process EventBus with a default-sized ring
@@ -100,14 +120,81 @@ func NewEventBusWithRingSize(capacity int) EventBus {
 		capacity = DefaultLogRingSize
 	}
 	return &eventBus{
-		handlers: make(map[string][]*subscription),
-		ring:     newEventRing(capacity),
+		handlers:       make(map[string][]*subscription),
+		ring:           newEventRing(capacity),
+		dispatchStacks: make(map[int64][]uint64),
 	}
 }
 
 func (b *eventBus) nextSubID() uint64 {
 	b.nextID++
 	return b.nextID
+}
+
+// pushDispatch records the seq for the goroutine that is about to run an
+// event's handlers. Returns a pop function the caller defers.
+func (b *eventBus) pushDispatch(seq uint64) func() {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	b.dispatchStacks[gid] = append(b.dispatchStacks[gid], seq)
+	b.dispatchMu.Unlock()
+	return func() {
+		b.dispatchMu.Lock()
+		stack := b.dispatchStacks[gid]
+		if n := len(stack); n > 0 {
+			stack = stack[:n-1]
+			if len(stack) == 0 {
+				delete(b.dispatchStacks, gid)
+			} else {
+				b.dispatchStacks[gid] = stack
+			}
+		}
+		b.dispatchMu.Unlock()
+	}
+}
+
+// SetSeqFloor advances the dispatch seq counter to at least floor. No-op if
+// the counter is already higher. Used by the engine on session recall so
+// freshly-dispatched events do not collide with journal entries from the
+// prior run.
+func (b *eventBus) SetSeqFloor(floor uint64) {
+	for {
+		cur := b.seqCounter.Load()
+		if floor <= cur {
+			return
+		}
+		if b.seqCounter.CompareAndSwap(cur, floor) {
+			return
+		}
+	}
+}
+
+// CurrentSeq returns the seq of the event whose handlers are currently
+// running on the calling goroutine, or 0 if no dispatch is in flight.
+// Implements journal.SeqSource.
+func (b *eventBus) CurrentSeq() uint64 {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	defer b.dispatchMu.Unlock()
+	stack := b.dispatchStacks[gid]
+	if len(stack) == 0 {
+		return 0
+	}
+	return stack[len(stack)-1]
+}
+
+// ParentSeq returns the seq of the event whose handler triggered the current
+// dispatch (the entry below the top of the goroutine's stack), or 0 if the
+// current dispatch has no detectable parent. Implements journal.SeqSource.
+func (b *eventBus) ParentSeq() uint64 {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	defer b.dispatchMu.Unlock()
+	stack := b.dispatchStacks[gid]
+	if len(stack) < 2 {
+		return 0
+	}
+	return stack[len(stack)-2]
 }
 
 func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) func() {
@@ -213,6 +300,13 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 	b.inflight.Add(1)
 	defer b.inflight.Done()
 
+	// Assign the dispatch seq before any handler runs so the journal sees
+	// this event's seq in its causally-correct slot — a nested emit from a
+	// typed handler will see this seq as its ParentSeq.
+	seq := b.seqCounter.Add(1)
+	pop := b.pushDispatch(seq)
+	defer pop()
+
 	meta := event.Meta()
 
 	// Append to the replay ring and snapshot handlers under a single write
@@ -258,6 +352,10 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	b.inflight.Add(1)
 	defer b.inflight.Done()
 
+	seq := b.seqCounter.Add(1)
+	pop := b.pushDispatch(seq)
+	defer pop()
+
 	// Wrap in VetoablePayload so handlers can set Veto via the shared pointer.
 	// Handlers receive the event by value, but VetoablePayload is a pointer —
 	// mutations to vp.Veto propagate back here.
@@ -274,8 +372,11 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	b.ring.append(event)
 	typed := make([]*subscription, len(b.handlers[eventType]))
 	copy(typed, b.handlers[eventType])
+	wilds := make([]*subscription, len(b.wildcards))
+	copy(wilds, b.wildcards)
 	b.mu.Unlock()
 
+	var result VetoResult
 	for _, sub := range typed {
 		if sub.filter != nil && !sub.filter(meta) {
 			continue
@@ -283,11 +384,22 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 		sub.handler(event)
 
 		if vp.Veto.Vetoed {
-			return vp.Veto, nil
+			result = vp.Veto
+			break
 		}
 	}
 
-	return VetoResult{}, nil
+	// Wildcard dispatch always runs, even on veto, so the journal records
+	// the event with vetoed=true. Wildcards see the same VetoablePayload
+	// pointer the typed handlers saw, so they can detect veto state.
+	for _, sub := range wilds {
+		if sub.filter != nil && !sub.filter(meta) {
+			continue
+		}
+		sub.handler(event)
+	}
+
+	return result, nil
 }
 
 func (b *eventBus) Drain(ctx context.Context) error {

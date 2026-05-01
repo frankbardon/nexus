@@ -16,6 +16,28 @@ type Config struct {
 	// registered). Populated from the top-level YAML `capabilities:` block.
 	Capabilities map[string]string `yaml:"capabilities"`
 	Plugins      PluginsConfig     `yaml:"plugins"`
+	// Journal tunes the always-on durable event log. The journal cannot be
+	// disabled — it is core, not a plugin — but its fsync, retention, and
+	// rotation thresholds are exposed here for ops trade-offs.
+	Journal JournalConfig `yaml:"journal"`
+}
+
+// JournalConfig tunes the durable per-session event log. Defaults are picked
+// for the typical interactive run (turns of 5–30 events, multi-day session
+// retention). Set fsync to "every-event" for forensic durability or "none"
+// for ephemeral test sessions.
+type JournalConfig struct {
+	// Fsync controls the disk-flush policy. Values: "turn-boundary"
+	// (default), "every-event", "none".
+	Fsync string `yaml:"fsync"`
+	// RetainDays is the age past which a session journal is swept on
+	// engine boot. 0 disables sweeping (in-flight sessions are never
+	// touched regardless).
+	RetainDays int `yaml:"retain_days"`
+	// RotateSizeMB triggers segment rotation on agent.turn.end when the
+	// active segment exceeds this many MiB. Rotated segments are
+	// zstd-compressed.
+	RotateSizeMB int `yaml:"rotate_size_mb"`
 }
 
 // CoreConfig holds engine-level settings.
@@ -77,6 +99,11 @@ func DefaultConfig() *Config {
 		Plugins: PluginsConfig{
 			Active:  []string{},
 			Configs: make(map[string]map[string]any),
+		},
+		Journal: JournalConfig{
+			Fsync:        "turn-boundary",
+			RetainDays:   30,
+			RotateSizeMB: 4,
 		},
 	}
 }

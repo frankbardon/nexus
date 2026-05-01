@@ -31,6 +31,7 @@ source, update this page in the same commit.
 ```yaml
 core:           # engine-level settings
 capabilities:   # capability → plugin-ID pinning (optional)
+journal:        # durable per-session event log (always on; tunables only)
 plugins:
   active: []    # plugin IDs (with optional /instance suffix)
   <plugin.id>:  # per-plugin config map
@@ -41,6 +42,7 @@ plugins:
 |----------------|--------|---------|-----------------------------------------------------------------------------|
 | `core`         | map    | *(see core section)* | Engine-level settings (logging, sessions, models). |
 | `capabilities` | map    | *(empty)* | Pin capability names to specific provider plugin IDs (e.g. `search.provider: nexus.search.brave`). Overrides default resolution (first active provider). |
+| `journal`      | map    | *(see journal section)* | Tuning knobs for the always-on event journal. The journal cannot be disabled. |
 | `plugins.active` | list | `[]`    | Plugin IDs to activate. Order doesn't matter — `Requires()` and `Dependencies()` are resolved automatically. Multi-instance plugins use a slash suffix: `nexus.agent.subagent/researcher`. |
 | `plugins.<id>` | map    | *(none)* | Per-plugin configuration. Keys other than `active` are treated as plugin IDs. |
 
@@ -108,6 +110,39 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+## Journal
+
+The journal is the engine's always-on durable event log. Every dispatched
+bus event lands as a JSONL envelope at
+`<sessions.root>/<session_id>/journal/events.jsonl` with a monotonic per-
+session sequence number, the parent dispatch's seq (best-effort), and the
+veto outcome for `before:*` events. The journal cannot be disabled — it is
+core infrastructure underpinning crash recovery, deterministic replay, and
+observability projections.
+
+```yaml
+journal:
+  fsync: turn-boundary       # turn-boundary | every-event | none
+  retain_days: 30
+  rotate_size_mb: 4
+```
+
+| Key              | Type   | Default          | Description |
+|------------------|--------|------------------|-------------|
+| `fsync`          | string | `turn-boundary`  | Disk-flush policy. `turn-boundary` fsyncs once per `agent.turn.end` (good throughput, recovers to last completed turn). `every-event` fsyncs after every envelope (strongest crash guarantee). `none` skips explicit fsync (test-only). |
+| `retain_days`    | int    | `30`             | Age in days past which a session's journal directory is removed on engine boot. `0` disables sweeping. In-flight sessions are never touched. |
+| `rotate_size_mb` | int    | `4`              | Active segment size threshold (MiB). When `agent.turn.end` lands and the active segment exceeds this, it is compressed into `events-NNN.jsonl.zst` and the active segment is truncated. |
+
+### Disk layout
+
+```
+~/.nexus/sessions/<id>/journal/
+  header.json                 # schema_version, created_at, fsync_mode, session_id
+  events.jsonl                # active segment (append-only)
+  events-001.jsonl.zst        # rotated, zstd-compressed
+  events-002.jsonl.zst
+```
 
 ## Plugin activation
 

@@ -35,6 +35,7 @@ type Harness struct {
 
 	timeout       time.Duration
 	retainSession bool // keep session dir on failure for debugging
+	keepSession   bool // keep session dir unconditionally (used by tests that read post-run artifacts)
 }
 
 // Option configures the test harness.
@@ -51,6 +52,16 @@ func WithTimeout(d time.Duration) Option {
 func WithRetainSession() Option {
 	return func(h *Harness) {
 		h.retainSession = true
+	}
+}
+
+// WithKeepSession keeps the session directory unconditionally so tests can
+// read post-run artifacts (the journal, plugin data dirs, metadata). The
+// caller is responsible for cleanup; using t.TempDir() as the sessions root
+// is the typical pattern.
+func WithKeepSession() Option {
+	return func(h *Harness) {
+		h.keepSession = true
 	}
 }
 
@@ -134,14 +145,27 @@ func (h *Harness) Run() {
 		h.t.Logf("testharness: engine stop error: %v", err)
 	}
 
-	// Clean up session dir unless retaining for debug.
-	if !h.retainSession || !h.t.Failed() {
+	// Clean up session dir unless retaining for debug or keeping for test
+	// reads. WithKeepSession is unconditional; WithRetainSession only
+	// kicks in when the test failed.
+	keep := h.keepSession || (h.retainSession && h.t.Failed())
+	if !keep {
 		if h.eng.Session != nil {
 			os.RemoveAll(h.eng.Session.RootDir)
 		}
 	} else if h.eng.Session != nil {
 		h.t.Logf("testharness: retaining session dir: %s", h.eng.Session.RootDir)
 	}
+}
+
+// SessionDir returns the absolute path of the session workspace created by
+// the harness. Empty before Run; remains valid after Run when paired with
+// WithKeepSession.
+func (h *Harness) SessionDir() string {
+	if h.eng == nil || h.eng.Session == nil {
+		return ""
+	}
+	return h.eng.Session.RootDir
 }
 
 // Events returns all collected events from the test run.
