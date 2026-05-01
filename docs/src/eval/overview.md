@@ -138,10 +138,38 @@ error path is covered by the integration test under `tests/integration/`.
 | 1 | Core runner, 7 deterministic assertions, 1 seed case | Shipped |
 | 2 | CLI, multi-case, baseline diff, 5 seed cases | Shipped |
 | 3 | `nexus eval record / promote` (failure → case in one command) | Shipped — see [`promotion.md`](./promotion.md) |
-| 4 | `plugins/observe/sampler/` (online sample capture) | Pending |
+| 4 | `plugins/observe/sampler/` (online sample capture) | Shipped — see [Online sampling](#online-sampling) |
 | 5 | `--full` LLM judge, `--inspect-mode` JSON-RPC protocol | Stubbed |
 
 The case directory layout finalized in Phase 2 is forward-compatible with
 Phase 3 promotion — `record` writes the same shape that Phase 2 reads. The
 report's `schema_version: "1"` is the contract Phase 5's protocol mode and
 external harnesses (Inspect AI, Braintrust) will pin against.
+
+## Online sampling
+
+Phase 4 adds the [`nexus.observe.sampler`](../plugins/observers/sampler.md)
+plugin: an opt-in observer that snapshots a configurable fraction of live
+sessions (plus every failed session, when `failure_capture` is on) into
+`~/.nexus/eval/samples/<id>/`. Captured directories share the
+case-compatible journal layout, so they feed straight into the promotion
+pipeline once an operator picks one out of the sample set.
+
+Activation is two opt-ins (off by default):
+
+```yaml
+plugins:
+  active:
+    - nexus.observe.sampler
+
+  nexus.observe.sampler:
+    enabled: true
+    rate: 0.05
+    failure_capture: true
+    out_dir: ~/.nexus/eval/samples
+```
+
+See [the sampler plugin doc](../plugins/observers/sampler.md) for the
+capture-decision rules, the `eval.candidate` event contract, the
+pluggable redactor hook, and the integration story with
+`nexus eval promote`.

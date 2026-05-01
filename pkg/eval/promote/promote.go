@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/iocopy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -114,7 +114,7 @@ func Promote(ctx context.Context, opts PromoteOptions) (*PromoteResult, error) {
 	// 1) Copy journal.
 	srcJournal := filepath.Join(opts.SessionDir, "journal")
 	dstJournal := filepath.Join(caseDir, "journal")
-	if err := copyDir(srcJournal, dstJournal); err != nil {
+	if err := iocopy.CopyDir(srcJournal, dstJournal); err != nil {
 		return nil, fmt.Errorf("copy journal: %w", err)
 	}
 
@@ -126,7 +126,7 @@ func Promote(ctx context.Context, opts PromoteOptions) (*PromoteResult, error) {
 		return nil, fmt.Errorf("create input dir: %w", err)
 	}
 	dstCfg := filepath.Join(dstCfgDir, "config.yaml")
-	if err := copyFile(srcCfg, dstCfg); err != nil {
+	if err := iocopy.CopyFile(srcCfg, dstCfg); err != nil {
 		// Snapshot may be absent on very early boot failures; surface as a
 		// warning but keep going so the user can paste in a config by hand.
 		if errors.Is(err, os.ErrNotExist) {
@@ -253,54 +253,6 @@ func prepareCaseDir(caseDir string, force bool) error {
 	}
 	if err := os.MkdirAll(caseDir, 0o755); err != nil {
 		return fmt.Errorf("create case dir: %w", err)
-	}
-	return nil
-}
-
-// copyDir recursively copies src into dst (which must not exist; the caller
-// is responsible for prep). Preserves regular files byte-for-byte; skips
-// special files (sockets, devices) — journals never include them.
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, rerr := filepath.Rel(src, path)
-		if rerr != nil {
-			return rerr
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		return copyFile(path, target)
-	})
-}
-
-// copyFile copies the contents of src to dst, preserving file mode.
-func copyFile(src, dst string) error {
-	sf, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sf.Close()
-	info, err := sf.Stat()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	defer df.Close()
-	if _, err := io.Copy(df, sf); err != nil {
-		return err
 	}
 	return nil
 }

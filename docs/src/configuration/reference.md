@@ -838,6 +838,51 @@ session, one span per event).
 | `service_name`  | string | `nexus` | OpenTelemetry service name. |
 | `exclude_events`| list   | *(empty)* | Event types to skip; supports prefix wildcards (`llm.stream.*`). |
 
+### `nexus.observe.sampler`
+
+Source: `plugins/observe/sampler/plugin.go`. **Off by default.** Captures a
+fraction of live session journals (and every failed session when
+`failure_capture` is on) into a local directory so the eval pipeline can
+score them later. The plugin must be both registered (it is — automatically
+via `pkg/engine/allplugins`) **and** listed in `plugins.active` *and*
+configured with `enabled: true` for any capture to happen. Omitting the
+config block, or setting `enabled: false`, makes the plugin a no-op:
+`Subscriptions()` returns empty, no bus traffic, no disk writes.
+
+```yaml
+plugins:
+  active:
+    - nexus.observe.sampler
+
+  nexus.observe.sampler:
+    enabled: false
+    rate: 0.0
+    failure_capture: true
+    out_dir: ~/.nexus/eval/samples
+```
+
+| Key               | Type    | Default                 | Description |
+|-------------------|---------|-------------------------|-------------|
+| `enabled`         | bool    | `false`                 | Master switch. When `false`, the plugin draws no bus traffic and writes no files even if it appears in `plugins.active`. |
+| `rate`            | float   | `0.0`                   | Fraction of normal sessions captured at `io.session.end`, in `[0, 1]`. `0.0` disables rate sampling; `1.0` captures every session. Validated at `Init`; out-of-range values fail boot when `enabled: true`. |
+| `failure_capture` | bool    | `true`                  | When `true`, sessions whose `metadata/session.json` status is anything other than `active` or `completed` are captured **regardless of `rate`**. Use `false` to disable failure capture entirely. |
+| `out_dir`         | string  | `~/.nexus/eval/samples` | Directory where samples land. Path expansion via `engine.ExpandPath`. Each sample is written to `<out_dir>/<session-id>/journal/` plus a `<out_dir>/<session-id>/metadata.json` sibling. |
+
+The plugin emits an `eval.candidate` event per capture (payload defined in
+`plugins/observe/sampler/events.go`) so downstream tooling — for example,
+`nexus eval list-candidates` once it lands — can enumerate fresh samples.
+
+The pluggable `Redactor` interface (`plugins/observe/sampler/redact.go`) is
+the hook for future PII scrubbing. v1 ships only the `IdentityRedactor`
+(byte-pass-through). Tests inject custom redactors via the package-private
+`Plugin.SetRedactor` API; production runs leave it on the default.
+
+> **Caveat: rotated journal segments.** When a non-identity redactor is
+> configured, the active `events.jsonl` segment is rewritten line-by-line
+> through it. Compressed `*.jsonl.zst` rotated segments are byte-copied
+> as-is in v1 — handling them transparently requires zstd round-trips
+> that are deferred to a follow-up.
+
 ---
 
 ## Planners
