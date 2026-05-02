@@ -9,6 +9,12 @@ import (
 	"sync"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/sandbox"
+
+	// Side-effect import: registers the default host sandbox factory so
+	// resolveSandbox can construct the baseline backend even when no plugin
+	// explicitly opts into a stricter tier.
+	_ "github.com/frankbardon/nexus/pkg/engine/sandbox/host"
 )
 
 // PluginBaseID extracts the base plugin ID from a potentially instanced ID.
@@ -155,6 +161,11 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			pluginCfg = make(map[string]any)
 		}
 
+		sb, err := lm.resolveSandbox(configuredID, pluginCfg)
+		if err != nil {
+			return fmt.Errorf("plugin %q sandbox resolve failed: %w", configuredID, err)
+		}
+
 		pctx := PluginContext{
 			Config:       pluginCfg,
 			Bus:          lm.bus,
@@ -170,6 +181,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			InstanceID:   instanceIDs[configuredID],
 			Replay:       lm.replay,
 			Journal:      lm.journal,
+			Sandbox:      sb,
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())
@@ -270,6 +282,31 @@ func (lm *LifecycleManager) capabilitiesCopy() map[string][]string {
 		out[k] = dup
 	}
 	return out
+}
+
+// resolveSandbox builds the per-plugin sandbox.Sandbox. Plugins with a
+// `sandbox:` config block use the named backend; plugins without one fall
+// back to a default host backend, which honors no command-allowlist and is
+// effectively the legacy "exec freely" behavior. Strict-mode boot: an
+// unknown backend name returns an error so the engine never silently
+// downgrades to host.
+func (lm *LifecycleManager) resolveSandbox(pluginID string, pluginCfg map[string]any) (sandbox.Sandbox, error) {
+	name, block := sandbox.FromPluginConfig(pluginCfg, sandbox.BackendHost)
+	if block == nil {
+		// No `sandbox:` block — use a baseline host backend so callers can
+		// still rely on ctx.Sandbox being non-nil. Empty config = no
+		// allowed-commands restriction (preserves prior behavior).
+		sb, err := sandbox.New(sandbox.BackendHost, nil)
+		if err != nil {
+			return nil, fmt.Errorf("default host sandbox for %q: %w", pluginID, err)
+		}
+		return sb, nil
+	}
+	sb, err := sandbox.New(name, block)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %q for %q: %w", name, pluginID, err)
+	}
+	return sb, nil
 }
 
 // expandRequirements walks Requires() transitively on every plugin already in

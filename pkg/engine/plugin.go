@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/sandbox"
 )
 
 // Plugin is the interface that all Nexus plugins must implement.
@@ -141,6 +142,13 @@ type PluginContext struct {
 	// register via Journal.SubscribeProjection so their derived files are
 	// driven by durable envelopes instead of live dispatch.
 	Journal *journal.Writer
+
+	// Sandbox is the per-plugin execution sandbox. Resolved at boot from
+	// the plugin's `sandbox:` config block; falls back to a default host
+	// backend when no block is supplied. Tools that shell out or evaluate
+	// code call Sandbox.Exec rather than reaching for os/exec or an
+	// in-process interpreter directly. Always non-nil during Init.
+	Sandbox sandbox.Sandbox
 }
 
 // LateShutdown is an optional marker interface. A plugin that implements it
