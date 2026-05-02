@@ -375,6 +375,16 @@ func (p *Plugin) handleSkillLoaded(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	// Skill helpers are Yaegi-bound. They have no representation under the
+	// wasm compiler (the bridge SDK doesn't surface them in v1), so when the
+	// agent path runs through wasm we skip helper loading entirely. Skill
+	// content (the markdown body) still reaches the agent the same way; only
+	// the in-script `import "skills/<name>"` binding is unavailable.
+	if p.compiler == compilerYaegiWasm {
+		p.logger.Info("skipping skill helper load under compiler=yaegi-wasm",
+			"skill", sc.Name, "skill_runtime", sc.Runtime)
+		return
+	}
 	helpers, err := loadSkillHelpers(sc.Name, sc.BaseDir)
 	if err != nil {
 		p.logger.Warn("skill helper load failed", "skill", sc.Name, "error", err)

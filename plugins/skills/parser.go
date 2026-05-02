@@ -23,6 +23,7 @@ type SkillRecord struct {
 	Class            string            `yaml:"class"`              // Semantic class for progressive discovery.
 	Subclass         string            `yaml:"subclass"`           // Optional grouping within class.
 	Tags             []string          `yaml:"tags"`               // Cross-cutting metadata for filtering.
+	Runtime          string            `yaml:"runtime"`            // "yaegi" (default) or "wasm" — selects the codeexec runtime for skill helpers.
 	Body             string            `yaml:"-"`
 	Scope            string            `yaml:"-"` // "project", "user", "builtin", "config"
 	Trusted          bool              `yaml:"-"`
@@ -66,6 +67,12 @@ func ParseSkillFile(path string) (*SkillRecord, error) {
 	}
 	if record.Description == "" {
 		return nil, fmt.Errorf("skill file %s missing required field: description", path)
+	}
+	switch record.Runtime {
+	case "", "yaegi", "wasm":
+		// "" defaults at the consumer; "yaegi" and "wasm" are the legal values.
+	default:
+		return nil, fmt.Errorf("skill file %s: invalid runtime %q (want \"yaegi\" or \"wasm\")", path, record.Runtime)
 	}
 
 	return record, nil

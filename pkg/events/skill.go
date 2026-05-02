@@ -28,6 +28,11 @@ type SkillContent struct {
 	Resources []string
 	Scope     string
 	BaseDir   string
+	// Runtime selects the codeexec runtime for this skill's helpers.
+	// Empty defaults to "yaegi" at the consumer for backwards compatibility;
+	// "wasm" routes the skill's run_code through ctx.Sandbox when codeexec
+	// is configured with compiler: yaegi-wasm.
+	Runtime string
 }
 
 // SkillRef is a lightweight reference to a skill by name.
