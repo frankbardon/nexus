@@ -44,10 +44,7 @@ func (b *Bridge) fsWriteAllowed(guestPath string) bool {
 	for _, m := range b.policy.FSMounts {
 		guest := filepath.Clean(m.Guest)
 		if clean == guest || strings.HasPrefix(clean, guest+string(filepath.Separator)) {
-			if m.Mode == "rw" {
-				return true
-			}
-			return false
+			return m.Mode == "rw"
 		}
 	}
 	return false
