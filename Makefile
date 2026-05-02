@@ -48,7 +48,7 @@ build-yaegi-wasm:
 	@echo "Building cmd/yaegi-runner for GOOS=wasip1 GOARCH=wasm..."
 	GOOS=wasip1 GOARCH=wasm $(GO) build -ldflags="-s -w" -trimpath -o $(YAEGI_WASM:.gz=) ./cmd/yaegi-runner
 	@echo "Compressing with gzip -9..."
-	gzip -9 -f $(YAEGI_WASM:.gz=)
+	gzip -9 -n -f $(YAEGI_WASM:.gz=)
 	@echo "Result: $(YAEGI_WASM)"
 	@ls -la $(YAEGI_WASM)
 
@@ -59,7 +59,7 @@ verify-yaegi-wasm:
 	@echo "Verifying $(YAEGI_WASM) is up to date..."
 	@tmp_dir=$$(mktemp -d); \
 	GOOS=wasip1 GOARCH=wasm $(GO) build -ldflags="-s -w" -trimpath -o $$tmp_dir/yaegi.wasm ./cmd/yaegi-runner && \
-	gzip -9 -f $$tmp_dir/yaegi.wasm && \
+	gzip -9 -n -f $$tmp_dir/yaegi.wasm && \
 	if cmp -s $(YAEGI_WASM) $$tmp_dir/yaegi.wasm.gz; then \
 	  echo "OK — embedded artefact matches a fresh build."; \
 	  rm -rf $$tmp_dir; \

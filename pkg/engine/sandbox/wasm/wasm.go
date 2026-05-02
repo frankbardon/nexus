@@ -22,6 +22,7 @@ import (
 	"github.com/tetratelabs/wazero/sys"
 
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
+	"github.com/frankbardon/nexus/pkg/engine/sandbox/wasm/host"
 )
 
 // expandHome resolves a leading ~ to the user's home dir. Mirrors
@@ -60,6 +61,7 @@ func init() {
 type Backend struct {
 	runtime  wazero.Runtime
 	compiled wazero.CompiledModule
+	bridge   *host.Bridge
 
 	allowedPackages []string
 	timeout         time.Duration
@@ -93,6 +95,17 @@ func newBackend(cfg map[string]any) (sandbox.Sandbox, error) {
 		return nil, fmt.Errorf("wasm: install wasi: %w", err)
 	}
 
+	policy, err := parsePolicy(cfg)
+	if err != nil {
+		_ = rt.Close(ctx)
+		return nil, err
+	}
+	bridge := host.NewBridge(policy, host.NewDefaultCaps(policy.FSMounts))
+	if err := bridge.Register(ctx, rt); err != nil {
+		_ = rt.Close(ctx)
+		return nil, fmt.Errorf("wasm: register bridge: %w", err)
+	}
+
 	compiled, err := rt.CompileModule(ctx, bytesWasm)
 	if err != nil {
 		_ = rt.Close(ctx)
@@ -102,6 +115,7 @@ func newBackend(cfg map[string]any) (sandbox.Sandbox, error) {
 	b := &Backend{
 		runtime:        rt,
 		compiled:       compiled,
+		bridge:         bridge,
 		timeout:        defaultTimeout,
 		maxOutputBytes: defaultMaxOut,
 	}

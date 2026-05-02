@@ -1,3 +1,5 @@
+//go:build wasip1
+
 // Command yaegi-runner is the embedded Yaegi-inside-Wasm interpreter that
 // backs the wasm sandbox. It is compiled with GOOS=wasip1 GOARCH=wasm and
 // embedded into the engine binary via //go:embed in
@@ -75,6 +77,9 @@ func run() error {
 
 	if err := i.Use(filteredStdlib(req.AllowedPackages)); err != nil {
 		return fmt.Errorf("install stdlib: %w", err)
+	}
+	if err := i.Use(sdkBindings()); err != nil {
+		return fmt.Errorf("install nexus_sdk: %w", err)
 	}
 
 	if _, err := i.Eval(req.Source); err != nil {
