@@ -83,6 +83,7 @@
 
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
+- [Sandboxing](./security/sandboxing.md)
 
 # Eval Harness
 

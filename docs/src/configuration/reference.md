@@ -508,15 +508,23 @@ explicitly via the top-level `capabilities:` block.
 
 ### `nexus.tool.shell`
 
-Source: `plugins/tools/shell/plugin.go`.
+Source: `plugins/tools/shell/plugin.go`. Routes commands through
+`pkg/engine/sandbox` so the kernel surface is a single audited boundary.
 
 | Key                | Type     | Default                  | Description |
 |--------------------|----------|--------------------------|-------------|
-| `allowed_commands` | list     | *(none — all allowed)*   | Whitelist of command names (exact match only, despite a misleading code comment). |
 | `working_dir`      | string   | *(session files dir)*    | Working directory for executions. |
-| `path_dirs`        | list     | *(none)*                 | Directories prepended to `PATH` for command resolution. |
 | `timeout`          | duration | `30s`                    | Per-command timeout. |
-| `sandbox`          | bool     | `false`                  | Strip sensitive env vars (AWS, Google, Azure, Anthropic API keys) before execution. |
+| `sandbox.backend`  | string   | `host`                   | Sandbox tier: `host` (current behaviour). Future: `gvisor`, `firecracker`, `landlock`. |
+| `sandbox.allowed_commands` | list | *(none — all allowed)* | Whitelist of base command names. |
+| `sandbox.path_dirs`        | list | *(none)*               | Directories prepended to `PATH`. |
+| `sandbox.env_restrict`     | bool | `false`                | Strip sensitive env vars (AWS, Google, Azure, Anthropic API keys) before execution. |
+| `sandbox.timeout`          | duration | `30s`              | Per-command default; `timeout` above wins per-call. |
+
+**Legacy keys** still accepted for backwards compatibility:
+`allowed_commands`, `path_dirs`, `sandbox: <bool>` at the top level are
+auto-shimmed into the equivalent `sandbox: { ... }` block. Documented as
+deprecated; removal targeted for the milestone after gVisor lands.
 
 ### `nexus.tool.file`
 
@@ -597,16 +605,33 @@ Source: `plugins/tools/ask/plugin.go`. **No configuration.** Registers
 
 ### `nexus.tool.code_exec`
 
-Source: `plugins/tools/codeexec/plugin.go`. Registers `run_code` (Go via Yaegi).
+Source: `plugins/tools/codeexec/plugin.go`. Registers `run_code` (Go).
+Two compilers selected via `compiler`:
 
-| Key                 | Type | Default                    | Description |
-|---------------------|------|----------------------------|-------------|
-| `timeout_seconds`   | int  | `30`                       | Script timeout in seconds. |
-| `max_output_bytes`  | int  | `65536`                    | Maximum captured output. |
-| `max_workers`       | int  | `runtime.NumCPU()`         | Concurrency cap for `parallel.*` constructs. |
-| `persist_scripts`   | bool | `true`                     | Write executed scripts to session files. |
-| `reject_goroutines` | bool | `true`                     | Reject scripts that spawn goroutines. |
-| `allowed_packages`  | list | *(stdlib whitelist)*       | Additional importable packages (must be in stdlib). |
+- `yaegi-host` (default) — in-process Yaegi interpreter. Full dynamic
+  bindings (`tools.*`, `parallel.*`, skill helpers); no kernel isolation.
+- `yaegi-wasm` — embedded Yaegi runner inside a wazero-managed Wasm
+  sandbox. Capability-gated I/O via `nexus_sdk/{http,fs,exec,env}`. v1
+  forfeits `tools.*`, `parallel.*`, and skill helpers — the bridge SDK
+  does not surface them.
+
+| Key                 | Type   | Default                    | Description |
+|---------------------|--------|----------------------------|-------------|
+| `compiler`          | string | `yaegi-host`               | `yaegi-host` or `yaegi-wasm`. The latter requires `sandbox.backend: wasm`. |
+| `timeout_seconds`   | int    | `30`                       | Script timeout in seconds. |
+| `max_output_bytes`  | int    | `65536`                    | Maximum captured output. |
+| `max_workers`       | int    | `runtime.NumCPU()`         | Concurrency cap for `parallel.*` (yaegi-host only). |
+| `persist_scripts`   | bool   | `true`                     | Write executed scripts to session files. |
+| `reject_goroutines` | bool   | `true`                     | Reject scripts that spawn goroutines. |
+| `allowed_packages`  | list   | *(stdlib whitelist)*       | Importable stdlib packages. |
+| `sandbox.backend`   | string | `host`                     | Required `wasm` for `compiler: yaegi-wasm`. Other backends (`host`) reject `KindGoWasm` requests. |
+| `sandbox.cache_dir` | string | *(none)*                   | Persistent wazero compilation cache. Recommended for fast cold-start across processes. |
+| `sandbox.timeout`   | duration | `30s`                    | Default per-call wasm timeout. |
+| `sandbox.net.policy` | string | `deny`                    | `deny` or `allow_hosts`. Empty `allow_hosts` = deny all. |
+| `sandbox.net.allow_hosts` | list | *(empty)*              | Exact-match hostname allowlist for `nexus_sdk/http`. |
+| `sandbox.fs_mounts` | list   | *(empty)*                  | List of `{host, guest, mode}` triples. `mode` is `ro` (default) or `rw`. Backs `nexus_sdk/fs`. |
+| `sandbox.exec_allowed` | list | *(empty)*                | Allowlist of commands invokable from `nexus_sdk/exec.Run`. Empty = deny. |
+| `sandbox.env`       | map    | *(empty)*                  | Sandbox-scoped env values returned by `nexus_sdk/env.Get`. Never the host's real env. |
 
 ---
 
