@@ -1,0 +1,18 @@
+name: provider-fallback
+description: |
+  Provider fallback chain configured (OpenAI primary -> Anthropic fallback).
+  In mock replay mode the primary's stashed responses pop without error,
+  so no actual fallback fires — but the case still validates that the
+  fallback plugin boots, parses the chain config, and a turn completes
+  cleanly with the chain in place. The real fallback path (provider error
+  -> chain advance -> success) is exercised by the live integration test
+  (tests/integration/fallback_test.go) which needs an API key; this eval
+  case is the deterministic boot-and-replay smoke test.
+tags:
+  - fallback
+  - mock
+  - boot
+owner: nexus-eval@example.com
+freshness_days: 365
+model_baseline: mock
+recorded_at: 2026-05-01T12:00:00Z

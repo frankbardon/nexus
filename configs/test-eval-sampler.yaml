@@ -1,0 +1,62 @@
+# Test: online sampler captures the live session journal at io.session.end.
+# Mock mode (no API key required).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestEvalSampler
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+journal:
+  fsync: every-event
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+    - nexus.observe.sampler
+
+  nexus.io.test:
+    inputs:
+      - "first"
+      - "second"
+    input_delay: 50ms
+    approval_mode: approve
+    timeout: 15s
+    mock_responses:
+      - content: "first reply"
+      - content: "second reply"
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
+
+  # out_dir is a placeholder — the integration test rewrites it to a tempdir
+  # so the test does not interact with the user's ~/.nexus/eval/samples tree.
+  nexus.observe.sampler:
+    enabled: true
+    rate: 1.0
+    failure_capture: true
+    out_dir: ~/.nexus/test-eval-samples

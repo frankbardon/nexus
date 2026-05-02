@@ -1,0 +1,43 @@
+# Eval case: build-error-fix
+#
+# Minimal mock-mode config. The runner overrides core.sessions.root with a
+# tempdir; replay short-circuits provider + tool calls via the journal
+# stash, so no API key or shell access is needed.
+core:
+  log_level: warn
+  tick_interval: 1h
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: timestamp
+
+journal:
+  fsync: none
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+    - nexus.tool.file
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.memory.capped:
+    max_messages: 20
+    persist: false
+
+  nexus.tool.file:
+    allow_external_writes: false

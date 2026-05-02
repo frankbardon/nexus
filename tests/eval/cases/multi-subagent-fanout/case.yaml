@@ -1,0 +1,15 @@
+name: multi-subagent-fanout
+description: |
+  Three subagent instances (researcher, coder, reviewer) register distinct
+  spawn_* tools at boot. The parent ReAct agent runs a single mock turn —
+  the case validates that the multi-instance plugin pattern works through
+  replay: each subagent emits its own tool.register event independently
+  during Ready(), regardless of replay short-circuiting.
+tags:
+  - subagent
+  - mock
+  - boot
+owner: nexus-eval@example.com
+freshness_days: 365
+model_baseline: mock
+recorded_at: 2026-05-01T12:00:00Z

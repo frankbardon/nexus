@@ -1,0 +1,7 @@
+# Inputs are stored in the journal — the runner re-fires them via the
+# journal coordinator, not through the io.test plugin. This file is the
+# canonical record of the user side of the dialogue, kept for human
+# auditability and Phase-3 promotion round-tripping.
+inputs:
+  - "Why won't main.go build?"
+  - "Show me the fixed version."

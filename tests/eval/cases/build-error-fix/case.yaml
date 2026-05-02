@@ -1,0 +1,15 @@
+name: build-error-fix
+description: |
+  Two-turn ReAct dialogue: the user asks why main.go won't build,
+  the agent calls read_file, then explains the bug. A follow-up
+  turn requests the fixed version (no tool calls). The journal is
+  hand-crafted (mock provider equivalent) and committed alongside
+  the case so the runner is reproducible without an API key.
+tags:
+  - react
+  - tools
+  - mock
+owner: nexus-eval@example.com
+freshness_days: 365
+model_baseline: mock
+recorded_at: 2026-05-01T12:00:00Z

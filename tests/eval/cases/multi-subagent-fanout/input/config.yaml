@@ -1,0 +1,53 @@
+# Eval case: multi-subagent-fanout
+#
+# Three named subagent instances. Each registers its own spawn_<suffix>
+# tool. Mock provider; no API key.
+core:
+  log_level: warn
+  tick_interval: 1h
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: timestamp
+
+journal:
+  fsync: none
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.subagent/researcher
+    - nexus.agent.subagent/coder
+    - nexus.agent.subagent/reviewer
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are an orchestrator with three named subagents available."
+
+  nexus.agent.subagent/researcher:
+    model_role: mock
+    system_prompt: "Research specialist."
+
+  nexus.agent.subagent/coder:
+    model_role: mock
+    system_prompt: "Coding specialist."
+
+  nexus.agent.subagent/reviewer:
+    model_role: mock
+    system_prompt: "Review specialist."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

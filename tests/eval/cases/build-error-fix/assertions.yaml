@@ -1,0 +1,85 @@
+# Assertions for build-error-fix. Mix of presence, count, and trace-drift
+# checks across the 7 deterministic kinds Phase 1 ships.
+deterministic:
+  # Both user inputs were re-fired by the journal coordinator.
+  - kind: event_emitted
+    type: io.input
+    count: { min: 2, max: 2 }
+
+  # Two LLM round-trips: turn-1 tool_use + turn-1 final, turn-2 final. Plus
+  # any retry from the gates would inflate this; tighten if it stabilizes.
+  - kind: event_emitted
+    type: llm.response
+    count: { min: 3, max: 3 }
+
+  # Exactly one read_file invocation in the journal.
+  - kind: event_emitted
+    type: tool.invoke
+    where:
+      name: read_file
+    count: { min: 1, max: 1 }
+
+  # Per-turn frame counts: 2 turn pairs.
+  - kind: event_count_bounds
+    bounds:
+      agent.turn.start: { min: 2, max: 2 }
+      agent.turn.end: { min: 2, max: 2 }
+      io.input: { min: 2, max: 2 }
+
+  # Strict event-type sequence (filtered to load-bearing types).
+  # Order: input1 -> turn1 -> tool_use response -> tool invoke/result ->
+  # final response -> turn end -> input2 -> turn2 -> final -> turn end.
+  - kind: event_sequence_strict
+    filter:
+      - io.input
+      - agent.turn.start
+      - agent.turn.end
+      - llm.response
+      - tool.invoke
+      - tool.result
+    pattern:
+      - io.input
+      - agent.turn.start
+      - llm.response
+      - tool.invoke
+      - tool.result
+      - llm.response
+      - agent.turn.end
+      - io.input
+      - agent.turn.start
+      - llm.response
+      - agent.turn.end
+
+  # Trace-drift permissive bound. 0.0 = exact match — given the journal is
+  # the ground truth, deterministic replay should match exactly. A future
+  # CI run that crosses a model upgrade will widen this.
+  - kind: event_sequence_distance
+    threshold: 0.05
+    filter:
+      - io.input
+      - agent.turn.start
+      - agent.turn.end
+      - llm.response
+      - tool.invoke
+      - tool.result
+
+  # Tool-invocation parity: count exact, arg-key shape parity.
+  - kind: tool_invocation_parity
+    count_tolerance: 0
+    arg_keys: true
+
+  # Token budget — trivially under the journal's recorded usage.
+  - kind: token_budget
+    max_input_tokens: 1000
+    max_output_tokens: 500
+    per_turn: false
+
+  # Latency: timestamps in the journal are 10ms apart, so per-turn deltas
+  # are ~50ms each. Cap p95 generously so a future model swap doesn't
+  # blow the budget on noise.
+  - kind: latency
+    p50_ms: 1000
+    p95_ms: 2000
+
+# Phase 1 has no semantic assertions; the block is reserved for Phase 5+.
+semantic: []

@@ -838,6 +838,51 @@ session, one span per event).
 | `service_name`  | string | `nexus` | OpenTelemetry service name. |
 | `exclude_events`| list   | *(empty)* | Event types to skip; supports prefix wildcards (`llm.stream.*`). |
 
+### `nexus.observe.sampler`
+
+Source: `plugins/observe/sampler/plugin.go`. **Off by default.** Captures a
+fraction of live session journals (and every failed session when
+`failure_capture` is on) into a local directory so the eval pipeline can
+score them later. The plugin must be both registered (it is — automatically
+via `pkg/engine/allplugins`) **and** listed in `plugins.active` *and*
+configured with `enabled: true` for any capture to happen. Omitting the
+config block, or setting `enabled: false`, makes the plugin a no-op:
+`Subscriptions()` returns empty, no bus traffic, no disk writes.
+
+```yaml
+plugins:
+  active:
+    - nexus.observe.sampler
+
+  nexus.observe.sampler:
+    enabled: false
+    rate: 0.0
+    failure_capture: true
+    out_dir: ~/.nexus/eval/samples
+```
+
+| Key               | Type    | Default                 | Description |
+|-------------------|---------|-------------------------|-------------|
+| `enabled`         | bool    | `false`                 | Master switch. When `false`, the plugin draws no bus traffic and writes no files even if it appears in `plugins.active`. |
+| `rate`            | float   | `0.0`                   | Fraction of normal sessions captured at `io.session.end`, in `[0, 1]`. `0.0` disables rate sampling; `1.0` captures every session. Validated at `Init`; out-of-range values fail boot when `enabled: true`. |
+| `failure_capture` | bool    | `true`                  | When `true`, sessions whose `metadata/session.json` status is anything other than `active` or `completed` are captured **regardless of `rate`**. Use `false` to disable failure capture entirely. |
+| `out_dir`         | string  | `~/.nexus/eval/samples` | Directory where samples land. Path expansion via `engine.ExpandPath`. Each sample is written to `<out_dir>/<session-id>/journal/` plus a `<out_dir>/<session-id>/metadata.json` sibling. |
+
+The plugin emits an `eval.candidate` event per capture (payload defined in
+`plugins/observe/sampler/events.go`) so downstream tooling — for example,
+`nexus eval list-candidates` once it lands — can enumerate fresh samples.
+
+The pluggable `Redactor` interface (`plugins/observe/sampler/redact.go`) is
+the hook for future PII scrubbing. v1 ships only the `IdentityRedactor`
+(byte-pass-through). Tests inject custom redactors via the package-private
+`Plugin.SetRedactor` API; production runs leave it on the default.
+
+> **Caveat: rotated journal segments.** When a non-identity redactor is
+> configured, the active `events.jsonl` segment is rewritten line-by-line
+> through it. Compressed `*.jsonl.zst` rotated segments are byte-copied
+> as-is in v1 — handling them transparently requires zstd round-trips
+> that are deferred to a follow-up.
+
 ---
 
 ## Planners
@@ -1095,6 +1140,57 @@ Source: `plugins/gates/tool_filter/plugin.go`. Modifies `request.ToolFilter` on
 |-----------|------|-------------|-------------|
 | `include` | list | *(empty)*   | Allowlist of tool names. |
 | `exclude` | list | *(empty)*   | Blocklist of tool names. |
+
+---
+
+## Eval harness
+
+The `eval:` block configures the offline eval harness invoked via the
+`nexus eval` subcommand. The engine itself ignores this block — only
+`cmd/nexus/eval.go` reads it. Per-flag overrides on the CLI take precedence
+over config values, which take precedence over built-in defaults.
+
+```yaml
+eval:
+  cases_dir: tests/eval/cases
+  reports_dir: tests/eval/reports
+  judge:
+    model: claude-haiku-4-5
+    temperature: 0
+    n_samples: 1
+    cache: true
+  baseline:
+    fail_on_score_drop: 0.05
+    fail_on_latency_p95_drop: 0.20
+```
+
+| Key                                 | Type    | Default                  | Description |
+|-------------------------------------|---------|--------------------------|-------------|
+| `cases_dir`                         | string  | `tests/eval/cases`       | Directory containing case bundles (`<id>/case.yaml`, `input/`, `journal/`, `assertions.yaml`). Path expansion via `engine.ExpandPath`. |
+| `reports_dir`                       | string  | `tests/eval/reports`     | Directory where `nexus eval run` writes per-run report directories (`<run-id>/report.json`, `<run-id>/summary.txt`, `<run-id>/_sessions/`). Path expansion via `engine.ExpandPath`. |
+| `judge.model`                       | string  | `claude-haiku-4-5`       | Model used by the LLM judge for `--full` semantic assertions. **Declared in v1; consumed in Phase 5.** |
+| `judge.temperature`                 | float   | `0`                      | Judge sampling temperature. **Declared in v1; consumed in Phase 5.** |
+| `judge.n_samples`                   | int     | `1`                      | Number of judge samples per assertion; majority-threshold kicks in at `>=3`. **Declared in v1; consumed in Phase 5.** |
+| `judge.cache`                       | bool    | `true`                   | Enable provider prompt cache for judge calls. **Declared in v1; consumed in Phase 5.** |
+| `baseline.fail_on_score_drop`       | float   | `0`                      | Absolute pass-rate drop (0–1) that fails `nexus eval baseline`. `0` disables the gate. CLI flag: `--fail-on-score-drop`. |
+| `baseline.fail_on_latency_p95_drop` | float   | `0`                      | Relative latency p95 increase (per case) that fails `nexus eval baseline`. `0` disables the gate. CLI flag: `--fail-on-latency-p95-drop`. |
+
+### Subcommand overview
+
+| Command | Description |
+|--------|-------------|
+| `nexus eval run [--case <id>] [--cases-dir <path>] [--tags <csv>] [--model <role>] [--deterministic] [--full] [--parallel <n>] [--report-dir <path>] [--config <path>]` | Run one or all cases under the cases dir; writes a JSON report. Exits 0 on all-pass, 1 if any case failed. |
+| `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. `--against` path can be a `report.json` file or its containing run-id directory; does not descend a parent that contains multiple runs. |
+| `nexus eval promote --session <id-or-path> --case <new-id> [--cases-dir <path>] [--owner <name>] [--tags <csv>] [--description <text>] [--no-edit] [--force] [--config <path>]` | Convert a real session under `~/.nexus/sessions/` into a deterministic eval case. See [`docs/src/eval/promotion.md`](../eval/promotion.md). |
+| `nexus eval record --from-session <id-or-path> --case <new-id> [...]` | Alias of `eval promote` — same flag set, same behaviour. |
+| `nexus eval --inspect-mode [--timeout=DURATION]` | Single-shot JSON-on-stdin/stdout protocol for external harnesses (Inspect AI, Braintrust, custom CI). Reads one request from stdin, writes one response to stdout. Mutually exclusive with subcommands. Deadline via `--timeout` flag, `NEXUS_EVAL_INSPECT_TIMEOUT` env, or 60s default. Wire format documented at [`docs/src/eval/inspect-protocol.md`](../eval/inspect-protocol.md). |
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXUS_EVAL_INSPECT_TIMEOUT` | `60s` | Per-request deadline for `nexus eval --inspect-mode`. Parsed as `time.Duration` (e.g. `30s`, `5m`). The `--timeout` flag overrides this; an empty value falls back to the default. Source: `cmd/nexus/eval.go:514-537`. |
+| `NEXUS_EVAL_INSPECT_KEEP_SESSIONS` | *(unset)* | When set to any non-empty value, retains the per-call temporary sessions root (`os.MkdirTemp` directory) for debugging instead of deleting it on exit. Off by default — directory is removed after the response is written. Source: `pkg/eval/protocol/runner.go:53-60`. |
 
 ---
 

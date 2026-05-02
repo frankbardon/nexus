@@ -29,6 +29,9 @@ vendor/
 # Docs
 docs/book/
 
+# Eval harness — generated reports (cases/ is source and stays tracked)
+tests/eval/reports/
+
 # OS files
 .DS_Store
 Thumbs.db

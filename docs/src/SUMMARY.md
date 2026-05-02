@@ -70,6 +70,7 @@
   - [Event Logger](./plugins/observers/logger.md)
   - [Thinking Persistence](./plugins/observers/thinking.md)
   - [OpenTelemetry](./plugins/observers/otel.md)
+  - [Online Sampler](./plugins/observers/sampler.md)
 - [Planners](./plugins/planners/index.md)
   - [Dynamic Planner](./plugins/planners/dynamic.md)
   - [Static Planner](./plugins/planners/static.md)
@@ -82,6 +83,14 @@
 
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
+
+# Eval Harness
+
+- [Overview](./eval/overview.md)
+- [Quickstart](./eval/quickstart.md)
+- [Case Format](./eval/case-format.md)
+- [Promoting a Session](./eval/promotion.md)
+- [Inspect-Mode Protocol](./eval/inspect-protocol.md)
 
 # Guides
 

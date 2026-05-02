@@ -1,0 +1,676 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/eval/baseline"
+	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
+	"github.com/frankbardon/nexus/pkg/eval/promote"
+	"github.com/frankbardon/nexus/pkg/eval/protocol"
+	"github.com/frankbardon/nexus/pkg/eval/report"
+	"github.com/frankbardon/nexus/pkg/eval/runner"
+	"gopkg.in/yaml.v3"
+)
+
+// jsonEncoder builds a *json.Encoder for w. Wrapping io.Writer keeps
+// writeBaselineJSON polymorphic across *os.File and bytes.Buffer (tests).
+func jsonEncoder(w io.Writer) *json.Encoder { return json.NewEncoder(w) }
+
+// runEval is the "nexus eval" subcommand. It dispatches to subcommands
+// (run, baseline, record, promote) based on the first positional arg.
+// Mirrors the shape of runIngest — same flag style, same logger handling,
+// same exit-code idioms.
+//
+// Top-level layout:
+//
+//	nexus eval [--inspect-mode [--timeout=...]] | <subcommand> [flags]
+//
+// `--inspect-mode` is mutually exclusive with subcommands and reads a
+// single JSON request from stdin, writing one JSON response to stdout.
+func runEval(args []string) int {
+	if len(args) == 0 {
+		printEvalHelp()
+		return 0
+	}
+	// Early sniff for --inspect-mode at the top level (Phase 5). The flag
+	// is mutually exclusive with subcommands; combining them surfaces as
+	// INVALID_REQUEST so the harness sees a structured error.
+	if hasInspectMode(args) {
+		return runEvalInspect(args)
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		printEvalHelp()
+		return 0
+	case "run":
+		return runEvalRun(args[1:])
+	case "baseline":
+		return runEvalBaseline(args[1:])
+	case "promote", "record":
+		return runEvalPromote(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "nexus eval: unknown subcommand %q\n", args[0])
+		printEvalHelp()
+		return 2
+	}
+}
+
+func printEvalHelp() {
+	fmt.Fprintln(os.Stderr, `usage: nexus eval <subcommand> [flags]
+
+Subcommands:
+  run        Run one or more eval cases and emit a JSON report.
+  baseline   Diff a fresh report against a stored baseline; gate on thresholds.
+  promote    Convert a real session into a deterministic eval case.
+  record     Alias for promote (--from-session selects the source).
+
+Top-level flags:
+  --inspect-mode             JSON-on-stdin/stdout protocol mode for external harnesses.
+  --timeout=DURATION         Inspect-mode only: per-request deadline (default 60s, env NEXUS_EVAL_INSPECT_TIMEOUT).
+
+Use 'nexus eval <subcommand> -h' for subcommand-specific flags.`)
+}
+
+// -- run subcommand ----------------------------------------------------------
+
+func runEvalRun(args []string) int {
+	fs := flag.NewFlagSet("eval run", flag.ExitOnError)
+	caseID := fs.String("case", "", "single case ID to run; takes precedence over --cases-dir filtering")
+	casesDir := fs.String("cases-dir", "", "directory containing case bundles (default: from eval.cases_dir, else tests/eval/cases)")
+	tagsCSV := fs.String("tags", "", "comma-separated tag filter; cases missing any tag are skipped")
+	model := fs.String("model", "", "override core.models.default for every case")
+	deterministic := fs.Bool("deterministic", true, "deterministic mode (no LLM judge calls — Phase 5 wires --full)")
+	full := fs.Bool("full", false, "run LLM-judge semantic assertions (Phase 5 — currently no-op)")
+	parallel := fs.Int("parallel", 0, "max concurrent cases (default 4)")
+	reportDir := fs.String("report-dir", "", "output directory (default: from eval.reports_dir, else tests/eval/reports)")
+	configPath := fs.String("config", "", "optional config path that contains an eval.* block; defaults are used otherwise")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: nexus eval run [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *full && *deterministic {
+		// --full implies !deterministic; the user explicitly asked for full.
+		*deterministic = false
+	}
+	if *full {
+		fmt.Fprintln(os.Stderr, "warning: --full is a Phase 5 placeholder; running in deterministic mode")
+		*deterministic = true
+	}
+
+	cfg := loadEvalConfig(*configPath)
+	resolvedCasesDir := firstNonEmpty(engine.ExpandPath(*casesDir), engine.ExpandPath(cfg.CasesDir), engine.ExpandPath("tests/eval/cases"))
+	resolvedReportDir := firstNonEmpty(engine.ExpandPath(*reportDir), engine.ExpandPath(cfg.ReportsDir), engine.ExpandPath("tests/eval/reports"))
+
+	// Discover cases.
+	var cases []*evalcase.Case
+	if *caseID != "" {
+		c, err := evalcase.Load(filepath.Join(resolvedCasesDir, *caseID))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load case %q: %v\n", *caseID, err)
+			return 1
+		}
+		cases = []*evalcase.Case{c}
+	} else {
+		discovered, err := discoverCases(resolvedCasesDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "discover cases under %q: %v\n", resolvedCasesDir, err)
+			return 1
+		}
+		if len(discovered) == 0 {
+			fmt.Fprintf(os.Stderr, "no cases found under %q\n", resolvedCasesDir)
+			return 1
+		}
+		cases = discovered
+	}
+
+	mode := "deterministic"
+	if !*deterministic {
+		mode = "full"
+	}
+
+	runID := time.Now().UTC().Format("20060102T150405Z")
+	tags := splitCSV(*tagsCSV)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Per-case sessions root: a temp tree under report-dir/run-id keeps
+	// session artifacts close to the report and out of ~/.nexus/sessions.
+	runDir := filepath.Join(resolvedReportDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "create run dir: %v\n", err)
+		return 1
+	}
+	sessionsRoot := filepath.Join(runDir, "_sessions")
+	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "create sessions dir: %v\n", err)
+		return 1
+	}
+
+	results := runner.RunMany(ctx, cases, runner.MultiOptions{
+		Parallelism:   *parallel,
+		Tags:          tags,
+		ModelOverride: *model,
+		PerCase: runner.Options{
+			SessionsRoot: sessionsRoot,
+		},
+	})
+	r := report.Aggregate(mode, results)
+	r.RunID = runID
+
+	// Write report.json + summary.txt to the run directory.
+	reportPath := filepath.Join(runDir, "report.json")
+	f, err := os.Create(reportPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open report: %v\n", err)
+		return 1
+	}
+	if err := report.WriteJSON(f, r); err != nil {
+		f.Close()
+		fmt.Fprintf(os.Stderr, "write report: %v\n", err)
+		return 1
+	}
+	f.Close()
+
+	summaryPath := filepath.Join(runDir, "summary.txt")
+	if sf, err := os.Create(summaryPath); err == nil {
+		_ = report.WriteSummary(sf, r)
+		sf.Close()
+	}
+
+	// Human summary to stderr (TTY-aware).
+	_ = report.WriteTerminalSummary(os.Stdout, r)
+	fmt.Fprintf(os.Stderr, "\nreport: %s\n", reportPath)
+
+	if r.Summary.Failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// -- baseline subcommand -----------------------------------------------------
+
+func runEvalBaseline(args []string) int {
+	fs := flag.NewFlagSet("eval baseline", flag.ExitOnError)
+	against := fs.String("against", "", "baseline report file or directory (required)")
+	freshPath := fs.String("report", "", "fresh report file or directory (defaults to the most recent under eval.reports_dir)")
+	failScore := fs.Float64("fail-on-score-drop", 0, "absolute pass-rate drop threshold (0–1); 0 disables (default: from eval.baseline.fail_on_score_drop)")
+	failLatency := fs.Float64("fail-on-latency-p95-drop", 0, "relative p95-latency increase threshold; 0 disables (default: from eval.baseline.fail_on_latency_p95_drop)")
+	configPath := fs.String("config", "", "optional config path that contains an eval.baseline.* block")
+	outPath := fs.String("out", "", "write the diff JSON to this path (default: stdout)")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: nexus eval baseline --against <path> [--report <path>] [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *against == "" {
+		fs.Usage()
+		fmt.Fprintln(os.Stderr, "\nerror: --against is required")
+		return 2
+	}
+
+	cfg := loadEvalConfig(*configPath)
+
+	// Resolve fresh report: if not given, scan reports_dir for the most
+	// recently-created run with a report.json.
+	freshResolved := engine.ExpandPath(*freshPath)
+	if freshResolved == "" {
+		latest, err := mostRecentReport(engine.ExpandPath(firstNonEmpty(cfg.ReportsDir, "tests/eval/reports")))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "auto-resolve fresh report: %v\n", err)
+			return 1
+		}
+		freshResolved = latest
+	}
+
+	againstReport, err := baseline.LoadReport(engine.ExpandPath(*against))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load against: %v\n", err)
+		return 1
+	}
+	freshReport, err := baseline.LoadReport(freshResolved)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load fresh: %v\n", err)
+		return 1
+	}
+
+	d, err := baseline.Compute(againstReport, freshReport)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "compute diff: %v\n", err)
+		return 1
+	}
+
+	// Apply thresholds. Flag overrides config; config defaults to 0.
+	thresholds := baseline.Thresholds{
+		FailOnScoreDrop:      pickFloat(*failScore, cfg.Baseline.FailOnScoreDrop),
+		FailOnLatencyP95Drop: pickFloat(*failLatency, cfg.Baseline.FailOnLatencyP95Drop),
+	}
+	failed := d.Decide(thresholds)
+
+	out := os.Stdout
+	if *outPath != "" {
+		f, err := os.Create(*outPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open out: %v\n", err)
+			return 1
+		}
+		defer f.Close()
+		out = f
+	}
+	if err := writeBaselineJSON(out, d); err != nil {
+		fmt.Fprintf(os.Stderr, "write diff: %v\n", err)
+		return 1
+	}
+
+	if failed {
+		fmt.Fprintln(os.Stderr, "baseline: thresholds breached — failing")
+		return 1
+	}
+	return 0
+}
+
+// -- promote subcommand ------------------------------------------------------
+
+// runEvalPromote handles `nexus eval promote` and its `record` alias. The
+// flag set is shared so the alias is a true alias — no behavioral drift.
+//
+// Source resolution: --session and --from-session are aliases. The value
+// can be either a bare session ID (resolved under the configured sessions
+// root) or an absolute / tilde-prefixed path. ExpandPath is applied last
+// so users can write `~/.nexus/sessions/<id>` if they prefer.
+func runEvalPromote(args []string) int {
+	fs := flag.NewFlagSet("eval promote", flag.ExitOnError)
+	session := fs.String("session", "", "session ID (looked up under core.sessions.root) or absolute path to a session dir")
+	fromSession := fs.String("from-session", "", "alias of --session; convenience for `nexus eval record`")
+	caseID := fs.String("case", "", "new case identifier (becomes the case directory's basename)")
+	casesDir := fs.String("cases-dir", "", "directory to write the case under (default: from eval.cases_dir, else tests/eval/cases)")
+	owner := fs.String("owner", "", "owner string recorded in case.yaml; falls back to $USER")
+	tagsCSV := fs.String("tags", "", "comma-separated tags recorded in case.yaml")
+	description := fs.String("description", "", "description recorded in case.yaml; defaults to a synthesized stub")
+	noEdit := fs.Bool("no-edit", false, "skip the post-write $EDITOR launch on assertions.yaml")
+	force := fs.Bool("force", false, "overwrite an existing case directory")
+	configPath := fs.String("config", "", "config file used to resolve eval.cases_dir and core.sessions.root")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: nexus eval promote --session <id-or-path> --case <new-id> [flags]
+       nexus eval record  --from-session <id-or-path> --case <new-id> [flags]`)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	src := firstNonEmpty(*session, *fromSession)
+	if src == "" {
+		fs.Usage()
+		fmt.Fprintln(os.Stderr, "\nerror: --session (or --from-session) is required")
+		return 2
+	}
+	if *caseID == "" {
+		fs.Usage()
+		fmt.Fprintln(os.Stderr, "\nerror: --case is required")
+		return 2
+	}
+
+	cfg := loadEvalConfig(*configPath)
+	resolvedCasesDir := firstNonEmpty(engine.ExpandPath(*casesDir), engine.ExpandPath(cfg.CasesDir), engine.ExpandPath("tests/eval/cases"))
+	if absDir, err := filepath.Abs(resolvedCasesDir); err == nil {
+		resolvedCasesDir = absDir
+	}
+
+	sessionDir, err := resolveSessionDir(src, *configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve session: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	res, err := promote.Promote(ctx, promote.PromoteOptions{
+		SessionDir:  sessionDir,
+		CaseID:      *caseID,
+		CasesDir:    resolvedCasesDir,
+		Owner:       *owner,
+		Tags:        splitCSV(*tagsCSV),
+		Description: *description,
+		OpenEditor:  !*noEdit,
+		Force:       *force,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "promote: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stdout, "promoted session %s -> %s\n", filepath.Base(sessionDir), res.CaseDir)
+	fmt.Fprintf(os.Stdout, "  events copied:  %d\n", res.EventCount)
+	fmt.Fprintf(os.Stdout, "  inputs scripted: %d\n", res.InputCount)
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	if !*noEdit {
+		fmt.Fprintln(os.Stdout, "  $EDITOR launched on assertions.yaml")
+	} else {
+		fmt.Fprintln(os.Stdout, "  next step: edit assertions.yaml — see docs/src/eval/promotion.md")
+	}
+	return 0
+}
+
+// resolveSessionDir takes a user-provided session reference and returns the
+// absolute path to the session directory.
+//
+// The reference may be:
+//   - an absolute or tilde-prefixed path that already names the dir;
+//   - a bare ID, in which case it resolves under
+//     `<core.sessions.root>/<id>` from the supplied config file (or the
+//     default ~/.nexus/sessions when no config is given).
+//
+// A path-like input that does not exist falls back to the ID-resolution
+// branch — useful when a user copies a session ID off a log line and pastes
+// it raw.
+func resolveSessionDir(ref, configPath string) (string, error) {
+	expanded := engine.ExpandPath(ref)
+	if filepath.IsAbs(expanded) {
+		if _, err := os.Stat(expanded); err == nil {
+			return expanded, nil
+		}
+	}
+	root := engine.ExpandPath(sessionsRoot(configPath))
+	candidate := filepath.Join(root, ref)
+	if _, err := os.Stat(candidate); err == nil {
+		abs, _ := filepath.Abs(candidate)
+		return abs, nil
+	}
+	if filepath.IsAbs(expanded) {
+		return "", fmt.Errorf("no session directory at %q", expanded)
+	}
+	return "", fmt.Errorf("no session directory at %q nor %q", expanded, candidate)
+}
+
+// sessionsRoot returns the configured core.sessions.root, falling back to
+// the engine default. It honors a user-supplied config file but never
+// fails: a missing or unparseable config yields the default.
+func sessionsRoot(configPath string) string {
+	if configPath == "" {
+		return engine.DefaultConfig().Core.Sessions.Root
+	}
+	cfg, err := engine.LoadConfig(engine.ExpandPath(configPath))
+	if err != nil || cfg == nil {
+		return engine.DefaultConfig().Core.Sessions.Root
+	}
+	return cfg.Core.Sessions.Root
+}
+
+// -- inspect-mode subcommand -------------------------------------------------
+
+// hasInspectMode reports whether --inspect-mode (or --inspect-mode=anything)
+// appears anywhere in args. Used as the gate before flag parsing so we
+// can build a dedicated FlagSet when present.
+func hasInspectMode(args []string) bool {
+	for _, a := range args {
+		if a == "--inspect-mode" || strings.HasPrefix(a, "--inspect-mode=") {
+			return true
+		}
+	}
+	return false
+}
+
+// runEvalInspect implements the JSON stdin/stdout protocol described in
+// docs/src/eval/inspect-protocol.md. The function:
+//
+//  1. Parses --inspect-mode and --timeout out of args. Any positional
+//     argument or unrelated flag is rejected as INVALID_REQUEST — the
+//     mode is mutually exclusive with subcommands.
+//  2. Reads exactly one JSON object from stdin (strict — unknown fields
+//     rejected by the protocol parser).
+//  3. Calls protocol.Run with a deadline derived from --timeout > env
+//     NEXUS_EVAL_INSPECT_TIMEOUT > the 60s default.
+//  4. Writes the protocol.Response to stdout. Errors are surfaced both
+//     as a non-zero exit code AND in the response's Error field so the
+//     external harness can rely on whichever it prefers.
+func runEvalInspect(args []string) int {
+	fs := flag.NewFlagSet("eval --inspect-mode", flag.ContinueOnError)
+	// Discard fs's default error output; we route everything through the
+	// protocol Response.
+	fs.SetOutput(io.Discard)
+	inspect := fs.Bool("inspect-mode", false, "")
+	timeoutFlag := fs.String("timeout", "", "per-request deadline (e.g. 60s, 5m); env NEXUS_EVAL_INSPECT_TIMEOUT also honored")
+	if err := fs.Parse(args); err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(fmt.Sprintf("flag parse: %v", err)), nil)
+		return 2
+	}
+	if !*inspect {
+		// Defensive — hasInspectMode returned true but flag parsing didn't
+		// see it. Should be unreachable.
+		writeInspectError(protocol.ErrInvalidRequest("--inspect-mode required"), nil)
+		return 2
+	}
+	if rest := fs.Args(); len(rest) > 0 {
+		writeInspectError(protocol.ErrInvalidRequest(fmt.Sprintf(
+			"--inspect-mode is mutually exclusive with subcommands or positional args; got %v", rest)), nil)
+		return 2
+	}
+
+	timeout, err := resolveInspectTimeout(*timeoutFlag)
+	if err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(err.Error()), nil)
+		return 2
+	}
+
+	// Read and parse the request envelope. Strict parsing surfaces typos
+	// as INVALID_REQUEST instead of silently defaulted fields.
+	req, err := protocol.ParseRequest(os.Stdin)
+	if err != nil {
+		writeInspectError(protocol.ErrInvalidRequest(err.Error()), nil)
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	resp, runErr := protocol.Run(ctx, req)
+	if runErr != nil {
+		writeInspectError(runErr, req.Metadata)
+		return 1
+	}
+	if err := protocol.WriteResponse(os.Stdout, resp); err != nil {
+		// Last-ditch: stdout already mid-write, surface to stderr.
+		fmt.Fprintf(os.Stderr, "nexus eval --inspect-mode: write response: %v\n", err)
+		return 1
+	}
+	if resp.Error != nil {
+		return 1
+	}
+	return 0
+}
+
+// resolveInspectTimeout picks the per-request deadline:
+//
+//  1. --timeout flag (parsed as time.Duration)
+//  2. NEXUS_EVAL_INSPECT_TIMEOUT env var
+//  3. 60s default
+//
+// Empty inputs at any level fall through to the next. Non-empty but
+// unparseable inputs surface as INVALID_REQUEST (caller's fault, not a
+// silent fallback).
+func resolveInspectTimeout(flagVal string) (time.Duration, error) {
+	const def = 60 * time.Second
+	if flagVal != "" {
+		d, err := time.ParseDuration(flagVal)
+		if err != nil {
+			return 0, fmt.Errorf("--timeout=%q: %v", flagVal, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("--timeout=%q must be positive", flagVal)
+		}
+		return d, nil
+	}
+	if envVal := os.Getenv("NEXUS_EVAL_INSPECT_TIMEOUT"); envVal != "" {
+		d, err := time.ParseDuration(envVal)
+		if err != nil {
+			return 0, fmt.Errorf("NEXUS_EVAL_INSPECT_TIMEOUT=%q: %v", envVal, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("NEXUS_EVAL_INSPECT_TIMEOUT=%q must be positive", envVal)
+		}
+		return d, nil
+	}
+	return def, nil
+}
+
+// writeInspectError serializes an error as a protocol Response on stdout.
+// Best-effort: if writing to stdout fails we fall through to stderr so a
+// caller piping nexus into a broken consumer still sees the diagnosis.
+func writeInspectError(err error, metadata map[string]any) {
+	resp := protocol.ResponseFromError(err, metadata)
+	if werr := protocol.WriteResponse(os.Stdout, resp); werr != nil {
+		fmt.Fprintf(os.Stderr, "nexus eval --inspect-mode: %v (write failed: %v)\n", err, werr)
+	}
+}
+
+// -- helpers -----------------------------------------------------------------
+
+// evalConfig is the top-level eval block.
+type evalConfig struct {
+	CasesDir   string `yaml:"cases_dir"`
+	ReportsDir string `yaml:"reports_dir"`
+	Judge      struct {
+		Model       string  `yaml:"model"`
+		Temperature float64 `yaml:"temperature"`
+		NSamples    int     `yaml:"n_samples"`
+		Cache       bool    `yaml:"cache"`
+	} `yaml:"judge"`
+	Baseline struct {
+		FailOnScoreDrop      float64 `yaml:"fail_on_score_drop"`
+		FailOnLatencyP95Drop float64 `yaml:"fail_on_latency_p95_drop"`
+	} `yaml:"baseline"`
+}
+
+// loadEvalConfig parses just the `eval:` block from a YAML config file. The
+// rest of the file (the engine config) is ignored. An empty path or missing
+// block returns zero defaults, which is the right behavior — flags fill in
+// what the user wants.
+func loadEvalConfig(path string) evalConfig {
+	if path == "" {
+		return evalConfig{}
+	}
+	data, err := os.ReadFile(engine.ExpandPath(path))
+	if err != nil {
+		return evalConfig{}
+	}
+	var wrapper struct {
+		Eval evalConfig `yaml:"eval"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
+		return evalConfig{}
+	}
+	return wrapper.Eval
+}
+
+// discoverCases walks dir, treating each immediate child directory as a case.
+// Cases that fail to load are reported but do not abort the discovery — the
+// CLI surfaces the load error and skips the case.
+func discoverCases(dir string) ([]*evalcase.Case, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []*evalcase.Case
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Skip hidden / underscore-prefixed dirs (e.g. _record sentinels).
+		name := e.Name()
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		c, err := evalcase.Load(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skip %s: %v\n", name, err)
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func pickFloat(flagValue, configValue float64) float64 {
+	if flagValue > 0 {
+		return flagValue
+	}
+	return configValue
+}
+
+// writeBaselineJSON encodes the diff as indented JSON.
+func writeBaselineJSON(w io.Writer, d *baseline.Diff) error {
+	enc := jsonEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(d)
+}
+
+// mostRecentReport scans reportsDir for run subdirectories and returns the
+// path to the lexicographically largest one's report.json. We rely on the
+// timestamped run-id format ("20060102T150405Z") sorting in chronological
+// order — the same trick the engine uses for session IDs.
+func mostRecentReport(reportsDir string) (string, error) {
+	entries, err := os.ReadDir(reportsDir)
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("no run directories under %q", reportsDir)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	return filepath.Join(reportsDir, names[0], "report.json"), nil
+}

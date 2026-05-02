@@ -1,0 +1,44 @@
+# Eval case: provider-fallback
+#
+# Fallback chain config (Anthropic primary, Anthropic backup — same
+# provider so we don't need an OpenAI plugin in active). Mock provider;
+# replay short-circuits both entries and the chain never advances. The
+# case validates config parsing + boot.
+core:
+  log_level: warn
+  tick_interval: 1h
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: mock-primary
+        max_tokens: 1024
+      - provider: nexus.llm.anthropic
+        model: mock-backup
+        max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: timestamp
+
+journal:
+  fsync: none
+  retain_days: 30
+  rotate_size_mb: 4
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.provider.fallback
+    - nexus.agent.react
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

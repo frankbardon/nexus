@@ -1,0 +1,43 @@
+# Assertions for react-planner-handoff. ReAct emits plan.request; static
+# planner emits plan.created and plan.result live. None of those events
+# are side-effecting, so they re-fire on every replay.
+deterministic:
+  # The agent went through the planner.
+  - kind: event_emitted
+    type: plan.request
+    count: { min: 1, max: 1 }
+
+  # Static planner emitted both creation and result with auto-approval.
+  - kind: event_emitted
+    type: plan.created
+    count: { min: 1, max: 1 }
+  - kind: event_emitted
+    type: plan.result
+    where:
+      Source: static
+      Approved: "true"
+    count: { min: 1, max: 1 }
+
+  # Single ReAct turn drove a single LLM round-trip after the plan settled.
+  - kind: event_count_bounds
+    bounds:
+      io.input: { min: 1, max: 1 }
+      agent.turn.start: { min: 1, max: 1 }
+      agent.turn.end: { min: 1, max: 1 }
+      plan.request: { min: 1, max: 1 }
+
+  # Permissive trace-drift bound — the live planner adds events the recorder
+  # didn't (status updates, thinking steps), so we filter to load-bearing
+  # events to keep the comparison meaningful.
+  - kind: event_sequence_distance
+    threshold: 0.30
+    filter:
+      - io.input
+      - agent.turn.start
+      - agent.turn.end
+      - plan.request
+      - plan.created
+      - plan.result
+      - llm.response
+
+semantic: []
