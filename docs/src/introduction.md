@@ -28,6 +28,7 @@ This means you can assemble exactly the agent you need by choosing which plugins
 | **Architecture** | Deep dive into the engine, event bus, plugin system, and session management |
 | **Plugin Reference** | Every built-in plugin with its configuration, events, and use cases |
 | **Reference** | Complete event type catalog and configuration reference |
+| **[Eval Harness](./eval/overview.md)** | Golden-trace replay, baseline diffs, online sampling, Inspect-AI-compatible JSON protocol |
 | **Guides** | Tutorials for writing skills and creating custom plugins |
 
 ## Quick Start

@@ -135,7 +135,7 @@ key off either signal.
 | `INVALID_REQUEST` | Wire-format violation: missing/extra field, both config sources set, schema mismatch, unknown field, malformed JSON, or the mode was paired with a subcommand. | Fix the request envelope. |
 | `CONFIG_LOAD` | The named `config_path` could not be read, or the YAML failed to parse. | Verify the path / contents. |
 | `ENGINE_BOOT` | Plugin initialization or capability resolution failed. | Inspect engine logs; usually a missing required plugin or bad per-plugin config. |
-| `RUN_FAILED` | The engine booted but the agent run itself errored after dispatch. | Inspect the response's `tool_calls`, the journal under `NEXUS_EVAL_INSPECT_KEEP_SESSIONS=1`, or rerun under `nexus eval run` with the same config. |
+| `RUN_FAILED` | The engine booted and ran, but projecting the journal into the response shape failed (e.g. malformed events, unreachable journal). Mid-run agent errors generally surface via `TIMEOUT` when context expires or as a partial response. | Inspect the response's `tool_calls`, the journal under `NEXUS_EVAL_INSPECT_KEEP_SESSIONS=1`, or rerun under `nexus eval run` with the same config. |
 | `TIMEOUT` | The request exceeded the deadline (flag, env, or default 60s) before reaching session-end. | Raise `--timeout`, lower `max_turns`, or simplify the case. |
 | `INTERNAL` | Unanticipated error. | Treat as a Nexus bug; file an issue. |
 

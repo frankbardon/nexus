@@ -87,6 +87,7 @@
 # Eval Harness
 
 - [Overview](./eval/overview.md)
+- [Quickstart](./eval/quickstart.md)
 - [Case Format](./eval/case-format.md)
 - [Promoting a Session](./eval/promotion.md)
 - [Inspect-Mode Protocol](./eval/inspect-protocol.md)

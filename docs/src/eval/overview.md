@@ -1,5 +1,8 @@
 # Eval Harness Overview
 
+**New here?** Start with the [quickstart](quickstart.md) for an end-to-end
+session→case→CI walkthrough.
+
 Nexus ships a first-class eval workflow built directly on top of the durable
 journal. The harness records, replays, and scores agent sessions offline —
 no API key required for the deterministic path — and gates regressions in
@@ -27,7 +30,9 @@ Two modes:
 The `--deterministic` contract is binding: PRs never block on judge flake.
 `--full` runs judge calls but still drives them through the journal stash —
 side effects are short-circuited even when the rubric is being graded.
-(`--full` is declared in Phase 2 and lit up in Phase 5.)
+`--full` is reserved for the LLM-judge mode — it is currently a placeholder.
+Passing `--full` prints a warning and runs in deterministic mode
+(`cmd/nexus/eval.go:108-113`). Full plumbing lands in a follow-up.
 
 ## What a case is
 
@@ -97,6 +102,12 @@ migration note.
 and computes a `Diff`. Per-case it records pass/fail movement, latency p50/
 p95 deltas, and token deltas. Per-run it records new/missing cases and the
 pass-rate delta.
+
+> **Pointing `--against` at the right directory.** `nexus eval run --report-dir X`
+> writes the report to `X/<run-id>/report.json` (e.g. `X/20260502T143022Z/report.json`).
+> `baseline --against` accepts either the run-id subdirectory or a `report.json`
+> file directly — it does **not** auto-descend a parent. Use `--against X/<run-id>`
+> or, when there's only one run under the parent, `--against X/*`.
 
 Two thresholds drive the exit code:
 

@@ -34,6 +34,7 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Integration tests** (`tests/integration/`) — Go tests behind `//go:build integration` tag. Two modes:
   - **Mock mode** (`mock_responses` set): No LLM calls, no API key, sub-second.
   - **Live mode** (no `mock_responses`): Real LLM calls via provider. Requires `ANTHROPIC_API_KEY`.
+- **Eval harness** (`pkg/eval/`) — Golden-trace runner, assertion engine, baseline differ, failure-promotion, Inspect-mode JSON protocol. CLI: `nexus eval ...`. Docs: `docs/src/eval/`.
 
 **All Claude updates must update relevant docs in `docs/`.**
 **Core system updates should be genericized and treated as reusable, single-use plugins shouldn't in `plugins` folder**
@@ -106,6 +107,7 @@ plugins/
   rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand
   observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL) — bus-driven, also visible in journal
+  observe/sampler/       # Online journal sampler — opt-in, FS-only
   planners/dynamic/      # LLM-generated execution plans
   planners/static/       # Config-defined fixed execution plans
   skills/                # Skill discovery and catalog

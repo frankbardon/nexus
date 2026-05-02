@@ -274,3 +274,24 @@ through `promote`.
 - **Tags are a superset filter.** `--tags react,mock` matches a case
   tagged `[react, mock, planner]` but skips `[react]` alone. Tag
   generously.
+
+## Reference cases
+
+The five seed cases in-tree are the canonical examples. Read the bundles
+when authoring a new case — the patterns scale:
+
+- `tests/eval/cases/build-error-fix/` — minimal end-to-end: ReAct + shell
+  tool + 2 turns.
+- `tests/eval/cases/react-planner-handoff/` — dynamic planner handing
+  tasks to the ReAct agent.
+- `tests/eval/cases/multi-subagent-fanout/` — orchestrator with parallel
+  workers.
+- `tests/eval/cases/provider-fallback/` — boot/config validation only;
+  the live error path stays in `tests/integration/fallback_test.go`
+  (replay short-circuit can't reproduce side-effect failures).
+- `tests/eval/cases/skills-discovery/` — agent invoking a skill loaded
+  via `scan_paths`.
+
+Each seed bundle keeps its `_record/main.go` recorder (build-tagged
+`//go:build evalrecord`) alongside the journal so the trace can be
+regenerated deterministically when the schema changes.

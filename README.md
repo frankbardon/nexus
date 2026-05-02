@@ -175,3 +175,4 @@ Topics covered:
 - [Desktop Shell](docs/src/desktop/overview.md) — Building desktop apps with `pkg/desktop/`
 - [Guides](docs/src/skills/authoring.md) — Writing skills, creating custom plugins
 - [Configuration Reference](docs/src/configuration/reference.md) — Full config schema
+- **Eval harness** — golden-trace replay, baseline diffs, online sampling, and an Inspect-AI-compatible JSON protocol. See [docs/src/eval/overview.md](docs/src/eval/overview.md).

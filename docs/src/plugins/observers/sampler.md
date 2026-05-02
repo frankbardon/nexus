@@ -162,20 +162,6 @@ provenance for analytics, not state for replay.
 - Sampled bytes are subject to the same retention rules the operator
   applies to `out_dir` itself; the plugin never deletes its own output.
 
-## Configuration
-
-```yaml
-plugins:
-  active:
-    - nexus.observe.sampler
-
-  nexus.observe.sampler:
-    enabled: true
-    rate: 0.05              # 5 % of normal sessions
-    failure_capture: true   # plus every failure
-    out_dir: ~/.nexus/eval/samples
-```
-
 ## Events
 
 ### Subscribes To

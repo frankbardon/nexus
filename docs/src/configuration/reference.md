@@ -1180,10 +1180,17 @@ eval:
 | Command | Description |
 |--------|-------------|
 | `nexus eval run [--case <id>] [--cases-dir <path>] [--tags <csv>] [--model <role>] [--deterministic] [--full] [--parallel <n>] [--report-dir <path>] [--config <path>]` | Run one or all cases under the cases dir; writes a JSON report. Exits 0 on all-pass, 1 if any case failed. |
-| `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. |
+| `nexus eval baseline --against <path> [--report <path>] [--fail-on-score-drop <f>] [--fail-on-latency-p95-drop <f>] [--out <path>] [--config <path>]` | Diff a fresh report against a stored baseline; honors thresholds for CI exit codes. `--against` path can be a `report.json` file or its containing run-id directory; does not descend a parent that contains multiple runs. |
 | `nexus eval promote --session <id-or-path> --case <new-id> [--cases-dir <path>] [--owner <name>] [--tags <csv>] [--description <text>] [--no-edit] [--force] [--config <path>]` | Convert a real session under `~/.nexus/sessions/` into a deterministic eval case. See [`docs/src/eval/promotion.md`](../eval/promotion.md). |
 | `nexus eval record --from-session <id-or-path> --case <new-id> [...]` | Alias of `eval promote` — same flag set, same behaviour. |
 | `nexus eval --inspect-mode [--timeout=DURATION]` | Single-shot JSON-on-stdin/stdout protocol for external harnesses (Inspect AI, Braintrust, custom CI). Reads one request from stdin, writes one response to stdout. Mutually exclusive with subcommands. Deadline via `--timeout` flag, `NEXUS_EVAL_INSPECT_TIMEOUT` env, or 60s default. Wire format documented at [`docs/src/eval/inspect-protocol.md`](../eval/inspect-protocol.md). |
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXUS_EVAL_INSPECT_TIMEOUT` | `60s` | Per-request deadline for `nexus eval --inspect-mode`. Parsed as `time.Duration` (e.g. `30s`, `5m`). The `--timeout` flag overrides this; an empty value falls back to the default. Source: `cmd/nexus/eval.go:514-537`. |
+| `NEXUS_EVAL_INSPECT_KEEP_SESSIONS` | *(unset)* | When set to any non-empty value, retains the per-call temporary sessions root (`os.MkdirTemp` directory) for debugging instead of deleting it on exit. Off by default — directory is removed after the response is written. Source: `pkg/eval/protocol/runner.go:53-60`. |
 
 ---
 
