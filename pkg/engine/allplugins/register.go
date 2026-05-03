@@ -65,6 +65,7 @@ import (
 	sqlitefts "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
 
 	// RAG plugins.
+	ragcitations "github.com/frankbardon/nexus/plugins/rag/citations"
 	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
 	cohereranker "github.com/frankbardon/nexus/plugins/rag/reranker/cohere"
@@ -178,6 +179,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.rag.reranker.cohere", cohereranker.New)
 	r.Register("nexus.rag.reranker.jina", jinareranker.New)
 	r.Register("nexus.rag.reranker.local", localreranker.New)
+	r.Register("nexus.rag.citations", ragcitations.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)

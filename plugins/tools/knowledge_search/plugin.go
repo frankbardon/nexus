@@ -170,6 +170,7 @@ func (p *Plugin) Emissions() []string {
 		"embeddings.request",
 		"vector.query",
 		"hybrid.query",
+		"rag.retrieved",
 		"before:tool.result",
 		"tool.result",
 		"tool.register",
@@ -261,6 +262,8 @@ func (p *Plugin) handle(tc events.ToolCall) {
 		all = all[:k]
 	}
 
+	p.emitRetrieved(tc.TurnID, all)
+
 	output, err := p.formatOutput(query, all)
 	if err != nil {
 		p.emit(tc, "", err.Error())
@@ -320,6 +323,28 @@ func (p *Plugin) resolveNamespaces(requested []string) []string {
 		}
 	}
 	return out
+}
+
+// emitRetrieved publishes the per-turn retrieval context so the citation
+// plugin can validate references against actually-retrieved chunks.
+func (p *Plugin) emitRetrieved(turnID string, hits []hit) {
+	if turnID == "" || len(hits) == 0 {
+		return
+	}
+	chunks := make([]events.RetrievedChunk, 0, len(hits))
+	for _, h := range hits {
+		chunks = append(chunks, events.RetrievedChunk{
+			Source:    h.match.Metadata["source"],
+			DocID:     h.match.ID,
+			ChunkIdx:  h.match.Metadata["chunk_idx"],
+			TrustTier: h.match.Metadata["trust_tier"],
+		})
+	}
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{
+		TurnID: turnID,
+		Source: pluginID,
+		Chunks: chunks,
+	})
 }
 
 func (p *Plugin) emit(tc events.ToolCall, output, errMsg string) {

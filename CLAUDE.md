@@ -105,6 +105,7 @@ plugins/
   embeddings/mock/       # embeddings.provider adapter: deterministic hash-based vectors; no network, opt-in via plugins.active
   vectorstore/chromem/   # vector.store adapter: philippgille/chromem-go, pure Go, JSON on-disk persistence; namespaces map to collections
   vectorstore/sqlite_fts/ # search.lexical adapter: SQLite FTS5 (modernc.org/sqlite, pure Go); BM25 ranking; namespaces map to FTS5 virtual tables; backed by per-plugin storage capability
+  rag/citations/         # rag.citations: parse <cite/> tags or Anthropic native Citations from llm.response, validate against rag.retrieved, emit llm.response.cited
   rag/hybrid/            # search.hybrid orchestrator: parallel vector + lexical retrieval, RRF or weighted fusion, per-query LexicalBias, optional reranker pass
   rag/reranker/cohere/   # search.reranker adapter: Cohere Rerank v2 API
   rag/reranker/jina/     # search.reranker adapter: Jina Reranker API

@@ -186,6 +186,7 @@ func (p *Plugin) Emissions() []string {
 		"vector.query",
 		"hybrid.query",
 		"vector.upsert",
+		"rag.retrieved",
 	}
 }
 
@@ -312,6 +313,30 @@ func (p *Plugin) queryAndStash(query string, vec []float32) {
 	p.lastQuery = query
 	p.lastMatches = filtered
 	p.mu.Unlock()
+	p.emitRetrieved(filtered)
+}
+
+// emitRetrieved publishes the retrieved-memory chunks for the citation
+// plugin. TurnID is unknown at recall time (handleInput fires before
+// agent.turn.start), so we leave it blank — the citation plugin treats
+// blank-turn entries as ambient (carried forward to the next turn it sees).
+func (p *Plugin) emitRetrieved(matches []events.VectorMatch) {
+	if len(matches) == 0 {
+		return
+	}
+	chunks := make([]events.RetrievedChunk, 0, len(matches))
+	for _, m := range matches {
+		chunks = append(chunks, events.RetrievedChunk{
+			Source:    m.Metadata["source"],
+			DocID:     m.ID,
+			ChunkIdx:  m.Metadata["chunk_idx"],
+			TrustTier: m.Metadata["trust_tier"],
+		})
+	}
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{
+		Source: pluginID,
+		Chunks: chunks,
+	})
 }
 
 // storeDoc embeds (if vec is nil) and upserts a single document.

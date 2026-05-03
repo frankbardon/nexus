@@ -864,6 +864,25 @@ backed BGE Reranker behind a build tag.
 
 ---
 
+### `nexus.rag.citations`
+
+Source: `plugins/rag/citations/plugin.go`. Provides `rag.citations`. Parses
+citation tags or Anthropic-native source attributions out of LLM responses
+and emits the structured `llm.response.cited` event for IO renderers to
+footnote.
+
+| Key                | Type   | Default | Description |
+|--------------------|--------|---------|-------------|
+| `mode`             | string | `auto`  | Citation source: `tag` (parses `<cite source="..." chunk="N"/>` markers), `anthropic_native` (reads `LLMResponse.Citations[]` populated by Anthropic), or `auto` (uses native when present, falls back to tag). |
+| `strict`           | bool   | `true`  | When true, citations whose `(source, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped. When false, they are kept and tagged with `TrustTier="unverified"`. |
+| `section_priority` | int    | `60`    | Priority of the citation-contract section in the system prompt (only used in tag/auto modes). |
+
+Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
+`nexus.memory.vector`) to build the per-turn validation set, then to
+`llm.response` to do the parsing. Emits `llm.response.cited`.
+
+---
+
 ### `nexus.rag.ingest`
 
 Source: `plugins/rag/ingest/plugin.go`. Backs the `nexus ingest` CLI subcommand
