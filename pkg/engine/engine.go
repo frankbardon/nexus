@@ -724,8 +724,13 @@ func (e *Engine) StartSession() error {
 
 	session := e.Session
 
-	// Write config snapshot to metadata.
-	if cfgData, err := yaml.Marshal(e.Config); err == nil {
+	// Write config snapshot to metadata. Prefer the original raw YAML bytes
+	// over yaml.Marshal(e.Config): the typed Config drops core.models and
+	// per-plugin configs (yaml:"-"), so re-marshaling would produce a snapshot
+	// that fails on recall.
+	if len(e.Config.Raw) > 0 {
+		_ = session.WriteFile("metadata/config-snapshot.yaml", e.Config.Raw)
+	} else if cfgData, err := yaml.Marshal(e.Config); err == nil {
 		_ = session.WriteFile("metadata/config-snapshot.yaml", cfgData)
 	}
 

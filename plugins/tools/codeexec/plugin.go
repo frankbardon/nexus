@@ -447,6 +447,11 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		Skills:  activeSkills,
 	})
 
+	// Persist the script up-front so it lands on disk regardless of compiler
+	// or success. Output artifacts (stdout, result, error) are written by the
+	// per-backend paths once they exist.
+	p.persist(tc, script, "", "", "")
+
 	if p.compiler == compilerYaegiWasm {
 		p.runScriptWasm(tc, script)
 		return
@@ -562,10 +567,10 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		return
 	}
 
-	// Persist uses the aggregated stdout — close the writer first so the tail
-	// lands in the buffer before we snapshot it.
+	// Persist output artifacts. Script was written up-front in runScript.
+	// Close the writer first so the tail lands in the buffer before snapshot.
 	stdout.Close()
-	p.persist(tc, script, stdout.String(), resultJSON, "")
+	p.persist(tc, "", stdout.String(), resultJSON, "")
 	finish(resultJSON, "", elapsedMs(started))
 }
 
@@ -668,14 +673,18 @@ func marshalReturn(v any) (string, error) {
 
 func elapsedMs(started time.Time) int64 { return time.Since(started).Milliseconds() }
 
-// persist writes script + artifacts to the session workspace. No-op when
-// session is absent or persist_scripts is disabled.
+// persist writes script + artifacts to the session workspace. Each field is
+// independent: empty values are skipped so callers can persist the script
+// up-front and the output artifacts later without clobbering script.go.
+// No-op when session is absent or persist_scripts is disabled.
 func (p *Plugin) persist(tc events.ToolCall, script, stdout, result, errMsg string) {
 	if p.session == nil || !p.persistScripts {
 		return
 	}
 	base := fmt.Sprintf("plugins/%s/%s", pluginID, tc.ID)
-	_ = p.session.WriteFile(base+"/script.go", []byte(script))
+	if script != "" {
+		_ = p.session.WriteFile(base+"/script.go", []byte(script))
+	}
 	if stdout != "" {
 		_ = p.session.WriteFile(base+"/stdout.txt", []byte(stdout))
 	}

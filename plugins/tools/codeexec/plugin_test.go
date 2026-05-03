@@ -207,6 +207,35 @@ func Run(ctx context.Context) (any, error) {
 	}
 }
 
+// TestPlugin_PersistsScriptOnRuntimeFailure pins the regression where the
+// script never landed on disk if execution failed (and, for the wasm path,
+// even on success). Persistence now happens up-front in runScript before
+// backend dispatch, so the script is recoverable regardless of outcome.
+func TestPlugin_PersistsScriptOnRuntimeFailure(t *testing.T) {
+	h := newHarness(t, nil)
+
+	script := `package main
+import "context"
+func Run(ctx context.Context) (any, error) {
+	notAVariable.Call()
+	return nil, nil
+}
+`
+	res := h.runCode(script)
+	if res.Error == "" {
+		t.Fatalf("expected runtime/compile error, got success: %q", res.Output)
+	}
+
+	scriptPath := filepath.Join(h.session.RootDir, "plugins", pluginID, res.ID, "script.go")
+	got, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("script.go missing on failure path: %v", err)
+	}
+	if string(got) != script {
+		t.Errorf("persisted script differs from input")
+	}
+}
+
 func TestPlugin_RejectsGoroutines(t *testing.T) {
 	h := newHarness(t, nil)
 

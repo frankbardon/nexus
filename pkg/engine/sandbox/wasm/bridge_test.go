@@ -102,7 +102,7 @@ func TestBridgeHTTPGetAllowed(t *testing.T) {
 			"allow_hosts": []any{host},
 		},
 	}
-	sb, err := sandbox.New(sandbox.BackendWasm, cfg)
+	sb, err := sandbox.New(sandbox.BackendWasm, withSharedCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestBridgeHTTPGetDenied(t *testing.T) {
 		"allowed_packages": []any{"context"},
 		// No net.allow_hosts → deny all.
 	}
-	sb, err := sandbox.New(sandbox.BackendWasm, cfg)
+	sb, err := sandbox.New(sandbox.BackendWasm, withSharedCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestBridgeFSReadInsideMount(t *testing.T) {
 			map[string]any{"host": dir, "guest": "/work", "mode": "ro"},
 		},
 	}
-	sb, err := sandbox.New(sandbox.BackendWasm, cfg)
+	sb, err := sandbox.New(sandbox.BackendWasm, withSharedCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestBridgeEnvGet(t *testing.T) {
 			"FOO": "bar",
 		},
 	}
-	sb, err := sandbox.New(sandbox.BackendWasm, cfg)
+	sb, err := sandbox.New(sandbox.BackendWasm, withSharedCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,6 +20,14 @@ type Config struct {
 	// disabled — it is core, not a plugin — but its fsync, retention, and
 	// rotation thresholds are exposed here for ops trade-offs.
 	Journal JournalConfig `yaml:"journal"`
+
+	// Raw is the original config YAML bytes the engine was loaded from.
+	// Populated by LoadConfigFromBytes (and by extension LoadConfig). Empty
+	// for configs constructed in-memory via DefaultConfig. Used by Engine
+	// to write a bytes-faithful session config snapshot — re-marshaling the
+	// typed Config drops fields parsed via the second-pass raw map (core.models
+	// and per-plugin configs both have yaml:"-").
+	Raw []byte `yaml:"-"`
 }
 
 // JournalConfig tunes the durable per-session event log. Defaults are picked
@@ -167,6 +175,11 @@ func LoadConfigFromBytes(data []byte) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
+	// Stash the input bytes so the engine can write a bytes-faithful config
+	// snapshot at session start. yaml.Marshal(cfg) loses core.models and
+	// per-plugin configs (both yaml:"-"), which breaks session recall.
+	cfg.Raw = append([]byte(nil), data...)
 
 	return cfg, nil
 }

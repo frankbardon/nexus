@@ -483,3 +483,47 @@ func TestCapability_PluginContextReceivesMap(t *testing.T) {
 		t.Errorf("consumer ctx.Capabilities[memory.history] = %v, want [provider-a]", got)
 	}
 }
+
+func TestSubstituteSessionPlaceholders(t *testing.T) {
+	in := map[string]any{
+		"backend": "wasm",
+		"fs_mounts": []any{
+			map[string]any{
+				"host":  "~/.nexus/sessions/${session_id}/files",
+				"guest": "/workspace",
+				"mode":  "rw",
+			},
+			map[string]any{
+				"host": "/etc/static",
+			},
+		},
+		"env": map[string]any{
+			"WORKSPACE":  "/workspace",
+			"SESSION_ID": "${session_id}",
+		},
+		"timeout_seconds": 60,
+	}
+	out := substituteSessionPlaceholders(in, "abc123").(map[string]any)
+
+	mounts := out["fs_mounts"].([]any)
+	first := mounts[0].(map[string]any)
+	if got := first["host"].(string); got != "~/.nexus/sessions/abc123/files" {
+		t.Errorf("fs_mounts[0].host = %q, want substituted path", got)
+	}
+	second := mounts[1].(map[string]any)
+	if got := second["host"].(string); got != "/etc/static" {
+		t.Errorf("fs_mounts[1].host changed unexpectedly: %q", got)
+	}
+	if got := out["env"].(map[string]any)["SESSION_ID"].(string); got != "abc123" {
+		t.Errorf("env.SESSION_ID = %q, want abc123", got)
+	}
+	if got := out["timeout_seconds"]; got != 60 {
+		t.Errorf("non-string scalar mutated: %v", got)
+	}
+
+	// Input untouched.
+	origHost := in["fs_mounts"].([]any)[0].(map[string]any)["host"].(string)
+	if origHost != "~/.nexus/sessions/${session_id}/files" {
+		t.Errorf("input mutated: %q", origHost)
+	}
+}

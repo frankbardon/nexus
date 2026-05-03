@@ -33,6 +33,10 @@ func (p *Plugin) runScriptWasm(tc events.ToolCall, script string) {
 
 	stdout := string(res.Stdout)
 	stderr := string(res.Stderr)
+	// Persist stdout regardless of outcome so a failing script's output is
+	// inspectable. Script was already written by runScript; error.txt is
+	// written by emitResult when errMsg is non-empty.
+	p.persist(tc, "", stdout, "", "")
 	if res.TimedOut {
 		p.emitResult(tc, stdout, "", "script timed out after "+p.timeout.String(), durationMs, res.Truncated)
 		return
