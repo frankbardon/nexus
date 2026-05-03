@@ -14,11 +14,17 @@ export function GetSettings():Promise<Record<string, Record<string, any>>>;
 
 export function GetSettingsSchema():Promise<desktop.SettingsSchema>;
 
+export function GetSessionEvent(arg1:string,arg2:string,arg3:number):Promise<desktop.TimelineEventDetail>;
+
 export function HasMissingRequired():Promise<Record<string, Array<string>>>;
+
+export function InspectSession(arg1:string,arg2:string):Promise<Array<desktop.TimelineEvent>>;
 
 export function ListAgents():Promise<Array<desktop.AgentInfo>>;
 
 export function ListFiles(arg1:string,arg2:string):Promise<Array<desktop.FileInfo>>;
+
+export function ListSessionArchives(arg1:string,arg2:string):Promise<Array<string>>;
 
 export function ListSessions(arg1:string):Promise<Array<desktop.SessionMeta>>;
 
@@ -36,7 +42,11 @@ export function PickFolder(arg1:string,arg2:string):Promise<string>;
 
 export function RecallSession(arg1:string,arg2:string):Promise<void>;
 
+export function RestoreSession(arg1:string,arg2:string,arg3:string):Promise<void>;
+
 export function RevealInFinder(arg1:string):Promise<void>;
+
+export function RewindSession(arg1:string,arg2:string,arg3:number):Promise<desktop.RewindResultInfo>;
 
 export function StopAgent(arg1:string):Promise<void>;
 

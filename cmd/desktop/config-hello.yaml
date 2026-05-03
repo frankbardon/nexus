@@ -21,9 +21,11 @@ plugins:
     subscribe:
       - "hello.response"
       - "ui.state.restore"
+      - "hitl.requested"
     accept:
       - "hello.request"
       - "ui.state.save"
+      - "hitl.responded"
 
   nexus.app.helloworld:
     greeting: "${greeting}"
