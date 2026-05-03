@@ -20,6 +20,8 @@ func main() {
 			os.Exit(runIngest(os.Args[2:]))
 		case "eval":
 			os.Exit(runEval(os.Args[2:]))
+		case "session":
+			os.Exit(runSession(os.Args[2:]))
 		}
 	}
 
