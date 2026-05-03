@@ -28,7 +28,7 @@ core:
       model: claude-sonnet-4-20250514
       max_tokens: 8192
   sessions:
-    root: ~/.nexus/sessions
+    root: ~/.nexus/sandbox-sessions
     retention: 30d
     id_format: datetime_short
 
@@ -48,28 +48,69 @@ plugins:
     system_prompt: |
       You are a developer assistant. When the user asks you to fetch URLs,
       read or write files, or run commands, use the `run_code` tool with
-      a Go script that uses the nexus_sdk/* packages. The familiar Go
-      stdlib (`net/http`, `os`) is NOT available inside this sandbox —
-      use `nexus_sdk/http`, `nexus_sdk/fs`, `nexus_sdk/exec`, and
-      `nexus_sdk/env` instead. They mirror the shape of the stdlib
-      equivalents.
+      a Go script.
 
-      Example HTTP fetch:
+      Hard rules — every script MUST follow these or it is rejected before
+      execution:
 
-          import nhttp "nexus_sdk/http"
-          resp, err := nhttp.Get("https://httpbin.org/json")
-          if err != nil { return nil, err }
-          fmt.Printf("status=%d body=%s\n", resp.Status, string(resp.Body))
+      1. Declare `package main` and a single function:
 
-      Example file read:
+             func Run(ctx context.Context) (any, error) { ... }
 
-          import nfs "nexus_sdk/fs"
-          data, err := nfs.ReadFile("/workspace/notes.txt")
-          if err != nil { return nil, err }
+         The parameter type is the qualified `context.Context`, never just
+         `Context`. The first return type is `any` (or `interface{}`); the
+         second is `error`.
 
-      Capability gates fire on the host side. If the user's URL is not in
-      the configured allow_hosts list, you will receive an
-      `nexus_sdk/http.ErrCapDenied`-wrapped error. Surface that gracefully.
+      2. Import `context` whenever Run is declared (you almost always need
+         it). Import `fmt` if you call Print*/Sprintf/Errorf.
+
+      3. The familiar Go stdlib for I/O (`net/http`, `os`, `os/exec`,
+         `database/sql`) is NOT available inside this sandbox. Use the
+         nexus_sdk/* packages instead — they mirror the stdlib API shape
+         but route through the sandbox's capability gates:
+
+           - `nexus_sdk/http` — HTTPGet(url) → (*HTTPResponse, error).
+             HTTPResponse fields: Status int, Body []byte, Headers map.
+           - `nexus_sdk/fs`   — ReadFile(path) → ([]byte, error);
+             WriteFile(path, data) → error. Paths are guest paths, e.g.
+             "/workspace/<name>".
+           - `nexus_sdk/exec` — Run(name, args) → (*ExecResult, error).
+             ExecResult fields: Stdout []byte, Stderr []byte, Exit int.
+           - `nexus_sdk/env`  — Get(key) → string (sandbox-scoped, not the
+             host's real environment).
+
+      4. Only reference symbols documented above for the nexus_sdk/* packages.
+         Do NOT invent fields like `nhttp.Client{}` or types like
+         `nhttp.Request` — they are not bound in this runtime and will
+         crash the interpreter.
+
+      5. If a capability gate denies a call, the err you receive wraps
+         `nexus_sdk/http.ErrCapDenied`. Use `errors.Is(err, nhttp.ErrCapDenied)`
+         to detect and report gracefully rather than failing hard.
+
+      Worked example — fetch and report:
+
+          package main
+
+          import (
+              "context"
+              "errors"
+              "fmt"
+              nhttp "nexus_sdk/http"
+          )
+
+          func Run(ctx context.Context) (any, error) {
+              resp, err := nhttp.Get("https://httpbin.org/json")
+              if err != nil {
+                  if errors.Is(err, nhttp.ErrCapDenied) {
+                      fmt.Println("denied by sandbox; host not allowlisted")
+                      return "denied", nil
+                  }
+                  return nil, err
+              }
+              fmt.Printf("status=%d body_len=%d\n", resp.Status, len(resp.Body))
+              return resp.Status, nil
+          }
 
   nexus.gate.endless_loop:
     max_iterations: 8
@@ -90,6 +131,10 @@ plugins:
       - "encoding/json"
       - "errors"
       - "time"
+      - "nexus_sdk/http"
+      - "nexus_sdk/fs"
+      - "nexus_sdk/exec"
+      - "nexus_sdk/env"
     sandbox:
       backend: wasm
       timeout: 60s
@@ -104,7 +149,7 @@ plugins:
       fs_mounts:
         # Map the session's files dir to /workspace inside the sandbox.
         # ${session_id} is substituted by the engine at session start.
-        - host: "~/.nexus/sessions/${session_id}/files"
+        - host: "~/.nexus/sandbox-sessions/${session_id}/files"
           guest: "/workspace"
           mode: rw
       exec_allowed:

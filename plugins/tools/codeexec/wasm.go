@@ -20,9 +20,10 @@ func (p *Plugin) runScriptWasm(tc events.ToolCall, script string) {
 	defer cancel()
 
 	res, err := p.sandbox.Exec(ctx, sandbox.ExecRequest{
-		Kind:    sandbox.KindGoWasm,
-		Source:  []byte(script),
-		Timeout: p.timeout,
+		Kind:            sandbox.KindGoWasm,
+		Source:          []byte(script),
+		AllowedPackages: p.allowedPackages,
+		Timeout:         p.timeout,
 	})
 	durationMs := time.Since(started).Milliseconds()
 	if err != nil {

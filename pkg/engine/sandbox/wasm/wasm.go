@@ -180,7 +180,10 @@ func (b *Backend) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.Ex
 	if timeout <= 0 {
 		timeout = b.timeout
 	}
-	allowed := b.allowedPackages
+	allowed := req.AllowedPackages
+	if len(allowed) == 0 {
+		allowed = b.allowedPackages
+	}
 
 	reqJSON, err := json.Marshal(map[string]any{
 		"source":           string(req.Source),

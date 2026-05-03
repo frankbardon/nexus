@@ -52,7 +52,17 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
+	// Yaegi panics on certain malformed snippets (e.g., a script that
+	// references a type the bindings haven't fully registered). Convert to
+	// a structured error so the host sees an envelope instead of a missing-
+	// envelope diagnostic from a wasm process that died mid-eval.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("yaegi panic: %v", r)
+		}
+	}()
+
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
@@ -129,12 +139,21 @@ func emit(r response) {
 // filteredStdlib mirrors plugins/tools/codeexec/stdlib.go. Kept inline to
 // keep the runner package self-contained — it must compile cleanly under
 // GOOS=wasip1 without dragging the engine module's plugins/* tree.
+//
+// Entries that name nexus_sdk/* paths are filtered out: those packages are
+// installed by sdkBindings(), not by stdlib.Symbols. Including them here
+// would be a no-op since stdlib.Symbols won't have a key for them, but
+// silently dropping them keeps a config that lists nexus_sdk imports under
+// allowed_packages from looking like a misconfiguration.
 func filteredStdlib(allowed []string) interp.Exports {
 	if len(allowed) == 0 {
 		return interp.Exports{}
 	}
 	allowedSet := make(map[string]bool, len(allowed))
 	for _, p := range allowed {
+		if strings.HasPrefix(p, "nexus_sdk/") {
+			continue
+		}
 		allowedSet[p] = true
 	}
 	out := interp.Exports{}

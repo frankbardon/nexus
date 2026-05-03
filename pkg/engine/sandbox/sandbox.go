@@ -75,6 +75,11 @@ type ExecRequest struct {
 	Net      NetPolicy
 	Timeout  time.Duration
 
+	// AllowedPackages narrows the stdlib whitelist visible to a Go-source
+	// payload (KindGoYaegi / KindGoWasm). Backends apply it as an override
+	// on top of any backend-level default. Ignored for KindShell.
+	AllowedPackages []string
+
 	// Backend lets a per-call override pick a non-default backend for the
 	// same plugin. Empty means "use the configured default".
 	Backend Backend
