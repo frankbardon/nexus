@@ -698,6 +698,10 @@ an external coordinator (separate from history buffers).
 | `prompt_file`       | string | *(none)*         | Path to a prompt file. |
 | `protect_recent`    | int    | `4`              | Recent messages exempt from compaction. |
 | `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before committing the summary back into history. Off = unchanged behavior. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the summary is at least this many bytes. |
 
 ### `nexus.memory.longterm`
 
