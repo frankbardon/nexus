@@ -46,7 +46,7 @@ active:
   - nexus.agent.react
   - nexus.tool.shell
   - nexus.tool.file
-  - nexus.tool.ask
+  - nexus.control.hitl
   - nexus.skills
   - nexus.memory.capped
 ```
@@ -61,7 +61,7 @@ active:
   - nexus.observe.thinking
   - nexus.tool.shell
   - nexus.tool.file
-  - nexus.tool.ask
+  - nexus.control.hitl
   - nexus.skills
   - nexus.memory.capped
   - nexus.memory.compaction

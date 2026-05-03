@@ -105,7 +105,7 @@ plugins:
     - nexus.agent.react
     - nexus.tool.shell          # Shell command execution
     - nexus.tool.file           # File read/write/list
-    - nexus.tool.ask            # Ask user questions
+    - nexus.control.hitl        # ask_user tool + HITL approvals
     - nexus.memory.capped
 
   nexus.tool.shell:

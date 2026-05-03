@@ -183,7 +183,8 @@ pattern.
 
 `bin/nexus -config <path> -replay <session-id>` re-runs a journaled session
 without external calls. The Anthropic / OpenAI / Gemini providers and the
-side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`)
+side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`),
+along with the `nexus.control.hitl` plugin's `hitl.responded` events,
 detect replay mode and emit the next journaled `llm.response` /
 `tool.result` from a FIFO stash seeded from the source journal in seq
 order. The replay coordinator drives `io.input` events; the live agent
@@ -598,10 +599,15 @@ Source: `plugins/tools/opener/plugin.go`. Registers `open_path`.
 | `open_cmd` | string   | platform default (`open` macOS, `xdg-open` Linux, `start` Win)  | Override the platform "open" command. |
 | `timeout`  | duration | `10s`                                                           | Per-open timeout. |
 
-### `nexus.tool.ask`
+### `nexus.control.hitl`
 
-Source: `plugins/tools/ask/plugin.go`. **No configuration.** Registers
-`ask_user`; emits `io.ask` and waits for `io.ask.response`.
+Source: `plugins/control/hitl/plugin.go`. **No configuration.** The
+unified human-in-the-loop primitive. Registers the LLM-facing
+`ask_user` tool with an extended schema (`prompt`, `mode`, `choices`,
+`default_choice_id`, `deadline_seconds`) and routes
+`hitl.requested` / `hitl.responded` events between requesters (the
+tool, gates, memory plugins) and IO surfaces. Replaces the prior
+`nexus.tool.ask`. See [Human-in-the-Loop plugin docs](../plugins/control/hitl.md).
 
 ### `nexus.tool.code_exec`
 
@@ -811,7 +817,7 @@ Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
 | `input_delay`            | duration | `500ms`     | Delay between inputs. |
 | `approval_mode`          | string   | `approve`   | `approve`, `deny`, `per-prompt`. |
 | `approval_rules`         | list     | *(empty)*   | Per-prompt rules: each `{match: <substring>, action: <approve|deny>}`. |
-| `ask_responses`          | list     | *(empty)*   | Responses to `io.ask` events. |
+| `hitl_responses`         | list     | *(empty)*   | Scripted answers to `hitl.requested` events. Bare strings are treated as `free_text`; `{choice_id: ..., free_text: ...}` maps populate the corresponding response fields. |
 | `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
 | `timeout`                | duration | `60s`       | Session timeout. |
 | `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
