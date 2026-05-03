@@ -1,0 +1,74 @@
+# Test: code_exec under the wasm sandbox compiler.
+#
+# Validates the engine wires `compiler: yaegi-wasm` through ctx.Sandbox to
+# the embedded Yaegi-on-Wasm runner. The snippet does pure compute (no
+# bridge calls) so this test exercises:
+#   - Sandbox interface plumbing (PluginContext.Sandbox)
+#   - WasmBackend boot (wazero runtime + embedded yaegi.wasm.gz)
+#   - Snippet round-trip: bus → run_code tool.invoke → wasm sandbox → result
+#
+# Bridge-SDK paths (HTTP/FS/exec/env) have unit-test coverage in
+# pkg/engine/sandbox/wasm/bridge_test.go — those run real httptest servers
+# and don't fit the static-mock harness shape.
+#
+# Mocked LLM, no API key required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestSandboxWasm
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.code_exec
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Use run_code to compute the sum of 1..10."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - tool_calls:
+          - name: run_code
+            arguments: |
+              {"script":"package main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n\nfunc Run(ctx context.Context) (any, error) {\n\tsum := 0\n\tfor i := 1; i <= 10; i++ { sum += i }\n\tfmt.Println(\"sum=\", sum)\n\treturn sum, nil\n}\n"}
+      - content: "Done. The script computed the sum and returned 55."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use tools when asked."
+
+  nexus.tool.code_exec:
+    compiler: yaegi-wasm
+    timeout_seconds: 30
+    allowed_packages: ["fmt", "context"]
+    sandbox:
+      backend: wasm
+      timeout: 30s
+      # cache_dir omitted intentionally — exercises the cold-start path so
+      # we know first-run on a clean machine works without state. Set a
+      # cache_dir in production configs to amortise the wazero AOT cost.
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

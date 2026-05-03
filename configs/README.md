@@ -118,6 +118,7 @@ go test -tags integration ./tests/integration/ -v
 | `test-minimal.yaml` | `minimal_test.go` | live (Anthropic) | Bare-engine boot, no tools/gates/observers |
 | `test-all-gates.yaml` | `all_gates_test.go` | live + mock variants | All 8 gates active, veto chain, gate interactions |
 | `test-code-exec.yaml` | `code_exec_test.go` | mock | `run_code` tool dispatching shell via in-process Yaegi |
+| `test-sandbox-wasm.yaml` | `sandboxwasm_test.go` | mock | `code_exec` under `compiler: yaegi-wasm`; pure-compute snippet round-trip + bridge net-deny path |
 | `test-fallback.yaml` | `fallback_test.go` | live | Provider fallback chain (primary fails → fallback responds) |
 | `test-fanout.yaml` | `fanout_test.go` | mock | Parallel multi-provider dispatch + collection |
 | `test-memory-simple.yaml` | `memory_test.go` | mock | Unbounded `memory.simple` provider |
@@ -164,3 +165,4 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 |--------|---------------|
 | `demo-gates-strict.yaml` | Tight gate limits, manual veto exploration |
 | `demo-rag.yaml` | RAG primitives walkthrough (embeddings + vector store + ingest + knowledge_search) |
+| `demo-sandbox-wasm.yaml` | `code_exec` under wasm sandbox; agent uses `nexus_sdk/{http,fs,exec,env}` to do gated I/O. Live Anthropic; `cache_dir` set so cold-start amortises across runs. |
