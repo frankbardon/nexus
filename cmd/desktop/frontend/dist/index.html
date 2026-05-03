@@ -19,6 +19,9 @@
 
     /* Wails window drag region */
     .wails-drag { --wails-draggable: drag; }
+
+    /* Alpine x-cloak: hide elements until Alpine has hydrated. */
+    [x-cloak] { display: none !important; }
   </style>
 </head>
 <body class="bg-base-100 text-base-content">
@@ -179,6 +182,13 @@
                      'bg-primary animate-pulse': session.status === 'running',
                      'bg-error': session.status === 'failed'
                    }"></div>
+
+              <!-- Timeline button -->
+              <button @click.stop="$store.timeline.open(session.id)"
+                      class="btn btn-ghost btn-xs btn-square opacity-0 group-hover:opacity-50 hover:!opacity-100"
+                      title="View timeline / rewind">
+                <i class="fa-solid fa-clock-rotate-left text-xs"></i>
+              </button>
 
               <!-- Delete button -->
               <button @click.stop="$store.sessions.deleteSession(session.id)"
@@ -710,6 +720,223 @@
     </aside>
 
     </div><!-- end content + file panel row -->
+  </div>
+
+  <!-- ── HITL approval modal ───────────────────────────────────── -->
+  <div x-data
+       x-show="$store.hitl.active"
+       x-cloak
+       x-transition.opacity
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div class="card bg-base-100 border border-base-300 shadow-2xl w-full max-w-lg mx-4"
+         @keydown.escape.window="$store.hitl.cancel()">
+      <div class="card-body p-5 space-y-4">
+
+        <!-- Header -->
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-circle-question text-primary"></i>
+          <h3 class="font-semibold text-base">Human input requested</h3>
+          <span class="badge badge-ghost badge-sm font-mono ml-auto"
+                x-text="$store.hitl.active && $store.hitl.active.mode"></span>
+        </div>
+
+        <!-- Prompt text -->
+        <div class="bg-base-200 border border-base-300 rounded-lg p-3 text-sm whitespace-pre-wrap"
+             x-text="$store.hitl.active && $store.hitl.active.prompt"></div>
+
+        <!-- Choice buttons (mode: choices | both) -->
+        <div x-show="$store.hitl.showChoices()" class="space-y-2">
+          <div class="text-xs font-semibold uppercase tracking-wider opacity-50">Choose one</div>
+          <template x-for="choice in ($store.hitl.active && $store.hitl.active.choices) || []" :key="choice.id">
+            <button class="btn btn-outline btn-sm w-full justify-start text-left"
+                    @click="$store.hitl.submit(choice.id, '')">
+              <i class="fa-solid fa-circle-chevron-right text-xs opacity-50"></i>
+              <span x-text="choice.label"></span>
+              <span class="font-mono text-xs opacity-40 ml-auto" x-text="choice.id"></span>
+            </button>
+          </template>
+        </div>
+
+        <!-- Free text input (mode: free_text | both) -->
+        <div x-show="$store.hitl.showFreeText()" class="space-y-2">
+          <div class="text-xs font-semibold uppercase tracking-wider opacity-50"
+               x-text="$store.hitl.active && $store.hitl.active.mode === 'both' ? 'Or write a reply' : 'Reply'"></div>
+          <textarea x-model="$store.hitl.freeText"
+                    placeholder="Type your answer..."
+                    class="textarea textarea-bordered w-full text-sm"
+                    rows="3"
+                    @keydown.meta.enter="$store.hitl.submit('', $store.hitl.freeText)"
+                    @keydown.ctrl.enter="$store.hitl.submit('', $store.hitl.freeText)"></textarea>
+          <div class="flex justify-end">
+            <button class="btn btn-primary btn-sm"
+                    :disabled="!$store.hitl.freeText.trim()"
+                    @click="$store.hitl.submit('', $store.hitl.freeText)">
+              Submit
+              <kbd class="kbd kbd-xs ml-1">⌘</kbd>
+              <kbd class="kbd kbd-xs">↵</kbd>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Session timeline drawer ────────────────────────────────── -->
+  <div x-data
+       x-show="$store.timeline.open_"
+       x-cloak
+       x-transition.opacity
+       class="fixed inset-0 z-40 flex items-stretch justify-end bg-black/40">
+    <div x-show="$store.timeline.open_"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="translate-x-full"
+         x-transition:enter-end="translate-x-0"
+         x-transition:leave="transition ease-in duration-150"
+         x-transition:leave-start="translate-x-0"
+         x-transition:leave-end="translate-x-full"
+         class="bg-base-100 border-l border-base-300 w-[640px] max-w-full flex flex-col h-full shadow-2xl"
+         @click.outside="$store.timeline.close()">
+
+      <!-- Header -->
+      <div class="px-4 py-3 border-b border-base-300 flex items-center gap-2">
+        <i class="fa-solid fa-clock-rotate-left text-primary"></i>
+        <div class="flex-1 min-w-0">
+          <div class="font-semibold text-sm truncate" x-text="'Timeline · ' + ($store.timeline.sessionID || '')"></div>
+          <div class="text-xs opacity-50 truncate"
+               x-text="($store.timeline.events.length || 0) + ' events'"></div>
+        </div>
+        <div class="join">
+          <button class="join-item btn btn-sm btn-ghost"
+                  :class="$store.timeline.tab === 'events' ? 'btn-active' : ''"
+                  @click="$store.timeline.tab = 'events'">Events</button>
+          <button class="join-item btn btn-sm btn-ghost"
+                  :class="$store.timeline.tab === 'archives' ? 'btn-active' : ''"
+                  @click="$store.timeline.tab = 'archives'; $store.timeline.refreshArchives()">
+            Archives
+            <span class="badge badge-xs ml-1" x-show="$store.timeline.archives.length"
+                  x-text="$store.timeline.archives.length"></span>
+          </button>
+        </div>
+        <button class="btn btn-ghost btn-sm btn-square ml-1"
+                @click="$store.timeline.refresh()" title="Refresh">
+          <i class="fa-solid fa-arrows-rotate text-xs"
+             :class="$store.timeline.loading ? 'animate-spin' : ''"></i>
+        </button>
+        <button class="btn btn-ghost btn-sm btn-square"
+                @click="$store.timeline.close()" title="Close">
+          <i class="fa-solid fa-xmark text-xs"></i>
+        </button>
+      </div>
+
+      <!-- Events tab -->
+      <div x-show="$store.timeline.tab === 'events'" class="flex-1 overflow-hidden flex flex-col">
+        <div x-show="$store.timeline.loading" class="flex justify-center py-6">
+          <span class="loading loading-spinner loading-md opacity-40"></span>
+        </div>
+        <div x-show="!$store.timeline.loading && $store.timeline.events.length === 0"
+             class="flex-1 flex items-center justify-center px-6">
+          <div class="text-center opacity-50">
+            <i class="fa-regular fa-circle-pause text-2xl mb-2"></i>
+            <p class="text-sm">No journal events for this session.</p>
+          </div>
+        </div>
+        <div x-show="!$store.timeline.loading && $store.timeline.events.length > 0"
+             class="flex-1 overflow-y-auto px-2 py-2 space-y-0.5 font-mono text-xs">
+          <template x-for="evt in $store.timeline.events" :key="evt.seq">
+            <div class="group flex items-center gap-2 px-2 py-1.5 rounded hover:bg-base-200 cursor-pointer"
+                 :class="$store.timeline.selectedSeq === evt.seq ? 'bg-primary/10' : ''"
+                 @click="$store.timeline.toggleDetail(evt.seq)">
+              <span class="text-primary/60 w-12 text-right shrink-0" x-text="evt.seq"></span>
+              <span class="opacity-50 shrink-0" x-text="$store.timeline.formatTime(evt.ts)"></span>
+              <span class="flex-1 truncate" x-text="evt.type"></span>
+              <span class="badge badge-xs badge-ghost opacity-60" x-show="evt.side_effect" title="Side effect">SE</span>
+              <span class="badge badge-xs badge-error opacity-70" x-show="evt.vetoed" title="Vetoed">V</span>
+              <button class="btn btn-ghost btn-xs btn-square opacity-0 group-hover:opacity-80 hover:!opacity-100 hover:text-warning"
+                      @click.stop="$store.timeline.confirmRewind(evt.seq)"
+                      title="Rewind to here">
+                <i class="fa-solid fa-clock-rotate-left text-xs"></i>
+              </button>
+            </div>
+          </template>
+        </div>
+        <!-- Inline payload preview -->
+        <div x-show="$store.timeline.detail" class="border-t border-base-300 px-3 py-2 max-h-48 overflow-y-auto bg-base-200">
+          <div class="text-xs font-semibold uppercase tracking-wider opacity-50 mb-1">
+            Event <span x-text="$store.timeline.detail && $store.timeline.detail.seq"></span> payload
+          </div>
+          <pre class="text-xs whitespace-pre-wrap break-all opacity-80"
+               x-text="$store.timeline.detailJSON()"></pre>
+        </div>
+      </div>
+
+      <!-- Archives tab -->
+      <div x-show="$store.timeline.tab === 'archives'" class="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+        <div x-show="$store.timeline.archives.length === 0" class="flex items-center justify-center py-12 opacity-50 text-sm">
+          No archives yet. Rewinding produces a snapshot here.
+        </div>
+        <template x-for="name in $store.timeline.archives" :key="name">
+          <div class="flex items-center gap-3 p-3 border border-base-300 rounded-lg bg-base-200/40">
+            <i class="fa-solid fa-box-archive opacity-60"></i>
+            <div class="flex-1 min-w-0">
+              <div class="font-mono text-sm truncate" x-text="name"></div>
+              <div class="text-xs opacity-50">Click restore to swap in as the live journal.</div>
+            </div>
+            <button class="btn btn-sm btn-outline"
+                    @click="$store.timeline.confirmRestore(name)">
+              <i class="fa-solid fa-rotate-left text-xs"></i> Restore
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Confirm modal (rewind / restore) ──────────────────────── -->
+  <div x-data
+       x-show="$store.timeline.confirm"
+       x-cloak
+       x-transition.opacity
+       class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70">
+    <div class="card bg-base-100 border border-base-300 shadow-2xl w-full max-w-md mx-4">
+      <div class="card-body p-5 space-y-4">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-triangle-exclamation text-warning"></i>
+          <h3 class="font-semibold text-base"
+              x-text="$store.timeline.confirm && $store.timeline.confirm.title"></h3>
+        </div>
+        <p class="text-sm opacity-80"
+           x-text="$store.timeline.confirm && $store.timeline.confirm.message"></p>
+        <div class="flex justify-end gap-2">
+          <button class="btn btn-ghost btn-sm" @click="$store.timeline.confirm = null">
+            Cancel
+          </button>
+          <button class="btn btn-warning btn-sm"
+                  @click="$store.timeline.runConfirm()">
+            <span x-text="$store.timeline.confirm && $store.timeline.confirm.action"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast container ───────────────────────────────────────── -->
+  <div x-data class="fixed bottom-4 right-4 z-[70] space-y-2 pointer-events-none">
+    <template x-for="t in $store.toast.items" :key="t.id">
+      <div class="alert pointer-events-auto shadow-lg max-w-sm"
+           :class="{
+             'alert-success': t.kind === 'success',
+             'alert-error':   t.kind === 'error',
+             'alert-info':    t.kind === 'info' || !t.kind,
+           }">
+        <i class="fa-solid"
+           :class="{
+             'fa-circle-check':         t.kind === 'success',
+             'fa-circle-exclamation':   t.kind === 'error',
+             'fa-circle-info':          t.kind === 'info' || !t.kind,
+           }"></i>
+        <span class="text-sm" x-text="t.msg"></span>
+      </div>
+    </template>
   </div>
 </div>
 
@@ -1557,6 +1784,284 @@ function settingsField(scope, field) {
     },
   };
 }
+</script>
+
+<!-- ── Toast store ─────────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('toast', {
+    items: [],
+    _seq: 0,
+    push(msg, kind = 'info', ttl = 3000) {
+      const id = ++this._seq;
+      this.items.push({ id, msg, kind });
+      setTimeout(() => {
+        this.items = this.items.filter(t => t.id !== id);
+      }, ttl);
+    },
+  });
+});
+</script>
+
+<!-- ── HITL store (multi-choice approval card) ──────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('hitl', {
+    // active is the rendered request: { request_id, prompt, mode, choices, agentID }
+    active: null,
+    freeText: '',
+    queue: [],
+
+    showChoices() {
+      const a = this.active;
+      return !!(a && (a.mode === 'choices' || a.mode === 'both') && a.choices && a.choices.length);
+    },
+    showFreeText() {
+      const a = this.active;
+      return !!(a && (a.mode === 'free_text' || a.mode === 'both' || !a.mode));
+    },
+
+    // present is the entry point: an agent's bus saw a hitl.requested
+    // event and forwarded the payload here. We support both the new
+    // event shape (HITLRequest with id/prompt/mode/choices) and the
+    // legacy ui.HITLRequestMessage (request_id, prompt, mode, choices).
+    present(agentID, payload) {
+      if (!payload) return;
+      const requestID = payload.request_id || payload.id || payload.ID || '';
+      const prompt = payload.prompt || payload.Prompt || '';
+      const mode = (payload.mode || payload.Mode || 'free_text').toLowerCase();
+      const rawChoices = payload.choices || payload.Choices || [];
+      const choices = (rawChoices || []).map(c => ({
+        id: c.id || c.ID || '',
+        label: c.label || c.Label || c.id || c.ID || '',
+      }));
+      const req = { agentID, request_id: requestID, prompt, mode, choices };
+
+      if (this.active) {
+        this.queue.push(req);
+        return;
+      }
+      this.active = req;
+      this.freeText = '';
+    },
+
+    submit(choiceID, freeText) {
+      if (!this.active) return;
+      const agentID = this.active.agentID;
+      const requestID = this.active.request_id;
+      const text = (freeText || '').trim();
+      const payload = { request_id: requestID };
+      if (choiceID) payload.choice_id = choiceID;
+      if (text)     payload.free_text = text;
+
+      // Emit on the agent's bus. The wails IO plugin's accept list
+      // includes "hitl.responded", so this round-trips to the engine.
+      const bus = window._agentBuses && window._agentBuses[agentID];
+      if (bus) {
+        bus.emit('hitl.responded', payload);
+      } else {
+        console.warn('hitl: no bus for agent', agentID);
+      }
+
+      // Pop the next queued request, if any.
+      this.active = null;
+      this.freeText = '';
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        this.active = next;
+      }
+    },
+
+    cancel() {
+      // Operator dismissed the modal without responding. Send an empty
+      // free_text so the engine resolves the request rather than
+      // leaving the agent loop hung.
+      if (!this.active) return;
+      this.submit('', '');
+    },
+  });
+
+  // Wire each agent's bus to the HITL store. The agent buses are
+  // registered after this script runs (in the per-agent script blocks),
+  // so we use a deferred attachment that polls _agentBuses then sets up
+  // listeners. Cheap and one-shot.
+  function attach() {
+    const agents = window._agentBuses || {};
+    for (const [agentID, bus] of Object.entries(agents)) {
+      if (bus._hitlAttached) continue;
+      bus._hitlAttached = true;
+      // The wails plugin in config-driven mode broadcasts the raw event
+      // type; in legacy mode it broadcasts type "hitl_request". Listen
+      // for both so the modal works regardless of the agent's config.
+      const handler = (payload) => Alpine.store('hitl').present(agentID, payload);
+      bus.on('hitl.requested', handler);
+      bus.on('hitl_request',   handler);
+    }
+  }
+  // Attach immediately if buses are already present, then attach again
+  // after Alpine has finished initializing all stores.
+  attach();
+  setTimeout(attach, 50);
+  setTimeout(attach, 250);
+});
+</script>
+
+<!-- ── Session timeline store (rewind / archives) ───────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('timeline', {
+    open_: false,
+    sessionID: null,
+    agentID: null,
+    tab: 'events',          // 'events' | 'archives'
+    events: [],
+    archives: [],
+    loading: false,
+    selectedSeq: null,
+    detail: null,           // full envelope (with payload) for selectedSeq
+    confirm: null,          // { title, message, action, run() }
+
+    async open(sessionID) {
+      const agentID = Alpine.store('shell').activeAgentID;
+      if (!agentID || !sessionID) return;
+      this.sessionID = sessionID;
+      this.agentID = agentID;
+      this.open_ = true;
+      this.tab = 'events';
+      this.selectedSeq = null;
+      this.detail = null;
+      await this.refresh();
+    },
+
+    close() {
+      this.open_ = false;
+      this.sessionID = null;
+      this.agentID = null;
+      this.events = [];
+      this.archives = [];
+      this.selectedSeq = null;
+      this.detail = null;
+      this.confirm = null;
+    },
+
+    async refresh() {
+      if (!this.agentID || !this.sessionID) return;
+      this.loading = true;
+      try {
+        const events = await window.go.desktop.Shell.InspectSession(this.agentID, this.sessionID);
+        this.events = events || [];
+      } catch (err) {
+        console.error('InspectSession failed:', err);
+        Alpine.store('toast').push('Failed to load timeline: ' + (err.message || err), 'error');
+      } finally {
+        this.loading = false;
+      }
+      // Refresh archives lazily — only when archives tab is active.
+      if (this.tab === 'archives') await this.refreshArchives();
+    },
+
+    async refreshArchives() {
+      if (!this.agentID || !this.sessionID) return;
+      try {
+        const names = await window.go.desktop.Shell.ListSessionArchives(this.agentID, this.sessionID);
+        this.archives = names || [];
+      } catch (err) {
+        console.error('ListSessionArchives failed:', err);
+        Alpine.store('toast').push('Failed to load archives: ' + (err.message || err), 'error');
+      }
+    },
+
+    async toggleDetail(seq) {
+      if (this.selectedSeq === seq) {
+        this.selectedSeq = null;
+        this.detail = null;
+        return;
+      }
+      this.selectedSeq = seq;
+      this.detail = null;
+      try {
+        this.detail = await window.go.desktop.Shell.GetSessionEvent(this.agentID, this.sessionID, seq);
+      } catch (err) {
+        console.error('GetSessionEvent failed:', err);
+        Alpine.store('toast').push('Failed to load event payload', 'error');
+      }
+    },
+
+    detailJSON() {
+      if (!this.detail) return '';
+      try {
+        return JSON.stringify(this.detail.payload, null, 2);
+      } catch {
+        return String(this.detail.payload);
+      }
+    },
+
+    confirmRewind(seq) {
+      const sid = this.sessionID;
+      const agentID = this.agentID;
+      this.confirm = {
+        title: 'Rewind session',
+        message: `This will archive the live journal for "${sid}" and truncate it to seq ${seq}. The archive can be restored later.`,
+        action: 'Archive & rewind',
+        run: async () => {
+          try {
+            const res = await window.go.desktop.Shell.RewindSession(agentID, sid, seq);
+            Alpine.store('toast').push(
+              `Rewound to seq ${res.truncated_seq} — ${res.events_kept} events kept, ${res.events_archived - res.events_kept} archived (${res.archive_name})`,
+              'success', 5000);
+            this.confirm = null;
+            await this.refresh();
+            await this.refreshArchives();
+          } catch (err) {
+            console.error('RewindSession failed:', err);
+            Alpine.store('toast').push('Rewind failed: ' + (err.message || err), 'error', 6000);
+          }
+        },
+      };
+    },
+
+    confirmRestore(archiveName) {
+      const sid = this.sessionID;
+      const agentID = this.agentID;
+      this.confirm = {
+        title: 'Restore archived journal',
+        message: `This will rotate the current live journal for "${sid}" to its own archive, then swap "${archiveName}" in as the new live journal.`,
+        action: 'Restore',
+        run: async () => {
+          try {
+            await window.go.desktop.Shell.RestoreSession(agentID, sid, archiveName);
+            Alpine.store('toast').push(`Restored archive ${archiveName}`, 'success', 4000);
+            this.confirm = null;
+            await this.refresh();
+            await this.refreshArchives();
+          } catch (err) {
+            console.error('RestoreSession failed:', err);
+            Alpine.store('toast').push('Restore failed: ' + (err.message || err), 'error', 6000);
+          }
+        },
+      };
+    },
+
+    runConfirm() {
+      if (this.confirm && typeof this.confirm.run === 'function') {
+        this.confirm.run();
+      }
+    },
+
+    formatTime(isoStr) {
+      if (!isoStr) return '';
+      // The Go side serializes UTC RFC3339 with millisecond precision.
+      // Render as HH:MM:SS.sss for compactness in the timeline list.
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return isoStr;
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const mm = String(d.getUTCMinutes()).padStart(2, '0');
+      const ss = String(d.getUTCSeconds()).padStart(2, '0');
+      const ms = String(d.getUTCMilliseconds()).padStart(3, '0');
+      return `${hh}:${mm}:${ss}.${ms}`;
+    },
+  });
+});
 </script>
 
 </body>

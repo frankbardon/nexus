@@ -91,6 +91,63 @@ export namespace desktop {
 	        this.display = source["display"];
 	    }
 	}
+	export class RewindResultInfo {
+	    archive_name: string;
+	    truncated_seq: number;
+	    events_kept: number;
+	    events_archived: number;
+
+	    static createFrom(source: any = {}) {
+	        return new RewindResultInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.archive_name = source["archive_name"];
+	        this.truncated_seq = source["truncated_seq"];
+	        this.events_kept = source["events_kept"];
+	        this.events_archived = source["events_archived"];
+	    }
+	}
+	export class TimelineEvent {
+	    seq: number;
+	    ts: string;
+	    type: string;
+	    source?: string;
+	    event_id?: string;
+	    parent_seq?: number;
+	    side_effect?: boolean;
+	    vetoed?: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new TimelineEvent(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.seq = source["seq"];
+	        this.ts = source["ts"];
+	        this.type = source["type"];
+	        this.source = source["source"];
+	        this.event_id = source["event_id"];
+	        this.parent_seq = source["parent_seq"];
+	        this.side_effect = source["side_effect"];
+	        this.vetoed = source["vetoed"];
+	    }
+	}
+	export class TimelineEventDetail extends TimelineEvent {
+	    payload?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new TimelineEventDetail(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        super(source);
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.payload = source["payload"];
+	    }
+	}
 	export class SessionMeta {
 	    id: string;
 	    agent_id: string;
