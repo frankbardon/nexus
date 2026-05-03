@@ -115,3 +115,45 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+func TestCheckSessionLockBehaviour(t *testing.T) {
+	root := t.TempDir()
+	sessionID := "sess-test"
+	if err := os.MkdirAll(filepath.Join(root, sessionID), 0o755); err != nil {
+		t.Fatalf("mkdir session: %v", err)
+	}
+	cfg := Config{}
+	cfg.Core.Sessions.Root = root
+
+	// No lock present → ok.
+	if err := checkSessionLock(cfg, sessionID, false); err != nil {
+		t.Fatalf("no-lock case: %v", err)
+	}
+
+	// Live lock present → error.
+	if err := WriteSessionLock(filepath.Join(root, sessionID), os.Getpid()); err != nil {
+		t.Fatalf("WriteSessionLock: %v", err)
+	}
+	err := checkSessionLock(cfg, sessionID, false)
+	if err == nil {
+		t.Fatalf("live-lock case: expected error, got nil")
+	}
+	if !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("expected ErrSessionLocked, got %v", err)
+	}
+
+	// Force bypasses the live lock.
+	if err := checkSessionLock(cfg, sessionID, true); err != nil {
+		t.Fatalf("force-bypass case: %v", err)
+	}
+
+	// Stale lock (impossibly large PID) → ok.
+	if err := WriteSessionLock(filepath.Join(root, sessionID), math.MaxInt32-1); err != nil {
+		t.Fatalf("WriteSessionLock stale: %v", err)
+	}
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		if err := checkSessionLock(cfg, sessionID, false); err != nil {
+			t.Fatalf("stale-lock case: %v", err)
+		}
+	}
+}
