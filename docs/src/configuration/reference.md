@@ -609,6 +609,30 @@ unified human-in-the-loop primitive. Registers the LLM-facing
 tool, gates, memory plugins) and IO surfaces. Replaces the prior
 `nexus.tool.ask`. See [Human-in-the-Loop plugin docs](../plugins/control/hitl.md).
 
+### `nexus.control.hitl_synthesizer`
+
+Source: `plugins/control/hitl_synthesizer/plugin.go`. Optional
+companion to `nexus.control.hitl` that renders context-aware approval
+prompts via a small/cheap LLM. Advertises the
+`hitl.prompt_synthesizer` capability; emitters opt in by setting
+`HITLRequest.PromptSynthesizer = "hitl.prompt_synthesizer"` and
+leaving `Prompt` empty. Subscribes to `before:hitl.requested`
+(vetoable, pointer payload) and to `hitl.requested` (mutates only when
+the emitter passed `*HITLRequest`) ahead of every IO plugin so the
+rendered text is in place before the operator sees the prompt.
+Synthesised prompts are cached on disk under
+`<session>/plugins/nexus.control.hitl_synthesizer/cache.jsonl`, keyed by
+`(action_kind, sha256(action_ref))`. See
+[HITL Prompt Synthesizer docs](../plugins/control/hitl_synthesizer.md).
+
+| Key                    | Type   | Default                              | Description |
+|------------------------|--------|--------------------------------------|-------------|
+| `model`                | string | `haiku`                              | Model role (resolved via `core.models`) used for synthesis. |
+| `model_id`             | string | *(none)*                             | Explicit model ID; bypasses role lookup when set. |
+| `max_action_ref_chars` | int    | `1500`                               | ActionRef truncation budget (in JSON characters) before sending to the model. |
+| `cache_enabled`        | bool   | `true`                               | Toggle the on-disk cache. Disable for debugging or strict-determinism runs. |
+| `fallback_prompt`      | string | `Approve action: {{.action_kind}}`   | Go `text/template` over `{action_kind, action_ref, requester_plugin, request_id}` used when synthesis fails. |
+
 ### `nexus.tool.code_exec`
 
 Source: `plugins/tools/codeexec/plugin.go`. Registers `run_code` (Go).
