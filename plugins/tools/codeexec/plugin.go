@@ -19,7 +19,21 @@ import (
 	"github.com/traefik/yaegi/interp"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/sandbox"
 	"github.com/frankbardon/nexus/pkg/events"
+)
+
+// compilerKind selects the runtime that executes agent-emitted snippets.
+type compilerKind string
+
+const (
+	// compilerYaegiHost runs Yaegi in-process. Fast, full dynamic bindings
+	// (`tools.*`, `parallel.*`, skill helpers), no kernel isolation.
+	compilerYaegiHost compilerKind = "yaegi-host"
+	// compilerYaegiWasm routes the snippet through ctx.Sandbox to an
+	// embedded Yaegi-on-Wasm runner. Capability-gated, no `tools.*` or
+	// skill helpers in v1; bridge SDK (`nexus_sdk/*`) follows in Phase 3.
+	compilerYaegiWasm compilerKind = "yaegi-wasm"
 )
 
 const (
@@ -43,10 +57,12 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 	prompts *engine.PromptRegistry
 	replay  *engine.ReplayState
+	sandbox sandbox.Sandbox
 
 	liveCalls atomic.Uint64
 
 	// Config.
+	compiler         compilerKind
 	timeout          time.Duration
 	maxOutputBytes   int
 	maxWorkers       int      // concurrency ceiling for parallel.* primitives
@@ -74,6 +90,7 @@ type Plugin struct {
 // New creates a new codeexec plugin.
 func New() engine.Plugin {
 	return &Plugin{
+		compiler:         compilerYaegiHost,
 		timeout:          defaultTimeout,
 		maxOutputBytes:   defaultMaxOutputBytes,
 		maxWorkers:       runtime.NumCPU(),
@@ -98,6 +115,30 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.session = ctx.Session
 	p.prompts = ctx.Prompts
 	p.replay = ctx.Replay
+	p.sandbox = ctx.Sandbox
+
+	if s, ok := ctx.Config["compiler"].(string); ok && s != "" {
+		switch compilerKind(s) {
+		case compilerYaegiHost, compilerYaegiWasm:
+			p.compiler = compilerKind(s)
+		default:
+			return fmt.Errorf("code_exec: invalid compiler %q (want %q or %q)",
+				s, compilerYaegiHost, compilerYaegiWasm)
+		}
+	}
+	if p.compiler == compilerYaegiWasm {
+		caps := p.sandbox.Capabilities()
+		hasWasm := false
+		for _, k := range caps.Kinds {
+			if k == sandbox.KindGoWasm {
+				hasWasm = true
+				break
+			}
+		}
+		if !hasWasm {
+			return fmt.Errorf("code_exec: compiler=yaegi-wasm requires a sandbox backend that supports KindGoWasm; configure plugin.sandbox.backend: wasm")
+		}
+	}
 
 	if v, ok := ctx.Config["timeout_seconds"].(int); ok && v > 0 {
 		p.timeout = time.Duration(v) * time.Second
@@ -334,6 +375,16 @@ func (p *Plugin) handleSkillLoaded(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	// Skill helpers are Yaegi-bound. They have no representation under the
+	// wasm compiler (the bridge SDK doesn't surface them in v1), so when the
+	// agent path runs through wasm we skip helper loading entirely. Skill
+	// content (the markdown body) still reaches the agent the same way; only
+	// the in-script `import "skills/<name>"` binding is unavailable.
+	if p.compiler == compilerYaegiWasm {
+		p.logger.Info("skipping skill helper load under compiler=yaegi-wasm",
+			"skill", sc.Name, "skill_runtime", sc.Runtime)
+		return
+	}
 	helpers, err := loadSkillHelpers(sc.Name, sc.BaseDir)
 	if err != nil {
 		p.logger.Warn("skill helper load failed", "skill", sc.Name, "error", err)
@@ -395,6 +446,11 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		Imports: analysis.Imports,
 		Skills:  activeSkills,
 	})
+
+	if p.compiler == compilerYaegiWasm {
+		p.runScriptWasm(tc, script)
+		return
+	}
 
 	stdout := newStreamingWriter(p.bus, tc.ID, tc.TurnID, p.maxOutputBytes)
 	// finish closes the stdout stream (flushing a Final chunk) and then emits

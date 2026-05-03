@@ -1,16 +1,14 @@
 package shell
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/sandbox"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -26,13 +24,11 @@ type Plugin struct {
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
 	replay  *engine.ReplayState
+	sandbox sandbox.Sandbox
 
-	allowedCommands []string
-	workingDir      string
-	pathDirs        []string // directories prepended to PATH
-	timeout         time.Duration
-	sandbox         bool
-	unsubs          []func()
+	workingDir string
+	timeout    time.Duration
+	unsubs     []func()
 
 	liveCalls atomic.Uint64
 }
@@ -60,34 +56,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.session = ctx.Session
 	p.replay = ctx.Replay
+	p.sandbox = ctx.Sandbox
 
-	// Parse allowed commands.
-	if ac, ok := ctx.Config["allowed_commands"].([]any); ok {
-		for _, cmd := range ac {
-			if s, ok := cmd.(string); ok {
-				p.allowedCommands = append(p.allowedCommands, s)
-			}
-		}
-	}
-
-	// Parse working directory. Default to session files dir so shell commands
-	// and the file_io plugin see the same filesystem location.
+	// Working directory. Default to session files dir so shell commands and
+	// the file_io plugin see the same filesystem location.
 	if wd, ok := ctx.Config["working_dir"].(string); ok && wd != "" {
 		p.workingDir = engine.ExpandPath(wd)
 	} else if p.session != nil {
 		p.workingDir = p.session.FilesDir()
 	}
 
-	// Parse extra PATH directories (prepended to PATH for command resolution).
-	if dirs, ok := ctx.Config["path_dirs"].([]any); ok {
-		for _, entry := range dirs {
-			if s, ok := entry.(string); ok && s != "" {
-				p.pathDirs = append(p.pathDirs, engine.ExpandPath(s))
-			}
-		}
-	}
-
-	// Parse timeout.
+	// Per-call default timeout.
 	if ts, ok := ctx.Config["timeout"].(string); ok {
 		d, err := time.ParseDuration(ts)
 		if err != nil {
@@ -96,18 +75,79 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.timeout = d
 	}
 
-	// Parse sandbox mode.
-	if sb, ok := ctx.Config["sandbox"].(bool); ok {
-		p.sandbox = sb
+	// Backwards-compatible legacy config: when the plugin has no `sandbox:`
+	// block but does have any of `allowed_commands`, `path_dirs`, or
+	// `sandbox: <bool>`, synthesise an equivalent host-backend config and
+	// replace the engine-supplied default sandbox. Documented as deprecated;
+	// removal targeted for the milestone after gVisor lands.
+	if needsLegacyShim(ctx.Config) {
+		shim, err := buildLegacyShim(ctx.Config)
+		if err != nil {
+			return err
+		}
+		p.sandbox = shim
 	}
 
-	// Register event handler.
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("tool.invoke", p.handleEvent,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
 	return nil
+}
+
+// needsLegacyShim reports whether the plugin config carries pre-Sandbox keys
+// (`allowed_commands`, `path_dirs`, top-level `sandbox: <bool>`). A new
+// `sandbox:` map block opts back into the structured path even if the legacy
+// keys are also present, since callers that bothered to write the new block
+// are unambiguously asking for it.
+func needsLegacyShim(cfg map[string]any) bool {
+	if cfg == nil {
+		return false
+	}
+	if _, ok := cfg["sandbox"].(map[string]any); ok {
+		return false
+	}
+	if _, ok := cfg["allowed_commands"]; ok {
+		return true
+	}
+	if _, ok := cfg["path_dirs"]; ok {
+		return true
+	}
+	if _, ok := cfg["sandbox"].(bool); ok {
+		return true
+	}
+	return false
+}
+
+// buildLegacyShim translates the deprecated top-level keys into a host
+// backend so existing configs keep working without the new sandbox block.
+func buildLegacyShim(cfg map[string]any) (sandbox.Sandbox, error) {
+	block := map[string]any{}
+	if v, ok := cfg["allowed_commands"]; ok {
+		block["allowed_commands"] = v
+	}
+	if v, ok := cfg["path_dirs"]; ok {
+		// path_dirs in the legacy shape are pre-expansion strings — pass
+		// through; the host backend doesn't expand, the caller does.
+		raw, ok := v.([]any)
+		if ok {
+			expanded := make([]any, 0, len(raw))
+			for _, entry := range raw {
+				if s, ok := entry.(string); ok {
+					expanded = append(expanded, engine.ExpandPath(s))
+				}
+			}
+			block["path_dirs"] = expanded
+		}
+	}
+	if v, ok := cfg["sandbox"].(bool); ok {
+		block["env_restrict"] = v
+	}
+	if ts, ok := cfg["timeout"].(string); ok {
+		block["timeout"] = ts
+	}
+	return sandbox.New(sandbox.BackendHost, block)
 }
 
 func (p *Plugin) Ready() error {
@@ -189,74 +229,35 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 		return
 	}
 
-	// Log command to session history.
 	if p.session != nil {
 		entry := fmt.Sprintf("%s\n", command)
 		_ = p.session.AppendFile("plugins/"+pluginID+"/history.txt", []byte(entry))
 	}
 
-	// Validate command against allowed list.
-	if !p.isCommandAllowed(command) {
-		p.emitResult(tc, "", fmt.Sprintf("command not allowed: %s", command), nil)
-		return
-	}
-
-	// Execute the command with timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-
-	if p.workingDir != "" {
-		cmd.Dir = p.workingDir
+	res, err := p.sandbox.Exec(ctx, sandbox.ExecRequest{
+		Kind:    sandbox.KindShell,
+		Source:  []byte(command),
+		WorkDir: p.workingDir,
+		Timeout: p.timeout,
+	})
+	if err != nil {
+		p.emitResult(tc, "", fmt.Sprintf("sandbox: %v", err), nil)
+		return
 	}
 
-	// If sandbox mode, restrict the environment.
-	if p.sandbox {
-		cmd.Env = []string{
-			"PATH=/usr/bin:/bin",
-			"HOME=/tmp",
-			"LANG=en_US.UTF-8",
-		}
-	}
-
-	// Prepend extra directories to PATH.
-	if len(p.pathDirs) > 0 {
-		if cmd.Env == nil {
-			cmd.Env = cmd.Environ()
-		}
-		extra := strings.Join(p.pathDirs, ":")
-		for i, env := range cmd.Env {
-			if strings.HasPrefix(env, "PATH=") {
-				cmd.Env[i] = "PATH=" + extra + ":" + env[5:]
-				break
-			}
-		}
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	stdoutStr := stdout.String()
-	stderrStr := stderr.String()
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-	timedOut := ctx.Err() == context.DeadlineExceeded
+	stdoutStr := string(res.Stdout)
+	stderrStr := string(res.Stderr)
 
 	structured := map[string]any{
 		"stdout":    stdoutStr,
 		"stderr":    stderrStr,
-		"exit_code": exitCode,
-		"timed_out": timedOut,
+		"exit_code": res.Exit,
+		"timed_out": res.TimedOut,
 	}
 
-	// Keep LLM-facing Output human-readable — concatenate stdout and stderr
-	// the same way we always have.
 	output := stdoutStr
 	if stderrStr != "" {
 		if output != "" {
@@ -265,41 +266,15 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 		output += "STDERR:\n" + stderrStr
 	}
 
-	if err != nil {
-		if timedOut {
-			p.emitResult(tc, output, fmt.Sprintf("command timed out after %s", p.timeout), structured)
-			return
-		}
-		errMsg := err.Error()
-		if output != "" {
-			errMsg = output + "\n" + errMsg
-		}
-		p.emitResult(tc, "", errMsg, structured)
+	if res.TimedOut {
+		p.emitResult(tc, output, fmt.Sprintf("command timed out after %s", p.timeout), structured)
 		return
 	}
-
+	if res.Exit != 0 && stderrStr == "" && stdoutStr == "" {
+		p.emitResult(tc, "", fmt.Sprintf("command exited %d", res.Exit), structured)
+		return
+	}
 	p.emitResult(tc, output, "", structured)
-}
-
-// isCommandAllowed checks if a command is permitted.
-func (p *Plugin) isCommandAllowed(command string) bool {
-	if len(p.allowedCommands) == 0 {
-		return true // no restrictions configured
-	}
-
-	// Extract the base command (first word).
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
-		return false
-	}
-	baseCmd := parts[0]
-
-	for _, allowed := range p.allowedCommands {
-		if baseCmd == allowed {
-			return true
-		}
-	}
-	return false
 }
 
 func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string, structured map[string]any) {

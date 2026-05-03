@@ -363,6 +363,7 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 		Body:      contentXML,
 		Scope:     record.Scope,
 		BaseDir:   record.BaseDir,
+		Runtime:   record.Runtime,
 		Resources: func() []string { r, _ := ListResources(record.BaseDir); return r }(),
 	})
 

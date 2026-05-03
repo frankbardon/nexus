@@ -95,6 +95,10 @@ import (
 	stopwordsgate "github.com/frankbardon/nexus/plugins/gates/stop_words"
 	tokenbudgetgate "github.com/frankbardon/nexus/plugins/gates/token_budget"
 	toolfiltergate "github.com/frankbardon/nexus/plugins/gates/tool_filter"
+
+	// Sandbox backends. Side-effect imports register the factories with
+	// pkg/engine/sandbox so configs can opt into stricter isolation tiers.
+	_ "github.com/frankbardon/nexus/pkg/engine/sandbox/wasm"
 )
 
 // RegisterAll registers every built-in plugin factory with the given registry.

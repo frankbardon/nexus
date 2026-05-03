@@ -67,7 +67,6 @@
   - [Test IO](./plugins/io/test.md)
   - [Wails Desktop](./plugins/io/wails.md)
 - [Observers](./plugins/observers/index.md)
-  - [Event Logger](./plugins/observers/logger.md)
   - [Thinking Persistence](./plugins/observers/thinking.md)
   - [OpenTelemetry](./plugins/observers/otel.md)
   - [Online Sampler](./plugins/observers/sampler.md)
@@ -83,6 +82,7 @@
 
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
+- [Sandboxing](./security/sandboxing.md)
 
 # Eval Harness
 

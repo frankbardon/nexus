@@ -1,0 +1,166 @@
+# Hand-drive demo: code_exec under the wasm sandbox compiler with the
+# nexus_sdk/* bridge SDK. Lets you ask the agent to write Go that fetches
+# a URL, reads/writes a session-scoped file, runs a sandbox-allowlisted
+# command, or reads sandbox-scoped env values.
+#
+# Run:
+#   make build
+#   bin/nexus -config configs/demo-sandbox-wasm.yaml
+#
+# Then prompt the agent with things like:
+#   "Use run_code with nexus_sdk/http to fetch https://httpbin.org/json
+#    and tell me what status code you got."
+#   "Write a Go snippet that reads /workspace/notes.txt via nexus_sdk/fs."
+#   "Use nexus_sdk/exec to run `git status` and summarise the output."
+#
+# First run pays a ~5–9 s wazero AOT cost compiling the embedded runner
+# (39 MiB). The cache_dir below persists the compiled module across
+# processes; second-and-later runs cold-start in ~50–200 ms.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/sandbox-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.code_exec
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a developer assistant. When the user asks you to fetch URLs,
+      read or write files, or run commands, use the `run_code` tool with
+      a Go script.
+
+      Hard rules — every script MUST follow these or it is rejected before
+      execution:
+
+      1. Declare `package main` and a single function:
+
+             func Run(ctx context.Context) (any, error) { ... }
+
+         The parameter type is the qualified `context.Context`, never just
+         `Context`. The first return type is `any` (or `interface{}`); the
+         second is `error`.
+
+      2. Import `context` whenever Run is declared (you almost always need
+         it). Import `fmt` if you call Print*/Sprintf/Errorf.
+
+      3. The familiar Go stdlib for I/O (`net/http`, `os`, `os/exec`,
+         `database/sql`) is NOT available inside this sandbox. Use the
+         nexus_sdk/* packages instead — they mirror the stdlib API shape
+         but route through the sandbox's capability gates:
+
+           - `nexus_sdk/http` — HTTPGet(url) → (*HTTPResponse, error).
+             HTTPResponse fields: Status int, Body []byte, Headers map.
+           - `nexus_sdk/fs`   — ReadFile(path) → ([]byte, error);
+             WriteFile(path, data) → error. Paths are guest paths, e.g.
+             "/workspace/<name>".
+           - `nexus_sdk/exec` — Run(name, args) → (*ExecResult, error).
+             ExecResult fields: Stdout []byte, Stderr []byte, Exit int.
+           - `nexus_sdk/env`  — Get(key) → string (sandbox-scoped, not the
+             host's real environment).
+
+      4. Only reference symbols documented above for the nexus_sdk/* packages.
+         Do NOT invent fields like `nhttp.Client{}` or types like
+         `nhttp.Request` — they are not bound in this runtime and will
+         crash the interpreter.
+
+      5. If a capability gate denies a call, the err you receive wraps
+         `nexus_sdk/http.ErrCapDenied`. Use `errors.Is(err, nhttp.ErrCapDenied)`
+         to detect and report gracefully rather than failing hard.
+
+      Worked example — fetch and report:
+
+          package main
+
+          import (
+              "context"
+              "errors"
+              "fmt"
+              nhttp "nexus_sdk/http"
+          )
+
+          func Run(ctx context.Context) (any, error) {
+              resp, err := nhttp.Get("https://httpbin.org/json")
+              if err != nil {
+                  if errors.Is(err, nhttp.ErrCapDenied) {
+                      fmt.Println("denied by sandbox; host not allowlisted")
+                      return "denied", nil
+                  }
+                  return nil, err
+              }
+              fmt.Printf("status=%d body_len=%d\n", resp.Status, len(resp.Body))
+              return resp.Status, nil
+          }
+
+  nexus.gate.endless_loop:
+    max_iterations: 8
+
+  nexus.memory.capped:
+    max_messages: 100
+    persist: true
+
+  nexus.tool.code_exec:
+    compiler: yaegi-wasm
+    timeout_seconds: 60
+    max_output_bytes: 65536
+    allowed_packages:
+      - "fmt"
+      - "context"
+      - "strings"
+      - "strconv"
+      - "encoding/json"
+      - "errors"
+      - "time"
+      - "nexus_sdk/http"
+      - "nexus_sdk/fs"
+      - "nexus_sdk/exec"
+      - "nexus_sdk/env"
+    sandbox:
+      backend: wasm
+      timeout: 60s
+      cache_dir: ~/.nexus/sandbox/wasm/cache
+      net:
+        # Allow a small set of well-known testing endpoints. Tweak to fit
+        # your demo. Empty list = deny all.
+        allow_hosts:
+          - "httpbin.org"
+          - "api.github.com"
+          - "example.com"
+      fs_mounts:
+        # Map the session's files dir to /workspace inside the sandbox.
+        # ${session_id} is substituted by the engine at session start.
+        - host: "~/.nexus/sandbox-sessions/${session_id}/files"
+          guest: "/workspace"
+          mode: rw
+      exec_allowed:
+        # Commands the snippet may invoke via nexus_sdk/exec.Run. Snippet
+        # invocations honour the same allowlist as the direct shell tool
+        # would — keep tight.
+        - "git"
+        - "ls"
+        - "echo"
+      env:
+        # Sandbox-scoped env values returned by nexus_sdk/env.Get. Never
+        # the host's real environment.
+        WORKSPACE: "/workspace"
+        DEMO_NAME: "sandbox-wasm"
