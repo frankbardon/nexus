@@ -119,6 +119,13 @@ On shutdown, the engine:
 2. Updates status to `"ended"`
 3. Saves a config snapshot for future recall
 
+The snapshot is the original config YAML bytes verbatim, not a re-serialization
+of the typed `Config` struct. `core.models` and per-plugin configs are parsed
+via a second-pass raw map (`yaml:"-"` on the typed fields), so re-marshaling
+would silently drop them and break recall. Configs constructed in-memory via
+`DefaultConfig()` (no source bytes) fall back to `yaml.Marshal` of the typed
+struct.
+
 ## Configuration
 
 Session behavior is configured in the `core.sessions` section:
