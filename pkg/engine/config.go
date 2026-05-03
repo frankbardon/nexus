@@ -55,7 +55,27 @@ type CoreConfig struct {
 	TickInterval        time.Duration  `yaml:"tick_interval"`
 	MaxConcurrentEvents int            `yaml:"max_concurrent_events"`
 	Sessions            SessionsConfig `yaml:"sessions"`
-	ModelsRaw           map[string]any `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+	// AgentID partitions per-agent storage and other per-agent state.
+	// Set by multi-agent embedders (the desktop shell) so each agent
+	// instance gets its own ScopeAgent storage tree under
+	// ~/.nexus/agents/<id>/. CLI and single-agent embedders leave it
+	// empty, which collapses ScopeAgent to ScopeApp.
+	AgentID   string         `yaml:"agent_id"`
+	Storage   StorageConfig  `yaml:"storage"`
+	ModelsRaw map[string]any `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+}
+
+// StorageConfig tunes the per-plugin SQLite storage manager. Defaults match
+// storage.DefaultSQLiteOptions and are picked for an interactive single-user
+// agent.
+type StorageConfig struct {
+	// Root overrides the data root used for App and Agent scope storage.
+	// Defaults to "~/.nexus" (the same root used for sessions).
+	Root          string `yaml:"root"`
+	BusyTimeoutMs int    `yaml:"busy_timeout_ms"`
+	CacheSizeKB   int    `yaml:"cache_size_kb"`
+	PoolMaxIdle   int    `yaml:"pool_max_idle"`
+	PoolMaxOpen   int    `yaml:"pool_max_open"`
 }
 
 // LoggingConfig controls the engine-wide logging pipeline.

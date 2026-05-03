@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
 
 	// Side-effect import: registers the default host sandbox factory so
 	// resolveSandbox can construct the baseline backend even when no plugin
@@ -42,6 +44,7 @@ type LifecycleManager struct {
 	system   *SystemInfo
 	replay   *ReplayState
 	journal  *journal.Writer
+	storage  *storage.Manager
 	// provenance records why each configured ID is active: the zero value
 	// (empty requiredBy) means the user listed it explicitly; otherwise it
 	// was auto-activated to satisfy the named plugin's Requires().
@@ -170,7 +173,11 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Config:       pluginCfg,
 			Bus:          lm.bus,
 			Logger:       lm.logger.With("plugin", configuredID),
-			DataDir:      "",
+			PluginID:     configuredID,
+			DataDir:      lm.sessionPluginDir(configuredID),
+			AppDataDir:   lm.appPluginDir(configuredID),
+			AgentDataDir: lm.agentPluginDir(configuredID),
+			Storage:      lm.storageOpener(configuredID),
 			Session:      lm.session,
 			Models:       lm.models,
 			Prompts:      lm.prompts,
@@ -282,6 +289,50 @@ func (lm *LifecycleManager) capabilitiesCopy() map[string][]string {
 		out[k] = dup
 	}
 	return out
+}
+
+// sessionPluginDir returns the per-plugin session-scoped directory used for
+// PluginContext.DataDir. Empty when no session is active (rare; mostly tests).
+func (lm *LifecycleManager) sessionPluginDir(pluginID string) string {
+	if lm.session == nil {
+		return ""
+	}
+	return lm.session.PluginDir(pluginID)
+}
+
+// appPluginDir returns the per-plugin App-scope directory used for
+// PluginContext.AppDataDir. Created lazily by the consumer; the lifecycle
+// only resolves the path.
+func (lm *LifecycleManager) appPluginDir(pluginID string) string {
+	root := storageRoot(lm.config)
+	return filepath.Join(root, "plugins", pluginID)
+}
+
+// agentPluginDir returns the per-plugin Agent-scope directory used for
+// PluginContext.AgentDataDir. Collapses to the App-scope path when no
+// AgentID is configured (CLI / single-agent embedders).
+func (lm *LifecycleManager) agentPluginDir(pluginID string) string {
+	root := storageRoot(lm.config)
+	if lm.config.Core.AgentID == "" {
+		return filepath.Join(root, "plugins", pluginID)
+	}
+	return filepath.Join(root, "agents", lm.config.Core.AgentID, "plugins", pluginID)
+}
+
+// storageOpener returns the closure that PluginContext.Storage exposes.
+// Captures pluginID once so the plugin never has to pass its own ID. Returns
+// a closure that always errors when no storage manager is wired (test
+// harnesses can opt out by leaving lm.storage nil).
+func (lm *LifecycleManager) storageOpener(pluginID string) func(storage.Scope) (storage.Storage, error) {
+	if lm.storage == nil {
+		return func(scope storage.Scope) (storage.Storage, error) {
+			return nil, fmt.Errorf("storage: no manager attached (engine constructed without storage)")
+		}
+	}
+	mgr := lm.storage
+	return func(scope storage.Scope) (storage.Storage, error) {
+		return mgr.Open(scope, pluginID)
+	}
 }
 
 // resolveSandbox builds the per-plugin sandbox.Sandbox. Plugins with a

@@ -60,6 +60,12 @@ plugins:
 | `sessions.root`                | string   | `~/.nexus/sessions`    | Base directory for session workspaces. |
 | `sessions.retention`           | string   | `30d`                  | Retention policy for old sessions. |
 | `sessions.id_format`           | string   | `timestamp`            | Session ID format: `timestamp`, `datetime_short`. |
+| `agent_id`                     | string   | *(empty)*              | Partitions per-agent storage and other per-agent state. Set by multi-agent embedders (the desktop shell). Empty in CLI / single-agent embedders, which collapses agent-scope storage to app-scope. |
+| `storage.root`                 | string   | `~/.nexus`             | Data root for app- and agent-scope per-plugin storage. App-scope `.db` files land at `<root>/plugins/<pluginID>/store.db`; agent-scope at `<root>/agents/<agent_id>/plugins/<pluginID>/store.db`. |
+| `storage.busy_timeout_ms`      | int      | `5000`                 | SQLite `busy_timeout` PRAGMA per handle (milliseconds). |
+| `storage.cache_size_kb`        | int      | `2048`                 | SQLite `cache_size` PRAGMA per handle (negative-form, in KiB). |
+| `storage.pool_max_idle`        | int      | `2`                    | `*sql.DB.SetMaxIdleConns` per handle. |
+| `storage.pool_max_open`        | int      | `4`                    | `*sql.DB.SetMaxOpenConns` per handle. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
 
 ### `core.models`

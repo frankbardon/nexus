@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
 	"github.com/frankbardon/nexus/pkg/events"
 	"gopkg.in/yaml.v3"
 )
@@ -44,6 +45,10 @@ type Engine struct {
 	// after construction; idle until a replay coordinator activates it.
 	// Plugins inspect Replay.Active() to short-circuit side effects.
 	Replay *ReplayState
+	// Storage opens scoped per-plugin SQLite-backed storage. Always
+	// non-nil after construction; closed by Stop. Plugins access it via
+	// PluginContext.Storage rather than reaching here directly.
+	Storage *storage.Manager
 
 	// RecallSessionID, when set, causes Boot to resume an existing session
 	// instead of creating a new one.
@@ -125,7 +130,16 @@ func newFromConfig(cfg *Config) *Engine {
 	replay := NewReplayState()
 	lifecycle.replay = replay
 
-	return &Engine{
+	storageRoot := storageRoot(cfg)
+	storageMgr := storage.NewManager(
+		storageRoot,
+		cfg.Core.AgentID,
+		nil, // session resolver wired post-construction; see attachStorageSession
+		storageOptions(cfg.Core.Storage),
+	)
+	lifecycle.storage = storageMgr
+
+	eng := &Engine{
 		Config:    cfg,
 		Bus:       bus,
 		Registry:  registry,
@@ -138,6 +152,39 @@ func newFromConfig(cfg *Config) *Engine {
 		Logger:    logger,
 		Logging:   fanout,
 		Replay:    replay,
+		Storage:   storageMgr,
+	}
+	// Resolve session-scoped storage paths against whatever Session is set
+	// at the time of Open. Captured here rather than at construction so a
+	// session created later in Boot is visible to plugins that call
+	// Storage(ScopeSession) during Init.
+	storageMgr.AttachSessionResolver(func() string {
+		if eng.Session == nil {
+			return ""
+		}
+		return eng.Session.RootDir
+	})
+	return eng
+}
+
+// storageRoot resolves the data root for App and Agent scope storage.
+// Defaults to ~/.nexus when storage.root is unset; the same root used for
+// session workspaces.
+func storageRoot(cfg *Config) string {
+	if cfg.Core.Storage.Root != "" {
+		return ExpandPath(cfg.Core.Storage.Root)
+	}
+	return ExpandPath("~/.nexus")
+}
+
+// storageOptions converts the YAML config block into the storage package's
+// per-handle SQLite options. Zero fields fall back to library defaults.
+func storageOptions(c StorageConfig) *storage.SQLiteOptions {
+	return &storage.SQLiteOptions{
+		BusyTimeoutMs: c.BusyTimeoutMs,
+		CacheSizeKB:   c.CacheSizeKB,
+		PoolMaxIdle:   c.PoolMaxIdle,
+		PoolMaxOpen:   c.PoolMaxOpen,
 	}
 }
 
@@ -477,6 +524,13 @@ func (e *Engine) Stop(ctx context.Context) error {
 		_ = e.Journal.Close(closeCtx)
 		cancel()
 		e.Journal = nil
+	}
+
+	if e.Storage != nil {
+		if err := e.Storage.Close(); err != nil {
+			e.Logger.Warn("storage close error", "error", err)
+		}
+		e.Storage = nil
 	}
 
 	return nil
