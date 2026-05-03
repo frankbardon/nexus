@@ -15,9 +15,18 @@ emits a single event type and waits for the structured response.
 
 ## Configuration
 
-No configuration options today. Future iterations will add a
-`require_approval` style policy for non-tool action kinds and a
-prompt-synthesizer capability binding.
+| Key                  | Type   | Default          | Description |
+|----------------------|--------|------------------|-------------|
+| `registry.enabled`   | bool   | `false`          | Mirror every `hitl.requested` to disk and watch for response files written by `nexus hitl respond`, webhook handlers, etc. |
+| `registry.dir`       | string | `~/.nexus/hitl`  | Filesystem directory for the request/response YAML pairs. Tilde-expanded; created at boot if missing. |
+
+The registry is the async out-of-band response channel — see the
+[HITL operations guide](../../operations/hitl.md#async-response-out-of-band-channels-via-the-filesystem-registry)
+for the wire format and CLI surface (`nexus hitl list / respond /
+cancel`, plus `nexus approve` and `nexus reject` shorthands).
+
+Future iterations will add a `require_approval` style policy for
+non-tool action kinds and a prompt-synthesizer capability binding.
 
 ## Tool Parameters
 
@@ -48,6 +57,7 @@ Tool result is structured JSON, not a bare string:
 |-------|----------|---------|
 | `tool.invoke` | 50 | Handles `ask_user` invocations from the agent. |
 | `hitl.responded` | 50 | Routes operator answers to the awaiting requester. |
+| `hitl.requested` | 50 | (Only when `registry.enabled`) Mirrors the request to disk for out-of-band response. |
 
 ### Emits
 

@@ -601,13 +601,18 @@ Source: `plugins/tools/opener/plugin.go`. Registers `open_path`.
 
 ### `nexus.control.hitl`
 
-Source: `plugins/control/hitl/plugin.go`. **No configuration.** The
-unified human-in-the-loop primitive. Registers the LLM-facing
-`ask_user` tool with an extended schema (`prompt`, `mode`, `choices`,
-`default_choice_id`, `deadline_seconds`) and routes
-`hitl.requested` / `hitl.responded` events between requesters (the
-tool, gates, memory plugins) and IO surfaces. Replaces the prior
-`nexus.tool.ask`. See [Human-in-the-Loop plugin docs](../plugins/control/hitl.md).
+Source: `plugins/control/hitl/plugin.go`. The unified human-in-the-loop
+primitive. Registers the LLM-facing `ask_user` tool with an extended
+schema (`prompt`, `mode`, `choices`, `default_choice_id`,
+`deadline_seconds`) and routes `hitl.requested` / `hitl.responded`
+events between requesters (the tool, gates, memory plugins) and IO
+surfaces. Replaces the prior `nexus.tool.ask`. See [Human-in-the-Loop
+plugin docs](../plugins/control/hitl.md).
+
+| Key                  | Type   | Default          | Description |
+|----------------------|--------|------------------|-------------|
+| `registry.enabled`   | bool   | `false`          | Mirror every `hitl.requested` to disk and watch for response files written by `nexus hitl respond`, webhook handlers, etc. |
+| `registry.dir`       | string | `~/.nexus/hitl`  | Filesystem directory the registry uses for `<id>.request.yaml` / `<id>.response.yaml` pairs. Tilde expansion via `engine.ExpandPath`. Created at boot if missing. |
 
 ### `nexus.control.hitl_synthesizer`
 

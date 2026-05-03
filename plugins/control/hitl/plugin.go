@@ -39,6 +39,12 @@ type Plugin struct {
 	mu      sync.Mutex
 	pending map[string]chan events.HITLResponse
 
+	// reg is the optional filesystem-backed registry (config-gated by
+	// registry.enabled). When non-nil, every hitl.requested is mirrored to
+	// disk and an fsnotify watcher dispatches matching response files back
+	// onto the bus. The synchronous IO-driven response path is unaffected.
+	reg *registry
+
 	liveCalls atomic.Uint64
 }
 
@@ -72,6 +78,26 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("hitl.responded", p.handleResponse,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
+
+	if cfg, ok := ctx.Config["registry"].(map[string]any); ok {
+		enabled, _ := cfg["enabled"].(bool)
+		if enabled {
+			dir, _ := cfg["dir"].(string)
+			if dir == "" {
+				dir = "~/.nexus/hitl"
+			}
+			reg, err := newRegistry(dir, p.logger, p.bus)
+			if err != nil {
+				return fmt.Errorf("hitl registry: %w", err)
+			}
+			p.reg = reg
+			p.unsubs = append(p.unsubs,
+				p.bus.Subscribe("hitl.requested", p.handleRequest,
+					engine.WithPriority(50), engine.WithSource(pluginID)),
+			)
+			p.logger.Info("hitl registry enabled", "dir", reg.Dir())
+		}
+	}
 
 	return nil
 }
@@ -128,14 +154,22 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	for _, unsub := range p.unsubs {
 		unsub()
 	}
+	if p.reg != nil {
+		p.reg.Close()
+		p.reg = nil
+	}
 	return nil
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	return []engine.EventSubscription{
+	subs := []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "hitl.responded", Priority: 50},
 	}
+	if p.reg != nil {
+		subs = append(subs, engine.EventSubscription{EventType: "hitl.requested", Priority: 50})
+	}
+	return subs
 }
 
 func (p *Plugin) Emissions() []string {
@@ -195,12 +229,39 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	ch, exists := p.pending[resp.RequestID]
 	p.mu.Unlock()
 
-	if exists {
-		select {
-		case ch <- resp:
-		default:
-			p.logger.Warn("hitl.responded dropped — channel full", "request_id", resp.RequestID)
-		}
+	// Clean up the registry file for this request — covers the case where
+	// an IO plugin answered before any out-of-band channel did, leaving the
+	// pending request file orphaned in the registry directory.
+	if p.reg != nil {
+		p.reg.removeRequest(resp.RequestID)
+	}
+
+	if !exists {
+		// No pending channel: either the request was already drained (this
+		// is a duplicate response from a second source) or it never existed
+		// (stale fsnotify event, replay artifact). Drop silently.
+		return
+	}
+	select {
+	case ch <- resp:
+	default:
+		// Channel already drained — first-response-wins. The duplicate is a
+		// no-op rather than a warning to keep the async-channel path quiet.
+	}
+}
+
+// handleRequest mirrors hitl.requested to the on-disk registry. Only wired
+// when registry.enabled is true.
+func (p *Plugin) handleRequest(event engine.Event[any]) {
+	req, ok := event.Payload.(events.HITLRequest)
+	if !ok {
+		return
+	}
+	if p.reg == nil {
+		return
+	}
+	if err := p.reg.persistRequest(req); err != nil {
+		p.logger.Warn("hitl registry: persist failed", "request_id", req.ID, "err", err)
 	}
 }
 
