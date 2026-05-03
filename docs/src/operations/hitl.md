@@ -62,9 +62,40 @@ nexus session restore --from-archive=20260503T141500Z --yes <session-id>
 ```
 
 `--yes` is required for `rewind` and `restore` because both rewrite the
-on-disk journal. There is no in-process locking yet — the operator is
-responsible for ensuring the session is not running when these
-commands fire.
+on-disk journal.
+
+### Session lock
+
+A running engine writes `<sessions.root>/<id>/session.lock` on `Boot`
+(JSON: `{pid, started_at, transport}`) and removes it on `Stop`.
+`rewind` and `restore` refuse to operate when the lock is present and
+its PID is alive on the host:
+
+```
+session is already running, pid=4242 — use a different session ID or stop the running process
+```
+
+A stale lock — PID is gone — is treated as absent. The next `Boot`
+overwrites it with a warning, and rewind/restore proceed without
+complaint.
+
+For the rare case where the lock is held by a wedged process that
+cannot be killed cleanly, both subcommands accept `--force`:
+
+```bash
+nexus session rewind --to-seq=42 --yes --force <session-id>
+nexus session restore --from-archive=20260503T141500Z --yes --force <session-id>
+```
+
+`--force` prints a warning to stderr. Concurrent writes against a
+journal being rewound produce undefined state, so use this flag only
+when you are certain the holder of the lock is not actually writing.
+
+Liveness probing currently works on Linux and macOS. On other
+platforms (Windows in particular), every lock is treated as live —
+operators must use `--force` to recover. This is deliberate: silently
+overwriting a real run's lock is worse than asking the operator to
+opt in.
 
 ### When to use it
 
@@ -81,8 +112,6 @@ commands fire.
 
 ### Limitations (foundation PR)
 
-- Rewind requires the session not to be running. There is no lock
-  file, the operator enforces.
 - Async out-of-band response channels (Slack, webhook, CLI `nexus hitl
   respond`) are not yet wired. The hitl plugin currently routes
   responses synchronously via the active IO plugin.

@@ -102,6 +102,7 @@ func runSessionRewind(args []string) int {
 	configPath := fs.String("config", "nexus.yaml", "path to config file")
 	toSeq := fs.Uint64("to-seq", 0, "highest seq to keep (inclusive); required")
 	yes := fs.Bool("yes", false, "skip confirmation prompt")
+	force := fs.Bool("force", false, "bypass the session lock check (use only when certain the session is not running)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: nexus session rewind --to-seq=N <session-id>")
 		fs.PrintDefaults()
@@ -118,13 +119,16 @@ func runSessionRewind(args []string) int {
 		fmt.Fprintf(os.Stderr, "this will archive the live journal for %q and truncate to seq %d.\nset --yes to proceed.\n", sessionID, *toSeq)
 		return 1
 	}
+	if *force {
+		fmt.Fprintf(os.Stderr, "warning: --force bypasses the session lock check; concurrent writes against this session will produce undefined state.\n")
+	}
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	res, err := engine.RewindSession(cfg, sessionID, *toSeq)
+	res, err := engine.RewindSession(cfg, sessionID, *toSeq, *force)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewind: %v\n", err)
 		return 1
@@ -139,6 +143,7 @@ func runSessionRestore(args []string) int {
 	configPath := fs.String("config", "nexus.yaml", "path to config file")
 	archiveName := fs.String("from-archive", "", "archive directory name to restore from; required")
 	yes := fs.Bool("yes", false, "skip confirmation prompt")
+	force := fs.Bool("force", false, "bypass the session lock check (use only when certain the session is not running)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: nexus session restore --from-archive=NAME <session-id>")
 		fs.PrintDefaults()
@@ -155,12 +160,15 @@ func runSessionRestore(args []string) int {
 		fmt.Fprintf(os.Stderr, "this will rotate the live journal for %q and replace it with archive %q.\nset --yes to proceed.\n", sessionID, *archiveName)
 		return 1
 	}
+	if *force {
+		fmt.Fprintf(os.Stderr, "warning: --force bypasses the session lock check; concurrent writes against this session will produce undefined state.\n")
+	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	if err := engine.RestoreSession(cfg, sessionID, *archiveName); err != nil {
+	if err := engine.RestoreSession(cfg, sessionID, *archiveName, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "restore: %v\n", err)
 		return 1
 	}
