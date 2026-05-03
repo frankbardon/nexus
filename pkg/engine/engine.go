@@ -394,6 +394,8 @@ func replayPayloadConverter(eventType string, payload any) (any, error) {
 		return journal.PayloadAs[events.LLMResponse](payload)
 	case "tool.result":
 		return journal.PayloadAs[events.ToolResult](payload)
+	case "hitl.responded":
+		return journal.PayloadAs[events.HITLResponse](payload)
 	default:
 		return payload, nil
 	}
