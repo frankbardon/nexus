@@ -806,6 +806,7 @@ results via Reciprocal Rank Fusion or weighted score combination.
 | `retrieve_k`       | int    | `50`    | Per-backend candidate count gathered before fusion. |
 | `fuse_to`          | int    | `20`    | Default post-fusion top-N when the caller does not specify K. |
 | `embedding_model`  | string | *(provider default)* | Embedding model used when callers fire `hybrid.query` without a pre-embedded vector. |
+| `reranker.enabled` | bool   | `false` | Apply a post-fusion reranker pass via the `search.reranker` capability. Off by default — enable when a reranker provider is active and the latency budget allows. |
 
 Requires `embeddings.provider`, `vector.store`, and `search.lexical`. Per-query
 `LexicalBias` (range -1..1) on the `hybrid.query` event tilts fusion weights
@@ -815,6 +816,51 @@ When `search.hybrid` is active, `nexus.tool.knowledge_search` automatically
 routes through it instead of querying the vector store directly.
 `nexus.memory.vector` opts in via `recall_via_hybrid: true` (off by default
 because the lexical leg adds latency on every user input).
+
+---
+
+### Rerankers (`search.reranker` capability)
+
+Three providers ship; activate one (rarely more than one). The hybrid
+orchestrator's `reranker.enabled: true` knob switches them on; without that,
+plugins can still emit `reranker.rerank` events directly.
+
+#### `nexus.rag.reranker.cohere`
+
+Source: `plugins/rag/reranker/cohere/plugin.go`. Cohere Rerank v2 API.
+
+| Key            | Type   | Default                | Description |
+|----------------|--------|------------------------|-------------|
+| `api_key`      | string | *(none)*               | Cohere API key. Mutually exclusive with `api_key_env`. |
+| `api_key_env`  | string | `COHERE_API_KEY`       | Env var to read the key from when `api_key` is unset. |
+| `model`        | string | `rerank-english-v3.0`  | Cohere reranker model identifier. |
+| `timeout_ms`   | int    | `10000`                | HTTP timeout in milliseconds. |
+| `api_base`     | string | *(Cohere v2 endpoint)* | Override for testing / private deployments. |
+
+#### `nexus.rag.reranker.jina`
+
+Source: `plugins/rag/reranker/jina/plugin.go`. Jina AI Reranker API.
+
+| Key            | Type   | Default                                   | Description |
+|----------------|--------|-------------------------------------------|-------------|
+| `api_key`      | string | *(none)*                                  | Jina API key. Mutually exclusive with `api_key_env`. |
+| `api_key_env`  | string | `JINA_API_KEY`                            | Env var to read the key from when `api_key` is unset. |
+| `model`        | string | `jina-reranker-v2-base-multilingual`      | Jina reranker model identifier. |
+| `timeout_ms`   | int    | `10000`                                   | HTTP timeout in milliseconds. |
+| `api_base`     | string | *(Jina v1 endpoint)*                      | Override for testing / private deployments. |
+
+#### `nexus.rag.reranker.local`
+
+Source: `plugins/rag/reranker/local/plugin.go`. Pure-Go TF-IDF cosine
+reranker. No API calls, no model files, no extra dependencies. Quality is
+materially below a real cross-encoder; use it for offline / cost-sensitive
+deployments and as the zero-dep fallback. Future phase will add an ONNX-
+backed BGE Reranker behind a build tag.
+
+| Key                  | Type | Default | Description |
+|----------------------|------|---------|-------------|
+| `min_token_length`   | int  | `2`     | Drop tokens shorter than this during scoring. |
+| `disable_stopwords`  | bool | `false` | Skip the built-in English stopword filter. |
 
 ---
 

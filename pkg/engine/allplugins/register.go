@@ -67,6 +67,9 @@ import (
 	// RAG plugins.
 	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
+	cohereranker "github.com/frankbardon/nexus/plugins/rag/reranker/cohere"
+	jinareranker "github.com/frankbardon/nexus/plugins/rag/reranker/jina"
+	localreranker "github.com/frankbardon/nexus/plugins/rag/reranker/local"
 
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
@@ -172,6 +175,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// RAG
 	r.Register("nexus.rag.ingest", ragingest.New)
 	r.Register("nexus.rag.hybrid", raghybrid.New)
+	r.Register("nexus.rag.reranker.cohere", cohereranker.New)
+	r.Register("nexus.rag.reranker.jina", jinareranker.New)
+	r.Register("nexus.rag.reranker.local", localreranker.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)

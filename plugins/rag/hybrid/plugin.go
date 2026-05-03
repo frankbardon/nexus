@@ -43,6 +43,13 @@ type Plugin struct {
 	retrieveK      int // per-backend candidate count
 	fuseTo         int // post-fusion top-N
 	embeddingModel string
+	// reranker enables a post-fusion reranker pass via the search.reranker
+	// capability. Off by default so single-mode + hybrid-only deployments
+	// keep their existing latency profile. When on and no provider is
+	// active, the orchestrator logs once at boot and proceeds without
+	// reranking — never fails the query.
+	rerankerEnabled bool
+	hasReranker     bool
 
 	unsubs []func()
 }
@@ -119,6 +126,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["embedding_model"].(string); ok {
 		p.embeddingModel = v
 	}
+	if r, ok := ctx.Config["reranker"].(map[string]any); ok {
+		if v, ok := r["enabled"].(bool); ok {
+			p.rerankerEnabled = v
+		}
+	}
+	p.hasReranker = len(ctx.Capabilities["search.reranker"]) > 0
+	if p.rerankerEnabled && !p.hasReranker {
+		p.logger.Warn("rag/hybrid: reranker.enabled=true but no search.reranker provider active; proceeding without rerank")
+	}
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("hybrid.query", p.handleQuery,
@@ -151,6 +167,7 @@ func (p *Plugin) Emissions() []string {
 		"embeddings.request",
 		"vector.query",
 		"lexical.query",
+		"reranker.rerank",
 	}
 }
 
@@ -228,6 +245,10 @@ func (p *Plugin) handleQuery(event engine.Event[any]) {
 		fused = fuseRRF(lists, p.rrfK)
 	}
 
+	if p.rerankerEnabled && p.hasReranker && len(fused) > 1 {
+		fused = p.applyReranker(req.Query, fused)
+	}
+
 	k := req.K
 	if k <= 0 {
 		k = p.fuseTo
@@ -249,6 +270,46 @@ func (p *Plugin) handleQuery(event engine.Event[any]) {
 		}
 	}
 	req.Matches = matches
+}
+
+// applyReranker re-scores the fused candidate pool via the active
+// search.reranker provider. Reranker errors are non-fatal — the orchestrator
+// returns the un-reranked list with a warning so a flaky reranker never
+// blocks knowledge retrieval. Returns the candidates re-sorted with the
+// reranker score replacing the fusion score (fusion score moves nowhere —
+// the rerank pass is meant to dominate the final ordering).
+func (p *Plugin) applyReranker(query string, fused []candidate) []candidate {
+	docs := make([]events.RerankDoc, len(fused))
+	for i, c := range fused {
+		docs[i] = events.RerankDoc{ID: c.id, Content: c.content}
+	}
+	req := &events.RerankRequest{
+		Query: query,
+		Docs:  docs,
+		TopN:  len(fused),
+	}
+	_ = p.bus.Emit("reranker.rerank", req)
+	if req.Error != "" {
+		p.logger.Warn("rag/hybrid: reranker failed; returning fusion order", "err", req.Error)
+		return fused
+	}
+	if len(req.Results) == 0 {
+		return fused
+	}
+
+	// Build new ordering by rerank score, dropping any result whose Index
+	// fell outside the input slice (defensive — providers should always echo
+	// valid indices).
+	out := make([]candidate, 0, len(req.Results))
+	for _, r := range req.Results {
+		if r.Index < 0 || r.Index >= len(fused) {
+			continue
+		}
+		c := fused[r.Index]
+		c.score = r.Score
+		out = append(out, c)
+	}
+	return out
 }
 
 // buildRankedLists turns the vector + lexical responses into normalized
