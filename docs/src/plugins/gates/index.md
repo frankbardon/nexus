@@ -20,6 +20,7 @@ providers.
 | `nexus.gate.content_safety`       | `before:io.output`      | Block or redact PII / secrets / sensitive content. |
 | `nexus.gate.context_window`       | `before:llm.request`    | Estimate context size; trigger compaction when approaching the limit. |
 | `nexus.gate.tool_filter`          | `before:llm.request`    | Modify the tool list (allowlist / blocklist). |
+| `nexus.gate.approval_policy`      | `before:tool.invoke`, `before:llm.request` | Policy-driven HITL approvals; emits `hitl.requested` and applies the operator's allow/reject/edit. |
 
 ## Configuration
 

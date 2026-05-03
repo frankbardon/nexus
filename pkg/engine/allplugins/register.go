@@ -85,6 +85,7 @@ import (
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
 	// Gate plugins.
+	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
 	contextwindowgate "github.com/frankbardon/nexus/plugins/gates/context_window"
 	endlessloopgate "github.com/frankbardon/nexus/plugins/gates/endless_loop"
@@ -186,6 +187,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
 
 	// Gates
+	r.Register("nexus.gate.approval_policy", approvalpolicygate.New)
 	r.Register("nexus.gate.content_safety", contentsafetygate.New)
 	r.Register("nexus.gate.context_window", contextwindowgate.New)
 	r.Register("nexus.gate.endless_loop", endlessloopgate.New)
