@@ -873,12 +873,18 @@ and the `rag.ingest` event handler.
 |-----------------------|------|----------------------------|-------------|
 | `chunker.size`        | int  | `1000`                     | Characters per chunk. |
 | `chunker.overlap`     | int  | `200`                      | Character overlap between chunks. |
-| `cache_dir`           | string | `~/.nexus/vectors/_cache` | Embedding cache directory (hash → vector). |
+| `cache_dir`           | string | `~/.nexus/vectors/_cache` | Embedding cache directory (hash → vector). The contextual-prefix cache lands at `<cache_dir>/_prefix/`. |
 | `backfill`            | bool | `true`                     | Walk watched directories at startup and ingest pre-existing files. |
 | `watch`               | list | *(empty)*                  | File watch entries; each is `{path, glob, namespace}`. |
 | `watch[].path`        | string | *(required)*             | Directory to watch. |
 | `watch[].glob`        | string | *(empty — match all)*    | Glob pattern for files to ingest. |
 | `watch[].namespace`   | string | *(required)*             | Vector store namespace. |
+| `contextual_retrieval.enabled`              | bool   | `false`                    | Per-chunk LLM-generated situating prefix (Anthropic contextual retrieval). Adds one LLM call per uncached chunk during ingest; ~49% reported recall improvement. Stored content stays the raw chunk; only the embed/lexical text is prefixed. |
+| `contextual_retrieval.model`                | string | *(role default)*           | Model role to use for prefix generation (e.g. `cheap`, `balanced`). Combined with `model_id` to override `core.models` at the call site. |
+| `contextual_retrieval.model_id`             | string | *(role default)*           | Concrete model identifier override. |
+| `contextual_retrieval.max_chars_doc_window` | int    | `2000`                     | Max characters of surrounding document context handed to the LLM. |
+| `contextual_retrieval.max_chars_prefix`     | int    | `400`                      | Truncate generated prefix to this many characters before concatenation. |
+| `contextual_retrieval.timeout_ms`           | int    | `30000`                    | Per-call timeout. On timeout the prefix is dropped and the raw chunk is used. |
 
 Requires `embeddings.provider` and `vector.store`. When `search.lexical` is
 also active, ingest dual-writes each chunk into the lexical store with the
