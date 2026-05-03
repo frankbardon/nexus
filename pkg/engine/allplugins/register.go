@@ -14,6 +14,7 @@ import (
 
 	// Control plugins.
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
+	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
 
 	// IO plugins.
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
@@ -74,7 +75,6 @@ import (
 	dynvarsplugin "github.com/frankbardon/nexus/plugins/system/dynvars"
 
 	// Tool plugins.
-	"github.com/frankbardon/nexus/plugins/tools/ask"
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
 	codeexecplugin "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
@@ -180,7 +180,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.catalog", catalogplugin.New)
 	r.Register("nexus.tool.pdf", pdfplugin.New)
 	r.Register("nexus.tool.opener", openerplugin.New)
-	r.Register("nexus.tool.ask", ask.New)
+	r.Register("nexus.control.hitl", hitlplugin.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
 	r.Register("nexus.tool.web", webplugin.New)
 	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
