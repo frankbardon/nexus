@@ -61,6 +61,9 @@ import (
 	// Vector store plugins (advertise the "vector.store" capability).
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
 
+	// Lexical store plugins (advertise the "search.lexical" capability).
+	sqlitefts "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
+
 	// RAG plugins.
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
 
@@ -161,6 +164,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)
+
+	// Lexical stores (capability: search.lexical)
+	r.Register("nexus.vectorstore.sqlite_fts", sqlitefts.New)
 
 	// RAG
 	r.Register("nexus.rag.ingest", ragingest.New)

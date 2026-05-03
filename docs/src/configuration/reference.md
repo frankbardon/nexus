@@ -769,6 +769,25 @@ Source: `plugins/vectorstore/chromem/plugin.go`. Provides `vector.store`.
 
 ---
 
+## Lexical store
+
+### `nexus.vectorstore.sqlite_fts`
+
+Source: `plugins/vectorstore/sqlite_fts/plugin.go`. Provides `search.lexical`.
+BM25 ranking via SQLite FTS5 — pure Go, no CGO. Backing storage comes from
+the engine's per-plugin storage capability; the `scope:` knob picks where the
+underlying `store.db` lands.
+
+| Key      | Type   | Default   | Description |
+|----------|--------|-----------|-------------|
+| `scope`  | string | `session` | Storage scope for the FTS index: `session`, `agent`, `app`. Knowledge-base-style corpora that survive across sessions should use `agent` or `app`. |
+
+Each namespace becomes a separate FTS5 virtual table (`lex_<safe_namespace>`)
+inside the scoped `store.db`. The provider auto-creates tables on first
+upsert; missing-namespace queries return zero results without error.
+
+---
+
 ## RAG
 
 ### `nexus.rag.ingest`
@@ -787,7 +806,14 @@ and the `rag.ingest` event handler.
 | `watch[].glob`        | string | *(empty — match all)*    | Glob pattern for files to ingest. |
 | `watch[].namespace`   | string | *(required)*             | Vector store namespace. |
 
-Requires `embeddings.provider` and `vector.store`.
+Requires `embeddings.provider` and `vector.store`. When `search.lexical` is
+also active, ingest dual-writes each chunk into the lexical store with the
+same `(namespace, doc_id)` pair the vector store uses.
+
+To migrate an existing chromem-only corpus to dual-mode: add
+`nexus.vectorstore.sqlite_fts` to `plugins.active` and re-run
+`nexus ingest --lexical=true PATH`. The embedding cache short-circuits the
+vector pass while the lexical store is freshly populated.
 
 ---
 

@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -47,6 +48,11 @@ type Plugin struct {
 	watches  []watchEntry
 	watcher  *watcher // lazily started in Ready when len(watches) > 0
 	backfill bool     // walk + ingest existing files at startup; on by default
+	// hasLexical indicates that the search.lexical capability is active and
+	// the ingest pipeline should dual-write each chunk into the lexical
+	// store alongside the vector store. Captured from PluginContext.Capabilities
+	// at Init so the per-ingest hot path stays free of capability lookups.
+	hasLexical bool
 
 	unsubs []func()
 }
@@ -131,6 +137,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			p.watches = append(p.watches, e)
 		}
 	}
+
+	p.hasLexical = len(ctx.Capabilities["search.lexical"]) > 0
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("rag.ingest", p.handleIngest,
@@ -245,6 +253,8 @@ func (p *Plugin) Emissions() []string {
 		"embeddings.request",
 		"vector.upsert",
 		"vector.delete",
+		"lexical.upsert",
+		"lexical.delete",
 		"rag.ingest",
 		"rag.ingest.delete",
 		"rag.ingest.result",
@@ -334,23 +344,34 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		}
 	}
 
+	ingestedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	docs := make([]events.VectorDoc, len(chunks))
+	lexDocs := make([]events.LexicalDoc, 0, len(chunks))
 	pathHash := pathKey(req.Path)
 	for i, c := range chunks {
 		meta := map[string]string{
-			"source":     req.Path,
-			"path_hash":  pathHash,
-			"chunk_idx":  fmt.Sprintf("%d", i),
-			"chunk_size": fmt.Sprintf("%d", len(c)),
+			"source":      req.Path,
+			"path_hash":   pathHash,
+			"chunk_idx":   fmt.Sprintf("%d", i),
+			"chunk_size":  fmt.Sprintf("%d", len(c)),
+			"ingested_at": ingestedAt,
 		}
 		for k, v := range req.Metadata {
 			meta[k] = v
 		}
+		docID := fmt.Sprintf("%s-%d", pathHash, i)
 		docs[i] = events.VectorDoc{
-			ID:       fmt.Sprintf("%s-%d", pathHash, i),
+			ID:       docID,
 			Vector:   vectors[i],
 			Content:  c,
 			Metadata: meta,
+		}
+		if p.hasLexical {
+			lexDocs = append(lexDocs, events.LexicalDoc{
+				ID:       docID,
+				Content:  c,
+				Metadata: meta,
+			})
 		}
 	}
 
@@ -359,6 +380,15 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 	if up.Error != "" {
 		return fmt.Errorf("upsert: %s", up.Error)
 	}
+
+	if p.hasLexical && len(lexDocs) > 0 {
+		lexUp := &events.LexicalUpsert{Namespace: req.Namespace, Docs: lexDocs}
+		_ = p.bus.Emit("lexical.upsert", lexUp)
+		if lexUp.Error != "" {
+			return fmt.Errorf("lexical upsert: %s", lexUp.Error)
+		}
+	}
+
 	req.Chunks = len(chunks)
 	req.SkippedCached = len(chunks) - len(missing)
 
@@ -367,6 +397,7 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		"namespace", req.Namespace,
 		"chunks", req.Chunks,
 		"skipped_cached", req.SkippedCached,
+		"lexical", p.hasLexical,
 	)
 	return nil
 }
@@ -389,6 +420,13 @@ func (p *Plugin) delete(req *events.RAGIngestDelete) error {
 	_ = p.bus.Emit("vector.delete", del)
 	if del.Error != "" {
 		return fmt.Errorf("delete: %s", del.Error)
+	}
+	if p.hasLexical {
+		lexDel := &events.LexicalDelete{Namespace: req.Namespace, IDs: ids}
+		_ = p.bus.Emit("lexical.delete", lexDel)
+		if lexDel.Error != "" {
+			return fmt.Errorf("lexical delete: %s", lexDel.Error)
+		}
 	}
 	p.logger.Info("deleted file chunks", "path", req.Path, "namespace", req.Namespace)
 	return nil
