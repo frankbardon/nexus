@@ -3,6 +3,7 @@ package sampler
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -84,7 +85,7 @@ func fixtureSession(t *testing.T, status string) *engine.SessionWorkspace {
 func randomTag() string {
 	b := make([]byte, 4)
 	_, _ = io.ReadFull(rand.New(rand.NewSource(time.Now().UnixNano())), b)
-	return strings.ToLower(strings.TrimSpace(string(b)))
+	return hex.EncodeToString(b)
 }
 
 func newTestLogger() *slog.Logger {
