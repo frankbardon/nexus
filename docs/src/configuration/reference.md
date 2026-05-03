@@ -727,6 +727,7 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `auto_store_compaction` | bool   | `true`                 | Store summaries when `memory.compacted` fires. |
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
+| `recall_via_hybrid`     | bool   | `false`                | When `search.hybrid` is active, route recall queries through it instead of direct vector lookup. Off by default — adds the lexical leg's latency to every user input. |
 
 ---
 
@@ -789,6 +790,33 @@ upsert; missing-namespace queries return zero results without error.
 ---
 
 ## RAG
+
+### `nexus.rag.hybrid`
+
+Source: `plugins/rag/hybrid/plugin.go`. Provides `search.hybrid` — a fusion
+orchestrator that runs vector + lexical retrieval in parallel and combines
+results via Reciprocal Rank Fusion or weighted score combination.
+
+| Key                | Type   | Default | Description |
+|--------------------|--------|---------|-------------|
+| `fusion`           | string | `rrf`   | Fusion strategy: `rrf` (rank-only, weight-free) or `weighted` (linear combination over min-max-normalized per-backend scores). |
+| `rrf_k`            | int    | `60`    | RRF smoothing constant. Lower values weight top ranks more heavily. |
+| `weights.vector`   | float  | `0.7`   | Per-backend bias for `weighted` fusion. |
+| `weights.lexical`  | float  | `0.3`   | Per-backend bias for `weighted` fusion. |
+| `retrieve_k`       | int    | `50`    | Per-backend candidate count gathered before fusion. |
+| `fuse_to`          | int    | `20`    | Default post-fusion top-N when the caller does not specify K. |
+| `embedding_model`  | string | *(provider default)* | Embedding model used when callers fire `hybrid.query` without a pre-embedded vector. |
+
+Requires `embeddings.provider`, `vector.store`, and `search.lexical`. Per-query
+`LexicalBias` (range -1..1) on the `hybrid.query` event tilts fusion weights
+without rewriting config — positive favors lexical, negative favors vector.
+
+When `search.hybrid` is active, `nexus.tool.knowledge_search` automatically
+routes through it instead of querying the vector store directly.
+`nexus.memory.vector` opts in via `recall_via_hybrid: true` (off by default
+because the lexical leg adds latency on every user input).
+
+---
 
 ### `nexus.rag.ingest`
 

@@ -105,7 +105,8 @@ plugins/
   embeddings/mock/       # embeddings.provider adapter: deterministic hash-based vectors; no network, opt-in via plugins.active
   vectorstore/chromem/   # vector.store adapter: philippgille/chromem-go, pure Go, JSON on-disk persistence; namespaces map to collections
   vectorstore/sqlite_fts/ # search.lexical adapter: SQLite FTS5 (modernc.org/sqlite, pure Go); BM25 ranking; namespaces map to FTS5 virtual tables; backed by per-plugin storage capability
-  rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand
+  rag/hybrid/            # search.hybrid orchestrator: parallel vector + lexical retrieval, RRF or weighted fusion, per-query LexicalBias
+  rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand; dual-writes to search.lexical when active
   observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL) — bus-driven, also visible in journal
   observe/sampler/       # Online journal sampler — opt-in, FS-only

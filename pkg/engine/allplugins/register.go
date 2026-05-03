@@ -65,6 +65,7 @@ import (
 	sqlitefts "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
 
 	// RAG plugins.
+	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
 
 	// Discovery plugins.
@@ -170,6 +171,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// RAG
 	r.Register("nexus.rag.ingest", ragingest.New)
+	r.Register("nexus.rag.hybrid", raghybrid.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)

@@ -36,9 +36,9 @@ const (
 	pluginName = "Vector Memory"
 	version    = "0.1.0"
 
-	defaultTopK           = 5
+	defaultTopK            = 5
 	defaultSectionPriority = 45
-	maxContentForEmbed    = 8192 // cap very long user inputs before embedding
+	maxContentForEmbed     = 8192 // cap very long user inputs before embedding
 )
 
 // Plugin implements vector-backed memory.
@@ -47,17 +47,25 @@ type Plugin struct {
 	logger  *slog.Logger
 	prompts *engine.PromptRegistry
 
-	namespace            string
-	topK                 int
-	minSimilarity        float32
-	embeddingModel       string
-	autoStoreCompaction  bool
-	autoStoreUserInput   bool // default false — conservative
-	sectionPriority      int
+	namespace           string
+	topK                int
+	minSimilarity       float32
+	embeddingModel      string
+	autoStoreCompaction bool
+	autoStoreUserInput  bool // default false — conservative
+	sectionPriority     int
+	// hasHybrid mirrors the knowledge_search switch: when search.hybrid is
+	// active, recall queries go through the orchestrator so memory benefits
+	// from lexical + vector fusion. Disabled by default — opt-in via
+	// `recall_via_hybrid: true` because per-input recall is latency-sensitive
+	// and the lexical leg adds work even when most user inputs are
+	// question-shaped.
+	recallViaHybrid bool
+	hasHybrid       bool
 
-	mu           sync.Mutex
-	lastQuery    string
-	lastMatches  []events.VectorMatch
+	mu          sync.Mutex
+	lastQuery   string
+	lastMatches []events.VectorMatch
 
 	unsubs []func()
 }
@@ -121,6 +129,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["section_priority"].(int); ok {
 		p.sectionPriority = v
 	}
+	if v, ok := ctx.Config["recall_via_hybrid"].(bool); ok {
+		p.recallViaHybrid = v
+	}
+	p.hasHybrid = len(ctx.Capabilities["search.hybrid"]) > 0
 
 	// Subscribe at priority 10 so the query+stash happens before the agent's
 	// handler fires at priority 50. That way the prompt section sees fresh
@@ -172,6 +184,7 @@ func (p *Plugin) Emissions() []string {
 	return []string{
 		"embeddings.request",
 		"vector.query",
+		"hybrid.query",
 		"vector.upsert",
 	}
 }
@@ -256,16 +269,40 @@ func (p *Plugin) handleExplicitStore(event engine.Event[any]) {
 }
 
 func (p *Plugin) queryAndStash(query string, vec []float32) {
-	q := &events.VectorQuery{Namespace: p.namespace, Vector: vec, K: p.topK}
-	_ = p.bus.Emit("vector.query", q)
-	if q.Error != "" {
-		p.logger.Warn("vector memory: query failed", "err", q.Error)
-		return
+	var matches []events.VectorMatch
+	if p.recallViaHybrid && p.hasHybrid {
+		h := &events.HybridQuery{
+			Namespace: p.namespace,
+			Query:     query,
+			Vector:    vec, // pass pre-embedded vector to skip the embed call
+			K:         p.topK,
+		}
+		_ = p.bus.Emit("hybrid.query", h)
+		if h.Error != "" {
+			p.logger.Warn("vector memory: hybrid query failed", "err", h.Error)
+			return
+		}
+		matches = make([]events.VectorMatch, 0, len(h.Matches))
+		for _, m := range h.Matches {
+			matches = append(matches, events.VectorMatch{
+				ID: m.ID, Content: m.Content, Metadata: m.Metadata,
+				Similarity: m.Similarity, // raw vector sim if present, else 0
+			})
+		}
+	} else {
+		q := &events.VectorQuery{Namespace: p.namespace, Vector: vec, K: p.topK}
+		_ = p.bus.Emit("vector.query", q)
+		if q.Error != "" {
+			p.logger.Warn("vector memory: query failed", "err", q.Error)
+			return
+		}
+		matches = q.Matches
 	}
-	filtered := q.Matches
+
+	filtered := matches
 	if p.minSimilarity > 0 {
 		filtered = filtered[:0]
-		for _, m := range q.Matches {
+		for _, m := range matches {
 			if m.Similarity >= p.minSimilarity {
 				filtered = append(filtered, m)
 			}
@@ -291,8 +328,8 @@ func (p *Plugin) storeDoc(content, source string, extra map[string]string, vec [
 		vec = v
 	}
 	meta := map[string]string{
-		"source":  source,
-		"stored":  time.Now().UTC().Format(time.RFC3339),
+		"source": source,
+		"stored": time.Now().UTC().Format(time.RFC3339),
 	}
 	for k, v := range extra {
 		if v != "" {
