@@ -1176,6 +1176,52 @@ Source: `plugins/gates/tool_filter/plugin.go`. Modifies `request.ToolFilter` on
 | `include` | list | *(empty)*   | Allowlist of tool names. |
 | `exclude` | list | *(empty)*   | Blocklist of tool names. |
 
+### `nexus.gate.approval_policy`
+
+Source: `plugins/gates/approval_policy/plugin.go`. Policy-driven approvals
+on `before:tool.invoke` and `before:llm.request`. The gate evaluates a
+config-supplied list of rules, and on first match emits a `hitl.requested`
+event and blocks waiting on `hitl.responded`. The operator's choice
+resolves to passthrough (allow), veto (reject), or passthrough-with-edits.
+
+| Key     | Type | Default   | Description |
+|---------|------|-----------|-------------|
+| `rules` | list | *(empty)* | Ordered list of approval rules. First match wins. |
+
+Each rule is a map with the following keys:
+
+| Key              | Type   | Default   | Description |
+|------------------|--------|-----------|-------------|
+| `match`          | map    | *(empty)* | Field/value tests against the action payload. String values are glob (`*`, `?`); dotted keys address nested fields (e.g. `args.command`). |
+| `mode`           | string | `choices` | One of `free_text`, `choices`, `both`. |
+| `choices`        | list   | *(see)*   | List of `{id, label, kind}` (or bare-string id). When omitted in `choices` mode, defaults to `[{id: allow, kind: allow}, {id: reject, kind: reject}]`. |
+| `default_choice` | string | *(empty)* | Choice id auto-selected when the timeout elapses. Without a default, a timeout vetoes the action. |
+| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset. |
+| `timeout`        | string | *(none)*  | Go duration (e.g. `5m`). When unset, the gate blocks indefinitely. |
+
+Match keys recognized by the runtime payload:
+
+- `action_kind` — `tool.invoke` or `llm.request`.
+- `tool` — the tool name (only meaningful for `tool.invoke`).
+- `args.<dotted>` — any nested key inside the tool's argument map.
+- `model` — the LLM model id (only meaningful for `llm.request`).
+- `role` — the LLM model role (only meaningful for `llm.request`).
+
+Example:
+
+```yaml
+nexus.gate.approval_policy:
+  rules:
+    - match: { action_kind: tool.invoke, tool: shell, args.command: "rm*" }
+      mode: choices
+      choices: [allow, reject]
+      timeout: 5m
+      default_choice: reject
+    - match: { action_kind: llm.request, model: "claude-opus-*" }
+      mode: choices
+      prompt: "About to call expensive model {{ .model }}. Approve?"
+```
+
 ---
 
 ## Eval harness
