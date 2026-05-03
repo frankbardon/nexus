@@ -633,6 +633,10 @@ Two compilers selected via `compiler`:
 | `sandbox.exec_allowed` | list | *(empty)*                | Allowlist of commands invokable from `nexus_sdk/exec.Run`. Empty = deny. |
 | `sandbox.env`       | map    | *(empty)*                  | Sandbox-scoped env values returned by `nexus_sdk/env.Get`. Never the host's real env. |
 
+The engine substitutes `${session_id}` in any string under the `sandbox:`
+block at session start, so per-session host paths can be hard-coded:
+`host: ~/.nexus/sessions/${session_id}/files`.
+
 ---
 
 ## Memory

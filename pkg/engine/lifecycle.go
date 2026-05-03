@@ -302,11 +302,44 @@ func (lm *LifecycleManager) resolveSandbox(pluginID string, pluginCfg map[string
 		}
 		return sb, nil
 	}
+	if lm.session != nil {
+		block = substituteSessionPlaceholders(block, lm.session.ID).(map[string]any)
+	}
 	sb, err := sandbox.New(name, block)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %q for %q: %w", name, pluginID, err)
 	}
 	return sb, nil
+}
+
+// substituteSessionPlaceholders walks a config tree and replaces ${session_id}
+// in every string with sessionID. Returns a new tree — the input is not
+// mutated. Used so configs can hard-code session-scoped paths like
+// `~/.nexus/sessions/${session_id}/files` and have the engine resolve the
+// real session ID at boot time. Strings without the placeholder pass through
+// unchanged; non-string scalars are returned as-is.
+func substituteSessionPlaceholders(v any, sessionID string) any {
+	switch x := v.(type) {
+	case string:
+		if !strings.Contains(x, "${session_id}") {
+			return x
+		}
+		return strings.ReplaceAll(x, "${session_id}", sessionID)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = substituteSessionPlaceholders(vv, sessionID)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, vv := range x {
+			out[i] = substituteSessionPlaceholders(vv, sessionID)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // expandRequirements walks Requires() transitively on every plugin already in
