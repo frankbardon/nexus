@@ -35,6 +35,14 @@ type MockResponse struct {
 	ToolCalls []events.ToolCallRequest
 }
 
+// hitlScript is a scripted response to a single hitl.requested event.
+// Bare-string config entries are normalized into FreeText; map entries
+// can populate either ChoiceID or FreeText.
+type hitlScript struct {
+	ChoiceID string
+	FreeText string
+}
+
 // Plugin is the test IO plugin. It feeds scripted inputs into the engine,
 // collects all bus events, and auto-responds to approvals per config.
 type Plugin struct {
@@ -48,7 +56,7 @@ type Plugin struct {
 	inputDelay    time.Duration
 	approvalMode  string // "approve", "deny", "per-prompt"
 	approvalRules []ApprovalRule
-	askResponses  []string
+	hitlResponses []hitlScript
 	mockResponses []MockResponse
 	timeout       time.Duration
 
@@ -158,10 +166,20 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		}
 	}
 
-	if v, ok := ctx.Config["ask_responses"].([]any); ok {
+	if v, ok := ctx.Config["hitl_responses"].([]any); ok {
 		for _, item := range v {
-			if s, ok := item.(string); ok {
-				p.askResponses = append(p.askResponses, s)
+			switch entry := item.(type) {
+			case string:
+				p.hitlResponses = append(p.hitlResponses, hitlScript{FreeText: entry})
+			case map[string]any:
+				script := hitlScript{}
+				if s, ok := entry["choice_id"].(string); ok {
+					script.ChoiceID = s
+				}
+				if s, ok := entry["free_text"].(string); ok {
+					script.FreeText = s
+				}
+				p.hitlResponses = append(p.hitlResponses, script)
 			}
 		}
 	}
@@ -179,7 +197,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.ask", p.handleAsk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleHITL, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
 	)
@@ -471,26 +489,27 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 	})
 }
 
-func (p *Plugin) handleAsk(e engine.Event[any]) {
-	ask, ok := e.Payload.(events.AskUser)
+func (p *Plugin) handleHITL(e engine.Event[any]) {
+	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
 		return
 	}
 
 	p.mu.Lock()
-	answer := ""
-	if len(p.askResponses) > 0 {
-		answer = p.askResponses[0]
-		if len(p.askResponses) > 1 {
-			p.askResponses = p.askResponses[1:]
+	resp := events.HITLResponse{RequestID: req.ID}
+	if len(p.hitlResponses) > 0 {
+		script := p.hitlResponses[0]
+		if len(p.hitlResponses) > 1 {
+			p.hitlResponses = p.hitlResponses[1:]
 		}
+		resp.ChoiceID = script.ChoiceID
+		resp.FreeText = script.FreeText
+	} else if req.DefaultChoiceID != "" {
+		resp.ChoiceID = req.DefaultChoiceID
 	}
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.ask.response", events.AskUserResponse{
-		PromptID: ask.PromptID,
-		Answer:   answer,
-	})
+	_ = p.bus.Emit("hitl.responded", resp)
 }
 
 // -- turn tracking -----------------------------------------------------------

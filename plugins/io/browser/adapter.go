@@ -21,7 +21,7 @@ type Adapter struct {
 	cancelHandler   func()
 	resumeHandler   func()
 	approvalCh      chan ui.ApprovalResponseMessage
-	askCh           chan ui.AskUserResponseMessage
+	askCh           chan ui.HITLResponseMessage
 }
 
 // NewAdapter creates a browser UI adapter backed by the given hub.
@@ -30,7 +30,7 @@ func NewAdapter(hub *Hub, sessionID string) *Adapter {
 		hub:        hub,
 		sessionID:  sessionID,
 		approvalCh: make(chan ui.ApprovalResponseMessage, 1),
-		askCh:      make(chan ui.AskUserResponseMessage, 1),
+		askCh:      make(chan ui.HITLResponseMessage, 1),
 	}
 
 	hub.OnMessage(a.handleInbound)
@@ -97,10 +97,11 @@ func (a *Adapter) RequestApproval(msg ui.ApprovalRequestMessage) (ui.ApprovalRes
 	}, nil
 }
 
-// RequestInput sends a question to the user and blocks until they respond with text.
-func (a *Adapter) RequestInput(msg ui.AskUserMessage) (ui.AskUserResponseMessage, error) {
-	if err := a.broadcast(ui.TypeAskRequest, msg); err != nil {
-		return ui.AskUserResponseMessage{}, fmt.Errorf("broadcasting ask request: %w", err)
+// RequestHumanInput sends a hitl request to all clients and blocks until
+// one responds.
+func (a *Adapter) RequestHumanInput(msg ui.HITLRequestMessage) (ui.HITLResponseMessage, error) {
+	if err := a.broadcast(ui.TypeHITLRequest, msg); err != nil {
+		return ui.HITLResponseMessage{}, fmt.Errorf("broadcasting hitl request: %w", err)
 	}
 	resp := <-a.askCh
 	return resp, nil
@@ -202,8 +203,8 @@ func (a *Adapter) handleInbound(_ string, env ui.Envelope) {
 			handler(msg)
 		}
 
-	case ui.TypeAskResponse:
-		var msg ui.AskUserResponseMessage
+	case ui.TypeHITLResponse:
+		var msg ui.HITLResponseMessage
 		if err := json.Unmarshal(env.Payload, &msg); err != nil {
 			return
 		}

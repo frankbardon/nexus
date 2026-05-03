@@ -138,7 +138,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m, cmd
+			if cmd != nil {
+				return m, cmd
+			}
+			return m, nil
 		}
 
 		switch msg.String() {

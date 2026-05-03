@@ -10,7 +10,7 @@ const (
 	TypeFileDownload     = "file_download"
 	TypeCancelRequest    = "cancel_request"
 	TypeResumeRequest    = "resume_request"
-	TypeAskResponse      = "ask_response"
+	TypeHITLResponse     = "hitl_response"
 
 	// Outbound (server -> client)
 	TypeOutput          = "output"
@@ -24,6 +24,6 @@ const (
 	TypeFileChanged     = "file_changed"
 	TypeSessionReset    = "session_reset"
 	TypeCancelComplete  = "cancel_complete"
-	TypeAskRequest      = "ask_request"
+	TypeHITLRequest     = "hitl_request"
 	TypeCodeExecStdout  = "code_exec_stdout"
 )
