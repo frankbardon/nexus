@@ -15,6 +15,7 @@ import (
 	// Control plugins.
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
+	hitlsynthplugin "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 
 	// IO plugins.
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
@@ -114,6 +115,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Control
 	r.Register("nexus.control.cancel", cancelplugin.New)
+	r.Register("nexus.control.hitl_synthesizer", hitlsynthplugin.New)
 
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
