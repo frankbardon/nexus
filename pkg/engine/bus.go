@@ -92,7 +92,15 @@ type eventBus struct {
 	wildcards []*subscription
 	nextID    uint64
 	inflight  sync.WaitGroup
-	ring      *eventRing
+	// drainMu serializes inflight.Add against inflight.Wait. Without it, a
+	// race window exists where Wait wakes up because the counter hit zero
+	// and is about to return — if Add(positive) lands during that window,
+	// the runtime panics with "WaitGroup is reused before previous Wait
+	// has returned." Holding drainMu around every Add and across the
+	// entire Wait closes that window. Done is left lock-free; it can
+	// never trigger the panic.
+	drainMu sync.Mutex
+	ring    *eventRing
 
 	// seqCounter is the per-bus monotonic dispatch counter. Assigned at
 	// EmitEvent / EmitVetoable entry, before typed handlers run, so a
@@ -308,7 +316,9 @@ func (b *eventBus) Emit(eventType string, payload any) error {
 }
 
 func (b *eventBus) EmitEvent(event Event[any]) error {
+	b.drainMu.Lock()
 	b.inflight.Add(1)
+	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
 	// Assign the dispatch seq before any handler runs so the journal sees
@@ -360,7 +370,9 @@ func (b *eventBus) EmitAsync(eventType string, payload any) <-chan error {
 }
 
 func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, error) {
+	b.drainMu.Lock()
 	b.inflight.Add(1)
+	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
 	seq := b.seqCounter.Add(1)
@@ -416,7 +428,15 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 func (b *eventBus) Drain(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
+		// Hold drainMu across the entire Wait. Any concurrent Add must
+		// acquire drainMu first, so an Add cannot land in the brief
+		// window between the WaitGroup counter hitting zero and Wait
+		// returning — which is the only window that triggers the
+		// "WaitGroup is reused before previous Wait has returned"
+		// runtime panic.
+		b.drainMu.Lock()
 		b.inflight.Wait()
+		b.drainMu.Unlock()
 		close(done)
 	}()
 
