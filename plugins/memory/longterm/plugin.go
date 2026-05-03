@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/approval"
 )
 
 const (
@@ -38,6 +40,13 @@ type Plugin struct {
 	autoLoad             bool
 	autoSaveInstructions string
 	agentID              string
+
+	// HITL approval gating for memory writes. Off by default.
+	approvalEnabled       bool
+	approvalDefaultChoice string
+	approvalTimeout       time.Duration
+	approvalKeyGlob       string // optional — only require approval when key matches
+	approvalSizeThreshold int    // optional — only require approval when content >= N bytes
 }
 
 // New creates a new long-term memory plugin.
@@ -73,6 +82,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "memory.longterm.delete", Priority: 50},
 		{EventType: "memory.longterm.list", Priority: 50},
 		{EventType: "tool.invoke", Priority: 50},
+		// hitl.responded is dynamically subscribed by the approval helper
+		// when require_approval.enabled and a write is pending. Declared
+		// here for introspection completeness.
+		{EventType: "hitl.responded", Priority: 50},
 	}
 }
 
@@ -86,6 +99,7 @@ func (p *Plugin) Emissions() []string {
 		"tool.register",
 		"before:tool.result",
 		"tool.result",
+		"hitl.requested",
 	}
 }
 
@@ -108,6 +122,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["agent_id"].(string); ok {
 		p.agentID = v
 	}
+	p.parseApprovalConfig(ctx.Config["require_approval"])
 
 	// Resolve storage paths based on scope.
 	basePath := "~/.nexus/memory/"
@@ -518,6 +533,12 @@ func (p *Plugin) doStore(req events.LongTermMemoryStoreRequest) error {
 		sessionID = p.session.ID
 	}
 
+	if p.shouldRequireApproval(req) {
+		if err := p.gateWithApproval(req, sessionID); err != nil {
+			return err
+		}
+	}
+
 	if err := store(p.writePath, req, sessionID); err != nil {
 		p.logger.Error("failed to store memory", "key", req.Key, "error", err)
 		return err
@@ -630,4 +651,108 @@ func extractStringMap(v any) map[string]string {
 		}
 	}
 	return result
+}
+
+// --- Approval gating ---
+
+// parseApprovalConfig reads the optional `require_approval` block. The
+// outer plugin treats any malformed value as "off" rather than failing
+// boot — this is an opt-in safety net, not load-bearing config.
+func (p *Plugin) parseApprovalConfig(raw any) {
+	cfg, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, ok := cfg["enabled"].(bool); ok {
+		p.approvalEnabled = v
+	}
+	if !p.approvalEnabled {
+		return
+	}
+	if v, ok := cfg["default_choice"].(string); ok {
+		p.approvalDefaultChoice = v
+	}
+	if v, ok := cfg["timeout"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			p.approvalTimeout = d
+		}
+	}
+	match, _ := cfg["match"].(map[string]any)
+	if v, ok := match["key_glob"].(string); ok {
+		p.approvalKeyGlob = v
+	}
+	if v, ok := match["size_threshold_bytes"].(int); ok {
+		p.approvalSizeThreshold = v
+	} else if v, ok := match["size_threshold_bytes"].(float64); ok {
+		p.approvalSizeThreshold = int(v)
+	}
+}
+
+// shouldRequireApproval returns true when the configured match block
+// matches the pending write. With no match block the behavior is "all
+// writes require approval"; partial blocks AND together (key_glob AND
+// size threshold).
+func (p *Plugin) shouldRequireApproval(req events.LongTermMemoryStoreRequest) bool {
+	if !p.approvalEnabled {
+		return false
+	}
+	if p.approvalKeyGlob != "" {
+		ok, _ := filepath.Match(p.approvalKeyGlob, req.Key)
+		if !ok {
+			return false
+		}
+	}
+	if p.approvalSizeThreshold > 0 && len(req.Content) < p.approvalSizeThreshold {
+		return false
+	}
+	return true
+}
+
+// gateWithApproval emits hitl.requested for the pending write and blocks
+// until the response. Returns a non-nil error when the operator rejects
+// (or the request is cancelled / times out into reject).
+func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, sessionID string) error {
+	preview := req.Content
+	truncated := false
+	const maxPreview = 2000
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview]
+		truncated = true
+	}
+	actionRef := map[string]any{
+		"key":     req.Key,
+		"content": preview,
+		"size":    len(req.Content),
+		"tags":    req.Tags,
+	}
+	if truncated {
+		actionRef["_truncated"] = true
+	}
+
+	prompt := fmt.Sprintf("Persist long-term memory entry '%s'? [%d bytes]", sanitizeKey(req.Key), len(req.Content))
+
+	_, allowed, err := approval.RequestApproval(context.Background(), approval.Request{
+		Bus:             p.bus,
+		Logger:          p.logger,
+		PluginID:        pluginID,
+		ActionKind:      "memory.longterm.write",
+		ActionRef:       actionRef,
+		Prompt:          prompt,
+		DefaultChoiceID: p.approvalDefaultChoice,
+		Timeout:         p.approvalTimeout,
+		SessionID:       sessionID,
+	})
+	if err != nil {
+		// Helper-internal failure (nil bus, etc.) — treat as a hard error.
+		p.logger.Error("longterm: approval request failed", "key", sanitizeKey(req.Key), "error", err)
+		return fmt.Errorf("longterm: approval: %w", err)
+	}
+	if !allowed {
+		p.logger.Info("longterm: write rejected by operator",
+			"key", sanitizeKey(req.Key),
+			"size", len(req.Content),
+		)
+		return fmt.Errorf("memory write rejected by approval gate")
+	}
+	return nil
 }

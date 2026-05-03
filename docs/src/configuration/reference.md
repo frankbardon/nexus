@@ -712,6 +712,11 @@ Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
 | `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
 | `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
 | `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.match.key_glob`             | string   | *(any)*   | Only require approval when the entry key matches this glob. |
+| `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the content is at least this many bytes. |
 
 ### `nexus.memory.vector`
 
