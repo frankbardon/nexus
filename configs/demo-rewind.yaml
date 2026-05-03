@@ -1,0 +1,103 @@
+# Demo: Session inspect + rewind + restore
+# Validates: the journal-backed time-travel CLI surface
+#
+# Run:
+#   bin/nexus -config configs/demo-rewind.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Generate a journal: have a short conversation (3-5 turns) so
+#      the session journal has plenty of events to scrub through.
+#      Quit (/quit) when done — the lock releases on stop.
+#
+#   2. Inspect the timeline:
+#        bin/nexus session inspect --config configs/demo-rewind.yaml <session-id>
+#      Each line is one envelope: seq, timestamp, type, side-effect
+#      marker (*), vetoed marker (!). The session ID is the directory
+#      name under ~/.nexus/demo-rewind-sessions/.
+#
+#   3. Rewind to a point in the past:
+#        bin/nexus session rewind --to-seq=12 --yes \
+#          --config configs/demo-rewind.yaml <session-id>
+#      The current journal is archived under
+#      ~/.nexus/demo-rewind-sessions/<id>/journal/archive/<timestamp>/
+#      and the live journal is replaced with events 1..12 only.
+#
+#   4. Verify rewind landed:
+#        bin/nexus session inspect --config configs/demo-rewind.yaml <session-id>
+#      The timeline now ends at seq 12.
+#
+#   5. List archives:
+#        bin/nexus session archives --config configs/demo-rewind.yaml <session-id>
+#      One entry per rewind, sorted ascending by timestamp.
+#
+#   6. Resume the truncated session:
+#        bin/nexus -config configs/demo-rewind.yaml -recall <session-id>
+#      The agent boots, replays 1..12 (no LLM calls — journaled
+#      responses are short-circuited via the replay coordinator), then
+#      resumes live execution. Continue the conversation forward; the
+#      new turns extend the truncated journal, not the archived one.
+#
+#   7. Restore the original (undo the rewind):
+#        bin/nexus session restore --from-archive=<archive-name> --yes \
+#          --config configs/demo-rewind.yaml <session-id>
+#      The post-rewind journal is itself rotated to a new archive (so
+#      the restore is also reversible), and the named archive is
+#      copied back as the live journal.
+#
+#   8. Lock guard: try to rewind while the agent is running
+#      (in another terminal). The CLI refuses with a clear error
+#      pointing at the live PID. Add --force to override.
+#
+# What to watch for:
+#   - The journal directory layout:
+#       ~/.nexus/demo-rewind-sessions/<id>/journal/
+#         ├── header.json
+#         ├── events.jsonl              <-- live, append-only
+#         └── archive/
+#             ├── 20260503T141500Z/     <-- per-rewind snapshot
+#             └── pre-restore-...../    <-- created by restore
+#   - The session.lock file in the session root while the engine is
+#     running. Removed automatically on /quit or SIGINT.
+#   - Replay short-circuits side-effecting plugins (anthropic provider,
+#     tools). The /quit + recall + replay loop produces functionally
+#     equivalent state without re-running the LLM.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+  sessions:
+    root: ~/.nexus/demo-rewind-sessions
+    retention: 30d
+    id_format: datetime_short
+  journal:
+    fsync_mode: turn-boundary
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.hitl
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: |
+      You're a friendly conversationalist. Keep replies brief — this
+      session is meant to be scrubbed and rewound for demo purposes,
+      so we want lots of small turns rather than one long monologue.
+
+  nexus.memory.capped:
+    max_messages: 40
+    persist: true

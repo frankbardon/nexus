@@ -1,0 +1,94 @@
+# Demo: Human-in-the-Loop end-to-end
+# Validates: ask_user multi-choice + freeform, async registry, file-based response
+#
+# Run:
+#   bin/nexus -config configs/demo-hitl.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Multi-choice ask_user: Ask the agent something open-ended like
+#      "Help me decide which database to use." It should call ask_user
+#      with mode=choices and present 2-3 options. Pressing 1-9 in the TUI
+#      picks a choice; the structured tool result is returned to the LLM.
+#   2. Freeform ask_user: Ask the agent for clarification on something
+#      ambiguous. It should call ask_user without choices; you get a
+#      textarea, Enter submits.
+#   3. Mode=both: Some prompts may benefit from "pick one of these or
+#      type something else." The TUI shows both affordances; numeric key
+#      picks a choice, Enter submits the textarea.
+#   4. Async out-of-band registry: While a hitl request is pending,
+#      open a second terminal:
+#        bin/nexus hitl list --config configs/demo-hitl.yaml
+#        bin/nexus hitl respond <id> --choice <id> --config configs/demo-hitl.yaml
+#      The CLI writes a response YAML; the running engine's fsnotify
+#      watcher picks it up and the agent unblocks. The TUI's modal
+#      closes automatically when the out-of-band response arrives.
+#   5. Approve/reject shorthands: For binary requests,
+#        bin/nexus approve <id>
+#        bin/nexus reject <id>
+#      map to the canonical "allow"/"reject" choice IDs.
+#
+# What to watch for:
+#   - Tool result is structured JSON ({choice_id, free_text}), not a
+#     bare string. The LLM is prompted to handle this shape.
+#   - Registry directory ~/.nexus/hitl/ accumulates *.request.yaml
+#     files only while requests are pending; both files are deleted
+#     after the response routes through.
+#   - System prompt deliberately encourages the agent to use ask_user
+#     with multi-choice when more than one reasonable path exists.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/demo-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.hitl
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a decision-support assistant. When the user asks a question
+      that has more than one reasonable answer or path, do NOT pick one
+      yourself — call the ask_user tool with mode="choices" and a
+      curated list of options.
+
+      Use mode="free_text" only when the answer space is genuinely
+      open-ended (e.g., "what should I name this project?").
+
+      Use mode="both" when there are obvious shortlist options but the
+      user might want something not on the list.
+
+      After the tool returns, the result is a JSON object:
+        {"choice_id": "..."} when the user picked
+        {"free_text": "..."} when the user typed
+        {"choice_id": "...", "free_text": "..."} in mode="both"
+      Use whichever fields are present.
+    max_iterations: 8
+
+  nexus.control.hitl:
+    registry:
+      enabled: true
+      dir: ~/.nexus/hitl
+
+  nexus.memory.capped:
+    max_messages: 40
+    persist: true
