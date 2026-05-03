@@ -23,12 +23,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/approval"
 )
 
 const (
@@ -54,6 +56,13 @@ type Plugin struct {
 	autoStoreCompaction  bool
 	autoStoreUserInput   bool // default false — conservative
 	sectionPriority      int
+
+	// HITL approval gating for vector writes. Off by default.
+	approvalEnabled        bool
+	approvalDefaultChoice  string
+	approvalTimeout        time.Duration
+	approvalNamespaceGlob  string
+	approvalSizeThreshold  int
 
 	mu           sync.Mutex
 	lastQuery    string
@@ -121,6 +130,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["section_priority"].(int); ok {
 		p.sectionPriority = v
 	}
+	p.parseApprovalConfig(ctx.Config["require_approval"])
 
 	// Subscribe at priority 10 so the query+stash happens before the agent's
 	// handler fires at priority 50. That way the prompt section sees fresh
@@ -165,6 +175,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.input", Priority: 10},
 		{EventType: "memory.compacted", Priority: 50},
 		{EventType: "memory.vector.store", Priority: 50},
+		// hitl.responded is dynamically subscribed by the approval helper
+		// when require_approval.enabled and a write is pending. Declared
+		// here for introspection completeness.
+		{EventType: "hitl.responded", Priority: 50},
 	}
 }
 
@@ -173,6 +187,7 @@ func (p *Plugin) Emissions() []string {
 		"embeddings.request",
 		"vector.query",
 		"vector.upsert",
+		"hitl.requested",
 	}
 }
 
@@ -283,6 +298,11 @@ func (p *Plugin) storeDoc(content, source string, extra map[string]string, vec [
 	if content == "" {
 		return nil
 	}
+	if p.shouldRequireApproval(content) {
+		if err := p.gateWithApproval(content, source, extra); err != nil {
+			return err
+		}
+	}
 	if vec == nil {
 		v, err := p.embedOne(content)
 		if err != nil {
@@ -376,4 +396,107 @@ func docID(content, source string, t time.Time) string {
 	h.Write([]byte("\x00"))
 	h.Write([]byte(t.UTC().Format(time.RFC3339Nano)))
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// --- Approval gating ---
+
+// parseApprovalConfig reads the optional `require_approval` block.
+// Malformed values are treated as "off" — boot continues.
+func (p *Plugin) parseApprovalConfig(raw any) {
+	cfg, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, ok := cfg["enabled"].(bool); ok {
+		p.approvalEnabled = v
+	}
+	if !p.approvalEnabled {
+		return
+	}
+	if v, ok := cfg["default_choice"].(string); ok {
+		p.approvalDefaultChoice = v
+	}
+	if v, ok := cfg["timeout"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			p.approvalTimeout = d
+		}
+	}
+	match, _ := cfg["match"].(map[string]any)
+	if v, ok := match["namespace_glob"].(string); ok {
+		p.approvalNamespaceGlob = v
+	}
+	if v, ok := match["size_threshold_bytes"].(int); ok {
+		p.approvalSizeThreshold = v
+	} else if v, ok := match["size_threshold_bytes"].(float64); ok {
+		p.approvalSizeThreshold = int(v)
+	}
+}
+
+// shouldRequireApproval evaluates the match block against this plugin's
+// fixed namespace and the pending content's size.
+func (p *Plugin) shouldRequireApproval(content string) bool {
+	if !p.approvalEnabled {
+		return false
+	}
+	if p.approvalNamespaceGlob != "" {
+		ok, _ := filepath.Match(p.approvalNamespaceGlob, p.namespace)
+		if !ok {
+			return false
+		}
+	}
+	if p.approvalSizeThreshold > 0 && len(content) < p.approvalSizeThreshold {
+		return false
+	}
+	return true
+}
+
+// gateWithApproval emits hitl.requested and blocks until the response.
+// Returns a non-nil error when the operator rejects.
+func (p *Plugin) gateWithApproval(content, source string, extra map[string]string) error {
+	preview := content
+	truncated := false
+	const maxPreview = 2000
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview]
+		truncated = true
+	}
+	actionRef := map[string]any{
+		"namespace": p.namespace,
+		"source":    source,
+		"content":   preview,
+		"size":      len(content),
+	}
+	if len(extra) > 0 {
+		actionRef["metadata"] = extra
+	}
+	if truncated {
+		actionRef["_truncated"] = true
+	}
+
+	prompt := fmt.Sprintf("Persist vector memory entry to namespace '%s'? [%d bytes, source=%s]",
+		p.namespace, len(content), source)
+
+	_, allowed, err := approval.RequestApproval(context.Background(), approval.Request{
+		Bus:             p.bus,
+		Logger:          p.logger,
+		PluginID:        pluginID,
+		ActionKind:      "memory.vector.write",
+		ActionRef:       actionRef,
+		Prompt:          prompt,
+		DefaultChoiceID: p.approvalDefaultChoice,
+		Timeout:         p.approvalTimeout,
+	})
+	if err != nil {
+		p.logger.Error("vector: approval request failed", "namespace", p.namespace, "error", err)
+		return fmt.Errorf("vector: approval: %w", err)
+	}
+	if !allowed {
+		p.logger.Info("vector: write rejected by operator",
+			"namespace", p.namespace,
+			"source", source,
+			"size", len(content),
+		)
+		return fmt.Errorf("vector memory write rejected by approval gate")
+	}
+	return nil
 }
