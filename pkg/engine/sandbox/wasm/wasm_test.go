@@ -2,6 +2,7 @@ package wasm_test
 
 import (
 	"context"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -21,14 +22,40 @@ var (
 	sharedBackends = map[string]sandbox.Sandbox{}
 )
 
+// sharedCacheDir is a wazero compilation cache shared across every wasm
+// sandbox built during the test run. The first sandbox pays the ~5–9 s AOT
+// compile; subsequent sandboxes (including those with distinct policies)
+// load the precompiled module from disk in ~50–200 ms. Without this the
+// bridge tests, which need a fresh backend per test for distinct policies,
+// each rebuilt from scratch and dominated CI time.
+var sharedCacheDir string
+
 func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "nexus-wasm-test-cache-*")
+	if err != nil {
+		panic("wasm test cache: " + err.Error())
+	}
+	sharedCacheDir = dir
+
 	code := m.Run()
+
 	sharedMu.Lock()
 	for _, sb := range sharedBackends {
 		_ = sb.Close()
 	}
 	sharedMu.Unlock()
+	_ = os.RemoveAll(sharedCacheDir)
 	os.Exit(code)
+}
+
+// withSharedCache returns a shallow copy of cfg with cache_dir set to the
+// shared wazero compilation cache. Tests that build a fresh sandbox per
+// case use this so they amortize AOT compile across the package.
+func withSharedCache(cfg map[string]any) map[string]any {
+	out := make(map[string]any, len(cfg)+1)
+	maps.Copy(out, cfg)
+	out["cache_dir"] = sharedCacheDir
+	return out
 }
 
 // helloScript prints to stdout and returns a string. Exercises both the
@@ -84,7 +111,7 @@ func newWasm(t *testing.T, cfg map[string]any) sandbox.Sandbox {
 	if sb, ok := sharedBackends[key]; ok {
 		return sb
 	}
-	sb, err := sandbox.New(sandbox.BackendWasm, cfg)
+	sb, err := sandbox.New(sandbox.BackendWasm, withSharedCache(cfg))
 	if err != nil {
 		t.Fatalf("new wasm: %v", err)
 	}
