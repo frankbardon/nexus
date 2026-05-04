@@ -284,8 +284,10 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			Tools:    tools,
 			Stream:   false,
 			Metadata: map[string]any{
-				"_source": source,
+				"_source":   source,
+				"task_kind": "subagent",
 			},
+			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}
 		if veto, vErr := p.bus.EmitVetoable("before:llm.request", &req); vErr == nil && veto.Vetoed {
 			logger.Info("llm.request vetoed", "reason", veto.Reason)

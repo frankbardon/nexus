@@ -135,8 +135,10 @@ func (h *Handler) AttemptRetry(
 			Messages: messages,
 			Stream:   false,
 			Metadata: map[string]any{
-				"_source": tag,
+				"_source":   tag,
+				"task_kind": "gate_retry",
 			},
+			Tags: map[string]string{"source_plugin": tag},
 		})
 
 		// Wait for response (blocking — bus is synchronous, response arrives on another handler).

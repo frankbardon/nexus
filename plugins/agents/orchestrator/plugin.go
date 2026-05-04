@@ -453,8 +453,10 @@ func (p *Plugin) sendDecomposeRequest() {
 		Messages: messages,
 		Stream:   false, // Need full response to parse JSON.
 		Metadata: map[string]any{
-			"_source": decomposeSource,
+			"_source":   decomposeSource,
+			"task_kind": "orchestrator_decompose",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
@@ -819,8 +821,10 @@ func (p *Plugin) sendSynthesizeRequest() {
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
-			"_source": synthesizeSource,
+			"_source":   synthesizeSource,
+			"task_kind": "orchestrator_synthesize",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {

@@ -319,7 +319,9 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 		Metadata: map[string]any{
 			"_source":   llmSource,
 			"_synth_id": corrID,
+			"task_kind": "hitl_synthesize",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	})
 	if emitErr != nil {
 		return "", fmt.Errorf("emit llm.request: %w", emitErr)

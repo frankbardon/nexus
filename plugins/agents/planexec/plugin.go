@@ -654,8 +654,10 @@ func (p *Plugin) sendStepLLMRequest() {
 		Tools:    tools,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source": executorSource,
+			"_source":   executorSource,
+			"task_kind": "planexec_step",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
@@ -913,8 +915,10 @@ func (p *Plugin) sendSynthesisRequest() {
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
-			"_source": synthesizerSource,
+			"_source":   synthesizerSource,
+			"task_kind": "planexec_synthesize",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {

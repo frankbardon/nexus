@@ -119,6 +119,7 @@ func (p *Plugin) selectByJudge(fanoutID string, state *fanoutState, responses []
 		"_source":       pluginID,
 		"_fanout_judge": true,
 		"_fanout_id":    fanoutID,
+		"task_kind":     "fanout_judge",
 	}
 
 	judgeReq := events.LLMRequest{
@@ -128,6 +129,7 @@ func (p *Plugin) selectByJudge(fanoutID string, state *fanoutState, responses []
 		},
 		Stream:   false,
 		Metadata: judgeMeta,
+		Tags:     map[string]string{"source_plugin": pluginID},
 		ResponseFormat: &events.ResponseFormat{
 			Type:   "json_schema",
 			Name:   "fanout_judge_selection",

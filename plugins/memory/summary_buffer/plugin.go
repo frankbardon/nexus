@@ -463,7 +463,9 @@ func (p *Plugin) triggerSummarisation(reason string) {
 			"_prev_count":  msgCount,
 			"_protect":     protectCount,
 			"_summarising": true,
+			"task_kind":    "summarise",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	})
 }
 
