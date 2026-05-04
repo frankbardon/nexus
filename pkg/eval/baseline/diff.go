@@ -28,9 +28,9 @@ type Diff struct {
 	Cases         []*CaseDelta `json:"cases"`
 	// Threshold breaches surface as bools so `nexus eval baseline` can
 	// translate them into exit codes without re-walking the structure.
-	Breached  Breaches  `json:"breaches"`
-	NewCases  []string  `json:"new_cases,omitempty"`
-	GoneCases []string  `json:"gone_cases,omitempty"`
+	Breached  Breaches `json:"breaches"`
+	NewCases  []string `json:"new_cases,omitempty"`
+	GoneCases []string `json:"gone_cases,omitempty"`
 }
 
 // DiffSummary aggregates pass/fail movement across the union of cases.

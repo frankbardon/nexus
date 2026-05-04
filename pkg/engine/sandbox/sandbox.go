@@ -65,15 +65,15 @@ type Mount struct {
 // ExecRequest is the input to Sandbox.Exec. Source carries the payload —
 // shell command for KindShell, Go source for KindGoYaegi/KindGoWasm.
 type ExecRequest struct {
-	Kind     Kind
-	Source   []byte
-	Args     []string
-	Stdin    []byte
-	Env      map[string]string
-	WorkDir  string
-	Mounts   []Mount
-	Net      NetPolicy
-	Timeout  time.Duration
+	Kind    Kind
+	Source  []byte
+	Args    []string
+	Stdin   []byte
+	Env     map[string]string
+	WorkDir string
+	Mounts  []Mount
+	Net     NetPolicy
+	Timeout time.Duration
 
 	// AllowedPackages narrows the stdlib whitelist visible to a Go-source
 	// payload (KindGoYaegi / KindGoWasm). Backends apply it as an override
@@ -136,13 +136,13 @@ type Sandbox interface {
 
 // Errors returned by sandbox implementations.
 var (
-	ErrKindUnsupported         = errors.New("sandbox: kind not supported by backend")
-	ErrCapabilityNotSupported  = errors.New("sandbox: capability not supported by backend")
-	ErrCapabilityDenied        = errors.New("sandbox: capability denied")
-	ErrTimeout                 = errors.New("sandbox: execution timed out")
-	ErrBackendNotConfigured    = errors.New("sandbox: backend not configured")
-	ErrUnknownBackend          = errors.New("sandbox: unknown backend")
-	ErrMissingDependency       = errors.New("sandbox: backend dependency missing")
+	ErrKindUnsupported        = errors.New("sandbox: kind not supported by backend")
+	ErrCapabilityNotSupported = errors.New("sandbox: capability not supported by backend")
+	ErrCapabilityDenied       = errors.New("sandbox: capability denied")
+	ErrTimeout                = errors.New("sandbox: execution timed out")
+	ErrBackendNotConfigured   = errors.New("sandbox: backend not configured")
+	ErrUnknownBackend         = errors.New("sandbox: unknown backend")
+	ErrMissingDependency      = errors.New("sandbox: backend dependency missing")
 )
 
 // Wrap returns a sandbox-prefixed error wrapping cause for context.

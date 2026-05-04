@@ -9,13 +9,13 @@ import (
 // flattened action-payload map (built by the gate handler). The first
 // matching rule wins.
 type rule struct {
-	match            map[string]any
-	mode             string
-	choices          []choiceCfg
-	defaultChoice    string
-	prompt           string
+	match             map[string]any
+	mode              string
+	choices           []choiceCfg
+	defaultChoice     string
+	prompt            string
 	promptSynthesizer string
-	timeoutSeconds   int
+	timeoutSeconds    int
 }
 
 // choiceCfg is a minimal in-config choice description. Mapped to

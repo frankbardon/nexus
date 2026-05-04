@@ -85,10 +85,10 @@ type Plugin struct {
 // MaxTotalTokens / MaxUSD must be > 0 (multiple are allowed and ANDed —
 // any exceeded triggers OnExceed).
 type ceiling struct {
-	Dimension string  // session | tenant | source_plugin
-	Window    string  // session | day; defaults to session
-	Match     string  // optional bucket-key restriction (e.g. "tools.web" for source_plugin)
-	OnExceed  string  // block | warn | downgrade-model
+	Dimension string // session | tenant | source_plugin
+	Window    string // session | day; defaults to session
+	Match     string // optional bucket-key restriction (e.g. "tools.web" for source_plugin)
+	OnExceed  string // block | warn | downgrade-model
 	MaxInput  int
 	MaxOutput int
 	MaxTotal  int

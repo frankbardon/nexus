@@ -267,10 +267,10 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		},
 		MaxTokens: 32,
 		Metadata: map[string]any{
-			"_source":     pluginID,
-			"_call_id":    callID,
-			"task_kind":   "classify",
-			"_routed_by":  pluginID, // suppress further routing on this probe
+			"_source":    pluginID,
+			"_call_id":   callID,
+			"task_kind":  "classify",
+			"_routed_by": pluginID, // suppress further routing on this probe
 		},
 	}
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &probe); err == nil && veto.Vetoed {

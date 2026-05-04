@@ -74,11 +74,11 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 
 	// Configuration.
-	model              string
-	modelRole          string
-	maxActionRefChars  int
-	cacheEnabled       bool
-	fallbackTemplate   *template.Template
+	model               string
+	modelRole           string
+	maxActionRefChars   int
+	cacheEnabled        bool
+	fallbackTemplate    *template.Template
 	fallbackTemplateRaw string
 
 	// Cache (in-memory mirror of cache.jsonl).

@@ -23,11 +23,11 @@ const HostModuleName = "nexus_bridge_v1"
 // statusCode values mirror those returned to the snippet via the high bits
 // of the bridge return value.
 const (
-	StatusOK            uint16 = 0
-	StatusInvalidOp     uint16 = 1
-	StatusBadRequest    uint16 = 2
-	StatusCapDenied     uint16 = 3
-	StatusInternal      uint16 = 4
+	StatusOK             uint16 = 0
+	StatusInvalidOp      uint16 = 1
+	StatusBadRequest     uint16 = 2
+	StatusCapDenied      uint16 = 3
+	StatusInternal       uint16 = 4
 	StatusBufferTooSmall uint16 = 5
 )
 

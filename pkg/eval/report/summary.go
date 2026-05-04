@@ -51,7 +51,7 @@ type colorizer struct {
 }
 
 const (
-	ansiReset  = "\033[0m"
+	ansiReset = "\033[0m"
 	ansiBold  = "\033[1m"
 	ansiDim   = "\033[2m"
 	ansiRed   = "\033[31m"

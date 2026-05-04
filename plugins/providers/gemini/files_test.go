@@ -71,7 +71,7 @@ func TestPreuploadParts_VertexBlocked(t *testing.T) {
 	}
 	big := make([]byte, inlineDataLimit+1)
 	_, err := p.preuploadParts(context.Background(), []events.Message{{
-		Role: "user",
+		Role:  "user",
 		Parts: []events.MessagePart{{Type: "image", MimeType: "image/png", Data: big}},
 	}})
 	if err == nil {
@@ -89,7 +89,7 @@ func TestPreuploadParts_NoChangeForSmall(t *testing.T) {
 	}
 	small := []byte("tiny")
 	out, err := p.preuploadParts(context.Background(), []events.Message{{
-		Role: "user",
+		Role:  "user",
 		Parts: []events.MessagePart{{Type: "image", MimeType: "image/png", Data: small}},
 	}})
 	if err != nil {

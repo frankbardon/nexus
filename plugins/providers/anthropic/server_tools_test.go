@@ -307,4 +307,3 @@ func TestConvertAPIResponse_NoServerToolResults(t *testing.T) {
 		}
 	}
 }
-
