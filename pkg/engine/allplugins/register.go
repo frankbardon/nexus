@@ -63,8 +63,16 @@ import (
 	// Vector store plugins (advertise the "vector.store" capability).
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
 
+	// Lexical store plugins (advertise the "search.lexical" capability).
+	sqlitefts "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
+
 	// RAG plugins.
+	ragcitations "github.com/frankbardon/nexus/plugins/rag/citations"
+	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
+	cohereranker "github.com/frankbardon/nexus/plugins/rag/reranker/cohere"
+	jinareranker "github.com/frankbardon/nexus/plugins/rag/reranker/jina"
+	localreranker "github.com/frankbardon/nexus/plugins/rag/reranker/local"
 
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
@@ -165,8 +173,16 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)
 
+	// Lexical stores (capability: search.lexical)
+	r.Register("nexus.vectorstore.sqlite_fts", sqlitefts.New)
+
 	// RAG
 	r.Register("nexus.rag.ingest", ragingest.New)
+	r.Register("nexus.rag.hybrid", raghybrid.New)
+	r.Register("nexus.rag.reranker.cohere", cohereranker.New)
+	r.Register("nexus.rag.reranker.jina", jinareranker.New)
+	r.Register("nexus.rag.reranker.local", localreranker.New)
+	r.Register("nexus.rag.citations", ragcitations.New)
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)

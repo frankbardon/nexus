@@ -6,6 +6,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
 )
 
 // Plugin is the interface that all Nexus plugins must implement.
@@ -102,10 +103,35 @@ type Requirement struct {
 
 // PluginContext provides plugins with access to engine services.
 type PluginContext struct {
-	Config  map[string]any
-	Bus     EventBus
-	Logger  *slog.Logger
+	Config map[string]any
+	Bus    EventBus
+	Logger *slog.Logger
+	// PluginID is the configured plugin ID, including any instance suffix
+	// (e.g. "nexus.agent.subagent/researcher"). Set by the lifecycle
+	// manager when the context is built. Plugins that need to identify
+	// themselves to engine services (storage, journal projections) read
+	// this rather than hardcoding their base ID.
+	PluginID string
+	// DataDir is the per-plugin session-scoped directory:
+	// <session.RootDir>/plugins/<PluginID>/. Created lazily on first
+	// access. Empty when the engine is constructed without a session
+	// (rare; mostly tests). For storage that should outlive the session,
+	// use AppDataDir or AgentDataDir, or call Storage(ScopeApp/ScopeAgent).
 	DataDir string
+	// AppDataDir is the per-plugin machine-wide directory:
+	// ~/.nexus/plugins/<PluginID>/. Survives across sessions and agents.
+	AppDataDir string
+	// AgentDataDir is the per-plugin per-agent directory:
+	// ~/.nexus/agents/<AgentID>/plugins/<PluginID>/. Collapses to
+	// AppDataDir when the engine has no AgentID configured (CLI / single-
+	// agent embedders).
+	AgentDataDir string
+	// Storage opens scoped SQLite-backed storage for this plugin. The
+	// returned handle exposes both KV sugar (Get/Put/Delete/List) and
+	// raw *sql.DB access for plugins that need joins, transactions, or
+	// virtual tables (FTS5). Handles are pooled — repeated calls with
+	// the same scope return the same underlying database.
+	Storage func(scope storage.Scope) (storage.Storage, error)
 	Session *SessionWorkspace
 	Models  *ModelRegistry
 	Prompts *PromptRegistry

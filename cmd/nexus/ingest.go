@@ -29,6 +29,8 @@ func runIngest(args []string) int {
 	vectorPath := fs.String("vector-path", "", "override vector store path (default: ~/.nexus/vectors)")
 	cachePath := fs.String("cache-path", "", "override embedding cache path (default: ~/.nexus/vectors/_cache)")
 	embeddingsModel := fs.String("model", "", "embedding model (default: text-embedding-3-small)")
+	lexical := fs.Bool("lexical", false, "also write each chunk into the SQLite FTS5 lexical store (re-runnable; embedding cache makes the vector pass a no-op so this also serves as 'reindex into the new lexical store')")
+	lexicalScope := fs.String("lexical-scope", "app", "scope for the lexical store when --lexical is set: app, agent, session")
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: nexus ingest --namespace=NAME [flags] PATH [PATH...]")
@@ -49,7 +51,7 @@ func runIngest(args []string) int {
 		return 2
 	}
 
-	cfg := buildIngestConfig(engine.ExpandPath(*vectorPath), engine.ExpandPath(*cachePath), *embeddingsModel, *chunkSize, *chunkOverlap)
+	cfg := buildIngestConfig(engine.ExpandPath(*vectorPath), engine.ExpandPath(*cachePath), *embeddingsModel, *chunkSize, *chunkOverlap, *lexical, *lexicalScope)
 	eng, err := engine.NewFromBytes(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create engine: %v\n", err)
@@ -160,13 +162,22 @@ func walkIngestPath(root, glob string) ([]string, error) {
 // embeddings.provider (OpenAI), vector.store (chromem), and the ingest
 // plugin. No agent, no LLM, no IO. Per-plugin configs live flat under
 // "plugins:" with the plugin ID as the key (see pkg/engine/config.go).
-func buildIngestConfig(vectorPath, cachePath, model string, chunkSize, chunkOverlap int) []byte {
+//
+// When lexical is true the sqlite_fts plugin is added to the active set,
+// which causes rag/ingest to dual-write each chunk into the lexical store.
+// Re-running ingest with --lexical against an already-vector-indexed corpus
+// is the "reindex" path: the embedding cache short-circuits vector
+// re-embedding while the lexical store is freshly populated.
+func buildIngestConfig(vectorPath, cachePath, model string, chunkSize, chunkOverlap int, lexical bool, lexicalScope string) []byte {
 	var b []byte
 	b = append(b, "core:\n  log_level: info\n"...)
 	b = append(b, "plugins:\n"...)
 	b = append(b, "  active:\n"...)
 	b = append(b, "    - nexus.embeddings.openai\n"...)
 	b = append(b, "    - nexus.vectorstore.chromem\n"...)
+	if lexical {
+		b = append(b, "    - nexus.vectorstore.sqlite_fts\n"...)
+	}
 	b = append(b, "    - nexus.rag.ingest\n"...)
 
 	if model != "" {
@@ -176,6 +187,10 @@ func buildIngestConfig(vectorPath, cachePath, model string, chunkSize, chunkOver
 	if vectorPath != "" {
 		b = append(b, "  nexus.vectorstore.chromem:\n"...)
 		b = append(b, fmt.Sprintf("    path: %q\n", vectorPath)...)
+	}
+	if lexical {
+		b = append(b, "  nexus.vectorstore.sqlite_fts:\n"...)
+		b = append(b, fmt.Sprintf("    scope: %q\n", lexicalScope)...)
 	}
 	b = append(b, "  nexus.rag.ingest:\n"...)
 	b = append(b, "    chunker:\n"...)

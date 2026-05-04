@@ -40,12 +40,17 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	toolName         string
-	allowedNS        []string // master list; empty means "any namespace" (rare)
-	defaultNS        []string // used when the LLM doesn't pick
-	topK             int
-	includeMetadata  bool
-	embeddingModel   string // optional pin; otherwise provider default
+	toolName        string
+	allowedNS       []string // master list; empty means "any namespace" (rare)
+	defaultNS       []string // used when the LLM doesn't pick
+	topK            int
+	includeMetadata bool
+	embeddingModel  string // optional pin; otherwise provider default
+	// hasHybrid switches the query path to search.hybrid (RRF / weighted
+	// fusion of vector + lexical) when the orchestrator capability is
+	// active. Falls back to direct vector.query otherwise so single-mode
+	// deployments keep working unchanged.
+	hasHybrid bool
 
 	unsubs []func()
 }
@@ -98,6 +103,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if len(p.allowedNS) == 0 {
 		return fmt.Errorf("knowledge_search: at least one namespace must be configured under 'namespaces'")
 	}
+
+	p.hasHybrid = len(ctx.Capabilities["search.hybrid"]) > 0
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("tool.invoke", p.handleEvent,
@@ -162,6 +169,8 @@ func (p *Plugin) Emissions() []string {
 	return []string{
 		"embeddings.request",
 		"vector.query",
+		"hybrid.query",
+		"rag.retrieved",
 		"before:tool.result",
 		"tool.result",
 		"tool.register",
@@ -206,36 +215,54 @@ func (p *Plugin) handle(tc events.ToolCall) {
 		return
 	}
 
-	// Embed the query.
-	embReq := &events.EmbeddingsRequest{Texts: []string{query}, Model: p.embeddingModel}
-	_ = p.bus.Emit("embeddings.request", embReq)
-	if embReq.Error != "" {
-		p.emit(tc, "", fmt.Sprintf("embed query: %s", embReq.Error))
-		return
-	}
-	if len(embReq.Vectors) != 1 {
-		p.emit(tc, "", "embed query: no vector returned")
-		return
-	}
-	vec := embReq.Vectors[0]
-
-	// Query each namespace, merge by similarity.
+	// Hybrid path: orchestrator handles embed + parallel vector/lexical
+	// + fusion. Direct vector path mirrors the old single-mode behavior.
 	all := make([]hit, 0, k*len(namespaces))
-	for _, ns := range namespaces {
-		q := &events.VectorQuery{Namespace: ns, Vector: vec, K: k}
-		_ = p.bus.Emit("vector.query", q)
-		if q.Error != "" {
-			p.logger.Warn("knowledge_search: namespace query failed", "namespace", ns, "err", q.Error)
-			continue
+	if p.hasHybrid {
+		for _, ns := range namespaces {
+			h := &events.HybridQuery{Namespace: ns, Query: query, K: k}
+			_ = p.bus.Emit("hybrid.query", h)
+			if h.Error != "" {
+				p.logger.Warn("knowledge_search: hybrid query failed", "namespace", ns, "err", h.Error)
+				continue
+			}
+			for _, m := range h.Matches {
+				all = append(all, hit{namespace: ns, match: events.VectorMatch{
+					ID: m.ID, Content: m.Content, Metadata: m.Metadata,
+					Similarity: m.Score,
+				}})
+			}
 		}
-		for _, m := range q.Matches {
-			all = append(all, hit{namespace: ns, match: m})
+	} else {
+		embReq := &events.EmbeddingsRequest{Texts: []string{query}, Model: p.embeddingModel}
+		_ = p.bus.Emit("embeddings.request", embReq)
+		if embReq.Error != "" {
+			p.emit(tc, "", fmt.Sprintf("embed query: %s", embReq.Error))
+			return
+		}
+		if len(embReq.Vectors) != 1 {
+			p.emit(tc, "", "embed query: no vector returned")
+			return
+		}
+		vec := embReq.Vectors[0]
+		for _, ns := range namespaces {
+			q := &events.VectorQuery{Namespace: ns, Vector: vec, K: k}
+			_ = p.bus.Emit("vector.query", q)
+			if q.Error != "" {
+				p.logger.Warn("knowledge_search: namespace query failed", "namespace", ns, "err", q.Error)
+				continue
+			}
+			for _, m := range q.Matches {
+				all = append(all, hit{namespace: ns, match: m})
+			}
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].match.Similarity > all[j].match.Similarity })
 	if len(all) > k {
 		all = all[:k]
 	}
+
+	p.emitRetrieved(tc.TurnID, all)
 
 	output, err := p.formatOutput(query, all)
 	if err != nil {
@@ -296,6 +323,28 @@ func (p *Plugin) resolveNamespaces(requested []string) []string {
 		}
 	}
 	return out
+}
+
+// emitRetrieved publishes the per-turn retrieval context so the citation
+// plugin can validate references against actually-retrieved chunks.
+func (p *Plugin) emitRetrieved(turnID string, hits []hit) {
+	if turnID == "" || len(hits) == 0 {
+		return
+	}
+	chunks := make([]events.RetrievedChunk, 0, len(hits))
+	for _, h := range hits {
+		chunks = append(chunks, events.RetrievedChunk{
+			Source:    h.match.Metadata["source"],
+			DocID:     h.match.ID,
+			ChunkIdx:  h.match.Metadata["chunk_idx"],
+			TrustTier: h.match.Metadata["trust_tier"],
+		})
+	}
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{
+		TurnID: turnID,
+		Source: pluginID,
+		Chunks: chunks,
+	})
 }
 
 func (p *Plugin) emit(tc events.ToolCall, output, errMsg string) {

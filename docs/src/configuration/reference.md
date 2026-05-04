@@ -60,6 +60,12 @@ plugins:
 | `sessions.root`                | string   | `~/.nexus/sessions`    | Base directory for session workspaces. |
 | `sessions.retention`           | string   | `30d`                  | Retention policy for old sessions. |
 | `sessions.id_format`           | string   | `timestamp`            | Session ID format: `timestamp`, `datetime_short`. |
+| `agent_id`                     | string   | *(empty)*              | Partitions per-agent storage and other per-agent state. Set by multi-agent embedders (the desktop shell). Empty in CLI / single-agent embedders, which collapses agent-scope storage to app-scope. |
+| `storage.root`                 | string   | `~/.nexus`             | Data root for app- and agent-scope per-plugin storage. App-scope `.db` files land at `<root>/plugins/<pluginID>/store.db`; agent-scope at `<root>/agents/<agent_id>/plugins/<pluginID>/store.db`. |
+| `storage.busy_timeout_ms`      | int      | `5000`                 | SQLite `busy_timeout` PRAGMA per handle (milliseconds). |
+| `storage.cache_size_kb`        | int      | `2048`                 | SQLite `cache_size` PRAGMA per handle (negative-form, in KiB). |
+| `storage.pool_max_idle`        | int      | `2`                    | `*sql.DB.SetMaxIdleConns` per handle. |
+| `storage.pool_max_open`        | int      | `4`                    | `*sql.DB.SetMaxOpenConns` per handle. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
 
 ### `core.models`
@@ -765,6 +771,7 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `auto_store_compaction` | bool   | `true`                 | Store summaries when `memory.compacted` fires. |
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
+| `recall_via_hybrid`     | bool   | `false`                | When `search.hybrid` is active, route recall queries through it instead of direct vector lookup. Off by default — adds the lexical leg's latency to every user input. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
 | `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
@@ -812,7 +819,118 @@ Source: `plugins/vectorstore/chromem/plugin.go`. Provides `vector.store`.
 
 ---
 
+## Lexical store
+
+### `nexus.vectorstore.sqlite_fts`
+
+Source: `plugins/vectorstore/sqlite_fts/plugin.go`. Provides `search.lexical`.
+BM25 ranking via SQLite FTS5 — pure Go, no CGO. Backing storage comes from
+the engine's per-plugin storage capability; the `scope:` knob picks where the
+underlying `store.db` lands.
+
+| Key      | Type   | Default   | Description |
+|----------|--------|-----------|-------------|
+| `scope`  | string | `session` | Storage scope for the FTS index: `session`, `agent`, `app`. Knowledge-base-style corpora that survive across sessions should use `agent` or `app`. |
+
+Each namespace becomes a separate FTS5 virtual table (`lex_<safe_namespace>`)
+inside the scoped `store.db`. The provider auto-creates tables on first
+upsert; missing-namespace queries return zero results without error.
+
+---
+
 ## RAG
+
+### `nexus.rag.hybrid`
+
+Source: `plugins/rag/hybrid/plugin.go`. Provides `search.hybrid` — a fusion
+orchestrator that runs vector + lexical retrieval in parallel and combines
+results via Reciprocal Rank Fusion or weighted score combination.
+
+| Key                | Type   | Default | Description |
+|--------------------|--------|---------|-------------|
+| `fusion`           | string | `rrf`   | Fusion strategy: `rrf` (rank-only, weight-free) or `weighted` (linear combination over min-max-normalized per-backend scores). |
+| `rrf_k`            | int    | `60`    | RRF smoothing constant. Lower values weight top ranks more heavily. |
+| `weights.vector`   | float  | `0.7`   | Per-backend bias for `weighted` fusion. |
+| `weights.lexical`  | float  | `0.3`   | Per-backend bias for `weighted` fusion. |
+| `retrieve_k`       | int    | `50`    | Per-backend candidate count gathered before fusion. |
+| `fuse_to`          | int    | `20`    | Default post-fusion top-N when the caller does not specify K. |
+| `embedding_model`  | string | *(provider default)* | Embedding model used when callers fire `hybrid.query` without a pre-embedded vector. |
+| `reranker.enabled` | bool   | `false` | Apply a post-fusion reranker pass via the `search.reranker` capability. Off by default — enable when a reranker provider is active and the latency budget allows. |
+
+Requires `embeddings.provider`, `vector.store`, and `search.lexical`. Per-query
+`LexicalBias` (range -1..1) on the `hybrid.query` event tilts fusion weights
+without rewriting config — positive favors lexical, negative favors vector.
+
+When `search.hybrid` is active, `nexus.tool.knowledge_search` automatically
+routes through it instead of querying the vector store directly.
+`nexus.memory.vector` opts in via `recall_via_hybrid: true` (off by default
+because the lexical leg adds latency on every user input).
+
+---
+
+### Rerankers (`search.reranker` capability)
+
+Three providers ship; activate one (rarely more than one). The hybrid
+orchestrator's `reranker.enabled: true` knob switches them on; without that,
+plugins can still emit `reranker.rerank` events directly.
+
+#### `nexus.rag.reranker.cohere`
+
+Source: `plugins/rag/reranker/cohere/plugin.go`. Cohere Rerank v2 API.
+
+| Key            | Type   | Default                | Description |
+|----------------|--------|------------------------|-------------|
+| `api_key`      | string | *(none)*               | Cohere API key. Mutually exclusive with `api_key_env`. |
+| `api_key_env`  | string | `COHERE_API_KEY`       | Env var to read the key from when `api_key` is unset. |
+| `model`        | string | `rerank-english-v3.0`  | Cohere reranker model identifier. |
+| `timeout_ms`   | int    | `10000`                | HTTP timeout in milliseconds. |
+| `api_base`     | string | *(Cohere v2 endpoint)* | Override for testing / private deployments. |
+
+#### `nexus.rag.reranker.jina`
+
+Source: `plugins/rag/reranker/jina/plugin.go`. Jina AI Reranker API.
+
+| Key            | Type   | Default                                   | Description |
+|----------------|--------|-------------------------------------------|-------------|
+| `api_key`      | string | *(none)*                                  | Jina API key. Mutually exclusive with `api_key_env`. |
+| `api_key_env`  | string | `JINA_API_KEY`                            | Env var to read the key from when `api_key` is unset. |
+| `model`        | string | `jina-reranker-v2-base-multilingual`      | Jina reranker model identifier. |
+| `timeout_ms`   | int    | `10000`                                   | HTTP timeout in milliseconds. |
+| `api_base`     | string | *(Jina v1 endpoint)*                      | Override for testing / private deployments. |
+
+#### `nexus.rag.reranker.local`
+
+Source: `plugins/rag/reranker/local/plugin.go`. Pure-Go TF-IDF cosine
+reranker. No API calls, no model files, no extra dependencies. Quality is
+materially below a real cross-encoder; use it for offline / cost-sensitive
+deployments and as the zero-dep fallback. Future phase will add an ONNX-
+backed BGE Reranker behind a build tag.
+
+| Key                  | Type | Default | Description |
+|----------------------|------|---------|-------------|
+| `min_token_length`   | int  | `2`     | Drop tokens shorter than this during scoring. |
+| `disable_stopwords`  | bool | `false` | Skip the built-in English stopword filter. |
+
+---
+
+### `nexus.rag.citations`
+
+Source: `plugins/rag/citations/plugin.go`. Provides `rag.citations`. Parses
+citation tags or Anthropic-native source attributions out of LLM responses
+and emits the structured `llm.response.cited` event for IO renderers to
+footnote.
+
+| Key                | Type   | Default | Description |
+|--------------------|--------|---------|-------------|
+| `mode`             | string | `auto`  | Citation source: `tag` (parses `<cite source="..." chunk="N"/>` markers), `anthropic_native` (reads `LLMResponse.Citations[]` populated by Anthropic), or `auto` (uses native when present, falls back to tag). |
+| `strict`           | bool   | `true`  | When true, citations whose `(source, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped. When false, they are kept and tagged with `TrustTier="unverified"`. |
+| `section_priority` | int    | `60`    | Priority of the citation-contract section in the system prompt (only used in tag/auto modes). |
+
+Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
+`nexus.memory.vector`) to build the per-turn validation set, then to
+`llm.response` to do the parsing. Emits `llm.response.cited`.
+
+---
 
 ### `nexus.rag.ingest`
 
@@ -823,14 +941,27 @@ and the `rag.ingest` event handler.
 |-----------------------|------|----------------------------|-------------|
 | `chunker.size`        | int  | `1000`                     | Characters per chunk. |
 | `chunker.overlap`     | int  | `200`                      | Character overlap between chunks. |
-| `cache_dir`           | string | `~/.nexus/vectors/_cache` | Embedding cache directory (hash → vector). |
+| `cache_dir`           | string | `~/.nexus/vectors/_cache` | Embedding cache directory (hash → vector). The contextual-prefix cache lands at `<cache_dir>/_prefix/`. |
 | `backfill`            | bool | `true`                     | Walk watched directories at startup and ingest pre-existing files. |
 | `watch`               | list | *(empty)*                  | File watch entries; each is `{path, glob, namespace}`. |
 | `watch[].path`        | string | *(required)*             | Directory to watch. |
 | `watch[].glob`        | string | *(empty — match all)*    | Glob pattern for files to ingest. |
 | `watch[].namespace`   | string | *(required)*             | Vector store namespace. |
+| `contextual_retrieval.enabled`              | bool   | `false`                    | Per-chunk LLM-generated situating prefix (Anthropic contextual retrieval). Adds one LLM call per uncached chunk during ingest; ~49% reported recall improvement. Stored content stays the raw chunk; only the embed/lexical text is prefixed. |
+| `contextual_retrieval.model`                | string | *(role default)*           | Model role to use for prefix generation (e.g. `cheap`, `balanced`). Combined with `model_id` to override `core.models` at the call site. |
+| `contextual_retrieval.model_id`             | string | *(role default)*           | Concrete model identifier override. |
+| `contextual_retrieval.max_chars_doc_window` | int    | `2000`                     | Max characters of surrounding document context handed to the LLM. |
+| `contextual_retrieval.max_chars_prefix`     | int    | `400`                      | Truncate generated prefix to this many characters before concatenation. |
+| `contextual_retrieval.timeout_ms`           | int    | `30000`                    | Per-call timeout. On timeout the prefix is dropped and the raw chunk is used. |
 
-Requires `embeddings.provider` and `vector.store`.
+Requires `embeddings.provider` and `vector.store`. When `search.lexical` is
+also active, ingest dual-writes each chunk into the lexical store with the
+same `(namespace, doc_id)` pair the vector store uses.
+
+To migrate an existing chromem-only corpus to dual-mode: add
+`nexus.vectorstore.sqlite_fts` to `plugins.active` and re-run
+`nexus ingest --lexical=true PATH`. The embedding cache short-circuits the
+vector pass while the lexical store is freshly populated.
 
 ---
 

@@ -23,7 +23,7 @@ Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `
 
 All comms via central typed event bus — plugins never call each other direct.
 
-- **Engine** (`pkg/engine/`) — Event bus, plugin registry, lifecycle, session workspace, config loading. Only "core" code.
+- **Engine** (`pkg/engine/`) — Event bus, plugin registry, lifecycle, session workspace, config loading, per-plugin SQLite storage (`pkg/engine/storage/`). Only "core" code.
 - **Events** (`pkg/events/`) — Typed event payload structs by domain: `core.go`, `llm.go`, `agent.go`, `tool.go`, `io.go`, `memory.go`, `skill.go`, `session.go`, `schema.go`.
 - **Plugins** (`plugins/`) — All behavior lives here. Each implements `engine.Plugin`.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
@@ -49,7 +49,7 @@ Every plugin implements `engine.Plugin` (`pkg/engine/plugin.go`):
 - `ID() string` — Dotted ID (e.g. `nexus.tool.shell`)
 - `Dependencies() []string` — IDs this plugin needs **already in the active set** for ordering; does NOT activate anything.
 - `Requires() []Requirement` — IDs this plugin needs to **activate** if absent; engine appends them to the active set at boot.
-- `Init(ctx PluginContext) error` — Gets config, bus, logger, data dir, session
+- `Init(ctx PluginContext) error` — Gets config, bus, logger, data dir, session, storage opener (`ctx.Storage(scope)` for app/agent/session-scoped SQLite)
 - `Ready() error` — Called after all plugins init'd
 - `Shutdown(ctx context.Context) error`
 - `Subscriptions() []EventSubscription` — Events plugin listens to
@@ -104,7 +104,13 @@ plugins/
   embeddings/openai/     # embeddings.provider adapter: OpenAI embeddings API (text-embedding-3-*)
   embeddings/mock/       # embeddings.provider adapter: deterministic hash-based vectors; no network, opt-in via plugins.active
   vectorstore/chromem/   # vector.store adapter: philippgille/chromem-go, pure Go, JSON on-disk persistence; namespaces map to collections
-  rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand
+  vectorstore/sqlite_fts/ # search.lexical adapter: SQLite FTS5 (modernc.org/sqlite, pure Go); BM25 ranking; namespaces map to FTS5 virtual tables; backed by per-plugin storage capability
+  rag/citations/         # rag.citations: parse <cite/> tags or Anthropic native Citations from llm.response, validate against rag.retrieved, emit llm.response.cited
+  rag/hybrid/            # search.hybrid orchestrator: parallel vector + lexical retrieval, RRF or weighted fusion, per-query LexicalBias, optional reranker pass
+  rag/reranker/cohere/   # search.reranker adapter: Cohere Rerank v2 API
+  rag/reranker/jina/     # search.reranker adapter: Jina Reranker API
+  rag/reranker/local/    # search.reranker adapter: pure-Go TF-IDF cosine (offline; baseline quality, zero deps)
+  rag/ingest/            # RAG file ingestion: recursive-character chunker + embedding cache + fsnotify watcher + rag.ingest event handler; backs the "nexus ingest" CLI subcommand; dual-writes to search.lexical when active
   observe/otel/          # OpenTelemetry trace export via OTLP
   observe/thinking/      # Thinking step persistence (JSONL) — bus-driven, also visible in journal
   observe/sampler/       # Online journal sampler — opt-in, FS-only
@@ -132,8 +138,13 @@ Sessions persist to `~/.nexus/sessions/<id>/` with:
 - `metadata/config-snapshot.yaml` — Config used for session
 - `context/` — Conversation context files
 - `files/` — Session file workspace
-- `plugins/<pluginID>/` — Per-plugin data dirs
+- `plugins/<pluginID>/` — Per-plugin data dirs (also holds session-scoped `store.db` if the plugin uses `ctx.Storage(ScopeSession)`)
 - `ui-state.json` — Frontend UI state snapshot (written by shell on `ui.state.save` events)
+
+App- and agent-scope per-plugin storage live outside the session tree at
+`~/.nexus/plugins/<pluginID>/store.db` and
+`~/.nexus/agents/<agentID>/plugins/<pluginID>/store.db`. See
+`docs/src/architecture/storage.md`.
 
 ## Planning System
 
@@ -156,7 +167,7 @@ Discovered exclusively from directories listed in the `nexus.skills` plugin's `s
 - **Event types**: Dotted namespace — `core.boot`, `llm.request`, `tool.result`, etc.
 - **Config**: YAML, loaded at startup. Plugin config passed as `map[string]any` during init.
 - **No direct plugin-to-plugin calls**: All comms via event bus.
-- **Dependencies**: Minimal — only `gopkg.in/yaml.v3` beyond stdlib. Anthropic API called via raw HTTP. JSON schema gate uses `github.com/santhosh-tekuri/jsonschema/v6`. Vector store uses `github.com/philippgille/chromem-go` (pure Go, no CGO). Desktop shell adds `github.com/wailsapp/wails/v2`, `github.com/zalando/go-keyring`, `github.com/fsnotify/fsnotify`.
+- **Dependencies**: Minimal — only `gopkg.in/yaml.v3` beyond stdlib. Anthropic API called via raw HTTP. JSON schema gate uses `github.com/santhosh-tekuri/jsonschema/v6`. Vector store uses `github.com/philippgille/chromem-go` (pure Go, no CGO). Per-plugin SQLite storage uses `modernc.org/sqlite` (pure Go, FTS5 included). Desktop shell adds `github.com/wailsapp/wails/v2`, `github.com/zalando/go-keyring`, `github.com/fsnotify/fsnotify`.
 - **Prompt construction**: All content injected into LLM prompts must use XML tag boundaries to separate structural sections. Use semantic tags (`<execution_plan>`, `<current_task>`, `<prior_results>`, `<user_request>`, `<skill_context>`, etc.) not markdown headers or bare concatenation. See `plugins/skills/catalog.go` for reference pattern. Shared XML helpers live in `pkg/engine/`.
 - **Path expansion**: Every config-supplied filesystem path must be funneled through `engine.ExpandPath` (`pkg/engine/paths.go`) at the read site so users can write `~` or `~/...` anywhere a path is accepted. There is exactly one helper — do not add new local `expandHome` copies.
 

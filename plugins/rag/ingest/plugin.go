@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -41,12 +42,18 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	chunker *chunker
-	cache   *embeddingCache
+	chunker    *chunker
+	cache      *embeddingCache
+	contextual *contextualizer
 
 	watches  []watchEntry
 	watcher  *watcher // lazily started in Ready when len(watches) > 0
 	backfill bool     // walk + ingest existing files at startup; on by default
+	// hasLexical indicates that the search.lexical capability is active and
+	// the ingest pipeline should dual-write each chunk into the lexical
+	// store alongside the vector store. Captured from PluginContext.Capabilities
+	// at Init so the per-ingest hot path stays free of capability lookups.
+	hasLexical bool
 
 	unsubs []func()
 }
@@ -131,6 +138,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			p.watches = append(p.watches, e)
 		}
 	}
+
+	p.hasLexical = len(ctx.Capabilities["search.lexical"]) > 0
+
+	// Optional contextual retrieval: per-chunk LLM-generated situating
+	// prefix to lift retrieval recall (Anthropic ~49% reduction in
+	// failures on internal corpora). Disabled by default.
+	contextualCfg, _ := ctx.Config["contextual_retrieval"].(map[string]any)
+	contextualizer, err := newContextualizer(p.bus, p.logger, contextualCfg, cacheDir)
+	if err != nil {
+		return fmt.Errorf("rag/ingest: contextual: %w", err)
+	}
+	p.contextual = contextualizer
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("rag.ingest", p.handleIngest,
@@ -230,6 +249,9 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	if p.watcher != nil {
 		p.watcher.close()
 	}
+	if p.contextual != nil {
+		p.contextual.close()
+	}
 	return nil
 }
 
@@ -245,6 +267,8 @@ func (p *Plugin) Emissions() []string {
 		"embeddings.request",
 		"vector.upsert",
 		"vector.delete",
+		"lexical.upsert",
+		"lexical.delete",
 		"rag.ingest",
 		"rag.ingest.delete",
 		"rag.ingest.result",
@@ -298,17 +322,35 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 	if err != nil {
 		return fmt.Errorf("read %q: %w", req.Path, err)
 	}
-	chunks := p.chunker.chunk(string(data))
+	docText := string(data)
+	chunks := p.chunker.chunk(docText)
 	if len(chunks) == 0 {
 		return nil
 	}
 
-	// Split into cached + uncached.
+	// Apply optional contextual retrieval: prefix each chunk with an
+	// LLM-generated situating paragraph. The text used for embedding +
+	// lexical indexing is `prefix + "\n\n" + chunk`; the original chunk is
+	// preserved for storage so retrieved Content stays human-readable.
+	embedTexts := make([]string, len(chunks))
+	for i, c := range chunks {
+		if p.contextual != nil {
+			if prefix := p.contextual.Prefix(docText, c); prefix != "" {
+				embedTexts[i] = prefix + "\n\n" + c
+				continue
+			}
+		}
+		embedTexts[i] = c
+	}
+
+	// Split into cached + uncached. Cache key uses the embed-text (which
+	// includes the contextual prefix) so re-ingest with contextual on/off
+	// produces independent cache entries.
 	vectors := make([][]float32, len(chunks))
 	missing := make([]int, 0, len(chunks))
 	missingText := make([]string, 0, len(chunks))
 
-	for i, c := range chunks {
+	for i, c := range embedTexts {
 		if v := p.cache.Get(c); v != nil {
 			vectors[i] = v
 			continue
@@ -334,23 +376,34 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		}
 	}
 
+	ingestedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	docs := make([]events.VectorDoc, len(chunks))
+	lexDocs := make([]events.LexicalDoc, 0, len(chunks))
 	pathHash := pathKey(req.Path)
 	for i, c := range chunks {
 		meta := map[string]string{
-			"source":     req.Path,
-			"path_hash":  pathHash,
-			"chunk_idx":  fmt.Sprintf("%d", i),
-			"chunk_size": fmt.Sprintf("%d", len(c)),
+			"source":      req.Path,
+			"path_hash":   pathHash,
+			"chunk_idx":   fmt.Sprintf("%d", i),
+			"chunk_size":  fmt.Sprintf("%d", len(c)),
+			"ingested_at": ingestedAt,
 		}
 		for k, v := range req.Metadata {
 			meta[k] = v
 		}
+		docID := fmt.Sprintf("%s-%d", pathHash, i)
 		docs[i] = events.VectorDoc{
-			ID:       fmt.Sprintf("%s-%d", pathHash, i),
+			ID:       docID,
 			Vector:   vectors[i],
 			Content:  c,
 			Metadata: meta,
+		}
+		if p.hasLexical {
+			lexDocs = append(lexDocs, events.LexicalDoc{
+				ID:       docID,
+				Content:  c,
+				Metadata: meta,
+			})
 		}
 	}
 
@@ -359,6 +412,15 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 	if up.Error != "" {
 		return fmt.Errorf("upsert: %s", up.Error)
 	}
+
+	if p.hasLexical && len(lexDocs) > 0 {
+		lexUp := &events.LexicalUpsert{Namespace: req.Namespace, Docs: lexDocs}
+		_ = p.bus.Emit("lexical.upsert", lexUp)
+		if lexUp.Error != "" {
+			return fmt.Errorf("lexical upsert: %s", lexUp.Error)
+		}
+	}
+
 	req.Chunks = len(chunks)
 	req.SkippedCached = len(chunks) - len(missing)
 
@@ -367,6 +429,7 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		"namespace", req.Namespace,
 		"chunks", req.Chunks,
 		"skipped_cached", req.SkippedCached,
+		"lexical", p.hasLexical,
 	)
 	return nil
 }
@@ -389,6 +452,13 @@ func (p *Plugin) delete(req *events.RAGIngestDelete) error {
 	_ = p.bus.Emit("vector.delete", del)
 	if del.Error != "" {
 		return fmt.Errorf("delete: %s", del.Error)
+	}
+	if p.hasLexical {
+		lexDel := &events.LexicalDelete{Namespace: req.Namespace, IDs: ids}
+		_ = p.bus.Emit("lexical.delete", lexDel)
+		if lexDel.Error != "" {
+			return fmt.Errorf("lexical delete: %s", lexDel.Error)
+		}
 	}
 	p.logger.Info("deleted file chunks", "path", req.Path, "namespace", req.Namespace)
 	return nil
