@@ -241,8 +241,10 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source": pluginID,
+			"_source":   pluginID,
+			"task_kind": "plan",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &llmReq); err == nil && veto.Vetoed {
 		p.logger.Info("llm.request vetoed", "reason", veto.Reason)

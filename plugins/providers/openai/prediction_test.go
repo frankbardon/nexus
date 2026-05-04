@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -70,7 +71,7 @@ func TestBuildRequestBody_PredictionStrippedOnReasoningModel(t *testing.T) {
 // TestConvertAPIResponse_PredictionAcceptancePopulated verifies that nonzero
 // accepted/rejected counts surface as Metadata["prediction_acceptance"].
 func TestConvertAPIResponse_PredictionAcceptancePopulated(t *testing.T) {
-	p := &Plugin{pricing: defaultPricing}
+	p := &Plugin{pricing: pricing.DefaultsFor(pricing.ProviderOpenAI)}
 
 	content := "edited text"
 	apiResp := apiResponse{
@@ -107,7 +108,7 @@ func TestConvertAPIResponse_PredictionAcceptancePopulated(t *testing.T) {
 // TestConvertAPIResponse_PredictionAcceptanceAbsentOnZero verifies that when
 // both counts are zero, the prediction_acceptance key is not set.
 func TestConvertAPIResponse_PredictionAcceptanceAbsentOnZero(t *testing.T) {
-	p := &Plugin{pricing: defaultPricing}
+	p := &Plugin{pricing: pricing.DefaultsFor(pricing.ProviderOpenAI)}
 
 	content := "hi"
 	apiResp := apiResponse{
@@ -202,7 +203,7 @@ func TestStreamFinalize_PredictionAcceptanceSurfaces(t *testing.T) {
 	p := &Plugin{
 		bus:                bus,
 		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		pricing:            defaultPricing,
+		pricing:            pricing.DefaultsFor(pricing.ProviderOpenAI),
 		currentRequestMeta: map[string]any{"_structured_output": true},
 	}
 

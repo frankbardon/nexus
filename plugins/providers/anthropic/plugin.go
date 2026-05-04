@@ -16,6 +16,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -23,55 +24,17 @@ const (
 	pluginID   = "nexus.llm.anthropic"
 	pluginName = "Anthropic LLM Provider"
 	version    = "0.1.0"
+
+	// defaultMaxTokens is the floor max_tokens applied when neither the
+	// request, the request's role, nor the default role specifies one.
+	// Picked to be large enough for a typical agent turn but well below
+	// every 4.x model's per-request ceiling.
+	defaultMaxTokens = 4096
 )
 
-// modelPricing holds per-model token rates in USD per million tokens.
-//
-// Cache rates are optional: when zero, calculateCost falls back to derived
-// multiples of InputPerMillion (read = 0.10×, write_5m = 1.25×, write_1h = 2.0×)
-// per Anthropic's published cache pricing.
-type modelPricing struct {
-	InputPerMillion        float64
-	OutputPerMillion       float64
-	CacheReadPerMillion    float64 // 0 → InputPerMillion * 0.10
-	CacheWrite5mPerMillion float64 // 0 → InputPerMillion * 1.25
-	CacheWrite1hPerMillion float64 // 0 → InputPerMillion * 2.0
-}
-
-// defaultPricing is the embedded fallback pricing table. Updated via patch
-// releases when providers change rates. Config override always wins.
-var defaultPricing = map[string]modelPricing{
-	"claude-sonnet-4-6-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-sonnet-4-5-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-haiku-4-5-20251001":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
-	"claude-opus-4-6-20250602":   {InputPerMillion: 15.0, OutputPerMillion: 75.0},
-	"claude-3-5-sonnet-20241022": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-3-5-haiku-20241022":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
-	"claude-3-opus-20240229":     {InputPerMillion: 15.0, OutputPerMillion: 75.0},
-}
-
-// calculateCost computes the USD cost for a single LLM call.
-//
-// Anthropic's `input_tokens` already excludes cache-creation and cache-read
-// portions, so usage.PromptTokens is the cache-miss (plain input) count and
-// CachedTokens / CacheWriteTokens are billed separately at their own rates.
-//
-// We currently treat all CacheWriteTokens as 5-minute-TTL writes; per-request
-// TTL selection (cf. plan 01) will route writes to the 1h rate when needed.
-func calculateCost(usage events.Usage, rates modelPricing) float64 {
-	cacheReadRate := rates.CacheReadPerMillion
-	if cacheReadRate == 0 {
-		cacheReadRate = rates.InputPerMillion * 0.10
-	}
-	cacheWriteRate := rates.CacheWrite5mPerMillion
-	if cacheWriteRate == 0 {
-		cacheWriteRate = rates.InputPerMillion * 1.25
-	}
-	return float64(usage.PromptTokens)/1_000_000*rates.InputPerMillion +
-		float64(usage.CacheWriteTokens)/1_000_000*cacheWriteRate +
-		float64(usage.CachedTokens)/1_000_000*cacheReadRate +
-		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
-}
+// Pricing tables and cost calculation live in pkg/engine/pricing/ — providers
+// share a single source of truth so the cost CLI, multi-dim budget gate, and
+// router can reason about every model uniformly.
 
 // Plugin implements the Anthropic LLM provider.
 type Plugin struct {
@@ -98,7 +61,7 @@ type Plugin struct {
 	files             filesConfig
 	citations         citationsConfig
 	structuredOutputs structuredOutputsConfig
-	pricing           map[string]modelPricing // merged: config overrides + embedded defaults
+	pricing           *pricing.Table // merged: config overrides + embedded defaults
 
 	// filesAPIURL is the production endpoint by default; tests override.
 	filesAPIURL string
@@ -106,6 +69,7 @@ type Plugin struct {
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
+	currentRequestTags map[string]string  // copied to llm.response for cost attribution
 	cancelFunc         context.CancelFunc // cancels the in-flight HTTP request
 	requestSeq         int                // monotonic counter for debug log filenames
 	sessionFileIDs     []string           // file_ids uploaded this session (for delete_on_shutdown)
@@ -355,6 +319,26 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		}
 	}
 
+	// max_tokens may still be 0 — common when the router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped. Try the role's
+	// max_tokens, then the default role's, then a safe constant. The
+	// Anthropic API rejects max_tokens=0 with "stream cannot be true when
+	// max tokens is 0", so we must never let that through.
+	if maxTokens == 0 && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			maxTokens = cfg.MaxTokens
+		}
+	}
+	if maxTokens == 0 && p.models != nil {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			maxTokens = def.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
+	}
+
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	// Files API preflight: when enabled, swap oversize Data parts for file_ids
@@ -464,6 +448,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	p.mu.Lock()
 	p.currentRequestMeta = meta
+	p.currentRequestTags = req.Tags
 	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
@@ -798,6 +783,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	// provider-attached keys are preserved.
 	p.mu.Lock()
 	meta := p.currentRequestMeta
+	tags := p.currentRequestTags
 	p.mu.Unlock()
 	if resp.Metadata == nil {
 		resp.Metadata = meta
@@ -806,6 +792,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 			resp.Metadata[k] = v
 		}
 	}
+	resp.Tags = tags
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
 		p.logger.Error("failed to emit llm.response", "error", err)
@@ -1050,6 +1037,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		}
 	}
 
+	p.mu.Lock()
+	tags := p.currentRequestTags
+	p.mu.Unlock()
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
 		Content:      st.fullContent.String(),
 		ToolCalls:    st.toolCalls,
@@ -1059,6 +1049,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		FinishReason: st.finishReason,
 		Citations:    st.citations,
 		Metadata:     respMeta,
+		Tags:         tags,
 	})
 }
 
@@ -1299,8 +1290,8 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 	}
 }
 
-// parsePricingConfig merges embedded defaults with optional config overrides.
-// Config format:
+// parsePricingConfig builds the merged price table from embedded defaults
+// plus optional `pricing:` overrides under the plugin's config block.
 //
 //	pricing:
 //	  claude-sonnet-4-6-20250514:
@@ -1310,52 +1301,19 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 //	    cache_write_5m_per_million: 3.75
 //	    cache_write_1h_per_million: 6.0
 //
-// Cache rates are optional; calculateCost derives them from input rate when
-// unset (read = 0.10×, write 5m = 1.25×, write 1h = 2.0×).
-func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
-	merged := make(map[string]modelPricing, len(defaultPricing))
-	for k, v := range defaultPricing {
-		merged[k] = v
+// Cache rates are optional; calc derives them when unset (read 0.10×,
+// write 5m 1.25×, write 1h 2.0×).
+func parsePricingConfig(cfg map[string]any) *pricing.Table {
+	tbl := pricing.DefaultsFor(pricing.ProviderAnthropic)
+	if raw, ok := cfg["pricing"].(map[string]any); ok {
+		tbl.Merge(raw)
 	}
-
-	raw, ok := cfg["pricing"].(map[string]any)
-	if !ok {
-		return merged
-	}
-
-	for model, val := range raw {
-		entry, ok := val.(map[string]any)
-		if !ok {
-			continue
-		}
-		p := merged[model]
-		if v, ok := entry["input_per_million"].(float64); ok {
-			p.InputPerMillion = v
-		}
-		if v, ok := entry["output_per_million"].(float64); ok {
-			p.OutputPerMillion = v
-		}
-		if v, ok := entry["cache_read_per_million"].(float64); ok {
-			p.CacheReadPerMillion = v
-		}
-		if v, ok := entry["cache_write_5m_per_million"].(float64); ok {
-			p.CacheWrite5mPerMillion = v
-		}
-		if v, ok := entry["cache_write_1h_per_million"].(float64); ok {
-			p.CacheWrite1hPerMillion = v
-		}
-		merged[model] = p
-	}
-
-	return merged
+	return tbl
 }
 
 // costForModel returns the USD cost for a response from the given model.
 func (p *Plugin) costForModel(model string, usage events.Usage) float64 {
-	if rates, ok := p.pricing[model]; ok {
-		return calculateCost(usage, rates)
-	}
-	return 0
+	return p.pricing.Calc(model, usage)
 }
 
 func (p *Plugin) debugLog(label string, data []byte) {

@@ -166,3 +166,4 @@ Manual / interactive only. Run with `bin/nexus -config configs/<name>.yaml`. Not
 | `demo-gates-strict.yaml` | Tight gate limits, manual veto exploration |
 | `demo-rag.yaml` | RAG primitives walkthrough (embeddings + vector store + ingest + knowledge_search) |
 | `demo-sandbox-wasm.yaml` | `code_exec` under wasm sandbox; agent uses `nexus_sdk/{http,fs,exec,env}` to do gated I/O. Live Anthropic; `cache_dir` set so cold-start amortises across runs. |
+| `demo-router-and-cost.yaml` | Per-step model router + multi-dim cost attribution (Idea 09). Metadata router pins planner/compaction to Haiku, ReAct main loop to Sonnet, escalates to Opus on iteration 3+. Classifier router covers free-form prompts via prompt-prefix-cached LLM judgment. Multi-dim `token_budget` ceilings (session, source_plugin, tenant). After turns, run `bin/nexus cost report --config configs/demo-router-and-cost.yaml --group-by source_plugin` to see attribution. |

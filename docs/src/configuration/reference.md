@@ -1172,6 +1172,59 @@ priority 5 (ahead of memory plugins).
 
 ---
 
+## Routers
+
+Plugins that subscribe `before:llm.request` and rewrite `request.Model`
+based on the request's metadata, tags, or an LLM-classifier judgment.
+Routers run at priority 50 (metadata) / 45 (classifier) — above gates,
+below the engine's tag seeder. Both stand down when the request already
+carries `_target_provider` (a fallback retry) or `_routed_by` (an upstream
+rule already chose a model).
+
+### `nexus.router.metadata`
+
+Source: `plugins/router/metadata/plugin.go`. Declarative rules over the
+request's `Metadata` (`_source`, `task_kind`, `iteration`) and `Tags`
+(`tenant`, `project`, `source_plugin`, ...). First matching rule wins;
+the terminal `default_model` / `default_role` fires when no rule matches.
+
+| Key             | Type   | Default     | Description |
+|-----------------|--------|-------------|-------------|
+| `rules`         | list   | *(empty)*   | Ordered rule list. See below. |
+| `default_model` | string | *(none)*    | Fallback model id when no rule matches. |
+| `default_role`  | string | *(none)*    | Fallback role when no rule matches. |
+
+Each entry under `rules`:
+
+| Key      | Type   | Default     | Description |
+|----------|--------|-------------|-------------|
+| `name`   | string | `rule#N`    | Optional label recorded on `req.Metadata["_routed_rule"]`. |
+| `match`  | map    | *(required)* | Match conditions. Keys: `metadata.<key>`, `tags.<key>`, `role`, `model`. Values: bare string (equality), or `{lt|lte|gt|gte|eq: N}` for numeric comparators on metadata fields. |
+| `use`    | string | *(one of)*  | Concrete model id to assign. |
+| `role`   | string | *(one of)*  | Role name to assign (resolved against `core.models`). |
+
+### `nexus.router.classifier`
+
+Source: `plugins/router/classifier/plugin.go`. Small LLM judges the
+difficulty of the user's most recent prompt and picks one of `candidates`.
+The decision is cached by prompt-prefix hash (LRU). Cache hits route
+synchronously; misses route to `fallback` immediately and warm the cache
+asynchronously via a probe `llm.request` tagged `_source: nexus.router.classifier`.
+
+| Key                    | Type   | Default     | Description |
+|------------------------|--------|-------------|-------------|
+| `classifier_model`     | string | *(one of)*  | Model id used for the classification probe. |
+| `classifier_role`      | string | *(one of)*  | Alternative to `classifier_model`. |
+| `candidates`           | list   | *(required)* | Cheapest-first list of model ids the classifier picks among. |
+| `fallback`             | string | *(none)*    | Model id used on cache miss while the cache warms. |
+| `prompt`               | string | *(default)* | Classifier prompt template (`%s` for candidates list and prompt). |
+| `prefix_chars`         | int    | `256`       | Number of leading prompt characters folded into the cache key. |
+| `cache_classification` | bool   | `true`      | Whether to cache decisions at all. |
+| `cache_max_entries`    | int    | `1024`      | LRU capacity. |
+| `latency_budget_ms`    | int    | `800`       | Drop the warm if the probe doesn't return within this window. |
+
+---
+
 ## Discovery
 
 ### `nexus.discovery.progressive`
@@ -1259,13 +1312,37 @@ Source: `plugins/gates/stop_words/plugin.go`. Gates both `before:llm.request`
 
 ### `nexus.gate.token_budget`
 
-Source: `plugins/gates/token_budget/plugin.go`.
+Source: `plugins/gates/token_budget/plugin.go`. Multi-dimensional ceilings
+(session / tenant / source_plugin) with `block`, `warn`, or `downgrade-model`
+actions. The legacy single-ceiling shape (`max_tokens`) still works as a
+session total-token ceiling.
 
-| Key                 | Type  | Default                                     | Description |
-|---------------------|-------|---------------------------------------------|-------------|
-| `max_tokens`        | int   | `100000`                                    | Session token ceiling. |
-| `warning_threshold` | float | `0.8`                                       | Warn when usage reaches this fraction. |
-| `message`           | string | `Token budget exhausted for this session.` | Veto message. |
+| Key                    | Type   | Default                                     | Description |
+|------------------------|--------|---------------------------------------------|-------------|
+| `max_tokens`           | int    | *(unset)*                                   | Backward-compat session total-token ceiling. |
+| `message`              | string | `Token budget exhausted for this session.`  | Default veto message for the legacy ceiling. |
+| `on_exceed`            | string | `block`                                     | Default action when a ceiling fires (`block` \| `warn` \| `downgrade-model`). Each ceiling can override. |
+| `downgrade_candidates` | list   | *(empty)*                                   | Model IDs the `downgrade-model` action picks the cheapest entry from (priced via `pkg/engine/pricing`). |
+| `pricing`              | map    | *(merged provider defaults)*                | Per-model overrides applied to the unified pricing table; same shape as the per-provider `pricing` block. |
+| `ceilings`             | list   | *(empty)*                                   | List of ceiling rules. See below. |
+
+Each entry under `ceilings`:
+
+| Key                 | Type   | Default     | Description |
+|---------------------|--------|-------------|-------------|
+| `dimension`         | string | `session`   | One of `session`, `tenant`, `source_plugin`. |
+| `match`             | string | *(none)*    | For `tenant`/`source_plugin`: only this bucket. |
+| `window`            | string | `session`   | `session` (lifetime of the session) or `day` (rolling UTC midnight). |
+| `on_exceed`         | string | top-level default | Per-rule override for the gate's `on_exceed`. |
+| `max_input_tokens`  | int    | *(unset)*   | Veto/downgrade once cumulative input tokens reach this value. |
+| `max_output_tokens` | int    | *(unset)*   | Same for completion tokens. |
+| `max_total_tokens`  | int    | *(unset)*   | Same for total tokens. |
+| `max_usd`           | float  | *(unset)*   | Same for USD spend. |
+| `max_usd_per_session` | float | *(unset)*  | Convenience alias for `max_usd` with `window: session`. |
+| `max_usd_per_day`   | float  | *(unset)*   | Convenience alias for `max_usd` with `window: day`. |
+| `message`           | string | *(reason)*  | Override message emitted on `block`/`warn`. |
+
+Tenant ceilings persist via app-scope SQLite (`~/.nexus/plugins/nexus.gate.token_budget/store.db`). Other dimensions are in-memory per session.
 
 ### `nexus.gate.rate_limiter`
 
@@ -1449,6 +1526,32 @@ eval:
 |----------|---------|-------------|
 | `NEXUS_EVAL_INSPECT_TIMEOUT` | `60s` | Per-request deadline for `nexus eval --inspect-mode`. Parsed as `time.Duration` (e.g. `30s`, `5m`). The `--timeout` flag overrides this; an empty value falls back to the default. Source: `cmd/nexus/eval.go:514-537`. |
 | `NEXUS_EVAL_INSPECT_KEEP_SESSIONS` | *(unset)* | When set to any non-empty value, retains the per-call temporary sessions root (`os.MkdirTemp` directory) for debugging instead of deleting it on exit. Off by default — directory is removed after the response is written. Source: `pkg/eval/protocol/runner.go:53-60`. |
+
+---
+
+## Cost CLI
+
+`nexus cost report` aggregates cost-attribution data from session
+journals (idea 09). Costs come from `llm.response.cost_usd` which
+providers emit using `pkg/engine/pricing` — the CLI is provider-agnostic.
+
+| Command | Purpose |
+|---------|---------|
+| `nexus cost report [--session <id>] [--tenant <t>] [--group-by <dim>] [--since <duration>] [--json] [--config <path>]` | Aggregate `llm.response` records by tag dimension. |
+
+Flags:
+
+- `--session <id>` — limit to one session id. Default: every session under `sessions.root`.
+- `--tenant <t>` — only `Tags["tenant"] == t`.
+- `--group-by <dim>` — one of `session_id` (default), `tenant`, `project`, `user`, `source_plugin`, `model`, `task_kind`.
+- `--since <duration>` — only events newer than `now - <duration>` (e.g. `24h`, `7d`).
+- `--json` — emit JSON instead of the default table.
+
+Tags are populated by:
+
+- The engine's `before:llm.request` seeder (`session_id`, plus `tenant`/`project`/`user` from `SessionMeta.Labels`).
+- Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
+- Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
 
 ---
 

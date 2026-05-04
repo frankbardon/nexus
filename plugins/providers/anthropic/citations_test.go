@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -111,7 +112,7 @@ func TestBuildContentBlocks_CitationsThreaded(t *testing.T) {
 // char_location citation and asserts LLMResponse.Citations carries the entry
 // with all populated fields preserved.
 func TestConvertAPIResponse_SingleCitation(t *testing.T) {
-	p := &Plugin{logger: silentLogger(), pricing: defaultPricing}
+	p := &Plugin{logger: silentLogger(), pricing: pricing.DefaultsFor(pricing.ProviderAnthropic)}
 	api := apiResponse{
 		ID:    "msg_cite",
 		Model: "claude-sonnet-4-5-20250514",
@@ -161,7 +162,7 @@ func TestConvertAPIResponse_SingleCitation(t *testing.T) {
 // TestConvertAPIResponse_MultipleCitations verifies citations from multiple
 // text blocks accumulate in the order produced by the API.
 func TestConvertAPIResponse_MultipleCitations(t *testing.T) {
-	p := &Plugin{logger: silentLogger(), pricing: defaultPricing}
+	p := &Plugin{logger: silentLogger(), pricing: pricing.DefaultsFor(pricing.ProviderAnthropic)}
 	api := apiResponse{
 		ID:    "msg_multi",
 		Model: "claude-sonnet-4-5-20250514",
@@ -202,7 +203,7 @@ func TestConvertAPIResponse_MultipleCitations(t *testing.T) {
 // TestConvertAPIResponse_NoCitations confirms responses without citations
 // produce a nil Citations slice (not an empty non-nil slice).
 func TestConvertAPIResponse_NoCitations(t *testing.T) {
-	p := &Plugin{logger: silentLogger(), pricing: defaultPricing}
+	p := &Plugin{logger: silentLogger(), pricing: pricing.DefaultsFor(pricing.ProviderAnthropic)}
 	api := apiResponse{
 		ID:         "msg_plain",
 		Model:      "claude-sonnet-4-5-20250514",
@@ -250,7 +251,7 @@ func TestStream_CitationsRoundTrip(t *testing.T) {
 	p := &Plugin{
 		bus:     rec.bus,
 		logger:  silentLogger(),
-		pricing: defaultPricing,
+		pricing: pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
 	p.handleStreamResponse(strings.NewReader(canonicalCitationsStream))

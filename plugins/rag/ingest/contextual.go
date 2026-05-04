@@ -136,9 +136,11 @@ func (c *contextualizer) generate(docContext, chunk string) (string, error) {
 		},
 		Stream: false,
 		Metadata: map[string]any{
-			"_source": "rag.ingest.contextual",
-			"_ctxreq": id,
+			"_source":   "rag.ingest.contextual",
+			"_ctxreq":   id,
+			"task_kind": "rag_contextualize",
 		},
+		Tags: map[string]string{"source_plugin": "nexus.rag.ingest"},
 	}
 	if err := c.bus.Emit("llm.request", req); err != nil {
 		return "", fmt.Errorf("emit llm.request: %w", err)

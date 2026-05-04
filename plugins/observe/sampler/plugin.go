@@ -406,11 +406,11 @@ func (p *Plugin) applyRedactor(dstJournal string) error {
 
 // snapshotMetadata is the on-disk shape of <case_dir>/metadata.json.
 type snapshotMetadata struct {
-	CapturedAt            string `json:"captured_at"`
-	Reason                string `json:"reason"`
+	CapturedAt            string  `json:"captured_at"`
+	Reason                string  `json:"reason"`
 	SamplingRateAtCapture float64 `json:"sampling_rate_at_capture"`
-	SessionStatus         string `json:"session_status"`
-	EngineVersion         string `json:"engine_version"`
+	SessionStatus         string  `json:"session_status"`
+	EngineVersion         string  `json:"engine_version"`
 }
 
 // writeMetadata serializes snapshotMetadata to <case_dir>/metadata.json. The

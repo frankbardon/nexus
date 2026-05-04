@@ -21,12 +21,12 @@ import (
 // primary's stashed response and never raises the error, so the fallback
 // branch is silent on replay.
 var nonReplayableTypes = map[string]bool{
-	"provider.fallback.error":       true,
-	"provider.fallback.advance":     true,
-	"provider.fallback.exhausted":   true,
-	"llm.error":                     true,
-	"tool.error":                    true,
-	"agent.iteration.exceeded":      true,
+	"provider.fallback.error":     true,
+	"provider.fallback.advance":   true,
+	"provider.fallback.exhausted": true,
+	"llm.error":                   true,
+	"tool.error":                  true,
+	"agent.iteration.exceeded":    true,
 }
 
 // observed is the per-promotion projection of the source journal: counts,

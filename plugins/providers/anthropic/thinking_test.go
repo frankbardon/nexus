@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -406,7 +407,7 @@ func TestStream_ExtendedThinkingRoundTrip(t *testing.T) {
 		bus:      rec.bus,
 		logger:   silentTestLogger(),
 		thinking: thinkingConfig{Enabled: true, BudgetTokens: 8192, IncludeThoughts: true},
-		pricing:  defaultPricing,
+		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
 	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream))
@@ -470,7 +471,7 @@ func TestStream_IncludeThoughtsFalseSilencesEvents(t *testing.T) {
 		bus:      rec.bus,
 		logger:   silentTestLogger(),
 		thinking: thinkingConfig{Enabled: true, BudgetTokens: 8192, IncludeThoughts: false},
-		pricing:  defaultPricing,
+		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
 	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream))

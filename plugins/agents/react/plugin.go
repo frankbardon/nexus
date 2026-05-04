@@ -745,6 +745,10 @@ func (p *Plugin) sendLLMRequest() {
 	// Resolve tool choice for this iteration.
 	tc := resolveToolChoice(p.toolChoiceCfg, p.iteration, &p.toolChoiceOverride)
 
+	// Snapshot iteration under the lock so the metadata router and
+	// downstream cost reports see the value at request emission time.
+	iteration := p.iteration
+
 	p.mu.Unlock()
 
 	// Query conversation history (LLM-native format) from the memory plugin.
@@ -774,6 +778,12 @@ func (p *Plugin) sendLLMRequest() {
 		Tools:      tq.Tools,
 		ToolChoice: tc,
 		Stream:     true,
+		Metadata: map[string]any{
+			"_source":   pluginID,
+			"task_kind": "react_main",
+			"iteration": iteration,
+		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {

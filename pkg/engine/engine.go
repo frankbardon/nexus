@@ -273,6 +273,35 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// Install schema registry bus subscriptions.
 	e.runUnsubs = append(e.runUnsubs, e.Schemas.Install(e.Bus)...)
 
+	// Seed baseline cost-attribution tags onto every llm.request before any
+	// router/gate runs. Tags must be attached at request creation per the
+	// DigitalApplied 2026 production guide; the engine owns the session
+	// dimensions (tenant/project/user/session_id), plugins layer their own
+	// (source_plugin, task_kind, parent_call_id) downstream.
+	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("before:llm.request", func(event Event[any]) {
+		vp, ok := event.Payload.(*VetoablePayload)
+		if !ok || e.Session == nil {
+			return
+		}
+		req, ok := vp.Original.(*events.LLMRequest)
+		if !ok {
+			return
+		}
+		meta, err := e.Session.SessionMetadata()
+		if err != nil {
+			return
+		}
+		if req.Tags == nil {
+			req.Tags = make(map[string]string)
+		}
+		setTagIfAbsent(req.Tags, "session_id", e.Session.ID)
+		for _, k := range []string{"tenant", "project", "user"} {
+			if v, ok := meta.Labels[k]; ok && v != "" {
+				setTagIfAbsent(req.Tags, k, v)
+			}
+		}
+	}, WithPriority(100), WithSource("nexus.engine.tag_seeder")))
+
 	// Track token usage and cost from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {
 		resp, ok := event.Payload.(events.LLMResponse)
@@ -880,6 +909,16 @@ func (e *Engine) prepareSession() error {
 }
 
 // parseLogLevel converts a string log level to slog.Level.
+// setTagIfAbsent assigns key=value only when the caller hasn't already set
+// the key. Lets per-plugin tags (set by emitting plugin) override
+// session-level seeds — important for `tenant` overrides in batch jobs and
+// for plugins that explicitly want a different attribution.
+func setTagIfAbsent(tags map[string]string, key, value string) {
+	if _, exists := tags[key]; !exists {
+		tags[key] = value
+	}
+}
+
 func parseLogLevel(level string) slog.Level {
 	switch level {
 	case "debug":

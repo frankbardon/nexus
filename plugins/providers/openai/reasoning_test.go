@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -168,7 +169,7 @@ func TestApplyReasoning_ReasoningModelNoEffortConfig(t *testing.T) {
 }
 
 func TestConvertAPIResponse_PopulatesReasoningTokens(t *testing.T) {
-	p := &Plugin{pricing: defaultPricing}
+	p := &Plugin{pricing: pricing.DefaultsFor(pricing.ProviderOpenAI)}
 
 	content := "thinking complete"
 	apiResp := apiResponse{

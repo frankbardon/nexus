@@ -24,6 +24,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -31,6 +32,10 @@ const (
 	pluginID   = "nexus.llm.gemini"
 	pluginName = "Google Gemini LLM Provider"
 	version    = "0.1.0"
+
+	// defaultMaxTokens is the floor max_tokens applied when neither the
+	// request, the request's role, nor the default role specifies one.
+	defaultMaxTokens = 4096
 )
 
 // Plugin implements the Gemini LLM provider.
@@ -49,7 +54,7 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
-	pricing map[string]modelPricing
+	pricing *pricing.Table
 
 	thinking      thinkingConfig
 	codeExecution bool
@@ -57,6 +62,7 @@ type Plugin struct {
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
+	currentRequestTags map[string]string // copied to llm.response for cost attribution
 	cancelFunc         context.CancelFunc
 	requestSeq         int
 }
@@ -256,6 +262,23 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
+	// max_tokens may still be 0 — common when a router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped.
+	if maxTokens == 0 && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			maxTokens = cfg.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			maxTokens = def.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
+	}
+
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	body, err := p.buildRequestBody(model, maxTokens, req)
@@ -338,6 +361,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	p.mu.Lock()
 	p.currentRequestMeta = meta
+	p.currentRequestTags = req.Tags
 	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
@@ -669,6 +693,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 
 	p.mu.Lock()
 	resp.Metadata = p.currentRequestMeta
+	resp.Tags = p.currentRequestTags
 	p.mu.Unlock()
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
@@ -911,6 +936,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 
 	p.mu.Lock()
 	meta := p.currentRequestMeta
+	tags := p.currentRequestTags
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
@@ -921,19 +947,32 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		Model:        model,
 		FinishReason: finishReason,
 		Metadata:     meta,
+		Tags:         tags,
 	})
 }
 
 // costForModel returns the USD cost for a response from the given model.
+//
+// Google appends "-001" / "-latest" / date suffixes to model IDs, so an
+// exact-match miss falls back to the longest-known-prefix match against the
+// table. Length-ordering avoids a "gemini-1.5" entry shadowing
+// "gemini-1.5-flash" when both are present.
 func (p *Plugin) costForModel(model string, usage events.Usage) float64 {
-	if rates, ok := p.pricing[model]; ok {
-		return calculateCost(usage, rates)
+	if cost := p.pricing.Calc(model, usage); cost > 0 {
+		return cost
 	}
-	// Try a prefix match (Google appends "-001" / "-latest" suffixes).
-	for prefix, rates := range p.pricing {
-		if strings.HasPrefix(model, prefix) {
-			return calculateCost(usage, rates)
+	if _, ok := p.pricing.Get(model); ok {
+		// Exact match exists but cost is zero (e.g. free model). Done.
+		return 0
+	}
+	var bestPrefix string
+	for _, candidate := range p.pricing.Models() {
+		if strings.HasPrefix(model, candidate) && len(candidate) > len(bestPrefix) {
+			bestPrefix = candidate
 		}
+	}
+	if bestPrefix != "" {
+		return p.pricing.Calc(bestPrefix, usage)
 	}
 	return 0
 }

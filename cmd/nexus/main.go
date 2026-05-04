@@ -28,6 +28,8 @@ func main() {
 			os.Exit(runHITLApprove(os.Args[2:]))
 		case "reject":
 			os.Exit(runHITLReject(os.Args[2:]))
+		case "cost":
+			os.Exit(runCost(os.Args[2:]))
 		}
 	}
 

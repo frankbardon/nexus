@@ -15,10 +15,10 @@ import (
 // fetches (with a finite timeout + body cap), real filesystem reads/writes
 // scoped to the configured mounts, and real subprocess invocation.
 type DefaultCaps struct {
-	Mounts          []FSMount
-	HTTPClient      *http.Client
-	HTTPMaxBodyMiB  int
-	ExecTimeout     time.Duration
+	Mounts         []FSMount
+	HTTPClient     *http.Client
+	HTTPMaxBodyMiB int
+	ExecTimeout    time.Duration
 }
 
 // NewDefaultCaps returns a DefaultCaps with sensible defaults: 30 s HTTP

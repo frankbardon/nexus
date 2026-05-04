@@ -73,10 +73,10 @@ type Plugin struct {
 	persist          bool // persist tracked messages + archives to session workspace
 
 	// HITL approval gating for compaction commits. Off by default.
-	approvalEnabled        bool
-	approvalDefaultChoice  string
-	approvalTimeout        time.Duration
-	approvalSizeThreshold  int
+	approvalEnabled       bool
+	approvalDefaultChoice string
+	approvalTimeout       time.Duration
+	approvalSizeThreshold int
 
 	// Runtime state.
 	mu                 sync.Mutex
@@ -609,7 +609,9 @@ func (p *Plugin) startCompaction(reason string) {
 			"_source":     llmSource,
 			"_backup":     backupPath,
 			"_prev_count": msgCount,
+			"task_kind":   "compaction",
 		},
+		Tags: map[string]string{"source_plugin": pluginID},
 	})
 }
 

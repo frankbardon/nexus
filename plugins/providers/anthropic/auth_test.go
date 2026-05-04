@@ -572,4 +572,3 @@ func writeFakeServiceAccount(t *testing.T, path, email string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
-

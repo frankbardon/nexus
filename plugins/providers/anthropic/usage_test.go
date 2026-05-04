@@ -5,6 +5,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -41,11 +42,11 @@ func TestApiUsage_ParsesCacheFields(t *testing.T) {
 // TestConvertAPIResponse_PopulatesCacheUsage verifies that convertAPIResponse
 // surfaces cache-write and cache-read tokens onto events.Usage.
 func TestConvertAPIResponse_PopulatesCacheUsage(t *testing.T) {
-	p := &Plugin{pricing: defaultPricing}
+	p := &Plugin{pricing: pricing.DefaultsFor(pricing.ProviderAnthropic)}
 
 	apiResp := apiResponse{
 		ID:    "msg_test",
-		Model: "claude-sonnet-4-6-20250514",
+		Model: "claude-sonnet-4-6",
 		Content: []apiContentBlock{
 			{Type: "text", Text: "hello"},
 		},
@@ -87,7 +88,7 @@ func TestConvertAPIResponse_PopulatesCacheUsage(t *testing.T) {
 // category at its respective rate. Uses Sonnet-4 default rates with derived
 // cache rates (read = input × 0.10, write_5m = input × 1.25).
 func TestCalculateCost_CacheRates(t *testing.T) {
-	rates := defaultPricing["claude-sonnet-4-6-20250514"]
+	tbl := pricing.DefaultsFor(pricing.ProviderAnthropic)
 	usage := events.Usage{
 		PromptTokens:     1000, // plain (cache-miss) input
 		CompletionTokens: 350,  // output
@@ -95,7 +96,7 @@ func TestCalculateCost_CacheRates(t *testing.T) {
 		CacheWriteTokens: 1024, // cache write (5m)
 	}
 
-	got := calculateCost(usage, rates)
+	got := tbl.Calc("claude-sonnet-4-6", usage)
 
 	// Expected:
 	//   plain  = 1000  / 1e6 * 3.0       = 0.003
@@ -113,7 +114,7 @@ func TestCalculateCost_CacheRates(t *testing.T) {
 // is priced strictly lower than the equivalent plain-input request — this is
 // the whole point of caching, so guard it explicitly.
 func TestCalculateCost_CacheCheaperThanPlain(t *testing.T) {
-	rates := defaultPricing["claude-sonnet-4-6-20250514"]
+	tbl := pricing.DefaultsFor(pricing.ProviderAnthropic)
 
 	cached := events.Usage{
 		PromptTokens:     100,
@@ -126,8 +127,8 @@ func TestCalculateCost_CacheCheaperThanPlain(t *testing.T) {
 		CompletionTokens: 200,
 	}
 
-	cachedCost := calculateCost(cached, rates)
-	plainCost := calculateCost(plain, rates)
+	cachedCost := tbl.Calc("claude-sonnet-4-6", cached)
+	plainCost := tbl.Calc("claude-sonnet-4-6", plain)
 
 	if cachedCost >= plainCost {
 		t.Errorf("expected cached request cheaper than plain: cached=%.6f plain=%.6f", cachedCost, plainCost)
@@ -137,7 +138,7 @@ func TestCalculateCost_CacheCheaperThanPlain(t *testing.T) {
 // TestCalculateCost_ExplicitCacheRates verifies that configured cache rates
 // are honored over the derived fallbacks.
 func TestCalculateCost_ExplicitCacheRates(t *testing.T) {
-	rates := modelPricing{
+	rates := pricing.Rates{
 		InputPerMillion:        3.0,
 		OutputPerMillion:       15.0,
 		CacheReadPerMillion:    0.50, // override (would be 0.30 derived)
@@ -150,7 +151,7 @@ func TestCalculateCost_ExplicitCacheRates(t *testing.T) {
 		CacheWriteTokens: 1_000_000,
 	}
 
-	got := calculateCost(usage, rates)
+	got := pricing.CalcAnthropic(usage, rates)
 	want := 0.50 + 4.00 // each 1M tokens * its rate
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("explicit-rates cost: got %.6f, want %.6f", got, want)
@@ -158,11 +159,11 @@ func TestCalculateCost_ExplicitCacheRates(t *testing.T) {
 }
 
 // TestParsePricingConfig_CacheKeys verifies the YAML override keys for cache
-// rates are parsed onto modelPricing.
+// rates are parsed onto the merged price table.
 func TestParsePricingConfig_CacheKeys(t *testing.T) {
 	cfg := map[string]any{
 		"pricing": map[string]any{
-			"claude-sonnet-4-6-20250514": map[string]any{
+			"claude-sonnet-4-6": map[string]any{
 				"input_per_million":          5.0,
 				"output_per_million":         20.0,
 				"cache_read_per_million":     0.42,
@@ -173,9 +174,9 @@ func TestParsePricingConfig_CacheKeys(t *testing.T) {
 	}
 
 	merged := parsePricingConfig(cfg)
-	p, ok := merged["claude-sonnet-4-6-20250514"]
+	p, ok := merged.Get("claude-sonnet-4-6")
 	if !ok {
-		t.Fatal("missing pricing entry for claude-sonnet-4-6-20250514")
+		t.Fatal("missing pricing entry for claude-sonnet-4-6")
 	}
 	if p.InputPerMillion != 5.0 {
 		t.Errorf("InputPerMillion: got %v, want 5.0", p.InputPerMillion)
