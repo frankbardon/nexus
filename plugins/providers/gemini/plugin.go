@@ -32,6 +32,10 @@ const (
 	pluginID   = "nexus.llm.gemini"
 	pluginName = "Google Gemini LLM Provider"
 	version    = "0.1.0"
+
+	// defaultMaxTokens is the floor max_tokens applied when neither the
+	// request, the request's role, nor the default role specifies one.
+	defaultMaxTokens = 4096
 )
 
 // Plugin implements the Gemini LLM provider.
@@ -256,6 +260,23 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if model == "" {
 		p.emitError(fmt.Errorf("gemini: no model resolved for role %q", req.Role))
 		return
+	}
+
+	// max_tokens may still be 0 — common when a router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped.
+	if maxTokens == 0 && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			maxTokens = cfg.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			maxTokens = def.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
 	}
 
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)

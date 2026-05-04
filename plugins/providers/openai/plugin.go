@@ -25,6 +25,10 @@ const (
 	pluginName = "OpenAI LLM Provider"
 	version    = "0.1.0"
 	apiURL     = "https://api.openai.com/v1/chat/completions"
+
+	// defaultMaxTokens is the floor max_tokens applied when neither the
+	// request, the request's role, nor the default role specifies one.
+	defaultMaxTokens = 4096
 )
 
 // Pricing tables and cost calculation live in pkg/engine/pricing/ — providers
@@ -276,6 +280,24 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 				maxTokens = def.MaxTokens
 			}
 		}
+	}
+
+	// max_tokens may still be 0 — common when a router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped. Try the role, then
+	// the default role, then a safe constant.
+	if maxTokens == 0 && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			maxTokens = cfg.MaxTokens
+		}
+	}
+	if maxTokens == 0 && p.models != nil {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			maxTokens = def.MaxTokens
+		}
+	}
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
 	}
 
 	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
