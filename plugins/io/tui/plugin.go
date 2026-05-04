@@ -40,7 +40,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.output.clear", Priority: 50},
 		{EventType: "io.status", Priority: 50},
 		{EventType: "io.approval.request", Priority: 50},
-		{EventType: "io.ask", Priority: 50},
+		{EventType: "hitl.requested", Priority: 50},
 		{EventType: "thinking.step", Priority: 50},
 		{EventType: "code.exec.stdout", Priority: 50},
 		{EventType: "plan.approval.request", Priority: 50},
@@ -59,7 +59,7 @@ func (p *Plugin) Emissions() []string {
 		"io.input",
 		"before:io.input",
 		"io.approval.response",
-		"io.ask.response",
+		"hitl.responded",
 		"plan.approval.response",
 		"io.session.start",
 		"io.session.end",
@@ -116,7 +116,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.output.clear", p.handleOutputClear, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.status", p.handleStatus, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.ask", p.handleAskUser, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleHITLRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
 		p.bus.Subscribe("code.exec.stdout", p.handleCodeExecStdout, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
@@ -215,23 +215,34 @@ func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 	}
 }
 
-func (p *Plugin) handleAskUser(e engine.Event[any]) {
-	ask, ok := e.Payload.(events.AskUser)
+func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
+	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
 		return
 	}
-	resp, err := p.adapter.RequestInput(ui.AskUserMessage{
-		PromptID: ask.PromptID,
-		Question: ask.Question,
-		TurnID:   ask.TurnID,
+	mode := string(req.Mode)
+	if mode == "" {
+		mode = string(events.HITLModeFreeText)
+	}
+	choices := make([]ui.HITLChoiceMessage, 0, len(req.Choices))
+	for _, c := range req.Choices {
+		choices = append(choices, ui.HITLChoiceMessage{ID: c.ID, Label: c.Label})
+	}
+	resp, err := p.adapter.RequestHumanInput(ui.HITLRequestMessage{
+		RequestID: req.ID,
+		Prompt:    req.Prompt,
+		Mode:      mode,
+		Choices:   choices,
+		TurnID:    req.TurnID,
 	})
 	if err != nil {
-		p.logger.Error("ask user request failed", "error", err)
+		p.logger.Error("hitl request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("io.ask.response", events.AskUserResponse{
-		PromptID: resp.PromptID,
-		Answer:   resp.Answer,
+	_ = p.bus.Emit("hitl.responded", events.HITLResponse{
+		RequestID: resp.RequestID,
+		ChoiceID:  resp.ChoiceID,
+		FreeText:  resp.FreeText,
 	})
 }
 

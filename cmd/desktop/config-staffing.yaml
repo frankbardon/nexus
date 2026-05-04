@@ -37,11 +37,13 @@ plugins:
       - "io.file.output_dir.response"
       - "io.file.selected"
       - "session.file.created"
+      - "hitl.requested"
     accept:
       - "match.request"
       - "ui.state.save"
       - "io.file.output_dir.request"
       - "io.file.selected"
+      - "hitl.responded"
 
   nexus.llm.anthropic:
     api_key: "${shell.anthropic_api_key}"

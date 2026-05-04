@@ -13,6 +13,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/approval"
 )
 
 const (
@@ -71,6 +72,12 @@ type Plugin struct {
 	protectRecent    int  // number of recent messages to keep verbatim
 	persist          bool // persist tracked messages + archives to session workspace
 
+	// HITL approval gating for compaction commits. Off by default.
+	approvalEnabled        bool
+	approvalDefaultChoice  string
+	approvalTimeout        time.Duration
+	approvalSizeThreshold  int
+
 	// Runtime state.
 	mu                 sync.Mutex
 	messages           []events.Message
@@ -128,6 +135,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "agent.turn.end", Priority: 5},
 		{EventType: "llm.response", Priority: 30},
 		{EventType: "memory.compact.request", Priority: 10},
+		// hitl.responded is dynamically subscribed by the approval helper
+		// when require_approval.enabled and a commit is pending. Declared
+		// here for introspection completeness.
+		{EventType: "hitl.responded", Priority: 50},
 	}
 }
 
@@ -138,6 +149,7 @@ func (p *Plugin) Emissions() []string {
 		"memory.compacted",
 		"thinking.step",
 		"io.status",
+		"hitl.requested",
 	}
 }
 
@@ -214,6 +226,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["persist"].(bool); ok {
 		p.persist = v
 	}
+	p.parseApprovalConfig(ctx.Config["require_approval"])
 
 	// Subscribe to events.
 	p.unsubs = append(p.unsubs,
@@ -600,6 +613,16 @@ func (p *Plugin) startCompaction(reason string) {
 }
 
 func (p *Plugin) finishCompaction(summary string) {
+	// Optional approval gate. Block before committing the summary back
+	// into history so a rejection leaves the live message list intact and
+	// the next attempt can retry.
+	if p.shouldRequireApproval(summary) {
+		if err := p.gateWithApproval(summary); err != nil {
+			p.abortCompaction(summary, err)
+			return
+		}
+	}
+
 	p.mu.Lock()
 
 	prevCount := len(p.messages)
@@ -747,4 +770,123 @@ func (p *Plugin) latestArchivePath() string {
 		}
 	}
 	return ""
+}
+
+// --- Approval gating ---
+
+// parseApprovalConfig reads the optional `require_approval` block.
+// Malformed values are treated as "off" — boot continues.
+func (p *Plugin) parseApprovalConfig(raw any) {
+	cfg, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if v, ok := cfg["enabled"].(bool); ok {
+		p.approvalEnabled = v
+	}
+	if !p.approvalEnabled {
+		return
+	}
+	if v, ok := cfg["default_choice"].(string); ok {
+		p.approvalDefaultChoice = v
+	}
+	if v, ok := cfg["timeout"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			p.approvalTimeout = d
+		}
+	}
+	match, _ := cfg["match"].(map[string]any)
+	if v, ok := match["size_threshold_bytes"].(int); ok {
+		p.approvalSizeThreshold = v
+	} else if v, ok := match["size_threshold_bytes"].(float64); ok {
+		p.approvalSizeThreshold = int(v)
+	}
+}
+
+// shouldRequireApproval returns true when the configured match block
+// matches the pending compaction summary. The only match key supported
+// here is size_threshold_bytes — namespace and key glob don't apply to
+// in-context compaction.
+func (p *Plugin) shouldRequireApproval(summary string) bool {
+	if !p.approvalEnabled {
+		return false
+	}
+	if p.approvalSizeThreshold > 0 && len(summary) < p.approvalSizeThreshold {
+		return false
+	}
+	return true
+}
+
+// gateWithApproval emits hitl.requested for the pending summary commit.
+// Returns a non-nil error when the operator rejects.
+func (p *Plugin) gateWithApproval(summary string) error {
+	preview := summary
+	truncated := false
+	const maxPreview = 2000
+	if len(preview) > maxPreview {
+		preview = preview[:maxPreview]
+		truncated = true
+	}
+	p.mu.Lock()
+	prevCount := len(p.messages)
+	p.mu.Unlock()
+	actionRef := map[string]any{
+		"summary":            preview,
+		"size":               len(summary),
+		"prev_message_count": prevCount,
+		"protect_recent":     p.protectRecent,
+	}
+	if truncated {
+		actionRef["_truncated"] = true
+	}
+
+	prompt := fmt.Sprintf("Commit compaction summary back into history? [%d bytes, %d → %d messages]",
+		len(summary), prevCount, p.protectRecent+1)
+
+	sessionID := ""
+	if p.session != nil {
+		sessionID = p.session.ID
+	}
+
+	_, allowed, err := approval.RequestApproval(context.Background(), approval.Request{
+		Bus:             p.bus,
+		Logger:          p.logger,
+		PluginID:        pluginID,
+		ActionKind:      "memory.compaction.commit",
+		ActionRef:       actionRef,
+		Prompt:          prompt,
+		DefaultChoiceID: p.approvalDefaultChoice,
+		Timeout:         p.approvalTimeout,
+		SessionID:       sessionID,
+	})
+	if err != nil {
+		p.logger.Error("compaction: approval request failed", "error", err)
+		return fmt.Errorf("compaction: approval: %w", err)
+	}
+	if !allowed {
+		return fmt.Errorf("compaction commit rejected by approval gate")
+	}
+	return nil
+}
+
+// abortCompaction releases the compacting flag and emits a status update
+// without mutating the tracked-message list. Called when the approval
+// gate rejects the summary.
+func (p *Plugin) abortCompaction(summary string, gateErr error) {
+	p.logger.Info("compaction commit rejected", "size", len(summary), "error", gateErr)
+
+	p.mu.Lock()
+	p.compacting = false
+	p.mu.Unlock()
+
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
+		Source:    pluginID,
+		Content:   fmt.Sprintf("Context compaction commit rejected: %v", gateErr),
+		Phase:     "compaction",
+		Timestamp: time.Now(),
+	})
+	_ = p.bus.Emit("io.status", events.StatusUpdate{
+		State:  "idle",
+		Detail: "",
+	})
 }

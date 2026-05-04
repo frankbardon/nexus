@@ -75,7 +75,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.output", Priority: 50},
 		{EventType: "io.approval.request", Priority: 10}, // run early so we auto-approve first
 		{EventType: "plan.approval.request", Priority: 10},
-		{EventType: "io.ask", Priority: 10},
+		{EventType: "hitl.requested", Priority: 10},
 		{EventType: "plan.created", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
 		{EventType: "thinking.step", Priority: 50},
@@ -91,7 +91,7 @@ func (p *Plugin) Emissions() []string {
 		"before:io.input",
 		"io.approval.response",
 		"plan.approval.response",
-		"io.ask.response",
+		"hitl.responded",
 		"io.session.start",
 		"io.session.end",
 	}
@@ -126,7 +126,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
-		p.bus.Subscribe("io.ask", p.handleAsk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleHITL, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinking, engine.WithSource(pluginID)),
@@ -323,28 +323,30 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 	})
 }
 
-// handleAsk responds to io.ask events. In oneshot mode there is no human to
-// answer questions, so we emit an empty response. The asking plugin is
-// expected to handle empty answers gracefully; if it cannot, the agent run
-// will surface an error that we capture in the JSON transcript.
-func (p *Plugin) handleAsk(e engine.Event[any]) {
-	ask, ok := e.Payload.(events.AskUser)
+// handleHITL responds to hitl.requested events. In oneshot mode there is
+// no human to answer, so we resolve with the request's DefaultChoiceID
+// when provided, otherwise an empty freeform response. The asking plugin
+// is expected to handle empty answers gracefully; if it cannot, the
+// agent run will surface an error that we capture in the JSON transcript.
+func (p *Plugin) handleHITL(e engine.Event[any]) {
+	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
 		return
 	}
 	p.mu.Lock()
 	p.approvals = append(p.approvals, approvalRecord{
-		Kind:         "ask",
-		PromptID:     ask.PromptID,
-		Description:  ask.Question,
+		Kind:         "hitl",
+		PromptID:     req.ID,
+		Description:  req.Prompt,
 		AutoApproved: true,
 	})
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.ask.response", events.AskUserResponse{
-		PromptID: ask.PromptID,
-		Answer:   "",
-	})
+	resp := events.HITLResponse{RequestID: req.ID}
+	if req.DefaultChoiceID != "" {
+		resp.ChoiceID = req.DefaultChoiceID
+	}
+	_ = p.bus.Emit("hitl.responded", resp)
 }
 
 func (p *Plugin) handlePlanCreated(e engine.Event[any]) {

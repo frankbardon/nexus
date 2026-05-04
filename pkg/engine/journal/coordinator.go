@@ -49,7 +49,7 @@ type CoordinatorOptions struct {
 //
 // At Run(), it scans the journal once to seed the replay state's per-event
 // queues with journaled responses (llm.response, tool.result,
-// io.ask.response), then re-emits io.input events from the journal in seq
+// hitl.responded), then re-emits io.input events from the journal in seq
 // order. The live agent reacts to each io.input as if it were a fresh
 // turn; the side-effecting plugins (providers, tools) check the engine's
 // replay flag and pop the next stashed response instead of calling out.
@@ -135,7 +135,7 @@ func (c *Coordinator) scan() error {
 	err = r.Iter(func(e Envelope) bool {
 		c.lastSeq = e.Seq
 		switch e.Type {
-		case "llm.response", "tool.result", "io.ask.response":
+		case "llm.response", "tool.result", "hitl.responded":
 			payload := e.Payload
 			if c.convert != nil {
 				if conv, cerr := c.convert(e.Type, payload); cerr == nil {

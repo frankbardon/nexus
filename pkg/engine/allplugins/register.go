@@ -14,6 +14,8 @@ import (
 
 	// Control plugins.
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
+	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
+	hitlsynthplugin "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 
 	// IO plugins.
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
@@ -74,7 +76,6 @@ import (
 	dynvarsplugin "github.com/frankbardon/nexus/plugins/system/dynvars"
 
 	// Tool plugins.
-	"github.com/frankbardon/nexus/plugins/tools/ask"
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
 	codeexecplugin "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
@@ -85,6 +86,7 @@ import (
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
 	// Gate plugins.
+	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
 	contextwindowgate "github.com/frankbardon/nexus/plugins/gates/context_window"
 	endlessloopgate "github.com/frankbardon/nexus/plugins/gates/endless_loop"
@@ -113,6 +115,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Control
 	r.Register("nexus.control.cancel", cancelplugin.New)
+	r.Register("nexus.control.hitl_synthesizer", hitlsynthplugin.New)
 
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
@@ -180,12 +183,13 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.catalog", catalogplugin.New)
 	r.Register("nexus.tool.pdf", pdfplugin.New)
 	r.Register("nexus.tool.opener", openerplugin.New)
-	r.Register("nexus.tool.ask", ask.New)
+	r.Register("nexus.control.hitl", hitlplugin.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
 	r.Register("nexus.tool.web", webplugin.New)
 	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
 
 	// Gates
+	r.Register("nexus.gate.approval_policy", approvalpolicygate.New)
 	r.Register("nexus.gate.content_safety", contentsafetygate.New)
 	r.Register("nexus.gate.context_window", contextwindowgate.New)
 	r.Register("nexus.gate.endless_loop", endlessloopgate.New)
