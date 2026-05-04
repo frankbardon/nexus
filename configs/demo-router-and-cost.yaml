@@ -1,0 +1,170 @@
+# Demo: per-step model router + multi-dim cost attribution (Idea 09).
+#
+# Validates: metadata routing (planner/compaction → haiku, react main → sonnet,
+# stuck loops → opus), classifier routing on free-form prompts, multi-dim
+# token_budget ceilings (session, tenant, source_plugin) with downgrade-model
+# action, and the `nexus cost report` CLI surfacing the resulting attribution.
+#
+# Run:
+#   bin/nexus -config configs/demo-router-and-cost.yaml
+#
+# Then in another terminal once you have a few turns under your belt:
+#   bin/nexus cost report --config configs/demo-router-and-cost.yaml
+#   bin/nexus cost report --config configs/demo-router-and-cost.yaml --group-by source_plugin
+#   bin/nexus cost report --config configs/demo-router-and-cost.yaml --group-by model
+#   bin/nexus cost report --config configs/demo-router-and-cost.yaml --group-by task_kind
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Metadata routing — type any prompt; the ReAct main loop is tagged
+#      `task_kind: react_main` and the metadata router routes the first 2
+#      iterations to Sonnet, then escalates to Opus on iteration 3+. Check
+#      llm.request.Metadata["_routed_by"] in the journal.
+#   2. Compaction routing — keep talking until the compaction trigger fires
+#      (~50 messages with the capped memory profile). The compaction llm.request
+#      carries `task_kind: compaction` and is routed to Haiku for cost.
+#   3. Classifier routing — turn off `nexus.router.metadata` and rely on the
+#      classifier alone. First request for a given prompt prefix uses fallback
+#      (sonnet); subsequent requests with the same prefix get the classifier's
+#      cached pick (haiku for trivial prompts, opus for complex).
+#   4. Multi-dim budget — send enough requests to bump the per-session
+#      `tools.web` ceiling. The downgrade-model action will rewrite the model
+#      from sonnet to haiku rather than vetoing.
+#   5. Cost report — after the session ends, `nexus cost report` shows the
+#      attribution rolled up by session_id (default), source_plugin, model,
+#      or task_kind. Verify the numbers add up.
+#
+# What to watch for:
+#   - `_routed_by` / `_routed_rule` / `_routed_from_model` on llm.request
+#     (visible via `bin/nexus session inspect`).
+#   - `_downgraded_by` / `_downgraded_from` when a budget ceiling forces the
+#     downgrade-model action.
+#   - The classifier's probe llm.request is tagged
+#     `_source: nexus.router.classifier` so it can't recurse into itself.
+#   - Tenant ceilings persist across sessions in
+#     `~/.nexus/plugins/nexus.gate.token_budget/store.db`. Other dimensions
+#     reset every session.
+#
+# Setting tenant/project/user on the session: the engine's tag seeder copies
+# SessionMeta.Labels into the request Tags. Labels aren't config-driven (they
+# come from the embedder), so for a demo you can edit
+# `~/.nexus/sessions/<id>/metadata/session.json` between turns and add e.g.
+# `"labels": {"tenant": "acme", "project": "demo"}`. Subsequent turns will
+# carry those tags through to the cost report.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6-20250514
+      max_tokens: 4096
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-6-20250602
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/demo-router-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+    - nexus.memory.compaction
+    # Routers — metadata first (priority 50, deterministic), classifier
+    # second (priority 45, defers when metadata already routed).
+    - nexus.router.metadata
+    - nexus.router.classifier
+    # Multi-dim budget gate (priority 10).
+    - nexus.gate.token_budget
+    # Iteration counter so escalation rules can reference it.
+    - nexus.gate.endless_loop
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a helpful assistant. Use any tools provided. Keep responses brief.
+
+  nexus.memory.capped:
+    max_messages: 100
+    persist: true
+
+  nexus.memory.compaction:
+    strategy: message_count
+    message_threshold: 50
+    model_role: quick   # routes through metadata router → haiku anyway
+
+  nexus.router.metadata:
+    rules:
+      # Internal/categorical sources go to the cheapest viable tier.
+      - name: planner-haiku
+        match: { metadata._source: nexus.planner.dynamic }
+        use: claude-haiku-4-5-20251001
+      - name: compaction-haiku
+        match: { metadata.task_kind: compaction }
+        use: claude-haiku-4-5-20251001
+      - name: summarise-haiku
+        match: { metadata.task_kind: summarise }
+        use: claude-haiku-4-5-20251001
+      # ReAct main loop: sonnet for the first 2 iterations, escalate
+      # to opus on iteration 3+ when the agent appears stuck.
+      - name: react-stuck-opus
+        match:
+          metadata.task_kind: react_main
+          metadata.iteration: { gte: 3 }
+        use: claude-opus-4-6-20250602
+      - name: react-main-sonnet
+        match: { metadata.task_kind: react_main }
+        use: claude-sonnet-4-6-20250514
+    default_model: claude-sonnet-4-6-20250514
+
+  nexus.router.classifier:
+    classifier_model: claude-haiku-4-5-20251001
+    candidates:
+      - claude-haiku-4-5-20251001
+      - claude-sonnet-4-6-20250514
+      - claude-opus-4-6-20250602
+    fallback: claude-sonnet-4-6-20250514
+    cache_classification: true
+    cache_max_entries: 1024
+    latency_budget_ms: 800
+
+  nexus.gate.token_budget:
+    on_exceed: block
+    downgrade_candidates:
+      - claude-opus-4-6-20250602
+      - claude-sonnet-4-6-20250514
+      - claude-haiku-4-5-20251001
+    ceilings:
+      # Hard session ceiling on total spend — vetoes when reached.
+      - dimension: session
+        max_usd: 1.00
+        message: "Session spend cap of $1.00 reached."
+      # Web tool subloop is allowed up to $0.25/session; over that we
+      # downgrade rather than veto so the agent keeps making progress.
+      - dimension: source_plugin
+        match: nexus.tool.web
+        max_usd_per_session: 0.25
+        on_exceed: downgrade-model
+      # Per-tenant rolling-day cap. Persists across sessions via app-scope
+      # SQLite. Only applies when the session has Labels["tenant"] set.
+      - dimension: tenant
+        max_usd_per_day: 5.00
+
+  nexus.gate.endless_loop:
+    max_iterations: 10
+    warning_at: 7
