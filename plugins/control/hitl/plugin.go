@@ -177,6 +177,7 @@ func (p *Plugin) Emissions() []string {
 		"before:tool.result",
 		"tool.result",
 		"tool.register",
+		"before:hitl.requested",
 		"hitl.requested",
 	}
 }
@@ -206,6 +207,26 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	p.mu.Lock()
 	p.pending[req.ID] = ch
 	p.mu.Unlock()
+
+	// Canonical Option B emission: vetoable pointer-payload first so
+	// before:hitl.requested subscribers (notably nexus.control.hitl_synthesizer)
+	// see the request and can mutate Prompt or veto. The non-vetoable value
+	// emission below is what IO plugins consume.
+	veto, vetoErr := p.bus.EmitVetoable("before:hitl.requested", &req)
+	if vetoErr != nil {
+		p.logger.Warn("emit before:hitl.requested failed", "error", vetoErr, "request_id", req.ID)
+	}
+	if veto.Vetoed {
+		p.mu.Lock()
+		delete(p.pending, req.ID)
+		p.mu.Unlock()
+		reason := veto.Reason
+		if reason == "" {
+			reason = "ask_user vetoed by before:hitl.requested handler"
+		}
+		p.emitResult(tc, "", reason)
+		return
+	}
 
 	_ = p.bus.Emit("hitl.requested", req)
 

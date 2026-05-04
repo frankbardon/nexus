@@ -130,6 +130,30 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 		hitlReq.Deadline = time.Now().Add(req.Timeout)
 	}
 
+	// Canonical Option B emission: vetoable pointer-payload first so
+	// before:hitl.requested subscribers (notably the HITL prompt synthesizer)
+	// can mutate hitlReq.Prompt or veto outright. The non-vetoable value
+	// emission below is the one IO plugins consume.
+	if veto, err := req.Bus.EmitVetoable("before:hitl.requested", &hitlReq); err != nil {
+		return events.HITLResponse{}, false, fmt.Errorf("approval: emit before:hitl.requested: %w", err)
+	} else if veto.Vetoed {
+		reason := veto.Reason
+		if reason == "" {
+			reason = "approval vetoed by before:hitl.requested handler"
+		}
+		logger.Warn("approval: request vetoed",
+			"plugin", req.PluginID,
+			"action_kind", req.ActionKind,
+			"request_id", id,
+			"reason", reason,
+		)
+		return events.HITLResponse{
+			RequestID:    id,
+			Cancelled:    true,
+			CancelReason: reason,
+		}, false, nil
+	}
+
 	if err := req.Bus.Emit("hitl.requested", hitlReq); err != nil {
 		return events.HITLResponse{}, false, fmt.Errorf("approval: emit hitl.requested: %w", err)
 	}

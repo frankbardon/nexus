@@ -149,6 +149,7 @@ func (p *Plugin) Emissions() []string {
 		"memory.compacted",
 		"thinking.step",
 		"io.status",
+		"before:hitl.requested",
 		"hitl.requested",
 	}
 }

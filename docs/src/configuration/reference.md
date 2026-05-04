@@ -628,9 +628,11 @@ prompts via a small/cheap LLM. Advertises the
 `hitl.prompt_synthesizer` capability; emitters opt in by setting
 `HITLRequest.PromptSynthesizer = "hitl.prompt_synthesizer"` and
 leaving `Prompt` empty. Subscribes to `before:hitl.requested`
-(vetoable, pointer payload) and to `hitl.requested` (mutates only when
-the emitter passed `*HITLRequest`) ahead of every IO plugin so the
-rendered text is in place before the operator sees the prompt.
+(canonical vetoable entry point, pointer payload — every in-tree HITL
+emitter publishes here first) and to `hitl.requested` as a backward
+compat fallback for out-of-tree emitters that publish a `*HITLRequest`
+pointer directly, ahead of every IO plugin so the rendered text is in
+place before the operator sees the prompt.
 Synthesised prompts are cached on disk under
 `<session>/plugins/nexus.control.hitl_synthesizer/cache.jsonl`, keyed by
 `(action_kind, sha256(action_ref))`. See

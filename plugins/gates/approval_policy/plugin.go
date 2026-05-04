@@ -107,7 +107,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 }
 
 func (p *Plugin) Emissions() []string {
-	return []string{"hitl.requested"}
+	return []string{"before:hitl.requested", "hitl.requested"}
 }
 
 // handleBeforeToolInvoke evaluates rules against pending tool-invoke
@@ -243,6 +243,21 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 		delete(p.pending, requestID)
 		p.mu.Unlock()
 	}()
+
+	// Canonical Option B emission: vetoable pointer-payload first so
+	// before:hitl.requested subscribers (notably nexus.control.hitl_synthesizer)
+	// can mutate Prompt or veto the request, then the non-vetoable value
+	// emission consumed by IO plugins.
+	if veto, err := p.bus.EmitVetoable("before:hitl.requested", &req); err != nil {
+		p.logger.Error("emit before:hitl.requested failed", "error", err, "action", actionKind)
+		return approvalOutcome{rejected: true, reason: fmt.Sprintf("approval gate emit failed: %v", err)}
+	} else if veto.Vetoed {
+		reason := veto.Reason
+		if reason == "" {
+			reason = "approval vetoed by before:hitl.requested handler"
+		}
+		return approvalOutcome{rejected: true, reason: reason}
+	}
 
 	if err := p.bus.Emit("hitl.requested", req); err != nil {
 		p.logger.Error("emit hitl.requested failed", "error", err, "action", actionKind)
