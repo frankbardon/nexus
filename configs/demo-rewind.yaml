@@ -92,6 +92,11 @@ plugins:
   nexus.llm.anthropic:
     api_key_env: ANTHROPIC_API_KEY
 
+  nexus.control.hitl:
+    registry:
+      enabled: true
+      dir: ~/.nexus/hitl
+
   nexus.agent.react:
     system_prompt: |
       You're a friendly conversationalist. Keep replies brief — this
