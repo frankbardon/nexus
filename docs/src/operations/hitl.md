@@ -10,9 +10,18 @@ Every interaction that needs an operator's input — clarification
 questions, approvals, plan picks, memory-write sign-offs — flows
 through one event family:
 
-- **`hitl.requested`** — emitted by the requesting plugin, payload is a
+- **`before:hitl.requested`** — canonical vetoable entry point, payload
+  is a `*engine.VetoablePayload` wrapping `*events.HITLRequest`. Every
+  in-tree HITL emitter calls `bus.EmitVetoable("before:hitl.requested",
+  &req)` first so that pre-IO subscribers (e.g. the
+  [HITL prompt synthesizer](../plugins/control/hitl_synthesizer.md)) can
+  mutate `Prompt` or block the request outright. A veto resolves the
+  request as cancelled/rejected without ever reaching IO.
+- **`hitl.requested`** — emitted by the requesting plugin after a
+  non-veto result on `before:hitl.requested`. Payload is a value
   `events.HITLRequest` carrying prompt, mode, optional choices,
-  default-on-deadline, and an opaque `ActionRef` for context.
+  default-on-deadline, and an opaque `ActionRef` for context. IO plugins
+  subscribe to this form.
 - **`hitl.responded`** — emitted by the IO plugin (or, eventually, an
   out-of-band channel), payload is a `events.HITLResponse` carrying the
   picked choice and/or freeform answer.

@@ -267,6 +267,59 @@ func TestSynthesize_ValuePayloadIgnored(t *testing.T) {
 	}
 }
 
+// TestSynthesize_NonToolEmitter_BeforePath simulates the canonical
+// Option B emission flow used by the approval_policy gate and the
+// memory/internal/approval helper: the emitter calls EmitVetoable on
+// before:hitl.requested first (so the synthesizer can mutate Prompt),
+// then the value-payload Emit on hitl.requested for IO consumers. The
+// test asserts synthesis fires for an approval-gate-shaped action even
+// though the emitter is not the ask_user tool.
+func TestSynthesize_NonToolEmitter_BeforePath(t *testing.T) {
+	_, bus := newTestPlugin(t)
+	stub := newStubProvider(bus, "Approve memory write to user_pref/theme?")
+
+	// IO-side stand-in: subscribe to the non-vetoable hitl.requested form
+	// so we can assert the value emission carries the synthesized prompt.
+	var ioSeen events.HITLRequest
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if r, ok := ev.Payload.(events.HITLRequest); ok {
+			ioSeen = r
+		}
+	}, engine.WithPriority(50))
+
+	req := events.HITLRequest{
+		ID:                "approval-1",
+		RequesterPlugin:   "nexus.gate.approval_policy",
+		ActionKind:        "memory.longterm.write",
+		PromptSynthesizer: CapabilityName,
+		ActionRef: map[string]any{
+			"key":   "user_pref/theme",
+			"value": "dark",
+		},
+	}
+
+	veto, err := bus.EmitVetoable("before:hitl.requested", &req)
+	if err != nil {
+		t.Fatalf("emit before:hitl.requested: %v", err)
+	}
+	if veto.Vetoed {
+		t.Fatalf("synthesizer must never veto, got reason=%q", veto.Reason)
+	}
+	if req.Prompt != "Approve memory write to user_pref/theme?" {
+		t.Fatalf("expected synthesized prompt on req, got %q", req.Prompt)
+	}
+
+	if err := bus.Emit("hitl.requested", req); err != nil {
+		t.Fatalf("emit hitl.requested: %v", err)
+	}
+	if ioSeen.Prompt != "Approve memory write to user_pref/theme?" {
+		t.Fatalf("expected IO subscriber to see synthesized prompt, got %q", ioSeen.Prompt)
+	}
+	if len(stub.seen) != 1 {
+		t.Errorf("expected 1 llm.request from non-tool emitter, got %d", len(stub.seen))
+	}
+}
+
 func TestBuildCacheKey_DeterministicAndPartitioned(t *testing.T) {
 	a := buildCacheKey("tool.invoke", map[string]any{"a": 1, "b": 2})
 	b := buildCacheKey("tool.invoke", map[string]any{"b": 2, "a": 1}) // same content, different literal order

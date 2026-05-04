@@ -628,9 +628,11 @@ prompts via a small/cheap LLM. Advertises the
 `hitl.prompt_synthesizer` capability; emitters opt in by setting
 `HITLRequest.PromptSynthesizer = "hitl.prompt_synthesizer"` and
 leaving `Prompt` empty. Subscribes to `before:hitl.requested`
-(vetoable, pointer payload) and to `hitl.requested` (mutates only when
-the emitter passed `*HITLRequest`) ahead of every IO plugin so the
-rendered text is in place before the operator sees the prompt.
+(canonical vetoable entry point, pointer payload — every in-tree HITL
+emitter publishes here first) and to `hitl.requested` as a backward
+compat fallback for out-of-tree emitters that publish a `*HITLRequest`
+pointer directly, ahead of every IO plugin so the rendered text is in
+place before the operator sees the prompt.
 Synthesised prompts are cached on disk under
 `<session>/plugins/nexus.control.hitl_synthesizer/cache.jsonl`, keyed by
 `(action_kind, sha256(action_ref))`. See
@@ -1370,7 +1372,8 @@ Each rule is a map with the following keys:
 | `mode`           | string | `choices` | One of `free_text`, `choices`, `both`. |
 | `choices`        | list   | *(see)*   | List of `{id, label, kind}` (or bare-string id). When omitted in `choices` mode, defaults to `[{id: allow, kind: allow}, {id: reject, kind: reject}]`. |
 | `default_choice` | string | *(empty)* | Choice id auto-selected when the timeout elapses. Without a default, a timeout vetoes the action. |
-| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset. |
+| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset (or empty when `prompt_synthesizer` is set so the synthesizer can fill it in). |
+| `prompt_synthesizer` | string | *(none)* | Capability ID of a registered prompt synthesizer (e.g. `hitl.prompt_synthesizer`). When set, the gate emits the request with `HITLRequest.PromptSynthesizer` populated and an empty `Prompt`, letting the synthesizer render an LLM-authored approval question via the canonical `before:hitl.requested` entry point. |
 | `timeout`        | string | *(none)*  | Go duration (e.g. `5m`). When unset, the gate blocks indefinitely. |
 
 Match keys recognized by the runtime payload:

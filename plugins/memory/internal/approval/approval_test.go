@@ -291,6 +291,103 @@ func TestRequestApproval_UnknownChoiceIDNotAllowed(t *testing.T) {
 	}
 }
 
+// TestRequestApproval_BeforeHandlerMutatesPrompt asserts that a
+// before:hitl.requested subscriber sees the request as a pointer and
+// can mutate its Prompt before the value-emission reaches IO. This is
+// the contract the HITL prompt synthesizer relies on.
+func TestRequestApproval_BeforeHandlerMutatesPrompt(t *testing.T) {
+	bus := engine.NewEventBus()
+
+	bus.Subscribe("before:hitl.requested", func(ev engine.Event[any]) {
+		vp, ok := ev.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		req, ok := vp.Original.(*events.HITLRequest)
+		if !ok {
+			return
+		}
+		req.Prompt = "synthesized: " + req.Prompt
+	}, engine.WithPriority(-100))
+
+	var captured events.HITLRequest
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		req, ok := ev.Payload.(events.HITLRequest)
+		if !ok {
+			return
+		}
+		captured = req
+		go func() {
+			_ = bus.Emit("hitl.responded", events.HITLResponse{
+				RequestID: req.ID,
+				ChoiceID:  "allow",
+			})
+		}()
+	}, engine.WithPriority(50))
+
+	_, allowed, err := RequestApproval(context.Background(), Request{
+		Bus:        bus,
+		Logger:     testLogger,
+		PluginID:   "test.plugin",
+		ActionKind: "memory.longterm.write",
+		Prompt:     "raw",
+		Timeout:    2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Errorf("expected allowed=true, got false")
+	}
+	if captured.Prompt != "synthesized: raw" {
+		t.Errorf("expected IO subscriber to see mutated prompt, got %q", captured.Prompt)
+	}
+}
+
+// TestRequestApproval_BeforeHandlerVetoCancels confirms that a veto on
+// before:hitl.requested aborts the approval round-trip with a cancelled
+// response and never reaches the non-vetoable hitl.requested form.
+func TestRequestApproval_BeforeHandlerVetoCancels(t *testing.T) {
+	bus := engine.NewEventBus()
+
+	bus.Subscribe("before:hitl.requested", func(ev engine.Event[any]) {
+		vp, ok := ev.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "policy: deny memory writes"}
+	}, engine.WithPriority(-100))
+
+	var ioCalls int
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		ioCalls++
+	}, engine.WithPriority(50))
+
+	resp, allowed, err := RequestApproval(context.Background(), Request{
+		Bus:        bus,
+		Logger:     testLogger,
+		PluginID:   "test.plugin",
+		ActionKind: "memory.longterm.write",
+		Prompt:     "Approve?",
+		Timeout:    1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Error("vetoed request must not be allowed")
+	}
+	if !resp.Cancelled {
+		t.Error("vetoed request should resolve as cancelled")
+	}
+	if resp.CancelReason != "policy: deny memory writes" {
+		t.Errorf("expected veto reason forwarded, got %q", resp.CancelReason)
+	}
+	if ioCalls != 0 {
+		t.Errorf("vetoed request must not emit hitl.requested, got %d", ioCalls)
+	}
+}
+
 func TestRequestApproval_MapPayloadResponseDecoded(t *testing.T) {
 	bus := engine.NewEventBus()
 	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {

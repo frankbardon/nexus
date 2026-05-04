@@ -1,0 +1,136 @@
+# Demo: LLM-rendered HITL approval prompts (issue #79)
+# Validates: nexus.control.hitl_synthesizer firing for non-tool emitters
+# (the approval policy gate) via the canonical before:hitl.requested entry
+# point.
+#
+# Run:
+#   bin/nexus -config configs/demo-hitl-synthesizer.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Synthesized destructive-shell prompt: ask the agent to "delete
+#      old build artifacts in /tmp using rm". The shell tool match
+#      triggers the destructive_shell rule, which sets
+#      prompt_synthesizer: hitl.prompt_synthesizer and leaves prompt
+#      empty. The synthesizer (haiku) renders a concrete one-liner
+#      mentioning the actual command, e.g.
+#        "Approve `rm -rf /tmp/build-*`?"
+#      before the TUI presents the prompt.
+#   2. Cache hit on second identical action: re-run the same command.
+#      The synthesizer answers from disk cache (no LLM call) — check
+#      the session's hitl_synthesizer/cache.jsonl after the run.
+#   3. Static prompt rule still works: the sensitive_path rule keeps
+#      the literal prompt: template (no synthesizer set), confirming
+#      both paths coexist in the same gate.
+#   4. Synthesizer fallback on LLM failure: kill your network mid-run
+#      and trigger the destructive_shell rule. The synthesizer falls
+#      back to its template ("Approve action: tool.invoke") rather
+#      than blocking forever.
+#
+# What to watch for:
+#   - The TUI receives a single rendered string in either path —
+#     synthesis is invisible to IO.
+#   - In the journal (~/.nexus/sessions/<id>/journal/), each
+#     hitl.requested for a synthesized rule is preceded by a
+#     before:hitl.requested record with the same payload.
+#   - llm.request entries tagged with
+#     metadata._source=nexus.control.hitl_synthesizer correspond to
+#     synthesis calls (not the agent's main loop).
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+    haiku:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 512
+  sessions:
+    root: ~/.nexus/demo-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.gate.approval_policy
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.control.hitl:
+    registry:
+      enabled: false
+
+  nexus.control.hitl_synthesizer:
+    model: haiku                       # cheap; resolved via core.models
+    max_action_ref_chars: 1500
+    cache_enabled: true
+    fallback_prompt: "Approve action: {{.action_kind}}"
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a sysadmin assistant. Be concise. Use shell + file tools
+      to investigate and modify the filesystem. The user has guarded
+      destructive actions behind an approval gate; if a tool result is
+      vetoed, explain what was blocked and ask the user how to proceed.
+
+  nexus.tool.shell:
+    allowed_commands: ["ls", "cat", "grep", "find", "rm", "mkdir", "touch", "echo"]
+    timeout: 10s
+    sandbox: true
+
+  nexus.tool.file:
+    base_dir: ~
+
+  nexus.gate.approval_policy:
+    rules:
+      # Destructive shell: any rm command needs approval, with the
+      # operator-facing prompt rendered by the LLM synthesizer.
+      - match:
+          action_kind: tool.invoke
+          tool: shell
+          args.command: "rm*"
+        mode: choices
+        choices:
+          - { id: allow,  label: "Run as-is", kind: allow }
+          - { id: reject, label: "Block",     kind: reject }
+        default_choice: reject
+        timeout: 30s
+        # No prompt: here — the synthesizer fills it in via the
+        # before:hitl.requested handler. The synthesizer sees the
+        # rule's ActionRef (tool name + arguments) and writes a
+        # concrete approval question.
+        prompt_synthesizer: hitl.prompt_synthesizer
+
+      # Sensitive paths: writing under /etc keeps the literal prompt
+      # template — proves static and synthesized rules coexist.
+      - match:
+          action_kind: tool.invoke
+          tool: file
+          args.path: "/etc/*"
+        mode: choices
+        choices:
+          - { id: allow,  label: "Write", kind: allow }
+          - { id: reject, label: "Block", kind: reject }
+        default_choice: reject
+        prompt: "Write to system path {{.args.path}}? This may affect other software."
+
+  nexus.memory.capped:
+    max_messages: 40
+    persist: true

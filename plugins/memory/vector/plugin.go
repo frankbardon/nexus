@@ -201,6 +201,7 @@ func (p *Plugin) Emissions() []string {
 		"hybrid.query",
 		"vector.upsert",
 		"rag.retrieved",
+		"before:hitl.requested",
 		"hitl.requested",
 	}
 }

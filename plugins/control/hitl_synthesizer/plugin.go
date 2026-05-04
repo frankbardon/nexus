@@ -9,16 +9,18 @@
 //
 // The synthesizer subscribes to two channels:
 //
-//   - before:hitl.requested — vetoable, pointer-payload. Future
-//     emitters call EmitVetoable on this event before their non-vetoable
-//     Emit so the synthesizer can mutate req.Prompt in place. The bus
-//     guarantees handlers see the same *VetoablePayload pointer.
+//   - before:hitl.requested — canonical, vetoable, pointer-payload entry
+//     point. Every in-tree HITL emitter (nexus.control.hitl ask_user,
+//     nexus.gate.approval_policy, the shared memory approval helper)
+//     calls EmitVetoable on this event before publishing the value-shape
+//     hitl.requested so the synthesizer can mutate req.Prompt in place.
+//     The bus guarantees handlers see the same *VetoablePayload pointer.
 //
-//   - hitl.requested — non-vetoable. The existing nexus.control.hitl
-//     plugin and gates emit values here. Synthesis only succeeds for
-//     pointer payloads; value payloads are skipped (a copy can't carry
-//     mutations back). In practice this is fine: the existing emitters
-//     either set Prompt directly or pass pointers explicitly.
+//   - hitl.requested — non-vetoable. Kept as a backward-compat fallback
+//     for out-of-tree emitters that publish a *HITLRequest pointer
+//     directly. Value payloads are skipped (a copy can't carry mutations
+//     back); all in-tree value emissions follow the before: path first
+//     so by the time IO plugins see the value form, Prompt is populated.
 //
 // Synthesised prompts are cached on disk (write-through JSONL) keyed by
 // (ActionKind, hash(ActionRef)) so identical actions don't pay the LLM

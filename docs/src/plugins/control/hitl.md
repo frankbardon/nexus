@@ -63,7 +63,8 @@ Tool result is structured JSON, not a bare string:
 
 | Event | When |
 |-------|------|
-| `hitl.requested` | A plugin (or the LLM via `ask_user`) needs human input. |
+| `before:hitl.requested` | Canonical vetoable entry point with `*HITLRequest` payload. Subscribers (e.g. the prompt synthesizer) can mutate `Prompt` or veto. |
+| `hitl.requested` | After a non-veto result, value-shape emission consumed by IO plugins. |
 | `tool.register` | Registers the `ask_user` tool at boot. |
 | `tool.result` | After the operator responds (carries the structured JSON). |
 
@@ -84,7 +85,11 @@ will consume it. Conventional values:
 
 ## How It Works
 
-1. Plugin emits `hitl.requested` with prompt + mode + choices.
+1. Plugin calls `bus.EmitVetoable("before:hitl.requested", &req)` so
+   `before:hitl.requested` subscribers (notably the prompt synthesizer)
+   can mutate `req.Prompt` or veto. On veto, the request resolves as
+   rejected/cancelled without reaching IO. On non-veto, the plugin
+   follows up with `bus.Emit("hitl.requested", req)`.
 2. The active IO plugin (TUI, Browser, Wails, oneshot, test) renders
    the prompt and collects the operator's answer.
 3. IO plugin emits `hitl.responded` with `{request_id, choice_id?, free_text?}`.

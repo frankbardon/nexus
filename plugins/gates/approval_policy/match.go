@@ -14,6 +14,7 @@ type rule struct {
 	choices          []choiceCfg
 	defaultChoice    string
 	prompt           string
+	promptSynthesizer string
 	timeoutSeconds   int
 }
 

@@ -378,6 +378,128 @@ func TestParseRules_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestApprovalPolicy_BeforeHandlerSynthesizesPrompt verifies the gate
+// emits before:hitl.requested with a pointer payload first, so the
+// HITL prompt synthesizer (or any other before:hitl.requested handler)
+// can mutate Prompt before IO sees the request.
+func TestApprovalPolicy_BeforeHandlerSynthesizesPrompt(t *testing.T) {
+	rules := []rule{{
+		match: map[string]any{"action_kind": "tool.invoke", "tool": "shell"},
+		mode:  string(events.HITLModeChoices),
+	}}
+	_, bus := newTestPlugin(t, rules)
+
+	bus.Subscribe("before:hitl.requested", func(ev engine.Event[any]) {
+		vp, ok := ev.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		req, ok := vp.Original.(*events.HITLRequest)
+		if !ok {
+			return
+		}
+		req.Prompt = "synthesized: " + req.ActionKind
+	}, engine.WithPriority(-100))
+
+	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+
+	tc := events.ToolCall{
+		ID:        "t1",
+		Name:      "shell",
+		Arguments: map[string]any{"command": "ls"},
+	}
+	veto, err := bus.EmitVetoable("before:tool.invoke", &tc)
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if veto.Vetoed {
+		t.Fatalf("expected allow, got veto: %s", veto.Reason)
+	}
+	if len(resp.seen) != 1 {
+		t.Fatalf("expected 1 hitl.requested, got %d", len(resp.seen))
+	}
+	if resp.seen[0].Prompt != "synthesized: tool.invoke" {
+		t.Errorf("expected synthesized prompt to reach IO, got %q", resp.seen[0].Prompt)
+	}
+}
+
+// TestApprovalPolicy_PromptSynthesizerOptIn asserts a rule with the
+// prompt_synthesizer key set propagates the capability ID onto the
+// emitted HITLRequest and leaves Prompt empty so the
+// before:hitl.requested subscriber can render it.
+func TestApprovalPolicy_PromptSynthesizerOptIn(t *testing.T) {
+	rules := []rule{{
+		match:             map[string]any{"action_kind": "tool.invoke", "tool": "shell"},
+		mode:              string(events.HITLModeChoices),
+		promptSynthesizer: "hitl.prompt_synthesizer",
+	}}
+	_, bus := newTestPlugin(t, rules)
+	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+
+	tc := events.ToolCall{
+		ID:        "t1",
+		Name:      "shell",
+		Arguments: map[string]any{"command": "rm -rf /tmp"},
+	}
+	if _, err := bus.EmitVetoable("before:tool.invoke", &tc); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if len(resp.seen) != 1 {
+		t.Fatalf("expected 1 hitl.requested, got %d", len(resp.seen))
+	}
+	if resp.seen[0].PromptSynthesizer != "hitl.prompt_synthesizer" {
+		t.Errorf("PromptSynthesizer not propagated, got %q", resp.seen[0].PromptSynthesizer)
+	}
+	if resp.seen[0].Prompt != "" {
+		t.Errorf("expected empty Prompt to leave synthesis room, got %q", resp.seen[0].Prompt)
+	}
+}
+
+// TestApprovalPolicy_BeforeHandlerVetoRejects asserts a veto on the
+// canonical before:hitl.requested entry point translates into a veto
+// on the original before:tool.invoke without ever firing IO.
+func TestApprovalPolicy_BeforeHandlerVetoRejects(t *testing.T) {
+	rules := []rule{{
+		match: map[string]any{"action_kind": "tool.invoke", "tool": "shell"},
+		mode:  string(events.HITLModeChoices),
+	}}
+	_, bus := newTestPlugin(t, rules)
+
+	bus.Subscribe("before:hitl.requested", func(ev engine.Event[any]) {
+		vp, ok := ev.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "approval auditor rejected"}
+	}, engine.WithPriority(-100))
+
+	var ioCalls int
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if _, ok := ev.Payload.(events.HITLRequest); ok {
+			ioCalls++
+		}
+	}, engine.WithPriority(50))
+
+	tc := events.ToolCall{
+		ID:        "t1",
+		Name:      "shell",
+		Arguments: map[string]any{"command": "ls"},
+	}
+	veto, err := bus.EmitVetoable("before:tool.invoke", &tc)
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if !veto.Vetoed {
+		t.Fatal("expected gate to veto tool.invoke when before:hitl.requested vetoes")
+	}
+	if veto.Reason != "approval auditor rejected" {
+		t.Errorf("expected veto reason forwarded, got %q", veto.Reason)
+	}
+	if ioCalls != 0 {
+		t.Errorf("vetoed approval must not emit hitl.requested to IO, got %d", ioCalls)
+	}
+}
+
 func TestParseRules_InvalidMode(t *testing.T) {
 	raw := []any{
 		map[string]any{"mode": "bogus"},

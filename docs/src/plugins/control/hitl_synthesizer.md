@@ -27,12 +27,12 @@ prompt or `text/template`.
 
 1. An emitter (gate, memory plugin, agent) builds a `HITLRequest`
    with `PromptSynthesizer: "hitl.prompt_synthesizer"` and an empty
-   `Prompt`. It either:
-   - Calls `bus.EmitVetoable("before:hitl.requested", &req)` first,
-     then `bus.Emit("hitl.requested", req)` once the synthesizer has
-     mutated `Prompt`, or
-   - Calls `bus.Emit("hitl.requested", &req)` directly with a
-     pointer payload.
+   `Prompt`, then publishes via the canonical entry point:
+   `bus.EmitVetoable("before:hitl.requested", &req)`. On a non-veto
+   result the emitter follows up with `bus.Emit("hitl.requested", req)`
+   for IO consumers to render. All in-tree HITL emitters
+   (`nexus.control.hitl` ask_user, `nexus.gate.approval_policy`,
+   the shared memory approval helper) follow this pattern.
 2. The synthesizer's handler runs at priority `-100`, ahead of every
    IO plugin (priorities 0/10/50). It checks the opt-in conditions,
    consults the cache, and if there's no hit emits an `llm.request`
@@ -40,8 +40,8 @@ prompt or `text/template`.
 3. The active LLM provider returns an `llm.response` synchronously;
    the synthesizer extracts the rendered text, writes it back into
    `req.Prompt`, and persists it to disk for next time.
-4. Subsequent IO plugins receive the pointer-shared payload (or the
-   value re-emitted by the wrapper) with `Prompt` already populated.
+4. The follow-up `Emit("hitl.requested", req)` value emission carries
+   the synthesized prompt to IO plugins.
 
 If the LLM call fails (provider error, empty response, missing
 `llm.response`), the synthesizer never blocks indefinitely: it falls
@@ -85,27 +85,32 @@ cache is hydrated at boot and written through on every store.
 To force a re-render (e.g. while iterating on the system prompt) set
 `cache_enabled: false` or delete `cache.jsonl`.
 
-## Pointer-vs-Value Payloads
+## Canonical Emission Pattern
 
-The synthesizer mutates the request in place. That requires the
-emitter to publish a `*HITLRequest`, not a value. The recommended
-pattern is to use the vetoable path:
+Every HITL emitter in the tree calls `EmitVetoable` on the canonical
+`before:hitl.requested` event first, then dispatches the value-shape
+`hitl.requested` for IO consumption:
 
 ```go
-// Future-proof emitter (gate or memory plugin):
-req := &events.HITLRequest{ /* … */ }
-if _, err := bus.EmitVetoable("before:hitl.requested", req); err != nil {
+req := events.HITLRequest{ /* … */ }
+veto, err := bus.EmitVetoable("before:hitl.requested", &req)
+if err != nil {
     return err
 }
-_ = bus.Emit("hitl.requested", *req)  // dereference once Prompt is filled
+if veto.Vetoed {
+    // Treat as rejected/cancelled per emitter semantics.
+    return nil
+}
+_ = bus.Emit("hitl.requested", req) // Prompt now reflects synthesizer mutations
 ```
 
-When the emitter publishes a value to `hitl.requested` (the legacy
-path), the synthesizer logs and skips — it cannot propagate
-mutations through a copy. In practice the legacy emitters either set
-`Prompt` themselves (the `ask_user` tool) or supply a `PromptTemplate`
-the requesting plugin renders inline, so the pointer-only constraint
-mostly affects new code that explicitly opts into LLM rendering.
+The pointer-payload first leg lets `before:hitl.requested` subscribers
+(notably this plugin) mutate `req.Prompt` in place, while keeping the
+non-vetoable `hitl.requested` form value-shaped — the type IO plugins
+expect. Out-of-tree emitters that emit `hitl.requested` directly with a
+pointer payload still work for backward compatibility (the synthesizer
+keeps the `hitl.requested` subscription as a fallback), but new code
+should use the canonical pattern above.
 
 ## Events
 
@@ -113,8 +118,8 @@ mostly affects new code that explicitly opts into LLM rendering.
 
 | Event | Priority | Purpose |
 |-------|----------|---------|
-| `before:hitl.requested` | -100 | Vetoable opt-in path; mutates `*HITLRequest.Prompt` via `*VetoablePayload`. Never vetoes. |
-| `hitl.requested` | -100 | Legacy path; mutates only when the payload is `*HITLRequest`. |
+| `before:hitl.requested` | -100 | Canonical entry point; mutates `*HITLRequest.Prompt` via `*VetoablePayload`. Never vetoes. |
+| `hitl.requested` | -100 | Backward-compat fallback for out-of-tree emitters that publish a pointer payload directly. In-tree emitters use the `before:` form. |
 | `llm.response` | 50 | Routes responses tagged with this plugin's `_source` to the awaiting synthesis call. |
 
 ### Emits

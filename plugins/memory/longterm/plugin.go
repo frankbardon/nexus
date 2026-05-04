@@ -99,6 +99,7 @@ func (p *Plugin) Emissions() []string {
 		"tool.register",
 		"before:tool.result",
 		"tool.result",
+		"before:hitl.requested",
 		"hitl.requested",
 	}
 }
