@@ -77,6 +77,10 @@ import (
 	// Discovery plugins.
 	progressiveplugin "github.com/frankbardon/nexus/plugins/discovery/progressive"
 
+	// Router plugins (idea 09).
+	classifierrouter "github.com/frankbardon/nexus/plugins/router/classifier"
+	metadatarouter "github.com/frankbardon/nexus/plugins/router/metadata"
+
 	// Skill plugins.
 	"github.com/frankbardon/nexus/plugins/skills"
 
@@ -186,6 +190,10 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Discovery
 	r.Register("nexus.discovery.progressive", progressiveplugin.New)
+
+	// Routers
+	r.Register("nexus.router.metadata", metadatarouter.New)
+	r.Register("nexus.router.classifier", classifierrouter.New)
 
 	// Skills
 	r.Register("nexus.skills", skills.New)
