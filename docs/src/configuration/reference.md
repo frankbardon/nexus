@@ -1372,7 +1372,8 @@ Each rule is a map with the following keys:
 | `mode`           | string | `choices` | One of `free_text`, `choices`, `both`. |
 | `choices`        | list   | *(see)*   | List of `{id, label, kind}` (or bare-string id). When omitted in `choices` mode, defaults to `[{id: allow, kind: allow}, {id: reject, kind: reject}]`. |
 | `default_choice` | string | *(empty)* | Choice id auto-selected when the timeout elapses. Without a default, a timeout vetoes the action. |
-| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset. |
+| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset (or empty when `prompt_synthesizer` is set so the synthesizer can fill it in). |
+| `prompt_synthesizer` | string | *(none)* | Capability ID of a registered prompt synthesizer (e.g. `hitl.prompt_synthesizer`). When set, the gate emits the request with `HITLRequest.PromptSynthesizer` populated and an empty `Prompt`, letting the synthesizer render an LLM-authored approval question via the canonical `before:hitl.requested` entry point. |
 | `timeout`        | string | *(none)*  | Go duration (e.g. `5m`). When unset, the gate blocks indefinitely. |
 
 Match keys recognized by the runtime payload:

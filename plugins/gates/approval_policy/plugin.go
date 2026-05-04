@@ -221,14 +221,15 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 	requestID := fmt.Sprintf("approval-%d-%d", time.Now().UnixNano(), p.requestCounter.Add(1))
 
 	req := events.HITLRequest{
-		ID:              requestID,
-		RequesterPlugin: pluginID,
-		ActionKind:      actionKind,
-		ActionRef:       payload,
-		Mode:            events.HITLMode(r.mode),
-		Choices:         choices,
-		DefaultChoiceID: defaultID,
-		Prompt:          prompt,
+		ID:                requestID,
+		RequesterPlugin:   pluginID,
+		ActionKind:        actionKind,
+		ActionRef:         payload,
+		Mode:              events.HITLMode(r.mode),
+		Choices:           choices,
+		DefaultChoiceID:   defaultID,
+		Prompt:            prompt,
+		PromptSynthesizer: r.promptSynthesizer,
 	}
 	if r.timeoutSeconds > 0 {
 		req.Deadline = time.Now().Add(time.Duration(r.timeoutSeconds) * time.Second)
@@ -434,9 +435,14 @@ func applyLLMEdit(req *events.LLMRequest, edits map[string]any) {
 
 // renderPrompt returns the rendered approval prompt. Falls back to a
 // generic "Approve <kind>: <target>" message when no template was set
-// or the template fails to parse/execute.
+// or the template fails to parse/execute. When the rule names a
+// prompt_synthesizer, an empty prompt template stays empty so the
+// synthesizer can fill it in via the before:hitl.requested handler.
 func renderPrompt(r rule, payload map[string]any, actionKind, target string) string {
 	if strings.TrimSpace(r.prompt) == "" {
+		if r.promptSynthesizer != "" {
+			return ""
+		}
 		return fmt.Sprintf("Approve %s: %s", actionKind, target)
 	}
 	tmpl, err := template.New("approval").Option("missingkey=zero").Parse(r.prompt)
@@ -551,6 +557,10 @@ func parseRule(obj map[string]any) (rule, error) {
 
 	if v, ok := obj["prompt"].(string); ok {
 		r.prompt = v
+	}
+
+	if v, ok := obj["prompt_synthesizer"].(string); ok {
+		r.promptSynthesizer = v
 	}
 
 	if v, ok := obj["timeout"].(string); ok && v != "" {
