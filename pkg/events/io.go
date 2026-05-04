@@ -59,19 +59,6 @@ type ApprovalResponse struct {
 	Always   bool
 }
 
-// AskUser asks the user a question and expects a free-form text response.
-type AskUser struct {
-	PromptID string
-	Question string
-	TurnID   string
-}
-
-// AskUserResponse carries the user's text answer.
-type AskUserResponse struct {
-	PromptID string
-	Answer   string
-}
-
 // HistoryReplay carries persisted conversation messages for UI display on session recall.
 type HistoryReplay struct {
 	Messages []Message

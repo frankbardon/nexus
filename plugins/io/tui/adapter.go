@@ -23,7 +23,7 @@ type Adapter struct {
 	resumeHandler   func()
 	approvalCh      chan ui.ApprovalResponseMessage
 
-	askCh chan ui.AskUserResponseMessage
+	askCh chan ui.HITLResponseMessage
 
 	done chan struct{}
 }
@@ -36,7 +36,7 @@ func NewAdapter(session *engine.SessionWorkspace, capabilities map[string][]stri
 		session:      session,
 		capabilities: capabilities,
 		approvalCh:   make(chan ui.ApprovalResponseMessage, 1),
-		askCh:        make(chan ui.AskUserResponseMessage, 1),
+		askCh:        make(chan ui.HITLResponseMessage, 1),
 		done:         make(chan struct{}),
 	}
 }
@@ -159,8 +159,11 @@ func (a *Adapter) RequestApproval(msg ui.ApprovalRequestMessage) (ui.ApprovalRes
 	}, nil
 }
 
-// RequestInput sends a question to the user and blocks until they respond with text.
-func (a *Adapter) RequestInput(msg ui.AskUserMessage) (ui.AskUserResponseMessage, error) {
+// RequestHumanInput sends a hitl request to the user and blocks until
+// they respond. The TUI renders Prompt and (when present) Choices; the
+// returned HITLResponseMessage carries the picked ChoiceID and/or
+// FreeText answer.
+func (a *Adapter) RequestHumanInput(msg ui.HITLRequestMessage) (ui.HITLResponseMessage, error) {
 	if a.program != nil {
 		a.program.Send(askUserMsg{msg})
 	}

@@ -214,6 +214,22 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}
 
+	// Acquire the session lock immediately after the workspace exists
+	// and before any plugin Init runs. Refuses to boot when an existing
+	// non-stale lock is found; overwrites a stale one with a warning.
+	if err := e.acquireSessionLock(); err != nil {
+		return err
+	}
+	// Release the lock if Boot fails after acquisition — the caller
+	// will not call Stop on a failed boot. Cleared at the end of a
+	// successful Boot so Stop owns the teardown.
+	bootSucceeded := false
+	defer func() {
+		if !bootSucceeded && e.Session != nil {
+			_ = RemoveSessionLock(e.Session.RootDir)
+		}
+	}()
+
 	if err := e.startJournal(); err != nil {
 		return fmt.Errorf("starting journal: %w", err)
 	}
@@ -374,7 +390,31 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}()
 
+	bootSucceeded = true
 	return nil
+}
+
+// acquireSessionLock writes session.lock under the active session
+// directory. If a lock is already present and its PID is alive, the
+// boot is refused with a SessionLockedError. A stale lock (PID gone)
+// is overwritten with a warning so a crashed prior run does not block
+// recovery.
+func (e *Engine) acquireSessionLock() error {
+	if e.Session == nil {
+		return fmt.Errorf("acquire lock: no session workspace")
+	}
+	dir := e.Session.RootDir
+	if existing, err := ReadSessionLock(dir); err == nil {
+		if !IsLockStale(existing) {
+			return &SessionLockedError{Dir: dir, Lock: existing}
+		}
+		e.Logger.Warn("overwriting stale session lock",
+			"session_id", e.Session.ID,
+			"stale_pid", existing.PID,
+			"started_at", existing.StartedAt,
+		)
+	}
+	return WriteSessionLock(dir, os.Getpid())
 }
 
 // crashResumeIfPartial inspects the current session's journal for an
@@ -441,6 +481,8 @@ func replayPayloadConverter(eventType string, payload any) (any, error) {
 		return journal.PayloadAs[events.LLMResponse](payload)
 	case "tool.result":
 		return journal.PayloadAs[events.ToolResult](payload)
+	case "hitl.responded":
+		return journal.PayloadAs[events.HITLResponse](payload)
 	default:
 		return payload, nil
 	}
@@ -531,6 +573,15 @@ func (e *Engine) Stop(ctx context.Context) error {
 			e.Logger.Warn("storage close error", "error", err)
 		}
 		e.Storage = nil
+	}
+
+	// Release the session lock last so a crash anywhere above leaves a
+	// stale lock that the next Boot can detect and overwrite, rather
+	// than no lock at all.
+	if e.Session != nil {
+		if err := RemoveSessionLock(e.Session.RootDir); err != nil {
+			e.Logger.Warn("removing session lock failed", "error", err)
+		}
 	}
 
 	return nil

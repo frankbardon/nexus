@@ -20,6 +20,14 @@ func main() {
 			os.Exit(runIngest(os.Args[2:]))
 		case "eval":
 			os.Exit(runEval(os.Args[2:]))
+		case "session":
+			os.Exit(runSession(os.Args[2:]))
+		case "hitl":
+			os.Exit(runHITL(os.Args[2:]))
+		case "approve":
+			os.Exit(runHITLApprove(os.Args[2:]))
+		case "reject":
+			os.Exit(runHITLReject(os.Args[2:]))
 		}
 	}
 

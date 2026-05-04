@@ -1,0 +1,147 @@
+# Demo: Policy-driven approval gate
+# Validates: rule matching, allow/reject veto, payload edits, LLM-request gating
+#
+# Run:
+#   bin/nexus -config configs/demo-approval-policy.yaml
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY set in env or .env
+#
+# What to test:
+#   1. Destructive shell match: Ask the agent to "delete the temp files
+#      using rm". The agent calls shell with `rm ...`; the gate matches
+#      args.command_glob "rm*", presents a 3-choice approval (allow/
+#      reject/edit). Try each path:
+#        - allow: shell runs as-is
+#        - reject: agent receives a vetoed tool result and continues
+#        - edit: pick "edit" then the gate currently logs the choice
+#          (full edit-payload UX is out of scope for this demo;
+#          emitter-side EditedPayload application is in deferred-item
+#          backlog #79)
+#   2. Path-glob match for fileio: Ask the agent to "write to /etc/foo"
+#      via the file tool. The gate matches args.path_glob "/etc/*" and
+#      blocks for approval.
+#   3. LLM-request gating: The "expensive_model" rule matches whenever
+#      the agent issues an llm.request with model=opus (the gate's
+#      action_kind is "llm.request"). Trigger by asking something that
+#      activates the orchestrator (it routes to opus). Approve / reject
+#      to see the request go through or be vetoed (which surfaces as a
+#      provider error in the agent loop).
+#   4. First-match-wins: If two rules could match, the first one in
+#      declaration order is used. "rm everything" hits the destructive
+#      shell rule before the broad shell rule, by ordering.
+#   5. Default choice on timeout: The destructive_shell rule has
+#      timeout: 30s. If you walk away without responding, the request
+#      auto-resolves to the default_choice ("reject"), the gate vetoes,
+#      the agent receives the failure.
+#
+# What to watch for:
+#   - The agent sees a vetoed tool.invoke as a tool failure, not an
+#     error — it can react to the rejection and try a different path.
+#   - The choice's "kind" field drives the gate decision: "allow" lets
+#     the action through, "reject" vetoes, "edit" passes the action
+#     through with the choice's edited_payload merged on top.
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+    opus:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/demo-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.control.hitl
+    - nexus.gate.approval_policy
+    - nexus.memory.capped
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.control.hitl:
+    registry:
+      enabled: true
+      dir: ~/.nexus/hitl
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a sysadmin assistant. Be concise. Use shell + file tools
+      to investigate and modify the filesystem. The user has guarded
+      destructive actions behind an approval gate; if a tool result is
+      vetoed, explain what was blocked and ask the user how to proceed.
+
+  nexus.tool.shell:
+    allowed_commands: ["ls", "cat", "grep", "find", "rm", "mkdir", "touch", "echo"]
+    timeout: 10s
+    sandbox: true
+
+  nexus.tool.file:
+    base_dir: ~
+
+  nexus.gate.approval_policy:
+    rules:
+      # Destructive shell: any rm command needs approval.
+      - match:
+          action_kind: tool.invoke
+          tool: shell
+          args.command: "rm*"
+        mode: choices
+        choices:
+          - { id: allow,  label: "Run as-is",          kind: allow }
+          - { id: edit,   label: "Approve with edits", kind: edit }
+          - { id: reject, label: "Block",              kind: reject }
+        default_choice: reject
+        timeout: 30s
+        prompt: |
+          About to run shell:
+            {{.args.command}}
+          in {{or .args.cwd "(default cwd)"}}.
+          Approve, edit args, or reject?
+
+      # Sensitive paths: writing under /etc, /usr, /System always asks.
+      - match:
+          action_kind: tool.invoke
+          tool: file
+          args.path: "/etc/*"
+        mode: choices
+        choices:
+          - { id: allow,  label: "Write",  kind: allow }
+          - { id: reject, label: "Block",  kind: reject }
+        default_choice: reject
+        prompt: "Write to system path {{.args.path}}? This may affect other software."
+
+      # Expensive model: any llm.request to opus needs sign-off in this
+      # demo (cost guard). Adjust to your taste.
+      - match:
+          action_kind: llm.request
+          model: claude-opus-4-7
+        mode: choices
+        choices:
+          - { id: allow,  label: "Run on Opus",     kind: allow }
+          - { id: reject, label: "Reroute (block)", kind: reject }
+        default_choice: allow
+        timeout: 60s
+        prompt: |
+          About to call Opus ({{.model}}) — high-cost tier.
+          Tools requested: {{.tools}}
+          Approve?
+
+  nexus.memory.capped:
+    max_messages: 40
+    persist: true

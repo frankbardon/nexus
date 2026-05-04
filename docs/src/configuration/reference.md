@@ -189,7 +189,8 @@ pattern.
 
 `bin/nexus -config <path> -replay <session-id>` re-runs a journaled session
 without external calls. The Anthropic / OpenAI / Gemini providers and the
-side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`)
+side-effecting tools (`shell`, `file`, `code_exec`, `web`, `pdf`, `ask_user`),
+along with the `nexus.control.hitl` plugin's `hitl.responded` events,
 detect replay mode and emit the next journaled `llm.response` /
 `tool.result` from a FIFO stash seeded from the source journal in seq
 order. The replay coordinator drives `io.input` events; the live agent
@@ -604,10 +605,44 @@ Source: `plugins/tools/opener/plugin.go`. Registers `open_path`.
 | `open_cmd` | string   | platform default (`open` macOS, `xdg-open` Linux, `start` Win)  | Override the platform "open" command. |
 | `timeout`  | duration | `10s`                                                           | Per-open timeout. |
 
-### `nexus.tool.ask`
+### `nexus.control.hitl`
 
-Source: `plugins/tools/ask/plugin.go`. **No configuration.** Registers
-`ask_user`; emits `io.ask` and waits for `io.ask.response`.
+Source: `plugins/control/hitl/plugin.go`. The unified human-in-the-loop
+primitive. Registers the LLM-facing `ask_user` tool with an extended
+schema (`prompt`, `mode`, `choices`, `default_choice_id`,
+`deadline_seconds`) and routes `hitl.requested` / `hitl.responded`
+events between requesters (the tool, gates, memory plugins) and IO
+surfaces. Replaces the prior `nexus.tool.ask`. See [Human-in-the-Loop
+plugin docs](../plugins/control/hitl.md).
+
+| Key                  | Type   | Default          | Description |
+|----------------------|--------|------------------|-------------|
+| `registry.enabled`   | bool   | `false`          | Mirror every `hitl.requested` to disk and watch for response files written by `nexus hitl respond`, webhook handlers, etc. |
+| `registry.dir`       | string | `~/.nexus/hitl`  | Filesystem directory the registry uses for `<id>.request.yaml` / `<id>.response.yaml` pairs. Tilde expansion via `engine.ExpandPath`. Created at boot if missing. |
+
+### `nexus.control.hitl_synthesizer`
+
+Source: `plugins/control/hitl_synthesizer/plugin.go`. Optional
+companion to `nexus.control.hitl` that renders context-aware approval
+prompts via a small/cheap LLM. Advertises the
+`hitl.prompt_synthesizer` capability; emitters opt in by setting
+`HITLRequest.PromptSynthesizer = "hitl.prompt_synthesizer"` and
+leaving `Prompt` empty. Subscribes to `before:hitl.requested`
+(vetoable, pointer payload) and to `hitl.requested` (mutates only when
+the emitter passed `*HITLRequest`) ahead of every IO plugin so the
+rendered text is in place before the operator sees the prompt.
+Synthesised prompts are cached on disk under
+`<session>/plugins/nexus.control.hitl_synthesizer/cache.jsonl`, keyed by
+`(action_kind, sha256(action_ref))`. See
+[HITL Prompt Synthesizer docs](../plugins/control/hitl_synthesizer.md).
+
+| Key                    | Type   | Default                              | Description |
+|------------------------|--------|--------------------------------------|-------------|
+| `model`                | string | `haiku`                              | Model role (resolved via `core.models`) used for synthesis. |
+| `model_id`             | string | *(none)*                             | Explicit model ID; bypasses role lookup when set. |
+| `max_action_ref_chars` | int    | `1500`                               | ActionRef truncation budget (in JSON characters) before sending to the model. |
+| `cache_enabled`        | bool   | `true`                               | Toggle the on-disk cache. Disable for debugging or strict-determinism runs. |
+| `fallback_prompt`      | string | `Approve action: {{.action_kind}}`   | Go `text/template` over `{action_kind, action_ref, requester_plugin, request_id}` used when synthesis fails. |
 
 ### `nexus.tool.code_exec`
 
@@ -698,6 +733,10 @@ an external coordinator (separate from history buffers).
 | `prompt_file`       | string | *(none)*         | Path to a prompt file. |
 | `protect_recent`    | int    | `4`              | Recent messages exempt from compaction. |
 | `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before committing the summary back into history. Off = unchanged behavior. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the summary is at least this many bytes. |
 
 ### `nexus.memory.longterm`
 
@@ -712,6 +751,11 @@ Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
 | `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
 | `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
 | `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.match.key_glob`             | string   | *(any)*   | Only require approval when the entry key matches this glob. |
+| `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the content is at least this many bytes. |
 
 ### `nexus.memory.vector`
 
@@ -728,6 +772,11 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
 | `recall_via_hybrid`     | bool   | `false`                | When `search.hybrid` is active, route recall queries through it instead of direct vector lookup. Off by default — adds the lexical leg's latency to every user input. |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.match.namespace_glob`       | string   | *(any)*   | Only require approval when the configured `namespace` matches this glob. |
+| `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the document content is at least this many bytes. |
 
 ---
 
@@ -942,7 +991,7 @@ Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
 | `input_delay`            | duration | `500ms`     | Delay between inputs. |
 | `approval_mode`          | string   | `approve`   | `approve`, `deny`, `per-prompt`. |
 | `approval_rules`         | list     | *(empty)*   | Per-prompt rules: each `{match: <substring>, action: <approve|deny>}`. |
-| `ask_responses`          | list     | *(empty)*   | Responses to `io.ask` events. |
+| `hitl_responses`         | list     | *(empty)*   | Scripted answers to `hitl.requested` events. Bare strings are treated as `free_text`; `{choice_id: ..., free_text: ...}` maps populate the corresponding response fields. |
 | `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
 | `timeout`                | duration | `60s`       | Session timeout. |
 | `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
@@ -1300,6 +1349,52 @@ Source: `plugins/gates/tool_filter/plugin.go`. Modifies `request.ToolFilter` on
 |-----------|------|-------------|-------------|
 | `include` | list | *(empty)*   | Allowlist of tool names. |
 | `exclude` | list | *(empty)*   | Blocklist of tool names. |
+
+### `nexus.gate.approval_policy`
+
+Source: `plugins/gates/approval_policy/plugin.go`. Policy-driven approvals
+on `before:tool.invoke` and `before:llm.request`. The gate evaluates a
+config-supplied list of rules, and on first match emits a `hitl.requested`
+event and blocks waiting on `hitl.responded`. The operator's choice
+resolves to passthrough (allow), veto (reject), or passthrough-with-edits.
+
+| Key     | Type | Default   | Description |
+|---------|------|-----------|-------------|
+| `rules` | list | *(empty)* | Ordered list of approval rules. First match wins. |
+
+Each rule is a map with the following keys:
+
+| Key              | Type   | Default   | Description |
+|------------------|--------|-----------|-------------|
+| `match`          | map    | *(empty)* | Field/value tests against the action payload. String values are glob (`*`, `?`); dotted keys address nested fields (e.g. `args.command`). |
+| `mode`           | string | `choices` | One of `free_text`, `choices`, `both`. |
+| `choices`        | list   | *(see)*   | List of `{id, label, kind}` (or bare-string id). When omitted in `choices` mode, defaults to `[{id: allow, kind: allow}, {id: reject, kind: reject}]`. |
+| `default_choice` | string | *(empty)* | Choice id auto-selected when the timeout elapses. Without a default, a timeout vetoes the action. |
+| `prompt`         | string | *(auto)*  | Go `text/template` string rendered against the action payload. Falls back to `Approve <kind>: <target>` when unset. |
+| `timeout`        | string | *(none)*  | Go duration (e.g. `5m`). When unset, the gate blocks indefinitely. |
+
+Match keys recognized by the runtime payload:
+
+- `action_kind` — `tool.invoke` or `llm.request`.
+- `tool` — the tool name (only meaningful for `tool.invoke`).
+- `args.<dotted>` — any nested key inside the tool's argument map.
+- `model` — the LLM model id (only meaningful for `llm.request`).
+- `role` — the LLM model role (only meaningful for `llm.request`).
+
+Example:
+
+```yaml
+nexus.gate.approval_policy:
+  rules:
+    - match: { action_kind: tool.invoke, tool: shell, args.command: "rm*" }
+      mode: choices
+      choices: [allow, reject]
+      timeout: 5m
+      default_choice: reject
+    - match: { action_kind: llm.request, model: "claude-opus-*" }
+      mode: choices
+      prompt: "About to call expensive model {{ .model }}. Approve?"
+```
 
 ---
 

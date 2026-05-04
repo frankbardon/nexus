@@ -70,6 +70,7 @@ plugins/
   agents/orchestrator/   # Decompose → parallel workers → synthesis pipeline
   apps/helloworld/       # Built-in hello-world placeholder agent
   control/cancel/        # control.cancel capability + /resume slash command
+  control/hitl/          # human-in-the-loop registry; owns ask_user tool, emits hitl.requested, routes hitl.responded
   discovery/progressive/ # Hierarchical tool discovery; LLM sees class summaries, drills via "discover" meta-tool
   providers/anthropic/   # Claude LLM provider (direct HTTP, no SDK; supports api_key config or api_key_env env var)
   providers/openai/      # OpenAI LLM provider (direct HTTP, no SDK; supports api_key config, api_key_env env var, base_url override)
@@ -84,7 +85,6 @@ plugins/
   tools/codeexec/        # run_code tool (Go via Yaegi interpreter); parallel constructs, stdlib whitelist
   tools/pdf/             # read_pdf tool via poppler-utils (pdftotext, pdfinfo)
   tools/opener/          # open_path tool (platform-aware: open / xdg-open / start)
-  tools/ask/             # ask_user tool; emits io.ask, blocks until io.ask.response
   tools/knowledge_search/ # LLM-facing "knowledge_search" tool; queries configured namespaces via vector.store + embeddings.provider, returns top-k with source paths for citation
   search/brave/          # search.provider adapter: Brave Search REST API
   search/anthropic_native/ # search.provider adapter: Anthropic's server-side web_search tool (direct HTTP)

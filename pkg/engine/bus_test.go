@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -229,5 +231,55 @@ func TestNewEventBusWithRingSize_FallsBackOnZero(t *testing.T) {
 	bus := NewEventBusWithRingSize(0).(*eventBus)
 	if bus.ring.cap != DefaultEventRingSize {
 		t.Errorf("ring cap = %d, want default %d", bus.ring.cap, DefaultEventRingSize)
+	}
+}
+
+// TestDrain_ConcurrentEmitsDoNotPanic exercises the race that triggered
+// "WaitGroup is reused before previous Wait has returned" in CI: many
+// emits firing concurrently with a Drain call. Without the drainMu
+// guard around inflight.Add, this test panics under -race within a
+// few iterations.
+func TestDrain_ConcurrentEmitsDoNotPanic(t *testing.T) {
+	bus := NewEventBus()
+
+	const workers = 32
+	const emitsPerWorker = 200
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < emitsPerWorker; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = bus.Emit("test.event", j)
+			}
+		}()
+	}
+
+	// Drain repeatedly while emits are flying. Each Drain may finish
+	// either because all in-flight emits completed or because new
+	// emits keep arriving and we eventually time out — both are fine
+	// for the regression case; the only failure mode we care about
+	// is the runtime panic.
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_ = bus.Drain(ctx)
+		cancel()
+	}
+
+	close(stop)
+	wg.Wait()
+
+	// Final clean drain so the bus settles before the test exits.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := bus.Drain(ctx); err != nil {
+		t.Fatalf("final Drain: %v", err)
 	}
 }

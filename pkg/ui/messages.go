@@ -70,17 +70,28 @@ type FileAttachment struct {
 	Data     []byte `json:"data"`
 }
 
-// AskUserMessage asks the user a question and expects a free-form text response.
-type AskUserMessage struct {
-	PromptID string `json:"prompt_id"`
-	Question string `json:"question"`
-	TurnID   string `json:"turn_id"`
+// HITLChoiceMessage is one option presented in a multi-choice human-in-the-loop request.
+type HITLChoiceMessage struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
-// AskUserResponseMessage carries the user's text answer.
-type AskUserResponseMessage struct {
-	PromptID string `json:"prompt_id"`
-	Answer   string `json:"answer"`
+// HITLRequestMessage is the IO-facing payload for a hitl.requested event.
+// IO plugins render Prompt and (when present) Choices, then return a
+// HITLResponseMessage carrying the operator's pick or freeform answer.
+type HITLRequestMessage struct {
+	RequestID string              `json:"request_id"`
+	Prompt    string              `json:"prompt"`
+	Mode      string              `json:"mode"`
+	Choices   []HITLChoiceMessage `json:"choices,omitempty"`
+	TurnID    string              `json:"turn_id,omitempty"`
+}
+
+// HITLResponseMessage carries the operator's reply.
+type HITLResponseMessage struct {
+	RequestID string `json:"request_id"`
+	ChoiceID  string `json:"choice_id,omitempty"`
+	FreeText  string `json:"free_text,omitempty"`
 }
 
 // CodeExecStdoutMessage streams a chunk of stdout from a run_code script
