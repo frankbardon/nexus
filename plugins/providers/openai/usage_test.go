@@ -5,6 +5,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -45,7 +46,6 @@ func TestApiUsage_ParsesPromptTokensDetails(t *testing.T) {
 	if u.PromptTokensDetails.CachedTokens != 1024 {
 		t.Errorf("PromptTokensDetails.CachedTokens: got %d, want 1024", u.PromptTokensDetails.CachedTokens)
 	}
-	// Sanity check on the placeholder fields that plans 10/12 will use.
 	if u.CompletionTokensDetails.ReasoningTokens != 96 {
 		t.Errorf("CompletionTokensDetails.ReasoningTokens: got %d, want 96", u.CompletionTokensDetails.ReasoningTokens)
 	}
@@ -57,7 +57,8 @@ func TestApiUsage_ParsesPromptTokensDetails(t *testing.T) {
 // TestConvertAPIResponse_PopulatesCachedTokens verifies that convertAPIResponse
 // surfaces prompt_tokens_details.cached_tokens onto events.Usage.CachedTokens.
 func TestConvertAPIResponse_PopulatesCachedTokens(t *testing.T) {
-	p := &Plugin{pricing: defaultPricing}
+	tbl := pricing.DefaultsFor(pricing.ProviderOpenAI)
+	p := &Plugin{pricing: tbl}
 
 	content := "hello"
 	apiResp := apiResponse{
@@ -88,10 +89,7 @@ func TestConvertAPIResponse_PopulatesCachedTokens(t *testing.T) {
 		t.Errorf("CachedTokens: got %d, want 1024", resp.Usage.CachedTokens)
 	}
 
-	// Cost should reflect the discount: 476 plain + 1024 cached at half rate
-	// + 200 output. Compare against a manual computation against the same
-	// rate table to guard against drift.
-	rates := defaultPricing["gpt-4o"]
+	rates, _ := tbl.Get("gpt-4o")
 	wantCost := float64(1500-1024)/1_000_000*rates.InputPerMillion +
 		float64(1024)/1_000_000*(rates.InputPerMillion*0.5) +
 		float64(200)/1_000_000*rates.OutputPerMillion
@@ -103,21 +101,20 @@ func TestConvertAPIResponse_PopulatesCachedTokens(t *testing.T) {
 // TestCalculateCost_NoCache verifies the no-cache path matches the prior
 // (input-only) cost calculation, so plain-input billing is preserved.
 func TestCalculateCost_NoCache(t *testing.T) {
-	rates := modelPricing{
+	rates := pricing.Rates{
 		InputPerMillion:  2.50,
 		OutputPerMillion: 10.0,
 	}
 	usage := events.Usage{
 		PromptTokens:     1500,
 		CompletionTokens: 200,
-		// CachedTokens left at 0
 	}
 
-	got := calculateCost(usage, rates)
+	got := pricing.CalcOpenAI(usage, rates)
 	want := float64(1500)/1_000_000*2.50 + float64(200)/1_000_000*10.0
 
 	if math.Abs(got-want) > 1e-9 {
-		t.Errorf("calculateCost (no cache): got %.10f, want %.10f", got, want)
+		t.Errorf("CalcOpenAI (no cache): got %.10f, want %.10f", got, want)
 	}
 }
 
@@ -125,14 +122,14 @@ func TestCalculateCost_NoCache(t *testing.T) {
 // roughly 75% of the plain-input cost (input portion only): half the prompt at
 // full rate + half at 0.5× rate = 0.75× full rate.
 func TestCalculateCost_HalfCacheDiscount(t *testing.T) {
-	rates := modelPricing{
+	rates := pricing.Rates{
 		InputPerMillion:  2.50,
 		OutputPerMillion: 10.0,
 	}
 
 	cached := events.Usage{
 		PromptTokens:     2000,
-		CompletionTokens: 0, // isolate the input contribution
+		CompletionTokens: 0,
 		CachedTokens:     1000,
 	}
 	plain := events.Usage{
@@ -140,10 +137,9 @@ func TestCalculateCost_HalfCacheDiscount(t *testing.T) {
 		CompletionTokens: 0,
 	}
 
-	cachedCost := calculateCost(cached, rates)
-	plainCost := calculateCost(plain, rates)
+	cachedCost := pricing.CalcOpenAI(cached, rates)
+	plainCost := pricing.CalcOpenAI(plain, rates)
 
-	// 50% cache hit at 0.5× rate → 0.75× plain cost.
 	want := plainCost * 0.75
 	if math.Abs(cachedCost-want) > 1e-9 {
 		t.Errorf("half-cache cost: got %.10f, want %.10f (plainCost=%.10f)", cachedCost, want, plainCost)
@@ -158,19 +154,19 @@ func TestCalculateCost_HalfCacheDiscount(t *testing.T) {
 // cache_read_per_million override is honored instead of the derived 50%
 // fallback.
 func TestCalculateCost_ExplicitCacheRate(t *testing.T) {
-	rates := modelPricing{
+	rates := pricing.Rates{
 		InputPerMillion:     2.50,
 		OutputPerMillion:    10.0,
-		CacheReadPerMillion: 0.30, // explicit; would be 1.25 if derived
+		CacheReadPerMillion: 0.30,
 	}
 	usage := events.Usage{
 		PromptTokens:     1_000_000,
 		CompletionTokens: 0,
-		CachedTokens:     1_000_000, // fully cached: PromptTokens-CachedTokens=0
+		CachedTokens:     1_000_000,
 	}
 
-	got := calculateCost(usage, rates)
-	want := 0.30 // 1M tokens * 0.30 / 1M
+	got := pricing.CalcOpenAI(usage, rates)
+	want := 0.30
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("explicit cache rate cost: got %.10f, want %.10f", got, want)
 	}
@@ -179,18 +175,17 @@ func TestCalculateCost_ExplicitCacheRate(t *testing.T) {
 // TestCalculateCost_DefensiveNegativePlain verifies that an inconsistent
 // payload where CachedTokens > PromptTokens does not produce a negative cost.
 func TestCalculateCost_DefensiveNegativePlain(t *testing.T) {
-	rates := modelPricing{
+	rates := pricing.Rates{
 		InputPerMillion:  2.50,
 		OutputPerMillion: 10.0,
 	}
 	usage := events.Usage{
 		PromptTokens:     500,
 		CompletionTokens: 0,
-		CachedTokens:     1000, // larger than PromptTokens — defensive branch
+		CachedTokens:     1000,
 	}
 
-	got := calculateCost(usage, rates)
-	// plain clamped to 0 → only cached contributes at 0.5× rate.
+	got := pricing.CalcOpenAI(usage, rates)
 	want := float64(1000) / 1_000_000 * (2.50 * 0.5)
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("defensive cost: got %.10f, want %.10f", got, want)
@@ -198,7 +193,7 @@ func TestCalculateCost_DefensiveNegativePlain(t *testing.T) {
 }
 
 // TestParsePricingConfig_CacheReadKey verifies the cache_read_per_million YAML
-// override key is parsed onto modelPricing.
+// override key is parsed onto the merged price table.
 func TestParsePricingConfig_CacheReadKey(t *testing.T) {
 	cfg := map[string]any{
 		"pricing": map[string]any{
@@ -211,7 +206,7 @@ func TestParsePricingConfig_CacheReadKey(t *testing.T) {
 	}
 
 	merged := parsePricingConfig(cfg)
-	p, ok := merged["gpt-4o"]
+	p, ok := merged.Get("gpt-4o")
 	if !ok {
 		t.Fatal("missing pricing entry for gpt-4o")
 	}

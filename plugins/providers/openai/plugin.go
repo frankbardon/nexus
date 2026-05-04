@@ -16,6 +16,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/engine/pricing"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -26,49 +27,8 @@ const (
 	apiURL     = "https://api.openai.com/v1/chat/completions"
 )
 
-// modelPricing holds per-model token rates in USD per million tokens.
-type modelPricing struct {
-	InputPerMillion     float64
-	OutputPerMillion    float64
-	CacheReadPerMillion float64 // 0 → derived as InputPerMillion * 0.5
-}
-
-// defaultPricing is the embedded fallback pricing table. Updated via patch
-// releases when providers change rates. Config override always wins.
-var defaultPricing = map[string]modelPricing{
-	"gpt-4o":            {InputPerMillion: 2.50, OutputPerMillion: 10.0},
-	"gpt-4o-mini":       {InputPerMillion: 0.15, OutputPerMillion: 0.60},
-	"gpt-4o-2024-11-20": {InputPerMillion: 2.50, OutputPerMillion: 10.0},
-	"gpt-4-turbo":       {InputPerMillion: 10.0, OutputPerMillion: 30.0},
-	"gpt-4":             {InputPerMillion: 30.0, OutputPerMillion: 60.0},
-	"gpt-3.5-turbo":     {InputPerMillion: 0.50, OutputPerMillion: 1.50},
-	"o1":                {InputPerMillion: 15.0, OutputPerMillion: 60.0},
-	"o1-mini":           {InputPerMillion: 3.0, OutputPerMillion: 12.0},
-	"o3":                {InputPerMillion: 10.0, OutputPerMillion: 40.0},
-	"o3-mini":           {InputPerMillion: 1.10, OutputPerMillion: 4.40},
-	"o4-mini":           {InputPerMillion: 1.10, OutputPerMillion: 4.40},
-}
-
-// calculateCost computes the USD cost for a single LLM call.
-//
-// OpenAI auto-caches eligible prompt prefixes (≥1024 tokens) and bills the
-// cached portion at half the input rate. We split prompt tokens into the
-// plain (cache miss) and cached portions and bill each at its own rate.
-func calculateCost(usage events.Usage, rates modelPricing) float64 {
-	cachedRate := rates.CacheReadPerMillion
-	if cachedRate == 0 {
-		cachedRate = rates.InputPerMillion * 0.5
-	}
-
-	plainInput := usage.PromptTokens - usage.CachedTokens
-	if plainInput < 0 {
-		plainInput = 0
-	}
-
-	return float64(plainInput)/1_000_000*rates.InputPerMillion +
-		float64(usage.CachedTokens)/1_000_000*cachedRate +
-		float64(usage.CompletionTokens)/1_000_000*rates.OutputPerMillion
-}
+// Pricing tables and cost calculation live in pkg/engine/pricing/ — providers
+// share a single source of truth.
 
 // Plugin implements the OpenAI LLM provider.
 type Plugin struct {
@@ -86,7 +46,7 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
-	pricing map[string]modelPricing // merged: config overrides + embedded defaults
+	pricing *pricing.Table // merged: config overrides + embedded defaults
 
 	reasoning      reasoningConfig
 	forceReasoning bool
@@ -99,6 +59,7 @@ type Plugin struct {
 
 	mu                 sync.Mutex
 	currentRequestMeta map[string]any
+	currentRequestTags map[string]string // copied to llm.response for cost attribution
 	cancelFunc         context.CancelFunc
 	requestSeq         int
 	sessionFileIDs     []string // file_ids uploaded this session (for delete_on_shutdown)
@@ -411,6 +372,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	p.mu.Lock()
 	p.currentRequestMeta = meta
+	p.currentRequestTags = req.Tags
 	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
@@ -686,6 +648,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	// metadata convertAPIResponse already attached (e.g. prediction_acceptance).
 	p.mu.Lock()
 	resp.Metadata = mergeMetadata(resp.Metadata, p.currentRequestMeta)
+	resp.Tags = p.currentRequestTags
 	p.mu.Unlock()
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
@@ -934,6 +897,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 
 	p.mu.Lock()
 	mergedMeta := mergeMetadata(streamMeta, p.currentRequestMeta)
+	tags := p.currentRequestTags
 	p.mu.Unlock()
 
 	_ = p.bus.Emit("llm.response", events.LLMResponse{
@@ -944,48 +908,23 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		Model:        model,
 		FinishReason: finishReason,
 		Metadata:     mergedMeta,
+		Tags:         tags,
 	})
 }
 
-// parsePricingConfig merges embedded defaults with optional config overrides.
-func parsePricingConfig(cfg map[string]any) map[string]modelPricing {
-	merged := make(map[string]modelPricing, len(defaultPricing))
-	for k, v := range defaultPricing {
-		merged[k] = v
+// parsePricingConfig builds the merged price table from embedded defaults
+// plus optional `pricing:` overrides under the plugin's config block.
+func parsePricingConfig(cfg map[string]any) *pricing.Table {
+	tbl := pricing.DefaultsFor(pricing.ProviderOpenAI)
+	if raw, ok := cfg["pricing"].(map[string]any); ok {
+		tbl.Merge(raw)
 	}
-
-	raw, ok := cfg["pricing"].(map[string]any)
-	if !ok {
-		return merged
-	}
-
-	for model, val := range raw {
-		entry, ok := val.(map[string]any)
-		if !ok {
-			continue
-		}
-		p := merged[model]
-		if v, ok := entry["input_per_million"].(float64); ok {
-			p.InputPerMillion = v
-		}
-		if v, ok := entry["output_per_million"].(float64); ok {
-			p.OutputPerMillion = v
-		}
-		if v, ok := entry["cache_read_per_million"].(float64); ok {
-			p.CacheReadPerMillion = v
-		}
-		merged[model] = p
-	}
-
-	return merged
+	return tbl
 }
 
 // costForModel returns the USD cost for a response from the given model.
 func (p *Plugin) costForModel(model string, usage events.Usage) float64 {
-	if rates, ok := p.pricing[model]; ok {
-		return calculateCost(usage, rates)
-	}
-	return 0
+	return p.pricing.Calc(model, usage)
 }
 
 func (p *Plugin) debugLog(label string, data []byte) {

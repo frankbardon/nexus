@@ -38,6 +38,17 @@ type LLMRequest struct {
 	Prediction     string // OpenAI-only: known-content prediction for low-latency edits.
 	// Other providers ignore this field. Empty = no prediction.
 	Metadata map[string]any
+
+	// Tags carries cost-attribution dimensions attached at request creation
+	// per the DigitalApplied "tags must be attached at request creation, not
+	// retroactively" guidance. The engine seeds baseline tags from session
+	// metadata (`tenant`, `project`, `user`, `session_id`); plugins layer
+	// their own (`source_plugin`, `task_kind`, `parent_call_id`).
+	//
+	// Propagates onto LLMResponse.Tags, OTEL spans, and journal records so
+	// that the cost report CLI and the multi-dimensional budget gate can
+	// roll up by any tag dimension.
+	Tags map[string]string
 }
 
 // Message represents a single message in an LLM conversation.
@@ -122,6 +133,12 @@ type LLMResponse struct {
 	// above contain the first successful response (or selected winner), and
 	// Alternatives contains the remaining responses.
 	Alternatives []LLMResponse
+
+	// Tags carries cost-attribution dimensions copied from the originating
+	// LLMRequest. Providers must propagate the request Tags onto the response
+	// they emit so downstream subscribers (cost CLI, budget gate, OTEL
+	// exporter) can attribute usage without re-correlating by call id.
+	Tags map[string]string
 }
 
 // Citation is a single source attribution returned by a provider that supports
