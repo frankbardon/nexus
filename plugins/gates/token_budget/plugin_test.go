@@ -159,14 +159,14 @@ func TestDowngradeAction_RewritesModel(t *testing.T) {
 			},
 		},
 		"downgrade_candidates": []any{
-			"claude-opus-4-6-20250602",
+			"claude-opus-4-7",
 			"claude-haiku-4-5-20251001",
-			"claude-sonnet-4-6-20250514",
+			"claude-sonnet-4-6",
 		},
 	})
 
 	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 10}})
-	req := &events.LLMRequest{Model: "claude-opus-4-6-20250602"}
+	req := &events.LLMRequest{Model: "claude-opus-4-7"}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if veto.Vetoed {
 		t.Fatal("downgrade-model must not veto")
@@ -177,7 +177,7 @@ func TestDowngradeAction_RewritesModel(t *testing.T) {
 	if req.Metadata["_downgraded_by"] != pluginID {
 		t.Fatalf("expected _downgraded_by tag")
 	}
-	if req.Metadata["_downgraded_from"] != "claude-opus-4-6-20250602" {
+	if req.Metadata["_downgraded_from"] != "claude-opus-4-7" {
 		t.Fatalf("expected previous model recorded, got %v", req.Metadata["_downgraded_from"])
 	}
 }
@@ -193,9 +193,9 @@ func TestDowngradeAction_NoCandidatesLeavesAlone(t *testing.T) {
 		},
 	})
 	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 1}})
-	req := &events.LLMRequest{Model: "claude-opus-4-6-20250602"}
+	req := &events.LLMRequest{Model: "claude-opus-4-7"}
 	bus.EmitVetoable("before:llm.request", req)
-	if req.Model != "claude-opus-4-6-20250602" {
+	if req.Model != "claude-opus-4-7" {
 		t.Fatalf("model should be untouched without candidates, got %s", req.Model)
 	}
 }

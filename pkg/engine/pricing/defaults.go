@@ -6,10 +6,14 @@ package pricing
 // All values are USD per million tokens.
 
 var anthropicDefaults = map[string]Rates{
-	"claude-sonnet-4-6-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-sonnet-4-5-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
-	"claude-haiku-4-5-20251001":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
-	"claude-opus-4-6-20250602":   {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	// Current Claude 4.x family (the canonical IDs accepted by the API).
+	"claude-opus-4-7":           {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	"claude-sonnet-4-6":         {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-haiku-4-5-20251001": {InputPerMillion: 0.80, OutputPerMillion: 4.0},
+	// Older 4.x snapshots kept for sessions that pin a specific dated build.
+	"claude-sonnet-4-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
+	"claude-opus-4-20250514":   {InputPerMillion: 15.0, OutputPerMillion: 75.0},
+	// Legacy 3.x family — present so historical journals still cost-attribute.
 	"claude-3-5-sonnet-20241022": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
 	"claude-3-5-haiku-20241022":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
 	"claude-3-opus-20240229":     {InputPerMillion: 15.0, OutputPerMillion: 75.0},

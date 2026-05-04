@@ -65,11 +65,11 @@ core:
       max_tokens: 2048
     balanced:
       provider: nexus.llm.anthropic
-      model: claude-sonnet-4-6-20250514
+      model: claude-sonnet-4-6
       max_tokens: 4096
     reasoning:
       provider: nexus.llm.anthropic
-      model: claude-opus-4-6-20250602
+      model: claude-opus-4-7
       max_tokens: 4096
   sessions:
     root: ~/.nexus/demo-router-sessions
@@ -126,19 +126,19 @@ plugins:
         match:
           metadata.task_kind: react_main
           metadata.iteration: { gte: 3 }
-        use: claude-opus-4-6-20250602
+        use: claude-opus-4-7
       - name: react-main-sonnet
         match: { metadata.task_kind: react_main }
-        use: claude-sonnet-4-6-20250514
-    default_model: claude-sonnet-4-6-20250514
+        use: claude-sonnet-4-6
+    default_model: claude-sonnet-4-6
 
   nexus.router.classifier:
     classifier_model: claude-haiku-4-5-20251001
     candidates:
       - claude-haiku-4-5-20251001
-      - claude-sonnet-4-6-20250514
-      - claude-opus-4-6-20250602
-    fallback: claude-sonnet-4-6-20250514
+      - claude-sonnet-4-6
+      - claude-opus-4-7
+    fallback: claude-sonnet-4-6
     cache_classification: true
     cache_max_entries: 1024
     latency_budget_ms: 800
@@ -146,8 +146,8 @@ plugins:
   nexus.gate.token_budget:
     on_exceed: block
     downgrade_candidates:
-      - claude-opus-4-6-20250602
-      - claude-sonnet-4-6-20250514
+      - claude-opus-4-7
+      - claude-sonnet-4-6
       - claude-haiku-4-5-20251001
     ceilings:
       # Hard session ceiling on total spend — vetoes when reached.

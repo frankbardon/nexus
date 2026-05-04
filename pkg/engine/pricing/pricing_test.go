@@ -140,9 +140,9 @@ func TestMergeIgnoresMalformed(t *testing.T) {
 func TestCheapestModel(t *testing.T) {
 	tbl := DefaultsFor(ProviderAnthropic)
 	got := tbl.CheapestModel([]string{
-		"claude-opus-4-6-20250602",
+		"claude-opus-4-7",
 		"claude-haiku-4-5-20251001",
-		"claude-sonnet-4-6-20250514",
+		"claude-sonnet-4-6",
 	})
 	if got != "claude-haiku-4-5-20251001" {
 		t.Fatalf("expected haiku as cheapest, got %s", got)

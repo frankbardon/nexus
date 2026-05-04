@@ -46,7 +46,7 @@ func TestConvertAPIResponse_PopulatesCacheUsage(t *testing.T) {
 
 	apiResp := apiResponse{
 		ID:    "msg_test",
-		Model: "claude-sonnet-4-6-20250514",
+		Model: "claude-sonnet-4-6",
 		Content: []apiContentBlock{
 			{Type: "text", Text: "hello"},
 		},
@@ -96,7 +96,7 @@ func TestCalculateCost_CacheRates(t *testing.T) {
 		CacheWriteTokens: 1024, // cache write (5m)
 	}
 
-	got := tbl.Calc("claude-sonnet-4-6-20250514", usage)
+	got := tbl.Calc("claude-sonnet-4-6", usage)
 
 	// Expected:
 	//   plain  = 1000  / 1e6 * 3.0       = 0.003
@@ -127,8 +127,8 @@ func TestCalculateCost_CacheCheaperThanPlain(t *testing.T) {
 		CompletionTokens: 200,
 	}
 
-	cachedCost := tbl.Calc("claude-sonnet-4-6-20250514", cached)
-	plainCost := tbl.Calc("claude-sonnet-4-6-20250514", plain)
+	cachedCost := tbl.Calc("claude-sonnet-4-6", cached)
+	plainCost := tbl.Calc("claude-sonnet-4-6", plain)
 
 	if cachedCost >= plainCost {
 		t.Errorf("expected cached request cheaper than plain: cached=%.6f plain=%.6f", cachedCost, plainCost)
@@ -163,7 +163,7 @@ func TestCalculateCost_ExplicitCacheRates(t *testing.T) {
 func TestParsePricingConfig_CacheKeys(t *testing.T) {
 	cfg := map[string]any{
 		"pricing": map[string]any{
-			"claude-sonnet-4-6-20250514": map[string]any{
+			"claude-sonnet-4-6": map[string]any{
 				"input_per_million":          5.0,
 				"output_per_million":         20.0,
 				"cache_read_per_million":     0.42,
@@ -174,9 +174,9 @@ func TestParsePricingConfig_CacheKeys(t *testing.T) {
 	}
 
 	merged := parsePricingConfig(cfg)
-	p, ok := merged.Get("claude-sonnet-4-6-20250514")
+	p, ok := merged.Get("claude-sonnet-4-6")
 	if !ok {
-		t.Fatal("missing pricing entry for claude-sonnet-4-6-20250514")
+		t.Fatal("missing pricing entry for claude-sonnet-4-6")
 	}
 	if p.InputPerMillion != 5.0 {
 		t.Errorf("InputPerMillion: got %v, want 5.0", p.InputPerMillion)
