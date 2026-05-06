@@ -249,18 +249,18 @@ type drainPlugin struct {
 	timeout time.Duration
 }
 
-func (d *drainPlugin) ID() string                          { return d.id }
-func (d *drainPlugin) Name() string                        { return d.id }
-func (d *drainPlugin) Version() string                     { return "test" }
-func (d *drainPlugin) Dependencies() []string              { return nil }
-func (d *drainPlugin) Requires() []Requirement             { return nil }
-func (d *drainPlugin) Capabilities() []Capability          { return nil }
-func (d *drainPlugin) Init(_ PluginContext) error          { return nil }
-func (d *drainPlugin) Ready() error                        { return nil }
-func (d *drainPlugin) Shutdown(_ context.Context) error    { return nil }
-func (d *drainPlugin) Subscriptions() []EventSubscription  { return nil }
-func (d *drainPlugin) Emissions() []string                 { return nil }
-func (d *drainPlugin) DrainTimeout() time.Duration         { return d.timeout }
+func (d *drainPlugin) ID() string                         { return d.id }
+func (d *drainPlugin) Name() string                       { return d.id }
+func (d *drainPlugin) Version() string                    { return "test" }
+func (d *drainPlugin) Dependencies() []string             { return nil }
+func (d *drainPlugin) Requires() []Requirement            { return nil }
+func (d *drainPlugin) Capabilities() []Capability         { return nil }
+func (d *drainPlugin) Init(_ PluginContext) error         { return nil }
+func (d *drainPlugin) Ready() error                       { return nil }
+func (d *drainPlugin) Shutdown(_ context.Context) error   { return nil }
+func (d *drainPlugin) Subscriptions() []EventSubscription { return nil }
+func (d *drainPlugin) Emissions() []string                { return nil }
+func (d *drainPlugin) DrainTimeout() time.Duration        { return d.timeout }
 
 // TestResolveDrainTimeout_Default falls back to the engine-default ceiling
 // when the config is empty and no plugin advertises a longer drain.

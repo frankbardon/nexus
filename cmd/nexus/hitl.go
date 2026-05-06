@@ -127,10 +127,9 @@ func runHITLRespond(args []string) int {
 		return 1
 	}
 
-	resp := events.HITLResponse{
-		RequestID: requestID,
-		ChoiceID:  *choice,
-		FreeText:  *freeText,
+	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID,
+		ChoiceID: *choice,
+		FreeText: *freeText,
 	}
 	if *editPath != "" {
 		payload, err := readEditedPayload(*editPath)
@@ -167,8 +166,7 @@ func runHITLCancel(args []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	resp := events.HITLResponse{
-		RequestID:    requestID,
+	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID,
 		Cancelled:    true,
 		CancelReason: *reason,
 	}
@@ -196,9 +194,8 @@ func runHITLApprove(args []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	return writeHITLResponseExit(dir, requestID, events.HITLResponse{
-		RequestID: requestID,
-		ChoiceID:  "allow",
+	return writeHITLResponseExit(dir, requestID, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID,
+		ChoiceID: "allow",
 	})
 }
 
@@ -223,9 +220,8 @@ func runHITLReject(args []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	return writeHITLResponseExit(dir, requestID, events.HITLResponse{
-		RequestID: requestID,
-		ChoiceID:  "reject",
+	return writeHITLResponseExit(dir, requestID, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID,
+		ChoiceID: "reject",
 	})
 }
 

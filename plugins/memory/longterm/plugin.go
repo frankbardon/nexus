@@ -302,9 +302,8 @@ func (p *Plugin) loadIndex() error {
 	p.index = merged
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("memory.longterm.loaded", events.LongTermMemoryLoaded{
-		Entries: merged,
-		Scope:   p.scope,
+	_ = p.bus.Emit("memory.longterm.loaded", events.LongTermMemoryLoaded{SchemaVersion: events.LongTermMemoryLoadedVersion, Entries: merged,
+		Scope: p.scope,
 	})
 
 	p.logger.Info("memory index loaded", "count", len(merged))
@@ -427,8 +426,7 @@ func (p *Plugin) handleMemoryWrite(tc events.ToolCall) {
 
 	tags := extractStringMap(tc.Arguments["tags"])
 
-	req := events.LongTermMemoryStoreRequest{
-		Key:     key,
+	req := events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: key,
 		Content: content,
 		Tags:    tags,
 	}
@@ -548,9 +546,7 @@ func (p *Plugin) doStore(req events.LongTermMemoryStoreRequest) error {
 	// Refresh index.
 	_ = p.loadIndex()
 
-	_ = p.bus.Emit("memory.longterm.stored", events.LongTermMemoryStored{
-		Key: sanitizeKey(req.Key),
-	})
+	_ = p.bus.Emit("memory.longterm.stored", events.LongTermMemoryStored{SchemaVersion: events.LongTermMemoryStoredVersion, Key: sanitizeKey(req.Key)})
 
 	p.logger.Info("memory stored", "key", sanitizeKey(req.Key))
 	return nil
@@ -561,8 +557,7 @@ func (p *Plugin) doRead(key string) (*events.LongTermMemoryEntry, error) {
 	for i := len(p.paths) - 1; i >= 0; i-- {
 		entry, err := read(p.paths[i], key)
 		if err == nil {
-			_ = p.bus.Emit("memory.longterm.result", events.LongTermMemoryReadResult{
-				Key:     entry.Key,
+			_ = p.bus.Emit("memory.longterm.result", events.LongTermMemoryReadResult{SchemaVersion: events.LongTermMemoryReadResultVersion, Key: entry.Key,
 				Content: entry.Content,
 				Tags:    entry.Tags,
 			})
@@ -580,9 +575,7 @@ func (p *Plugin) doDelete(key string) error {
 
 	_ = p.loadIndex()
 
-	_ = p.bus.Emit("memory.longterm.deleted", events.LongTermMemoryDeleted{
-		Key: sanitizeKey(key),
-	})
+	_ = p.bus.Emit("memory.longterm.deleted", events.LongTermMemoryDeleted{SchemaVersion: events.LongTermMemoryDeletedVersion, Key: sanitizeKey(key)})
 
 	p.logger.Info("memory deleted", "key", sanitizeKey(key))
 	return nil
@@ -605,9 +598,7 @@ func (p *Plugin) doList(tags map[string]string) ([]events.LongTermMemoryIndex, e
 		}
 	}
 
-	_ = p.bus.Emit("memory.longterm.list.result", events.LongTermMemoryListResult{
-		Entries: merged,
-	})
+	_ = p.bus.Emit("memory.longterm.list.result", events.LongTermMemoryListResult{SchemaVersion: events.LongTermMemoryListResultVersion, Entries: merged})
 
 	return merged, nil
 }
@@ -615,8 +606,7 @@ func (p *Plugin) doList(tags map[string]string) ([]events.LongTermMemoryIndex, e
 // --- Helpers ---
 
 func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
-	result := events.ToolResult{
-		ID:     tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,

@@ -167,9 +167,8 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 			Vetoed: true,
 			Reason: fmt.Sprintf("Content safety: %s", checkList),
 		}
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: msg,
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: msg,
+			Role: "system",
 		})
 
 	case "redact":

@@ -31,8 +31,7 @@ func (s *stubProvider) install() func() {
 			// Don't emit anything — exercise the timeout path.
 			return
 		}
-		_ = s.bus.Emit("llm.response", events.LLMResponse{
-			Content:  s.prefix,
+		_ = s.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: s.prefix,
 			Metadata: req.Metadata,
 		})
 	}, engine.WithPriority(50))

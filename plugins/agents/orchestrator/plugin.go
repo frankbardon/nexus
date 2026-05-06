@@ -293,10 +293,9 @@ func (p *Plugin) handleStreamChunkEvent(event engine.Event[any]) {
 		p.mu.Lock()
 		p.streamed = true
 		p.mu.Unlock()
-		_ = p.bus.Emit("io.output.stream", events.OutputChunk{
-			Content: chunk.Content,
-			TurnID:  chunk.TurnID,
-			Index:   chunk.Index,
+		_ = p.bus.Emit("io.output.stream", events.OutputChunk{SchemaVersion: events.OutputChunkVersion, Content: chunk.Content,
+			TurnID: chunk.TurnID,
+			Index:  chunk.Index,
 		})
 	}
 }
@@ -311,9 +310,7 @@ func (p *Plugin) handleStreamEndEvent(event engine.Event[any]) {
 	p.mu.Unlock()
 
 	if currentPhase == phaseSynthesizing {
-		_ = p.bus.Emit("io.output.stream.end", events.StreamRef{
-			TurnID: end.TurnID,
-		})
+		_ = p.bus.Emit("io.output.stream.end", events.StreamRef{SchemaVersion: events.StreamRefVersion, TurnID: end.TurnID})
 	}
 }
 
@@ -367,8 +364,7 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.mu.Unlock()
 
 	// Emit turn start.
-	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: 0,
 		SessionID: input.SessionID,
 	})
@@ -448,8 +444,7 @@ func (p *Plugin) sendDecomposeRequest() {
 		Content: decomposeInstruction,
 	})
 
-	req := events.LLMRequest{
-		Role:     p.orchestratorModelRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.orchestratorModelRole,
 		Messages: messages,
 		Stream:   false, // Need full response to parse JSON.
 		Metadata: map[string]any{
@@ -669,8 +664,7 @@ func (p *Plugin) dispatchReadyWorkers() {
 			"task", s.task,
 		)
 
-		_ = p.bus.Emit("subagent.spawn", events.SubagentSpawn{
-			SpawnID:      s.spawnID,
+		_ = p.bus.Emit("subagent.spawn", events.SubagentSpawn{SchemaVersion: events.SubagentSpawnVersion, SpawnID: s.spawnID,
 			Task:         s.task,
 			SystemPrompt: workerPrompt.String(),
 			Tools:        s.tools,
@@ -816,8 +810,7 @@ func (p *Plugin) sendSynthesizeRequest() {
 	synthesisRole := p.synthesisModelRole
 	p.mu.Unlock()
 
-	req := events.LLMRequest{
-		Role:     synthesisRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: synthesisRole,
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
@@ -857,8 +850,7 @@ func (p *Plugin) handleSynthesizeResponse(resp events.LLMResponse) {
 
 	p.emitStatus("idle", "")
 
-	output := events.AgentOutput{
-		Content:  resp.Content,
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: resp.Content,
 		Role:     "assistant",
 		TurnID:   turnID,
 		Metadata: map[string]any{"streamed": streamed},
@@ -870,9 +862,7 @@ func (p *Plugin) handleSynthesizeResponse(resp events.LLMResponse) {
 		_ = p.bus.Emit("io.output", output)
 	}
 
-	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
-		TurnID: turnID,
-	})
+	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID})
 }
 
 // Helper methods.
@@ -894,16 +884,14 @@ func (p *Plugin) emitPlanUpdate(turnID string) {
 	}
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("agent.plan", events.Plan{
-		Steps:  steps,
+	_ = p.bus.Emit("agent.plan", events.Plan{SchemaVersion: events.PlanVersion, Steps: steps,
 		TurnID: turnID,
 	})
 }
 
 // emitStatus emits an io.status event.
 func (p *Plugin) emitStatus(state, detail string) {
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  state,
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: state,
 		Detail: detail,
 	})
 }

@@ -267,14 +267,11 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 	p.mu.Unlock()
 
 	if !result.Approved || len(result.Steps) == 0 {
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: "Plan was not approved. Please try again with a different request.",
-			Role:    "system",
-			TurnID:  result.TurnID,
-		})
-		_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Plan was not approved. Please try again with a different request.",
+			Role:   "system",
 			TurnID: result.TurnID,
 		})
+		_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: result.TurnID})
 		return
 	}
 
@@ -337,19 +334,16 @@ func (p *Plugin) handleCancelEvent(event engine.Event[any]) {
 
 	p.emitStatus("idle", "")
 
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: "_Operation cancelled. Type /resume or press the resume button to continue._",
-		Role:    "system",
-		TurnID:  turnID,
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "_Operation cancelled. Type /resume or press the resume button to continue._",
+		Role:   "system",
+		TurnID: turnID,
 	})
 
-	_ = p.bus.Emit("cancel.complete", events.CancelComplete{
-		TurnID:    turnID,
+	_ = p.bus.Emit("cancel.complete", events.CancelComplete{SchemaVersion: events.CancelCompleteVersion, TurnID: turnID,
 		Resumable: true,
 	})
 
-	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: p.iteration,
 	})
 }
@@ -371,8 +365,7 @@ func (p *Plugin) handleResumeEvent(event engine.Event[any]) {
 
 	p.logger.Info("resuming cancelled turn", "turn_id", turnID)
 
-	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: p.iteration,
 	})
 
@@ -433,16 +426,14 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	turnID := p.currentTurnID
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: 0,
 		SessionID: input.SessionID,
 	})
 
 	if p.planningEnabled {
 		p.emitStatus("thinking", "Requesting plan")
-		_ = p.bus.Emit("plan.request", events.PlanRequest{
-			TurnID:    turnID,
+		_ = p.bus.Emit("plan.request", events.PlanRequest{SchemaVersion: events.PlanRequestVersion, TurnID: turnID,
 			SessionID: input.SessionID,
 			Input:     input.Content,
 		})
@@ -488,8 +479,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				Status:      "pending",
 			}
 		}
-		_ = p.bus.Emit("agent.plan", events.Plan{
-			Steps:  steps,
+		_ = p.bus.Emit("agent.plan", events.Plan{SchemaVersion: events.PlanVersion, Steps: steps,
 			TurnID: turnID,
 		})
 
@@ -505,8 +495,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 					args = map[string]any{}
 				}
 
-				toolCall := events.ToolCall{
-					ID:        tc.ID,
+				toolCall := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: tc.ID,
 					Name:      tc.Name,
 					Arguments: args,
 					TurnID:    turnID,
@@ -515,8 +504,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 				if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
 					p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
-					syntheticResult := events.ToolResult{
-						ID:     tc.ID,
+					syntheticResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 						Name:   tc.Name,
 						Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 						TurnID: turnID,
@@ -554,8 +542,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 				args = map[string]any{}
 			}
-			call := events.ToolCall{
-				ID:        tc.ID,
+			call := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: tc.ID,
 				Name:      tc.Name,
 				Arguments: args,
 				TurnID:    turnID,
@@ -573,8 +560,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			if !pr.vetoed {
 				continue
 			}
-			_ = p.bus.Emit("tool.result", events.ToolResult{
-				ID:     pr.call.ID,
+			_ = p.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: pr.call.ID,
 				Name:   pr.call.Name,
 				Error:  fmt.Sprintf("Tool call vetoed: %s", pr.vetoReason),
 				TurnID: turnID,
@@ -591,8 +577,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				select {
 				case sem <- struct{}{}:
 				case <-turnCtx.Done():
-					_ = p.bus.Emit("tool.result", events.ToolResult{
-						ID:     call.ID,
+					_ = p.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: call.ID,
 						Name:   call.Name,
 						Error:  "tool dispatch cancelled",
 						TurnID: turnID,
@@ -601,8 +586,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				}
 				defer func() { <-sem }()
 				if turnCtx.Err() != nil {
-					_ = p.bus.Emit("tool.result", events.ToolResult{
-						ID:     call.ID,
+					_ = p.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: call.ID,
 						Name:   call.Name,
 						Error:  "tool dispatch cancelled",
 						TurnID: turnID,
@@ -642,8 +626,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 
 	// Emit vetoable before:io.output. Content came from llm.response and was
 	// already recorded by nexus.memory.capped at priority 10.
-	output := events.AgentOutput{
-		Content:  resp.Content,
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: resp.Content,
 		Role:     "assistant",
 		TurnID:   turnID,
 		Metadata: map[string]any{"streamed": true},
@@ -658,8 +641,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	p.currentPlanStep = -1
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: iteration,
 	})
 }
@@ -755,12 +737,12 @@ func (p *Plugin) sendLLMRequest() {
 	// The bus dispatches synchronously, so hq.Messages is populated by the
 	// time Emit returns. Nil result means no memory plugin answered —
 	// treated as empty history, which is still a valid request.
-	hq := &events.HistoryQuery{}
+	hq := &events.HistoryQuery{SchemaVersion: events.HistoryQueryVersion}
 	_ = p.bus.Emit("memory.history.query", hq)
 
 	// Query tool catalog (registered tool definitions) from the catalog
 	// plugin. Same pointer-mutation pattern as HistoryQuery.
-	tq := &events.ToolCatalogQuery{}
+	tq := &events.ToolCatalogQuery{SchemaVersion: events.ToolCatalogQueryVersion}
 	_ = p.bus.Emit("tool.catalog.query", tq)
 
 	var messages []events.Message
@@ -772,8 +754,7 @@ func (p *Plugin) sendLLMRequest() {
 	}
 	messages = append(messages, hq.Messages...)
 
-	req := events.LLMRequest{
-		Role:       p.modelRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Messages:   messages,
 		Tools:      tq.Tools,
 		ToolChoice: tc,
@@ -819,15 +800,13 @@ func (p *Plugin) emitPlanProgress() {
 		}
 	}
 
-	_ = p.bus.Emit("agent.plan", events.Plan{
-		Steps:  steps,
+	_ = p.bus.Emit("agent.plan", events.Plan{SchemaVersion: events.PlanVersion, Steps: steps,
 		TurnID: turnID,
 	})
 }
 
 func (p *Plugin) emitStatus(state, detail string) {
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  state,
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: state,
 		Detail: detail,
 	})
 }

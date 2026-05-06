@@ -207,16 +207,14 @@ func (p *Plugin) watch(ctx context.Context, tc events.ToolCall, timeout time.Dur
 		"timeout", timeout,
 		"override", override)
 
-	_ = p.bus.Emit("tool.timeout", events.ToolTimeout{
-		ToolName: tc.Name,
+	_ = p.bus.Emit("tool.timeout", events.ToolTimeout{SchemaVersion: events.ToolTimeoutVersion, ToolName: tc.Name,
 		CallID:   tc.ID,
 		Timeout:  timeout,
 		Override: override,
 		TurnID:   tc.TurnID,
 	})
 
-	_ = p.bus.Emit("tool.result", events.ToolResult{
-		ID:     tc.ID,
+	_ = p.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Error:  guidance,
 		TurnID: tc.TurnID,

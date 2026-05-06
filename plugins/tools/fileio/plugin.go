@@ -606,8 +606,7 @@ func (p *Plugin) handleListFiles(tc events.ToolCall) {
 }
 
 func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string, structured map[string]any) {
-	result := events.ToolResult{
-		ID:               tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:             tc.Name,
 		Output:           output,
 		Error:            errMsg,

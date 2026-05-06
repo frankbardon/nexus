@@ -229,9 +229,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 // Ready emits session start and begins feeding inputs.
 func (p *Plugin) Ready() error {
-	_ = p.bus.Emit("io.session.start", events.SessionInfo{
-		Transport: "test",
-	})
+	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "test"})
 
 	// Feed inputs asynchronously so Ready returns promptly.
 	go p.feedInputs()
@@ -290,7 +288,7 @@ func (p *Plugin) feedInputs() {
 		p.mu.Unlock()
 
 		p.logger.Info("test IO sending input", "index", i, "content_len", len(input))
-		payload := events.UserInput{Content: input}
+		payload := events.UserInput{SchemaVersion: events.UserInputVersion, Content: input}
 		if veto, err := p.bus.EmitVetoable("before:io.input", &payload); err == nil && veto.Vetoed {
 			continue
 		}
@@ -414,8 +412,7 @@ func (p *Plugin) nextMockResponse() MockResponse {
 }
 
 func (p *Plugin) buildMockResponse(mock MockResponse, metadata map[string]any) events.LLMResponse {
-	return events.LLMResponse{
-		Content:      mock.Content,
+	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: mock.Content,
 		ToolCalls:    mock.ToolCalls,
 		Model:        "mock",
 		FinishReason: "end_turn",
@@ -469,8 +466,7 @@ func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 
 	approved := p.shouldApprove(req.ToolCall, req.Description)
 
-	_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
-		PromptID: req.PromptID,
+	_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: req.PromptID,
 		Approved: approved,
 	})
 }
@@ -483,8 +479,7 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 
 	approved := p.shouldApprove("", req.Description)
 
-	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{
-		PromptID: req.PromptID,
+	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: req.PromptID,
 		Approved: approved,
 	})
 }
@@ -496,7 +491,7 @@ func (p *Plugin) handleHITL(e engine.Event[any]) {
 	}
 
 	p.mu.Lock()
-	resp := events.HITLResponse{RequestID: req.ID}
+	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID}
 	if len(p.hitlResponses) > 0 {
 		script := p.hitlResponses[0]
 		if len(p.hitlResponses) > 1 {
@@ -565,6 +560,6 @@ func (p *Plugin) endSession() {
 	p.finalized = true
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.session.end", events.SessionInfo{Transport: "test"})
+	_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "test"})
 	close(p.done)
 }

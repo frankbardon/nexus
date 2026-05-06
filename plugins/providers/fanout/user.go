@@ -35,8 +35,7 @@ func (p *Plugin) presentToUser(fanoutID string, state *fanoutState, responses []
 	p.mu.Unlock()
 
 	// Emit the choice event for IO plugins to render.
-	_ = p.bus.Emit("provider.fanout.choose", events.ProviderFanoutChoose{
-		FanoutID:  fanoutID,
+	_ = p.bus.Emit("provider.fanout.choose", events.ProviderFanoutChoose{SchemaVersion: events.ProviderFanoutChooseVersion, FanoutID: fanoutID,
 		Role:      state.role,
 		Responses: options,
 	})

@@ -274,14 +274,13 @@ func writeFileAtomic(path string, data []byte) error {
 func readResponseFile(path string) (events.HITLResponse, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return events.HITLResponse{}, fmt.Errorf("read %s: %w", path, err)
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, fmt.Errorf("read %s: %w", path, err)
 	}
 	var rec responseFile
 	if err := yaml.Unmarshal(data, &rec); err != nil {
-		return events.HITLResponse{}, fmt.Errorf("parse %s: %w", path, err)
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return events.HITLResponse{
-		RequestID:     rec.RequestID,
+	return events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: rec.RequestID,
 		ChoiceID:      rec.ChoiceID,
 		FreeText:      rec.FreeText,
 		EditedPayload: rec.EditedPayload,

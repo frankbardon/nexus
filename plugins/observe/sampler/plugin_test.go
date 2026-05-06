@@ -146,7 +146,7 @@ func TestPlugin_Disabled_NoSubscriptions_NoCaptures(t *testing.T) {
 			t.Errorf("disabled plugin Emissions=%v, want empty", em)
 		}
 		// Emit io.session.end. The plugin should ignore it.
-		_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+		_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 		if got := captured.Load(); got != 0 {
 			t.Errorf("disabled plugin emitted %d candidates, want 0", got)
 		}
@@ -176,7 +176,7 @@ func TestPlugin_RateOne_AllSessionsCaptured(t *testing.T) {
 		}
 	}, engine.WithSource("test-collector"))
 
-	_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+	_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -248,7 +248,7 @@ func TestPlugin_RateZero_FailureCaptureOnly(t *testing.T) {
 		var captured atomic.Int32
 		bus.Subscribe(EvalCandidateEventType, func(_ engine.Event[any]) { captured.Add(1) }, engine.WithSource("test"))
 
-		_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+		_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 		if captured.Load() != 0 {
 			t.Errorf("completed session captured %d times, want 0", captured.Load())
@@ -278,7 +278,7 @@ func TestPlugin_RateZero_FailureCaptureOnly(t *testing.T) {
 			}
 		}, engine.WithSource("test"))
 
-		_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+		_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 		mu.Lock()
 		defer mu.Unlock()
@@ -306,7 +306,7 @@ func TestPlugin_RateZero_NoFailureCapture(t *testing.T) {
 		var captured atomic.Int32
 		bus.Subscribe(EvalCandidateEventType, func(_ engine.Event[any]) { captured.Add(1) }, engine.WithSource("test"))
 
-		_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+		_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 		if captured.Load() != 0 {
 			t.Errorf("status=%q captured %d times, want 0", status, captured.Load())
@@ -365,7 +365,7 @@ func TestPlugin_DeterministicRng_SeedReproducible(t *testing.T) {
 	var captured atomic.Int32
 	bus.Subscribe(EvalCandidateEventType, func(_ engine.Event[any]) { captured.Add(1) }, engine.WithSource("test"))
 
-	_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+	_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 	if expectAccept && captured.Load() != 1 {
 		t.Errorf("seed=42 expected accept but no capture (got %d)", captured.Load())
@@ -397,7 +397,7 @@ func TestPlugin_Redactor_StubDropsPayload(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
 
-	_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+	_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 	out, err := os.Open(filepath.Join(outDir, sess.ID, "journal", "events.jsonl"))
 	if err != nil {
@@ -436,7 +436,7 @@ func TestPlugin_Redactor_IdentityPreservesBytes(t *testing.T) {
 		"out_dir": outDir,
 	}, sess)
 
-	_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+	_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 	src, err := os.ReadFile(filepath.Join(sess.RootDir, "journal", "events.jsonl"))
 	if err != nil {
@@ -478,7 +478,7 @@ func TestPlugin_Concurrent_TwoSessions(t *testing.T) {
 			}
 		}, engine.WithSource("test"))
 
-		_ = bus.Emit("io.session.end", events.SessionInfo{ID: sess.ID, Transport: "test"})
+		_ = bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, ID: sess.ID, Transport: "test"})
 
 		mu.Lock()
 		defer mu.Unlock()

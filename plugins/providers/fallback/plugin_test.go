@@ -70,8 +70,7 @@ func TestFallback_VetoesProviderError(t *testing.T) {
 	})
 
 	// Simulate: agent emits llm.request with before: gate.
-	origReq := &events.LLMRequest{
-		Role: "balanced",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{
 			{Role: "user", Content: "hello"},
 		},
@@ -79,8 +78,7 @@ func TestFallback_VetoesProviderError(t *testing.T) {
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)
 
 	// Simulate: provider fails with non-retryable error.
-	errInfo := &events.ErrorInfo{
-		Source:      "nexus.llm.anthropic",
+	errInfo := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.anthropic",
 		Err:         fmt.Errorf("anthropic: API returned status 401: unauthorized"),
 		Retryable:   false,
 		RequestMeta: origReq.Metadata,
@@ -119,15 +117,13 @@ func TestFallback_ChainExhausted_NoVeto(t *testing.T) {
 	)
 
 	// Inject request.
-	origReq := &events.LLMRequest{
-		Role:     "balanced",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{{Role: "user", Content: "hello"}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)
 
 	// First failure → fallback to index 1.
-	errInfo1 := &events.ErrorInfo{
-		Source:      "nexus.llm.anthropic",
+	errInfo1 := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.anthropic",
 		Err:         fmt.Errorf("anthropic: error"),
 		Retryable:   false,
 		RequestMeta: origReq.Metadata,
@@ -138,8 +134,7 @@ func TestFallback_ChainExhausted_NoVeto(t *testing.T) {
 	}
 
 	// Second failure (now at index 1) → chain exhausted.
-	errInfo2 := &events.ErrorInfo{
-		Source:    "nexus.llm.openai",
+	errInfo2 := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.openai",
 		Err:       fmt.Errorf("openai: error"),
 		Retryable: false,
 		RequestMeta: map[string]any{
@@ -168,9 +163,8 @@ func TestFallback_IgnoresNonProviderErrors(t *testing.T) {
 	)
 
 	// Error from a non-provider source.
-	errInfo := &events.ErrorInfo{
-		Source: "nexus.tool.shell",
-		Err:    fmt.Errorf("shell: command failed"),
+	errInfo := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.tool.shell",
+		Err: fmt.Errorf("shell: command failed"),
 	}
 	result, _ := bus.EmitVetoable("before:core.error", errInfo)
 	if result.Vetoed {
@@ -192,15 +186,13 @@ func TestFallback_IgnoresRetryableInProgress(t *testing.T) {
 		bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
 	)
 
-	origReq := &events.LLMRequest{
-		Role:     "balanced",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{{Role: "user", Content: "hello"}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)
 
 	// Error is retryable and retries NOT exhausted — provider still handling.
-	errInfo := &events.ErrorInfo{
-		Source:           "nexus.llm.anthropic",
+	errInfo := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.anthropic",
 		Err:              fmt.Errorf("anthropic: 429 rate limited"),
 		Retryable:        true,
 		RetriesExhausted: false,
@@ -226,15 +218,13 @@ func TestFallback_RetriesExhausted_TriggersFallback(t *testing.T) {
 		bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
 	)
 
-	origReq := &events.LLMRequest{
-		Role:     "balanced",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{{Role: "user", Content: "hello"}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)
 
 	// Error is retryable but retries exhausted.
-	errInfo := &events.ErrorInfo{
-		Source:           "nexus.llm.anthropic",
+	errInfo := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.anthropic",
 		Err:              fmt.Errorf("anthropic: max retries exceeded"),
 		Retryable:        true,
 		RetriesExhausted: true,
@@ -272,8 +262,7 @@ func TestFallback_EmptyRole_UsesDefault(t *testing.T) {
 	})
 
 	// Empty role — should resolve to default ("balanced") which has fallback.
-	origReq := &events.LLMRequest{
-		Role:     "",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "",
 		Messages: []events.Message{{Role: "user", Content: "hello"}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)
@@ -286,8 +275,7 @@ func TestFallback_EmptyRole_UsesDefault(t *testing.T) {
 	}
 
 	// Simulate provider failure.
-	errInfo := &events.ErrorInfo{
-		Source:      "nexus.llm.anthropic",
+	errInfo := &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: "nexus.llm.anthropic",
 		Err:         fmt.Errorf("anthropic: error"),
 		Retryable:   false,
 		RequestMeta: origReq.Metadata,
@@ -316,8 +304,7 @@ func TestFallback_NoChain_NoIntercept(t *testing.T) {
 	)
 
 	// Request for "quick" role — only 1 entry, no fallback chain.
-	origReq := &events.LLMRequest{
-		Role:     "quick",
+	origReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "quick",
 		Messages: []events.Message{{Role: "user", Content: "hello"}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", origReq)

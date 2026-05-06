@@ -30,7 +30,7 @@ func TestRerankRanksTermOverlap(t *testing.T) {
 		{ID: "match", Content: "ENOENT means the file does not exist on disk"},
 		{ID: "partial", Content: "errors include EAGAIN and ENFILE conditions"},
 	}
-	req := &events.RerankRequest{Query: "ENOENT file missing", Docs: docs, TopN: 3}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "ENOENT file missing", Docs: docs, TopN: 3}
 	if err := bus.Emit("reranker.rerank", req); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestRerankRespectsTopN(t *testing.T) {
 		{ID: "2", Content: "alpha gamma"},
 		{ID: "3", Content: "delta epsilon"},
 	}
-	req := &events.RerankRequest{Query: "alpha", Docs: docs, TopN: 1}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "alpha", Docs: docs, TopN: 1}
 	_ = bus.Emit("reranker.rerank", req)
 	if len(req.Results) != 1 {
 		t.Fatalf("TopN=1 returned %d results", len(req.Results))
@@ -70,7 +70,7 @@ func TestRerankCarriesIndex(t *testing.T) {
 		{ID: "b", Content: "the answer is here"},
 		{ID: "c", Content: "irrelevant"},
 	}
-	req := &events.RerankRequest{Query: "answer here", Docs: docs}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "answer here", Docs: docs}
 	_ = bus.Emit("reranker.rerank", req)
 	if req.Results[0].Index != 1 {
 		t.Fatalf("top hit Index = %d, want 1 (b)", req.Results[0].Index)
@@ -81,7 +81,7 @@ func TestRerankEmptyDocs(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	req := &events.RerankRequest{Query: "x", Docs: nil}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "x", Docs: nil}
 	_ = bus.Emit("reranker.rerank", req)
 	if req.Error != "" {
 		t.Fatalf("empty docs should not error, got %q", req.Error)
@@ -95,8 +95,7 @@ func TestRerankIgnoresAlreadyClaimed(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	req := &events.RerankRequest{
-		Query:    "x",
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "x",
 		Docs:     []events.RerankDoc{{ID: "a", Content: "x"}},
 		Provider: "someone.else",
 	}

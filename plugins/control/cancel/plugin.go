@@ -123,14 +123,13 @@ func (p *Plugin) handleInputCommand(event engine.Event[any]) {
 		turnID := p.cancelledTurn
 		p.mu.Unlock()
 		if turnID == "" {
-			_ = p.bus.Emit("io.output", events.AgentOutput{
-				Content: "Nothing to resume.",
-				Role:    "system",
+			_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Nothing to resume.",
+				Role: "system",
 			})
 			vp.Veto = engine.VetoResult{Vetoed: true, Reason: "no cancelled turn to resume"}
 			return
 		}
-		_ = p.bus.Emit("cancel.resume", events.CancelResume{TurnID: turnID})
+		_ = p.bus.Emit("cancel.resume", events.CancelResume{SchemaVersion: events.CancelResumeVersion, TurnID: turnID})
 		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "consumed /resume command"}
 	}
 }
@@ -171,14 +170,11 @@ func (p *Plugin) handleCancelRequest(event engine.Event[any]) {
 
 	p.logger.Info("cancelling turn", "turn_id", turnID)
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "cancelling",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "cancelling",
 		Detail: "Cancelling current operation...",
 	})
 
-	_ = p.bus.Emit("cancel.active", events.CancelActive{
-		TurnID: turnID,
-	})
+	_ = p.bus.Emit("cancel.active", events.CancelActive{SchemaVersion: events.CancelActiveVersion, TurnID: turnID})
 }
 
 func (p *Plugin) handleResumeRequest(event engine.Event[any]) {

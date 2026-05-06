@@ -127,8 +127,7 @@ func (c *contextualizer) generate(docContext, chunk string) (string, error) {
 	}()
 
 	prompt := buildContextPrompt(docContext, chunk, c.maxDocChars)
-	req := events.LLMRequest{
-		Role:  c.modelRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: c.modelRole,
 		Model: c.model,
 		Messages: []events.Message{
 			{Role: "system", Content: contextSystemPrompt},

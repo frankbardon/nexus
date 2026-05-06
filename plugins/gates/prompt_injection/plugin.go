@@ -143,15 +143,13 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 					Vetoed: true,
 					Reason: fmt.Sprintf("Prompt injection detected: %s", matched),
 				}
-				_ = p.bus.Emit("io.output", events.AgentOutput{
-					Content: p.message,
-					Role:    "system",
+				_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: p.message,
+					Role: "system",
 				})
 			} else {
 				// Warn mode — emit warning but don't veto.
-				_ = p.bus.Emit("io.output", events.AgentOutput{
-					Content: "Warning: potential prompt injection detected in input.",
-					Role:    "system",
+				_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Warning: potential prompt injection detected in input.",
+					Role: "system",
 				})
 			}
 			return

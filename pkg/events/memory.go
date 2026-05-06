@@ -2,8 +2,30 @@ package events
 
 import "time"
 
+// Schema-version constants for memory.* payloads. See doc.go.
+const (
+	MemoryEntryVersion                 = 1
+	MemoryQueryVersion                 = 1
+	MemoryResultVersion                = 1
+	HistoryQueryVersion                = 1
+	LongTermMemoryEntryVersion         = 1
+	LongTermMemoryLoadedVersion        = 1
+	LongTermMemoryStoreRequestVersion  = 1
+	LongTermMemoryStoredVersion        = 1
+	LongTermMemoryReadRequestVersion   = 1
+	LongTermMemoryReadResultVersion    = 1
+	LongTermMemoryDeleteRequestVersion = 1
+	LongTermMemoryDeletedVersion       = 1
+	LongTermMemoryQueryVersion         = 1
+	LongTermMemoryListResultVersion    = 1
+	CompactionTriggeredVersion         = 1
+	CompactionCompleteVersion          = 1
+)
+
 // MemoryEntry represents a single memory record.
 type MemoryEntry struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Key       string
 	Content   string
 	Metadata  map[string]any
@@ -12,6 +34,8 @@ type MemoryEntry struct {
 
 // MemoryQuery describes a query against the memory store.
 type MemoryQuery struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Query     string
 	Limit     int
 	SessionID string
@@ -19,6 +43,8 @@ type MemoryQuery struct {
 
 // MemoryResult carries the results of a memory query.
 type MemoryResult struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Entries []MemoryEntry
 	Query   string
 }
@@ -29,6 +55,8 @@ type MemoryResult struct {
 // pointer-mutation pattern as VetoablePayload. Callers consume Messages
 // after Emit returns.
 type HistoryQuery struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	// SessionID scopes the query when multiple sessions share a bus. Empty
 	// means "the current session". Set by caller.
 	SessionID string
@@ -49,6 +77,8 @@ type LongTermMemoryIndex struct {
 
 // LongTermMemoryEntry is a full memory record.
 type LongTermMemoryEntry struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Key           string            `json:"key"`
 	Content       string            `json:"content"`
 	Tags          map[string]string `json:"tags"`
@@ -60,58 +90,69 @@ type LongTermMemoryEntry struct {
 // LongTermMemoryLoaded signals that the memory index has been injected into
 // the system prompt.
 type LongTermMemoryLoaded struct {
-	Entries []LongTermMemoryIndex `json:"entries"`
-	Scope   string                `json:"scope"` // "agent", "global", or "both"
+	SchemaVersion int                   `json:"_schema_version"`
+	Entries       []LongTermMemoryIndex `json:"entries"`
+	Scope         string                `json:"scope"` // "agent", "global", or "both"
 }
 
 // LongTermMemoryStoreRequest is a request to write or update a memory entry.
 type LongTermMemoryStoreRequest struct {
-	Key     string            `json:"key"`
-	Content string            `json:"content"`
-	Tags    map[string]string `json:"tags,omitempty"`
+	SchemaVersion int               `json:"_schema_version"`
+	Key           string            `json:"key"`
+	Content       string            `json:"content"`
+	Tags          map[string]string `json:"tags,omitempty"`
 }
 
 // LongTermMemoryStored confirms a memory entry was written.
 type LongTermMemoryStored struct {
-	Key string `json:"key"`
+	SchemaVersion int    `json:"_schema_version"`
+	Key           string `json:"key"`
 }
 
 // LongTermMemoryReadRequest is a request to read a memory entry by key.
 type LongTermMemoryReadRequest struct {
-	Key string `json:"key"`
+	SchemaVersion int    `json:"_schema_version"`
+	Key           string `json:"key"`
 }
 
 // LongTermMemoryReadResult carries the full content of a memory entry.
 type LongTermMemoryReadResult struct {
-	Key     string            `json:"key"`
-	Content string            `json:"content"`
-	Tags    map[string]string `json:"tags"`
+	SchemaVersion int               `json:"_schema_version"`
+	Key           string            `json:"key"`
+	Content       string            `json:"content"`
+	Tags          map[string]string `json:"tags"`
 }
 
 // LongTermMemoryDeleteRequest is a request to delete a memory entry.
 type LongTermMemoryDeleteRequest struct {
-	Key string `json:"key"`
+	SchemaVersion int    `json:"_schema_version"`
+	Key           string `json:"key"`
 }
 
 // LongTermMemoryDeleted confirms a memory entry was deleted.
 type LongTermMemoryDeleted struct {
-	Key string `json:"key"`
+	SchemaVersion int    `json:"_schema_version"`
+	Key           string `json:"key"`
 }
 
 // LongTermMemoryQuery is a request to list or filter memories.
 type LongTermMemoryQuery struct {
-	Tags map[string]string `json:"tags,omitempty"`
+	SchemaVersion int               `json:"_schema_version"`
+	Tags          map[string]string `json:"tags,omitempty"`
 }
 
 // LongTermMemoryListResult carries filtered memory index entries.
 type LongTermMemoryListResult struct {
-	Entries []LongTermMemoryIndex `json:"entries"`
+	SchemaVersion int                   `json:"_schema_version"`
+	Entries       []LongTermMemoryIndex `json:"entries"`
 }
 
 // --- Compaction events ---
 
 // CompactionTriggered signals that context compaction is starting.
 type CompactionTriggered struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Reason       string // human-readable trigger reason
 	MessageCount int    // number of messages before compaction
 	BackupPath   string // session-relative path to the backup file
@@ -120,6 +161,8 @@ type CompactionTriggered struct {
 // CompactionComplete signals that context compaction has finished.
 // Subscribers should replace their conversation history with Messages.
 type CompactionComplete struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Messages     []Message // the compacted conversation
 	BackupPath   string    // session-relative path to the backup file
 	MessageCount int       // number of messages after compaction

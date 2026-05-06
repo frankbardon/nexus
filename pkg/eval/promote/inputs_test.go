@@ -14,7 +14,7 @@ import (
 func TestExtractInputs_OrderAndShape(t *testing.T) {
 	envs := []journal.Envelope{
 		{Seq: 1, Type: "io.session.start", Payload: map[string]any{"session_id": "x"}},
-		{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "first"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "first"}},
 		{Seq: 3, Type: "agent.turn.start"},
 		{Seq: 4, Type: "io.input", Payload: map[string]any{"Content": "second", "Files": nil}},
 		{Seq: 5, Type: "io.input", Payload: map[string]any{"content": "third-lowercase"}},

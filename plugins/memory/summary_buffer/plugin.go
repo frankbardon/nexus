@@ -412,11 +412,10 @@ func (p *Plugin) triggerSummarisation(reason string) {
 	p.summarising = true
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("memory.compaction.triggered", events.CompactionTriggered{
-		Reason:       reason,
+	_ = p.bus.Emit("memory.compaction.triggered", events.CompactionTriggered{SchemaVersion: events.CompactionTriggeredVersion, Reason: reason,
 		MessageCount: msgCount,
 	})
-	_ = p.bus.Emit("io.status", events.StatusUpdate{State: "thinking", Detail: "Summarising context..."})
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking", Detail: "Summarising context..."})
 
 	var transcript strings.Builder
 	for _, msg := range snapshot {
@@ -453,8 +452,7 @@ func (p *Plugin) triggerSummarisation(reason string) {
 		{Role: "user", Content: "Here is the conversation to compact:\n\n" + transcript.String()},
 	}
 
-	_ = p.bus.Emit("llm.request", events.LLMRequest{
-		Role:     p.modelRole,
+	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
@@ -507,12 +505,11 @@ func (p *Plugin) finishSummarisation(summary string) {
 		"new_messages", len(compacted),
 	)
 
-	_ = p.bus.Emit("memory.compacted", events.CompactionComplete{
-		Messages:     compacted,
+	_ = p.bus.Emit("memory.compacted", events.CompactionComplete{SchemaVersion: events.CompactionCompleteVersion, Messages: compacted,
 		MessageCount: len(compacted),
 		PrevCount:    prevCount,
 	})
-	_ = p.bus.Emit("io.status", events.StatusUpdate{State: "idle", Detail: ""})
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "idle", Detail: ""})
 }
 
 // safeSplit walks a proposed split index leftward until splitting at that

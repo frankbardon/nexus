@@ -177,11 +177,11 @@ func (p *Plugin) Ready() error {
 
 	w, err := newWatcher(p.logger, p.watches, func(path, ns string, removed bool) {
 		if removed {
-			del := &events.RAGIngestDelete{Path: path, Namespace: ns}
+			del := &events.RAGIngestDelete{SchemaVersion: events.RAGIngestDeleteVersion, Path: path, Namespace: ns}
 			_ = p.bus.Emit("rag.ingest.delete", del)
 			return
 		}
-		req := &events.RAGIngest{Path: path, Namespace: ns}
+		req := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: ns}
 		_ = p.bus.Emit("rag.ingest", req)
 	})
 	if err != nil {
@@ -229,7 +229,7 @@ func (p *Plugin) runBackfill() {
 					return nil
 				}
 			}
-			req := &events.RAGIngest{Path: path, Namespace: e.Namespace}
+			req := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: e.Namespace}
 			_ = p.bus.Emit("rag.ingest", req)
 			count++
 			return nil
@@ -360,7 +360,7 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 	}
 
 	if len(missing) > 0 {
-		embReq := &events.EmbeddingsRequest{Texts: missingText}
+		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: missingText}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			return fmt.Errorf("embed: %s", embReq.Error)
@@ -407,14 +407,14 @@ func (p *Plugin) ingest(req *events.RAGIngest) error {
 		}
 	}
 
-	up := &events.VectorUpsert{Namespace: req.Namespace, Docs: docs}
+	up := &events.VectorUpsert{SchemaVersion: events.VectorUpsertVersion, Namespace: req.Namespace, Docs: docs}
 	_ = p.bus.Emit("vector.upsert", up)
 	if up.Error != "" {
 		return fmt.Errorf("upsert: %s", up.Error)
 	}
 
 	if p.hasLexical && len(lexDocs) > 0 {
-		lexUp := &events.LexicalUpsert{Namespace: req.Namespace, Docs: lexDocs}
+		lexUp := &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: req.Namespace, Docs: lexDocs}
 		_ = p.bus.Emit("lexical.upsert", lexUp)
 		if lexUp.Error != "" {
 			return fmt.Errorf("lexical upsert: %s", lexUp.Error)
@@ -448,13 +448,13 @@ func (p *Plugin) delete(req *events.RAGIngestDelete) error {
 	for i := 0; i < maxChunks; i++ {
 		ids = append(ids, fmt.Sprintf("%s-%d", pathHash, i))
 	}
-	del := &events.VectorDelete{Namespace: req.Namespace, IDs: ids}
+	del := &events.VectorDelete{SchemaVersion: events.VectorDeleteVersion, Namespace: req.Namespace, IDs: ids}
 	_ = p.bus.Emit("vector.delete", del)
 	if del.Error != "" {
 		return fmt.Errorf("delete: %s", del.Error)
 	}
 	if p.hasLexical {
-		lexDel := &events.LexicalDelete{Namespace: req.Namespace, IDs: ids}
+		lexDel := &events.LexicalDelete{SchemaVersion: events.LexicalDeleteVersion, Namespace: req.Namespace, IDs: ids}
 		_ = p.bus.Emit("lexical.delete", lexDel)
 		if lexDel.Error != "" {
 			return fmt.Errorf("lexical delete: %s", lexDel.Error)

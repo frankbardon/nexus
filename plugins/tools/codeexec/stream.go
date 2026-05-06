@@ -124,8 +124,7 @@ func (w *streamingWriter) flushLocked(chunk []byte, final bool) {
 	if len(chunk) == 0 && !final {
 		return
 	}
-	_ = w.bus.Emit("code.exec.stdout", events.CodeExecStdout{
-		CallID:    w.callID,
+	_ = w.bus.Emit("code.exec.stdout", events.CodeExecStdout{SchemaVersion: events.CodeExecStdoutVersion, CallID: w.callID,
 		TurnID:    w.turnID,
 		Chunk:     string(chunk),
 		Final:     final,

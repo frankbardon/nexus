@@ -207,21 +207,18 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 	p.persistRequest(planID, req)
 
 	// Emit thinking steps so the user sees planning progress.
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    req.TurnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 		Source:    pluginID,
 		Content:   "Analyzing request to create execution plan...",
 		Phase:     "planning",
 		Timestamp: time.Now(),
 	})
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: "Planning: analyzing request",
 	})
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    req.TurnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 		Source:    pluginID,
 		Content:   "Sending request to LLM for plan generation...",
 		Phase:     "planning",
@@ -235,8 +232,7 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 	}
 
 	// Emit LLM request tagged for this plugin.
-	llmReq := events.LLMRequest{
-		Role:     p.modelRole,
+	llmReq := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
@@ -263,13 +259,11 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 		return
 	}
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: "Planning: processing LLM response",
 	})
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    req.TurnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 		Source:    pluginID,
 		Content:   "Received plan from LLM, parsing structure...",
 		Phase:     "planning",
@@ -283,16 +277,14 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	p.persistPlan(planID, result)
 
 	// Emit thinking step with plan summary.
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    req.TurnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 		Source:    pluginID,
 		Content:   fmt.Sprintf("Plan generated: %s (%d steps)", result.Summary, len(result.Steps)),
 		Phase:     "planning",
 		Timestamp: time.Now(),
 	})
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: fmt.Sprintf("Planning: %d steps generated", len(result.Steps)),
 	})
 
@@ -315,13 +307,11 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 		p.pendingResult = &result
 		p.mu.Unlock()
 
-		_ = p.bus.Emit("io.status", events.StatusUpdate{
-			State:  "waiting",
+		_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "waiting",
 			Detail: "Planning: awaiting approval",
 		})
 
-		_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-			TurnID:    req.TurnID,
+		_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 			Source:    pluginID,
 			Content:   "Plan requires approval before execution",
 			Phase:     "planning",
@@ -334,8 +324,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 			desc += fmt.Sprintf("  %d. %s\n", step.Order, step.Description)
 		}
 
-		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{
-			PromptID:    planID,
+		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{SchemaVersion: events.ApprovalRequestVersion, PromptID: planID,
 			Description: desc,
 			Risk:        "medium",
 		})
@@ -374,15 +363,13 @@ func (p *Plugin) handleApprovalResponse(resp events.ApprovalResponse) {
 	p.persistApproval(planID, resp.Approved)
 
 	if !resp.Approved {
-		_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-			TurnID:    result.TurnID,
+		_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: result.TurnID,
 			Source:    pluginID,
 			Content:   "Plan rejected by user",
 			Phase:     "planning",
 			Timestamp: time.Now(),
 		})
-		_ = p.bus.Emit("plan.result", events.PlanResult{
-			TurnID:   result.TurnID,
+		_ = p.bus.Emit("plan.result", events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: result.TurnID,
 			PlanID:   result.PlanID,
 			Approved: false,
 			Source:   "dynamic",
@@ -407,8 +394,7 @@ func (p *Plugin) parsePlanResponse(content, turnID, planID string) (events.PlanR
 
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		p.logger.Warn("failed to parse plan JSON, using fallback", "error", err)
-		return events.PlanResult{
-			TurnID:  turnID,
+		return events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: turnID,
 			PlanID:  planID,
 			Summary: "Execute the user's request directly",
 			Steps: []events.PlanResultStep{
@@ -438,8 +424,7 @@ func (p *Plugin) parsePlanResponse(content, turnID, planID string) (events.PlanR
 		summary = "Dynamic execution plan"
 	}
 
-	return events.PlanResult{
-		TurnID:  turnID,
+	return events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: turnID,
 		PlanID:  planID,
 		Steps:   steps,
 		Summary: summary,

@@ -57,10 +57,9 @@ func run() error {
 	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	envelopes := []journal.Envelope{
 		{Seq: 1, Ts: t0, Type: "io.session.start", Payload: map[string]any{"session_id": "multi-subagent-fanout-golden"}},
-		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{Content: "Spawn the researcher subagent to look up Go modules best practices."}},
+		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "Spawn the researcher subagent to look up Go modules best practices."}},
 		{Seq: 3, Ts: t0.Add(20 * time.Millisecond), Type: "agent.turn.start"},
-		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "end_turn",
 			Usage:        events.Usage{PromptTokens: 130, CompletionTokens: 50, TotalTokens: 180},
 			Content:      "I would delegate to the researcher subagent here, but this is a mock test turn.",

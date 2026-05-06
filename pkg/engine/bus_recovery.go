@@ -122,8 +122,7 @@ func (b *eventBus) invokeHandler(sub *subscription, event Event[any], vetoable b
 			return
 		}
 
-		errPayload := events.ErrorInfo{
-			Source:    pluginID,
+		errPayload := events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: pluginID,
 			Err:       fmt.Errorf("plugin panic: %s", reason),
 			EventType: eventType,
 			Stack:     string(stack),
@@ -184,4 +183,3 @@ func panicFromPlugin(stack []byte) bool {
 	}
 	return false
 }
-

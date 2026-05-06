@@ -219,9 +219,8 @@ func (p *Plugin) handleRejectMode(vp *engine.VetoablePayload, waitDuration time.
 		Reason: fmt.Sprintf("Rate limited: retry in %ds", seconds),
 	}
 
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: msg,
-		Role:    "system",
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: msg,
+		Role: "system",
 	})
 
 	// Non-blocking one-shot retry after the wait period.
@@ -253,9 +252,8 @@ func (p *Plugin) handleQueueMode(vp *engine.VetoablePayload, waitDuration time.D
 			Vetoed: true,
 			Reason: fmt.Sprintf("Rate limited: queue full (max_pending=%d)", p.maxPending),
 		}
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: fmt.Sprintf("Rate limit queue full (%d pending). Request rejected.", p.maxPending),
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Rate limit queue full (%d pending). Request rejected.", p.maxPending),
+			Role: "system",
 		})
 		return
 	}
@@ -271,9 +269,8 @@ func (p *Plugin) handleQueueMode(vp *engine.VetoablePayload, waitDuration time.D
 		Reason: fmt.Sprintf("Rate limited (queued): retry in ~%ds", seconds),
 	}
 
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: msg,
-		Role:    "system",
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: msg,
+		Role: "system",
 	})
 }
 

@@ -159,8 +159,7 @@ func (p *Plugin) handleApprovalResponseEvent(event engine.Event[any]) {
 func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 	planID := generatePlanID()
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: "Planning: loading static plan",
 	})
 
@@ -176,8 +175,7 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 		}
 	}
 
-	result := events.PlanResult{
-		TurnID:  req.TurnID,
+	result := events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: req.TurnID,
 		PlanID:  planID,
 		Steps:   steps,
 		Summary: p.summary,
@@ -191,16 +189,14 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 	p.persistPlan(planID, result)
 
 	// Emit thinking steps.
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    req.TurnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: req.TurnID,
 		Source:    pluginID,
 		Content:   fmt.Sprintf("Using predefined plan: %s (%d steps)", p.summary, len(p.steps)),
 		Phase:     "planning",
 		Timestamp: time.Now(),
 	})
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: fmt.Sprintf("Planning: %d steps loaded", len(p.steps)),
 	})
 
@@ -218,8 +214,7 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 			desc += fmt.Sprintf("  %d. %s\n", step.Order, step.Description)
 		}
 
-		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{
-			PromptID:    planID,
+		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{SchemaVersion: events.ApprovalRequestVersion, PromptID: planID,
 			Description: desc,
 			Risk:        "low",
 		})
@@ -245,16 +240,14 @@ func (p *Plugin) handleApprovalResponse(resp events.ApprovalResponse) {
 	p.persistApproval(planID, resp.Approved)
 
 	if !resp.Approved {
-		_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-			TurnID:    turnID,
+		_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
 			Source:    pluginID,
 			Content:   "Plan rejected by user",
 			Phase:     "planning",
 			Timestamp: time.Now(),
 		})
 		// Emit result with empty steps to signal rejection.
-		_ = p.bus.Emit("plan.result", events.PlanResult{
-			TurnID:   turnID,
+		_ = p.bus.Emit("plan.result", events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: turnID,
 			PlanID:   planID,
 			Approved: false,
 			Source:   "static",
@@ -274,8 +267,7 @@ func (p *Plugin) handleApprovalResponse(resp events.ApprovalResponse) {
 		}
 	}
 
-	_ = p.bus.Emit("plan.result", events.PlanResult{
-		TurnID:   turnID,
+	_ = p.bus.Emit("plan.result", events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: turnID,
 		PlanID:   planID,
 		Steps:    steps,
 		Summary:  p.summary,

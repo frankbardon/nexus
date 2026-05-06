@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm
+.PHONY: build run clean test fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
 
 BINARY_NAME=nexus
 BUILD_DIR=bin
@@ -28,8 +28,15 @@ fmt:
 vet:
 	$(GO) vet ./...
 
-lint: vet
+lint: vet check-events
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+# Static check: every pkg/events/ struct mutation must bump its
+# <Name>Version constant. Compares the working tree against
+# $$CHECK_EVENTS_BASE (default HEAD~1). See scripts/check-event-versions.sh
+# for usage and docs/src/architecture/events.md for the rule itself.
+check-events:
+	@scripts/check-event-versions.sh
 
 docs:
 	mdbook build docs

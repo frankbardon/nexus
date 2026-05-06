@@ -121,9 +121,8 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 				Vetoed: true,
 				Reason: fmt.Sprintf("Input contains prohibited term: %q", found),
 			}
-			_ = p.bus.Emit("io.output", events.AgentOutput{
-				Content: p.message,
-				Role:    "system",
+			_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: p.message,
+				Role: "system",
 			})
 			return
 		}
@@ -146,9 +145,8 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 			Vetoed: true,
 			Reason: fmt.Sprintf("Output contains prohibited term: %q", found),
 		}
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: p.message,
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: p.message,
+			Role: "system",
 		})
 	}
 }

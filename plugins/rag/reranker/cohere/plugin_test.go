@@ -64,7 +64,7 @@ func TestRerankSuccessfulResponse(t *testing.T) {
 		{ID: "second", Content: "beta"},
 		{ID: "third", Content: "gamma"},
 	}
-	req := &events.RerankRequest{Query: "test", Docs: docs, TopN: 3}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "test", Docs: docs, TopN: 3}
 	if err := bus.Emit("reranker.rerank", req); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
@@ -89,9 +89,8 @@ func TestRerankHTTPErrorSurfacedAsError(t *testing.T) {
 	_, bus, cleanup := newPluginWithServer(t, srv)
 	t.Cleanup(cleanup)
 
-	req := &events.RerankRequest{
-		Query: "test",
-		Docs:  []events.RerankDoc{{ID: "a", Content: "x"}},
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "test",
+		Docs: []events.RerankDoc{{ID: "a", Content: "x"}},
 	}
 	_ = bus.Emit("reranker.rerank", req)
 	if req.Error == "" {
@@ -107,8 +106,7 @@ func TestRerankRespectsAlreadyClaimedProvider(t *testing.T) {
 	_, bus, cleanup := newPluginWithServer(t, srv)
 	t.Cleanup(cleanup)
 
-	req := &events.RerankRequest{
-		Query:    "test",
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "test",
 		Docs:     []events.RerankDoc{{ID: "a", Content: "x"}},
 		Provider: "someone.else",
 	}

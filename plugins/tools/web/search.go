@@ -20,8 +20,7 @@ func (p *Plugin) handleSearch(tc events.ToolCall) {
 		return
 	}
 
-	req := &events.SearchRequest{
-		Query:      query,
+	req := &events.SearchRequest{SchemaVersion: events.SearchRequestVersion, Query: query,
 		Count:      p.defaultCount,
 		SafeSearch: p.defaultSafeSearch,
 		Language:   p.defaultLanguage,

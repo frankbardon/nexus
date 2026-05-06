@@ -115,13 +115,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// answer while it is blocked inside the handler chain.
 	p.adapter.OnInput(func(msg ui.InputMessage) {
 		if msg.Content == "/quit" || msg.Content == "/exit" {
-			_ = p.bus.Emit("io.session.end", events.SessionInfo{
-				Transport: "browser",
-			})
+			_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "browser"})
 			return
 		}
 		go func(content string) {
-			input := events.UserInput{Content: content}
+			input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: content}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
@@ -130,24 +128,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	})
 
 	p.adapter.OnApprovalResponse(func(msg ui.ApprovalResponseMessage) {
-		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
-			PromptID: msg.PromptID,
+		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: msg.PromptID,
 			Approved: msg.Approved,
 			Always:   msg.Always,
 		})
 	})
 
 	p.adapter.OnCancel(func() {
-		_ = p.bus.Emit("cancel.request", events.CancelRequest{
-			Source: "browser",
-		})
+		_ = p.bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "browser"})
 	})
 
 	p.adapter.OnResume(func() {
-		_ = p.bus.Emit("cancel.resume", events.CancelResume{})
+		_ = p.bus.Emit("cancel.resume", events.CancelResume{SchemaVersion:
+
+		// Wire outbound handlers (engine -> user).
+		events.CancelResumeVersion})
 	})
 
-	// Wire outbound handlers (engine -> user).
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
@@ -178,9 +175,7 @@ func (p *Plugin) Ready() error {
 		return fmt.Errorf("starting browser server: %w", err)
 	}
 
-	_ = p.bus.Emit("io.session.start", events.SessionInfo{
-		Transport: "browser",
-	})
+	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "browser"})
 
 	if p.openBrowser && p.system != nil && p.system.HasOpen() {
 		url := fmt.Sprintf("http://%s:%d", p.host, p.port)
@@ -314,10 +309,9 @@ func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
 		p.logger.Error("hitl request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("hitl.responded", events.HITLResponse{
-		RequestID: resp.RequestID,
-		ChoiceID:  resp.ChoiceID,
-		FreeText:  resp.FreeText,
+	_ = p.bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: resp.RequestID,
+		ChoiceID: resp.ChoiceID,
+		FreeText: resp.FreeText,
 	})
 }
 
@@ -363,8 +357,7 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 		p.logger.Error("plan approval request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{
-		PromptID: resp.PromptID,
+	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: resp.PromptID,
 		Approved: resp.Approved,
 		Always:   resp.Always,
 	})

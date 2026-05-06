@@ -2,8 +2,28 @@ package events
 
 import "time"
 
+// Schema-version constants for io.* payloads. See doc.go.
+const (
+	UserInputVersion             = 1
+	AgentOutputVersion           = 1
+	OutputChunkVersion           = 1
+	StreamRefVersion             = 1
+	StatusUpdateVersion          = 1
+	ApprovalRequestVersion       = 1
+	ApprovalResponseVersion      = 1
+	HistoryReplayVersion         = 1
+	FileOpenRequestVersion       = 1
+	FileOpenResponseVersion      = 1
+	FileOutputDirRequestVersion  = 1
+	FileOutputDirResponseVersion = 1
+	FileSelectedVersion          = 1
+	SessionInfoVersion           = 1
+)
+
 // UserInput represents input submitted by the user.
 type UserInput struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Content   string
 	Files     []FileAttachment
 	SessionID string
@@ -18,6 +38,8 @@ type FileAttachment struct {
 
 // AgentOutput represents a complete output message from the agent.
 type AgentOutput struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Content  string
 	Role     string // "assistant", "system", "tool"
 	Metadata map[string]any
@@ -26,6 +48,8 @@ type AgentOutput struct {
 
 // OutputChunk represents a single chunk of streamed output.
 type OutputChunk struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Content string
 	TurnID  string
 	Index   int
@@ -33,12 +57,16 @@ type OutputChunk struct {
 
 // StreamRef marks the start of a streaming response.
 type StreamRef struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID   string
 	Metadata map[string]any
 }
 
 // StatusUpdate describes the current operational state of the agent.
 type StatusUpdate struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	State  string // "idle", "thinking", "tool_running", "streaming"
 	Detail string
 	ToolID string
@@ -46,6 +74,8 @@ type StatusUpdate struct {
 
 // ApprovalRequest asks the user to approve an action.
 type ApprovalRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	PromptID    string
 	Description string
 	ToolCall    string
@@ -54,6 +84,8 @@ type ApprovalRequest struct {
 
 // ApprovalResponse carries the user's approval decision.
 type ApprovalResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	PromptID string
 	Approved bool
 	Always   bool
@@ -61,6 +93,8 @@ type ApprovalResponse struct {
 
 // HistoryReplay carries persisted conversation messages for UI display on session recall.
 type HistoryReplay struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Messages []Message
 }
 
@@ -74,6 +108,8 @@ type HistoryReplay struct {
 // themselves, correlating on RequestID. The handler runs the dialog on
 // a background goroutine so the bus is never held by the native UI.
 type FileOpenRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	RequestID        string
 	Title            string
 	DefaultDirectory string
@@ -97,6 +133,8 @@ type FileFilter struct {
 //     refused, etc.). Treat this the same as cancelled from a UX
 //     perspective, but log it.
 type FileOpenResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	RequestID string
 	Path      string
 	Cancelled bool
@@ -107,11 +145,15 @@ type FileOpenResponse struct {
 // directory for the requesting agent. The shell responds with
 // FileOutputDirResponse, correlated on RequestID.
 type FileOutputDirRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	RequestID string
 }
 
 // FileOutputDirResponse carries the resolved output directory path.
 type FileOutputDirResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	RequestID string
 	Path      string
 	Error     string
@@ -121,6 +163,8 @@ type FileOutputDirResponse struct {
 // browser panel. Agent plugins can subscribe to this event to react
 // to file selection without any Wails awareness.
 type FileSelected struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Path string
 	Name string
 	Size int64
@@ -128,6 +172,8 @@ type FileSelected struct {
 
 // SessionInfo describes a connected session.
 type SessionInfo struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	ID          string
 	Transport   string
 	ConnectedAt time.Time

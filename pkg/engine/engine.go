@@ -16,6 +16,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/storage"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/events/compat"
 	"gopkg.in/yaml.v3"
 )
 
@@ -381,9 +382,8 @@ func (e *Engine) Boot(ctx context.Context) error {
 		if !ok {
 			return
 		}
-		_ = e.Bus.Emit("io.output", events.AgentOutput{
-			Content: fmt.Sprintf("[%s] %s", errInfo.Source, errInfo.Err.Error()),
-			Role:    "error",
+		_ = e.Bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("[%s] %s", errInfo.Source, errInfo.Err.Error()),
+			Role: "error",
 		})
 	}))
 
@@ -414,9 +414,8 @@ func (e *Engine) Boot(ctx context.Context) error {
 				return
 			case t := <-ticker.C:
 				tickSeq++
-				_ = e.Bus.Emit("core.tick", events.TickInfo{
-					Sequence: tickSeq,
-					Time:     t,
+				_ = e.Bus.Emit("core.tick", events.TickInfo{SchemaVersion: events.TickInfoVersion, Sequence: tickSeq,
+					Time: t,
 				})
 			}
 		}
@@ -505,19 +504,58 @@ func (e *Engine) crashResumeIfPartial() error {
 // subscribers expect. Centralized here because the journal package cannot
 // import the events package, and per-call type switches in the coordinator
 // would scatter event-type knowledge across both packages.
+//
+// Schema-version handling: each known event type has a Go-side version
+// constant. When the journal record carries an older `_schema_version`,
+// compat.Apply lifts the map up to the running version before
+// journal.PayloadAs re-types it. With the compat registry empty (today's
+// state), Apply is a no-op pass-through; the wiring exists so future
+// version bumps land in pkg/events/compat without touching this file.
 func replayPayloadConverter(eventType string, payload any) (any, error) {
 	switch eventType {
 	case "io.input":
-		return journal.PayloadAs[events.UserInput](payload)
+		return convertVersioned[events.UserInput](eventType, events.UserInputVersion, payload)
 	case "llm.response":
-		return journal.PayloadAs[events.LLMResponse](payload)
+		return convertVersioned[events.LLMResponse](eventType, events.LLMResponseVersion, payload)
 	case "tool.result":
-		return journal.PayloadAs[events.ToolResult](payload)
+		return convertVersioned[events.ToolResult](eventType, events.ToolResultVersion, payload)
 	case "hitl.responded":
-		return journal.PayloadAs[events.HITLResponse](payload)
+		return convertVersioned[events.HITLResponse](eventType, events.HITLResponseVersion, payload)
 	default:
 		return payload, nil
 	}
+}
+
+// convertVersioned applies any registered compat migrators between the
+// recorded `_schema_version` and the running version constant before
+// re-typing via journal.PayloadAs. Falls through to PayloadAs unchanged
+// when the payload isn't a map (already typed) or has no version field.
+func convertVersioned[T any](eventType string, currentVer int, payload any) (T, error) {
+	if m, ok := payload.(map[string]any); ok {
+		recorded := 0
+		if v, ok := m["_schema_version"]; ok {
+			switch n := v.(type) {
+			case float64:
+				recorded = int(n)
+			case int:
+				recorded = n
+			}
+		}
+		// recorded == 0 means the field was absent or zero — the v0==v1
+		// rule documented in pkg/events/doc.go applies. Treat as the
+		// running version so Apply is a no-op without a registered
+		// 0->1 migrator. When v2 ships, the migrator chain takes over.
+		if recorded == 0 {
+			recorded = currentVer
+		}
+		migrated, err := compat.Apply(eventType, recorded, currentVer, m)
+		if err != nil {
+			var zero T
+			return zero, fmt.Errorf("compat: %w", err)
+		}
+		payload = migrated
+	}
+	return journal.PayloadAs[T](payload)
 }
 
 // ReplaySession runs deterministic replay against a previously-journaled
@@ -744,12 +782,12 @@ func (e *Engine) Run(ctx context.Context) error {
 	case sig := <-sigCh:
 		e.Logger.Info("received signal", "signal", sig)
 		// Cancel the active agent turn so in-flight LLM requests abort immediately.
-		_ = e.Bus.Emit("cancel.request", events.CancelRequest{Source: "signal:" + sig.String()})
+		_ = e.Bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "signal:" + sig.String()})
 	case <-e.SessionEnded():
 		e.Logger.Info("session ended")
 	case <-ctx.Done():
 		e.Logger.Info("context cancelled")
-		_ = e.Bus.Emit("cancel.request", events.CancelRequest{Source: "context"})
+		_ = e.Bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "context"})
 	}
 
 	// Use a fresh background context for shutdown so plugin Shutdown calls
@@ -827,9 +865,7 @@ func (e *Engine) replayHistory() error {
 	}
 
 	e.Logger.Info("replaying conversation history", "messages", len(messages))
-	return e.Bus.Emit("io.history.replay", events.HistoryReplay{
-		Messages: messages,
-	})
+	return e.Bus.Emit("io.history.replay", events.HistoryReplay{SchemaVersion: events.HistoryReplayVersion, Messages: messages})
 }
 
 // EndSession finalizes the session metadata with ended_at and status.

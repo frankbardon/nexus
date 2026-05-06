@@ -41,9 +41,8 @@ func autoRespond(bus engine.EventBus, choiceID string) {
 			return
 		}
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
-				ChoiceID:  choiceID,
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
+				ChoiceID: choiceID,
 			})
 		}()
 	}, engine.WithPriority(10))
@@ -187,9 +186,8 @@ func TestVectorApprovalActionRefSurfacesNamespace(t *testing.T) {
 		}
 		captured = req
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
-				ChoiceID:  "allow",
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
+				ChoiceID: "allow",
 			})
 		}()
 	}, engine.WithPriority(10))

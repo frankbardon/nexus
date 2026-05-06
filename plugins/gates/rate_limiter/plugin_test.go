@@ -61,7 +61,7 @@ func newQueuePlugin(t *testing.T, perWindow int, window time.Duration, maxPendin
 func TestRateLimiter_UnderLimit_NoVeto(t *testing.T) {
 	_, bus := newRejectPlugin(t, 5, 10*time.Second)
 	for i := range 4 {
-		veto, err := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+		veto, err := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 		if err != nil {
 			t.Fatalf("request %d: unexpected error: %v", i, err)
 		}
@@ -74,9 +74,9 @@ func TestRateLimiter_UnderLimit_NoVeto(t *testing.T) {
 func TestRateLimiter_RejectMode_Vetoes(t *testing.T) {
 	_, bus := newRejectPlugin(t, 2, 10*time.Second)
 	for range 2 {
-		bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+		bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	}
-	veto, err := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	veto, err := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,9 +98,9 @@ func TestRateLimiter_RejectMode_EmitsRetryAfterWait(t *testing.T) {
 		mu.Unlock()
 	})
 
-	bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 
-	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if !veto.Vetoed {
 		t.Fatal("expected veto")
 	}
@@ -124,9 +124,9 @@ func TestRateLimiter_RejectMode_EmitsRetryAfterWait(t *testing.T) {
 
 func TestRateLimiter_WindowExpiry_AllowsThrough(t *testing.T) {
 	_, bus := newRejectPlugin(t, 1, 50*time.Millisecond)
-	bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	time.Sleep(60 * time.Millisecond)
-	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if veto.Vetoed {
 		t.Fatal("should not veto after window expiry")
 	}
@@ -142,14 +142,14 @@ func TestRateLimiter_QueueMode_BeyondRateQueued(t *testing.T) {
 	})
 
 	// Burn the first slot.
-	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if veto.Vetoed {
 		t.Fatal("first request must not be vetoed")
 	}
 
 	// Two more should queue (vetoed but not full).
 	for i := range 2 {
-		v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+		v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 		if !v.Vetoed {
 			t.Fatalf("queued request %d should veto, got passthrough", i)
 		}
@@ -176,21 +176,21 @@ func TestRateLimiter_QueueMode_RejectsBeyondMaxPending(t *testing.T) {
 	_, bus := newQueuePlugin(t, 1, 5*time.Second, 2)
 
 	// Burn the first allowed slot.
-	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if veto.Vetoed {
 		t.Fatal("first request must not be vetoed")
 	}
 
 	// Fill the queue (2 slots).
 	for i := range 2 {
-		v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+		v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 		if !v.Vetoed {
 			t.Fatalf("queued request %d should veto", i)
 		}
 	}
 
 	// Next request must reject (queue full).
-	v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+	v, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 	if !v.Vetoed {
 		t.Fatal("expected veto when queue full")
 	}
@@ -229,7 +229,7 @@ func TestRateLimiter_QueueMode_NoLeakOnShutdown(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			bus.EmitVetoable("before:llm.request", &events.LLMRequest{})
+			bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion})
 		}()
 	}
 	wg.Wait()

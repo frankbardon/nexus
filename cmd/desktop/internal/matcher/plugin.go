@@ -317,13 +317,13 @@ func (p *Plugin) runMatch(req MatchRequest) {
 	}()
 
 	pool := candidatePool()
-	llmReq := events.LLMRequest{
-		// Role-based resolution: the Anthropic provider looks up
-		// the actual model ID and max_tokens from the engine's
-		// ModelRegistry, which the host binary populates from
-		// core.models in config.yaml. Leaving Model and MaxTokens
-		// zero-valued is the signal to use the role.
-		Role:   rankRole,
+	llmReq := events.LLMRequest{SchemaVersion:
+	// Role-based resolution: the Anthropic provider looks up
+	// the actual model ID and max_tokens from the engine's
+	// ModelRegistry, which the host binary populates from
+	// core.models in config.yaml. Leaving Model and MaxTokens
+	// zero-valued is the signal to use the role.
+	events.LLMRequestVersion, Role: rankRole,
 		Stream: false,
 		Messages: []events.Message{
 			{Role: "system", Content: rankSystemPrompt},

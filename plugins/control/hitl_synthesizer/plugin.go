@@ -308,8 +308,7 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 	systemMsg := defaultSystemPrompt
 	userMsg := buildUserPrompt(req, p.maxActionRefChars)
 
-	emitErr := p.bus.Emit("llm.request", events.LLMRequest{
-		Role:  p.modelRole,
+	emitErr := p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Model: p.model,
 		Messages: []events.Message{
 			{Role: "system", Content: systemMsg},

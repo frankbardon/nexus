@@ -20,6 +20,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/events/compat"
 )
 
 // Result is everything Run produces about a single case execution.
@@ -234,18 +235,44 @@ func replay(ctx context.Context, eng *engine.Engine, journalDir string) error {
 // replayPayloadConverter mirrors engine.replayPayloadConverter (which is
 // unexported). The engine's coordinator path uses its own converter; the
 // runner's case-driven path needs the same conversion table so io.input
-// payloads land as typed events.UserInput.
+// payloads land as typed events.UserInput. Routes recorded payloads
+// through pkg/events/compat to lift older schema versions to the running
+// version before re-typing.
 func replayPayloadConverter(eventType string, payload any) (any, error) {
 	switch eventType {
 	case "io.input":
-		return journal.PayloadAs[events.UserInput](payload)
+		return convertVersioned[events.UserInput](eventType, events.UserInputVersion, payload)
 	case "llm.response":
-		return journal.PayloadAs[events.LLMResponse](payload)
+		return convertVersioned[events.LLMResponse](eventType, events.LLMResponseVersion, payload)
 	case "tool.result":
-		return journal.PayloadAs[events.ToolResult](payload)
+		return convertVersioned[events.ToolResult](eventType, events.ToolResultVersion, payload)
 	default:
 		return payload, nil
 	}
+}
+
+func convertVersioned[T any](eventType string, currentVer int, payload any) (T, error) {
+	if m, ok := payload.(map[string]any); ok {
+		recorded := 0
+		if v, ok := m["_schema_version"]; ok {
+			switch n := v.(type) {
+			case float64:
+				recorded = int(n)
+			case int:
+				recorded = n
+			}
+		}
+		if recorded == 0 {
+			recorded = currentVer
+		}
+		migrated, err := compat.Apply(eventType, recorded, currentVer, m)
+		if err != nil {
+			var zero T
+			return zero, fmt.Errorf("compat: %w", err)
+		}
+		payload = migrated
+	}
+	return journal.PayloadAs[T](payload)
 }
 
 // loadJournal reads every envelope out of a journal directory into an

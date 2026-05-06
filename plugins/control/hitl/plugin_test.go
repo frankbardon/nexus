@@ -8,8 +8,7 @@ import (
 )
 
 func TestBuildRequestFromToolCallFreeText(t *testing.T) {
-	tc := events.ToolCall{
-		ID:     "call-1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1",
 		Name:   "ask_user",
 		TurnID: "turn-1",
 		Arguments: map[string]any{
@@ -38,8 +37,7 @@ func TestBuildRequestFromToolCallFreeText(t *testing.T) {
 }
 
 func TestBuildRequestFromToolCallChoices(t *testing.T) {
-	tc := events.ToolCall{
-		ID:     "call-2",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-2",
 		Name:   "ask_user",
 		TurnID: "turn-2",
 		Arguments: map[string]any{
@@ -71,8 +69,7 @@ func TestBuildRequestFromToolCallChoices(t *testing.T) {
 }
 
 func TestBuildRequestRejectsUnknownDefault(t *testing.T) {
-	tc := events.ToolCall{
-		ID:     "call-3",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-3",
 		Name:   "ask_user",
 		TurnID: "turn-3",
 		Arguments: map[string]any{
@@ -91,8 +88,7 @@ func TestBuildRequestRejectsUnknownDefault(t *testing.T) {
 }
 
 func TestBuildRequestRejectsChoicesModeWithoutChoices(t *testing.T) {
-	tc := events.ToolCall{
-		ID:     "call-4",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-4",
 		Name:   "ask_user",
 		TurnID: "turn-4",
 		Arguments: map[string]any{
@@ -107,8 +103,7 @@ func TestBuildRequestRejectsChoicesModeWithoutChoices(t *testing.T) {
 }
 
 func TestBuildRequestRejectsDuplicateChoiceID(t *testing.T) {
-	tc := events.ToolCall{
-		ID:     "call-5",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-5",
 		Name:   "ask_user",
 		TurnID: "turn-5",
 		Arguments: map[string]any{
@@ -135,22 +130,22 @@ func TestEncodeResponseForLLMShapes(t *testing.T) {
 	}{
 		{
 			name: "freetext",
-			resp: events.HITLResponse{RequestID: "r1", FreeText: "hi"},
+			resp: events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: "r1", FreeText: "hi"},
 			want: map[string]string{"free_text": "hi"},
 		},
 		{
 			name: "choice",
-			resp: events.HITLResponse{RequestID: "r2", ChoiceID: "allow"},
+			resp: events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: "r2", ChoiceID: "allow"},
 			want: map[string]string{"choice_id": "allow"},
 		},
 		{
 			name: "both",
-			resp: events.HITLResponse{RequestID: "r3", ChoiceID: "edit", FreeText: "trim"},
+			resp: events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: "r3", ChoiceID: "edit", FreeText: "trim"},
 			want: map[string]string{"choice_id": "edit", "free_text": "trim"},
 		},
 		{
 			name:   "cancelled",
-			resp:   events.HITLResponse{RequestID: "r4", Cancelled: true, CancelReason: "deadline"},
+			resp:   events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: "r4", Cancelled: true, CancelReason: "deadline"},
 			errStr: "deadline",
 		},
 	}

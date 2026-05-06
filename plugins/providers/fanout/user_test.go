@@ -66,8 +66,7 @@ func (b *mockBus) emitted() []emittedEvent {
 
 // helper to build test responses with fanout metadata.
 func makeResponse(provider, model, content string, cost float64) events.LLMResponse {
-	return events.LLMResponse{
-		Content: content,
+	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content,
 		Model:   model,
 		CostUSD: cost,
 		Usage: events.Usage{
@@ -377,8 +376,7 @@ func TestHandleUserChoice_DeliversToChannel(t *testing.T) {
 	// Simulate receiving a provider.fanout.chosen event.
 	p.handleUserChoice(engine.Event[any]{
 		Type: "provider.fanout.chosen",
-		Payload: events.ProviderFanoutChosen{
-			FanoutID:    "test-fanout",
+		Payload: events.ProviderFanoutChosen{SchemaVersion: events.ProviderFanoutChosenVersion, FanoutID: "test-fanout",
 			ChosenIndex: 2,
 		},
 	})
@@ -399,8 +397,7 @@ func TestHandleUserChoice_UnknownFanoutID(t *testing.T) {
 	// Should not panic when fanout ID is not found.
 	p.handleUserChoice(engine.Event[any]{
 		Type: "provider.fanout.chosen",
-		Payload: events.ProviderFanoutChosen{
-			FanoutID:    "nonexistent",
+		Payload: events.ProviderFanoutChosen{SchemaVersion: events.ProviderFanoutChosenVersion, FanoutID: "nonexistent",
 			ChosenIndex: 0,
 		},
 	})

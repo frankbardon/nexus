@@ -53,13 +53,13 @@ func TestToolTimeout_NormalCompletion_NoInterference(t *testing.T) {
 	})
 
 	// Tool fires invoke then result well before the deadline.
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", Name: "fast"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "fast"})
 	time.Sleep(20 * time.Millisecond)
-	veto, _ := bus.EmitVetoable("before:tool.result", &events.ToolResult{ID: "c1", Name: "fast"})
+	veto, _ := bus.EmitVetoable("before:tool.result", &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "c1", Name: "fast"})
 	if veto.Vetoed {
 		t.Fatalf("normal result must not be vetoed, got %q", veto.Reason)
 	}
-	_ = bus.Emit("tool.result", events.ToolResult{ID: "c1", Name: "fast"})
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "c1", Name: "fast"})
 
 	// Wait past the original deadline; no timeout should fire.
 	time.Sleep(250 * time.Millisecond)
@@ -98,7 +98,7 @@ func TestToolTimeout_DefaultTimeoutFires(t *testing.T) {
 		}
 	})
 
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "hang", Name: "stuck", TurnID: "turn-1"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "hang", Name: "stuck", TurnID: "turn-1"})
 
 	select {
 	case <-seenReady:
@@ -147,7 +147,7 @@ func TestToolTimeout_PerToolOverride_Longer(t *testing.T) {
 		mu.Unlock()
 	})
 
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", Name: "slow"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "slow"})
 
 	// Past the default but inside the override.
 	time.Sleep(80 * time.Millisecond)
@@ -159,7 +159,7 @@ func TestToolTimeout_PerToolOverride_Longer(t *testing.T) {
 	}
 
 	// Provide a real result before the override expires.
-	_ = bus.Emit("tool.result", events.ToolResult{ID: "c1", Name: "slow"})
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "c1", Name: "slow"})
 
 	time.Sleep(200 * time.Millisecond)
 	mu.Lock()
@@ -184,7 +184,7 @@ func TestToolTimeout_PerToolOverride_Shorter(t *testing.T) {
 	})
 
 	start := time.Now()
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", Name: "flaky"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "flaky"})
 
 	select {
 	case tt := <-done:
@@ -273,14 +273,14 @@ func TestToolTimeout_ConcurrentCallsIndependent(t *testing.T) {
 
 	// Fire two quick + one defaulting + one with override; each gets its
 	// own timer.
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "fast1", Name: "fast"})
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "fast2", Name: "fast"})
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "hang", Name: "hang"})
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "slow", Name: "slow"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "fast1", Name: "fast"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "fast2", Name: "fast"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "hang", Name: "hang"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "slow", Name: "slow"})
 
 	// Quick ones complete immediately.
-	_ = bus.Emit("tool.result", events.ToolResult{ID: "fast1", Name: "fast"})
-	_ = bus.Emit("tool.result", events.ToolResult{ID: "fast2", Name: "fast"})
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "fast1", Name: "fast"})
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "fast2", Name: "fast"})
 
 	// Wait for default-timeout firing of "hang".
 	deadline := time.After(500 * time.Millisecond)
@@ -300,7 +300,7 @@ func TestToolTimeout_ConcurrentCallsIndependent(t *testing.T) {
 
 	// Slow tool should still be in-flight (override is 200ms; we've only
 	// passed ~50ms so far). Provide its real result before the override.
-	_ = bus.Emit("tool.result", events.ToolResult{ID: "slow", Name: "slow"})
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "slow", Name: "slow"})
 
 	// Drain remaining ready signals.
 	for i := 0; i < 4; i++ {
@@ -334,7 +334,7 @@ func TestToolTimeout_LateResultSuppressed(t *testing.T) {
 		}
 	})
 
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", Name: "stuck"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "stuck"})
 
 	select {
 	case <-timeoutCh:
@@ -343,7 +343,7 @@ func TestToolTimeout_LateResultSuppressed(t *testing.T) {
 	}
 
 	// Late real result. before:tool.result must veto it.
-	veto, err := bus.EmitVetoable("before:tool.result", &events.ToolResult{ID: "c1", Name: "stuck"})
+	veto, err := bus.EmitVetoable("before:tool.result", &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "c1", Name: "stuck"})
 	if err != nil {
 		t.Fatalf("emit veto: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestToolTimeout_ErrorMessageContainsExactHint(t *testing.T) {
 		}
 	})
 
-	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "x1", Name: "web_fetch"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "x1", Name: "web_fetch"})
 
 	select {
 	case r := <-got:
