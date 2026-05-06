@@ -74,6 +74,7 @@ func (p *Plugin) Emissions() []string {
 		"io.session.end",
 		"cancel.request",
 		"cancel.resume",
+		"core.config.reload.request",
 	}
 }
 
@@ -105,7 +106,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		sessionID = ctx.Session.ID
 	}
 	p.adapter = NewAdapter(p.hub, sessionID)
-	p.server = NewServer(p.hub, ctx.Session, p.logger, p.host, p.port, ctx.Capabilities)
+	p.server = NewServer(p.hub, ctx.Session, p.logger, p.host, p.port, ctx.Capabilities, ctx.Bus)
 
 	// Wire inbound callbacks (user -> engine).
 	// Input handling must run in a goroutine because the event bus dispatches

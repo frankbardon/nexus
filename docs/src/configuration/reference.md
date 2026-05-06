@@ -181,11 +181,75 @@ runtime settings like log level and tick interval) and aren't journal-specific.
 engine:
   shutdown:
     drain_timeout: 30s
+  config_watch:
+    enabled: false      # opt in to fsnotify hot-reload
+    debounce: 1s
 ```
 
-| Key                        | Type     | Default | Description |
-|----------------------------|----------|---------|-------------|
-| `shutdown.drain_timeout`   | duration | `30s`   | Maximum time the engine waits for in-flight bus dispatches to complete on `Shutdown` before the plugin teardown phase begins. Acts as a floor: a plugin implementing `engine.DrainOverride` can extend (but not shorten) the effective window so a single batch poller or MCP server can flush without operators bumping the global setting. Sub-second values are accepted but rarely useful. |
+| Key                            | Type     | Default | Description |
+|--------------------------------|----------|---------|-------------|
+| `shutdown.drain_timeout`       | duration | `30s`   | Maximum time the engine waits for in-flight bus dispatches to complete on `Shutdown` before the plugin teardown phase begins. Acts as a floor: a plugin implementing `engine.DrainOverride` can extend (but not shorten) the effective window so a single batch poller or MCP server can flush without operators bumping the global setting. Sub-second values are accepted but rarely useful. |
+| `config_watch.enabled`         | bool     | `false` | When `true`, the CLI starts an `fsnotify` watcher on the `-config` path and calls `Engine.ReloadConfig` on every debounced edit. Default off because production deploys often touch the config file mid-rollout and operators rarely want auto-reload during such windows. SIGHUP and the browser admin endpoint remain available regardless. |
+| `config_watch.debounce`        | duration | `1s`    | Window across which `fsnotify` write/create events on the same file are coalesced into a single reload. Editors commonly fire two or three Write events per save; `1s` is well above that storm but short enough that the operator perceives the reload as instant. |
+
+### Hot reload
+
+The engine supports applying a new config to a running process without
+restarting any unaffected plugins. The flow is two-phase:
+
+1. **Validate phase (atomic).** The new config is run through the same
+   schema validation as boot; capability provider identity is pinned (a
+   plugin advertising `memory.history` cannot be replaced by another
+   provider mid-flight); the diff between current and new active sets is
+   computed. Any failure here returns an error and leaves the engine
+   untouched.
+2. **Apply phase (best-effort).** The diff is walked: removed plugins
+   shut down, in-place reloaders accept their new config, restart-only
+   plugins are torn down and re-initialized, and added plugins run the
+   full lifecycle. Engine-level fields (`drain_timeout`, `config_watch`)
+   are swapped atomically before per-plugin work.
+
+A reload that fails midway through the apply phase logs the error and
+surfaces it to the caller; the engine is left in a best-effort consistent
+state. True rollback is not attempted because "undoing" a `Shutdown` is
+not generally possible.
+
+**Triggers:**
+
+- **`SIGHUP`** to the CLI process re-reads the original `-config` path
+  and applies the result. (`SIGINT` and `SIGTERM` continue to terminate
+  the engine.)
+- **`POST /admin/reload-config`** on the browser plugin's HTTP server.
+  Body is empty (re-read original path) or `{"path": "/abs/path/to/new.yaml"}`
+  for ad-hoc paths. No auth layer yet — alpha-only; front with a reverse
+  proxy if exposed.
+- **`fsnotify` watcher** on the original path. Off by default; opt in
+  via `engine.config_watch.enabled: true`. Debounced by
+  `engine.config_watch.debounce` to absorb editor save bursts.
+
+**Plugin opt-in: `ConfigReloader`.** A plugin that implements
+
+```go
+type ConfigReloader interface {
+    ReloadConfig(old, new map[string]any) error
+}
+```
+
+receives the in-place hook on a config-only change instead of going
+through `Shutdown` → `Init` → `Ready`. Implementations must be
+transactional from the bus's perspective: returning an error must leave
+the plugin in its prior state. Plugins that don't implement the
+interface go through the full restart path; both work, the in-place
+hook is just an optimization for plugins where a restart would drop
+in-progress work (active streams, bound listeners) the operator would
+notice.
+
+**Capability provider identity is pinned.** Hot-reload rejects any
+config change that would resolve a currently-bound capability (e.g.
+`memory.history`) to a different concrete provider. The session has
+in-flight state bound to the existing provider; a silent swap would
+strip the operator's history. Restart the engine to change capability
+providers.
 
 ## Journal
 

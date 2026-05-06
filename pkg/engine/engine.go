@@ -55,6 +55,14 @@ type Engine struct {
 	// instead of creating a new one.
 	RecallSessionID string
 
+	// ConfigPath is the on-disk path the engine was loaded from (set by
+	// New(); empty for NewFromBytes / DefaultConfig). The CLI's SIGHUP
+	// handler and the browser admin endpoint use this as the default for
+	// hot-reload — a ConfigReloadRequest with an empty Path re-reads from
+	// here. Embedders that ship //go:embed configs can leave it empty;
+	// reload requests then need an explicit Path or a different trigger.
+	ConfigPath string
+
 	// Run-scoped state installed by Boot and torn down by Stop. Embedders
 	// should not touch these fields directly.
 	runUnsubs  []func()
@@ -77,7 +85,9 @@ func New(configPath string) (*Engine, error) {
 		}
 	}
 
-	return newFromConfig(cfg), nil
+	eng := newFromConfig(cfg)
+	eng.ConfigPath = configPath
+	return eng, nil
 }
 
 // NewFromBytes creates a fully wired Engine from an in-memory YAML
@@ -394,6 +404,41 @@ func (e *Engine) Boot(ctx context.Context) error {
 		case e.sessionEnd <- struct{}{}:
 		default:
 		}
+	}))
+
+	// Listen for hot-reload requests from external triggers (browser admin
+	// endpoint, custom plugins). The CLI's SIGHUP path bypasses the bus
+	// because it runs from the signal goroutine; the bus subscription is
+	// for in-process callers that already hold the bus reference but not
+	// the engine's. Re-read from ConfigPath when no override is supplied.
+	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("core.config.reload.request", func(ev Event[any]) {
+		req, ok := ev.Payload.(events.ConfigReloadRequest)
+		if !ok {
+			return
+		}
+		path := req.Path
+		if path == "" {
+			path = e.ConfigPath
+		}
+		result := events.ConfigReloadResult{
+			SchemaVersion: events.ConfigReloadResultVersion,
+			Source:        req.Source,
+			OK:            true,
+		}
+		if path == "" {
+			result.OK = false
+			result.ErrorMessage = "no config path supplied and engine has no original path"
+		} else {
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				result.OK = false
+				result.ErrorMessage = fmt.Sprintf("load %s: %v", path, err)
+			} else if err := e.ReloadConfig(cfg); err != nil {
+				result.OK = false
+				result.ErrorMessage = err.Error()
+			}
+		}
+		_ = e.Bus.Emit("core.config.reload.result", result)
 	}))
 
 	// Start core.tick heartbeat. The tick goroutine lives on its own

@@ -17,6 +17,7 @@
 - [Per-Plugin Storage](./architecture/storage.md)
 - [Model Registry](./architecture/models.md)
 - [Prompt Registry](./architecture/prompts.md)
+- [Hot Reload](./architecture/hot-reload.md)
 
 # Desktop Shell
 

@@ -5,10 +5,12 @@ import "time"
 // Schema-version constants for core.* payloads. See doc.go for the
 // versioning convention.
 const (
-	BootConfigVersion     = 1
-	ShutdownReasonVersion = 1
-	ErrorInfoVersion      = 1
-	TickInfoVersion       = 1
+	BootConfigVersion          = 1
+	ShutdownReasonVersion      = 1
+	ErrorInfoVersion           = 1
+	TickInfoVersion            = 1
+	ConfigReloadRequestVersion = 1
+	ConfigReloadResultVersion  = 1
 )
 
 // BootConfig carries bootstrap configuration for system startup.
@@ -52,4 +54,29 @@ type TickInfo struct {
 
 	Sequence int
 	Time     time.Time
+}
+
+// ConfigReloadRequest is emitted by an external trigger (admin HTTP, custom
+// plugin) to request that the engine re-read its YAML and apply the result
+// via Engine.ReloadConfig. Path may override the original config path; an
+// empty Path means "re-read whatever path the engine was launched with".
+// Source identifies the trigger for log correlation (e.g. "browser-admin").
+type ConfigReloadRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	Path   string `json:"path,omitempty"`
+	Source string `json:"source,omitempty"`
+}
+
+// ConfigReloadResult is emitted by the engine after acting on a
+// ConfigReloadRequest. Triggers that need synchronous feedback (the admin
+// HTTP endpoint) subscribe to this and correlate by the optional RequestID
+// field. ErrorMessage is empty on success.
+type ConfigReloadResult struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	RequestID    string `json:"request_id,omitempty"`
+	Source       string `json:"source,omitempty"`
+	OK           bool   `json:"ok"`
+	ErrorMessage string `json:"error,omitempty"`
 }

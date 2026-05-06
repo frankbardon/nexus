@@ -75,6 +75,20 @@
               "description": "Maximum wall-clock the engine waits for in-flight bus dispatches to drain on Stop. Go duration string (e.g. '30s')."
             }
           }
+        },
+        "config_watch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When true, the CLI starts an fsnotify watcher on the -config path and calls Engine.ReloadConfig on edits. Default false; SIGHUP and the browser admin endpoint remain available regardless."
+            },
+            "debounce": {
+              "type": "string",
+              "description": "Collapse fsnotify bursts within this window into one reload. Go duration string (e.g. '1s'). Default 1s."
+            }
+          }
         }
       }
     },

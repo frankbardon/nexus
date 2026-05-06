@@ -184,6 +184,10 @@ func validateEngineConfig(cfg *Config) *configValidationResult {
 			"shutdown": map[string]any{
 				"drain_timeout": durationToString(cfg.Engine.Shutdown.DrainTimeout),
 			},
+			"config_watch": map[string]any{
+				"enabled":  cfg.Engine.ConfigWatch.Enabled,
+				"debounce": durationToString(cfg.Engine.ConfigWatch.Debounce),
+			},
 		},
 		"plugins": map[string]any{
 			"active": cfg.Plugins.Active,

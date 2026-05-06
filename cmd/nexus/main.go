@@ -5,9 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/allplugins"
+	"github.com/frankbardon/nexus/pkg/engine/configwatch"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 func main() {
@@ -84,9 +88,102 @@ func main() {
 		return
 	}
 
-	// Run handles SIGINT/SIGTERM internally; embedders call Boot/Stop directly.
-	if err := eng.Run(context.Background()); err != nil {
+	// Boot/Stop directly so SIGHUP can hot-reload while SIGINT/SIGTERM exit.
+	// Mirrors what eng.Run does internally, plus the SIGHUP and watcher hooks.
+	if err := runWithReload(eng, effectiveConfig); err != nil {
 		fmt.Fprintf(os.Stderr, "engine error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runWithReload is the CLI's Boot+wait+Stop loop with SIGHUP reload and an
+// optional fsnotify watcher driven by engine.config_watch.enabled. SIGINT
+// and SIGTERM continue to terminate the engine; SIGHUP triggers
+// engine.ReloadConfig with the same -config path the binary was launched
+// with.
+func runWithReload(eng *engine.Engine, configPath string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := eng.Boot(ctx); err != nil {
+		return fmt.Errorf("boot: %w", err)
+	}
+
+	// Optional fsnotify watcher. Off by default; opt in via
+	// engine.config_watch.enabled in YAML. The reload callback re-reads
+	// the original config path to keep the trigger semantics identical to
+	// SIGHUP — operators get the same behavior whether they type kill
+	// -HUP or save the file.
+	var watcher *configwatch.Watcher
+	if eng.Config.Engine.ConfigWatch.Enabled && configPath != "" {
+		debounce := eng.Config.Engine.ConfigWatch.Debounce
+		if debounce <= 0 {
+			debounce = engine.DefaultConfigWatchDebounce
+		}
+		w, err := configwatch.New(configPath, debounce, eng.Logger, func() {
+			if err := reloadFromPath(eng, configPath); err != nil {
+				eng.Logger.Error("config watch reload failed", "error", err)
+			}
+		})
+		if err != nil {
+			eng.Logger.Warn("config watch failed to start", "error", err)
+		} else {
+			watcher = w
+			eng.Logger.Info("config watch active",
+				"path", configPath,
+				"debounce", debounce)
+		}
+	}
+	defer func() {
+		if watcher != nil {
+			_ = watcher.Close()
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				eng.Logger.Info("received SIGHUP — reloading config", "path", configPath)
+				if err := reloadFromPath(eng, configPath); err != nil {
+					eng.Logger.Error("SIGHUP reload failed", "error", err)
+				}
+				continue
+			}
+			eng.Logger.Info("received signal", "signal", sig)
+			_ = eng.Bus.Emit("cancel.request", events.CancelRequest{
+				SchemaVersion: events.CancelRequestVersion,
+				Source:        "signal:" + sig.String(),
+			})
+			return eng.Stop(context.Background())
+		case <-eng.SessionEnded():
+			eng.Logger.Info("session ended")
+			return eng.Stop(context.Background())
+		case <-ctx.Done():
+			eng.Logger.Info("context cancelled")
+			_ = eng.Bus.Emit("cancel.request", events.CancelRequest{
+				SchemaVersion: events.CancelRequestVersion,
+				Source:        "context",
+			})
+			return eng.Stop(context.Background())
+		}
+	}
+}
+
+// reloadFromPath re-reads the config file at path and applies it via
+// Engine.ReloadConfig. Empty path is a no-op (the engine was constructed
+// from defaults; there is no source file to re-read).
+func reloadFromPath(eng *engine.Engine, path string) error {
+	if path == "" {
+		return fmt.Errorf("no config path to reload from")
+	}
+	cfg, err := engine.LoadConfig(path)
+	if err != nil {
+		return fmt.Errorf("load: %w", err)
+	}
+	return eng.ReloadConfig(cfg)
 }

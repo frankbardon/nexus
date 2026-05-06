@@ -202,3 +202,18 @@ type LateShutdown interface {
 type DrainOverride interface {
 	DrainTimeout() time.Duration
 }
+
+// ConfigReloader is implemented by plugins that can apply a config change in
+// place without a full Shutdown/Init cycle. Engine.ReloadConfig calls
+// ReloadConfig with the previous and new raw config maps (both already
+// schema-validated). Implementations must be transactional from the bus's
+// perspective: returning an error must leave the plugin in its previous
+// state — bus subscriptions, in-memory data, persisted scratch — unchanged.
+//
+// Plugins that don't implement this interface go through the full restart
+// path on a config change (Shutdown -> Init -> Ready). Implementing it is an
+// optimization for plugins where a restart would drop in-progress work
+// (active streams, bound HTTP listeners) the operator would notice.
+type ConfigReloader interface {
+	ReloadConfig(old, new map[string]any) error
+}

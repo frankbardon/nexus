@@ -33,11 +33,35 @@ type Config struct {
 
 // EngineConfig holds top-level engine resilience knobs that are not strictly
 // "core" runtime settings (log level, tick interval) and not journal-specific.
-// Currently houses the shutdown drain timeout; future resilience phases will
-// extend this struct rather than scattering settings under core.
+// Currently houses the shutdown drain timeout and the optional fsnotify-based
+// config watcher; future resilience phases will extend this struct rather than
+// scattering settings under core.
 type EngineConfig struct {
-	Shutdown ShutdownConfig `yaml:"shutdown"`
+	Shutdown    ShutdownConfig    `yaml:"shutdown"`
+	ConfigWatch ConfigWatchConfig `yaml:"config_watch"`
 }
+
+// ConfigWatchConfig governs the optional fsnotify-based hot-reload watcher.
+// Off by default — operators who want auto-reload opt in explicitly because
+// in production environments rapid YAML edits during deploys can trigger
+// undesired plugin restarts. SIGHUP and the admin HTTP endpoint remain
+// available regardless of this setting.
+type ConfigWatchConfig struct {
+	// Enabled toggles the fsnotify watcher. When false, only SIGHUP and the
+	// browser admin endpoint can trigger ReloadConfig.
+	Enabled bool `yaml:"enabled"`
+	// Debounce collapses bursts of fsnotify events on the same file into a
+	// single reload. Zero falls back to defaultConfigWatchDebounce. Editors
+	// commonly fire two or three Write events when saving — too short a
+	// debounce reads a half-written file; too long delays the reload.
+	Debounce time.Duration `yaml:"debounce"`
+}
+
+// DefaultConfigWatchDebounce balances editor save bursts (250-500ms) against
+// reload latency. Set well above the typical fsnotify Write storm so partial
+// writes never trigger validation. Exported for the CLI's watcher wiring,
+// which substitutes it when ConfigWatchConfig.Debounce is zero.
+const DefaultConfigWatchDebounce = 1 * time.Second
 
 // ShutdownConfig governs engine shutdown behavior. DrainTimeout is the wall
 // clock the engine gives in-flight bus dispatches to complete before the
