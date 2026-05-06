@@ -1,5 +1,10 @@
 package events
 
+// Schema-version constants for reranker.* payloads. See doc.go.
+const (
+	RerankRequestVersion = 1
+)
+
 // RerankDoc is one document handed to a cross-encoder reranker. Content is
 // the text the reranker scores against the query; ID is opaque so the caller
 // can map results back to their own structures.
@@ -22,6 +27,8 @@ type RerankResult struct {
 // payload on "reranker.rerank"; the provider fills Results / Provider /
 // Error in place before Emit returns.
 type RerankRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Query string
 	Docs  []RerankDoc
 	TopN  int

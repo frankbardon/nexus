@@ -1,5 +1,16 @@
 package events
 
+// Schema-version constants for llm.* payloads. See doc.go.
+const (
+	LLMRequestVersion   = 1
+	LLMResponseVersion  = 1
+	StreamChunkVersion  = 1
+	StreamEndVersion    = 1
+	BatchSubmitVersion  = 1
+	BatchStatusVersion  = 1
+	BatchResultsVersion = 1
+)
+
 // ToolChoice controls which tools the LLM is allowed or required to use.
 type ToolChoice struct {
 	Mode string `json:"mode"`           // "auto" | "required" | "none" | "tool"
@@ -25,6 +36,8 @@ type ResponseFormat struct {
 
 // LLMRequest describes a request to a language model.
 type LLMRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Role           string // Model role (e.g., "reasoning", "balanced", "quick")
 	Model          string // Explicit model ID override (takes precedence over Role)
 	Messages       []Message
@@ -115,6 +128,8 @@ type ToolDef struct {
 
 // LLMResponse is the complete response from a language model.
 type LLMResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Content      string
 	ToolCalls    []ToolCallRequest
 	Usage        Usage
@@ -169,6 +184,8 @@ type Usage struct {
 
 // StreamChunk is a single chunk from a streaming LLM response.
 type StreamChunk struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Content  string
 	ToolCall *ToolCallRequest // partial tool call
 	Index    int
@@ -177,6 +194,8 @@ type StreamChunk struct {
 
 // StreamEnd signals the completion of a streaming LLM response.
 type StreamEnd struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID       string
 	Usage        Usage
 	FinishReason string
@@ -189,6 +208,8 @@ type StreamEnd struct {
 //
 // Bus event type: "llm.batch.submit".
 type BatchSubmit struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Provider string // "anthropic" | "openai"
 	Requests []BatchRequest
 	Metadata map[string]any
@@ -207,6 +228,8 @@ type BatchRequest struct {
 //
 // Bus event type: "llm.batch.status".
 type BatchStatus struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Provider string
 	BatchID  string
 	Status   string // "submitted" | "in_progress" | "completed" | "failed" | "cancelled"
@@ -225,6 +248,8 @@ type BatchCounts struct {
 //
 // Bus event type: "llm.batch.results".
 type BatchResults struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Provider string
 	BatchID  string
 	Results  []BatchResult

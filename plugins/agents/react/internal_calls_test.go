@@ -21,29 +21,25 @@ func TestHandleToolResult_DropsInternalCalls(t *testing.T) {
 	p.pendingToolCalls = 2
 
 	// Inner call from a run_code script — flagged internal by the agent.
-	p.handleToolInvokeEvent(engine.Event[any]{Payload: events.ToolCall{
-		ID:           "code-1-abc",
+	p.handleToolInvokeEvent(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-1-abc",
 		Name:         "read_file",
 		TurnID:       "turn-xyz",
 		ParentCallID: "toolu_outer",
 	}})
 	// Top-level call from the LLM.
-	p.handleToolInvokeEvent(engine.Event[any]{Payload: events.ToolCall{
-		ID:     "toolu_real",
+	p.handleToolInvokeEvent(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "toolu_real",
 		Name:   "write_file",
 		TurnID: "turn-xyz",
 	}})
 
 	// Inner result arrives first — must be dropped without counting.
-	p.handleToolResult(events.ToolResult{
-		ID:     "code-1-abc",
+	p.handleToolResult(events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "code-1-abc",
 		Name:   "read_file",
 		Output: "inner payload",
 		TurnID: "turn-xyz",
 	})
 	// Top-level result — counts as one.
-	p.handleToolResult(events.ToolResult{
-		ID:     "toolu_real",
+	p.handleToolResult(events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "toolu_real",
 		Name:   "write_file",
 		Output: "outer payload",
 		TurnID: "turn-xyz",

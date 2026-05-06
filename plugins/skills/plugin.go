@@ -227,8 +227,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	}
 
 	// Emit activation event (triggers handleActivate which loads into context).
-	_ = p.bus.Emit("skill.activate", events.SkillActivation{
-		Name:        name,
+	_ = p.bus.Emit("skill.activate", events.SkillActivation{SchemaVersion: events.SkillActivationVersion, Name: name,
 		RequestedBy: "agent",
 	})
 
@@ -237,8 +236,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 }
 
 func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
-	result := events.ToolResult{
-		ID:     tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,
@@ -253,7 +251,7 @@ func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
 func (p *Plugin) discoverSkills() {
 	if len(p.scanPaths) == 0 {
 		p.logger.Info("skills plugin: no scan_paths configured, skipping discovery")
-		_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: nil})
+		_ = p.bus.Emit("skill.discover", events.SkillCatalog{SchemaVersion: events.SkillCatalogVersion, Skills: nil})
 		return
 	}
 
@@ -284,7 +282,7 @@ func (p *Plugin) discoverSkills() {
 			Subclass:    r.Subclass,
 		}
 	}
-	_ = p.bus.Emit("skill.discover", events.SkillCatalog{Skills: summaries})
+	_ = p.bus.Emit("skill.discover", events.SkillCatalog{SchemaVersion: events.SkillCatalogVersion, Skills: summaries})
 	p.logger.Info("skill discovery complete", "count", len(p.catalog))
 }
 
@@ -348,8 +346,7 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 		p.skillSchemas[record.Name] = schemaName
 		p.mu.Unlock()
 
-		_ = p.bus.Emit("schema.register", events.SchemaRegistration{
-			Name:   schemaName,
+		_ = p.bus.Emit("schema.register", events.SchemaRegistration{SchemaVersion: events.SchemaRegistrationVersion, Name: schemaName,
 			Schema: schema,
 			Source: pluginID,
 		})
@@ -358,8 +355,7 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 
 	// Build content XML and emit skill.loaded.
 	contentXML := BuildSkillContentXML(*record)
-	_ = p.bus.Emit("skill.loaded", events.SkillContent{
-		Name:      record.Name,
+	_ = p.bus.Emit("skill.loaded", events.SkillContent{SchemaVersion: events.SkillContentVersion, Name: record.Name,
 		Body:      contentXML,
 		Scope:     record.Scope,
 		BaseDir:   record.BaseDir,
@@ -403,11 +399,10 @@ func (p *Plugin) handleResourceRead(e engine.Event[any]) {
 		return
 	}
 
-	_ = p.bus.Emit("skill.resource.result", events.SkillResourceData{
-		SkillName: req.SkillName,
-		Path:      req.Path,
-		Content:   data,
-		MimeType:  inferMimeType(req.Path),
+	_ = p.bus.Emit("skill.resource.result", events.SkillResourceData{SchemaVersion: events.SkillResourceDataVersion, SkillName: req.SkillName,
+		Path:     req.Path,
+		Content:  data,
+		MimeType: inferMimeType(req.Path),
 	})
 }
 
@@ -426,8 +421,7 @@ func (p *Plugin) handleDeactivate(e engine.Event[any]) {
 	p.mu.Unlock()
 
 	if hasSchema {
-		_ = p.bus.Emit("schema.deregister", events.SchemaDeregistration{
-			Name:   schemaName,
+		_ = p.bus.Emit("schema.deregister", events.SchemaDeregistration{SchemaVersion: events.SchemaDeregistrationVersion, Name: schemaName,
 			Source: pluginID,
 		})
 		p.logger.Info("deregistered output schema for skill", "name", ref.Name)

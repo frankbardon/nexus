@@ -142,9 +142,8 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 				estimated, p.maxContextTokens),
 		}
 
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: fmt.Sprintf("Context approaching limit (%d estimated tokens). Compacting conversation...", estimated),
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Context approaching limit (%d estimated tokens). Compacting conversation...", estimated),
+			Role: "system",
 		})
 
 		// Trigger compaction.

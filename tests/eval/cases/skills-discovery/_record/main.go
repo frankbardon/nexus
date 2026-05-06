@@ -58,10 +58,9 @@ func run() error {
 	t0 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	envelopes := []journal.Envelope{
 		{Seq: 1, Ts: t0, Type: "io.session.start", Payload: map[string]any{"session_id": "skills-discovery-golden"}},
-		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{Content: "What skills are available?"}},
+		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "What skills are available?"}},
 		{Seq: 3, Ts: t0.Add(20 * time.Millisecond), Type: "agent.turn.start"},
-		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "end_turn",
 			Usage:        events.Usage{PromptTokens: 90, CompletionTokens: 30, TotalTokens: 120},
 			Content:      "I see code-review, doc-analysis, and git-workflow available.",

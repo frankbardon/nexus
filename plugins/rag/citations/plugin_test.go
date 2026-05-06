@@ -36,7 +36,7 @@ func newTestPlugin(t *testing.T, mode string, strict bool) (*Plugin, engine.Even
 // emitted on the bus, plus the unsubscribe.
 func captureCited(t *testing.T, bus engine.EventBus) (*events.CitedResponse, func()) {
 	t.Helper()
-	captured := &events.CitedResponse{}
+	captured := &events.CitedResponse{SchemaVersion: events.CitedResponseVersion}
 	unsub := bus.Subscribe("llm.response.cited", func(ev engine.Event[any]) {
 		c, _ := ev.Payload.(events.CitedResponse)
 		*captured = c
@@ -48,8 +48,7 @@ func TestParsesAndStripsTagInStrictMode(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t, "tag", true)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("rag.retrieved", events.RetrievalContext{
-		TurnID: "t1",
+	_ = bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: "t1",
 		Chunks: []events.RetrievedChunk{
 			{Source: "/docs/auth.md", DocID: "d-1", ChunkIdx: "3"},
 		},
@@ -58,8 +57,7 @@ func TestParsesAndStripsTagInStrictMode(t *testing.T) {
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	resp := events.LLMResponse{
-		Content:  `The token expires in 24 hours.<cite source="/docs/auth.md" chunk="3"/> Renewal is automatic.`,
+	resp := events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: `The token expires in 24 hours.<cite source="/docs/auth.md" chunk="3"/> Renewal is automatic.`,
 		Metadata: map[string]any{"turn_id": "t1"},
 	}
 	_ = bus.Emit("llm.response", resp)
@@ -85,8 +83,7 @@ func TestStrictDropsUnknownCitation(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t, "tag", true)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("rag.retrieved", events.RetrievalContext{
-		TurnID: "t2",
+	_ = bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: "t2",
 		Chunks: []events.RetrievedChunk{
 			{Source: "/docs/known.md", ChunkIdx: "1"},
 		},
@@ -95,8 +92,7 @@ func TestStrictDropsUnknownCitation(t *testing.T) {
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Content:  `Fact A.<cite source="/docs/unknown.md" chunk="9"/> Fact B.<cite source="/docs/known.md" chunk="1"/>`,
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: `Fact A.<cite source="/docs/unknown.md" chunk="9"/> Fact B.<cite source="/docs/known.md" chunk="1"/>`,
 		Metadata: map[string]any{"turn_id": "t2"},
 	})
 
@@ -112,16 +108,14 @@ func TestNonStrictMarksUnknownAsUnverified(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t, "tag", false)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("rag.retrieved", events.RetrievalContext{
-		TurnID: "t3",
+	_ = bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: "t3",
 		Chunks: []events.RetrievedChunk{{Source: "/docs/known.md", ChunkIdx: "1"}},
 	})
 
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Content:  `Fact.<cite source="/docs/unknown.md" chunk="9"/>`,
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: `Fact.<cite source="/docs/unknown.md" chunk="9"/>`,
 		Metadata: map[string]any{"turn_id": "t3"},
 	})
 
@@ -140,8 +134,7 @@ func TestNoTagsNoEmit(t *testing.T) {
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Content:  "no citations here",
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "no citations here",
 		Metadata: map[string]any{"turn_id": "t4"},
 	})
 
@@ -157,8 +150,7 @@ func TestAnthropicNativePath(t *testing.T) {
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Content: "answer with native citations",
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "answer with native citations",
 		Citations: []events.Citation{
 			{DocumentTitle: "doc-A.md", CitedText: "snippet", StartCharIndex: 0, EndCharIndex: 7},
 		},
@@ -180,8 +172,7 @@ func TestAutoModeDetectsNativeWhenPresent(t *testing.T) {
 	cited, unsub := captureCited(t, bus)
 	t.Cleanup(unsub)
 
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Content:   "x",
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "x",
 		Citations: []events.Citation{{DocumentTitle: "doc"}},
 		Metadata:  map[string]any{"turn_id": "t6"},
 	})
@@ -195,11 +186,10 @@ func TestTurnEndDiscardsContext(t *testing.T) {
 	p, bus, cleanup := newTestPlugin(t, "tag", true)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("rag.retrieved", events.RetrievalContext{
-		TurnID: "t7",
+	_ = bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: "t7",
 		Chunks: []events.RetrievedChunk{{Source: "x", ChunkIdx: "0"}},
 	})
-	_ = bus.Emit("agent.turn.end", events.TurnInfo{TurnID: "t7"})
+	_ = bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: "t7"})
 
 	p.mu.Lock()
 	_, present := p.turns["t7"]

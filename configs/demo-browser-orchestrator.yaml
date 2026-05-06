@@ -92,8 +92,7 @@ plugins:
       5. Read files in chunks 16kb or less
       6. Follow the existing code style and conventions of the project
 
-  nexus.agent.subagent/main:
-    max_iterations: 8
+  nexus.agent.subagent/main: {}
 
   nexus.gate.endless_loop:
     max_iterations: 15

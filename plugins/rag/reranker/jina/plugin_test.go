@@ -55,7 +55,7 @@ func TestRerankSuccessfulResponse(t *testing.T) {
 		{ID: "a", Content: "alpha"},
 		{ID: "b", Content: "beta"},
 	}
-	req := &events.RerankRequest{Query: "test", Docs: docs, TopN: 2}
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "test", Docs: docs, TopN: 2}
 	_ = bus.Emit("reranker.rerank", req)
 	if req.Error != "" {
 		t.Fatalf("error: %s", req.Error)
@@ -73,9 +73,8 @@ func TestRerankHTTPErrorSurfacedAsError(t *testing.T) {
 	_, bus, cleanup := newPluginWithServer(t, srv)
 	t.Cleanup(cleanup)
 
-	req := &events.RerankRequest{
-		Query: "test",
-		Docs:  []events.RerankDoc{{ID: "a", Content: "x"}},
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: "test",
+		Docs: []events.RerankDoc{{ID: "a", Content: "x"}},
 	}
 	_ = bus.Emit("reranker.rerank", req)
 	if req.Error == "" {

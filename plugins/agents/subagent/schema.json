@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.subagent.json",
+  "title": "nexus.agent.subagent",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model_role":         {"type": "string", "description": "Role used for the subagent's LLM calls."},
+    "system_prompt":      {"type": "string", "description": "Inline system prompt."},
+    "system_prompt_file": {"type": "string", "description": "Path to a file containing the system prompt."},
+    "tool_name":          {"type": "string", "description": "Name of the spawn tool registered with the catalog."},
+    "tool_description":   {"type": "string", "description": "Description shown to the parent agent."}
+  }
+}

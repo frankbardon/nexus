@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.skills.json",
+  "title": "nexus.skills",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scan_paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Directories to scan for SKILL.md skill packs."
+    },
+    "trust_project":            {"type": "string",  "description": "Trust policy for project-local skills (always|prompt|never)."},
+    "max_active_skills":        {"type": "integer", "minimum": 1, "description": "Cap on simultaneously active skills."},
+    "catalog_in_system_prompt": {"type": "boolean", "description": "Inject the skill catalog into the system prompt."},
+    "disabled_skills": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Skill names to suppress from discovery."
+    }
+  }
+}

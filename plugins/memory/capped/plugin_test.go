@@ -23,25 +23,21 @@ func TestToolResult_SkipsInternalCalls(t *testing.T) {
 
 	// Outer call — the LLM-facing run_code invocation. Only the internal
 	// filter state is updated; the call itself is not appended.
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:   "outer-1",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "outer-1",
 		Name: "run_code",
 	}})
 	// Inner call dispatched by the script. ParentCallID flags it internal.
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:           "code-inner-1",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-inner-1",
 		Name:         "discover",
 		ParentCallID: "outer-1",
 	}})
 	// Inner result — filtered out because its ID was flagged internal.
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "code-inner-1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "code-inner-1",
 		Name:   "discover",
 		Output: "{}",
 	}})
 	// Outer result — lands in history as a tool-role message.
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "outer-1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "outer-1",
 		Name:   "run_code",
 		Output: "ok",
 	}})
@@ -71,19 +67,18 @@ func TestPairSafeTruncation(t *testing.T) {
 	// Buffer: [user, assistant(tool_use t1), tool(t1), user-2]
 	// After appending user-2, cap is 3 so naive drop would yield
 	// [tool(t1), user-2, ...] — orphaning the tool result.
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "u1"}})
-	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
-		Content:   "call shell",
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "u1"}})
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "call shell",
 		ToolCalls: []events.ToolCallRequest{{ID: "t1", Name: "shell"}},
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID: "t1", Name: "shell", Output: "ok",
-	}})
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "u2"}})
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "t1", Name: "shell", Output: "ok"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.
 
-	// Expect the orphan tool result dropped. Result should be
-	// [assistant(tool_use t1), user-2] or similar — notably, NOT starting
-	// with a "tool" message.
+		// Expect the orphan tool result dropped. Result should be
+		// [assistant(tool_use t1), user-2] or similar — notably, NOT starting
+		// with a "tool" message.
+		UserInputVersion, Content: "u2"}})
+
 	if len(p.messages) > 0 && p.messages[0].Role == "tool" {
 		t.Fatalf("buffer starts with orphan tool message: %+v", p.messages)
 	}
@@ -100,8 +95,7 @@ func TestToolResult_UnmatchedInternalInvokeCleansUp(t *testing.T) {
 	p.logger = slog.Default()
 	p.persist = false
 
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:           "code-orphan",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-orphan",
 		Name:         "discover",
 		ParentCallID: "outer-x",
 	}})

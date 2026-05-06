@@ -220,7 +220,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 	all := make([]hit, 0, k*len(namespaces))
 	if p.hasHybrid {
 		for _, ns := range namespaces {
-			h := &events.HybridQuery{Namespace: ns, Query: query, K: k}
+			h := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: ns, Query: query, K: k}
 			_ = p.bus.Emit("hybrid.query", h)
 			if h.Error != "" {
 				p.logger.Warn("knowledge_search: hybrid query failed", "namespace", ns, "err", h.Error)
@@ -234,7 +234,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 			}
 		}
 	} else {
-		embReq := &events.EmbeddingsRequest{Texts: []string{query}, Model: p.embeddingModel}
+		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{query}, Model: p.embeddingModel}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			p.emit(tc, "", fmt.Sprintf("embed query: %s", embReq.Error))
@@ -246,7 +246,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 		}
 		vec := embReq.Vectors[0]
 		for _, ns := range namespaces {
-			q := &events.VectorQuery{Namespace: ns, Vector: vec, K: k}
+			q := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: ns, Vector: vec, K: k}
 			_ = p.bus.Emit("vector.query", q)
 			if q.Error != "" {
 				p.logger.Warn("knowledge_search: namespace query failed", "namespace", ns, "err", q.Error)
@@ -340,16 +340,14 @@ func (p *Plugin) emitRetrieved(turnID string, hits []hit) {
 			TrustTier: h.match.Metadata["trust_tier"],
 		})
 	}
-	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{
-		TurnID: turnID,
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: turnID,
 		Source: pluginID,
 		Chunks: chunks,
 	})
 }
 
 func (p *Plugin) emit(tc events.ToolCall, output, errMsg string) {
-	result := events.ToolResult{
-		ID:     tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,

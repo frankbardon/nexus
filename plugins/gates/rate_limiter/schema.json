@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.rate_limiter.json",
+  "title": "nexus.gate.rate_limiter",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["reject", "queue"],
+      "default": "reject",
+      "description": "Limiter behavior when the budget is exhausted. 'reject' vetoes and emits a single gate.llm.retry once the window ages out. 'queue' buffers up to queue.max_pending retry slots and drains them at the configured rate; excess is rejected."
+    },
+    "requests_per_minute": {"type": "integer", "minimum": 1, "description": "Allowed LLM requests per window."},
+    "window_seconds":      {"type": "integer", "minimum": 1, "description": "Length of the rolling window in seconds."},
+    "pause_message":       {"type": "string",  "description": "Message logged when the limiter pauses dispatch."},
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Queue-mode tuning. Ignored when mode is 'reject'.",
+      "properties": {
+        "max_pending": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100,
+          "description": "Maximum buffered retry slots before further requests are rejected outright."
+        }
+      }
+    }
+  }
+}

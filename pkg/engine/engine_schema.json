@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/engine.json",
+  "title": "Nexus engine top-level configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "log_level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "description": "Engine log verbosity."
+        },
+        "tick_interval": {
+          "type": "string",
+          "description": "Heartbeat tick interval as a Go duration string (e.g. '5s')."
+        },
+        "max_concurrent_events": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Soft ceiling on concurrent bus dispatches; 0 = unbounded."
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Per-agent storage partition key. Empty collapses ScopeAgent to ScopeApp."
+        },
+        "sessions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "root":      {"type": "string", "description": "Session root directory (~/... allowed)."},
+            "retention": {"type": "string", "description": "Retention horizon (e.g. '30d')."},
+            "id_format": {"type": "string", "description": "Session ID format: timestamp | datetime_short | uuid."}
+          }
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "root":            {"type": "string"},
+            "busy_timeout_ms": {"type": "integer", "minimum": 0},
+            "cache_size_kb":   {"type": "integer", "minimum": 0},
+            "pool_max_idle":   {"type": "integer", "minimum": 0},
+            "pool_max_open":   {"type": "integer", "minimum": 0}
+          }
+        },
+        "logging": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bootstrap_stderr": {"type": "boolean"},
+            "buffer_size":      {"type": "integer", "minimum": 0}
+          }
+        },
+        "models": {
+          "type": "object",
+          "description": "Named model roles (default, reasoning, balanced, ...). Free-form per role.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shutdown": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "drain_timeout": {
+              "type": "string",
+              "description": "Maximum wall-clock the engine waits for in-flight bus dispatches to drain on Stop. Go duration string (e.g. '30s')."
+            }
+          }
+        },
+        "config_watch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When true, the CLI starts an fsnotify watcher on the -config path and calls Engine.ReloadConfig on edits. Default false; SIGHUP and the browser admin endpoint remain available regardless."
+            },
+            "debounce": {
+              "type": "string",
+              "description": "Collapse fsnotify bursts within this window into one reload. Go duration string (e.g. '1s'). Default 1s."
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Capability → plugin-ID pins (e.g. memory.history: nexus.memory.capped).",
+      "additionalProperties": {"type": "string"}
+    },
+    "plugins": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "active": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Ordered list of active plugin IDs (instance-suffixed forms supported)."
+        }
+      }
+    },
+    "journal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fsync": {
+          "type": "string",
+          "enum": ["turn-boundary", "every-event", "none"],
+          "description": "Disk-flush policy for the durable journal."
+        },
+        "retain_days":    {"type": "integer", "minimum": 0},
+        "rotate_size_mb": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,5 +1,10 @@
 package events
 
+// Schema-version constants for hybrid.* payloads. See doc.go.
+const (
+	HybridQueryVersion = 1
+)
+
 // HybridMatch is one fused result returned by a hybrid search. Score is the
 // fused relevance (RRF or weighted, per orchestrator config); Similarity and
 // Lexical preserve the raw per-backend scores so downstream consumers can
@@ -25,6 +30,8 @@ type HybridMatch struct {
 // Vector to skip the embed call. LexicalBias in [-1, 1] tilts the per-query
 // fusion weights — positive favors lexical, negative favors vector.
 type HybridQuery struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Namespace   string
 	Query       string
 	Vector      []float32

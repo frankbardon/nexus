@@ -64,28 +64,24 @@ func run() error {
 		{Seq: 1, Ts: t0, Type: "io.session.start", Payload: map[string]any{"session_id": "build-error-fix-golden"}},
 
 		// Turn 1: user asks about build error; assistant uses read_file then explains.
-		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{Content: "Why won't main.go build?"}},
+		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "Why won't main.go build?"}},
 		{Seq: 3, Ts: t0.Add(20 * time.Millisecond), Type: "agent.turn.start"},
-		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "tool_use",
 			Usage:        events.Usage{PromptTokens: 80, CompletionTokens: 40, TotalTokens: 120},
 			ToolCalls: []events.ToolCallRequest{
 				{ID: "tc_1", Name: "read_file", Arguments: string(tcArgs)},
 			},
 		}},
-		{Seq: 5, Ts: t0.Add(40 * time.Millisecond), Type: "tool.invoke", Payload: events.ToolCall{
-			ID:        "tc_1",
+		{Seq: 5, Ts: t0.Add(40 * time.Millisecond), Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "tc_1",
 			Name:      "read_file",
 			Arguments: map[string]any{"path": "main.go"},
 		}},
-		{Seq: 6, Ts: t0.Add(50 * time.Millisecond), Type: "tool.result", Payload: events.ToolResult{
-			ID:     "tc_1",
+		{Seq: 6, Ts: t0.Add(50 * time.Millisecond), Type: "tool.result", Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tc_1",
 			Name:   "read_file",
 			Output: "package main\n\nfunc main() {\n\treturn 0\n}\n",
 		}},
-		{Seq: 7, Ts: t0.Add(60 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 7, Ts: t0.Add(60 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "end_turn",
 			Usage:        events.Usage{PromptTokens: 140, CompletionTokens: 70, TotalTokens: 210},
 			Content:      "main() returns 0 but its declared type is void; remove the return value or change the signature.",
@@ -93,10 +89,9 @@ func run() error {
 		{Seq: 8, Ts: t0.Add(70 * time.Millisecond), Type: "agent.turn.end"},
 
 		// Turn 2: follow-up; pure conversational, no tool calls.
-		{Seq: 9, Ts: t0.Add(80 * time.Millisecond), Type: "io.input", Payload: events.UserInput{Content: "Show me the fixed version."}},
+		{Seq: 9, Ts: t0.Add(80 * time.Millisecond), Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "Show me the fixed version."}},
 		{Seq: 10, Ts: t0.Add(90 * time.Millisecond), Type: "agent.turn.start"},
-		{Seq: 11, Ts: t0.Add(100 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 11, Ts: t0.Add(100 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "end_turn",
 			Usage:        events.Usage{PromptTokens: 160, CompletionTokens: 50, TotalTokens: 210},
 			Content:      "package main\n\nfunc main() {}\n",

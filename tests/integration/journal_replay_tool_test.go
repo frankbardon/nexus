@@ -49,15 +49,13 @@ func TestJournalReplay_ToolShortCircuit(t *testing.T) {
 	// emit of tool.invoke triggers shell's short-circuit.
 	envelopes := []journal.Envelope{
 		{Seq: 1, Type: "io.session.start"},
-		{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "list files"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "list files"}},
 		{Seq: 3, Type: "agent.turn.start"},
-		{Seq: 4, Type: "tool.invoke", Payload: events.ToolCall{
-			ID:        "call-1",
+		{Seq: 4, Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1",
 			Name:      "shell",
 			Arguments: map[string]any{"command": "ls"},
 		}},
-		{Seq: 5, Type: "tool.result", Payload: events.ToolResult{
-			ID:     "call-1",
+		{Seq: 5, Type: "tool.result", Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "call-1",
 			Name:   "shell",
 			Output: "journaled output: foo bar baz",
 		}},
@@ -127,8 +125,7 @@ plugins:
 	// io.input drive isn't useful here (no agent loop), but the stash + the
 	// shell short-circuit are.
 	eng.Replay.SetActive(true)
-	eng.Replay.Push("tool.result", events.ToolResult{
-		ID:     "ignored-by-handler",
+	eng.Replay.Push("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "ignored-by-handler",
 		Name:   "shell",
 		Output: "journaled output: foo bar baz",
 	})
@@ -136,8 +133,7 @@ plugins:
 	// Live tool.invoke — this would normally exec `ls`. With replay active,
 	// shell's handler must short-circuit, pop the stash, and emit the
 	// journaled result.
-	if err := eng.Bus.Emit("tool.invoke", events.ToolCall{
-		ID:        "live-call-id",
+	if err := eng.Bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "live-call-id",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}); err != nil {

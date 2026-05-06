@@ -18,23 +18,19 @@ func TestToolResult_SkipsInternalCalls(t *testing.T) {
 	p.persist = false
 
 	// Outer LLM-facing call.
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:   "outer-1",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "outer-1",
 		Name: "run_code",
 	}})
 	// Inner script-dispatched call.
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:           "code-inner-1",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-inner-1",
 		Name:         "read_file",
 		ParentCallID: "outer-1",
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "code-inner-1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "code-inner-1",
 		Name:   "read_file",
 		Output: "file contents",
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "outer-1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "outer-1",
 		Name:   "run_code",
 		Output: "done",
 	}})

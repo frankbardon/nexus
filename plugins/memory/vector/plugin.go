@@ -288,11 +288,10 @@ func (p *Plugin) handleExplicitStore(event engine.Event[any]) {
 func (p *Plugin) queryAndStash(query string, vec []float32) {
 	var matches []events.VectorMatch
 	if p.recallViaHybrid && p.hasHybrid {
-		h := &events.HybridQuery{
-			Namespace: p.namespace,
-			Query:     query,
-			Vector:    vec, // pass pre-embedded vector to skip the embed call
-			K:         p.topK,
+		h := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: p.namespace,
+			Query:  query,
+			Vector: vec, // pass pre-embedded vector to skip the embed call
+			K:      p.topK,
 		}
 		_ = p.bus.Emit("hybrid.query", h)
 		if h.Error != "" {
@@ -307,7 +306,7 @@ func (p *Plugin) queryAndStash(query string, vec []float32) {
 			})
 		}
 	} else {
-		q := &events.VectorQuery{Namespace: p.namespace, Vector: vec, K: p.topK}
+		q := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: p.namespace, Vector: vec, K: p.topK}
 		_ = p.bus.Emit("vector.query", q)
 		if q.Error != "" {
 			p.logger.Warn("vector memory: query failed", "err", q.Error)
@@ -349,8 +348,7 @@ func (p *Plugin) emitRetrieved(matches []events.VectorMatch) {
 			TrustTier: m.Metadata["trust_tier"],
 		})
 	}
-	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{
-		Source: pluginID,
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, Source: pluginID,
 		Chunks: chunks,
 	})
 }
@@ -383,8 +381,7 @@ func (p *Plugin) storeDoc(content, source string, extra map[string]string, vec [
 		}
 	}
 	id := docID(content, source, time.Now())
-	up := &events.VectorUpsert{
-		Namespace: p.namespace,
+	up := &events.VectorUpsert{SchemaVersion: events.VectorUpsertVersion, Namespace: p.namespace,
 		Docs: []events.VectorDoc{{
 			ID:       id,
 			Vector:   vec,
@@ -402,7 +399,7 @@ func (p *Plugin) storeDoc(content, source string, extra map[string]string, vec [
 
 // embedOne embeds a single string via the embeddings.provider capability.
 func (p *Plugin) embedOne(text string) ([]float32, error) {
-	req := &events.EmbeddingsRequest{Texts: []string{text}, Model: p.embeddingModel}
+	req := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{text}, Model: p.embeddingModel}
 	_ = p.bus.Emit("embeddings.request", req)
 	if req.Error != "" {
 		return nil, fmt.Errorf("embed: %s", req.Error)

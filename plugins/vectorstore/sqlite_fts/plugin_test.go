@@ -56,7 +56,7 @@ func TestUpsertAndQuery(t *testing.T) {
 		{ID: "3", Content: "func parseHeader returns the parsed HTTP header",
 			Metadata: map[string]string{"source": "/tmp/c.go", "chunk_idx": "0"}},
 	}
-	up := &events.LexicalUpsert{Namespace: "test", Docs: docs}
+	up := &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "test", Docs: docs}
 	if err := bus.Emit("lexical.upsert", up); err != nil {
 		t.Fatalf("emit upsert: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestUpsertAndQuery(t *testing.T) {
 		t.Fatalf("upsert error: %s", up.Error)
 	}
 
-	q := &events.LexicalQuery{Namespace: "test", Query: "ENOENT", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "test", Query: "ENOENT", K: 5}
 	if err := bus.Emit("lexical.query", q); err != nil {
 		t.Fatalf("emit query: %v", err)
 	}
@@ -91,12 +91,12 @@ func TestQueryReturnsBM25RankedHits(t *testing.T) {
 		{ID: "2", Content: "alpha alpha alpha beta", Metadata: map[string]string{"source": "b"}},
 		{ID: "3", Content: "delta epsilon zeta", Metadata: map[string]string{"source": "c"}},
 	}
-	up := &events.LexicalUpsert{Namespace: "test", Docs: docs}
+	up := &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "test", Docs: docs}
 	if err := bus.Emit("lexical.upsert", up); err != nil {
 		t.Fatalf("emit upsert: %v", err)
 	}
 
-	q := &events.LexicalQuery{Namespace: "test", Query: "alpha", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "test", Query: "alpha", K: 5}
 	if err := bus.Emit("lexical.query", q); err != nil {
 		t.Fatalf("emit query: %v", err)
 	}
@@ -114,14 +114,13 @@ func TestNamespaceIsolation(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	for _, ns := range []string{"a", "b"} {
-		_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{
-			Namespace: ns,
+		_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: ns,
 			Docs: []events.LexicalDoc{{ID: "1", Content: "marker " + ns,
 				Metadata: map[string]string{"source": ns}}},
 		})
 	}
 
-	q := &events.LexicalQuery{Namespace: "a", Query: "marker", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "a", Query: "marker", K: 5}
 	_ = bus.Emit("lexical.query", q)
 	if len(q.Matches) != 1 || q.Matches[0].Metadata["source"] != "a" {
 		t.Fatalf("namespace a got %v", q.Matches)
@@ -133,14 +132,13 @@ func TestUpsertReplacesExistingID(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	for _, content := range []string{"original content xyz", "replacement content xyz"} {
-		_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{
-			Namespace: "test",
+		_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "test",
 			Docs: []events.LexicalDoc{{ID: "1", Content: content,
 				Metadata: map[string]string{"source": "a"}}},
 		})
 	}
 
-	q := &events.LexicalQuery{Namespace: "test", Query: "xyz", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "test", Query: "xyz", K: 5}
 	_ = bus.Emit("lexical.query", q)
 	if len(q.Matches) != 1 {
 		t.Fatalf("expected 1 hit after replace, got %d", len(q.Matches))
@@ -154,21 +152,20 @@ func TestDeleteByID(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{
-		Namespace: "test",
+	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "test",
 		Docs: []events.LexicalDoc{
 			{ID: "1", Content: "keep me", Metadata: map[string]string{"source": "a"}},
 			{ID: "2", Content: "delete me", Metadata: map[string]string{"source": "b"}},
 		},
 	})
 
-	del := &events.LexicalDelete{Namespace: "test", IDs: []string{"2"}}
+	del := &events.LexicalDelete{SchemaVersion: events.LexicalDeleteVersion, Namespace: "test", IDs: []string{"2"}}
 	_ = bus.Emit("lexical.delete", del)
 	if del.Error != "" {
 		t.Fatalf("delete error: %s", del.Error)
 	}
 
-	q := &events.LexicalQuery{Namespace: "test", Query: "me", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "test", Query: "me", K: 5}
 	_ = bus.Emit("lexical.query", q)
 	if len(q.Matches) != 1 || q.Matches[0].ID != "1" {
 		t.Fatalf("expected only doc 1 after delete, got %v", q.Matches)
@@ -179,19 +176,18 @@ func TestNamespaceDrop(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{
-		Namespace: "drop_me",
+	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "drop_me",
 		Docs: []events.LexicalDoc{{ID: "1", Content: "marker",
 			Metadata: map[string]string{"source": "a"}}},
 	})
 
-	drop := &events.LexicalNamespaceDrop{Namespace: "drop_me"}
+	drop := &events.LexicalNamespaceDrop{SchemaVersion: events.LexicalNamespaceDropVersion, Namespace: "drop_me"}
 	_ = bus.Emit("lexical.namespace.drop", drop)
 	if drop.Error != "" {
 		t.Fatalf("drop error: %s", drop.Error)
 	}
 
-	q := &events.LexicalQuery{Namespace: "drop_me", Query: "marker", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "drop_me", Query: "marker", K: 5}
 	_ = bus.Emit("lexical.query", q)
 	if len(q.Matches) != 0 {
 		t.Fatalf("expected 0 matches after drop, got %d", len(q.Matches))
@@ -202,7 +198,7 @@ func TestUnknownNamespaceQuery(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	q := &events.LexicalQuery{Namespace: "never_existed", Query: "anything", K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "never_existed", Query: "anything", K: 5}
 	if err := bus.Emit("lexical.query", q); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
@@ -218,14 +214,13 @@ func TestSanitizedQueryToleratesSpecialCharacters(t *testing.T) {
 	_, bus, cleanup := newTestPlugin(t)
 	t.Cleanup(cleanup)
 
-	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{
-		Namespace: "test",
+	_ = bus.Emit("lexical.upsert", &events.LexicalUpsert{SchemaVersion: events.LexicalUpsertVersion, Namespace: "test",
 		Docs: []events.LexicalDoc{{ID: "1", Content: "func parseHeader returns header",
 			Metadata: map[string]string{"source": "a"}}},
 	})
 
 	// FTS5 special chars: parens / quotes / colon / asterisk
-	q := &events.LexicalQuery{Namespace: "test", Query: `"parseHeader" : (returns)`, K: 5}
+	q := &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: "test", Query: `"parseHeader" : (returns)`, K: 5}
 	if err := bus.Emit("lexical.query", q); err != nil {
 		t.Fatalf("emit: %v", err)
 	}

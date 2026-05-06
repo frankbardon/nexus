@@ -348,8 +348,7 @@ func decodeOpenAIChatBody(raw json.RawMessage) (*events.LLMResponse, error) {
 		return nil, err
 	}
 
-	out := &events.LLMResponse{
-		Model: resp.Model,
+	out := &events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: resp.Model,
 		Usage: events.Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,

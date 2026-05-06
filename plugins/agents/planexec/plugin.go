@@ -316,8 +316,7 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 	}
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    turnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
 		Source:    pluginID,
 		Content:   fmt.Sprintf("Plan received from %s (%d steps)", result.Source, len(steps)),
 		Phase:     "planning",
@@ -330,8 +329,7 @@ func (p *Plugin) handlePlanResultEvent(event engine.Event[any]) {
 
 	if needsApproval {
 		p.emitStatus("waiting", "Awaiting plan approval")
-		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{
-			PromptID:    p.planID,
+		_ = p.bus.Emit("plan.approval.request", events.ApprovalRequest{SchemaVersion: events.ApprovalRequestVersion, PromptID: p.planID,
 			Description: formatPlanForDisplay(steps),
 			Risk:        "medium",
 		})
@@ -363,10 +361,9 @@ func (p *Plugin) handleStreamChunkEvent(event engine.Event[any]) {
 		p.mu.Lock()
 		p.streamed = true
 		p.mu.Unlock()
-		_ = p.bus.Emit("io.output.stream", events.OutputChunk{
-			Content: chunk.Content,
-			TurnID:  chunk.TurnID,
-			Index:   chunk.Index,
+		_ = p.bus.Emit("io.output.stream", events.OutputChunk{SchemaVersion: events.OutputChunkVersion, Content: chunk.Content,
+			TurnID: chunk.TurnID,
+			Index:  chunk.Index,
 		})
 	}
 }
@@ -381,9 +378,7 @@ func (p *Plugin) handleStreamEndEvent(event engine.Event[any]) {
 	p.mu.Unlock()
 
 	if currentPhase == phaseSynthesizing {
-		_ = p.bus.Emit("io.output.stream.end", events.StreamRef{
-			TurnID: end.TurnID,
-		})
+		_ = p.bus.Emit("io.output.stream.end", events.StreamRef{SchemaVersion: events.StreamRefVersion, TurnID: end.TurnID})
 	}
 }
 
@@ -498,15 +493,13 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.mu.Unlock()
 
 	// Emit turn start.
-	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.start", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: 0,
 		SessionID: input.SessionID,
 	})
 
 	p.emitStatus("thinking", "Requesting plan")
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		TurnID:    turnID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
 		Source:    pluginID,
 		Content:   "Requesting plan from configured planner...",
 		Phase:     "planning",
@@ -514,8 +507,7 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	})
 
 	// Delegate plan generation to whichever planner plugin is active.
-	_ = p.bus.Emit("plan.request", events.PlanRequest{
-		TurnID:    turnID,
+	_ = p.bus.Emit("plan.request", events.PlanRequest{SchemaVersion: events.PlanRequestVersion, TurnID: turnID,
 		SessionID: sessionID,
 		Input:     input.Content,
 	})
@@ -529,14 +521,12 @@ func (p *Plugin) finishTurnWithMessage(turnID, message string) {
 	iteration := p.iteration
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: message,
-		Role:    "system",
-		TurnID:  turnID,
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: message,
+		Role:   "system",
+		TurnID: turnID,
 	})
 	p.emitStatus("idle", "")
-	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: iteration,
 	})
 }
@@ -648,8 +638,7 @@ func (p *Plugin) sendStepLLMRequest() {
 
 	p.mu.Unlock()
 
-	req := events.LLMRequest{
-		Role:     p.executionModelRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.executionModelRole,
 		Messages: messages,
 		Tools:    tools,
 		Stream:   false,
@@ -702,8 +691,7 @@ func (p *Plugin) handleExecutorResponse(resp events.LLMResponse) {
 				args = map[string]any{}
 			}
 
-			toolCall := events.ToolCall{
-				ID:        tc.ID,
+			toolCall := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: tc.ID,
 				Name:      tc.Name,
 				Arguments: args,
 				TurnID:    turnID,
@@ -711,8 +699,7 @@ func (p *Plugin) handleExecutorResponse(resp events.LLMResponse) {
 
 			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
 				p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
-				syntheticResult := events.ToolResult{
-					ID:     tc.ID,
+				syntheticResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 					Name:   tc.Name,
 					Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 					TurnID: turnID,
@@ -858,8 +845,7 @@ func (p *Plugin) requestReplan() {
 	p.stepHistory = nil
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("plan.request", events.PlanRequest{
-		TurnID:    turnID,
+	_ = p.bus.Emit("plan.request", events.PlanRequest{SchemaVersion: events.PlanRequestVersion, TurnID: turnID,
 		SessionID: sessionID,
 		Input:     replanContext.String(),
 	})
@@ -910,8 +896,7 @@ func (p *Plugin) sendSynthesisRequest() {
 
 	p.mu.Unlock()
 
-	req := events.LLMRequest{
-		Role:     p.executionModelRole,
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.executionModelRole,
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
@@ -952,8 +937,7 @@ func (p *Plugin) handleSynthesizerResponse(resp events.LLMResponse) {
 
 	p.emitStatus("idle", "")
 
-	output := events.AgentOutput{
-		Content:  resp.Content,
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: resp.Content,
 		Role:     "assistant",
 		TurnID:   turnID,
 		Metadata: map[string]any{"streamed": streamed},
@@ -965,8 +949,7 @@ func (p *Plugin) handleSynthesizerResponse(resp events.LLMResponse) {
 		_ = p.bus.Emit("io.output", output)
 	}
 
-	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{
-		TurnID:    turnID,
+	_ = p.bus.Emit("agent.turn.end", events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		Iteration: iteration,
 	})
 }
@@ -985,16 +968,14 @@ func (p *Plugin) emitPlanUpdate(turnID string) {
 	}
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("agent.plan", events.Plan{
-		Steps:  steps,
+	_ = p.bus.Emit("agent.plan", events.Plan{SchemaVersion: events.PlanVersion, Steps: steps,
 		TurnID: turnID,
 	})
 }
 
 // emitStatus emits an io.status event.
 func (p *Plugin) emitStatus(state, detail string) {
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  state,
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: state,
 		Detail: detail,
 	})
 }

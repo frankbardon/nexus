@@ -53,18 +53,16 @@ func TestJournalReplay_FunctionalEquivalence(t *testing.T) {
 
 	envelopes := []journal.Envelope{
 		{Seq: 1, Type: "io.session.start", Payload: map[string]any{"session_id": sourceID}},
-		{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "first message"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "first message"}},
 		{Seq: 3, Type: "agent.turn.start"},
-		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{
-			Content:      "first reply from journal",
+		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "first reply from journal",
 			Model:        "mock",
 			FinishReason: "end_turn",
 		}},
 		{Seq: 5, Type: "agent.turn.end"},
-		{Seq: 6, Type: "io.input", Payload: events.UserInput{Content: "second message"}},
+		{Seq: 6, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "second message"}},
 		{Seq: 7, Type: "agent.turn.start"},
-		{Seq: 8, Type: "llm.response", Payload: events.LLMResponse{
-			Content:      "second reply from journal",
+		{Seq: 8, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "second reply from journal",
 			Model:        "mock",
 			FinishReason: "end_turn",
 		}},
@@ -132,10 +130,10 @@ plugins:
 
 	// Collect llm.response and io.input emits during replay.
 	var (
-		mu              sync.Mutex
-		llmResponses    []events.LLMResponse
-		inputEmits      []events.UserInput
-		ioInputBadType  int
+		mu             sync.Mutex
+		llmResponses   []events.LLMResponse
+		inputEmits     []events.UserInput
+		ioInputBadType int
 	)
 	unsubResp := eng.Bus.Subscribe("llm.response", func(ev engine.Event[any]) {
 		if r, ok := ev.Payload.(events.LLMResponse); ok {

@@ -285,8 +285,7 @@ func (p *Plugin) handleQuery(e engine.Event[any]) {
 	var matched []events.MemoryEntry
 	for _, msg := range p.messages {
 		if query.Query == "" || strings.Contains(strings.ToLower(msg.Content), strings.ToLower(query.Query)) {
-			matched = append(matched, events.MemoryEntry{
-				Key:       msg.Role,
+			matched = append(matched, events.MemoryEntry{SchemaVersion: events.MemoryEntryVersion, Key: msg.Role,
 				Content:   msg.Content,
 				SessionID: query.SessionID,
 			})
@@ -298,9 +297,8 @@ func (p *Plugin) handleQuery(e engine.Event[any]) {
 		matched = matched[len(matched)-query.Limit:]
 	}
 
-	_ = p.bus.Emit("memory.result", events.MemoryResult{
-		Entries: matched,
-		Query:   query.Query,
+	_ = p.bus.Emit("memory.result", events.MemoryResult{SchemaVersion: events.MemoryResultVersion, Entries: matched,
+		Query: query.Query,
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
@@ -154,6 +155,14 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		lm.plugins[i] = pluginMap[id]
 	}
 
+	// Validate config schemas before Init so typos and type errors surface
+	// before any plugin allocates resources or holds onto a partial
+	// configuration. Errors are aggregated across every plugin so operators
+	// fix every issue in one pass.
+	if err := validateConfigSchemas(lm.config, pluginMap, sortedIDs, lm.logger); err != nil {
+		return err
+	}
+
 	_ = lm.bus.Emit("core.boot", nil)
 
 	// Init phase.
@@ -225,13 +234,22 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 // completion. Plugins that implement LateShutdown and return true are shut
 // down after every non-late plugin, so observers (logger, tracers) can still
 // receive records emitted during peer teardown.
+//
+// Drain budget: the engine waits up to engine.shutdown.drain_timeout (default
+// 30s) for in-flight bus dispatches to complete. Plugins that implement
+// DrainOverride may extend the budget; the engine takes the maximum across
+// the engine default and every override so a single slow plugin can flush
+// without forcing operators to bump the global setting.
 func (lm *LifecycleManager) Shutdown(ctx context.Context) error {
 	lm.logger.Info("shutting down engine")
 
 	_ = lm.bus.Emit("core.shutdown", nil)
 
-	if err := lm.bus.Drain(ctx); err != nil {
-		lm.logger.Warn("drain timed out", "error", err)
+	drainTimeout := lm.resolveDrainTimeout()
+	drainCtx, drainCancel := context.WithTimeout(ctx, drainTimeout)
+	defer drainCancel()
+	if err := lm.bus.Drain(drainCtx); err != nil {
+		lm.logger.Warn("drain timed out", "timeout", drainTimeout, "error", err)
 	}
 
 	// Partition plugins into normal and late phases. Preserve init order so
@@ -270,6 +288,27 @@ func (lm *LifecycleManager) Shutdown(ctx context.Context) error {
 // Plugins returns the ordered list of initialized plugins.
 func (lm *LifecycleManager) Plugins() []Plugin {
 	return lm.plugins
+}
+
+// resolveDrainTimeout picks the larger of the configured engine default and
+// every per-plugin DrainOverride. This lets a single batch poller or MCP
+// server extend the drain window without operators having to bump the global
+// setting for the rest of the active set.
+func (lm *LifecycleManager) resolveDrainTimeout() time.Duration {
+	timeout := defaultShutdownDrainTimeout
+	if lm.config != nil && lm.config.Engine.Shutdown.DrainTimeout > 0 {
+		timeout = lm.config.Engine.Shutdown.DrainTimeout
+	}
+	for _, p := range lm.plugins {
+		do, ok := p.(DrainOverride)
+		if !ok {
+			continue
+		}
+		if d := do.DrainTimeout(); d > timeout {
+			timeout = d
+		}
+	}
+	return timeout
 }
 
 // Capabilities returns a defensive copy of the capability → provider-IDs map

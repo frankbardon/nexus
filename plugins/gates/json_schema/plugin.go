@@ -200,9 +200,8 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		Vetoed: true,
 		Reason: fmt.Sprintf("JSON schema validation failed: %s", result.Error),
 	}
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: fmt.Sprintf("Response failed JSON schema validation after %d retries: %s", p.maxRetries, result.Error),
-		Role:    "system",
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Response failed JSON schema validation after %d retries: %s", p.maxRetries, result.Error),
+		Role: "system",
 	})
 }
 

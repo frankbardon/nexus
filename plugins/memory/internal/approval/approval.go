@@ -81,7 +81,7 @@ type Request struct {
 // Cancelled response with allowed=false.
 func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, bool, error) {
 	if req.Bus == nil {
-		return events.HITLResponse{}, false, errors.New("approval: bus is required")
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false, errors.New("approval: bus is required")
 	}
 	logger := req.Logger
 	if logger == nil {
@@ -95,7 +95,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 
 	id, err := newRequestID()
 	if err != nil {
-		return events.HITLResponse{}, false, fmt.Errorf("approval: id generation: %w", err)
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false, fmt.Errorf("approval: id generation: %w", err)
 	}
 
 	respCh := make(chan events.HITLResponse, 1)
@@ -115,8 +115,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 	}, engine.WithPriority(50), engine.WithSource(req.PluginID))
 	defer unsub()
 
-	hitlReq := events.HITLRequest{
-		ID:              id,
+	hitlReq := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id,
 		SessionID:       req.SessionID,
 		RequesterPlugin: req.PluginID,
 		ActionKind:      req.ActionKind,
@@ -135,7 +134,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 	// can mutate hitlReq.Prompt or veto outright. The non-vetoable value
 	// emission below is the one IO plugins consume.
 	if veto, err := req.Bus.EmitVetoable("before:hitl.requested", &hitlReq); err != nil {
-		return events.HITLResponse{}, false, fmt.Errorf("approval: emit before:hitl.requested: %w", err)
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false, fmt.Errorf("approval: emit before:hitl.requested: %w", err)
 	} else if veto.Vetoed {
 		reason := veto.Reason
 		if reason == "" {
@@ -147,15 +146,14 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 			"request_id", id,
 			"reason", reason,
 		)
-		return events.HITLResponse{
-			RequestID:    id,
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: id,
 			Cancelled:    true,
 			CancelReason: reason,
 		}, false, nil
 	}
 
 	if err := req.Bus.Emit("hitl.requested", hitlReq); err != nil {
-		return events.HITLResponse{}, false, fmt.Errorf("approval: emit hitl.requested: %w", err)
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false, fmt.Errorf("approval: emit hitl.requested: %w", err)
 	}
 
 	var timer <-chan time.Time
@@ -189,8 +187,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 		)
 		// Deadline expired without a response. Resolve to default choice
 		// when one is set; otherwise treat as cancelled.
-		resp := events.HITLResponse{
-			RequestID:    id,
+		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: id,
 			ChoiceID:     req.DefaultChoiceID,
 			Cancelled:    req.DefaultChoiceID == "",
 			CancelReason: "deadline expired",
@@ -205,8 +202,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 			"request_id", id,
 			"err", ctx.Err(),
 		)
-		resp := events.HITLResponse{
-			RequestID:    id,
+		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: id,
 			Cancelled:    true,
 			CancelReason: "context cancelled",
 		}
@@ -254,11 +250,11 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		return v, true
 	case *events.HITLResponse:
 		if v == nil {
-			return events.HITLResponse{}, false
+			return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false
 		}
 		return *v, true
 	case map[string]any:
-		resp := events.HITLResponse{}
+		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion}
 		resp.RequestID, _ = v["request_id"].(string)
 		resp.ChoiceID, _ = v["choice_id"].(string)
 		resp.FreeText, _ = v["free_text"].(string)
@@ -272,11 +268,13 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		}
 		return resp, true
 	default:
-		return events.HITLResponse{}, false
+		return events.HITLResponse{SchemaVersion: events.
+
+			// newRequestID returns a stable, journal-friendly request ID.
+			HITLResponseVersion}, false
 	}
 }
 
-// newRequestID returns a stable, journal-friendly request ID.
 func newRequestID() (string, error) {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {

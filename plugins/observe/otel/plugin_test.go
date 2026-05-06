@@ -104,8 +104,7 @@ func TestIsExcluded_Empty(t *testing.T) {
 
 func TestExtractAttributes_LLMRequest(t *testing.T) {
 	temp := 0.7
-	req := &events.LLMRequest{
-		Role:        "balanced",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Model:       "claude-sonnet-4-20250514",
 		MaxTokens:   8192,
 		Stream:      true,
@@ -125,8 +124,7 @@ func TestExtractAttributes_LLMRequest(t *testing.T) {
 }
 
 func TestExtractAttributes_LLMResponse(t *testing.T) {
-	resp := &events.LLMResponse{
-		Model:        "claude-sonnet-4-20250514",
+	resp := &events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "claude-sonnet-4-20250514",
 		FinishReason: "end_turn",
 		Usage:        events.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150},
 		ToolCalls:    []events.ToolCallRequest{{ID: "tc1", Name: "shell"}},
@@ -139,8 +137,7 @@ func TestExtractAttributes_LLMResponse(t *testing.T) {
 }
 
 func TestExtractAttributes_ToolResult_WithError(t *testing.T) {
-	result := &events.ToolResult{
-		ID:     "tc1",
+	result := &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tc1",
 		Name:   "shell",
 		Error:  "command failed",
 		TurnID: "turn-1",
@@ -152,8 +149,7 @@ func TestExtractAttributes_ToolResult_WithError(t *testing.T) {
 }
 
 func TestExtractAttributes_ToolResult_NoError(t *testing.T) {
-	result := &events.ToolResult{
-		ID:     "tc1",
+	result := &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tc1",
 		Name:   "shell",
 		Output: "ok",
 		TurnID: "turn-1",
@@ -170,7 +166,7 @@ func TestExtractAttributes_ToolResult_NoError(t *testing.T) {
 }
 
 func TestExtractAttributes_VetoablePayload(t *testing.T) {
-	req := &events.LLMRequest{Role: "balanced", Model: "test"}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced", Model: "test"}
 	vp := &engine.VetoablePayload{
 		Original: req,
 		Veto:     engine.VetoResult{Vetoed: true, Reason: "rate limited"},

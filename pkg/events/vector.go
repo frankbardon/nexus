@@ -1,5 +1,13 @@
 package events
 
+// Schema-version constants for vector.* payloads. See doc.go.
+const (
+	VectorUpsertVersion        = 1
+	VectorQueryVersion         = 1
+	VectorDeleteVersion        = 1
+	VectorNamespaceDropVersion = 1
+)
+
 // VectorDoc is a single document in a vector store: opaque ID, the embedding
 // vector, the original textual content (optional — stores may persist it for
 // re-ranking or provenance), and string-keyed metadata. Metadata is scoped to
@@ -27,6 +35,8 @@ type VectorMatch struct {
 // Upsert semantics: documents with an ID already present in the namespace are
 // replaced. Adapters without native upsert implement this as delete-then-add.
 type VectorUpsert struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Namespace string
 	Docs      []VectorDoc
 
@@ -38,6 +48,8 @@ type VectorUpsert struct {
 // pointer payload on "vector.query"; the provider fills Matches / Provider /
 // Error in place before Emit returns.
 type VectorQuery struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Namespace string
 	Vector    []float32
 	K         int
@@ -51,6 +63,8 @@ type VectorQuery struct {
 // VectorDelete requests removal of documents by ID from a namespace. Fired
 // as a pointer payload on "vector.delete".
 type VectorDelete struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Namespace string
 	IDs       []string
 
@@ -62,6 +76,8 @@ type VectorDelete struct {
 // pointer payload on "vector.namespace.drop". Idempotent: dropping an
 // unknown namespace is not an error.
 type VectorNamespaceDrop struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Namespace string
 
 	Provider string

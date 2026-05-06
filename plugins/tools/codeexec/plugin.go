@@ -439,8 +439,7 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		return
 	}
 
-	_ = p.bus.Emit("code.exec.request", events.CodeExecRequest{
-		CallID:  tc.ID,
+	_ = p.bus.Emit("code.exec.request", events.CodeExecRequest{SchemaVersion: events.CodeExecRequestVersion, CallID: tc.ID,
 		TurnID:  tc.TurnID,
 		Script:  script,
 		Imports: analysis.Imports,
@@ -706,8 +705,7 @@ func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, d
 		_ = p.session.WriteFile(base+"/error.txt", []byte(errMsg))
 	}
 
-	_ = p.bus.Emit("code.exec.result", events.CodeExecResult{
-		CallID:    tc.ID,
+	_ = p.bus.Emit("code.exec.result", events.CodeExecResult{SchemaVersion: events.CodeExecResultVersion, CallID: tc.ID,
 		TurnID:    tc.TurnID,
 		Output:    stdout,
 		Result:    result,
@@ -728,8 +726,7 @@ func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, d
 	}
 	out, _ := json.Marshal(envelope)
 
-	r := events.ToolResult{
-		ID:     tc.ID,
+	r := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: string(out),
 		Error:  errMsg,

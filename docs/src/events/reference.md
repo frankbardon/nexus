@@ -11,6 +11,8 @@ Complete reference for all event types in Nexus, organized by domain.
 | `core.shutdown` | `ShutdownReason` | Engine shutting down |
 | `core.tick` | `TickInfo` | Periodic heartbeat |
 | `core.error` | `ErrorInfo` | Error reported by a plugin |
+| `core.config.reload.request` | `ConfigReloadRequest` | External trigger asks the engine to re-read its config |
+| `core.config.reload.result` | `ConfigReloadResult` | Engine response to a reload request (success / error) |
 
 ### Payloads
 

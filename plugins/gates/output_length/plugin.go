@@ -140,9 +140,8 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 	p.logger.Warn("output length exceeded after retries",
 		"length", len(result.Content), "max", p.maxChars)
 	// Don't veto — let the long response through with a warning.
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: fmt.Sprintf("Note: response exceeds %d character limit (%d chars) after %d retry attempts.",
-			p.maxChars, len(result.Content), p.maxRetries),
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Note: response exceeds %d character limit (%d chars) after %d retry attempts.",
+		p.maxChars, len(result.Content), p.maxRetries),
 		Role: "system",
 	})
 }

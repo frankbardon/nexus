@@ -46,8 +46,7 @@ func (h *testHarness) registerSlowEchoTool(sleep time.Duration, inflightPeak *at
 		}
 		time.Sleep(sleep)
 		msg, _ := tc.Arguments["message"].(string)
-		_ = h.bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = h.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Output: "echoed: " + msg,
 			TurnID: tc.TurnID,

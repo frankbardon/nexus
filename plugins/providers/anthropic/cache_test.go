@@ -464,8 +464,7 @@ func TestBuildRequestBody_WithCache(t *testing.T) {
 		logger: silentLogger(),
 	}
 
-	req := events.LLMRequest{
-		Model:     "claude-sonnet-4-6-20250514",
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
 		MaxTokens: 1024,
 		Messages: []events.Message{
 			{Role: "system", Content: "you are helpful"},
@@ -514,8 +513,7 @@ func TestBuildRequestBody_CacheDisabled(t *testing.T) {
 		logger: silentLogger(),
 	}
 
-	req := events.LLMRequest{
-		Model:     "claude-sonnet-4-6-20250514",
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
 		MaxTokens: 1024,
 		Messages: []events.Message{
 			{Role: "system", Content: "sys"},

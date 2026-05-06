@@ -331,11 +331,10 @@ func (p *Plugin) submit(ctx context.Context, sub events.BatchSubmit) error {
 
 	p.startPoller(ab)
 
-	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{
-		Provider: ab.Provider,
-		BatchID:  ab.BatchID,
-		Status:   statusSubmitted,
-		Counts:   events.BatchCounts{Total: len(ab.OriginalReqs)},
+	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{SchemaVersion: events.BatchStatusVersion, Provider: ab.Provider,
+		BatchID: ab.BatchID,
+		Status:  statusSubmitted,
+		Counts:  events.BatchCounts{Total: len(ab.OriginalReqs)},
 	})
 	p.logger.Info("batch submitted", "provider", sub.Provider, "batch_id", batchID, "requests", len(sub.Requests))
 	return nil
@@ -401,11 +400,10 @@ func (p *Plugin) pollOnceAnthropic(ctx context.Context, ab *activeBatch) bool {
 		p.logger.Warn("batch: anthropic status fetch failed", "batch_id", ab.BatchID, "error", err)
 		return false
 	}
-	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{
-		Provider: ab.Provider,
-		BatchID:  ab.BatchID,
-		Status:   status,
-		Counts:   counts,
+	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{SchemaVersion: events.BatchStatusVersion, Provider: ab.Provider,
+		BatchID: ab.BatchID,
+		Status:  status,
+		Counts:  counts,
 	})
 	switch status {
 	case statusCompleted, statusFailed, statusCancelled:
@@ -428,11 +426,10 @@ func (p *Plugin) pollOnceOpenAI(ctx context.Context, ab *activeBatch) bool {
 		p.logger.Warn("batch: openai status fetch failed", "batch_id", ab.BatchID, "error", err)
 		return false
 	}
-	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{
-		Provider: ab.Provider,
-		BatchID:  ab.BatchID,
-		Status:   status,
-		Counts:   counts,
+	_ = p.bus.Emit("llm.batch.status", events.BatchStatus{SchemaVersion: events.BatchStatusVersion, Provider: ab.Provider,
+		BatchID: ab.BatchID,
+		Status:  status,
+		Counts:  counts,
 	})
 	switch status {
 	case statusCompleted, statusFailed, statusCancelled:
@@ -462,10 +459,9 @@ func (p *Plugin) pollOnceOpenAI(ctx context.Context, ab *activeBatch) bool {
 
 // finalize emits the BatchResults event and tears down state for one batch.
 func (p *Plugin) finalize(ab *activeBatch, results []events.BatchResult) {
-	_ = p.bus.Emit("llm.batch.results", events.BatchResults{
-		Provider: ab.Provider,
-		BatchID:  ab.BatchID,
-		Results:  results,
+	_ = p.bus.Emit("llm.batch.results", events.BatchResults{SchemaVersion: events.BatchResultsVersion, Provider: ab.Provider,
+		BatchID: ab.BatchID,
+		Results: results,
 	})
 	if err := deleteBatch(p.dataDir, ab.BatchID); err != nil {
 		p.logger.Warn("batch: delete state file failed", "batch_id", ab.BatchID, "error", err)

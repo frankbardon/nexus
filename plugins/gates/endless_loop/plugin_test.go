@@ -20,7 +20,7 @@ func TestEndlessLoop_VetoesAtMax(t *testing.T) {
 	bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
 		engine.WithPriority(10))
 
-	req := events.LLMRequest{Messages: []events.Message{{Role: "user", Content: "hi"}}}
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}}}
 
 	// First 3 should pass.
 	for i := 1; i <= 3; i++ {
@@ -54,14 +54,14 @@ func TestEndlessLoop_ResetsOnInput(t *testing.T) {
 		engine.WithPriority(10))
 	bus.Subscribe("io.input", p.handleInput, engine.WithPriority(5))
 
-	req := events.LLMRequest{Messages: []events.Message{{Role: "user", Content: "hi"}}}
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}}}
 
 	// Use 2 iterations.
 	bus.EmitVetoable("before:llm.request", &req)
 	bus.EmitVetoable("before:llm.request", &req)
 
 	// Simulate new user input — should reset.
-	bus.Emit("io.input", events.UserInput{Content: "new message"})
+	bus.Emit("io.input", events.UserInput{SchemaVersion: events.UserInputVersion, Content: "new message"})
 
 	// Should pass again.
 	result, _ := bus.EmitVetoable("before:llm.request", &req)
@@ -81,8 +81,7 @@ func TestEndlessLoop_SkipsSourcedRequests(t *testing.T) {
 		engine.WithPriority(10))
 
 	// Sourced request (from planner) should not count.
-	req := events.LLMRequest{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}},
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic"},
 	}
 
@@ -112,7 +111,7 @@ func TestEndlessLoop_Warning(t *testing.T) {
 	bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
 		engine.WithPriority(10))
 
-	req := events.LLMRequest{Messages: []events.Message{{Role: "user", Content: "hi"}}}
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}}}
 
 	for i := 0; i < 3; i++ {
 		bus.EmitVetoable("before:llm.request", &req)

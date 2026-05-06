@@ -179,8 +179,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 
 	task, _ := tc.Arguments["task"].(string)
 	if task == "" {
-		errResult := events.ToolResult{
-			ID:     tc.ID,
+		errResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Error:  "task is required",
 			TurnID: tc.TurnID,
@@ -199,8 +198,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	spawnID := generateSpawnID()
 	subResult := p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
 
-	toolResult := events.ToolResult{
-		ID:     tc.ID,
+	toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: subResult.Result,
 		Error:  subResult.Error,
@@ -229,8 +227,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 	turnID := "subagent_" + spawnID
 	source := "subagent." + spawnID
 
-	_ = p.bus.Emit("subagent.started", events.SubagentStarted{
-		SpawnID:      spawnID,
+	_ = p.bus.Emit("subagent.started", events.SubagentStarted{SchemaVersion: events.SubagentStartedVersion, SpawnID: spawnID,
 		Task:         task,
 		ParentTurnID: parentTurnID,
 	})
@@ -278,8 +275,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 		}, engine.WithPriority(1))
 
 		// Send LLM request tagged with our source so the parent ReAct ignores it.
-		req := events.LLMRequest{
-			Role:     modelRole,
+		req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: modelRole,
 			Messages: history,
 			Tools:    tools,
 			Stream:   false,
@@ -317,8 +313,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 		})
 
 		// Emit iteration event for observability.
-		_ = p.bus.Emit("subagent.iteration", events.SubagentIteration{
-			SpawnID:   spawnID,
+		_ = p.bus.Emit("subagent.iteration", events.SubagentIteration{SchemaVersion: events.SubagentIterationVersion, SpawnID: spawnID,
 			Iteration: iteration,
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
@@ -380,8 +375,7 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 			args = map[string]any{}
 		}
 
-		toolCall := events.ToolCall{
-			ID:        tc.ID,
+		toolCall := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: tc.ID,
 			Name:      tc.Name,
 			Arguments: args,
 			TurnID:    turnID,
@@ -389,8 +383,7 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 
 		if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
 			p.logger.Info("subagent tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
-			resultCh <- events.ToolResult{
-				ID:     tc.ID,
+			resultCh <- events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 				Name:   tc.Name,
 				Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 				TurnID: turnID,
@@ -417,8 +410,7 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 }
 
 func (p *Plugin) completeSubagent(spawnID, parentTurnID, result, errMsg string, iterations int, usage events.Usage, costUSD float64) events.SubagentComplete {
-	complete := events.SubagentComplete{
-		SpawnID:      spawnID,
+	complete := events.SubagentComplete{SchemaVersion: events.SubagentCompleteVersion, SpawnID: spawnID,
 		Result:       result,
 		Error:        errMsg,
 		Iterations:   iterations,

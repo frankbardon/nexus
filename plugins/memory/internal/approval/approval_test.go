@@ -38,7 +38,7 @@ func observeRequest(bus engine.EventBus, reply events.HITLResponse) func() event
 
 func TestRequestApproval_AllowResolvesToTrue(t *testing.T) {
 	bus := engine.NewEventBus()
-	getReq := observeRequest(bus, events.HITLResponse{ChoiceID: "allow"})
+	getReq := observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
 	resp, allowed, err := RequestApproval(context.Background(), Request{
 		Bus:        bus,
@@ -77,7 +77,7 @@ func TestRequestApproval_AllowResolvesToTrue(t *testing.T) {
 
 func TestRequestApproval_RejectResolvesToFalse(t *testing.T) {
 	bus := engine.NewEventBus()
-	observeRequest(bus, events.HITLResponse{ChoiceID: "reject"})
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject"})
 
 	resp, allowed, err := RequestApproval(context.Background(), Request{
 		Bus:        bus,
@@ -193,7 +193,7 @@ func TestRequestApproval_ContextCancelled(t *testing.T) {
 
 func TestRequestApproval_CancelledResponseNotAllowed(t *testing.T) {
 	bus := engine.NewEventBus()
-	observeRequest(bus, events.HITLResponse{Cancelled: true, CancelReason: "operator quit"})
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, Cancelled: true, CancelReason: "operator quit"})
 
 	_, allowed, err := RequestApproval(context.Background(), Request{
 		Bus:        bus,
@@ -212,8 +212,7 @@ func TestRequestApproval_CancelledResponseNotAllowed(t *testing.T) {
 
 func TestRequestApproval_EditedPayloadLogsAndProceeds(t *testing.T) {
 	bus := engine.NewEventBus()
-	observeRequest(bus, events.HITLResponse{
-		ChoiceID:      "reject",
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject",
 		EditedPayload: map[string]any{"limit": 50},
 	})
 
@@ -254,7 +253,7 @@ func TestRequestApproval_PassesCustomChoices(t *testing.T) {
 		{ID: "yes", Label: "Yes", Kind: events.ChoiceAllow},
 		{ID: "no", Label: "No", Kind: events.ChoiceReject},
 	}
-	observeRequest(bus, events.HITLResponse{ChoiceID: "yes"})
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "yes"})
 
 	_, allowed, err := RequestApproval(context.Background(), Request{
 		Bus:        bus,
@@ -274,7 +273,7 @@ func TestRequestApproval_PassesCustomChoices(t *testing.T) {
 
 func TestRequestApproval_UnknownChoiceIDNotAllowed(t *testing.T) {
 	bus := engine.NewEventBus()
-	observeRequest(bus, events.HITLResponse{ChoiceID: "mystery"})
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "mystery"})
 
 	_, allowed, err := RequestApproval(context.Background(), Request{
 		Bus:        bus,
@@ -318,9 +317,8 @@ func TestRequestApproval_BeforeHandlerMutatesPrompt(t *testing.T) {
 		}
 		captured = req
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
-				ChoiceID:  "allow",
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
+				ChoiceID: "allow",
 			})
 		}()
 	}, engine.WithPriority(50))

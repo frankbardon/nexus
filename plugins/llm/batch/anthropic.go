@@ -293,8 +293,7 @@ func decodeAnthropicMessage(raw json.RawMessage) (*events.LLMResponse, error) {
 		}
 	}
 
-	return &events.LLMResponse{
-		Content:      content.String(),
+	return &events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content.String(),
 		ToolCalls:    toolCalls,
 		Model:        msg.Model,
 		FinishReason: msg.StopReason,

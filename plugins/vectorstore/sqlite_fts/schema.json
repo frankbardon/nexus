@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.vectorstore.sqlite_fts.json",
+  "title": "nexus.vectorstore.sqlite_fts",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scope": {"type": "string", "enum": ["session", "agent", "app"], "description": "Storage scope used for the FTS5 database."}
+  }
+}

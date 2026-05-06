@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.summary_buffer.json",
+  "title": "nexus.memory.summary_buffer",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "strategy":          {"type": "string", "enum": ["message_count", "token_estimate", "turn_count"]},
+    "message_threshold": {"type": "integer", "minimum": 1},
+    "token_threshold":   {"type": "integer", "minimum": 1},
+    "turn_threshold":    {"type": "integer", "minimum": 1},
+    "chars_per_token":   {"type": "number", "minimum": 0},
+    "max_recent":        {"type": "integer", "minimum": 0, "description": "Messages kept verbatim; older messages are summarized."},
+    "model_role":        {"type": "string"},
+    "model":             {"type": "string"},
+    "prompt":            {"type": "string"},
+    "prompt_file":       {"type": "string"}
+  }
+}

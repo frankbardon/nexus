@@ -309,7 +309,7 @@ func (p *Plugin) applyDowngrade(req *events.LLMRequest, c ceiling, reason string
 }
 
 func (p *Plugin) emitOutput(msg string) {
-	_ = p.bus.Emit("io.output", events.AgentOutput{Content: msg, Role: "system"})
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: msg, Role: "system"})
 }
 
 // bucketKeyFor returns the key the ceiling applies to for the given
@@ -404,9 +404,8 @@ func (c ceiling) maybeWarn(p *Plugin, bucketKey string, t usageTotals) {
 	if emitted {
 		return
 	}
-	_ = p.bus.Emit("io.output", events.AgentOutput{
-		Content: fmt.Sprintf("Warning: %s budget at %.0f%%", c.Dimension, util*100),
-		Role:    "system",
+	_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Warning: %s budget at %.0f%%", c.Dimension, util*100),
+		Role: "system",
 	})
 }
 

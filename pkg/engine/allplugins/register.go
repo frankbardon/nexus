@@ -109,6 +109,7 @@ import (
 	stopwordsgate "github.com/frankbardon/nexus/plugins/gates/stop_words"
 	tokenbudgetgate "github.com/frankbardon/nexus/plugins/gates/token_budget"
 	toolfiltergate "github.com/frankbardon/nexus/plugins/gates/tool_filter"
+	tooltimeoutgate "github.com/frankbardon/nexus/plugins/gates/tool_timeout"
 
 	// Sandbox backends. Side-effect imports register the factories with
 	// pkg/engine/sandbox so configs can opt into stricter isolation tiers.
@@ -224,4 +225,5 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.gate.stop_words", stopwordsgate.New)
 	r.Register("nexus.gate.token_budget", tokenbudgetgate.New)
 	r.Register("nexus.gate.tool_filter", toolfiltergate.New)
+	r.Register("nexus.gate.tool_timeout", tooltimeoutgate.New)
 }

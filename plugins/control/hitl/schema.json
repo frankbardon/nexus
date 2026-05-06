@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.control.hitl.json",
+  "title": "nexus.control.hitl",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Persistent registry of pending HITL requests for resume across sessions.",
+      "properties": {
+        "enabled": {"type": "boolean", "description": "Persist hitl.requested events so /resume can replay them."},
+        "dir":     {"type": "string",  "description": "Directory under which to write registry entries."}
+      }
+    }
+  }
+}

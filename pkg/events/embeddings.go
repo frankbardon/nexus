@@ -1,11 +1,18 @@
 package events
 
+// Schema-version constants for embeddings.* payloads. See doc.go.
+const (
+	EmbeddingsRequestVersion = 1
+)
+
 // EmbeddingsRequest is an outbound embeddings request. The consumer fires it
 // as a pointer payload on "embeddings.request"; the capability-resolved
 // provider fills Vectors / Provider / Model / Error in place before Emit
 // returns. Mirrors the synchronous fill pattern used by SearchRequest and
 // HistoryQuery — embeddings are a one-shot lookup with no streaming surface.
 type EmbeddingsRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	// Texts is the batch of strings to embed. Order is preserved in Vectors.
 	Texts []string
 	// Model is the embeddings model to use. Zero value means provider default.

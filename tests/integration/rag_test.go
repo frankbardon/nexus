@@ -31,7 +31,7 @@ func TestRAG_IngestAndQuery(t *testing.T) {
 	const body = "feline mammals purr softly in sunlight"
 	path := writeTestFile(t, "cats.md", body)
 
-	req := &events.RAGIngest{Path: path, Namespace: "kb"}
+	req := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: "kb"}
 	if err := eng.Bus.Emit("rag.ingest", req); err != nil {
 		t.Fatalf("emit rag.ingest: %v", err)
 	}
@@ -42,10 +42,9 @@ func TestRAG_IngestAndQuery(t *testing.T) {
 		t.Fatalf("expected 1 chunk for short text, got %d", req.Chunks)
 	}
 
-	q := &events.VectorQuery{
-		Namespace: "kb",
-		Vector:    mockVecFor(t, eng, body),
-		K:         3,
+	q := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: "kb",
+		Vector: mockVecFor(t, eng, body),
+		K:      3,
 	}
 	if err := eng.Bus.Emit("vector.query", q); err != nil {
 		t.Fatalf("emit vector.query: %v", err)
@@ -82,7 +81,7 @@ func TestRAG_EmbeddingCache(t *testing.T) {
 
 	path := writeTestFile(t, "dogs.md", strings.Repeat("canine loyal companion. ", 40))
 
-	first := &events.RAGIngest{Path: path, Namespace: "kb"}
+	first := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: "kb"}
 	_ = eng.Bus.Emit("rag.ingest", first)
 	if first.Error != "" {
 		t.Fatalf("first ingest: %s", first.Error)
@@ -91,7 +90,7 @@ func TestRAG_EmbeddingCache(t *testing.T) {
 		t.Errorf("expected zero cache hits on first ingest, got %d", first.SkippedCached)
 	}
 
-	second := &events.RAGIngest{Path: path, Namespace: "kb"}
+	second := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: "kb"}
 	_ = eng.Bus.Emit("rag.ingest", second)
 	if second.Error != "" {
 		t.Fatalf("second ingest: %s", second.Error)
@@ -112,28 +111,26 @@ func TestRAG_IngestDelete(t *testing.T) {
 	defer teardown(eng)
 
 	path := writeTestFile(t, "ephemeral.md", "this content will be removed")
-	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{Path: path, Namespace: "kb"})
+	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: "kb"})
 
-	q := &events.VectorQuery{
-		Namespace: "kb",
-		Vector:    mockVecFor(t, eng, "this content will be removed"),
-		K:         3,
+	q := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: "kb",
+		Vector: mockVecFor(t, eng, "this content will be removed"),
+		K:      3,
 	}
 	_ = eng.Bus.Emit("vector.query", q)
 	if len(q.Matches) == 0 {
 		t.Fatalf("expected ≥1 match before delete, got 0")
 	}
 
-	del := &events.RAGIngestDelete{Path: path, Namespace: "kb"}
+	del := &events.RAGIngestDelete{SchemaVersion: events.RAGIngestDeleteVersion, Path: path, Namespace: "kb"}
 	_ = eng.Bus.Emit("rag.ingest.delete", del)
 	if del.Error != "" {
 		t.Fatalf("delete: %s", del.Error)
 	}
 
-	q2 := &events.VectorQuery{
-		Namespace: "kb",
-		Vector:    mockVecFor(t, eng, "this content will be removed"),
-		K:         3,
+	q2 := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: "kb",
+		Vector: mockVecFor(t, eng, "this content will be removed"),
+		K:      3,
 	}
 	_ = eng.Bus.Emit("vector.query", q2)
 	for _, m := range q2.Matches {
@@ -152,13 +149,12 @@ func TestRAG_NamespaceIsolation(t *testing.T) {
 	p1 := writeTestFile(t, "kb-only.md", "namespace KB unique phrase alpha")
 	p2 := writeTestFile(t, "docs-only.md", "namespace DOCS unique phrase beta")
 
-	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{Path: p1, Namespace: "kb"})
-	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{Path: p2, Namespace: "docs"})
+	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: p1, Namespace: "kb"})
+	_ = eng.Bus.Emit("rag.ingest", &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: p2, Namespace: "docs"})
 
-	q := &events.VectorQuery{
-		Namespace: "kb",
-		Vector:    mockVecFor(t, eng, "namespace DOCS unique phrase beta"),
-		K:         5,
+	q := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: "kb",
+		Vector: mockVecFor(t, eng, "namespace DOCS unique phrase beta"),
+		K:      5,
 	}
 	_ = eng.Bus.Emit("vector.query", q)
 	for _, m := range q.Matches {
@@ -168,16 +164,15 @@ func TestRAG_NamespaceIsolation(t *testing.T) {
 	}
 
 	// Drop the docs namespace; kb should still answer.
-	drop := &events.VectorNamespaceDrop{Namespace: "docs"}
+	drop := &events.VectorNamespaceDrop{SchemaVersion: events.VectorNamespaceDropVersion, Namespace: "docs"}
 	_ = eng.Bus.Emit("vector.namespace.drop", drop)
 	if drop.Error != "" {
 		t.Fatalf("drop namespace: %s", drop.Error)
 	}
 
-	qDocs := &events.VectorQuery{
-		Namespace: "docs",
-		Vector:    mockVecFor(t, eng, "anything"),
-		K:         5,
+	qDocs := &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: "docs",
+		Vector: mockVecFor(t, eng, "anything"),
+		K:      5,
 	}
 	_ = eng.Bus.Emit("vector.query", qDocs)
 	if len(qDocs.Matches) != 0 {
@@ -241,7 +236,7 @@ func writeTestFile(t *testing.T, name, content string) string {
 // through the bus so tests don't reach into the provider directly.
 func mockVecFor(t *testing.T, eng *engine.Engine, text string) []float32 {
 	t.Helper()
-	req := &events.EmbeddingsRequest{Texts: []string{text}}
+	req := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{text}}
 	if err := eng.Bus.Emit("embeddings.request", req); err != nil {
 		t.Fatalf("emit embeddings.request: %v", err)
 	}

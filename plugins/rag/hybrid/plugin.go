@@ -193,7 +193,7 @@ func (p *Plugin) handleQuery(event engine.Event[any]) {
 	// Embed if the caller did not pre-embed.
 	vec := req.Vector
 	if len(vec) == 0 {
-		embReq := &events.EmbeddingsRequest{Texts: []string{req.Query}, Model: p.embeddingModel}
+		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{req.Query}, Model: p.embeddingModel}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			req.Error = fmt.Sprintf("embed query: %s", embReq.Error)
@@ -210,8 +210,8 @@ func (p *Plugin) handleQuery(event engine.Event[any]) {
 	// non-fatal — fusion proceeds with whichever lists came back.
 	var (
 		wg   sync.WaitGroup
-		vecQ = &events.VectorQuery{Namespace: req.Namespace, Vector: vec, K: p.retrieveK, Filter: req.Filter}
-		lexQ = &events.LexicalQuery{Namespace: req.Namespace, Query: req.Query, K: p.retrieveK, Filter: req.Filter}
+		vecQ = &events.VectorQuery{SchemaVersion: events.VectorQueryVersion, Namespace: req.Namespace, Vector: vec, K: p.retrieveK, Filter: req.Filter}
+		lexQ = &events.LexicalQuery{SchemaVersion: events.LexicalQueryVersion, Namespace: req.Namespace, Query: req.Query, K: p.retrieveK, Filter: req.Filter}
 	)
 	wg.Add(2)
 	go func() {
@@ -283,10 +283,9 @@ func (p *Plugin) applyReranker(query string, fused []candidate) []candidate {
 	for i, c := range fused {
 		docs[i] = events.RerankDoc{ID: c.id, Content: c.content}
 	}
-	req := &events.RerankRequest{
-		Query: query,
-		Docs:  docs,
-		TopN:  len(fused),
+	req := &events.RerankRequest{SchemaVersion: events.RerankRequestVersion, Query: query,
+		Docs: docs,
+		TopN: len(fused),
 	}
 	_ = p.bus.Emit("reranker.rerank", req)
 	if req.Error != "" {

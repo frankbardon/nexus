@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.embeddings.mock.json",
+  "title": "nexus.embeddings.mock",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dimensions": {"type": "integer", "minimum": 1, "description": "Vector dimensionality emitted by the mock embedder."},
+    "model":      {"type": "string",  "description": "Reported model identifier (informational only)."}
+  }
+}

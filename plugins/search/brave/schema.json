@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.search.brave.json",
+  "title": "nexus.search.brave",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_key":     {"type": "string", "description": "Direct Brave Search API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable holding the Brave Search API key."},
+    "timeout":     {"type": "string", "description": "HTTP timeout (Go duration)."}
+  }
+}

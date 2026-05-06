@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.orchestrator.json",
+  "title": "nexus.agent.orchestrator",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_workers":              {"type": "integer", "minimum": 1, "description": "Concurrency cap for worker subagents."},
+    "max_subtasks":             {"type": "integer", "minimum": 1, "description": "Hard cap on subtasks (excess truncated)."},
+    "worker_max_iterations":    {"type": "integer", "minimum": 1, "description": "Iteration limit per worker."},
+    "orchestrator_model_role":  {"type": "string", "description": "Role used for decomposition."},
+    "worker_model_role":        {"type": "string", "description": "Role used by workers."},
+    "synthesis_model_role":     {"type": "string", "description": "Role used for the final synthesis."},
+    "fail_fast":                {"type": "boolean", "description": "Cancel remaining workers on the first failure."},
+    "system_prompt":            {"type": "string", "description": "Inline system prompt."},
+    "system_prompt_file":       {"type": "string", "description": "Path to a file containing the system prompt."}
+  }
+}

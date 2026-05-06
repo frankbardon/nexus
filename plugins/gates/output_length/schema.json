@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.output_length.json",
+  "title": "nexus.gate.output_length",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_chars":    {"type": "integer", "minimum": 1, "description": "Maximum allowed response length in characters."},
+    "max_retries":  {"type": "integer", "minimum": 0, "description": "Number of LLM retry attempts when over budget."},
+    "retry_prompt": {"type": "string",  "description": "Prompt template appended on retry."}
+  }
+}

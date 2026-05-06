@@ -48,8 +48,7 @@ func (s *stubProvider) handle(e engine.Event[any]) {
 		return
 	}
 	corrID, _ := req.Metadata["_synth_id"].(string)
-	_ = s.bus.Emit("llm.response", events.LLMResponse{
-		Content: content,
+	_ = s.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content,
 		Metadata: map[string]any{
 			"_source":   llmSource,
 			"_synth_id": corrID,
@@ -90,8 +89,7 @@ func TestSynthesize_CacheMiss_LLMRender(t *testing.T) {
 	_, bus := newTestPlugin(t)
 	stub := newStubProvider(bus, "Approve running ls in /tmp?")
 
-	req := &events.HITLRequest{
-		ID:                "h1",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h1",
 		ActionKind:        "tool.invoke",
 		PromptSynthesizer: CapabilityName,
 		ActionRef: map[string]any{
@@ -126,8 +124,7 @@ func TestSynthesize_CacheHit_NoLLMCall(t *testing.T) {
 	p.cache[key] = "Cached: ok to ls?"
 	p.cacheMu.Unlock()
 
-	req := &events.HITLRequest{
-		ID:                "h2",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h2",
 		ActionKind:        actionKind,
 		PromptSynthesizer: CapabilityName,
 		ActionRef:         actionRef,
@@ -157,8 +154,7 @@ func TestSynthesize_LLMFailure_FallbackTemplate(t *testing.T) {
 	stub := newStubProvider(bus, "")
 	stub.fail = true
 
-	req := &events.HITLRequest{
-		ID:                "h3",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h3",
 		ActionKind:        "memory.longterm.write",
 		PromptSynthesizer: CapabilityName,
 		ActionRef:         map[string]any{"key": "user_pref/theme"},
@@ -182,8 +178,7 @@ func TestSynthesize_NoSynthesizerSet_NoOp(t *testing.T) {
 	_, bus := newTestPlugin(t)
 	stub := newStubProvider(bus, "should not run")
 
-	req := &events.HITLRequest{
-		ID:         "h4",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h4",
 		ActionKind: "tool.invoke",
 		// PromptSynthesizer intentionally empty.
 		ActionRef: map[string]any{"tool": "shell"},
@@ -203,8 +198,7 @@ func TestSynthesize_PromptAlreadySet_NoOp(t *testing.T) {
 	_, bus := newTestPlugin(t)
 	stub := newStubProvider(bus, "should not run")
 
-	req := &events.HITLRequest{
-		ID:                "h5",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h5",
 		ActionKind:        "tool.invoke",
 		PromptSynthesizer: CapabilityName,
 		Prompt:            "Already set by emitter",
@@ -225,8 +219,7 @@ func TestSynthesize_BeforeVetoablePath(t *testing.T) {
 	_, bus := newTestPlugin(t)
 	stub := newStubProvider(bus, "Vetoable path prompt")
 
-	req := &events.HITLRequest{
-		ID:                "h6",
+	req := &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h6",
 		ActionKind:        "tool.invoke",
 		PromptSynthesizer: CapabilityName,
 		ActionRef:         map[string]any{"tool": "shell", "command": "rm -rf /"},
@@ -253,8 +246,7 @@ func TestSynthesize_ValuePayloadIgnored(t *testing.T) {
 	// Emit by VALUE — the synthesizer can't carry mutations forward
 	// through a value payload, so it must skip cleanly without making
 	// LLM calls.
-	req := events.HITLRequest{
-		ID:                "h7",
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "h7",
 		ActionKind:        "tool.invoke",
 		PromptSynthesizer: CapabilityName,
 		ActionRef:         map[string]any{"tool": "shell"},
@@ -287,8 +279,7 @@ func TestSynthesize_NonToolEmitter_BeforePath(t *testing.T) {
 		}
 	}, engine.WithPriority(50))
 
-	req := events.HITLRequest{
-		ID:                "approval-1",
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "approval-1",
 		RequesterPlugin:   "nexus.gate.approval_policy",
 		ActionKind:        "memory.longterm.write",
 		PromptSynthesizer: CapabilityName,

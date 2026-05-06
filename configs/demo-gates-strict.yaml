@@ -70,7 +70,6 @@ plugins:
 
   nexus.gate.token_budget:
     max_tokens: 5000
-    warning_threshold: 0.5
 
   nexus.gate.rate_limiter:
     requests_per_minute: 5

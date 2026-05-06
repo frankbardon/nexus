@@ -230,13 +230,11 @@ func (p *Plugin) initLegacy() {
 	// if the callback chain later tried to send back to the webview.
 	p.adapter.OnInput(func(msg ui.InputMessage) {
 		if msg.Content == "/quit" || msg.Content == "/exit" {
-			_ = p.bus.Emit("io.session.end", events.SessionInfo{
-				Transport: "wails",
-			})
+			_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "wails"})
 			return
 		}
 		go func(content string) {
-			input := events.UserInput{Content: content}
+			input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: content}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
@@ -245,25 +243,24 @@ func (p *Plugin) initLegacy() {
 	})
 
 	p.adapter.OnApprovalResponse(func(msg ui.ApprovalResponseMessage) {
-		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
-			PromptID: msg.PromptID,
+		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: msg.PromptID,
 			Approved: msg.Approved,
 			Always:   msg.Always,
 		})
 	})
 
 	p.adapter.OnCancel(func() {
-		_ = p.bus.Emit("cancel.request", events.CancelRequest{
-			Source: "wails",
-		})
+		_ = p.bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "wails"})
 	})
 
 	p.adapter.OnResume(func() {
-		_ = p.bus.Emit("cancel.resume", events.CancelResume{})
+		_ = p.bus.Emit("cancel.resume", events.CancelResume{SchemaVersion:
+
+		// Outbound: engine bus -> webview. Mirrors nexus.io.browser's
+		// subscription set one-for-one (parity rule in CLAUDE.md §7a).
+		events.CancelResumeVersion})
 	})
 
-	// Outbound: engine bus -> webview. Mirrors nexus.io.browser's
-	// subscription set one-for-one (parity rule in CLAUDE.md §7a).
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
@@ -290,9 +287,7 @@ func (p *Plugin) initLegacy() {
 // is no HTTP server to start here — the Wails host process already owns
 // the webview, and the Runtime was installed by the embedder before Boot.
 func (p *Plugin) Ready() error {
-	_ = p.bus.Emit("io.session.start", events.SessionInfo{
-		Transport: "wails",
-	})
+	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "wails"})
 	return nil
 }
 
@@ -409,10 +404,9 @@ func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
 		p.logger.Error("hitl request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("hitl.responded", events.HITLResponse{
-		RequestID: resp.RequestID,
-		ChoiceID:  resp.ChoiceID,
-		FreeText:  resp.FreeText,
+	_ = p.bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: resp.RequestID,
+		ChoiceID: resp.ChoiceID,
+		FreeText: resp.FreeText,
 	})
 }
 
@@ -458,8 +452,7 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 		p.logger.Error("plan approval request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{
-		PromptID: resp.PromptID,
+	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: resp.PromptID,
 		Approved: resp.Approved,
 		Always:   resp.Always,
 	})
@@ -555,7 +548,7 @@ func (p *Plugin) handleFileOpenRequest(e engine.Event[any]) {
 	}
 
 	go func() {
-		resp := events.FileOpenResponse{RequestID: req.RequestID}
+		resp := events.FileOpenResponse{SchemaVersion: events.FileOpenResponseVersion, RequestID: req.RequestID}
 		path, err := p.hub.OpenFileDialog(opts)
 		switch {
 		case err != nil && errors.Is(err, ErrFileDialogUnavailable):

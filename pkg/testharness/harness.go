@@ -36,6 +36,7 @@ type Harness struct {
 	timeout       time.Duration
 	retainSession bool // keep session dir on failure for debugging
 	keepSession   bool // keep session dir unconditionally (used by tests that read post-run artifacts)
+	failFast      bool // disable bus panic recovery so tests surface stack traces
 }
 
 // Option configures the test harness.
@@ -72,6 +73,16 @@ func WithJudge(j Judge) Option {
 	}
 }
 
+// WithFailFast disables the bus's panic-recovery wrapper so handler panics
+// propagate with their original stack trace instead of being swallowed into
+// a core.error event. Useful while iterating on a flaky test where the
+// recovered emit obscures the real failure.
+func WithFailFast() Option {
+	return func(h *Harness) {
+		h.failFast = true
+	}
+}
+
 // New creates a test harness from a config file. The config should use
 // nexus.io.test as its IO plugin.
 func New(t *testing.T, configPath string, opts ...Option) *Harness {
@@ -100,6 +111,14 @@ func New(t *testing.T, configPath string, opts ...Option) *Harness {
 
 	for _, opt := range opts {
 		opt(h)
+	}
+
+	// Apply fail-fast on the bus before Boot so the very first dispatch in
+	// startJournal subscriptions sees the toggled wrapper.
+	if h.failFast {
+		if setter, ok := eng.Bus.(interface{ SetFailFast(bool) }); ok {
+			setter.SetFailFast(true)
+		}
 	}
 
 	// Default judge: Anthropic Haiku if API key available.

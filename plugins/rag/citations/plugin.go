@@ -231,7 +231,7 @@ var attrPattern = regexp.MustCompile(`(\w+)\s*=\s*"([^"]*)"`)
 func (p *Plugin) fromTags(resp events.LLMResponse, turnID string) events.CitedResponse {
 	matches := citePattern.FindAllStringSubmatchIndex(resp.Content, -1)
 	if len(matches) == 0 {
-		return events.CitedResponse{TurnID: turnID, Text: resp.Content, Mode: "tag"}
+		return events.CitedResponse{SchemaVersion: events.CitedResponseVersion, TurnID: turnID, Text: resp.Content, Mode: "tag"}
 	}
 
 	allow := p.snapshot(turnID)
@@ -266,8 +266,7 @@ func (p *Plugin) fromTags(resp events.LLMResponse, turnID string) events.CitedRe
 	}
 	out.WriteString(resp.Content[last:])
 
-	return events.CitedResponse{
-		TurnID:    turnID,
+	return events.CitedResponse{SchemaVersion: events.CitedResponseVersion, TurnID: turnID,
 		Text:      out.String(),
 		Citations: cites,
 		Mode:      "tag",
@@ -284,8 +283,7 @@ func (p *Plugin) fromAnthropicNative(resp events.LLMResponse, turnID string) eve
 			SpanEnd:   c.EndCharIndex,
 		})
 	}
-	return events.CitedResponse{
-		TurnID:    turnID,
+	return events.CitedResponse{SchemaVersion: events.CitedResponseVersion, TurnID: turnID,
 		Text:      resp.Content,
 		Citations: cites,
 		Mode:      "anthropic_native",
