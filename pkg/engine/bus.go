@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -113,6 +114,16 @@ type eventBus struct {
 	// handler-snapshot reads.
 	dispatchMu     sync.Mutex
 	dispatchStacks map[int64][]uint64
+
+	// logger is used by the panic-recovery wrapper to record plugin panics
+	// with structured fields. Wired post-construction by the engine via
+	// SetLogger; if nil the recovery wrapper falls back to a discard logger.
+	logger *slog.Logger
+
+	// failFast disables panic recovery in invokeHandler when true. Used by
+	// the test harness (WithFailFast) to surface stack traces from flaky
+	// tests rather than swallowing them as core.error events.
+	failFast bool
 }
 
 // DefaultEventRingSize is the default capacity of the bus's in-memory
@@ -170,6 +181,22 @@ func (b *eventBus) pushDispatch(seq uint64) func() {
 		}
 		b.dispatchMu.Unlock()
 	}
+}
+
+// SetLogger installs a logger used by the panic-recovery wrapper to record
+// plugin panics. Idempotent; the engine wires this once after construction
+// so structured logs from invokeHandler reach the same fanout as the rest
+// of the engine.
+func (b *eventBus) SetLogger(l *slog.Logger) {
+	b.logger = l
+}
+
+// SetFailFast toggles the panic-recovery wrapper. When true, handler panics
+// propagate up the call stack instead of being recovered into core.error.
+// Used by test harnesses (WithFailFast) so flaky tests surface their stack
+// traces rather than swallowing them.
+func (b *eventBus) SetFailFast(v bool) {
+	b.failFast = v
 }
 
 // SetSeqFloor advances the dispatch seq counter to at least floor. No-op if
@@ -347,14 +374,14 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 		if sub.filter != nil && !sub.filter(meta) {
 			continue
 		}
-		sub.handler(event)
+		b.invokeHandler(sub, event, false)
 	}
 
 	for _, sub := range wilds {
 		if sub.filter != nil && !sub.filter(meta) {
 			continue
 		}
-		sub.handler(event)
+		b.invokeHandler(sub, event, false)
 	}
 
 	return nil
@@ -404,7 +431,7 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 		if sub.filter != nil && !sub.filter(meta) {
 			continue
 		}
-		sub.handler(event)
+		b.invokeHandler(sub, event, true)
 
 		if vp.Veto.Vetoed {
 			result = vp.Veto
@@ -419,7 +446,7 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 		if sub.filter != nil && !sub.filter(meta) {
 			continue
 		}
-		sub.handler(event)
+		b.invokeHandler(sub, event, false)
 	}
 
 	return result, nil

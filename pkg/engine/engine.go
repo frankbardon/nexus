@@ -119,6 +119,9 @@ func newFromConfig(cfg *Config) *Engine {
 	// shared with the bus ring anymore — durable event history lives in
 	// the journal.
 	bus := NewEventBus()
+	if setter, ok := bus.(interface{ SetLogger(*slog.Logger) }); ok {
+		setter.SetLogger(logger.With("subsystem", "bus"))
+	}
 	registry := NewPluginRegistry()
 	models := NewModelRegistry(cfg.Core.ModelsRaw)
 	prompts := NewPromptRegistry()

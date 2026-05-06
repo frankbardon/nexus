@@ -10,7 +10,8 @@ import (
 
 // Config is the top-level configuration for the engine.
 type Config struct {
-	Core CoreConfig `yaml:"core"`
+	Core   CoreConfig   `yaml:"core"`
+	Engine EngineConfig `yaml:"engine"`
 	// Capabilities pins a capability name to a specific provider plugin ID,
 	// overriding the default resolution (first active provider, else first
 	// registered). Populated from the top-level YAML `capabilities:` block.
@@ -29,6 +30,30 @@ type Config struct {
 	// and per-plugin configs both have yaml:"-").
 	Raw []byte `yaml:"-"`
 }
+
+// EngineConfig holds top-level engine resilience knobs that are not strictly
+// "core" runtime settings (log level, tick interval) and not journal-specific.
+// Currently houses the shutdown drain timeout; future resilience phases will
+// extend this struct rather than scattering settings under core.
+type EngineConfig struct {
+	Shutdown ShutdownConfig `yaml:"shutdown"`
+}
+
+// ShutdownConfig governs engine shutdown behavior. DrainTimeout is the wall
+// clock the engine gives in-flight bus dispatches to complete before the
+// plugin Shutdown phase begins; plugins that need a longer drain (batch
+// pollers, MCP servers) opt in via the DrainOverride interface and the
+// engine takes the larger of the two.
+type ShutdownConfig struct {
+	// DrainTimeout caps how long the engine waits for in-flight events to
+	// drain on Shutdown. Zero falls back to defaultShutdownDrainTimeout.
+	DrainTimeout time.Duration `yaml:"drain_timeout"`
+}
+
+// defaultShutdownDrainTimeout is the engine's drain ceiling when no override
+// is configured. 30s is a deliberate bump over the historical hardcoded 10s
+// to give long-running plugins (batch coordinators, MCP) headroom.
+const defaultShutdownDrainTimeout = 30 * time.Second
 
 // JournalConfig tunes the durable per-session event log. Defaults are picked
 // for the typical interactive run (turns of 5–30 events, multi-day session

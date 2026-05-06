@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
@@ -188,4 +189,16 @@ type PluginContext struct {
 // init order, just like the normal phase.
 type LateShutdown interface {
 	LateShutdown() bool
+}
+
+// DrainOverride is an optional interface a plugin implements when it needs
+// a longer drain window than the engine default for in-flight work to
+// complete (batch pollers flushing pending submissions, MCP servers waiting
+// on remote acks). The engine takes the maximum of the configured
+// engine.shutdown.drain_timeout and every plugin override before draining
+// the bus, so a single slow plugin can extend the window without forcing
+// every operator to bump the global default. Returning a non-positive
+// duration is equivalent to not implementing the interface.
+type DrainOverride interface {
+	DrainTimeout() time.Duration
 }

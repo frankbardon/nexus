@@ -30,6 +30,7 @@ source, update this page in the same commit.
 
 ```yaml
 core:           # engine-level settings
+engine:         # engine resilience knobs (shutdown drain, ...)
 capabilities:   # capability → plugin-ID pinning (optional)
 journal:        # durable per-session event log (always on; tunables only)
 plugins:
@@ -41,6 +42,7 @@ plugins:
 | Key            | Type   | Default | Description                                                                 |
 |----------------|--------|---------|-----------------------------------------------------------------------------|
 | `core`         | map    | *(see core section)* | Engine-level settings (logging, sessions, models). |
+| `engine`       | map    | *(see engine section)* | Engine resilience knobs (shutdown drain budget). |
 | `capabilities` | map    | *(empty)* | Pin capability names to specific provider plugin IDs (e.g. `search.provider: nexus.search.brave`). Overrides default resolution (first active provider). |
 | `journal`      | map    | *(see journal section)* | Tuning knobs for the always-on event journal. The journal cannot be disabled. |
 | `plugins.active` | list | `[]`    | Plugin IDs to activate. Order doesn't matter — `Requires()` and `Dependencies()` are resolved automatically. Multi-instance plugins use a slash suffix: `nexus.agent.subagent/researcher`. |
@@ -116,6 +118,21 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+## Engine
+
+Engine-level resilience knobs that don't belong under `core` (which is for
+runtime settings like log level and tick interval) and aren't journal-specific.
+
+```yaml
+engine:
+  shutdown:
+    drain_timeout: 30s
+```
+
+| Key                        | Type     | Default | Description |
+|----------------------------|----------|---------|-------------|
+| `shutdown.drain_timeout`   | duration | `30s`   | Maximum time the engine waits for in-flight bus dispatches to complete on `Shutdown` before the plugin teardown phase begins. Acts as a floor: a plugin implementing `engine.DrainOverride` can extend (but not shorten) the effective window so a single batch poller or MCP server can flush without operators bumping the global setting. Sub-second values are accepted but rarely useful. |
 
 ## Journal
 
