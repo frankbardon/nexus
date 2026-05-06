@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.vector.json",
+  "title": "nexus.memory.vector",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "namespace":             {"type": "string"},
+    "top_k":                 {"type": "integer", "minimum": 1},
+    "min_similarity":        {"type": "number", "minimum": 0, "maximum": 1},
+    "embedding_model":       {"type": "string"},
+    "auto_store_compaction": {"type": "boolean"},
+    "auto_store_user_input": {"type": "boolean"},
+    "section_priority":      {"type": "integer"},
+    "recall_via_hybrid":     {"type": "boolean"},
+    "require_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":        {"type": "boolean"},
+        "default_choice": {"type": "string"},
+        "timeout":        {"type": "string"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "namespace_glob":       {"type": "string"},
+            "size_threshold_bytes": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

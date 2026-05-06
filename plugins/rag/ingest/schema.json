@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.rag.ingest.json",
+  "title": "nexus.rag.ingest",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "chunker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size":    {"type": "integer", "minimum": 1, "description": "Target chunk size in characters."},
+        "overlap": {"type": "integer", "minimum": 0, "description": "Character overlap between chunks."}
+      }
+    },
+    "cache_dir": {"type": "string", "description": "Embedding cache directory."},
+    "backfill":  {"type": "boolean", "description": "Re-walk watched directories at startup."},
+    "watch": {
+      "type": "array",
+      "description": "Per-namespace watch entries.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "namespace"],
+        "properties": {
+          "path":      {"type": "string"},
+          "glob":      {"type": "string"},
+          "namespace": {"type": "string"}
+        }
+      }
+    },
+    "contextual_retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-chunk LLM-generated situating prefix.",
+      "properties": {
+        "enabled":              {"type": "boolean"},
+        "model":                {"type": "string"},
+        "model_id":             {"type": "string"},
+        "max_chars_doc_window": {"type": "integer", "minimum": 1},
+        "max_chars_prefix":     {"type": "integer", "minimum": 1},
+        "timeout_ms":           {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

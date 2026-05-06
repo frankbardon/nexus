@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.json_schema.json",
+  "title": "nexus.gate.json_schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_file":  {"type": "string",  "description": "Path to a JSON schema file used to validate llm.response content."},
+    "schema": {
+      "description": "Inline schema (JSON-encoded string or YAML object).",
+      "oneOf": [
+        {"type": "string"},
+        {"type": "object"}
+      ]
+    },
+    "max_retries":  {"type": "integer", "minimum": 0, "description": "Number of LLM retry attempts on validation failure."},
+    "retry_prompt": {"type": "string",  "description": "Prompt template appended on retry."}
+  }
+}

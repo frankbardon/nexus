@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.discovery.progressive.json",
+  "title": "nexus.discovery.progressive",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scope":              {"type": "string", "enum": ["session", "turn", "hybrid"], "description": "Lifetime of discovered tools."},
+    "idle_prune_turns":   {"type": "integer", "minimum": 0, "description": "Drop a discovered tool after N turns without use."},
+    "classless_behavior": {"type": "string", "enum": ["include", "exclude"], "description": "How to treat tools that have no class."},
+    "always_include":     {"type": "array",  "items": {"type": "string"}, "description": "Tool IDs always presented to the LLM."},
+    "default_depth":      {"type": "string", "enum": ["class", "full"], "description": "Default disclosure level for new tools."}
+  }
+}

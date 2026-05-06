@@ -46,7 +46,6 @@ plugins:
     api_key_env: ANTHROPIC_API_KEY
 
   nexus.agent.planexec:
-    max_iterations: 8
     execution_model_role: balanced
     replan_on_failure: false
     approval: always

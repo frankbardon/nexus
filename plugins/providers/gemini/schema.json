@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.llm.gemini.json",
+  "title": "nexus.llm.gemini",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "debug":         {"type": "boolean", "description": "Persist request/response bodies."},
+    "auth":          {"type": "string", "enum": ["api_key", "vertex"], "description": "Authentication mode."},
+    "api_key":       {"type": "string", "description": "Public Generative Language API key."},
+    "api_key_env":   {"type": "string", "description": "Override the env var name."},
+    "project_id":               {"type": "string", "description": "Vertex GCP project ID."},
+    "location":                 {"type": "string", "description": "Vertex region (e.g. us-central1)."},
+    "service_account_json":     {"type": "string", "description": "Path to a Vertex service-account JSON key file."},
+    "service_account_json_env": {"type": "string", "description": "Env var holding the Vertex SA JSON path."},
+    "vertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project":      {"type": "string"},
+        "region":       {"type": "string"},
+        "location":     {"type": "string"},
+        "sa_key_file":     {"type": "string"},
+        "sa_key_file_env": {"type": "string"}
+      }
+    },
+    "thinking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":          {"type": "boolean"},
+        "budget_tokens":    {"type": "integer"},
+        "include_thoughts": {"type": "boolean"}
+      }
+    },
+    "code_execution": {"type": "boolean", "description": "Enable Gemini's built-in code-execution tool."},
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":    {"type": "boolean"},
+        "min_tokens": {"type": "integer", "minimum": 0},
+        "ttl":        {"type": "string"}
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":       {"type": "boolean"},
+        "max_retries":   {"type": "integer", "minimum": 0},
+        "initial_delay": {"type": "string"},
+        "max_delay":     {"type": "string"},
+        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "jitter"]},
+        "multiplier":    {"type": "number", "minimum": 0},
+        "statuses":      {"type": "array", "items": {"type": "integer"}}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Per-model pricing overrides."
+    }
+  }
+}

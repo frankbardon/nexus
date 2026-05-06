@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.react.json",
+  "title": "nexus.agent.react",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "planning": {
+      "type": "boolean",
+      "description": "Emit plan.request before iterating; defers to a planner plugin."
+    },
+    "model_role": {
+      "type": "string",
+      "description": "Role name from core.models used for the agent's LLM calls."
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "Inline system prompt (overrides system_prompt_file)."
+    },
+    "system_prompt_file": {
+      "type": "string",
+      "description": "Path to a file containing the system prompt."
+    },
+    "parallel_tools": {
+      "type": "boolean",
+      "description": "Run multiple tool calls from a single LLM response in parallel."
+    },
+    "max_concurrent": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Concurrency ceiling when parallel_tools is true."
+    },
+    "tool_choice": {
+      "description": "Constrain tool selection: string shorthand (auto|required|any|none) or a map with mode/name/sequence.",
+      "oneOf": [
+        {"type": "string", "enum": ["auto", "required", "any", "none"]},
+        {"type": "object"}
+      ]
+    }
+  }
+}

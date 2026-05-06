@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.router.metadata.json",
+  "title": "nexus.router.metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rules": {
+      "type": "array",
+      "description": "Ordered match → use/role rewrite rules.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name":  {"type": "string", "description": "Optional rule label for logs."},
+          "use":   {"type": "string", "description": "Direct model ID to use when the rule matches."},
+          "role":  {"type": "string", "description": "core.models role to use when the rule matches."},
+          "match": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Match conditions (metadata.* / tags.* / role / model)."
+          }
+        }
+      }
+    },
+    "default_model": {"type": "string", "description": "Fallback model when no rule matches."},
+    "default_role":  {"type": "string", "description": "Fallback role when no rule matches."}
+  }
+}

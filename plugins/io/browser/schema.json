@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.browser.json",
+  "title": "nexus.io.browser",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "host":         {"type": "string",  "description": "Bind address for the browser HTTP/WS server."},
+    "port":         {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Port the browser server listens on."},
+    "open_browser": {"type": "boolean", "description": "Auto-open the system default browser on boot."}
+  }
+}

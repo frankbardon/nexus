@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.planner.dynamic.json",
+  "title": "nexus.planner.dynamic",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "approval":         {"type": "string", "enum": ["always", "never", "auto"], "description": "When to request operator approval before executing a plan."},
+    "plan_prompt":      {"type": "string", "description": "Inline plan prompt template."},
+    "plan_prompt_file": {"type": "string", "description": "Path to a file containing the plan prompt template."},
+    "model_role":       {"type": "string", "description": "Role from core.models for plan synthesis."},
+    "model":            {"type": "string", "description": "Direct model ID override."},
+    "max_steps":        {"type": "integer", "minimum": 1, "description": "Maximum plan steps emitted by the LLM."}
+  }
+}

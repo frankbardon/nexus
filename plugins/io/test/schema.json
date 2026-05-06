@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.test.json",
+  "title": "nexus.io.test",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "inputs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Scripted user inputs played in order."
+    },
+    "input_delay":   {"type": "string", "description": "Delay between scripted inputs (Go duration)."},
+    "approval_mode": {"type": "string", "enum": ["approve", "deny", "per-prompt"], "description": "Default approval response."},
+    "approval_rules": {
+      "type": "array",
+      "description": "Pattern → action overrides for approval prompts (used when approval_mode=per-prompt).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "match":  {"type": "string"},
+          "action": {"type": "string", "enum": ["approve", "deny"]}
+        }
+      }
+    },
+    "hitl_responses": {
+      "type": "array",
+      "description": "Scripted HITL responses (string for free-text, object with choice_id/free_text).",
+      "items": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "choice_id": {"type": "string"},
+              "free_text": {"type": "string"}
+            }
+          }
+        ]
+      }
+    },
+    "mock_responses": {
+      "type": "array",
+      "description": "Scripted LLM responses; when present the plugin runs in offline mock mode.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "content": {"type": "string"},
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name":      {"type": "string"},
+                "arguments": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "timeout": {"type": "string", "description": "Overall test timeout (Go duration)."}
+  }
+}

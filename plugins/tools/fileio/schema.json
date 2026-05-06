@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.file.json",
+  "title": "nexus.tool.file",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "base_dir":              {"type": "string", "description": "Base directory for file operations."},
+    "allow_external_writes": {"type": "boolean", "description": "Permit reads/writes outside base_dir."},
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-tool enable/disable map.",
+      "properties": {
+        "read_file":       {"type": "boolean"},
+        "write_file":      {"type": "boolean"},
+        "check_file_size": {"type": "boolean"},
+        "list_files":      {"type": "boolean"}
+      }
+    }
+  }
+}

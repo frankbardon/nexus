@@ -26,6 +26,59 @@ source, update this page in the same commit.
   user's home directory; `~/foo` resolves to `<home>/foo`. Relative paths are
   resolved against the engine's working directory and not modified.
 
+## Validation
+
+Configuration is validated **strictly at boot**, after YAML loading and before
+any plugin's `Init()` runs. The engine compiles the top-level schema plus every
+active plugin's schema (when the plugin advertises one) and validates each
+config block against it. **Validation errors abort boot** — they are aggregated
+across every plugin so a single boot attempt surfaces every issue at once,
+sorted, with the offending key path on each line:
+
+```
+config validation failed:
+  - plugins.nexus.gate.token_budget.warning_threshold: unknown key "warning_threshold"
+  - plugins.nexus.tool.web.timeoutt: unknown key "timeoutt" (did you mean "timeout"?)
+2 errors; aborting boot
+```
+
+**Unknown keys fail boot.** Plugin schemas declare `additionalProperties: false`
+at every object level, so a typo in a key name is a hard error rather than a
+silently-ignored value. The validator emits a "did you mean" suggestion when a
+close match exists in the schema's declared keys (Levenshtein distance ≤ 3 and
+strictly less than half the candidate's length). This guarantees that the only
+keys you can write in YAML are the ones the engine actually reads — silent
+typos are not possible for plugins that ship a schema.
+
+**Deprecated keys log a warning** but do not fail boot. Schemas mark these with
+`deprecated: true`. Move off the key when convenient; deprecation warnings are
+the engine's signal that a future minor release may delete the shim.
+
+**Plugins without a schema** (legacy or third-party) are skipped with a `debug`
+log. They are not blocked from booting. The engine's own top-level keys
+(`core`, `engine`, `capabilities`, `plugins.active`, `journal`) are always
+validated against the engine schema.
+
+### Schema authoring
+
+Plugins expose their schema by implementing the optional
+`engine.ConfigSchemaProvider` interface (defined in
+`pkg/engine/config_validation.go`). Conventions:
+
+- The schema lives at `plugins/<id>/schema.json` and is `//go:embed`-ed by a
+  small `schema.go` in the same package; the plugin's `ConfigSchema()` method
+  returns the embedded bytes.
+- Schemas declare `"$schema": "https://json-schema.org/draft/2020-12/schema"`
+  and **must** set `"additionalProperties": false` on every object level so
+  unknown keys are caught.
+- Mark deprecated keys with `"deprecated": true` (a sibling of `type`,
+  `description`, etc.). The validator walks the schema once and warns when a
+  deprecated key is present in the user's config.
+- The schema is canonical for the plugin's config map — what `Init()` actually
+  reads. Schema drift from real consumption is a bug; the smoke test in
+  `pkg/engine/configs_smoke_test.go` validates every shipped YAML against
+  every active plugin's schema and is the canary for that drift.
+
 ## Top-level structure
 
 ```yaml

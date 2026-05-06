@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.rag.hybrid.json",
+  "title": "nexus.rag.hybrid",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "fusion":          {"type": "string", "enum": ["rrf", "weighted"], "description": "Fusion strategy combining vector + lexical results."},
+    "rrf_k":           {"type": "number", "minimum": 0, "description": "RRF k constant (rank dampener)."},
+    "weights": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-source weights for the weighted fusion strategy.",
+      "properties": {
+        "vector":  {"type": "number", "minimum": 0},
+        "lexical": {"type": "number", "minimum": 0}
+      }
+    },
+    "retrieve_k":      {"type": "integer", "minimum": 1, "description": "Pre-fusion candidate count from each retriever."},
+    "fuse_to":         {"type": "integer", "minimum": 1, "description": "Final result count after fusion."},
+    "embedding_model": {"type": "string",  "description": "Embedding model used for the vector leg."},
+    "reranker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "description": "Run a search.reranker pass over the fused results."}
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.stop_words.json",
+  "title": "nexus.gate.stop_words",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "case_sensitive": {"type": "boolean", "description": "Match words case-sensitively."},
+    "message":        {"type": "string",  "description": "Message returned/logged on a match."},
+    "words": {
+      "description": "Inline word list; either []string or a single string.",
+      "oneOf": [
+        {"type": "array", "items": {"type": "string"}},
+        {"type": "string"}
+      ]
+    },
+    "word_files": {
+      "description": "One or more files containing one word per line.",
+      "oneOf": [
+        {"type": "array", "items": {"type": "string"}},
+        {"type": "string"}
+      ]
+    }
+  }
+}

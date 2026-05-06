@@ -155,6 +155,14 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		lm.plugins[i] = pluginMap[id]
 	}
 
+	// Validate config schemas before Init so typos and type errors surface
+	// before any plugin allocates resources or holds onto a partial
+	// configuration. Errors are aggregated across every plugin so operators
+	// fix every issue in one pass.
+	if err := validateConfigSchemas(lm.config, pluginMap, sortedIDs, lm.logger); err != nil {
+		return err
+	}
+
 	_ = lm.bus.Emit("core.boot", nil)
 
 	// Init phase.

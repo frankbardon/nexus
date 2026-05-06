@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.wails.json",
+  "title": "nexus.io.wails",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "subscribe": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Event types to forward from the bus to the Wails frontend."
+    },
+    "accept": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Event types accepted from the Wails frontend and forwarded onto the bus."
+    }
+  }
+}

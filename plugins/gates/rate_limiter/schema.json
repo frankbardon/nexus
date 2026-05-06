@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.rate_limiter.json",
+  "title": "nexus.gate.rate_limiter",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "requests_per_minute": {"type": "integer", "minimum": 1, "description": "Allowed LLM requests per window."},
+    "window_seconds":      {"type": "integer", "minimum": 1, "description": "Length of the rolling window in seconds."},
+    "pause_message":       {"type": "string",  "description": "Message logged when the limiter pauses dispatch."}
+  }
+}
