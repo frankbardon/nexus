@@ -22,6 +22,10 @@ export function GetIngestState(arg1) {
   return window['go']['desktop']['Shell']['GetIngestState'](arg1);
 }
 
+export function GetSessionEvent(arg1, arg2, arg3) {
+  return window['go']['desktop']['Shell']['GetSessionEvent'](arg1, arg2, arg3);
+}
+
 export function GetSettings() {
   return window['go']['desktop']['Shell']['GetSettings']();
 }
@@ -34,12 +38,20 @@ export function HasMissingRequired() {
   return window['go']['desktop']['Shell']['HasMissingRequired']();
 }
 
+export function InspectSession(arg1, arg2) {
+  return window['go']['desktop']['Shell']['InspectSession'](arg1, arg2);
+}
+
 export function ListAgents() {
   return window['go']['desktop']['Shell']['ListAgents']();
 }
 
 export function ListFiles(arg1, arg2) {
   return window['go']['desktop']['Shell']['ListFiles'](arg1, arg2);
+}
+
+export function ListSessionArchives(arg1, arg2) {
+  return window['go']['desktop']['Shell']['ListSessionArchives'](arg1, arg2);
 }
 
 export function ListSessions(arg1) {
@@ -74,8 +86,16 @@ export function RecallSession(arg1, arg2) {
   return window['go']['desktop']['Shell']['RecallSession'](arg1, arg2);
 }
 
+export function RestoreSession(arg1, arg2, arg3) {
+  return window['go']['desktop']['Shell']['RestoreSession'](arg1, arg2, arg3);
+}
+
 export function RevealInFinder(arg1) {
   return window['go']['desktop']['Shell']['RevealInFinder'](arg1);
+}
+
+export function RewindSession(arg1, arg2, arg3) {
+  return window['go']['desktop']['Shell']['RewindSession'](arg1, arg2, arg3);
 }
 
 export function StopAgent(arg1) {
