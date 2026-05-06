@@ -1416,14 +1416,47 @@ Tenant ceilings persist via app-scope SQLite (`~/.nexus/plugins/nexus.gate.token
 
 ### `nexus.gate.rate_limiter`
 
-Source: `plugins/gates/rate_limiter/plugin.go`. Pauses (re-emits via
-`gate.llm.retry` after a wait) rather than rejecting.
+Source: `plugins/gates/rate_limiter/plugin.go`. Vetoes `before:llm.request`
+when the per-window budget is exhausted; the agent's `gate.llm.retry`
+subscriber re-issues the request after the limiter signals the budget has
+freed up. The pre-Phase-3 `time.Sleep` behavior was removed in alpha — there
+is no compat shim.
 
-| Key                   | Type   | Default                                                     | Description |
-|-----------------------|--------|-------------------------------------------------------------|-------------|
-| `requests_per_minute` | int    | `60`                                                        | Requests allowed per `window_seconds`. |
-| `window_seconds`      | int    | `60`                                                        | Sliding window length. |
-| `pause_message`       | string | `Rate limit reached. Pausing for {seconds}s...`             | Output template; `{seconds}` is interpolated. |
+| Key                   | Type    | Default                                                     | Description |
+|-----------------------|---------|-------------------------------------------------------------|-------------|
+| `mode`                | string  | `reject`                                                    | `reject` (veto, schedule a single one-shot retry once the window ages out) or `queue` (buffer up to `queue.max_pending` retry slots; a drainer goroutine emits `gate.llm.retry` at the configured rate; excess is rejected outright). |
+| `requests_per_minute` | int     | `60`                                                        | Requests allowed per `window_seconds`. |
+| `window_seconds`      | int     | `60`                                                        | Sliding window length. |
+| `pause_message`       | string  | `Rate limit reached. Pausing for {seconds}s...`             | Output template; `{seconds}` is interpolated. |
+| `queue.max_pending`   | int     | `100`                                                       | Maximum buffered retry slots in `mode: queue`. Ignored in `reject` mode. |
+
+### `nexus.gate.tool_timeout`
+
+Source: `plugins/gates/tool_timeout/plugin.go`. Per-call deadline gate. On
+`tool.invoke` it starts a timer; on expiry it emits a `tool.timeout`
+observability event plus a synthetic `tool.result` carrying an error message
+that names the exact override key. A `before:tool.result` veto suppresses any
+late real result for the same call ID so the agent's `pendingToolCalls`
+counter stays consistent. Note: Go cancellation is cooperative — the original
+tool goroutine may keep running until it honors its own context. The gate's
+job is to unblock the agent, not preempt the tool.
+
+Per-tool override keys may be exact tool names (`web_fetch`) or
+[`path.Match`](https://pkg.go.dev/path#Match)-style globs (`mcp.*`).
+Resolution: an exact key wins; among glob matches the longest pattern wins;
+otherwise `default_timeout` applies.
+
+The synthetic error message format is fixed and intended to be read by
+operators:
+
+```
+tool <name> exceeded timeout <duration>; raise via gates.tool_timeout.per_tool.<name>: <duration>
+```
+
+| Key               | Type            | Default | Description |
+|-------------------|-----------------|---------|-------------|
+| `default_timeout` | duration string | `30s`   | Applied when no `per_tool` key matches. |
+| `per_tool`        | map[string]duration | `{}` | Per-tool overrides keyed by exact tool name or `path.Match` glob. |
 
 ### `nexus.gate.prompt_injection`
 
