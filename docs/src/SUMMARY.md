@@ -44,7 +44,6 @@
   - [File I/O](./plugins/tools/file.md)
   - [PDF Reader](./plugins/tools/pdf.md)
   - [File Opener](./plugins/tools/opener.md)
-  - [Ask User](./plugins/tools/ask.md)
   - [Code Exec (run_code)](./plugins/tools/code_exec.md)
   - [Knowledge Search](./plugins/tools/knowledge_search.md)
 - [Memory](./plugins/memory/index.md)
