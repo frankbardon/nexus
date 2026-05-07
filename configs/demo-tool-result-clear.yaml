@@ -1,0 +1,79 @@
+# Demo: tool-result clearing (Idea 30, layer 1).
+#
+# Aggressive thresholds make a single tool call followed by ONE additional
+# user turn enough to trigger clearing. Watch the `memory.tool_result_cleared`
+# event and the `<tool_result … cleared="true" …/>` envelope replacing the
+# original body in the next outgoing LLM request.
+#
+# Run:
+#   bin/nexus -config configs/demo-tool-result-clear.yaml
+#
+# Suggested transcript (two user messages):
+#   1. "List files in /tmp using shell"
+#        → ReAct calls `shell` with `ls /tmp` (or similar). Tool result body
+#          lands verbatim in history.
+#   2. "Switch topic — tell me a joke."
+#        → Second turn fires. tool_result_clear sees the prior tool result is
+#          1 turn old AND larger than 50 bytes; it replaces the body with the
+#          envelope marker before the request leaves the agent.
+#
+# Inspect the swap by tailing the session journal:
+#   tail -f ~/.nexus/sessions/<session-id>/journal/*.jsonl | grep -E \
+#       'memory\.tool_result_cleared|memory\.curated|tool\.result'
+#
+# Or enable info-level logging (already set below) and look for
+# "tool_result_clear" entries in the run output.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 7d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.memory.tool_result_clear
+    - nexus.tool.shell
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a demo assistant. When the user asks for files or directory
+      listings, use the shell tool. Keep responses short.
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 50
+    persist: true
+
+  # Aggressive thresholds — clear anything older than 1 turn + over 50 bytes.
+  # Production defaults are 5 turns / 1000 bytes; this config exists to make
+  # the layer easy to observe with a short transcript.
+  nexus.memory.tool_result_clear:
+    enabled: true
+    age_turns: 1
+    size_bytes_threshold: 50
+    preserve_recent_kinds: ["error"]
+    drop_strategy: replace_with_envelope
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, pwd, echo, head, wc, find]
+    timeout: 10s
