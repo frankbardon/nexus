@@ -145,6 +145,13 @@ func (s *SessionWorkspace) FilesDir() string {
 	return filepath.Join(s.RootDir, "files")
 }
 
+// BlobsDir returns the path to the per-session blobs subdirectory used by
+// pkg/engine/blobs. Lazily created by the blob store on first Put — no
+// directory is forced at session boot.
+func (s *SessionWorkspace) BlobsDir() string {
+	return filepath.Join(s.RootDir, "blobs")
+}
+
 // MetadataDir returns the path to the metadata subdirectory.
 func (s *SessionWorkspace) MetadataDir() string {
 	return filepath.Join(s.RootDir, "metadata")
