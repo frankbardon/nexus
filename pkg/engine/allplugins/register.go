@@ -20,6 +20,7 @@ import (
 	// IO plugins.
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
 	oneshotplugin "github.com/frankbardon/nexus/plugins/io/oneshot"
+	realtimeplugin "github.com/frankbardon/nexus/plugins/io/realtime"
 	testioplugin "github.com/frankbardon/nexus/plugins/io/test"
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
 	voiceplugin "github.com/frankbardon/nexus/plugins/io/voice"
@@ -138,6 +139,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
 	r.Register("nexus.io.browser", browserplugin.New)
+	r.Register("nexus.io.realtime", realtimeplugin.New)
 	r.Register("nexus.io.voice", voiceplugin.New)
 	r.Register("nexus.io.oneshot", oneshotplugin.New)
 	r.Register("nexus.io.test", testioplugin.New)
