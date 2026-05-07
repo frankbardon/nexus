@@ -286,6 +286,10 @@ Certain metadata keys carry special meaning:
 | `PromptTokens` | int | Input tokens consumed |
 | `CompletionTokens` | int | Output tokens generated |
 | `TotalTokens` | int | Total tokens |
+| `ReasoningTokens` | int | Thinking / reasoning tokens (Gemini 2.5 thoughtTokenCount, etc.) |
+| `CachedTokens` | int | Tokens served from a prompt cache |
+| `CacheWriteTokens` | int | Tokens written into a prompt cache |
+| `ModalityBreakdown` | map[string]int | Per-modality token counts when the provider reports them. Lowercase keys: `text`, `image`, `audio`, `video`, `document`. Empty when the provider does not split modalities (Anthropic) or the request was text-only. Cost-attribution consumers read this to bill image / audio turns separately. |
 
 **StreamChunk**
 | Field | Type | Description |

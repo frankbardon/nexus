@@ -703,6 +703,9 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		CachedTokens:     apiResp.Usage.PromptTokensDetails.CachedTokens,
 		ReasoningTokens:  apiResp.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
+	if mb := openaiModalityBreakdown(apiResp.Usage); len(mb) > 0 {
+		usage.ModalityBreakdown = mb
+	}
 
 	resp := events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: apiResp.Model,
 		Usage:   usage,
@@ -889,6 +892,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		TotalTokens:      usage.TotalTokens,
 		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
 		ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
+	}
+	if mb := openaiModalityBreakdown(usage); len(mb) > 0 {
+		finalUsage.ModalityBreakdown = mb
 	}
 
 	// Emit stream end.

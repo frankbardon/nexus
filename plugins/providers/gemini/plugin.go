@@ -673,11 +673,22 @@ type apiInlineData struct {
 }
 
 type apiUsageMetadata struct {
-	PromptTokenCount        int `json:"promptTokenCount"`
-	CandidatesTokenCount    int `json:"candidatesTokenCount"`
-	TotalTokenCount         int `json:"totalTokenCount"`
-	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
-	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	PromptTokenCount        int                 `json:"promptTokenCount"`
+	CandidatesTokenCount    int                 `json:"candidatesTokenCount"`
+	TotalTokenCount         int                 `json:"totalTokenCount"`
+	ThoughtsTokenCount      int                 `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int                 `json:"cachedContentTokenCount"`
+	PromptTokensDetails     []apiModalityDetail `json:"promptTokensDetails,omitempty"`
+	CandidatesTokensDetails []apiModalityDetail `json:"candidatesTokensDetails,omitempty"`
+	CacheTokensDetails      []apiModalityDetail `json:"cacheTokensDetails,omitempty"`
+}
+
+// apiModalityDetail mirrors Gemini's `{ modality, tokenCount }` entries inside
+// promptTokensDetails / candidatesTokensDetails. Modality is one of "TEXT",
+// "IMAGE", "AUDIO", "VIDEO", "DOCUMENT" per the API.
+type apiModalityDetail struct {
+	Modality   string `json:"modality"`
+	TokenCount int    `json:"tokenCount"`
 }
 
 func (p *Plugin) handleSyncResponse(body io.Reader) {
@@ -767,6 +778,9 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 		usage.TotalTokens = apiResp.UsageMetadata.TotalTokenCount
 		usage.ReasoningTokens = apiResp.UsageMetadata.ThoughtsTokenCount
 		usage.CachedTokens = apiResp.UsageMetadata.CachedContentTokenCount
+		if mb := geminiModalityBreakdown(apiResp.UsageMetadata); len(mb) > 0 {
+			usage.ModalityBreakdown = mb
+		}
 	}
 
 	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content.String(),
@@ -913,6 +927,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		TotalTokens:      totalUsage.TotalTokenCount,
 		ReasoningTokens:  totalUsage.ThoughtsTokenCount,
 		CachedTokens:     totalUsage.CachedContentTokenCount,
+	}
+	if mb := geminiModalityBreakdown(&totalUsage); len(mb) > 0 {
+		finalUsage.ModalityBreakdown = mb
 	}
 
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: turnID,
