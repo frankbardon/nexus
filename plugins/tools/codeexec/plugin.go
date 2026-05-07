@@ -19,6 +19,7 @@ import (
 	"github.com/traefik/yaegi/interp"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/blobs"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
 	"github.com/frankbardon/nexus/pkg/events"
 )
@@ -48,6 +49,12 @@ const (
 const (
 	defaultTimeout        = 30 * time.Second
 	defaultMaxOutputBytes = 64 * 1024
+
+	// Blob store knobs for nexus.ReturnImage. Mirror nexus.tool.file so
+	// scripts that emit images share the same routing behaviour as
+	// read_image / read_document / take_screenshot.
+	defaultBlobByteBudget      int64 = 2 * 1024 * 1024 * 1024
+	defaultBlobInlineThreshold int64 = 256 * 1024
 )
 
 // Plugin implements programmatic tool calling via an embedded Yaegi interpreter.
@@ -70,6 +77,13 @@ type Plugin struct {
 	allowedImports   map[string]bool
 	persistScripts   bool
 	rejectGoroutines bool
+
+	// blobStore backs nexus.ReturnImage when the script emits a payload
+	// larger than blobInlineCutoff. Created at Init when a session
+	// workspace is available; nil otherwise (script-emitted images then
+	// always inline regardless of size).
+	blobStore        *blobs.Store
+	blobInlineCutoff int64
 
 	// Registry of other tools — snapshot from tool.register events. Keyed by
 	// tool name. Used to generate typed bindings at run_code time.
@@ -174,6 +188,26 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		if len(out) > 0 {
 			p.allowedPackages = out
 		}
+	}
+
+	// Blob store wiring for nexus.ReturnImage. Same field shape as
+	// nexus.tool.file: blob_store.{byte_budget, inline_threshold}.
+	budget := defaultBlobByteBudget
+	p.blobInlineCutoff = defaultBlobInlineThreshold
+	if bs, ok := ctx.Config["blob_store"].(map[string]any); ok {
+		if v, ok := intLike(bs["byte_budget"]); ok {
+			budget = v
+		}
+		if v, ok := intLike(bs["inline_threshold"]); ok {
+			p.blobInlineCutoff = v
+		}
+	}
+	if p.session != nil {
+		store, err := blobs.New(p.session.BlobsDir(), budget)
+		if err != nil {
+			return fmt.Errorf("code_exec: blob store init: %w", err)
+		}
+		p.blobStore = store
 	}
 
 	p.rebuildAllowedImports()
@@ -287,6 +321,7 @@ func (p *Plugin) buildBindingsSection() string {
 	}
 
 	b.WriteString("\nAlways available: parallel.Map, parallel.ForEach, parallel.All.")
+	b.WriteString("\nMultimodal helper: import \"nexus\" for nexus.ReturnImage(data []byte, mimeType string) — attach images to the next LLM turn.")
 	return b.String()
 }
 
@@ -314,13 +349,29 @@ func (p *Plugin) Emissions() []string {
 }
 
 func (p *Plugin) rebuildAllowedImports() {
-	out := make(map[string]bool, len(p.allowedPackages)+2)
+	out := make(map[string]bool, len(p.allowedPackages)+3)
 	for _, s := range p.allowedPackages {
 		out[s] = true
 	}
 	out["tools"] = true
 	out["parallel"] = true
+	out["nexus"] = true
 	p.allowedImports = out
+}
+
+// intLike accepts the JSON-ish numeric kinds yaml.v3 unmarshals into and
+// returns an int64. Mirrors the helper in nexus.tool.file / screenshot /
+// web so blob_store config keys parse identically across plugins.
+func intLike(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 // -- event handlers ---------------------------------------------------------
@@ -457,13 +508,15 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 	}
 
 	stdout := newStreamingWriter(p.bus, tc.ID, tc.TurnID, p.maxOutputBytes)
+	imageBuf := &imageBuffer{}
 	// finish closes the stdout stream (flushing a Final chunk) and then emits
 	// code.exec.result / tool.result. Ordering matters: consumers expect
 	// code.exec.stdout{Final:true} to land before the result so they can
 	// mark the live-output section closed before showing the summary.
 	finish := func(result, errMsg string, durationMs int64) {
 		stdout.Close()
-		p.emitResult(tc, stdout.String(), result, errMsg, durationMs, stdout.Truncated())
+		parts := p.flushImageBuffer(imageBuf)
+		p.emitResultParts(tc, stdout.String(), result, errMsg, durationMs, stdout.Truncated(), parts)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
@@ -530,6 +583,10 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 	}
 	if err := i.Use(buildParallelExports(p.maxWorkers)); err != nil {
 		finish("", fmt.Sprintf("install parallel package: %v", err), 0)
+		return
+	}
+	if err := i.Use(buildNexusExports(imageBuf)); err != nil {
+		finish("", fmt.Sprintf("install nexus package: %v", err), 0)
 		return
 	}
 
@@ -695,11 +752,50 @@ func (p *Plugin) persist(tc events.ToolCall, script, stdout, result, errMsg stri
 	}
 }
 
-// emitResult sends code.exec.result + tool.result (with vetoable guard) back
-// to the agent. The Output of tool.result is a JSON document containing
-// stdout, the return value, and any error — giving the model a structured
-// surface to reason over.
-func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, durationMs int64, truncated bool) {
+// flushImageBuffer routes captured nexus.ReturnImage payloads through the
+// blob store using the shared inline / blob threshold pattern. Returns
+// the resulting MessageParts; nil when the buffer is empty.
+//
+// Failure to store a blob is logged and the corresponding image is
+// skipped — partial OutputParts (everything that did store) still ship,
+// rather than dropping the whole batch on a single transient error.
+func (p *Plugin) flushImageBuffer(buf *imageBuffer) []events.MessagePart {
+	if buf == nil {
+		return nil
+	}
+	images := buf.Snapshot()
+	if len(images) == 0 {
+		return nil
+	}
+	parts := make([]events.MessagePart, 0, len(images))
+	for _, img := range images {
+		part := events.MessagePart{Type: "image", MimeType: img.MimeType}
+		// When the blob store isn't available (no session workspace) we
+		// inline regardless of size — gives test harnesses a working
+		// path without forcing them to wire a session.
+		if p.blobStore == nil || int64(len(img.Data)) <= p.blobInlineCutoff {
+			part.Data = img.Data
+			parts = append(parts, part)
+			continue
+		}
+		h, err := p.blobStore.Put(img.Data, img.MimeType)
+		if err != nil {
+			p.logger.Warn("code_exec: blob store put failed", "error", err)
+			continue
+		}
+		if _, _, err := p.blobStore.Sweep(); err != nil {
+			p.logger.Warn("code_exec: blob store sweep failed", "error", err)
+		}
+		part.URI = h.URI()
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// emitResultParts is emitResult with multimodal MessagePart support
+// threaded through. The original emitResult delegates here with no
+// parts so existing callers stay byte-identical on the wire.
+func (p *Plugin) emitResultParts(tc events.ToolCall, stdout, result, errMsg string, durationMs int64, truncated bool, parts []events.MessagePart) {
 	if errMsg != "" && p.persistScripts && p.session != nil {
 		base := fmt.Sprintf("plugins/%s/%s", pluginID, tc.ID)
 		_ = p.session.WriteFile(base+"/error.txt", []byte(errMsg))
@@ -727,16 +823,24 @@ func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, d
 	out, _ := json.Marshal(envelope)
 
 	r := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
-		Name:   tc.Name,
-		Output: string(out),
-		Error:  errMsg,
-		TurnID: tc.TurnID,
+		Name:        tc.Name,
+		Output:      string(out),
+		Error:       errMsg,
+		OutputParts: parts,
+		TurnID:      tc.TurnID,
 	}
 	if veto, verr := p.bus.EmitVetoable("before:tool.result", &r); verr == nil && veto.Vetoed {
 		p.logger.Info("code_exec tool.result vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", r)
+}
+
+// emitResult is the back-compat wrapper for the parts-less path
+// (everything except runScript's host loop). Forwards to emitResultParts
+// with a nil OutputParts slice so existing callers stay byte-identical.
+func (p *Plugin) emitResult(tc events.ToolCall, stdout, result, errMsg string, durationMs int64, truncated bool) {
+	p.emitResultParts(tc, stdout, result, errMsg, durationMs, truncated, nil)
 }
 
 // runCodeShortDescription is the tool-schema description. Kept tight — the
@@ -791,6 +895,11 @@ Available imports:
     Use these to fan out independent work (tool calls or compute) instead of
     serializing — first error cancels the rest. Map returns any; cast to the
     typed slice: results.([]T).
+  - nexus: nexus.ReturnImage(data []byte, mimeType string) attaches an image
+    to the resulting tool_result (alongside main.Run's JSON return) so the
+    next LLM turn sees it. Multiple calls stack in script order. Useful for
+    scripts that render charts, fetch image bytes from a tool, or otherwise
+    need to surface visual content to the model.
   - skills/<skill_name>: helper functions shipped with currently-active skills.
 
 Forbidden: import "os", "net/*", "syscall", "unsafe", "reflect", "runtime";

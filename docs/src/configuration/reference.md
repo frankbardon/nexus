@@ -829,6 +829,13 @@ Two compilers selected via `compiler`:
   forfeits `tools.*`, `parallel.*`, and skill helpers — the bridge SDK
   does not surface them.
 
+Multimodal helper (host compiler only): scripts may
+`import "nexus"` and call `nexus.ReturnImage(data []byte, mimeType string)`
+to attach images to the resulting `tool.result` (alongside `main.Run`'s
+JSON return). Multiple calls stack in script order; the routing follows
+the same inline / blob-store threshold pattern used by other multimodal
+tools.
+
 | Key                 | Type   | Default                    | Description |
 |---------------------|--------|----------------------------|-------------|
 | `compiler`          | string | `yaegi-host`               | `yaegi-host` or `yaegi-wasm`. The latter requires `sandbox.backend: wasm`. |
@@ -838,6 +845,8 @@ Two compilers selected via `compiler`:
 | `persist_scripts`   | bool   | `true`                     | Write executed scripts to session files. |
 | `reject_goroutines` | bool   | `true`                     | Reject scripts that spawn goroutines. |
 | `allowed_packages`  | list   | *(stdlib whitelist)*       | Importable stdlib packages. |
+| `blob_store.byte_budget`     | int | `2147483648` (2 GiB) | Soft cap on total stored blob bytes per session for `nexus.ReturnImage` payloads. `0` = unbounded. |
+| `blob_store.inline_threshold`| int | `262144` (256 KiB)   | Payloads at or below this size are inlined on the `MessagePart` instead of being stored as a blob. |
 | `sandbox.backend`   | string | `host`                     | Required `wasm` for `compiler: yaegi-wasm`. Other backends (`host`) reject `KindGoWasm` requests. |
 | `sandbox.cache_dir` | string | *(none)*                   | Persistent wazero compilation cache. Recommended for fast cold-start across processes. |
 | `sandbox.timeout`   | duration | `30s`                    | Default per-call wasm timeout. |
