@@ -89,6 +89,7 @@
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
 - [Sandboxing](./security/sandboxing.md)
+- [Native Realtime API — deferred](./multimodal/native-realtime-deferred.md)
 
 # Eval Harness
 

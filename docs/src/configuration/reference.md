@@ -1374,6 +1374,16 @@ transcript output.
 Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file`
 > stdin.
 
+### Native Realtime API integration — deferred
+
+OpenAI Realtime and Gemini Multimodal Live are entire new wire protocols
+separate from the standard chat/generate endpoints. They are **not**
+part of the multimodal-foundation PR (#93) and are tracked as a
+follow-up under issue #91. Until they land, voice-mode use the
+ASR → LLM → TTS pipeline implemented in `plugins/io/voice/`. See
+[Native Realtime API integration — deferred](../multimodal/native-realtime-deferred.md)
+for the full rationale and follow-up scope.
+
 ---
 
 ## Observers
