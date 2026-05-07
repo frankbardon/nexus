@@ -52,6 +52,15 @@ const (
 // stub that writes a fixture PNG to outPath.
 type runFunc func(ctx context.Context, bin string, args []string, outPath string) error
 
+// platformCmdFunc is the seam tests use to bypass the per-platform PATH
+// probe. CI hosts (especially headless Linux runners) typically have none
+// of `screencapture`, `gnome-screenshot`, `grim`, or `import` installed,
+// so the production probe returns "no screenshot tool found" before the
+// stubbed runFunc gets a chance to write a fixture PNG. Tests inject a
+// platformCmdFunc that returns synthetic bin/args and lets runFunc do the
+// work.
+type platformCmdFunc func(outPath string) (bin string, args []string, err error)
+
 // Plugin implements the take_screenshot tool.
 type Plugin struct {
 	bus     engine.EventBus
@@ -68,6 +77,12 @@ type Plugin struct {
 	// be installed on the CI host.
 	run runFunc
 
+	// platformCmd resolves the per-OS screenshot binary + args. Production
+	// uses defaultPlatformCommand (PATH probe); tests inject a stub that
+	// returns a synthetic command so handleScreenshot reaches runFunc on
+	// CI hosts without any screenshot tool installed.
+	platformCmd platformCmdFunc
+
 	unsubs []func()
 
 	liveCalls atomic.Uint64
@@ -80,8 +95,9 @@ func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 // New returns a fresh screenshot plugin.
 func New() engine.Plugin {
 	return &Plugin{
-		timeout: defaultCaptureTimeout,
-		run:     execRun,
+		timeout:     defaultCaptureTimeout,
+		run:         execRun,
+		platformCmd: defaultPlatformCommand,
 	}
 }
 
@@ -99,6 +115,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.replay = ctx.Replay
 	if p.run == nil {
 		p.run = execRun
+	}
+	if p.platformCmd == nil {
+		p.platformCmd = defaultPlatformCommand
 	}
 
 	if ts, ok := ctx.Config["timeout"].(string); ok && ts != "" {
@@ -209,7 +228,7 @@ func (p *Plugin) handleScreenshot(tc events.ToolCall) {
 	defer os.RemoveAll(tmpDir)
 	outPath := filepath.Join(tmpDir, "screen.png")
 
-	bin, args, perr := p.platformCommand(outPath)
+	bin, args, perr := p.platformCmd(outPath)
 	if perr != nil {
 		p.emitResult(tc, "", perr.Error(), nil, nil)
 		return
@@ -262,11 +281,13 @@ func (p *Plugin) handleScreenshot(tc events.ToolCall) {
 	p.emitResult(tc, summary, "", structured, []events.MessagePart{part})
 }
 
-// platformCommand returns the binary + args to capture the full screen to
-// outPath as PNG, picking the first installed tool per platform. Returns
-// an unsupported-platform error when nothing is appropriate or no candidate
-// is on PATH.
-func (p *Plugin) platformCommand(outPath string) (string, []string, error) {
+// defaultPlatformCommand returns the binary + args to capture the full
+// screen to outPath as PNG, picking the first installed tool per platform.
+// Returns an unsupported-platform error when nothing is appropriate or no
+// candidate is on PATH. This is the production platformCmdFunc; tests
+// inject a stub instead so handleScreenshot can reach the runFunc on CI
+// hosts without any screenshot tool installed.
+func defaultPlatformCommand(outPath string) (string, []string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		bin, err := exec.LookPath("screencapture")

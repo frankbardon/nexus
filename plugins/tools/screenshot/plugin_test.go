@@ -66,6 +66,14 @@ func stubRun(payload []byte, fail error) runFunc {
 	}
 }
 
+// stubPlatformCmd is a platformCmdFunc that returns a synthetic command so
+// handleScreenshot proceeds to runFunc without probing PATH. The returned
+// bin / args are never executed (runFunc is also stubbed) but must
+// non-empty so the plugin's "no command resolved" guard passes.
+func stubPlatformCmd(_ string) (string, []string, error) {
+	return "stub-screenshot", []string{}, nil
+}
+
 // makePlugin spins up a screenshot plugin with the given inline cutoff and
 // stubbed exec runner. Returns the plugin and a busCapture for assertions.
 func makePlugin(t *testing.T, inlineCutoff int64, run runFunc) (*Plugin, *busCapture) {
@@ -82,6 +90,7 @@ func makePlugin(t *testing.T, inlineCutoff int64, run runFunc) (*Plugin, *busCap
 		blobInlineCutoff: inlineCutoff,
 		timeout:          5 * time.Second,
 		run:              run,
+		platformCmd:      stubPlatformCmd,
 	}
 	return p, bus
 }
@@ -152,9 +161,10 @@ func TestScreenshot_Blob(t *testing.T) {
 func TestScreenshot_NoBlobStore(t *testing.T) {
 	bus := newBusCapture(t)
 	p := &Plugin{
-		bus:     bus,
-		timeout: time.Second,
-		run:     stubRun(minPNG, nil),
+		bus:         bus,
+		timeout:     time.Second,
+		run:         stubRun(minPNG, nil),
+		platformCmd: stubPlatformCmd,
 	}
 	p.handleScreenshot(events.ToolCall{ID: "shot-3", Name: toolName})
 
