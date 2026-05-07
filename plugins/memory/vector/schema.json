@@ -13,6 +13,8 @@
     "auto_store_user_input": {"type": "boolean"},
     "section_priority":      {"type": "integer"},
     "recall_via_hybrid":     {"type": "boolean"},
+    "store_images":          {"type": "boolean", "description": "Embed image FileAttachments on user input via the multimodal embeddings.provider and store under image_namespace. Off by default."},
+    "image_namespace":       {"type": "string", "description": "Vector store namespace for image embeddings. Defaults to <namespace>-images."},
     "require_approval": {
       "type": "object",
       "additionalProperties": false,

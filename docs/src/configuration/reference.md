@@ -967,6 +967,8 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
 | `recall_via_hybrid`     | bool   | `false`                | When `search.hybrid` is active, route recall queries through it instead of direct vector lookup. Off by default — adds the lexical leg's latency to every user input. |
+| `store_images`          | bool   | `false`                | Embed image attachments on `UserInput.Files` (any `MimeType` starting with `image/`) via the multimodal `embeddings.provider` and store the resulting vector under `image_namespace`. Requires a multimodal adapter (e.g. `nexus.embeddings.cohere_multimodal`); text-only adapters will reject and the path no-ops. Off by default — opt-in. |
+| `image_namespace`       | string | `<namespace>-images`   | Vector store namespace for image embeddings. Kept separate from the text namespace so similarity queries can target one or the other. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
 | `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
