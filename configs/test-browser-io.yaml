@@ -1,0 +1,35 @@
+# Test: io/browser plugin boots successfully and emits io.session.start.
+# No actual browser is opened; the test exercises only the boot path.
+# Port 0 lets the OS assign a free port so the test never collides with
+# whatever else is listening on 8080.
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.browser
+
+  nexus.io.test:
+    inputs: []
+    timeout: 5s
+
+  nexus.io.browser:
+    host: 127.0.0.1
+    # Port 0 is rejected by schema; pick a high port unlikely to collide.
+    # Tests run sequentially (not in parallel within the integration tag),
+    # so a fixed port is acceptable.
+    port: 19181
+    open_browser: false
