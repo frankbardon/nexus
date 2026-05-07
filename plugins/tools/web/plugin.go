@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/blobs"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -28,6 +29,12 @@ const (
 	defaultMaxSize     = int64(5 * 1024 * 1024) // 5 MB
 	defaultSearchCount = 10
 	defaultExtractMode = "readability"
+
+	// fetch_page_image blob store knobs. Mirror nexus.tool.file defaults so
+	// page screenshots and document reads share predictable behaviour when
+	// both plugins are active.
+	defaultPageImageBlobBudget   int64 = 2 * 1024 * 1024 * 1024
+	defaultPageImageInlineCutoff int64 = 256 * 1024
 )
 
 // Plugin implements the web_search and web_fetch tools.
@@ -57,6 +64,14 @@ type Plugin struct {
 	blockedDomains  []string
 	followRedirects bool
 	maxRedirects    int
+
+	// fetch_page_image config — when pageImage is nil/unset, the tool
+	// short-circuits with an actionable error rather than silently
+	// no-oping. The blob store is created at Init when a session is
+	// available; same shape as nexus.tool.file / nexus.tool.screenshot.
+	pageImage        *pageImageProvider
+	blobStore        *blobs.Store
+	blobInlineCutoff int64
 }
 
 // New returns a fresh web tool plugin.
@@ -96,6 +111,34 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	if err := p.loadConfig(ctx.Config); err != nil {
 		return err
+	}
+
+	// Optional fetch_page_image provider. Absence means the tool will
+	// surface a clear "not configured" error at invoke time.
+	provider, err := loadPageImageProviderConfig(ctx.Config)
+	if err != nil {
+		return err
+	}
+	p.pageImage = provider
+
+	// Per-session blob store, shared across web tools that need to attach
+	// binary payloads (currently only fetch_page_image).
+	budget := defaultPageImageBlobBudget
+	p.blobInlineCutoff = defaultPageImageInlineCutoff
+	if bs, ok := ctx.Config["blob_store"].(map[string]any); ok {
+		if v, ok := intLike(bs["byte_budget"]); ok {
+			budget = v
+		}
+		if v, ok := intLike(bs["inline_threshold"]); ok {
+			p.blobInlineCutoff = v
+		}
+	}
+	if p.session != nil {
+		store, err := blobs.New(p.session.BlobsDir(), budget)
+		if err != nil {
+			return fmt.Errorf("web: blob store init: %w", err)
+		}
+		p.blobStore = store
 	}
 
 	p.client = &http.Client{
@@ -178,6 +221,33 @@ func (p *Plugin) Ready() error {
 		},
 	})
 
+	_ = p.bus.Emit("tool.register", events.ToolDef{
+		Name:        "fetch_page_image",
+		Description: "Capture a rendered web page as a PNG screenshot and attach it to the next LLM turn as multimodal content. Use when the agent needs to see a page's actual layout (charts, dashboards, image-heavy pages, JS-rendered apps) rather than its text. Requires an external screenshot provider configured via plugin settings.",
+		Class:       "research",
+		Subclass:    "fetch",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url": map[string]any{
+					"type":        "string",
+					"description": "Absolute http(s) URL to capture.",
+				},
+			},
+			"required": []string{"url"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"url":        map[string]any{"type": "string"},
+				"media_type": map[string]any{"type": "string"},
+				"size":       map[string]any{"type": "integer"},
+				"blob_uri":   map[string]any{"type": "string", "description": "nexus-blob:<sha256> reference when stored as a blob; empty when inlined."},
+			},
+			"required": []string{"url", "media_type", "size"},
+		},
+	})
+
 	return nil
 }
 
@@ -212,7 +282,9 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 	if !ok {
 		return
 	}
-	if tc.Name != "web_search" && tc.Name != "web_fetch" {
+	switch tc.Name {
+	case "web_search", "web_fetch", "fetch_page_image":
+	default:
 		return
 	}
 	if engine.ReplayToolShortCircuit(p.replay, p.bus, tc, p.logger) {
@@ -224,6 +296,8 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 		p.handleSearch(tc)
 	case "web_fetch":
 		p.handleFetch(tc)
+	case "fetch_page_image":
+		p.handleFetchPageImage(tc)
 	}
 }
 
@@ -310,6 +384,21 @@ func toInt(v any) (int, bool) {
 		return int(n), true
 	case float64:
 		return int(n), true
+	}
+	return 0, false
+}
+
+// intLike accepts the JSON-ish numeric kinds yaml.v3 unmarshals into and
+// returns an int64. Mirrors the helper in nexus.tool.file / screenshot so
+// blob_store.byte_budget configs parse identically across plugins.
+func intLike(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
 	}
 	return 0, false
 }

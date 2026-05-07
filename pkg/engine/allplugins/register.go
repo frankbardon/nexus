@@ -20,8 +20,10 @@ import (
 	// IO plugins.
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
 	oneshotplugin "github.com/frankbardon/nexus/plugins/io/oneshot"
+	realtimeplugin "github.com/frankbardon/nexus/plugins/io/realtime"
 	testioplugin "github.com/frankbardon/nexus/plugins/io/test"
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
+	voiceplugin "github.com/frankbardon/nexus/plugins/io/voice"
 
 	// LLM coordination plugins.
 	batchplugin "github.com/frankbardon/nexus/plugins/llm/batch"
@@ -60,6 +62,7 @@ import (
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
 	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
+	coheremultimodalembeddings "github.com/frankbardon/nexus/plugins/embeddings/cohere_multimodal"
 	mockembeddings "github.com/frankbardon/nexus/plugins/embeddings/mock"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 
@@ -97,6 +100,7 @@ import (
 	knowledgesearchplugin "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
+	screenshotplugin "github.com/frankbardon/nexus/plugins/tools/screenshot"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
@@ -136,6 +140,8 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
 	r.Register("nexus.io.browser", browserplugin.New)
+	r.Register("nexus.io.realtime", realtimeplugin.New)
+	r.Register("nexus.io.voice", voiceplugin.New)
 	r.Register("nexus.io.oneshot", oneshotplugin.New)
 	r.Register("nexus.io.test", testioplugin.New)
 
@@ -180,6 +186,10 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Embeddings providers (capability: embeddings.provider)
 	r.Register("nexus.embeddings.openai", openaiembeddings.New)
 	r.Register("nexus.embeddings.mock", mockembeddings.New)
+	// Multimodal (text + image) Cohere Embed v3 adapter. Opt-in: not in
+	// the default plugins.active list; users wire it explicitly when they
+	// want image embedding support.
+	r.Register("nexus.embeddings.cohere_multimodal", coheremultimodalembeddings.New)
 
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)
@@ -213,6 +223,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.file", fileio.New)
 	r.Register("nexus.tool.catalog", catalogplugin.New)
 	r.Register("nexus.tool.pdf", pdfplugin.New)
+	r.Register("nexus.tool.screenshot", screenshotplugin.New)
 	r.Register("nexus.tool.opener", openerplugin.New)
 	r.Register("nexus.control.hitl", hitlplugin.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)

@@ -180,6 +180,21 @@ type Usage struct {
 	ReasoningTokens  int // thinking/reasoning tokens (Gemini 2.5 thoughtTokenCount, etc.)
 	CachedTokens     int // tokens served from a prompt cache (billed at a discount)
 	CacheWriteTokens int // tokens written into a prompt cache (billed at a premium over plain input)
+
+	// ModalityBreakdown carries per-modality token counts when the provider
+	// exposes them. Keys are stable lowercase modality identifiers
+	// ("text", "image", "audio", "video", "document"); each key value is the
+	// number of tokens the provider attributed to that modality across the
+	// turn (input + output combined when a provider does not split them).
+	//
+	// Empty when the provider does not report modality breakdowns
+	// (Anthropic rolls image / document tokens into input_tokens) or when the
+	// request was text-only.
+	//
+	// Cost-attribution consumers (cost CLI, multi-dim budget gate) read this
+	// to bill image / audio turns separately from text. Additive map; new
+	// modality keys can be introduced without an LLMResponse schema bump.
+	ModalityBreakdown map[string]int
 }
 
 // StreamChunk is a single chunk from a streaming LLM response.

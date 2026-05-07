@@ -40,6 +40,36 @@ func TestAppendMessages(t *testing.T) {
 	}
 }
 
+// TestToolResultParts_CarriedToMessage verifies that ToolResult.OutputParts
+// (the multimodal carrier) are copied onto the resulting tool-role
+// Message.Parts so the next LLM request includes the multimodal content.
+func TestToolResultParts_CarriedToMessage(t *testing.T) {
+	p := New().(*Plugin)
+	p.logger = slog.Default()
+
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tm-1",
+		Name:   "read_image",
+		Output: "Loaded image diagram.png",
+		OutputParts: []events.MessagePart{
+			{Type: "image", MimeType: "image/png", URI: "nexus-blob:abc123"},
+		},
+	}})
+
+	msgs := p.GetHistory()
+	if len(msgs) != 1 {
+		t.Fatalf("len(history) = %d, want 1", len(msgs))
+	}
+	if got := len(msgs[0].Parts); got != 1 {
+		t.Fatalf("Message.Parts len = %d, want 1", got)
+	}
+	if msgs[0].Parts[0].URI != "nexus-blob:abc123" {
+		t.Errorf("Parts[0].URI = %q, want nexus-blob:abc123", msgs[0].Parts[0].URI)
+	}
+	if msgs[0].Parts[0].Type != "image" {
+		t.Errorf("Parts[0].Type = %q, want image", msgs[0].Parts[0].Type)
+	}
+}
+
 // TestInternalCallsFiltered proves that tool results for ParentCallID-flagged
 // calls never reach history. Same invariant as the capped plugin.
 func TestInternalCallsFiltered(t *testing.T) {

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.voice.json",
+  "title": "nexus.io.voice",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "asr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "ASR provider id. Only 'openai_whisper' is wired in this PR; local-model providers (local_whisper, faster_whisper, distil_whisper) are accepted by the schema but rejected at Init pending #92."
+        },
+        "api_key_env": {"type": "string", "description": "Env var that holds the API key. Default OPENAI_API_KEY."},
+        "api_key":     {"type": "string", "description": "Inline API key. Overrides api_key_env when set."},
+        "model":       {"type": "string", "description": "Whisper model id. Default whisper-1."},
+        "endpoint":    {"type": "string", "description": "Override URL for the transcription endpoint (test injection)."}
+      }
+    },
+    "tts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider":    {"type": "string", "description": "TTS provider id. Only 'openai' is wired in this PR; local-model providers (kokoro, local_*, *_local) are accepted by the schema but rejected at Init pending #92."},
+        "api_key_env": {"type": "string", "description": "Env var that holds the API key. Default OPENAI_API_KEY."},
+        "api_key":     {"type": "string", "description": "Inline API key. Overrides api_key_env when set."},
+        "model":       {"type": "string", "description": "TTS model id. Default tts-1."},
+        "voice":       {"type": "string", "description": "Voice preset id. Default alloy."},
+        "streaming":   {"type": "boolean", "description": "Always true in v1; reserved for future non-streaming mode."},
+        "endpoint":    {"type": "string", "description": "Override URL for the speech endpoint (test injection)."},
+        "chunk_bytes": {"type": "integer", "description": "Frame size in bytes for emitted output chunks. Default 8192."}
+      }
+    },
+    "vad": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold":  {"type": "number",  "description": "RMS energy threshold (normalized 0..1) above which the buffer is considered speech. Default 0.02."},
+        "silence_ms": {"type": "integer", "description": "Milliseconds of below-threshold audio that triggers an utterance flush. Default 600."}
+      }
+    },
+    "barge_in": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":   {"type": "boolean", "description": "Cancel an in-flight TTS turn when new speech is detected. Default true."},
+        "threshold": {"type": "number",  "description": "RMS threshold above which an incoming chunk is treated as barge-in. Default 0.02."}
+      }
+    },
+    "text_fallback": {"type": "boolean", "description": "Allow io.input from non-voice transports to flow through unchanged. Default true."}
+  }
+}

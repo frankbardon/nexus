@@ -670,13 +670,23 @@ deprecated; removal targeted for the milestone after gVisor lands.
 ### `nexus.tool.file`
 
 Source: `plugins/tools/fileio/plugin.go`. Registers `read_file`, `write_file`,
-`check_file_size`, `list_files`.
+`check_file_size`, `list_files`, `read_image`, `read_document`.
 
-| Key                     | Type | Default                 | Description |
-|-------------------------|------|-------------------------|-------------|
-| `base_dir`              | string | *(session files dir)* | Base directory for file operations. |
-| `allow_external_writes` | bool   | `false`               | Permit reads/writes outside `base_dir`. |
-| `tools.<tool_name>`     | bool   | `true` for each       | Per-tool enable/disable: `read_file`, `write_file`, `check_file_size`, `list_files`. |
+`read_image` and `read_document` return a `MessagePart` on
+`ToolResult.OutputParts`; the memory plugin copies parts onto the resulting
+tool-role `Message.Parts` so the next LLM request sees the multimodal
+content. Provider plugins resolve `MessagePart.URI = "nexus-blob:<sha>"`
+references from the per-session blob store at `~/.nexus/sessions/<id>/blobs/`
+when the payload was stored, or use the inline `MessagePart.Data` when it
+was inlined.
+
+| Key                          | Type   | Default                 | Description |
+|------------------------------|--------|-------------------------|-------------|
+| `base_dir`                   | string | *(session files dir)* | Base directory for file operations. |
+| `allow_external_writes`      | bool   | `false`               | Permit reads/writes outside `base_dir`. |
+| `blob_store.byte_budget`     | int    | `2147483648` (2 GiB)  | Soft cap on total stored blob bytes per session. `0` = unbounded. Applied via LRU sweep after each blob put. |
+| `blob_store.inline_threshold`| int    | `262144` (256 KiB)    | Payloads at or below this size are inlined on the `MessagePart` instead of being stored as a blob. |
+| `tools.<tool_name>`          | bool   | `true` for each       | Per-tool enable/disable: `read_file`, `write_file`, `check_file_size`, `list_files`, `read_image`, `read_document`. |
 
 ### `nexus.tool.catalog`
 
@@ -686,22 +696,32 @@ Source: `plugins/tools/catalog/plugin.go`. **No configuration.** Provides the
 
 ### `nexus.tool.web`
 
-Source: `plugins/tools/web/plugin.go`. Registers `web_search` and `web_fetch`.
-Requires the `search.provider` capability for `web_search`.
+Source: `plugins/tools/web/plugin.go`. Registers `web_search`, `web_fetch`,
+and `fetch_page_image`. Requires the `search.provider` capability for
+`web_search`. `fetch_page_image` requires `screenshot_provider` config —
+without it, the tool surfaces a clear error at invoke time.
 
-| Key                          | Type     | Default                                | Description |
-|------------------------------|----------|----------------------------------------|-------------|
-| `search.default_count`       | int      | `10`                                   | Default result count for `web_search`. |
-| `search.default_safe_search` | string   | `moderate`                             | `off`, `moderate`, `strict`. |
-| `search.default_language`    | string   | *(none)*                               | BCP-47 language tag (e.g. `en`, `es-MX`). |
-| `fetch.user_agent`           | string   | `Nexus/0.1 (+https://...)`             | User-Agent header for `web_fetch`. |
-| `fetch.timeout`              | duration | `20s`                                  | HTTP timeout. |
-| `fetch.max_size`             | int      | `5242880` (5 MB)                       | Maximum response body size. |
-| `fetch.default_extract`      | string   | `readability`                          | `readability` or `raw`. |
-| `fetch.allowed_domains`      | list     | *(none — allow all)*                   | Allowlist of domains. |
-| `fetch.blocked_domains`      | list     | *(none)*                               | Blocklist of domains. |
-| `fetch.follow_redirects`     | bool     | `true`                                 | Follow HTTP redirects. |
-| `fetch.max_redirects`        | int      | `5`                                    | Maximum redirect chain length. |
+| Key                              | Type     | Default                                | Description |
+|----------------------------------|----------|----------------------------------------|-------------|
+| `search.default_count`           | int      | `10`                                   | Default result count for `web_search`. |
+| `search.default_safe_search`     | string   | `moderate`                             | `off`, `moderate`, `strict`. |
+| `search.default_language`        | string   | *(none)*                               | BCP-47 language tag (e.g. `en`, `es-MX`). |
+| `fetch.user_agent`               | string   | `Nexus/0.1 (+https://...)`             | User-Agent header for `web_fetch`. |
+| `fetch.timeout`                  | duration | `20s`                                  | HTTP timeout. |
+| `fetch.max_size`                 | int      | `5242880` (5 MB)                       | Maximum response body size. |
+| `fetch.default_extract`          | string   | `readability`                          | `readability` or `raw`. |
+| `fetch.allowed_domains`          | list     | *(none — allow all)*                   | Allowlist of domains. |
+| `fetch.blocked_domains`          | list     | *(none)*                               | Blocklist of domains. |
+| `fetch.follow_redirects`         | bool     | `true`                                 | Follow HTTP redirects. |
+| `fetch.max_redirects`            | int      | `5`                                    | Maximum redirect chain length. |
+| `screenshot_provider.url`        | string   | *(required for `fetch_page_image`)*    | Endpoint of the external screenshot service (urlbox, screenshotapi.net, browserless, …). |
+| `screenshot_provider.method`     | string   | `POST`                                 | `GET` or `POST`. |
+| `screenshot_provider.api_key_env`| string   | *(none)*                               | Env var holding the bearer token / API key. POST sends `Authorization: Bearer <key>`; GET appends `api_key=<key>` to the query. |
+| `screenshot_provider.url_param_name` | string | `url`                              | Field name carrying the target URL. |
+| `screenshot_provider.request_template` | map | *(empty)*                          | Extra fields merged into the JSON body (POST) or query string (GET). |
+| `screenshot_provider.headers`    | map      | *(empty)*                              | Fixed headers sent with every provider request. |
+| `blob_store.byte_budget`         | int      | `2147483648` (2 GiB)                   | Soft cap on total stored blob bytes per session for `fetch_page_image`. `0` = unbounded. |
+| `blob_store.inline_threshold`    | int      | `262144` (256 KiB)                     | Payloads at or below this size are inlined on the `MessagePart` instead of stored as a blob. |
 
 ### `nexus.tool.knowledge_search`
 
@@ -719,8 +739,18 @@ Source: `plugins/tools/knowledge_search/plugin.go`. Requires
 
 ### `nexus.tool.pdf`
 
-Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
-`pdftotext` (poppler-utils) on `PATH`.
+Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Two modes
+selectable per call via `mode` argument or `default_mode` config:
+
+- `text` (default) — extract text via `pdftotext` (poppler-utils).
+  Requires `pdftotext` on `PATH` (or `pdftotext_bin` config).
+- `document` — return the raw PDF bytes as a `file` `MessagePart` on
+  `ToolResult.OutputParts` for native multimodal providers (Anthropic,
+  Gemini). No poppler call. `first_page`, `last_page`, and `layout`
+  arguments are ignored in this mode.
+
+If `default_mode` is `document` and `pdftotext` is missing, the plugin
+boots; text mode then surfaces an actionable error per call.
 
 | Key               | Type     | Default                | Description |
 |-------------------|----------|------------------------|-------------|
@@ -729,6 +759,24 @@ Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
 | `timeout`         | duration | `30s`                  | Per-extraction timeout. |
 | `save_to_session` | bool     | `false`                | Persist extracted text to session files. |
 | `save_file_name`  | string   | *(derived from PDF)*   | Custom filename for the saved text. |
+| `default_mode`    | string   | `text`                 | `text` or `document`. Default `read_pdf` mode when the LLM doesn't supply one. |
+
+### `nexus.tool.screenshot`
+
+Source: `plugins/tools/screenshot/plugin.go`. Registers `take_screenshot`.
+Captures the full screen as PNG and emits an `image` `MessagePart` on
+`ToolResult.OutputParts`. Capture path is platform-specific:
+
+- `darwin`: `screencapture -t png -x <tmpfile>`
+- `linux`: `gnome-screenshot -f <tmpfile>`, then `grim <tmpfile>`, then
+  ImageMagick's `import -window root <tmpfile>` as fallbacks
+- other platforms: emits `ToolResult.Error: "screenshot not supported on this platform"`
+
+| Key                          | Type     | Default               | Description |
+|------------------------------|----------|-----------------------|-------------|
+| `timeout`                    | duration | `15s`                 | Per-capture subprocess timeout. |
+| `blob_store.byte_budget`     | int      | `2147483648` (2 GiB)  | Soft cap on total stored blob bytes per session. `0` = unbounded. |
+| `blob_store.inline_threshold`| int      | `262144` (256 KiB)    | Payloads at or below this size are inlined on the `MessagePart` instead of stored as a blob. |
 
 ### `nexus.tool.opener`
 
@@ -792,6 +840,13 @@ Two compilers selected via `compiler`:
   forfeits `tools.*`, `parallel.*`, and skill helpers — the bridge SDK
   does not surface them.
 
+Multimodal helper (host compiler only): scripts may
+`import "nexus"` and call `nexus.ReturnImage(data []byte, mimeType string)`
+to attach images to the resulting `tool.result` (alongside `main.Run`'s
+JSON return). Multiple calls stack in script order; the routing follows
+the same inline / blob-store threshold pattern used by other multimodal
+tools.
+
 | Key                 | Type   | Default                    | Description |
 |---------------------|--------|----------------------------|-------------|
 | `compiler`          | string | `yaegi-host`               | `yaegi-host` or `yaegi-wasm`. The latter requires `sandbox.backend: wasm`. |
@@ -801,6 +856,8 @@ Two compilers selected via `compiler`:
 | `persist_scripts`   | bool   | `true`                     | Write executed scripts to session files. |
 | `reject_goroutines` | bool   | `true`                     | Reject scripts that spawn goroutines. |
 | `allowed_packages`  | list   | *(stdlib whitelist)*       | Importable stdlib packages. |
+| `blob_store.byte_budget`     | int | `2147483648` (2 GiB) | Soft cap on total stored blob bytes per session for `nexus.ReturnImage` payloads. `0` = unbounded. |
+| `blob_store.inline_threshold`| int | `262144` (256 KiB)   | Payloads at or below this size are inlined on the `MessagePart` instead of being stored as a blob. |
 | `sandbox.backend`   | string | `host`                     | Required `wasm` for `compiler: yaegi-wasm`. Other backends (`host`) reject `KindGoWasm` requests. |
 | `sandbox.cache_dir` | string | *(none)*                   | Persistent wazero compilation cache. Recommended for fast cold-start across processes. |
 | `sandbox.timeout`   | duration | `30s`                    | Default per-call wasm timeout. |
@@ -910,6 +967,8 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
 | `recall_via_hybrid`     | bool   | `false`                | When `search.hybrid` is active, route recall queries through it instead of direct vector lookup. Off by default — adds the lexical leg's latency to every user input. |
+| `store_images`          | bool   | `false`                | Embed image attachments on `UserInput.Files` (any `MimeType` starting with `image/`) via the multimodal `embeddings.provider` and store the resulting vector under `image_namespace`. Requires a multimodal adapter (e.g. `nexus.embeddings.cohere_multimodal`); text-only adapters will reject and the path no-ops. Off by default — opt-in. |
+| `image_namespace`       | string | `<namespace>-images`   | Vector store namespace for image embeddings. Kept separate from the text namespace so similarity queries can target one or the other. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
 | `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
@@ -1004,6 +1063,30 @@ Deterministic hash-based vectors; opt-in via `plugins.active`.
 |--------------|--------|------------------|-------------|
 | `dimensions` | int    | `128`            | Vector dimensionality. |
 | `model`      | string | `mock-embedding` | Model ID string returned to callers. |
+
+### `nexus.embeddings.cohere_multimodal`
+
+Source: `plugins/embeddings/cohere_multimodal/plugin.go`. Provides
+`embeddings.provider` via Cohere Embed v3 (`POST /v2/embed`). Multimodal:
+accepts text and image inputs in a single batch through
+`EmbeddingsRequest.Inputs`. Opt-in: registered but **not** in the default
+`plugins.active` list — wire it explicitly when image embeddings are
+required (e.g. `nexus.memory.vector` with `store_images: true`).
+
+For an `EmbeddingsInput` carrying `ImageURI` with the `nexus-blob:`
+scheme, the plugin resolves bytes via the per-session blob store. When
+the engine boots without a session (rare, mostly tests), the plugin
+errors clearly — callers must inline bytes via `EmbeddingsInput.Image`
+instead.
+
+| Key            | Type     | Default                       | Description |
+|----------------|----------|-------------------------------|-------------|
+| `api_key`      | string   | *(required, or via env)*      | Cohere API key. |
+| `api_key_env`  | string   | `COHERE_API_KEY`              | Override env var name. |
+| `base_url`     | string   | `https://api.cohere.com`      | Cohere API base URL. The plugin appends `/v2/embed` itself. |
+| `model`        | string   | `embed-english-v3.0`          | Cohere embedding model. |
+| `input_type`   | string   | `search_document`             | Cohere `input_type` (e.g. `search_document`, `search_query`, `classification`, `clustering`, `image`). |
+| `timeout`      | duration | `30s`                         | HTTP timeout. |
 
 ---
 
@@ -1182,6 +1265,73 @@ Source: `plugins/io/browser/plugin.go`.
 | `port`         | int    | `8080`      | HTTP listen port. |
 | `open_browser` | bool   | `true`      | Auto-open the browser tab on startup (no-op when the OS lacks an opener). |
 
+### `nexus.io.realtime`
+
+Source: `plugins/io/realtime/plugin.go`. WebSocket bidirectional transport
+for low-latency clients (browser front-ends, native voice clients) that
+want raw `stream.delta` deltas, tool previews, voice audio chunks, and
+cancel envelopes without going through the `nexus.io.browser` UI hub.
+
+| Key            | Type   | Default  | Description |
+|----------------|--------|----------|-------------|
+| `listen_addr`  | string | `:7676`  | TCP address the WebSocket server binds to. |
+| `path`         | string | `/ws`    | URL path the WebSocket handler is mounted at. |
+| `max_clients`  | int    | `16`     | Concurrent connection cap. New dials past the cap receive HTTP 503. |
+
+**Outbound envelopes** (server → client, JSON): `stream.delta`, `stream.end`,
+`tool.preview`, `audio.chunk`, `cancel.complete`, `hitl.request`.
+
+**Inbound envelopes** (client → server, JSON): `input`, `audio.chunk`,
+`cancel`, `approval`.
+
+**No auth in v1.** Origin checks and bearer-token validation are tracked
+follow-ups; operators running this on a public network must front it
+with a reverse proxy that does its own authentication.
+
+### `nexus.io.voice`
+
+Source: `plugins/io/voice/plugin.go`. Bus-driven voice IO bridge:
+consumes `voice.audio.input.chunk` events (typically from
+`nexus.io.realtime`), runs simple energy-based VAD plus ASR via the
+OpenAI Whisper API, and emits `io.input`. Consumes `llm.response`,
+runs TTS via the OpenAI `/audio/speech` endpoint, and emits
+`voice.audio.output.chunk` frames back. Implements barge-in: a
+speech-energy input chunk arriving while a TTS turn is in flight emits
+`cancel.request{Source: "voice"}`.
+
+Local-model providers (`local_whisper`, `faster_whisper`,
+`distil_whisper` for ASR; `kokoro`, `local_*`, `*_local` for TTS) are
+recognized by the schema but rejected at `Init` with a clear error
+pointing at issue #92, where the local-model bootstrapping work is
+tracked separately.
+
+| Key                  | Type    | Default            | Description |
+|----------------------|---------|--------------------|-------------|
+| `asr.provider`       | string  | `openai_whisper`   | Only `openai_whisper` is wired in this PR. Local-model values rejected pending #92. |
+| `asr.api_key_env`    | string  | `OPENAI_API_KEY`   | Env var that holds the API key. |
+| `asr.api_key`        | string  | *(none)*           | Inline API key. Overrides `api_key_env`. |
+| `asr.model`          | string  | `whisper-1`        | Whisper model id. |
+| `asr.endpoint`       | string  | OpenAI default     | Override URL for the transcription endpoint (test injection). |
+| `tts.provider`       | string  | `openai`           | Only `openai` is wired in this PR. Local-model values rejected pending #92. |
+| `tts.api_key_env`    | string  | `OPENAI_API_KEY`   | Env var that holds the API key. |
+| `tts.api_key`        | string  | *(none)*           | Inline API key. Overrides `api_key_env`. |
+| `tts.model`          | string  | `tts-1`            | TTS model id. |
+| `tts.voice`          | string  | `alloy`            | Voice preset id. |
+| `tts.streaming`      | bool    | `true`             | Always true in v1; reserved for future non-streaming mode. |
+| `tts.endpoint`       | string  | OpenAI default     | Override URL for the speech endpoint (test injection). |
+| `tts.chunk_bytes`    | int     | `8192`             | Frame size in bytes for emitted output chunks. |
+| `vad.threshold`      | number  | `0.02`             | RMS energy threshold (normalized 0..1) above which the buffer is considered speech. |
+| `vad.silence_ms`     | integer | `600`              | Milliseconds of below-threshold audio that triggers an utterance flush. |
+| `barge_in.enabled`   | bool    | `true`             | Cancel an in-flight TTS turn when new speech is detected. |
+| `barge_in.threshold` | number  | `vad.threshold`    | RMS threshold above which an incoming chunk is treated as barge-in. |
+| `text_fallback`      | bool    | `true`             | Allow `io.input` from non-voice transports to flow through unchanged. |
+
+VAD energy is computed as RMS over little-endian PCM int16 samples for
+`audio/wav` / `audio/pcm` / `audio/l16`. For compressed containers
+(webm/opus, mpeg/mp3) the bytes are not PCM and we fall back to a
+byte-level energy heuristic until a proper decode is added — flagged
+with a `TODO(#91)` in `plugins/io/voice/vad.go`.
+
 ### `nexus.io.test`
 
 Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
@@ -1223,6 +1373,16 @@ transcript output.
 
 Prompt resolution precedence: `NEXUS_ONESHOT_PROMPT` env > `input` > `input_file`
 > stdin.
+
+### Native Realtime API integration — deferred
+
+OpenAI Realtime and Gemini Multimodal Live are entire new wire protocols
+separate from the standard chat/generate endpoints. They are **not**
+part of the multimodal-foundation PR (#93) and are tracked as a
+follow-up under issue #91. Until they land, voice-mode use the
+ASR → LLM → TTS pipeline implemented in `plugins/io/voice/`. See
+[Native Realtime API integration — deferred](../multimodal/native-realtime-deferred.md)
+for the full rationale and follow-up scope.
 
 ---
 

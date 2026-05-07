@@ -35,7 +35,14 @@ type Plugin struct {
 	timeout       time.Duration // per-command timeout
 	saveToSession bool          // persist extracted text to session files
 	saveFileName  string        // custom filename for session save (default: derived from PDF name)
-	unsubs        []func()
+
+	// defaultMode chooses between text extraction and native-document
+	// pass-through when the LLM doesn't supply a `mode` argument.
+	// Values: "text" (default — current behaviour, runs pdftotext) or
+	// "document" (returns the raw PDF bytes as a file MessagePart).
+	defaultMode string
+
+	unsubs []func()
 
 	liveCalls atomic.Uint64
 }
@@ -46,9 +53,18 @@ func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 
 func New() engine.Plugin {
 	return &Plugin{
-		timeout: 30 * time.Second,
+		timeout:     30 * time.Second,
+		defaultMode: modeText,
 	}
 }
+
+// Modes for read_pdf. modeText runs pdftotext like before; modeDocument
+// returns the raw PDF bytes as a file MessagePart so multimodal-capable
+// providers (Anthropic, Gemini) can read the document natively.
+const (
+	modeText     = "text"
+	modeDocument = "document"
+)
 
 func (p *Plugin) ID() string                        { return pluginID }
 func (p *Plugin) Name() string                      { return pluginName }
@@ -71,15 +87,25 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.timeout = d
 	}
 
-	// Allow overriding the binary path via config.
+	if dm, ok := ctx.Config["default_mode"].(string); ok && dm != "" {
+		if dm != modeText && dm != modeDocument {
+			return fmt.Errorf("pdf: invalid default_mode %q (want %q or %q)", dm, modeText, modeDocument)
+		}
+		p.defaultMode = dm
+	}
+
+	// Allow overriding the binary path via config. pdftotext is only
+	// required for text mode; if the operator wired default_mode:
+	// document and never opts back into text per-call, the binary
+	// stays absent and the document path still works.
 	if bin, ok := ctx.Config["pdftotext_bin"].(string); ok {
 		p.pdftotext = bin
 	} else {
-		path, err := exec.LookPath("pdftotext")
-		if err != nil {
-			return fmt.Errorf("pdf: pdftotext not found in PATH — install poppler (brew install poppler / apt install poppler-utils): %w", err)
+		if path, err := exec.LookPath("pdftotext"); err == nil {
+			p.pdftotext = path
+		} else if p.defaultMode == modeText {
+			return fmt.Errorf("pdf: pdftotext not found in PATH — install poppler (brew install poppler / apt install poppler-utils) or set default_mode: document: %w", err)
 		}
-		p.pdftotext = path
 	}
 
 	if save, ok := ctx.Config["save_to_session"].(bool); ok {
@@ -109,7 +135,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 func (p *Plugin) Ready() error {
 	_ = p.bus.Emit("tool.register", events.ToolDef{
 		Name:        "read_pdf",
-		Description: "Extract text content from a PDF file. Returns the full text by default, or a specific page range.",
+		Description: "Read a PDF file. Default mode 'text' extracts text via poppler/pdftotext. Mode 'document' returns the raw PDF bytes as a file MessagePart so multimodal providers (Anthropic, Gemini) can read the document natively (preserves images, layout, native rendering).",
 		Class:       "data",
 		Subclass:    "extract",
 		Parameters: map[string]any{
@@ -119,17 +145,22 @@ func (p *Plugin) Ready() error {
 					"type":        "string",
 					"description": "Path to the PDF file",
 				},
+				"mode": map[string]any{
+					"type":        "string",
+					"description": "Output mode. 'text' (default) extracts text via pdftotext. 'document' returns the raw PDF bytes as a file MessagePart for native multimodal providers; pagination/layout args are ignored in document mode.",
+					"enum":        []string{modeText, modeDocument},
+				},
 				"first_page": map[string]any{
 					"type":        "integer",
-					"description": "First page to extract (1-based). Omit to start from the beginning.",
+					"description": "First page to extract (1-based). Omit to start from the beginning. Ignored in document mode.",
 				},
 				"last_page": map[string]any{
 					"type":        "integer",
-					"description": "Last page to extract (1-based). Omit to read through the end.",
+					"description": "Last page to extract (1-based). Omit to read through the end. Ignored in document mode.",
 				},
 				"layout": map[string]any{
 					"type":        "boolean",
-					"description": "Preserve original physical layout. Useful for tables and forms. Default false.",
+					"description": "Preserve original physical layout. Useful for tables and forms. Default false. Ignored in document mode.",
 				},
 			},
 			"required": []string{"path"},
@@ -194,6 +225,27 @@ func (p *Plugin) handleReadPDF(tc events.ToolCall) {
 	}
 	if info.IsDir() {
 		p.emitResult(tc, "", "path is a directory, not a file")
+		return
+	}
+
+	// Per-call mode override; falls back to plugin default. Document mode
+	// short-circuits the pdftotext path entirely so a session that only
+	// uses native-document hand-off doesn't need poppler installed.
+	mode := p.defaultMode
+	if m, ok := tc.Arguments["mode"].(string); ok && m != "" {
+		if m != modeText && m != modeDocument {
+			p.emitResult(tc, "", fmt.Sprintf("invalid mode %q (want %q or %q)", m, modeText, modeDocument))
+			return
+		}
+		mode = m
+	}
+	if mode == modeDocument {
+		p.handleReadPDFDocument(tc, path, absPath)
+		return
+	}
+
+	if p.pdftotext == "" {
+		p.emitResult(tc, "", "pdftotext binary not configured: set pdftotext_bin or install poppler-utils to use mode 'text'")
 		return
 	}
 
@@ -269,6 +321,51 @@ func (p *Plugin) handleReadPDF(tc events.ToolCall) {
 	}
 
 	p.emitResult(tc, text, "")
+}
+
+// handleReadPDFDocument is the native-document hand-off path. Reads the
+// raw PDF bytes and emits them as a file MessagePart on
+// ToolResult.OutputParts so multimodal-capable providers (Anthropic,
+// Gemini) consume the document directly. No poppler call is made.
+//
+// Bytes ride inline on the part — the PDF plugin doesn't own a blob
+// store. Operators with very large PDFs should pair this with
+// nexus.tool.file's read_document, which routes through the per-session
+// blob store. Keeping read_pdf inline avoids a duplicate blob-store
+// wiring path for the common (sub-MB) case.
+func (p *Plugin) handleReadPDFDocument(tc events.ToolCall, path, absPath string) {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		p.emitResult(tc, "", fmt.Sprintf("read pdf bytes: %s", err))
+		return
+	}
+
+	const mime = "application/pdf"
+	part := events.MessagePart{
+		Type:     "file",
+		MimeType: mime,
+		Data:     data,
+	}
+	summary := fmt.Sprintf("Loaded PDF %q (%d bytes) as native document", path, len(data))
+	result := events.ToolResult{
+		SchemaVersion: events.ToolResultVersion,
+		ID:            tc.ID,
+		Name:          tc.Name,
+		Output:        summary,
+		OutputStructured: map[string]any{
+			"path":       path,
+			"media_type": mime,
+			"size":       int64(len(data)),
+			"mode":       modeDocument,
+		},
+		OutputParts: []events.MessagePart{part},
+		TurnID:      tc.TurnID,
+	}
+	if veto, vErr := p.bus.EmitVetoable("before:tool.result", &result); vErr == nil && veto.Vetoed {
+		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		return
+	}
+	_ = p.bus.Emit("tool.result", result)
 }
 
 // getPageCount uses pdfinfo to extract the page count.

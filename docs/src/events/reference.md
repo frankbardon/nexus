@@ -286,6 +286,23 @@ Certain metadata keys carry special meaning:
 | `PromptTokens` | int | Input tokens consumed |
 | `CompletionTokens` | int | Output tokens generated |
 | `TotalTokens` | int | Total tokens |
+| `ReasoningTokens` | int | Thinking / reasoning tokens (Gemini 2.5 thoughtTokenCount, etc.) |
+| `CachedTokens` | int | Tokens served from a prompt cache |
+| `CacheWriteTokens` | int | Tokens written into a prompt cache |
+| `ModalityBreakdown` | map[string]int | Per-modality token counts when the provider reports them. Lowercase keys: `text`, `image`, `audio`, `video`, `document`. Empty when the provider does not split modalities (Anthropic) or the request was text-only. Cost-attribution consumers read this to bill image / audio turns separately. |
+
+#### Multimodal tool results
+
+`ToolResult` carries an `OutputParts []MessagePart` field for tools that
+emit multimodal content (image, audio, document, video). When non-empty,
+memory plugins copy the parts onto the resulting tool-role
+`Message.Parts` so the next LLM request includes the multimodal content
+alongside (or in place of) `Output`.
+
+Large payloads should be stored via `pkg/engine/blobs` and referenced via
+`MessagePart.URI = "nexus-blob:<sha256>"` so the journal stays compact;
+small payloads can ride inline as `MessagePart.Data`. Provider plugins
+resolve `nexus-blob:` URIs at request-assembly time.
 
 **StreamChunk**
 | Field | Type | Description |
@@ -690,13 +707,27 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 **EmbeddingsRequest**
 | Field | Type | Description |
 |-------|------|-------------|
-| `Texts` | []string | Batch of strings to embed (input). |
+| `Texts` | []string | Batch of strings to embed (input). Used when `Inputs` is empty — back-compat with text-only adapters. |
+| `Inputs` | []EmbeddingsInput | Polymorphic batch (text + image inputs) for multimodal-aware providers. When non-empty, providers consume `Inputs` and ignore `Texts`. |
 | `Model` | string | Requested model; provider may echo back actual model used. |
 | `Dimensions` | int | Optional truncation hint. Zero = provider default. |
 | `Vectors` | [][]float32 | Result vectors, in input order (output). |
 | `Provider` | string | Plugin ID of the adapter that answered (output). |
 | `Usage` | EmbeddingsUsage | Token usage when reported by the provider (output). |
 | `Error` | string | Non-empty on failure (output). |
+
+**EmbeddingsInput**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Text` | string | Text snippet. Mutually exclusive with `Image` and `ImageURI`. |
+| `Image` | []byte | Inline image bytes. Mutually exclusive with `Text` and `ImageURI`. Requires `MimeType`. |
+| `ImageURI` | string | Image reference: `nexus-blob:<sha>` (engine blob store) or external URL. Mutually exclusive with `Text` and `Image`. |
+| `MimeType` | string | IANA media type (e.g. `image/png`). Required when `Image` is set; recommended for `ImageURI`. |
+
+Adapters that don't support image inputs must return a clear error when
+they encounter an image-bearing input rather than silently downgrading.
+See `nexus.embeddings.cohere_multimodal` for a multimodal-aware reference
+adapter.
 
 **EmbeddingsUsage**
 | Field | Type | Description |

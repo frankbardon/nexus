@@ -55,6 +55,8 @@ type Plugin struct {
 	embeddingModel      string
 	autoStoreCompaction bool
 	autoStoreUserInput  bool // default false — conservative
+	storeImages         bool // default false — opt-in; only useful when a multimodal embeddings.provider is active
+	imageNamespace      string
 	sectionPriority     int
 	// hasHybrid mirrors the knowledge_search switch: when search.hybrid is
 	// active, recall queries go through the orchestrator so memory benefits
@@ -138,6 +140,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["section_priority"].(int); ok {
 		p.sectionPriority = v
 	}
+	if v, ok := ctx.Config["store_images"].(bool); ok {
+		p.storeImages = v
+	}
+	if v, ok := ctx.Config["image_namespace"].(string); ok && v != "" {
+		p.imageNamespace = v
+	}
 	if v, ok := ctx.Config["recall_via_hybrid"].(bool); ok {
 		p.recallViaHybrid = v
 	}
@@ -166,6 +174,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"top_k", p.topK,
 		"auto_store_compaction", p.autoStoreCompaction,
 		"auto_store_user_input", p.autoStoreUserInput,
+		"store_images", p.storeImages,
 	)
 	return nil
 }
@@ -208,11 +217,18 @@ func (p *Plugin) Emissions() []string {
 
 // handleInput runs on every user message: embeds it, queries, stashes hits
 // for the next prompt section render. Optionally stores the input itself.
+// When `store_images: true`, also embeds and stores any image attachments
+// on the user input under the image namespace.
 func (p *Plugin) handleInput(event engine.Event[any]) {
 	in, ok := event.Payload.(events.UserInput)
 	if !ok {
 		return
 	}
+
+	if p.storeImages {
+		p.storeImageAttachments(in)
+	}
+
 	content := strings.TrimSpace(in.Content)
 	if content == "" {
 		return
@@ -234,6 +250,92 @@ func (p *Plugin) handleInput(event engine.Event[any]) {
 		p.storeDoc(content, "user", map[string]string{
 			"session": in.SessionID,
 		}, vec)
+	}
+}
+
+// storeImageAttachments embeds every image FileAttachment on the user
+// input via the multimodal embeddings.provider and stores the resulting
+// vector under the configured image namespace. Image parts whose
+// MimeType doesn't start with "image/" are skipped — non-image
+// attachments are out of scope for this opt-in path.
+//
+// On embed failure (e.g. the active embeddings.provider is text-only and
+// returned a clear rejection), this method logs a Warn and continues —
+// it must not break the text recall path that runs after.
+func (p *Plugin) storeImageAttachments(in events.UserInput) {
+	if len(in.Files) == 0 {
+		return
+	}
+	ns := p.imageNamespace
+	if ns == "" {
+		ns = p.namespace + "-images"
+	}
+	for _, f := range in.Files {
+		if !strings.HasPrefix(strings.ToLower(f.MimeType), "image/") {
+			continue
+		}
+		if len(f.Data) == 0 {
+			continue
+		}
+		req := &events.EmbeddingsRequest{
+			SchemaVersion: events.EmbeddingsRequestVersion,
+			Model:         p.embeddingModel,
+			Inputs: []events.EmbeddingsInput{{
+				Image:    f.Data,
+				MimeType: f.MimeType,
+			}},
+		}
+		if err := p.bus.Emit("embeddings.request", req); err != nil {
+			p.logger.Warn("vector memory: image embed emit failed", "err", err, "file", f.Name)
+			continue
+		}
+		if req.Error != "" {
+			p.logger.Warn("vector memory: image embed rejected", "err", req.Error, "file", f.Name)
+			continue
+		}
+		if len(req.Vectors) != 1 || len(req.Vectors[0]) == 0 {
+			p.logger.Warn("vector memory: image embed returned no vector", "file", f.Name)
+			continue
+		}
+
+		meta := map[string]string{
+			"source":    "user_image",
+			"session":   in.SessionID,
+			"file_name": f.Name,
+			"mime_type": f.MimeType,
+			"stored":    time.Now().UTC().Format(time.RFC3339),
+		}
+		// Content is left as a brief descriptor: image vectors recall by
+		// embedding similarity, but the prompt section needs *something*
+		// to render. Storing raw bytes inline would balloon the JSON
+		// vector store; we record the file name + caption hint instead.
+		descriptor := f.Name
+		if descriptor == "" {
+			descriptor = "(unnamed image)"
+		}
+		descriptor = "[image] " + descriptor + " (" + f.MimeType + ")"
+
+		id := docID(descriptor, "user_image", time.Now())
+		up := &events.VectorUpsert{
+			SchemaVersion: events.VectorUpsertVersion,
+			Namespace:     ns,
+			Docs: []events.VectorDoc{{
+				ID:       id,
+				Vector:   req.Vectors[0],
+				Content:  descriptor,
+				Metadata: meta,
+			}},
+		}
+		if err := p.bus.Emit("vector.upsert", up); err != nil {
+			p.logger.Warn("vector memory: image upsert emit failed", "err", err, "file", f.Name)
+			continue
+		}
+		if up.Error != "" {
+			p.logger.Warn("vector memory: image upsert failed", "err", up.Error, "file", f.Name)
+			continue
+		}
+		p.logger.Debug("vector memory: stored image embedding",
+			"namespace", ns, "file", f.Name, "id", id)
 	}
 }
 

@@ -12,6 +12,15 @@
     "persist_scripts":   {"type": "boolean"},
     "reject_goroutines": {"type": "boolean"},
     "allowed_packages":  {"type": "array", "items": {"type": "string"}},
+    "blob_store": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Settings for the per-session blob store backing nexus.ReturnImage.",
+      "properties": {
+        "byte_budget":      {"type": "integer", "description": "Soft cap on total stored blob bytes per session. 0 = unbounded.", "default": 2147483648},
+        "inline_threshold": {"type": "integer", "description": "Payloads at or below this size are inlined on the MessagePart instead of being stored as a blob.", "default": 262144}
+      }
+    },
     "sandbox": {
       "type": "object",
       "additionalProperties": true,
