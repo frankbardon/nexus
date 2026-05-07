@@ -37,3 +37,14 @@ func SkipForHistory(meta map[string]any) bool {
 	kind, _ := meta["task_kind"].(string)
 	return internalTaskKinds[kind]
 }
+
+// SkipForCuration returns true when the request metadata indicates an
+// internal sub-flow whose outgoing LLM request a curation layer should
+// leave alone. Mirrors SkipForHistory but is intended for the
+// before:llm.request side: tool_result_clear, tool_def_pruner, and any
+// other curator should bail when the request originates from a planner,
+// classifier, summariser, compaction, or subagent flow rather than the
+// main agent loop.
+func SkipForCuration(meta map[string]any) bool {
+	return SkipForHistory(meta)
+}

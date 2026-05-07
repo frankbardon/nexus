@@ -19,6 +19,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
 )
 
 const (
@@ -175,7 +176,7 @@ func (p *Plugin) handleBeforeLLMRequest(e engine.Event[any]) {
 	if !ok {
 		return
 	}
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	if internalflow.SkipForCuration(req.Metadata) {
 		return
 	}
 	if len(req.Tools) == 0 {

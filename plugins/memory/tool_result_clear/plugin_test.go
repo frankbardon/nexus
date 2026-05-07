@@ -152,7 +152,7 @@ func TestSubsequentCallDropsEarlier(t *testing.T) {
 	}
 }
 
-func TestSkipsSourcedRequests(t *testing.T) {
+func TestSkipsInternalSubFlowRequests(t *testing.T) {
 	_, bus := newPluginForTest(t)
 	big := strings.Repeat("a", 2000)
 	bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t6", Name: "web_fetch"})
@@ -163,13 +163,19 @@ func TestSkipsSourcedRequests(t *testing.T) {
 
 	cleared := 0
 	bus.Subscribe("memory.tool_result_cleared", func(_ engine.Event[any]) { cleared++ })
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: map[string]any{"_source": "another.plugin"},
-		Messages: []events.Message{{Role: "tool", ToolCallID: "t6", Content: big}}}
+	// task_kind = "plan" (or any internal kind) signals an internal sub-flow
+	// — curators must leave it alone. A non-empty `_source` alone is no
+	// longer a skip signal: every agent main request now tags its own
+	// pluginID for cost attribution (Idea 09).
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+		Metadata: map[string]any{"_source": "nexus.planner.dynamic", "task_kind": "plan"},
+		Messages: []events.Message{{Role: "tool", ToolCallID: "t6", Content: big}},
+	}
 	if _, err := bus.EmitVetoable("before:llm.request", req); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
 	if cleared != 0 {
-		t.Fatalf("must not touch sourced requests, got %d", cleared)
+		t.Fatalf("must not touch internal sub-flow requests, got %d", cleared)
 	}
 }
 

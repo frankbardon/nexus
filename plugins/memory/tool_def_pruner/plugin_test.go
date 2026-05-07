@@ -95,7 +95,7 @@ func TestNeverPruneList(t *testing.T) {
 	}
 }
 
-func TestSkipsSourcedRequests(t *testing.T) {
+func TestSkipsInternalSubFlowRequests(t *testing.T) {
 	_, bus := newPluginForTest(t)
 
 	bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: []events.ToolDef{{Name: "shell"}}})
@@ -105,13 +105,16 @@ func TestSkipsSourcedRequests(t *testing.T) {
 
 	pruned := 0
 	bus.Subscribe("memory.tool_def_pruned", func(_ engine.Event[any]) { pruned++ })
+	// task_kind=plan signals an internal sub-flow — pruner stays out of
+	// the way. Idea 09 made every agent main request tag its own
+	// pluginID, so a non-empty `_source` is no longer the skip signal.
 	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
-		Metadata: map[string]any{"_source": "internal.plugin"},
+		Metadata: map[string]any{"_source": "nexus.planner.dynamic", "task_kind": "plan"},
 		Tools:    []events.ToolDef{{Name: "shell"}},
 	}
 	bus.EmitVetoable("before:llm.request", req)
 	if pruned != 0 {
-		t.Fatalf("must not prune sourced requests, got %d", pruned)
+		t.Fatalf("must not prune internal sub-flow requests, got %d", pruned)
 	}
 }
 

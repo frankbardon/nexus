@@ -23,6 +23,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
 )
 
 const (
@@ -268,8 +269,11 @@ func (p *Plugin) handleBeforeLLMRequest(e engine.Event[any]) {
 	if !ok {
 		return
 	}
-	// Skip internal/synthetic requests (e.g. summaries, gates retrying).
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	// Skip internal sub-flow requests (planner / classifier / summariser
+	// / compaction / subagent). Main agent loops are processed even
+	// though every agent main request now tags `_source = pluginID` for
+	// cost attribution (Idea 09).
+	if internalflow.SkipForCuration(req.Metadata) {
 		return
 	}
 
