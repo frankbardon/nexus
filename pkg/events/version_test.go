@@ -155,6 +155,13 @@ func versionedPayloads() []versionedPayload {
 		{"VectorQuery", func() any { return VectorQuery{SchemaVersion: VectorQueryVersion} }, VectorQueryVersion},
 		{"VectorDelete", func() any { return VectorDelete{SchemaVersion: VectorDeleteVersion} }, VectorDeleteVersion},
 		{"VectorNamespaceDrop", func() any { return VectorNamespaceDrop{SchemaVersion: VectorNamespaceDropVersion} }, VectorNamespaceDropVersion},
+		// voice.go
+		{"VoiceAudioInputChunk", func() any {
+			return VoiceAudioInputChunk{SchemaVersion: VoiceAudioInputChunkVersion}
+		}, VoiceAudioInputChunkVersion},
+		{"VoiceAudioOutputChunk", func() any {
+			return VoiceAudioOutputChunk{SchemaVersion: VoiceAudioOutputChunkVersion}
+		}, VoiceAudioOutputChunkVersion},
 	}
 }
 
