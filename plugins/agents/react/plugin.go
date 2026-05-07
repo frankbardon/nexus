@@ -245,8 +245,12 @@ func (p *Plugin) handleLLMResponseEvent(event engine.Event[any]) {
 	if !ok {
 		return
 	}
-	// Skip responses tagged for other plugins (e.g., planner LLM calls).
-	if source, _ := resp.Metadata["_source"].(string); source != "" {
+	// Skip responses tagged for other plugins (planner, summary buffer,
+	// subagent, etc.). Since Idea 09 the agent tags its own request with
+	// `_source = pluginID` for cost attribution and providers propagate
+	// that onto the response, so an empty-source check would skip our
+	// own reply too.
+	if source, _ := resp.Metadata["_source"].(string); source != "" && source != pluginID {
 		return
 	}
 	p.handleLLMResponse(resp)

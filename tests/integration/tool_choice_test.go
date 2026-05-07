@@ -47,9 +47,12 @@ func TestToolChoice_SequenceCyclesAcrossIterations(t *testing.T) {
 		if !ok {
 			return
 		}
-		// Skip non-agent requests (planner / compaction) — react agent requests
-		// are the only ones carrying the configured tool_choice sequence.
-		if src, _ := req.Metadata["_source"].(string); src != "" {
+		// Only inspect ReAct main-loop requests — those carry the configured
+		// tool_choice sequence. Filter by task_kind because every agent main
+		// request now also tags itself with `_source = pluginID` for cost
+		// attribution (Idea 09), so a non-empty source check would let
+		// planner / classifier probes through too.
+		if kind, _ := req.Metadata["task_kind"].(string); kind != "react_main" {
 			return
 		}
 		mu.Lock()
