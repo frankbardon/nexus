@@ -1,8 +1,17 @@
 package events
 
+// Schema-version constants for code.* payloads. See doc.go.
+const (
+	CodeExecRequestVersion = 1
+	CodeExecStdoutVersion  = 1
+	CodeExecResultVersion  = 1
+)
+
 // CodeExecRequest signals that a run_code script is about to execute.
 // Emitted by nexus.tool.code_exec before the Yaegi interpreter runs the script.
 type CodeExecRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	CallID  string // matches the originating ToolCall.ID
 	TurnID  string
 	Script  string   // full Go source
@@ -17,6 +26,8 @@ type CodeExecRequest struct {
 // exceeds an internal threshold; the last chunk (possibly empty) carries
 // Final=true so UIs can mark the stream closed.
 type CodeExecStdout struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	CallID    string
 	TurnID    string
 	Chunk     string // UTF-8 text; may contain newlines
@@ -27,6 +38,8 @@ type CodeExecStdout struct {
 // CodeExecResult reports the outcome of a run_code script.
 // Emitted by nexus.tool.code_exec after the script returns (or errors out).
 type CodeExecResult struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	CallID    string
 	TurnID    string
 	Output    string // stdout (capped at max_output_bytes)

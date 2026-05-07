@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.rag.reranker.cohere.json",
+  "title": "nexus.rag.reranker.cohere",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_key":     {"type": "string", "description": "Direct Cohere API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable holding the Cohere API key."},
+    "model":       {"type": "string", "description": "Cohere rerank model ID."},
+    "timeout_ms":  {"type": "integer", "minimum": 1, "description": "HTTP timeout in milliseconds."},
+    "api_base":    {"type": "string", "description": "Override Cohere API base URL."}
+  }
+}

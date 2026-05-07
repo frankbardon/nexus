@@ -83,13 +83,13 @@ plugins:
 	}
 
 	var resp struct {
-		Schema                int            `json:"schema"`
-		SessionID             string         `json:"session_id"`
-		FinalAssistantMessage string         `json:"final_assistant_message"`
-		ToolCalls             []any          `json:"tool_calls"`
-		Tokens                struct{ Input, Output int } `json:"tokens"`
-		LatencyMs             int64          `json:"latency_ms"`
-		Metadata              map[string]any `json:"metadata"`
+		Schema                int                             `json:"schema"`
+		SessionID             string                          `json:"session_id"`
+		FinalAssistantMessage string                          `json:"final_assistant_message"`
+		ToolCalls             []any                           `json:"tool_calls"`
+		Tokens                struct{ Input, Output int }     `json:"tokens"`
+		LatencyMs             int64                           `json:"latency_ms"`
+		Metadata              map[string]any                  `json:"metadata"`
 		Error                 *struct{ Code, Message string } `json:"error"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
@@ -148,7 +148,7 @@ func TestEvalInspect_InvalidRequest(t *testing.T) {
 	}
 
 	var resp struct {
-		Schema int                              `json:"schema"`
+		Schema int                             `json:"schema"`
 		Error  *struct{ Code, Message string } `json:"error"`
 	}
 	if jerr := json.Unmarshal(stdout.Bytes(), &resp); jerr != nil {

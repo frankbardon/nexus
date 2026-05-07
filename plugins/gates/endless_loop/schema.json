@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.endless_loop.json",
+  "title": "nexus.gate.endless_loop",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_iterations": {"type": "integer", "minimum": 1, "description": "Hard cap on agent iterations per turn."},
+    "warning_at":     {"type": "integer", "minimum": 1, "description": "Iteration count that triggers an info warning."}
+  }
+}

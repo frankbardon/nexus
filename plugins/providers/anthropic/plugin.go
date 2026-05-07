@@ -272,15 +272,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		raw, ok := p.replay.Pop("llm.response")
 		if !ok {
 			p.logger.Warn("anthropic: replay stash empty for llm.request — emitting empty response")
-			_ = p.bus.Emit("llm.response", events.LLMResponse{
-				Model: req.Model,
-			})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		resp, err := journal.PayloadAs[events.LLMResponse](raw)
 		if err != nil {
 			p.logger.Warn("anthropic: replay payload decode failed", "error", err)
-			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		_ = p.bus.Emit("llm.response", resp)
@@ -349,8 +347,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
 		if err != nil {
 			preflightCancel()
-			p.emitErrorInfo(events.ErrorInfo{
-				Err:         fmt.Errorf("anthropic: files preflight failed: %w", err),
+			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("anthropic: files preflight failed: %w", err),
 				Retryable:   false,
 				RequestMeta: req.Metadata,
 			})
@@ -417,8 +414,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			p.logger.Info("LLM request cancelled")
 			return
 		}
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:              fmt.Errorf("anthropic: HTTP request failed: %w", err),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("anthropic: HTTP request failed: %w", err),
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
@@ -429,8 +425,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:         fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
 		})
@@ -839,8 +834,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 			}
 			thinkingBlocks = append(thinkingBlocks, tb)
 			if p.thinking.IncludeThoughts && block.Thinking != "" {
-				_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-					TurnID:    apiResp.ID,
+				_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: apiResp.ID,
 					Source:    pluginID,
 					Content:   block.Thinking,
 					Phase:     "reasoning",
@@ -889,8 +883,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 	// 0 for now — billing impact is captured in CompletionTokens. Plan 02
 	// reserves the field for when Anthropic exposes it.
 
-	resp := events.LLMResponse{
-		Content:      content.String(),
+	resp := events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content.String(),
 		ToolCalls:    toolCalls,
 		Usage:        usage,
 		CostUSD:      p.costForModel(apiResp.Model, usage),
@@ -1010,8 +1003,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	}
 
 	// Emit stream end.
-	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
-		TurnID:       st.turnID,
+	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: st.turnID,
 		FinishReason: st.finishReason,
 		Usage:        finalUsage,
 	})
@@ -1040,8 +1032,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	p.mu.Lock()
 	tags := p.currentRequestTags
 	p.mu.Unlock()
-	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:      st.fullContent.String(),
+	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: st.fullContent.String(),
 		ToolCalls:    st.toolCalls,
 		Usage:        finalUsage,
 		CostUSD:      p.costForModel(st.model, finalUsage),
@@ -1128,10 +1119,9 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 			switch data.Delta.Type {
 			case "text_delta":
 				st.fullContent.WriteString(data.Delta.Text)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					Content: data.Delta.Text,
-					Index:   st.chunkIndex,
-					TurnID:  st.turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: data.Delta.Text,
+					Index:  st.chunkIndex,
+					TurnID: st.turnID,
 				})
 				st.chunkIndex++
 
@@ -1144,8 +1134,7 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 			case "thinking_delta":
 				st.thinkingBuilder.WriteString(data.Delta.Thinking)
 				if p.thinking.IncludeThoughts && data.Delta.Thinking != "" {
-					_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-						TurnID:    st.turnID,
+					_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: st.turnID,
 						Source:    pluginID,
 						Content:   data.Delta.Thinking,
 						Phase:     "reasoning",
@@ -1167,10 +1156,9 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 					st.currentToolInput.WriteString(data.Delta.PartialJSON)
 					// Stream structured output tool input as content chunks.
 					if st.currentToolCall.Name == "_structured_output" {
-						_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-							Content: data.Delta.PartialJSON,
-							Index:   st.chunkIndex,
-							TurnID:  st.turnID,
+						_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: data.Delta.PartialJSON,
+							Index:  st.chunkIndex,
+							TurnID: st.turnID,
 						})
 						st.chunkIndex++
 					}
@@ -1194,10 +1182,9 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 				st.fullContent.WriteString(st.currentToolInput.String())
 			} else {
 				st.toolCalls = append(st.toolCalls, *st.currentToolCall)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					ToolCall: st.currentToolCall,
-					Index:    st.chunkIndex,
-					TurnID:   st.turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: st.currentToolCall,
+					Index:  st.chunkIndex,
+					TurnID: st.turnID,
 				})
 				st.chunkIndex++
 			}
@@ -1332,10 +1319,9 @@ func (p *Plugin) debugLog(label string, data []byte) {
 }
 
 func (p *Plugin) emitError(err error) {
-	p.emitErrorInfo(events.ErrorInfo{
-		Source: pluginID,
-		Err:    err,
-		Fatal:  false,
+	p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: pluginID,
+		Err:   err,
+		Fatal: false,
 	})
 }
 

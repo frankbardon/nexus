@@ -1,7 +1,19 @@
 package events
 
+import "time"
+
+// Schema-version constants for tool.* payloads. See doc.go.
+const (
+	ToolCallVersion         = 1
+	ToolCatalogQueryVersion = 1
+	ToolTimeoutVersion      = 1
+	ToolResultVersion       = 1
+)
+
 // ToolCall represents a tool invocation.
 type ToolCall struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	ID        string
 	Name      string
 	Arguments map[string]any
@@ -23,13 +35,32 @@ type ToolCall struct {
 // the handler fills Tools in place before Emit returns. Same pattern as
 // HistoryQuery — no correlation IDs, no round-trip via a response event.
 type ToolCatalogQuery struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	// Tools is filled by the handler. Caller should treat it as nil on
 	// input; a nil result after Emit means no catalog plugin answered.
 	Tools []ToolDef
 }
 
+// ToolTimeout signals that a tool invocation exceeded its configured
+// per-call deadline. Emitted by nexus.gate.tool_timeout alongside a
+// synthetic tool.result error so observers can distinguish a tool's own
+// timeout from a gate-enforced one. Override names the exact YAML key the
+// operator should set to lift the limit.
+type ToolTimeout struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	ToolName string
+	CallID   string
+	Timeout  time.Duration
+	Override string // e.g. "gates.tool_timeout.per_tool.<name>"
+	TurnID   string
+}
+
 // ToolResult carries the outcome of a tool invocation.
 type ToolResult struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	ID         string // matches ToolCall.ID
 	Name       string
 	Output     string

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.shell.json",
+  "title": "nexus.tool.shell",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "working_dir": {"type": "string", "description": "Working directory for executions."},
+    "timeout":     {"type": "string", "description": "Per-command timeout (Go duration)."},
+    "sandbox": {
+      "description": "Sandbox configuration block. Boolean form is a deprecated env-restrict shorthand.",
+      "oneOf": [
+        {"type": "boolean"},
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "backend":          {"type": "string"},
+            "allowed_commands": {"type": "array", "items": {"type": "string"}},
+            "path_dirs":        {"type": "array", "items": {"type": "string"}},
+            "env_restrict":     {"type": "boolean"},
+            "timeout":          {"type": "string"}
+          }
+        }
+      ]
+    },
+    "allowed_commands": {
+      "type": "array",
+      "items": {"type": "string"},
+      "deprecated": true,
+      "description": "Deprecated: use sandbox.allowed_commands instead."
+    },
+    "path_dirs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "deprecated": true,
+      "description": "Deprecated: use sandbox.path_dirs instead."
+    }
+  }
+}

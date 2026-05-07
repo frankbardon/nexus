@@ -239,13 +239,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		raw, ok := p.replay.Pop("llm.response")
 		if !ok {
 			p.logger.Warn("openai: replay stash empty for llm.request — emitting empty response")
-			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		resp, err := journal.PayloadAs[events.LLMResponse](raw)
 		if err != nil {
 			p.logger.Warn("openai: replay payload decode failed", "error", err)
-			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		_ = p.bus.Emit("llm.response", resp)
@@ -311,8 +311,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
 		if err != nil {
 			preflightCancel()
-			p.emitErrorInfo(events.ErrorInfo{
-				Err:         fmt.Errorf("openai: files preflight failed: %w", err),
+			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: files preflight failed: %w", err),
 				Retryable:   false,
 				RequestMeta: req.Metadata,
 			})
@@ -363,8 +362,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			p.logger.Info("LLM request cancelled")
 			return
 		}
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:              fmt.Errorf("openai: HTTP request failed: %w", err),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: HTTP request failed: %w", err),
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
@@ -375,8 +373,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:         fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody)),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
 		})
@@ -707,8 +704,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
 		ReasoningTokens:  apiResp.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 
-	resp := events.LLMResponse{
-		Model:   apiResp.Model,
+	resp := events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: apiResp.Model,
 		Usage:   usage,
 		CostUSD: p.costForModel(apiResp.Model, usage),
 	}
@@ -826,10 +822,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
 			text := *choice.Delta.Content
 			fullContent.WriteString(text)
-			_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-				Content: text,
-				Index:   chunkIndex,
-				TurnID:  turnID,
+			_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: text,
+				Index:  chunkIndex,
+				TurnID: turnID,
 			})
 			chunkIndex++
 		}
@@ -878,10 +873,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		}
 		toolCalls = append(toolCalls, *tc)
 
-		_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-			ToolCall: tc,
-			Index:    chunkIndex,
-			TurnID:   turnID,
+		_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: tc,
+			Index:  chunkIndex,
+			TurnID: turnID,
 		})
 		chunkIndex++
 	}
@@ -898,8 +892,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	}
 
 	// Emit stream end.
-	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
-		TurnID:       turnID,
+	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: turnID,
 		FinishReason: finishReason,
 		Usage:        finalUsage,
 	})
@@ -922,8 +915,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	tags := p.currentRequestTags
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:      fullContent.String(),
+	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: fullContent.String(),
 		ToolCalls:    toolCalls,
 		Usage:        finalUsage,
 		CostUSD:      p.costForModel(model, finalUsage),
@@ -965,10 +957,9 @@ func (p *Plugin) debugLog(label string, data []byte) {
 }
 
 func (p *Plugin) emitError(err error) {
-	p.emitErrorInfo(events.ErrorInfo{
-		Source: pluginID,
-		Err:    err,
-		Fatal:  false,
+	p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: pluginID,
+		Err:   err,
+		Fatal: false,
 	})
 }
 

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.provider.fallback.json",
+  "title": "nexus.provider.fallback",
+  "description": "Fallback coordinator: no plugin-level config — chains live under core.models.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

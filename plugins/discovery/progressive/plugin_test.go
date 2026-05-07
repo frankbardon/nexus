@@ -140,9 +140,7 @@ func TestBeforeLLMRequest_FullDepth(t *testing.T) {
 	})
 
 	// Build request with the original tool.
-	req := &events.LLMRequest{
-		Tools: []events.ToolDef{{Name: "read_file"}},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: []events.ToolDef{{Name: "read_file"}}}
 	vp := &engine.VetoablePayload{Original: req}
 
 	p.handleBeforeLLMRequest(engine.Event[any]{
@@ -177,9 +175,8 @@ func TestBeforeLLMRequest_ClassDepth(t *testing.T) {
 		Payload: events.ToolDef{Name: "custom_tool"},
 	})
 
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "You are helpful."}},
-		Tools:    []events.ToolDef{{Name: "all_tools_placeholder"}},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "You are helpful."}},
+		Tools: []events.ToolDef{{Name: "all_tools_placeholder"}},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 
@@ -222,9 +219,8 @@ func TestBeforeLLMRequest_ClasslessExclude(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools:    []events.ToolDef{},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
+		Tools: []events.ToolDef{},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 
@@ -260,8 +256,7 @@ func TestDiscoverRevealsTools(t *testing.T) {
 	})
 
 	// Discover full class.
-	tc := events.ToolCall{
-		ID:        "call-1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1",
 		Name:      "discover",
 		Arguments: map[string]any{"class": "filesystem"},
 	}
@@ -278,9 +273,8 @@ func TestDiscoverRevealsTools(t *testing.T) {
 	}
 
 	// Now a subsequent LLM request should include filesystem tools.
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools:    []events.ToolDef{},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
+		Tools: []events.ToolDef{},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
@@ -313,8 +307,7 @@ func TestDiscoverSubclass(t *testing.T) {
 	})
 
 	// Discover only "read" subclass.
-	tc := events.ToolCall{
-		ID:        "call-1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1",
 		Name:      "discover",
 		Arguments: map[string]any{"class": "filesystem", "subclass": "read"},
 	}
@@ -325,9 +318,8 @@ func TestDiscoverSubclass(t *testing.T) {
 	}
 
 	// LLM request should include read_file but not write_file.
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools:    []events.ToolDef{},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
+		Tools: []events.ToolDef{},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
@@ -357,9 +349,8 @@ func TestTurnScope(t *testing.T) {
 	p.revealed["filesystem"] = true
 
 	// First turn — revealed set gets reset.
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools:    []events.ToolDef{},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
+		Tools: []events.ToolDef{},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
@@ -394,9 +385,8 @@ func TestAlwaysInclude(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{
-		Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools:    []events.ToolDef{},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
+		Tools: []events.ToolDef{},
 	}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
@@ -422,8 +412,7 @@ func TestSkipInternalRequests(t *testing.T) {
 	})
 
 	originalTools := []events.ToolDef{{Name: "read_file"}}
-	req := &events.LLMRequest{
-		Tools:    originalTools,
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: originalTools,
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic"},
 	}
 	vp := &engine.VetoablePayload{Original: req}
@@ -451,9 +440,7 @@ func TestToolChoiceForcesReveal(t *testing.T) {
 		Payload: events.ToolDef{Name: "query_db", Description: "Query.", Class: "database"},
 	})
 
-	req := &events.LLMRequest{
-		ToolChoice: &events.ToolChoice{Mode: "tool", Name: "write_file"},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "write_file"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -484,9 +471,7 @@ func TestToolChoiceNoOpWhenAlreadyVisible(t *testing.T) {
 		Payload: events.ToolDef{Name: "custom_tool"},
 	})
 
-	req := &events.LLMRequest{
-		ToolChoice: &events.ToolChoice{Mode: "tool", Name: "custom_tool"},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "custom_tool"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -509,9 +494,7 @@ func TestToolChoiceUnknownToolIsNoOp(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{
-		ToolChoice: &events.ToolChoice{Mode: "tool", Name: "nonexistent"},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "nonexistent"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -593,8 +576,7 @@ func TestDiscoverUnknownClass(t *testing.T) {
 	p := newTestPlugin()
 	bus := p.bus.(*testBus)
 
-	tc := events.ToolCall{
-		ID:        "call-1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1",
 		Name:      "discover",
 		Arguments: map[string]any{"class": "nonexistent"},
 	}
@@ -631,7 +613,7 @@ func TestHybrid_ToolUseResetsIdle(t *testing.T) {
 	// Reveal filesystem class.
 	p.handleToolInvoke(engine.Event[any]{
 		Type:    "tool.invoke",
-		Payload: events.ToolCall{ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
+		Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
 	})
 	if !p.revealed["filesystem"] {
 		t.Fatal("discover should have revealed filesystem class")
@@ -640,14 +622,14 @@ func TestHybrid_ToolUseResetsIdle(t *testing.T) {
 	// Simulate 5 turns. Each turn: LLM request (increments idle), then tool
 	// use (resets to 0). Class should remain revealed throughout.
 	for turn := 0; turn < 5; turn++ {
-		req := &events.LLMRequest{Tools: []events.ToolDef{{Name: "placeholder"}}}
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: []events.ToolDef{{Name: "placeholder"}}}
 		p.handleBeforeLLMRequest(engine.Event[any]{
 			Type:    "before:llm.request",
 			Payload: &engine.VetoablePayload{Original: req},
 		})
 		p.handleToolInvoke(engine.Event[any]{
 			Type:    "tool.invoke",
-			Payload: events.ToolCall{ID: "x", Name: "read_file"},
+			Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "x", Name: "read_file"},
 		})
 		if !p.revealed["filesystem"] {
 			t.Fatalf("turn %d: class pruned while tool was in active use", turn)
@@ -670,13 +652,13 @@ func TestHybrid_PrunesAfterIdle(t *testing.T) {
 
 	p.handleToolInvoke(engine.Event[any]{
 		Type:    "tool.invoke",
-		Payload: events.ToolCall{ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
+		Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "discover", Arguments: map[string]any{"class": "filesystem"}},
 	})
 
 	// 3 LLM requests, no tool use — idleTurns["filesystem"] goes 1→2→3,
 	// prunes on the third because 3 > idle_prune_turns (2).
 	for i := 0; i < 3; i++ {
-		req := &events.LLMRequest{Tools: []events.ToolDef{{Name: "placeholder"}}}
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: []events.ToolDef{{Name: "placeholder"}}}
 		p.handleBeforeLLMRequest(engine.Event[any]{
 			Type:    "before:llm.request",
 			Payload: &engine.VetoablePayload{Original: req},

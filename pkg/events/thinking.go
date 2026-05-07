@@ -2,8 +2,15 @@ package events
 
 import "time"
 
+// Schema-version constants for thinking.* payloads. See doc.go.
+const (
+	ThinkingStepVersion = 1
+)
+
 // ThinkingStep represents an intermediate reasoning step visible to the user.
 type ThinkingStep struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID    string
 	Source    string // plugin ID that generated this thinking step
 	Content   string

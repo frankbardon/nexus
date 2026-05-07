@@ -112,7 +112,6 @@ plugins:
 
   nexus.gate.token_budget:
     max_tokens: 50000
-    warning_threshold: 0.7
     message: "Token budget exhausted."
 
   nexus.gate.rate_limiter:
@@ -129,7 +128,7 @@ plugins:
     max_retries: 2
 
   nexus.gate.content_safety:
-    action: warn
+    action: redact
     check_pii_email: true
     check_pii_phone: true
     check_pii_ssn: true

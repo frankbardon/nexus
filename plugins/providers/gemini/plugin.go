@@ -216,13 +216,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		raw, ok := p.replay.Pop("llm.response")
 		if !ok {
 			p.logger.Warn("gemini: replay stash empty for llm.request — emitting empty response")
-			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		resp, err := journal.PayloadAs[events.LLMResponse](raw)
 		if err != nil {
 			p.logger.Warn("gemini: replay payload decode failed", "error", err)
-			_ = p.bus.Emit("llm.response", events.LLMResponse{Model: req.Model})
+			_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: req.Model})
 			return
 		}
 		_ = p.bus.Emit("llm.response", resp)
@@ -332,8 +332,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			p.logger.Info("LLM request cancelled")
 			return
 		}
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:              fmt.Errorf("gemini: HTTP request failed: %w", err),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("gemini: HTTP request failed: %w", err),
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
@@ -344,8 +343,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitErrorInfo(events.ErrorInfo{
-			Err:         fmt.Errorf("gemini: API returned status %d: %s", resp.StatusCode, string(respBody)),
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("gemini: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
 		})
@@ -719,8 +717,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 		for _, part := range cand.Content.Parts {
 			switch {
 			case part.Thought && part.Text != "":
-				_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-					TurnID:    turnID,
+				_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
 					Source:    pluginID,
 					Content:   part.Text,
 					Phase:     "reasoning",
@@ -744,8 +741,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 				code := part.ExecutableCode.Code
 				lang := part.ExecutableCode.Language
 				content.WriteString(fmt.Sprintf("\n```%s\n%s\n```\n", strings.ToLower(lang), code))
-				_ = p.bus.Emit("tool.invoke", events.ToolCall{
-					Name:      "_gemini_code_execution",
+				_ = p.bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "_gemini_code_execution",
 					Arguments: map[string]any{"language": lang, "code": code},
 				})
 
@@ -753,8 +749,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 				out := part.CodeExecutionResult.Output
 				outcome := part.CodeExecutionResult.Outcome
 				content.WriteString(fmt.Sprintf("\n```output\n%s\n```\n", out))
-				toolResult := events.ToolResult{
-					Name:   "_gemini_code_execution",
+				toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, Name: "_gemini_code_execution",
 					Output: out,
 				}
 				if outcome != "OUTCOME_OK" {
@@ -774,8 +769,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 		usage.CachedTokens = apiResp.UsageMetadata.CachedContentTokenCount
 	}
 
-	return events.LLMResponse{
-		Content:      content.String(),
+	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: content.String(),
 		ToolCalls:    toolCalls,
 		Usage:        usage,
 		CostUSD:      p.costForModel(model, usage),
@@ -844,8 +838,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		for _, part := range cand.Content.Parts {
 			switch {
 			case part.Thought && part.Text != "":
-				_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-					TurnID:    turnID,
+				_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
 					Source:    pluginID,
 					Content:   part.Text,
 					Phase:     "reasoning",
@@ -854,10 +847,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 
 			case part.Text != "":
 				fullContent.WriteString(part.Text)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					Content: part.Text,
-					Index:   chunkIndex,
-					TurnID:  turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: part.Text,
+					Index:  chunkIndex,
+					TurnID: turnID,
 				})
 				chunkIndex++
 
@@ -869,10 +861,9 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 					Arguments: string(args),
 				}
 				toolCalls = append(toolCalls, tc)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					ToolCall: &tc,
-					Index:    chunkIndex,
-					TurnID:   turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: &tc,
+					Index:  chunkIndex,
+					TurnID: turnID,
 				})
 				chunkIndex++
 				toolCallSeq++
@@ -882,14 +873,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 				lang := part.ExecutableCode.Language
 				snippet := fmt.Sprintf("\n```%s\n%s\n```\n", strings.ToLower(lang), code)
 				fullContent.WriteString(snippet)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					Content: snippet,
-					Index:   chunkIndex,
-					TurnID:  turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: snippet,
+					Index:  chunkIndex,
+					TurnID: turnID,
 				})
 				chunkIndex++
-				_ = p.bus.Emit("tool.invoke", events.ToolCall{
-					Name:      "_gemini_code_execution",
+				_ = p.bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "_gemini_code_execution",
 					Arguments: map[string]any{"language": lang, "code": code},
 				})
 
@@ -898,14 +887,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 				outcome := part.CodeExecutionResult.Outcome
 				snippet := fmt.Sprintf("\n```output\n%s\n```\n", out)
 				fullContent.WriteString(snippet)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{
-					Content: snippet,
-					Index:   chunkIndex,
-					TurnID:  turnID,
+				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: snippet,
+					Index:  chunkIndex,
+					TurnID: turnID,
 				})
 				chunkIndex++
-				toolResult := events.ToolResult{
-					Name:   "_gemini_code_execution",
+				toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, Name: "_gemini_code_execution",
 					Output: out,
 				}
 				if outcome != "OUTCOME_OK" {
@@ -928,8 +915,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		CachedTokens:     totalUsage.CachedContentTokenCount,
 	}
 
-	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
-		TurnID:       turnID,
+	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: turnID,
 		FinishReason: finishReason,
 		Usage:        finalUsage,
 	})
@@ -939,8 +925,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	tags := p.currentRequestTags
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("llm.response", events.LLMResponse{
-		Content:      fullContent.String(),
+	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: fullContent.String(),
 		ToolCalls:    toolCalls,
 		Usage:        finalUsage,
 		CostUSD:      p.costForModel(model, finalUsage),
@@ -992,10 +977,9 @@ func (p *Plugin) debugLog(label string, data []byte) {
 }
 
 func (p *Plugin) emitError(err error) {
-	p.emitErrorInfo(events.ErrorInfo{
-		Source: pluginID,
-		Err:    err,
-		Fatal:  false,
+	p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: pluginID,
+		Err:   err,
+		Fatal: false,
 	})
 }
 

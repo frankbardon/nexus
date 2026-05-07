@@ -53,14 +53,11 @@ func TestAppendRoundTrip(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	p.messageThreshold = 1000 // avoid accidental trigger
 
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "hi"}})
-	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
-		Content:   "hello",
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "hi"}})
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "hello",
 		ToolCalls: []events.ToolCallRequest{{ID: "t1", Name: "shell"}},
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID: "t1", Name: "shell", Output: "ok",
-	}})
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "t1", Name: "shell", Output: "ok"}})
 
 	msgs := p.GetHistory()
 	if len(msgs) != 3 {
@@ -79,7 +76,7 @@ func TestTriggerFiresLLMRequest(t *testing.T) {
 	p.maxRecent = 1
 
 	for i := 0; i < 3; i++ {
-		p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "msg"}})
+		p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "msg"}})
 	}
 
 	last := rec.last()
@@ -104,11 +101,10 @@ func TestFinishSummarisationReplacesBuffer(t *testing.T) {
 
 	// Seed 5 plain user messages — no tool pairs so safeSplit is a no-op.
 	for _, c := range []string{"a", "b", "c", "d", "e"} {
-		p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: c}})
+		p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: c}})
 	}
 	p.triggerSummarisation("test")
-	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
-		Content:  "SUMMARY",
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "SUMMARY",
 		Metadata: map[string]any{"_source": llmSource},
 	}})
 
@@ -161,12 +157,8 @@ func TestInternalCallsFiltered(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	p.messageThreshold = 1000
 
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID: "code-1", Name: "discover", ParentCallID: "outer",
-	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID: "code-1", Name: "discover", Output: "dropped",
-	}})
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-1", Name: "discover", ParentCallID: "outer"}})
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "code-1", Name: "discover", Output: "dropped"}})
 	if got := len(p.GetHistory()); got != 0 {
 		t.Fatalf("expected empty history, got %d", got)
 	}
@@ -176,9 +168,9 @@ func TestInternalCallsFiltered(t *testing.T) {
 func TestHistoryQueryContract(t *testing.T) {
 	p, _ := newTestPlugin(t)
 	p.messageThreshold = 1000
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "hi"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "hi"}})
 
-	q := &events.HistoryQuery{}
+	q := &events.HistoryQuery{SchemaVersion: events.HistoryQueryVersion}
 	p.handleHistoryQuery(engine.Event[any]{Payload: q})
 	if len(q.Messages) != 1 || q.Messages[0].Content != "hi" {
 		t.Fatalf("q.Messages wrong: %+v", q.Messages)
@@ -201,7 +193,7 @@ func TestAllProtectedNoOp(t *testing.T) {
 	p, rec := newTestPlugin(t)
 	p.messageThreshold = 1000
 	p.maxRecent = 10
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "only"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "only"}})
 	p.triggerSummarisation("test")
 	if rec.last() != nil {
 		t.Fatal("expected no llm.request when all messages protected")

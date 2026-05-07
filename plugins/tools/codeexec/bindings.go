@@ -162,8 +162,7 @@ func (inv *invocation) callToolTyped(name string, argsVal reflect.Value, argsTyp
 	}
 
 	callID := "code-" + randID()
-	tc := events.ToolCall{
-		ID:           callID,
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: callID,
 		Name:         name,
 		Arguments:    raw,
 		TurnID:       inv.turnID,
@@ -260,8 +259,7 @@ func (inv *invocation) callTool(name string, argsVal reflect.Value, argsType ref
 	}
 
 	callID := "code-" + randID()
-	tc := events.ToolCall{
-		ID:           callID,
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: callID,
 		Name:         name,
 		Arguments:    raw,
 		TurnID:       inv.turnID,

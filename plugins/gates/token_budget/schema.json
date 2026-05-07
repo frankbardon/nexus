@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.token_budget.json",
+  "title": "nexus.gate.token_budget",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_tokens":    {"type": "integer", "minimum": 1, "description": "Legacy single-session token ceiling."},
+    "message":       {"type": "string",  "description": "Default message used by the legacy max_tokens ceiling."},
+    "on_exceed":     {"type": "string",  "enum": ["block", "warn", "downgrade-model"], "description": "Default action applied when a ceiling has none."},
+    "downgrade_candidates": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Model IDs eligible for downgrade routing (cheapest first)."
+    },
+    "ceilings": {
+      "type": "array",
+      "description": "Per-dimension budget ceilings.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "dimension":           {"type": "string", "enum": ["session", "tenant", "source_plugin"]},
+          "window":              {"type": "string", "enum": ["session", "day"]},
+          "match":               {"type": "string", "description": "Optional match string scoping the ceiling."},
+          "on_exceed":           {"type": "string", "enum": ["block", "warn", "downgrade-model"]},
+          "message":             {"type": "string"},
+          "max_input_tokens":    {"type": "integer", "minimum": 0},
+          "max_output_tokens":   {"type": "integer", "minimum": 0},
+          "max_total_tokens":    {"type": "integer", "minimum": 0},
+          "max_usd":             {"type": "number",  "minimum": 0},
+          "max_usd_per_session": {"type": "number",  "minimum": 0},
+          "max_usd_per_day":     {"type": "number",  "minimum": 0}
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "description": "Per-model pricing overrides; keys are model IDs.",
+      "additionalProperties": true
+    }
+  }
+}

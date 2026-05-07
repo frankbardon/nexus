@@ -82,8 +82,7 @@ func TestRoutesByMetadataSource(t *testing.T) {
 		"default_model": "claude-sonnet-4-6-20250514",
 	})
 
-	req := &events.LLMRequest{
-		Model:    "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
 		Metadata: map[string]any{"_source": "planner"},
 	}
 	emit(bus, req)
@@ -112,7 +111,7 @@ func TestFallsBackToDefaultModel(t *testing.T) {
 		"default_model": "claude-sonnet-4-6-20250514",
 	})
 
-	req := &events.LLMRequest{Metadata: map[string]any{"_source": "react"}}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: map[string]any{"_source": "react"}}
 	emit(bus, req)
 	if req.Model != "claude-sonnet-4-6-20250514" {
 		t.Fatalf("expected sonnet default, got %s", req.Model)
@@ -140,17 +139,13 @@ func TestNumericComparatorGteEscalates(t *testing.T) {
 		},
 	})
 
-	low := &events.LLMRequest{
-		Metadata: map[string]any{"task_kind": "react_main", "iteration": 1},
-	}
+	low := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: map[string]any{"task_kind": "react_main", "iteration": 1}}
 	emit(bus, low)
 	if low.Model != "claude-sonnet-4-6-20250514" {
 		t.Fatalf("low iteration should hit sonnet, got %s", low.Model)
 	}
 
-	high := &events.LLMRequest{
-		Metadata: map[string]any{"task_kind": "react_main", "iteration": 4},
-	}
+	high := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: map[string]any{"task_kind": "react_main", "iteration": 4}}
 	emit(bus, high)
 	if high.Model != "claude-opus-4-6-20250602" {
 		t.Fatalf("high iteration should escalate to opus, got %s", high.Model)
@@ -167,8 +162,7 @@ func TestRoutesByTagDimension(t *testing.T) {
 		},
 	})
 
-	req := &events.LLMRequest{
-		Role: "balanced",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Tags: map[string]string{"tenant": "premium"},
 	}
 	emit(bus, req)
@@ -187,8 +181,7 @@ func TestSkipsWhenTargetProviderPinned(t *testing.T) {
 		},
 	})
 
-	req := &events.LLMRequest{
-		Model: "claude-sonnet-4-6-20250514",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
 		Metadata: map[string]any{
 			"_source":          "planner",
 			"_target_provider": "nexus.llm.openai",
@@ -218,7 +211,7 @@ func TestFirstMatchWins(t *testing.T) {
 			},
 		},
 	})
-	req := &events.LLMRequest{Metadata: map[string]any{"_source": "react"}}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: map[string]any{"_source": "react"}}
 	emit(bus, req)
 	if req.Model != "claude-haiku-4-5-20251001" {
 		t.Fatalf("first matching rule must win, got %s", req.Model)
@@ -227,7 +220,7 @@ func TestFirstMatchWins(t *testing.T) {
 
 func TestNoRulesNoMutation(t *testing.T) {
 	_, bus := newRouter(t, map[string]any{})
-	req := &events.LLMRequest{Model: "claude-sonnet-4-6-20250514"}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514"}
 	emit(bus, req)
 	if req.Model != "claude-sonnet-4-6-20250514" {
 		t.Fatalf("expected no mutation, got %s", req.Model)

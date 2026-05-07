@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.search.gemini_native.json",
+  "title": "nexus.search.gemini_native",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_key":     {"type": "string", "description": "Direct Gemini API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable holding the Gemini API key."},
+    "model":       {"type": "string", "description": "Gemini model used for grounding."},
+    "timeout":     {"type": "string", "description": "HTTP timeout (Go duration)."}
+  }
+}

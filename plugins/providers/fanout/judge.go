@@ -122,8 +122,7 @@ func (p *Plugin) selectByJudge(fanoutID string, state *fanoutState, responses []
 		"task_kind":     "fanout_judge",
 	}
 
-	judgeReq := events.LLMRequest{
-		Role: p.cfg.JudgeRole,
+	judgeReq := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.cfg.JudgeRole,
 		Messages: []events.Message{
 			{Role: "user", Content: prompt},
 		},

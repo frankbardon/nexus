@@ -37,9 +37,8 @@ func newTestPlugin(action string, checks ...string) (*Plugin, engine.EventBus) {
 func TestContentSafety_DetectsEmail(t *testing.T) {
 	_, bus := newTestPlugin("block", "email")
 
-	output := events.AgentOutput{
-		Content: "Contact me at user@example.com for details.",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Contact me at user@example.com for details.",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if !result.Vetoed {
@@ -50,9 +49,8 @@ func TestContentSafety_DetectsEmail(t *testing.T) {
 func TestContentSafety_DetectsSSN(t *testing.T) {
 	_, bus := newTestPlugin("block", "ssn")
 
-	output := events.AgentOutput{
-		Content: "The SSN is 123-45-6789.",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "The SSN is 123-45-6789.",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if !result.Vetoed {
@@ -74,7 +72,7 @@ func TestContentSafety_DetectsAPIKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output := events.AgentOutput{Content: tt.content, Role: "assistant"}
+			output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: tt.content, Role: "assistant"}
 			result, _ := bus.EmitVetoable("before:io.output", &output)
 			if !result.Vetoed {
 				t.Fatalf("expected veto for %s API key", tt.name)
@@ -86,9 +84,8 @@ func TestContentSafety_DetectsAPIKey(t *testing.T) {
 func TestContentSafety_DetectsPrivateKey(t *testing.T) {
 	_, bus := newTestPlugin("block", "private_key")
 
-	output := events.AgentOutput{
-		Content: "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if !result.Vetoed {
@@ -99,9 +96,8 @@ func TestContentSafety_DetectsPrivateKey(t *testing.T) {
 func TestContentSafety_DetectsInternalIP(t *testing.T) {
 	_, bus := newTestPlugin("block", "internal_ip")
 
-	output := events.AgentOutput{
-		Content: "The server is at 192.168.1.100.",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "The server is at 192.168.1.100.",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if !result.Vetoed {
@@ -112,9 +108,8 @@ func TestContentSafety_DetectsInternalIP(t *testing.T) {
 func TestContentSafety_AllowsCleanContent(t *testing.T) {
 	_, bus := newTestPlugin("block", "email", "ssn", "api_key", "private_key")
 
-	output := events.AgentOutput{
-		Content: "This is perfectly safe content with no sensitive data.",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "This is perfectly safe content with no sensitive data.",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if result.Vetoed {
@@ -125,9 +120,8 @@ func TestContentSafety_AllowsCleanContent(t *testing.T) {
 func TestContentSafety_RedactMode(t *testing.T) {
 	_, bus := newTestPlugin("redact", "email")
 
-	output := events.AgentOutput{
-		Content: "Contact user@example.com for help.",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Contact user@example.com for help.",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if result.Vetoed {
@@ -144,9 +138,8 @@ func TestContentSafety_RedactMode(t *testing.T) {
 func TestContentSafety_SkipsNonAssistant(t *testing.T) {
 	_, bus := newTestPlugin("block", "email")
 
-	output := events.AgentOutput{
-		Content: "Contact user@example.com",
-		Role:    "system",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Contact user@example.com",
+		Role: "system",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if result.Vetoed {
@@ -157,9 +150,8 @@ func TestContentSafety_SkipsNonAssistant(t *testing.T) {
 func TestContentSafety_DetectsPassword(t *testing.T) {
 	_, bus := newTestPlugin("block", "password")
 
-	output := events.AgentOutput{
-		Content: "password=mysecretpass123",
-		Role:    "assistant",
+	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "password=mysecretpass123",
+		Role: "assistant",
 	}
 	result, _ := bus.EmitVetoable("before:io.output", &output)
 	if !result.Vetoed {

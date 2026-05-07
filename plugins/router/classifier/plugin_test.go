@@ -62,8 +62,7 @@ func TestInit_RequiresClassifierModel(t *testing.T) {
 func TestSkipsInternalSourcedRequests(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{
-		Model: "claude-sonnet-4-6-20250514",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
 		Messages: []events.Message{
 			{Role: "user", Content: "hello"},
 		},
@@ -83,8 +82,7 @@ func TestSkipsInternalSourcedRequests(t *testing.T) {
 func TestSkipsAlreadyRouted(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{
-		Model: "claude-sonnet-4-6-20250514",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
 		Messages: []events.Message{
 			{Role: "user", Content: "complex question"},
 		},
@@ -99,8 +97,7 @@ func TestSkipsAlreadyRouted(t *testing.T) {
 func TestCacheMissAppliesFallback(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{
-		Model: "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
 		Messages: []events.Message{
 			{Role: "user", Content: "complex question"},
 		},
@@ -119,8 +116,7 @@ func TestCacheHitRoutesImmediately(t *testing.T) {
 	prompt := "what is the capital of france"
 	p.cache.put(promptHash(prompt, defaultPrefixChars), "haiku")
 
-	req := &events.LLMRequest{
-		Model:    "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
 		Messages: []events.Message{{Role: "user", Content: prompt}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)
@@ -150,16 +146,14 @@ func TestClassifierWarmsCacheAsync(t *testing.T) {
 		callID, _ := req.Metadata["_call_id"].(string)
 		go func() {
 			defer probeWG.Done()
-			_ = bus.Emit("llm.response", events.LLMResponse{
-				Content:  "haiku",
+			_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "haiku",
 				Metadata: map[string]any{"_call_id": callID},
 			})
 		}()
 	})
 
 	prompt := "trivial weather query"
-	req := &events.LLMRequest{
-		Model:    "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
 		Messages: []events.Message{{Role: "user", Content: prompt}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)

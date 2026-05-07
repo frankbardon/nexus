@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.tool_filter.json",
+  "title": "nexus.gate.tool_filter",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "include": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Allow-list of tool name patterns; when set, only matching tools are exposed."
+    },
+    "exclude": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Deny-list of tool name patterns applied after include."
+    }
+  }
+}

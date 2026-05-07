@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.oneshot.json",
+  "title": "nexus.io.oneshot",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "input":       {"type": "string",  "description": "Inline prompt (one of input / input_file / read_stdin must be set)."},
+    "input_file":  {"type": "string",  "description": "Path to a file holding the prompt."},
+    "output_file": {"type": "string",  "description": "Path the JSON transcript is written to."},
+    "pretty":      {"type": "boolean", "description": "Pretty-print the JSON transcript."},
+    "read_stdin":  {"type": "boolean", "description": "Read the prompt from stdin."}
+  }
+}

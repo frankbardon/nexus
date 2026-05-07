@@ -2,6 +2,11 @@ package events
 
 import "time"
 
+// Schema-version constants for search.* payloads. See doc.go.
+const (
+	SearchRequestVersion = 1
+)
+
 // SearchRequest is an outbound web search request. The tool plugin fires it
 // as a pointer payload on "search.request"; the capability-resolved provider
 // fills Results / Provider / Error in place before Emit returns. Mirrors the
@@ -9,6 +14,8 @@ import "time"
 // than the async LLMRequest/LLMResponse pair, since search is a one-shot
 // lookup with no streaming surface.
 type SearchRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Query      string
 	Count      int    // max results; zero means provider default
 	SafeSearch string // "off" | "moderate" | "strict"

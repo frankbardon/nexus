@@ -112,22 +112,22 @@ func (c *ToolCache) handleResult(ev Event[any]) {
 // canonicalize failure (the caller falls back to the FIFO stash).
 func (c *ToolCache) Lookup(toolID string, args map[string]any) (events.ToolResult, bool) {
 	if c == nil {
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	key, err := canonicalArgsHash(toolID, args)
 	if err != nil {
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	path := c.pathFor(toolID, key)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	var res events.ToolResult
 	if err := json.Unmarshal(data, &res); err != nil {
 		c.logger.Warn("toolcache: malformed cache file ignored",
 			"path", path, "error", err)
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	return res, true
 }

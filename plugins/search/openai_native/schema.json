@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.search.openai_native.json",
+  "title": "nexus.search.openai_native",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "api_key":     {"type": "string", "description": "Direct OpenAI API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable holding the OpenAI API key."},
+    "model":       {"type": "string", "description": "OpenAI model used to invoke the Responses web_search tool."},
+    "base_url":    {"type": "string", "description": "Override OpenAI API base URL."},
+    "timeout":     {"type": "string", "description": "HTTP timeout (Go duration)."}
+  }
+}

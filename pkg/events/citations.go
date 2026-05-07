@@ -1,5 +1,11 @@
 package events
 
+// Schema-version constants for citations.* payloads. See doc.go.
+const (
+	RetrievalContextVersion = 1
+	CitedResponseVersion    = 1
+)
+
 // RetrievedChunk is one piece of context a retrieval plugin pulled for the
 // current turn. The citation plugin uses it as the validation set: cited
 // references must point at chunks that were actually retrieved during the
@@ -17,6 +23,8 @@ type RetrievedChunk struct {
 //
 // Bus event type: "rag.retrieved".
 type RetrievalContext struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID string
 	Source string // emitter plugin ID for debug
 	Chunks []RetrievedChunk
@@ -44,6 +52,8 @@ type CitationRef struct {
 // Emitted as "llm.response.cited" after every llm.response that resolves
 // against an active retrieval context.
 type CitedResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID    string
 	Text      string
 	Citations []CitationRef

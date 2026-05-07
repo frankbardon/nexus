@@ -130,8 +130,7 @@ func (h *Handler) AttemptRetry(
 		h.mu.Unlock()
 
 		// Emit LLM request tagged with our source.
-		_ = h.bus.Emit("llm.request", events.LLMRequest{
-			Role:     h.config.ModelRole,
+		_ = h.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: h.config.ModelRole,
 			Messages: messages,
 			Stream:   false,
 			Metadata: map[string]any{

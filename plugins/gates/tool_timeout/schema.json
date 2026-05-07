@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.tool_timeout.json",
+  "title": "nexus.gate.tool_timeout",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "default_timeout": {
+      "type": "string",
+      "description": "Default per-call timeout as a Go duration string (e.g. '30s', '2m'). Applied when no per_tool override matches."
+    },
+    "per_tool": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "Per-tool overrides keyed by tool name. Values are Go duration strings. Keys may be exact names ('web_fetch') or glob patterns matched via path.Match ('mcp.*'). Resolution: exact key wins; among glob matches the longest pattern wins; otherwise default_timeout applies."
+    }
+  }
+}

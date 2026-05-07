@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.llm.anthropic.json",
+  "title": "nexus.llm.anthropic",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "debug":        {"type": "boolean", "description": "Persist request/response bodies to the session for debugging."},
+    "auth_mode":    {"type": "string", "enum": ["api_key", "bedrock", "vertex"], "description": "Authentication mode."},
+    "api_key":      {"type": "string", "description": "Direct API key (auth_mode: api_key)."},
+    "api_key_env":  {"type": "string", "description": "Environment variable to read the API key from."},
+    "auth": {
+      "type": "object",
+      "description": "Optional structured auth block; mirrors auth_mode subkeys.",
+      "additionalProperties": true
+    },
+    "bedrock": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AWS Bedrock auth block.",
+      "properties": {
+        "region":                    {"type": "string"},
+        "access_key_id":             {"type": "string"},
+        "access_key_id_env":         {"type": "string"},
+        "secret_access_key":         {"type": "string"},
+        "secret_access_key_env":     {"type": "string"},
+        "session_token":             {"type": "string"},
+        "session_token_env":         {"type": "string"}
+      }
+    },
+    "vertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "GCP Vertex AI auth block.",
+      "properties": {
+        "project":                  {"type": "string"},
+        "project_id":               {"type": "string"},
+        "region":                   {"type": "string"},
+        "location":                 {"type": "string"},
+        "sa_key_file":              {"type": "string"},
+        "sa_key_file_env":          {"type": "string"},
+        "service_account_json":     {"type": "string"},
+        "service_account_json_env": {"type": "string"}
+      }
+    },
+    "project_id":               {"type": "string", "description": "Top-level Vertex project ID alias."},
+    "location":                 {"type": "string", "description": "Top-level Vertex region alias."},
+    "service_account_json":     {"type": "string", "description": "Top-level Vertex SA JSON path alias."},
+    "service_account_json_env": {"type": "string", "description": "Top-level Vertex SA JSON env-var alias."},
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":        {"type": "boolean"},
+        "system":         {"type": "boolean"},
+        "tools":          {"type": "boolean"},
+        "message_prefix": {"type": "integer", "minimum": 0},
+        "ttl":            {"type": "string", "description": "5m or 1h."}
+      }
+    },
+    "thinking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":          {"type": "boolean"},
+        "budget_tokens":    {"type": "integer"},
+        "include_thoughts": {"type": "boolean"}
+      }
+    },
+    "multimodal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pdf_beta": {"type": "boolean"}
+      }
+    },
+    "citations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "structured_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode":        {"type": "string", "enum": ["tool", "native"]},
+        "beta_header": {"type": "string"}
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":            {"type": "boolean"},
+        "upload_threshold":   {"type": "integer", "minimum": 0},
+        "cache_uploads":      {"type": "boolean"},
+        "delete_on_shutdown": {"type": "boolean"}
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Backoff configuration shared by every provider.",
+      "properties": {
+        "enabled":       {"type": "boolean"},
+        "max_retries":   {"type": "integer", "minimum": 0},
+        "initial_delay": {"type": "string"},
+        "max_delay":     {"type": "string"},
+        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "jitter"]},
+        "multiplier":    {"type": "number", "minimum": 0},
+        "statuses":      {"type": "array", "items": {"type": "integer"}}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "description": "Per-model pricing overrides; keys are model IDs.",
+      "additionalProperties": true
+    }
+  }
+}

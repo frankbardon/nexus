@@ -60,8 +60,7 @@ func run() error {
 		{ID: "step_2", Description: "Identify issues", Instructions: "Flag bugs and quality problems.", Status: "pending", Order: 2},
 		{ID: "step_3", Description: "Propose fixes", Instructions: "Suggest concrete code changes.", Status: "pending", Order: 3},
 	}
-	planResult := events.PlanResult{
-		TurnID:   "turn-1",
+	planResult := events.PlanResult{SchemaVersion: events.PlanResultVersion, TurnID: "turn-1",
 		PlanID:   "plan-1",
 		Steps:    steps,
 		Summary:  "Three-step review workflow",
@@ -70,13 +69,12 @@ func run() error {
 	}
 	envelopes := []journal.Envelope{
 		{Seq: 1, Ts: t0, Type: "io.session.start", Payload: map[string]any{"session_id": "react-planner-handoff-golden"}},
-		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{Content: "Please review the codebase."}},
+		{Seq: 2, Ts: t0.Add(10 * time.Millisecond), Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "Please review the codebase."}},
 		{Seq: 3, Ts: t0.Add(20 * time.Millisecond), Type: "agent.turn.start"},
-		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "plan.request", Payload: events.PlanRequest{TurnID: "turn-1", Input: "Please review the codebase."}},
+		{Seq: 4, Ts: t0.Add(30 * time.Millisecond), Type: "plan.request", Payload: events.PlanRequest{SchemaVersion: events.PlanRequestVersion, TurnID: "turn-1", Input: "Please review the codebase."}},
 		{Seq: 5, Ts: t0.Add(40 * time.Millisecond), Type: "plan.created", Payload: planResult},
 		{Seq: 6, Ts: t0.Add(50 * time.Millisecond), Type: "plan.result", Payload: planResult},
-		{Seq: 7, Ts: t0.Add(60 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{
-			Model:        "mock",
+		{Seq: 7, Ts: t0.Add(60 * time.Millisecond), Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Model: "mock",
 			FinishReason: "end_turn",
 			Usage:        events.Usage{PromptTokens: 220, CompletionTokens: 80, TotalTokens: 300},
 			Content:      "Plan complete: codebase reviewed, no critical issues found.",

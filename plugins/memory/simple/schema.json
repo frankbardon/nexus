@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.simple.json",
+  "title": "nexus.memory.simple",
+  "description": "Unbounded append-only history; no configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

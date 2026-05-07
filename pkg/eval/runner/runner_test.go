@@ -36,18 +36,16 @@ func TestRun_ReplaysSyntheticJournal(t *testing.T) {
 	}
 	envelopes := []journal.Envelope{
 		{Seq: 1, Type: "io.session.start", Payload: map[string]any{"session_id": "synthetic"}},
-		{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "first message"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "first message"}},
 		{Seq: 3, Type: "agent.turn.start"},
-		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{
-			Content:      "first reply",
+		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "first reply",
 			Model:        "mock",
 			FinishReason: "end_turn",
 		}},
 		{Seq: 5, Type: "agent.turn.end"},
-		{Seq: 6, Type: "io.input", Payload: events.UserInput{Content: "second message"}},
+		{Seq: 6, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "second message"}},
 		{Seq: 7, Type: "agent.turn.start"},
-		{Seq: 8, Type: "llm.response", Payload: events.LLMResponse{
-			Content:      "second reply",
+		{Seq: 8, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "second reply",
 			Model:        "mock",
 			FinishReason: "end_turn",
 		}},

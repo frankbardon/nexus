@@ -209,10 +209,9 @@ func TestBuildRequestBody_ReasoningModelStripsTemperature(t *testing.T) {
 		reasoning: reasoningConfig{Effort: "medium"},
 	}
 
-	req := events.LLMRequest{
-		Messages: []events.Message{
-			{Role: "user", Content: "hello"},
-		},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
+		{Role: "user", Content: "hello"},
+	},
 		Temperature: &temp,
 	}
 

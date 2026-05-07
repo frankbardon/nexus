@@ -16,8 +16,7 @@ import (
 // serialized as {type: "content", content: <prediction>}.
 func TestBuildRequestBody_PredictionSet(t *testing.T) {
 	p := &Plugin{}
-	req := events.LLMRequest{
-		Messages:   []events.Message{{Role: "user", Content: "rewrite please"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "rewrite please"}},
 		Prediction: "the known target text",
 	}
 
@@ -39,10 +38,7 @@ func TestBuildRequestBody_PredictionSet(t *testing.T) {
 // when LLMRequest.Prediction is the empty string.
 func TestBuildRequestBody_PredictionEmpty(t *testing.T) {
 	p := &Plugin{}
-	req := events.LLMRequest{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
-		// Prediction left empty
-	}
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}}} // Prediction left empty
 
 	body := p.buildRequestBody("gpt-4o", 1024, req)
 
@@ -56,8 +52,7 @@ func TestBuildRequestBody_PredictionEmpty(t *testing.T) {
 // reject it (o1, o3, o4, gpt-5*-thinking).
 func TestBuildRequestBody_PredictionStrippedOnReasoningModel(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	req := events.LLMRequest{
-		Messages:   []events.Message{{Role: "user", Content: "rewrite"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "rewrite"}},
 		Prediction: "the target",
 	}
 

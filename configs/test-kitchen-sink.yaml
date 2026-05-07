@@ -82,7 +82,7 @@ plugins:
     max_chars: 5000
 
   nexus.gate.content_safety:
-    action: warn
+    action: redact
 
   nexus.gate.context_window:
     max_context_tokens: 100000

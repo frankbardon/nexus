@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.app.helloworld.json",
+  "title": "nexus.app.helloworld",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "greeting": {"type": "string", "description": "Greeting string emitted on io.input."}
+  }
+}

@@ -57,7 +57,6 @@ plugins:
     system_prompt: "You are a test orchestrator. Decompose the request into 2 subtasks, spawn workers for each, then synthesise."
 
   nexus.agent.subagent/main:
-    max_iterations: 4
     model_role: quick
 
   nexus.gate.endless_loop:

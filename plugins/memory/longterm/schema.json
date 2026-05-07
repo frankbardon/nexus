@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.longterm.json",
+  "title": "nexus.memory.longterm",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scope":                  {"type": "string", "enum": ["agent", "global", "both"]},
+    "path":                   {"type": "string", "description": "Base directory for memory files."},
+    "agent_id":               {"type": "string"},
+    "auto_load":              {"type": "boolean"},
+    "auto_save_instructions": {"type": "string"},
+    "require_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":        {"type": "boolean"},
+        "default_choice": {"type": "string"},
+        "timeout":        {"type": "string"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "key_glob":             {"type": "string"},
+            "size_threshold_bytes": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

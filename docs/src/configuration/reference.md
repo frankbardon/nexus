@@ -26,10 +26,64 @@ source, update this page in the same commit.
   user's home directory; `~/foo` resolves to `<home>/foo`. Relative paths are
   resolved against the engine's working directory and not modified.
 
+## Validation
+
+Configuration is validated **strictly at boot**, after YAML loading and before
+any plugin's `Init()` runs. The engine compiles the top-level schema plus every
+active plugin's schema (when the plugin advertises one) and validates each
+config block against it. **Validation errors abort boot** — they are aggregated
+across every plugin so a single boot attempt surfaces every issue at once,
+sorted, with the offending key path on each line:
+
+```
+config validation failed:
+  - plugins.nexus.gate.token_budget.warning_threshold: unknown key "warning_threshold"
+  - plugins.nexus.tool.web.timeoutt: unknown key "timeoutt" (did you mean "timeout"?)
+2 errors; aborting boot
+```
+
+**Unknown keys fail boot.** Plugin schemas declare `additionalProperties: false`
+at every object level, so a typo in a key name is a hard error rather than a
+silently-ignored value. The validator emits a "did you mean" suggestion when a
+close match exists in the schema's declared keys (Levenshtein distance ≤ 3 and
+strictly less than half the candidate's length). This guarantees that the only
+keys you can write in YAML are the ones the engine actually reads — silent
+typos are not possible for plugins that ship a schema.
+
+**Deprecated keys log a warning** but do not fail boot. Schemas mark these with
+`deprecated: true`. Move off the key when convenient; deprecation warnings are
+the engine's signal that a future minor release may delete the shim.
+
+**Plugins without a schema** (legacy or third-party) are skipped with a `debug`
+log. They are not blocked from booting. The engine's own top-level keys
+(`core`, `engine`, `capabilities`, `plugins.active`, `journal`) are always
+validated against the engine schema.
+
+### Schema authoring
+
+Plugins expose their schema by implementing the optional
+`engine.ConfigSchemaProvider` interface (defined in
+`pkg/engine/config_validation.go`). Conventions:
+
+- The schema lives at `plugins/<id>/schema.json` and is `//go:embed`-ed by a
+  small `schema.go` in the same package; the plugin's `ConfigSchema()` method
+  returns the embedded bytes.
+- Schemas declare `"$schema": "https://json-schema.org/draft/2020-12/schema"`
+  and **must** set `"additionalProperties": false` on every object level so
+  unknown keys are caught.
+- Mark deprecated keys with `"deprecated": true` (a sibling of `type`,
+  `description`, etc.). The validator walks the schema once and warns when a
+  deprecated key is present in the user's config.
+- The schema is canonical for the plugin's config map — what `Init()` actually
+  reads. Schema drift from real consumption is a bug; the smoke test in
+  `pkg/engine/configs_smoke_test.go` validates every shipped YAML against
+  every active plugin's schema and is the canary for that drift.
+
 ## Top-level structure
 
 ```yaml
 core:           # engine-level settings
+engine:         # engine resilience knobs (shutdown drain, ...)
 capabilities:   # capability → plugin-ID pinning (optional)
 journal:        # durable per-session event log (always on; tunables only)
 plugins:
@@ -41,6 +95,7 @@ plugins:
 | Key            | Type   | Default | Description                                                                 |
 |----------------|--------|---------|-----------------------------------------------------------------------------|
 | `core`         | map    | *(see core section)* | Engine-level settings (logging, sessions, models). |
+| `engine`       | map    | *(see engine section)* | Engine resilience knobs (shutdown drain budget). |
 | `capabilities` | map    | *(empty)* | Pin capability names to specific provider plugin IDs (e.g. `search.provider: nexus.search.brave`). Overrides default resolution (first active provider). |
 | `journal`      | map    | *(see journal section)* | Tuning knobs for the always-on event journal. The journal cannot be disabled. |
 | `plugins.active` | list | `[]`    | Plugin IDs to activate. Order doesn't matter — `Requires()` and `Dependencies()` are resolved automatically. Multi-instance plugins use a slash suffix: `nexus.agent.subagent/researcher`. |
@@ -116,6 +171,85 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+## Engine
+
+Engine-level resilience knobs that don't belong under `core` (which is for
+runtime settings like log level and tick interval) and aren't journal-specific.
+
+```yaml
+engine:
+  shutdown:
+    drain_timeout: 30s
+  config_watch:
+    enabled: false      # opt in to fsnotify hot-reload
+    debounce: 1s
+```
+
+| Key                            | Type     | Default | Description |
+|--------------------------------|----------|---------|-------------|
+| `shutdown.drain_timeout`       | duration | `30s`   | Maximum time the engine waits for in-flight bus dispatches to complete on `Shutdown` before the plugin teardown phase begins. Acts as a floor: a plugin implementing `engine.DrainOverride` can extend (but not shorten) the effective window so a single batch poller or MCP server can flush without operators bumping the global setting. Sub-second values are accepted but rarely useful. |
+| `config_watch.enabled`         | bool     | `false` | When `true`, the CLI starts an `fsnotify` watcher on the `-config` path and calls `Engine.ReloadConfig` on every debounced edit. Default off because production deploys often touch the config file mid-rollout and operators rarely want auto-reload during such windows. SIGHUP and the browser admin endpoint remain available regardless. |
+| `config_watch.debounce`        | duration | `1s`    | Window across which `fsnotify` write/create events on the same file are coalesced into a single reload. Editors commonly fire two or three Write events per save; `1s` is well above that storm but short enough that the operator perceives the reload as instant. |
+
+### Hot reload
+
+The engine supports applying a new config to a running process without
+restarting any unaffected plugins. The flow is two-phase:
+
+1. **Validate phase (atomic).** The new config is run through the same
+   schema validation as boot; capability provider identity is pinned (a
+   plugin advertising `memory.history` cannot be replaced by another
+   provider mid-flight); the diff between current and new active sets is
+   computed. Any failure here returns an error and leaves the engine
+   untouched.
+2. **Apply phase (best-effort).** The diff is walked: removed plugins
+   shut down, in-place reloaders accept their new config, restart-only
+   plugins are torn down and re-initialized, and added plugins run the
+   full lifecycle. Engine-level fields (`drain_timeout`, `config_watch`)
+   are swapped atomically before per-plugin work.
+
+A reload that fails midway through the apply phase logs the error and
+surfaces it to the caller; the engine is left in a best-effort consistent
+state. True rollback is not attempted because "undoing" a `Shutdown` is
+not generally possible.
+
+**Triggers:**
+
+- **`SIGHUP`** to the CLI process re-reads the original `-config` path
+  and applies the result. (`SIGINT` and `SIGTERM` continue to terminate
+  the engine.)
+- **`POST /admin/reload-config`** on the browser plugin's HTTP server.
+  Body is empty (re-read original path) or `{"path": "/abs/path/to/new.yaml"}`
+  for ad-hoc paths. No auth layer yet — alpha-only; front with a reverse
+  proxy if exposed.
+- **`fsnotify` watcher** on the original path. Off by default; opt in
+  via `engine.config_watch.enabled: true`. Debounced by
+  `engine.config_watch.debounce` to absorb editor save bursts.
+
+**Plugin opt-in: `ConfigReloader`.** A plugin that implements
+
+```go
+type ConfigReloader interface {
+    ReloadConfig(old, new map[string]any) error
+}
+```
+
+receives the in-place hook on a config-only change instead of going
+through `Shutdown` → `Init` → `Ready`. Implementations must be
+transactional from the bus's perspective: returning an error must leave
+the plugin in its prior state. Plugins that don't implement the
+interface go through the full restart path; both work, the in-place
+hook is just an optimization for plugins where a restart would drop
+in-progress work (active streams, bound listeners) the operator would
+notice.
+
+**Capability provider identity is pinned.** Hot-reload rejects any
+config change that would resolve a currently-bound capability (e.g.
+`memory.history`) to a different concrete provider. The session has
+in-flight state bound to the existing provider; a silent swap would
+strip the operator's history. Restart the engine to change capability
+providers.
 
 ## Journal
 
@@ -1346,14 +1480,47 @@ Tenant ceilings persist via app-scope SQLite (`~/.nexus/plugins/nexus.gate.token
 
 ### `nexus.gate.rate_limiter`
 
-Source: `plugins/gates/rate_limiter/plugin.go`. Pauses (re-emits via
-`gate.llm.retry` after a wait) rather than rejecting.
+Source: `plugins/gates/rate_limiter/plugin.go`. Vetoes `before:llm.request`
+when the per-window budget is exhausted; the agent's `gate.llm.retry`
+subscriber re-issues the request after the limiter signals the budget has
+freed up. The pre-Phase-3 `time.Sleep` behavior was removed in alpha — there
+is no compat shim.
 
-| Key                   | Type   | Default                                                     | Description |
-|-----------------------|--------|-------------------------------------------------------------|-------------|
-| `requests_per_minute` | int    | `60`                                                        | Requests allowed per `window_seconds`. |
-| `window_seconds`      | int    | `60`                                                        | Sliding window length. |
-| `pause_message`       | string | `Rate limit reached. Pausing for {seconds}s...`             | Output template; `{seconds}` is interpolated. |
+| Key                   | Type    | Default                                                     | Description |
+|-----------------------|---------|-------------------------------------------------------------|-------------|
+| `mode`                | string  | `reject`                                                    | `reject` (veto, schedule a single one-shot retry once the window ages out) or `queue` (buffer up to `queue.max_pending` retry slots; a drainer goroutine emits `gate.llm.retry` at the configured rate; excess is rejected outright). |
+| `requests_per_minute` | int     | `60`                                                        | Requests allowed per `window_seconds`. |
+| `window_seconds`      | int     | `60`                                                        | Sliding window length. |
+| `pause_message`       | string  | `Rate limit reached. Pausing for {seconds}s...`             | Output template; `{seconds}` is interpolated. |
+| `queue.max_pending`   | int     | `100`                                                       | Maximum buffered retry slots in `mode: queue`. Ignored in `reject` mode. |
+
+### `nexus.gate.tool_timeout`
+
+Source: `plugins/gates/tool_timeout/plugin.go`. Per-call deadline gate. On
+`tool.invoke` it starts a timer; on expiry it emits a `tool.timeout`
+observability event plus a synthetic `tool.result` carrying an error message
+that names the exact override key. A `before:tool.result` veto suppresses any
+late real result for the same call ID so the agent's `pendingToolCalls`
+counter stays consistent. Note: Go cancellation is cooperative — the original
+tool goroutine may keep running until it honors its own context. The gate's
+job is to unblock the agent, not preempt the tool.
+
+Per-tool override keys may be exact tool names (`web_fetch`) or
+[`path.Match`](https://pkg.go.dev/path#Match)-style globs (`mcp.*`).
+Resolution: an exact key wins; among glob matches the longest pattern wins;
+otherwise `default_timeout` applies.
+
+The synthetic error message format is fixed and intended to be read by
+operators:
+
+```
+tool <name> exceeded timeout <duration>; raise via gates.tool_timeout.per_tool.<name>: <duration>
+```
+
+| Key               | Type            | Default | Description |
+|-------------------|-----------------|---------|-------------|
+| `default_timeout` | duration string | `30s`   | Applied when no `per_tool` key matches. |
+| `per_tool`        | map[string]duration | `{}` | Per-tool overrides keyed by exact tool name or `path.Match` glob. |
 
 ### `nexus.gate.prompt_injection`
 

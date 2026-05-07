@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.knowledge_search.json",
+  "title": "nexus.tool.knowledge_search",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tool_name":        {"type": "string",  "description": "Override the LLM-facing tool name."},
+    "top_k":            {"type": "integer", "minimum": 1, "description": "Number of top results returned per query."},
+    "include_metadata": {"type": "boolean", "description": "Include vector store metadata in results."},
+    "embedding_model":  {"type": "string",  "description": "Embedding model used for query embedding."},
+    "namespaces": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Allowed namespaces; empty means any namespace."
+    },
+    "default_namespaces": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Namespaces queried when the LLM does not specify one."
+    }
+  }
+}

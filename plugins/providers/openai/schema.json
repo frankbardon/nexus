@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.llm.openai.json",
+  "title": "nexus.llm.openai",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "debug":            {"type": "boolean", "description": "Persist request/response bodies to the session."},
+    "auth_mode":        {"type": "string", "enum": ["openai", "azure_key", "azure_aad"], "description": "Authentication mode."},
+    "api_key":          {"type": "string", "description": "Direct API key."},
+    "api_key_env":      {"type": "string", "description": "Environment variable for the key."},
+    "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints."},
+    "azure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint":    {"type": "string"},
+        "api_key":     {"type": "string"},
+        "api_key_env": {"type": "string"},
+        "api_version": {"type": "string"},
+        "use_msi":     {"type": "boolean"}
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":            {"type": "boolean"},
+        "purpose":            {"type": "string"},
+        "upload_threshold":   {"type": "integer", "minimum": 0},
+        "cache_uploads":      {"type": "boolean"},
+        "delete_on_shutdown": {"type": "boolean"}
+      }
+    },
+    "reasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":       {"type": "boolean"},
+        "budget_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "force_reasoning": {"type": "boolean", "description": "Force reasoning even on non-o-series models (experimental)."},
+    "multimodal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vision": {"type": "boolean"}
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":       {"type": "boolean"},
+        "max_retries":   {"type": "integer", "minimum": 0},
+        "initial_delay": {"type": "string"},
+        "max_delay":     {"type": "string"},
+        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "jitter"]},
+        "multiplier":    {"type": "number", "minimum": 0},
+        "statuses":      {"type": "array", "items": {"type": "integer"}}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "description": "Per-model pricing overrides; keys are model IDs.",
+      "additionalProperties": true
+    }
+  }
+}

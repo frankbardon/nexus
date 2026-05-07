@@ -14,15 +14,13 @@ func TestAppendMessages(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
 
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "hi"}})
-	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
-		Content: "hello",
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "hi"}})
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "hello",
 		ToolCalls: []events.ToolCallRequest{
 			{ID: "t1", Name: "shell", Arguments: `{"cmd":"ls"}`},
 		},
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "t1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "t1",
 		Name:   "shell",
 		Output: "file.txt",
 	}})
@@ -48,13 +46,11 @@ func TestInternalCallsFiltered(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
 
-	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{
-		ID:           "code-inner-1",
+	p.handleToolInvoke(engine.Event[any]{Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "code-inner-1",
 		Name:         "discover",
 		ParentCallID: "outer-1",
 	}})
-	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{
-		ID:     "code-inner-1",
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "code-inner-1",
 		Name:   "discover",
 		Output: "dropped",
 	}})
@@ -69,9 +65,9 @@ func TestInternalCallsFiltered(t *testing.T) {
 func TestHistoryQuery(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "hi"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "hi"}})
 
-	q := &events.HistoryQuery{}
+	q := &events.HistoryQuery{SchemaVersion: events.HistoryQueryVersion}
 	p.handleHistoryQuery(engine.Event[any]{Payload: q})
 	if got := len(q.Messages); got != 1 {
 		t.Fatalf("q.Messages len = %d, want 1", got)
@@ -85,12 +81,10 @@ func TestHistoryQuery(t *testing.T) {
 func TestCompactedReplacesBuffer(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "one"}})
-	p.handleInput(engine.Event[any]{Payload: events.UserInput{Content: "two"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "one"}})
+	p.handleInput(engine.Event[any]{Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "two"}})
 
-	p.handleCompacted(engine.Event[any]{Payload: events.CompactionComplete{
-		Messages: []events.Message{{Role: "system", Content: "summary"}},
-	}})
+	p.handleCompacted(engine.Event[any]{Payload: events.CompactionComplete{SchemaVersion: events.CompactionCompleteVersion, Messages: []events.Message{{Role: "system", Content: "summary"}}}})
 
 	msgs := p.GetHistory()
 	if len(msgs) != 1 || msgs[0].Content != "summary" {
@@ -105,8 +99,7 @@ func TestLLMResponseWithSourceIgnored(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
 
-	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
-		Content:  "internal",
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "internal",
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic"},
 	}})
 

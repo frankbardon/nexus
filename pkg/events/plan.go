@@ -1,7 +1,16 @@
 package events
 
+// Schema-version constants for plan.* payloads. See doc.go.
+const (
+	PlanRequestVersion  = 1
+	PlanResultVersion   = 1
+	PlanProgressVersion = 1
+)
+
 // PlanRequest asks an active planner to generate a plan for the given input.
 type PlanRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID    string
 	SessionID string
 	Input     string
@@ -9,6 +18,8 @@ type PlanRequest struct {
 
 // PlanResult carries a completed plan back to the agent for execution.
 type PlanResult struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID   string
 	PlanID   string
 	Steps    []PlanResultStep
@@ -28,6 +39,8 @@ type PlanResultStep struct {
 
 // PlanProgress reports a step status change during plan execution.
 type PlanProgress struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	TurnID string
 	PlanID string
 	StepID string

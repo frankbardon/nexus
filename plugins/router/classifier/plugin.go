@@ -259,8 +259,7 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		p.mu.Unlock()
 	}()
 
-	probe := events.LLMRequest{
-		Role:  p.classifierRole,
+	probe := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.classifierRole,
 		Model: p.classifierModel,
 		Messages: []events.Message{
 			{Role: "user", Content: fmt.Sprintf(p.prompt, strings.Join(p.candidates, ", "), prompt)},

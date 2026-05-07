@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.rag.citations.json",
+  "title": "nexus.rag.citations",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode":             {"type": "string", "enum": ["tag", "anthropic_native", "auto"], "description": "Citation extraction mode."},
+    "strict":           {"type": "boolean", "description": "Reject responses with citations missing from rag.retrieved."},
+    "section_priority": {"type": "integer", "description": "Prompt section priority for the citations contract."}
+  }
+}

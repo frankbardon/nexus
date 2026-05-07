@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.control.hitl.synthesizer.json",
+  "title": "nexus.control.hitl.synthesizer",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model":                {"type": "string",  "description": "Model role from core.models used for question synthesis."},
+    "model_id":             {"type": "string",  "description": "Direct model ID override (bypasses role lookup)."},
+    "max_action_ref_chars": {"type": "integer", "minimum": 1, "description": "Cap on the action-reference text fed to the synthesizer."},
+    "cache_enabled":        {"type": "boolean", "description": "Cache synthesized questions per action signature."},
+    "fallback_prompt":      {"type": "string",  "description": "Go template used when the LLM call fails."}
+  }
+}

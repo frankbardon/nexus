@@ -78,12 +78,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// Wire inbound callbacks (user -> engine).
 	p.adapter.OnInput(func(msg ui.InputMessage) {
 		if msg.Content == "/quit" || msg.Content == "/exit" {
-			_ = p.bus.Emit("io.session.end", events.SessionInfo{
-				Transport: "tui",
-			})
+			_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "tui"})
 			return
 		}
-		input := events.UserInput{Content: msg.Content}
+		input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: msg.Content}
 		if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 			return
 		}
@@ -91,24 +89,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	})
 
 	p.adapter.OnApprovalResponse(func(msg ui.ApprovalResponseMessage) {
-		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
-			PromptID: msg.PromptID,
+		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: msg.PromptID,
 			Approved: msg.Approved,
 			Always:   msg.Always,
 		})
 	})
 
 	p.adapter.OnCancel(func() {
-		_ = p.bus.Emit("cancel.request", events.CancelRequest{
-			Source: "tui",
-		})
+		_ = p.bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "tui"})
 	})
 
 	p.adapter.OnResume(func() {
-		_ = p.bus.Emit("cancel.resume", events.CancelResume{})
+		_ = p.bus.Emit("cancel.resume", events.CancelResume{SchemaVersion:
+
+		// Wire outbound handlers (engine -> user).
+		events.CancelResumeVersion})
 	})
 
-	// Wire outbound handlers (engine -> user).
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
@@ -135,9 +132,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 // Ready starts the BubbleTea program.
 func (p *Plugin) Ready() error {
-	_ = p.bus.Emit("io.session.start", events.SessionInfo{
-		Transport: "tui",
-	})
+	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "tui"})
 	return p.adapter.Start(context.Background())
 }
 
@@ -239,10 +234,9 @@ func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
 		p.logger.Error("hitl request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("hitl.responded", events.HITLResponse{
-		RequestID: resp.RequestID,
-		ChoiceID:  resp.ChoiceID,
-		FreeText:  resp.FreeText,
+	_ = p.bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: resp.RequestID,
+		ChoiceID: resp.ChoiceID,
+		FreeText: resp.FreeText,
 	})
 }
 
@@ -288,8 +282,7 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 		p.logger.Error("plan approval request failed", "error", err)
 		return
 	}
-	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{
-		PromptID: resp.PromptID,
+	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: resp.PromptID,
 		Approved: resp.Approved,
 		Always:   resp.Always,
 	})

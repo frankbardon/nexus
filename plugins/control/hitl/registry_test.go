@@ -86,8 +86,7 @@ func TestRegistryPersistRequestRoundTrip(t *testing.T) {
 	}
 	defer reg.Close()
 
-	req := events.HITLRequest{
-		ID:              "hitl-turn-1-call-1",
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "hitl-turn-1-call-1",
 		SessionID:       "2026-05-03-001",
 		TurnID:          "turn-1",
 		RequesterPlugin: pluginID,
@@ -147,7 +146,7 @@ func TestRegistryPersistRequestRejectsBadID(t *testing.T) {
 
 	bad := []string{"", "../escape", "a/b", `c\d`, ".", ".."}
 	for _, id := range bad {
-		req := events.HITLRequest{ID: id, Prompt: "x"}
+		req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id, Prompt: "x"}
 		if err := reg.persistRequest(req); err == nil {
 			t.Fatalf("persistRequest(%q) succeeded; want error", id)
 		}
@@ -163,8 +162,7 @@ func TestRegistryWatchEmitsResponse(t *testing.T) {
 	}
 	defer reg.Close()
 
-	req := events.HITLRequest{
-		ID:     "hitl-r1",
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "hitl-r1",
 		Prompt: "ok?",
 		Mode:   events.HITLModeChoices,
 		Choices: []events.HITLChoice{
@@ -175,8 +173,7 @@ func TestRegistryWatchEmitsResponse(t *testing.T) {
 		t.Fatalf("persistRequest: %v", err)
 	}
 
-	respPath, err := writeResponseFile(dir, req.ID, events.HITLResponse{
-		ChoiceID: "allow",
+	respPath, err := writeResponseFile(dir, req.ID, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow",
 		FreeText: "lgtm",
 	})
 	if err != nil {
@@ -214,7 +211,7 @@ func TestRegistryCloseRemovesPendingRequests(t *testing.T) {
 		t.Fatalf("newRegistry: %v", err)
 	}
 
-	if err := reg.persistRequest(events.HITLRequest{ID: "hitl-r2", Prompt: "x"}); err != nil {
+	if err := reg.persistRequest(events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: "hitl-r2", Prompt: "x"}); err != nil {
 		t.Fatalf("persistRequest: %v", err)
 	}
 	path := filepath.Join(dir, "hitl-r2"+requestSuffix)
@@ -266,8 +263,7 @@ func TestListRequestFiles(t *testing.T) {
 
 func TestReadResponseFileCancelled(t *testing.T) {
 	dir := t.TempDir()
-	path, err := writeResponseFile(dir, "hitl-cancel", events.HITLResponse{
-		Cancelled:    true,
+	path, err := writeResponseFile(dir, "hitl-cancel", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, Cancelled: true,
 		CancelReason: "operator override",
 	})
 	if err != nil {

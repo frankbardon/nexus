@@ -244,8 +244,7 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 	)
 
 	// Notify observers.
-	_ = p.bus.Emit("provider.fanout.start", events.ProviderFanoutStart{
-		FanoutID: fanoutID,
+	_ = p.bus.Emit("provider.fanout.start", events.ProviderFanoutStart{SchemaVersion: events.ProviderFanoutStartVersion, FanoutID: fanoutID,
 		Role:     role,
 		Strategy: p.cfg.Strategy,
 		Targets:  targets,
@@ -325,8 +324,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	)
 
 	// Notify per-provider response.
-	_ = p.bus.Emit("provider.fanout.response", events.ProviderFanoutResponse{
-		FanoutID: fanoutID,
+	_ = p.bus.Emit("provider.fanout.response", events.ProviderFanoutResponse{SchemaVersion: events.ProviderFanoutResponseVersion, FanoutID: fanoutID,
 		Provider: provider,
 		Model:    resp.Model,
 		Success:  true,
@@ -392,8 +390,7 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	)
 
 	// Notify per-provider failure.
-	_ = p.bus.Emit("provider.fanout.response", events.ProviderFanoutResponse{
-		FanoutID: fanoutID,
+	_ = p.bus.Emit("provider.fanout.response", events.ProviderFanoutResponse{SchemaVersion: events.ProviderFanoutResponseVersion, FanoutID: fanoutID,
 		Provider: provider,
 		Model:    model,
 		Success:  false,
@@ -487,8 +484,7 @@ func (p *Plugin) finalize(fanoutID string, state *fanoutState) {
 		if len(errors) > 0 {
 			errMsg = fmt.Sprintf("fanout: all %d providers failed, first: %s", len(errors), errors[0].err)
 		}
-		_ = p.bus.Emit("core.error", &events.ErrorInfo{
-			Source:      pluginID,
+		_ = p.bus.Emit("core.error", &events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Source: pluginID,
 			Err:         fmt.Errorf("%s", errMsg),
 			Fatal:       false,
 			RequestMeta: origRequest.Metadata,
@@ -570,8 +566,7 @@ func (p *Plugin) emitFinalResponse(fanoutID string, state *fanoutState, response
 	)
 
 	// Notify completion.
-	_ = p.bus.Emit("provider.fanout.complete", events.ProviderFanoutComplete{
-		FanoutID:  fanoutID,
+	_ = p.bus.Emit("provider.fanout.complete", events.ProviderFanoutComplete{SchemaVersion: events.ProviderFanoutCompleteVersion, FanoutID: fanoutID,
 		Role:      state.role,
 		Strategy:  state.strategy,
 		Succeeded: len(responses),

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.system.dynvars.json",
+  "title": "nexus.system.dynvars",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "date":        {"type": "boolean", "description": "Inject {{date}} (YYYY-MM-DD)."},
+    "time":        {"type": "boolean", "description": "Inject {{time}} (HH:MM:SS)."},
+    "timezone":    {"type": "boolean", "description": "Inject {{timezone}} (IANA name)."},
+    "cwd":         {"type": "boolean", "description": "Inject {{cwd}} (current working directory)."},
+    "session_dir": {"type": "boolean", "description": "Inject {{session_dir}} (active session root)."},
+    "os":          {"type": "boolean", "description": "Inject {{os}} (host operating system)."}
+  }
+}

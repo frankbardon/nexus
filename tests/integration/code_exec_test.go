@@ -59,7 +59,7 @@ func TestCodeExec_RejectsScriptWithGoStmt(t *testing.T) {
 				{
 					"tool_calls": []map[string]any{
 						{
-							"name": "run_code",
+							"name":      "run_code",
 							"arguments": `{"script":"package main\n\nimport \"context\"\n\nfunc Run(ctx context.Context) (any, error) {\n\tgo func() {}()\n\treturn nil, nil\n}\n"}`,
 						},
 					},

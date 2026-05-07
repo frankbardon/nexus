@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.approval_policy.json",
+  "title": "nexus.gate.approval_policy",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rules": {
+      "type": "array",
+      "description": "Approval policy rules; first matching rule wins.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "match": {
+            "type": "object",
+            "description": "Match conditions against the action being approved.",
+            "additionalProperties": true
+          },
+          "mode":          {"type": "string", "enum": ["free_text", "choices", "both"], "description": "HITL response mode requested from the operator."},
+          "choices": {
+            "type": "array",
+            "description": "Choice list (string id or {id,label,kind} map).",
+            "items": {
+              "oneOf": [
+                {"type": "string"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id"],
+                  "properties": {
+                    "id":    {"type": "string"},
+                    "label": {"type": "string"},
+                    "kind":  {"type": "string"}
+                  }
+                }
+              ]
+            }
+          },
+          "default_choice":     {"type": "string", "description": "Choice id pre-selected for the operator."},
+          "prompt":             {"type": "string", "description": "Static prompt presented to the operator."},
+          "prompt_synthesizer": {"type": "string", "description": "Plugin ID used to synthesize the prompt dynamically."},
+          "timeout":            {"type": "string", "description": "How long to wait for the operator (Go duration)."}
+        }
+      }
+    }
+  }
+}

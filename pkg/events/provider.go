@@ -1,8 +1,20 @@
 package events
 
+// Schema-version constants for provider.* payloads. See doc.go.
+const (
+	ProviderFallbackVersion       = 1
+	ProviderFanoutStartVersion    = 1
+	ProviderFanoutResponseVersion = 1
+	ProviderFanoutCompleteVersion = 1
+	ProviderFanoutChooseVersion   = 1
+	ProviderFanoutChosenVersion   = 1
+)
+
 // ProviderFallback notifies IO plugins and observers that a provider switch
 // occurred due to the primary provider failing.
 type ProviderFallback struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	Role           string // model role being resolved (e.g. "balanced")
 	FailedProvider string // plugin ID of the provider that failed
 	FailedModel    string // model that failed
@@ -20,6 +32,8 @@ type ProviderFanoutTarget struct {
 
 // ProviderFanoutStart signals that a fanout request has been initiated.
 type ProviderFanoutStart struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	FanoutID string
 	Role     string
 	Strategy string // "all", "llm_judge", "heuristic", "user"
@@ -28,6 +42,8 @@ type ProviderFanoutStart struct {
 
 // ProviderFanoutResponse signals that one provider in a fanout has responded.
 type ProviderFanoutResponse struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	FanoutID string
 	Provider string // plugin ID that responded
 	Model    string
@@ -38,6 +54,8 @@ type ProviderFanoutResponse struct {
 // ProviderFanoutComplete signals that all fanout providers have responded
 // (or the deadline was reached) and the final result has been emitted.
 type ProviderFanoutComplete struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	FanoutID  string
 	Role      string
 	Strategy  string
@@ -48,6 +66,8 @@ type ProviderFanoutComplete struct {
 // ProviderFanoutChoose presents fanout responses for user selection.
 // IO plugins render a picker UI when they receive this event.
 type ProviderFanoutChoose struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	FanoutID  string
 	Role      string
 	Responses []ProviderFanoutOption
@@ -64,6 +84,8 @@ type ProviderFanoutOption struct {
 
 // ProviderFanoutChosen carries the user's selection from a fanout choice.
 type ProviderFanoutChosen struct {
+	SchemaVersion int `json:"_schema_version"`
+
 	FanoutID    string
 	ChosenIndex int // -1 means user declined to choose (fall back to "all")
 }

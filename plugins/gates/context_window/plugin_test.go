@@ -25,10 +25,9 @@ func TestContextWindow_UnderThreshold_NoVeto(t *testing.T) {
 	)
 
 	// Small message — well under threshold.
-	req := &events.LLMRequest{
-		Messages: []events.Message{
-			{Role: "user", Content: "Hello"},
-		},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
+		{Role: "user", Content: "Hello"},
+	},
 	}
 
 	veto, err := bus.EmitVetoable("before:llm.request", req)
@@ -64,10 +63,9 @@ func TestContextWindow_OverThreshold_Vetoes(t *testing.T) {
 	for i := range bigContent {
 		bigContent[i] = 'a'
 	}
-	req := &events.LLMRequest{
-		Messages: []events.Message{
-			{Role: "user", Content: string(bigContent)},
-		},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
+		{Role: "user", Content: string(bigContent)},
+	},
 	}
 
 	veto, err := bus.EmitVetoable("before:llm.request", req)
@@ -95,10 +93,9 @@ func TestContextWindow_SkipsSourcedRequests(t *testing.T) {
 	)
 
 	// Sourced request (e.g. from compaction plugin) should not be vetoed.
-	req := &events.LLMRequest{
-		Messages: []events.Message{
-			{Role: "user", Content: "a long message that exceeds the limit easily"},
-		},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
+		{Role: "user", Content: "a long message that exceeds the limit easily"},
+	},
 		Metadata: map[string]any{"_source": "nexus.memory.compaction"},
 	}
 
@@ -138,10 +135,9 @@ func TestContextWindow_EmitsRetryAfterCompaction(t *testing.T) {
 	})
 
 	// Trigger a veto (sets pendingRetry = true).
-	req := &events.LLMRequest{
-		Messages: []events.Message{
-			{Role: "user", Content: "a long message that exceeds limit"},
-		},
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
+		{Role: "user", Content: "a long message that exceeds limit"},
+	},
 	}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if !veto.Vetoed {
@@ -149,9 +145,7 @@ func TestContextWindow_EmitsRetryAfterCompaction(t *testing.T) {
 	}
 
 	// Simulate compaction completing.
-	bus.Emit("memory.compacted", events.CompactionComplete{
-		Messages: []events.Message{{Role: "user", Content: "short"}},
-	})
+	bus.Emit("memory.compacted", events.CompactionComplete{SchemaVersion: events.CompactionCompleteVersion, Messages: []events.Message{{Role: "user", Content: "short"}}})
 
 	mu.Lock()
 	got := retryCount
@@ -182,9 +176,7 @@ func TestContextWindow_NoRetryWithoutPriorVeto(t *testing.T) {
 	})
 
 	// Compaction fires but we never vetoed — should not retry.
-	bus.Emit("memory.compacted", events.CompactionComplete{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
-	})
+	bus.Emit("memory.compacted", events.CompactionComplete{SchemaVersion: events.CompactionCompleteVersion, Messages: []events.Message{{Role: "user", Content: "hi"}}})
 
 	if retryCount != 0 {
 		t.Fatalf("expected 0 retries without prior veto, got %d", retryCount)

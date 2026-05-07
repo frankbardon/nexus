@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.observe.sampler.json",
+  "title": "nexus.observe.sampler",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled":         {"type": "boolean", "description": "Enable sampling; defaults to off so the plugin is no-op when configured but unused."},
+    "rate":            {"type": "number",  "minimum": 0, "maximum": 1, "description": "Fraction of turns sampled (0..1)."},
+    "failure_capture": {"type": "boolean", "description": "Always capture failed turns regardless of sampling rate."},
+    "out_dir":         {"type": "string",  "description": "Directory for written sample artifacts."}
+  }
+}

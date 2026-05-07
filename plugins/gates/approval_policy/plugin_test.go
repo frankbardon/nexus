@@ -77,8 +77,7 @@ func TestApprovalPolicy_NoMatch_PassThrough(t *testing.T) {
 	_, bus := newTestPlugin(t, rules)
 	// No responder needed — the rule shouldn't match, so no hitl.requested.
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "fileio.read", // not "shell"
 		Arguments: map[string]any{"path": "/tmp/x"},
 	}
@@ -97,10 +96,9 @@ func TestApprovalPolicy_Match_Allow(t *testing.T) {
 		mode:  string(events.HITLModeChoices),
 	}}
 	_, bus := newTestPlugin(t, rules)
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}
@@ -128,10 +126,9 @@ func TestApprovalPolicy_Match_Reject_Vetoes(t *testing.T) {
 		mode:  string(events.HITLModeChoices),
 	}}
 	_, bus := newTestPlugin(t, rules)
-	newScriptedResponder(bus, events.HITLResponse{ChoiceID: "reject"})
+	newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject"})
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "rm -rf /"},
 	}
@@ -155,13 +152,11 @@ func TestApprovalPolicy_Match_Edit_MutatesPayload(t *testing.T) {
 		},
 	}}
 	_, bus := newTestPlugin(t, rules)
-	newScriptedResponder(bus, events.HITLResponse{
-		ChoiceID:      "edit",
+	newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "edit",
 		EditedPayload: map[string]any{"command": "ls -la"},
 	})
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "rm -rf /"},
 	}
@@ -183,11 +178,10 @@ func TestApprovalPolicy_GlobMatch(t *testing.T) {
 		mode:  string(events.HITLModeChoices),
 	}}
 	_, bus := newTestPlugin(t, rules)
-	newScriptedResponder(bus, events.HITLResponse{ChoiceID: "reject"})
+	newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject"})
 
 	// "ls" doesn't match "rm*" — should pass through silently.
-	safeCall := events.ToolCall{
-		Name:      "shell",
+	safeCall := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}
 	if veto, _ := bus.EmitVetoable("before:tool.invoke", &safeCall); veto.Vetoed {
@@ -195,8 +189,7 @@ func TestApprovalPolicy_GlobMatch(t *testing.T) {
 	}
 
 	// "rm -rf /" matches "rm*" — should be vetoed.
-	dangerous := events.ToolCall{
-		Name:      "shell",
+	dangerous := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell",
 		Arguments: map[string]any{"command": "rm -rf /"},
 	}
 	veto, _ := bus.EmitVetoable("before:tool.invoke", &dangerous)
@@ -215,8 +208,7 @@ func TestApprovalPolicy_DefaultChoice_OnTimeout(t *testing.T) {
 	_, bus := newTestPlugin(t, rules)
 	// No responder — gate must time out.
 
-	tc := events.ToolCall{
-		Name:      "shell",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}
 	start := time.Now()
@@ -240,15 +232,15 @@ func TestApprovalPolicy_LLMRequest_Match(t *testing.T) {
 		mode:  string(events.HITLModeChoices),
 	}}
 	_, bus := newTestPlugin(t, rules)
-	newScriptedResponder(bus, events.HITLResponse{ChoiceID: "reject"})
+	newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject"})
 
-	req := events.LLMRequest{Model: "claude-opus-4-7"}
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-7"}
 	veto, _ := bus.EmitVetoable("before:llm.request", &req)
 	if !veto.Vetoed {
 		t.Fatal("expected veto for matching expensive model")
 	}
 
-	cheaper := events.LLMRequest{Model: "claude-haiku-4-5"}
+	cheaper := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-haiku-4-5"}
 	veto2, _ := bus.EmitVetoable("before:llm.request", &cheaper)
 	if veto2.Vetoed {
 		t.Fatal("haiku should not match opus glob")
@@ -264,8 +256,7 @@ func TestApprovalPolicy_LLMRequest_SkipsSourcedRequests(t *testing.T) {
 	// No responder — if the gate tried to request approval the test
 	// would deadlock. The skip path must short-circuit before that.
 
-	req := events.LLMRequest{
-		Model:    "x",
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "x",
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic"},
 	}
 	done := make(chan struct{})
@@ -293,9 +284,9 @@ func TestApprovalPolicy_FirstMatchWins(t *testing.T) {
 		},
 	}
 	_, bus := newTestPlugin(t, rules)
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{Name: "shell", Arguments: map[string]any{"command": "ls"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"command": "ls"}}
 	bus.EmitVetoable("before:tool.invoke", &tc)
 
 	if len(resp.seen) != 1 {
@@ -310,9 +301,9 @@ func TestApprovalPolicy_PromptTemplate(t *testing.T) {
 		prompt: "Run shell {{ index .args \"command\" }}?",
 	}}
 	_, bus := newTestPlugin(t, rules)
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{Name: "shell", Arguments: map[string]any{"command": "ls /etc"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"command": "ls /etc"}}
 	bus.EmitVetoable("before:tool.invoke", &tc)
 
 	if len(resp.seen) != 1 {
@@ -330,9 +321,9 @@ func TestApprovalPolicy_DefaultPrompt_WhenUnset(t *testing.T) {
 		mode:  string(events.HITLModeChoices),
 	}}
 	_, bus := newTestPlugin(t, rules)
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{Name: "shell", Arguments: map[string]any{"command": "ls"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"command": "ls"}}
 	bus.EmitVetoable("before:tool.invoke", &tc)
 
 	if len(resp.seen) != 1 || resp.seen[0].Prompt == "" {
@@ -401,10 +392,9 @@ func TestApprovalPolicy_BeforeHandlerSynthesizesPrompt(t *testing.T) {
 		req.Prompt = "synthesized: " + req.ActionKind
 	}, engine.WithPriority(-100))
 
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}
@@ -434,10 +424,9 @@ func TestApprovalPolicy_PromptSynthesizerOptIn(t *testing.T) {
 		promptSynthesizer: "hitl.prompt_synthesizer",
 	}}
 	_, bus := newTestPlugin(t, rules)
-	resp := newScriptedResponder(bus, events.HITLResponse{ChoiceID: "allow"})
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "rm -rf /tmp"},
 	}
@@ -480,8 +469,7 @@ func TestApprovalPolicy_BeforeHandlerVetoRejects(t *testing.T) {
 		}
 	}, engine.WithPriority(50))
 
-	tc := events.ToolCall{
-		ID:        "t1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
 		Name:      "shell",
 		Arguments: map[string]any{"command": "ls"},
 	}

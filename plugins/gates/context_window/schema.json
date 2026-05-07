@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.gate.context_window.json",
+  "title": "nexus.gate.context_window",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_context_tokens": {"type": "integer", "minimum": 1,    "description": "Hard ceiling on estimated context tokens."},
+    "trigger_ratio":      {"type": "number",  "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Fraction of max_context_tokens at which compaction is triggered."},
+    "chars_per_token":    {"type": "number",  "exclusiveMinimum": 0, "description": "Heuristic chars-per-token used for size estimation."}
+  }
+}

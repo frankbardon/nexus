@@ -35,8 +35,7 @@ func autoRespond(bus engine.EventBus, choiceID string, cancelled bool) {
 			return
 		}
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
 				ChoiceID:  choiceID,
 				Cancelled: cancelled,
 			})
@@ -52,8 +51,7 @@ func TestApprovalDisabled_NoGate(t *testing.T) {
 		requested = true
 	}, engine.WithPriority(10))
 
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "test-key",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "test-key",
 		Content: "hello world",
 	}); err != nil {
 		t.Fatalf("doStore: %v", err)
@@ -70,8 +68,7 @@ func TestApprovalEnabled_AllowProceeds(t *testing.T) {
 	})
 	autoRespond(bus, "allow", false)
 
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "k1",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k1",
 		Content: "approved content",
 	}); err != nil {
 		t.Fatalf("doStore allowed should succeed: %v", err)
@@ -91,8 +88,7 @@ func TestApprovalEnabled_RejectAborts(t *testing.T) {
 	})
 	autoRespond(bus, "reject", false)
 
-	err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "k2",
+	err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k2",
 		Content: "should not persist",
 	})
 	if err == nil {
@@ -118,8 +114,7 @@ func TestApprovalKeyGlob_NonMatchingKeySkipsGate(t *testing.T) {
 	}, engine.WithPriority(10))
 
 	// "ordinary-key" does not match "secret-*" — write should proceed.
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "ordinary-key",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "ordinary-key",
 		Content: "harmless",
 	}); err != nil {
 		t.Fatalf("doStore: %v", err)
@@ -139,8 +134,7 @@ func TestApprovalKeyGlob_MatchingKeyTriggersGate(t *testing.T) {
 	})
 	autoRespond(bus, "reject", false)
 
-	err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "secret-credentials",
+	err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "secret-credentials",
 		Content: "high stakes",
 	})
 	if err == nil {
@@ -160,8 +154,7 @@ func TestApprovalSizeThreshold_SmallSkips(t *testing.T) {
 		requested = true
 	}, engine.WithPriority(10))
 
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "small",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "small",
 		Content: "tiny note",
 	}); err != nil {
 		t.Fatalf("doStore: %v", err)
@@ -188,15 +181,13 @@ func TestApprovalSizeThreshold_LargeTriggers(t *testing.T) {
 		}
 		captured = req
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
-				ChoiceID:  "allow",
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
+				ChoiceID: "allow",
 			})
 		}()
 	}, engine.WithPriority(10))
 
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "big",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "big",
 		Content: "this is more than ten bytes",
 	}); err != nil {
 		t.Fatalf("doStore: %v", err)
@@ -229,15 +220,13 @@ func TestApprovalContentTruncatedInActionRef(t *testing.T) {
 		}
 		captured = req
 		go func() {
-			_ = bus.Emit("hitl.responded", events.HITLResponse{
-				RequestID: req.ID,
-				ChoiceID:  "allow",
+			_ = bus.Emit("hitl.responded", events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID,
+				ChoiceID: "allow",
 			})
 		}()
 	}, engine.WithPriority(10))
 
-	if err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "big-blob",
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "big-blob",
 		Content: string(big),
 	}); err != nil {
 		t.Fatalf("doStore: %v", err)
@@ -263,8 +252,7 @@ func TestApprovalDefaultChoice_RejectOnTimeout(t *testing.T) {
 	// No responder.
 
 	start := time.Now()
-	err := p.doStore(events.LongTermMemoryStoreRequest{
-		Key:     "k",
+	err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k",
 		Content: "x",
 	})
 	if err == nil {

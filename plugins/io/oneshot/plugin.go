@@ -148,9 +148,7 @@ func (p *Plugin) Ready() error {
 	p.startedAt = time.Now()
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.session.start", events.SessionInfo{
-		Transport: "oneshot",
-	})
+	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "oneshot"})
 
 	prompt, err := p.resolvePrompt()
 	if err != nil {
@@ -173,7 +171,7 @@ func (p *Plugin) Ready() error {
 		p.inputSent = true
 		p.mu.Unlock()
 
-		input := events.UserInput{Content: prompt}
+		input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: prompt}
 		if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 			return
 		}
@@ -294,8 +292,7 @@ func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 	})
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
-		PromptID: req.PromptID,
+	_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: req.PromptID,
 		Approved: true,
 		Always:   false,
 	})
@@ -316,8 +313,7 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 	})
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{
-		PromptID: req.PromptID,
+	_ = p.bus.Emit("plan.approval.response", events.ApprovalResponse{SchemaVersion: events.ApprovalResponseVersion, PromptID: req.PromptID,
 		Approved: true,
 		Always:   false,
 	})
@@ -342,7 +338,7 @@ func (p *Plugin) handleHITL(e engine.Event[any]) {
 	})
 	p.mu.Unlock()
 
-	resp := events.HITLResponse{RequestID: req.ID}
+	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: req.ID}
 	if req.DefaultChoiceID != "" {
 		resp.ChoiceID = req.DefaultChoiceID
 	}
@@ -499,7 +495,7 @@ func (p *Plugin) finalize() {
 	}
 	if err != nil {
 		p.logger.Error("oneshot: failed to marshal transcript", "error", err)
-		_ = p.bus.Emit("io.session.end", events.SessionInfo{Transport: "oneshot"})
+		_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "oneshot"})
 		return
 	}
 
@@ -515,7 +511,7 @@ func (p *Plugin) finalize() {
 		}
 	}
 
-	_ = p.bus.Emit("io.session.end", events.SessionInfo{Transport: "oneshot"})
+	_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "oneshot"})
 }
 
 func cloneSlice[T any](in []T) []T {

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.provider.fanout.json",
+  "title": "nexus.provider.fanout",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "strategy":     {"type": "string", "enum": ["all", "llm_judge", "heuristic", "user"], "description": "Selection strategy."},
+    "deadline_ms":  {"type": "integer", "minimum": 0, "description": "Milliseconds to wait before forcing selection."},
+    "heuristic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefer":         {"type": "string", "enum": ["longest", "shortest", "fastest", "cheapest"]},
+        "require_finish": {"type": "boolean"}
+      }
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {"type": "string"}
+      }
+    }
+  }
+}

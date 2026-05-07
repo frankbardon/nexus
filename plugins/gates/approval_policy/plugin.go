@@ -220,8 +220,7 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 
 	requestID := fmt.Sprintf("approval-%d-%d", time.Now().UnixNano(), p.requestCounter.Add(1))
 
-	req := events.HITLRequest{
-		ID:                requestID,
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: requestID,
 		RequesterPlugin:   pluginID,
 		ActionKind:        actionKind,
 		ActionRef:         payload,
@@ -271,7 +270,7 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 		case resp = <-ch:
 		case <-time.After(time.Duration(r.timeoutSeconds) * time.Second):
 			if defaultID != "" {
-				resp = events.HITLResponse{RequestID: requestID, ChoiceID: defaultID}
+				resp = events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID, ChoiceID: defaultID}
 				p.logger.Info("approval timed out, applying default", "default", defaultID, "action", actionKind)
 			} else {
 				p.logger.Warn("approval timed out with no default", "action", actionKind)
@@ -615,11 +614,11 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		return v, true
 	case *events.HITLResponse:
 		if v == nil {
-			return events.HITLResponse{}, false
+			return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false
 		}
 		return *v, true
 	case map[string]any:
-		resp := events.HITLResponse{}
+		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion}
 		resp.RequestID, _ = v["request_id"].(string)
 		resp.ChoiceID, _ = v["choice_id"].(string)
 		resp.FreeText, _ = v["free_text"].(string)
@@ -633,6 +632,6 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		}
 		return resp, true
 	default:
-		return events.HITLResponse{}, false
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false
 	}
 }

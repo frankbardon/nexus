@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.opener.json",
+  "title": "nexus.tool.opener",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "timeout":  {"type": "string", "description": "Subprocess timeout (Go duration)."},
+    "open_cmd": {"type": "string", "description": "Override the platform-default opener command."}
+  }
+}

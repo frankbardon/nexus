@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.observe.otel.json",
+  "title": "nexus.observe.otel",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "endpoint":     {"type": "string", "description": "OTLP endpoint (host:port for gRPC, full URL for HTTP)."},
+    "protocol":     {"type": "string", "enum": ["grpc", "http"], "description": "OTLP transport protocol."},
+    "insecure":     {"type": "boolean", "description": "Skip TLS verification."},
+    "service_name": {"type": "string", "description": "OpenTelemetry service.name attribute."},
+    "exclude_events": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Event types to exclude from tracing."
+    }
+  }
+}

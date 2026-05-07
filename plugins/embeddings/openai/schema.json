@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.embeddings.openai.json",
+  "title": "nexus.embeddings.openai",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "base_url":    {"type": "string", "description": "Override OpenAI API base URL."},
+    "api_key":     {"type": "string", "description": "Direct API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable to read the API key from."},
+    "model":       {"type": "string", "description": "Embedding model ID (e.g. text-embedding-3-small)."},
+    "timeout":     {"type": "string", "description": "HTTP timeout (Go duration string)."}
+  }
+}

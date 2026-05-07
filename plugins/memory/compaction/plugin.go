@@ -540,21 +540,18 @@ func (p *Plugin) startCompaction(reason string) {
 	backupPath := p.archiveSnapshot(snapshot, reason)
 
 	// Emit trigger notification.
-	_ = p.bus.Emit("memory.compaction.triggered", events.CompactionTriggered{
-		Reason:       reason,
+	_ = p.bus.Emit("memory.compaction.triggered", events.CompactionTriggered{SchemaVersion: events.CompactionTriggeredVersion, Reason: reason,
 		MessageCount: msgCount,
 		BackupPath:   backupPath,
 	})
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		Source:    pluginID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, Source: pluginID,
 		Content:   fmt.Sprintf("Context compaction triggered: %s. Backup saved to %s", reason, backupPath),
 		Phase:     "compaction",
 		Timestamp: time.Now(),
 	})
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "thinking",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "thinking",
 		Detail: "Compacting context...",
 	})
 
@@ -600,8 +597,7 @@ func (p *Plugin) startCompaction(reason string) {
 		{Role: "user", Content: "Here is the conversation to compact:\n\n" + transcript.String()},
 	}
 
-	_ = p.bus.Emit("llm.request", events.LLMRequest{
-		Role:     p.modelRole,
+	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
@@ -661,23 +657,20 @@ func (p *Plugin) finishCompaction(summary string) {
 		"backup", backupPath,
 	)
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		Source:    pluginID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, Source: pluginID,
 		Content:   fmt.Sprintf("Context compacted: %d messages → %d messages", prevCount, len(compacted)),
 		Phase:     "compaction",
 		Timestamp: time.Now(),
 	})
 
 	// Emit compaction complete so conversation memory and agents replace their history.
-	_ = p.bus.Emit("memory.compacted", events.CompactionComplete{
-		Messages:     compacted,
+	_ = p.bus.Emit("memory.compacted", events.CompactionComplete{SchemaVersion: events.CompactionCompleteVersion, Messages: compacted,
 		BackupPath:   backupPath,
 		MessageCount: len(compacted),
 		PrevCount:    prevCount,
 	})
 
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "idle",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "idle",
 		Detail: "",
 	})
 }
@@ -882,14 +875,12 @@ func (p *Plugin) abortCompaction(summary string, gateErr error) {
 	p.compacting = false
 	p.mu.Unlock()
 
-	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
-		Source:    pluginID,
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, Source: pluginID,
 		Content:   fmt.Sprintf("Context compaction commit rejected: %v", gateErr),
 		Phase:     "compaction",
 		Timestamp: time.Now(),
 	})
-	_ = p.bus.Emit("io.status", events.StatusUpdate{
-		State:  "idle",
+	_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "idle",
 		Detail: "",
 	})
 }

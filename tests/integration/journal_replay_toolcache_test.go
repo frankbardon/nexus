@@ -76,15 +76,13 @@ plugins:
 	// 1. Live recording pass — cache subscriber catches invoke + result
 	// pairs and writes the cache file.
 	args := map[string]any{"command": "ls", "dir": "/tmp"}
-	if err := eng.Bus.Emit("tool.invoke", events.ToolCall{
-		ID:        "live-rec-1",
+	if err := eng.Bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "live-rec-1",
 		Name:      "shell",
 		Arguments: args,
 	}); err != nil {
 		t.Fatalf("Emit invoke: %v", err)
 	}
-	if err := eng.Bus.Emit("tool.result", events.ToolResult{
-		ID:     "live-rec-1",
+	if err := eng.Bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "live-rec-1",
 		Name:   "shell",
 		Output: "cached output payload",
 	}); err != nil {
@@ -113,8 +111,7 @@ plugins:
 	// Now fire a NEW invoke with same args, different live ID. The
 	// short-circuit helper must consult the cache and emit cached output
 	// stamped with the live ID.
-	tc := events.ToolCall{
-		ID:        "live-replay-1",
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "live-replay-1",
 		Name:      "shell",
 		Arguments: args,
 	}
@@ -162,8 +159,8 @@ plugins: {active: []}
 	defer eng.Stop(context.Background()) //nolint:errcheck
 
 	emit := func(id string, args map[string]any, output string) {
-		eng.Bus.Emit("tool.invoke", events.ToolCall{ID: id, Name: "shell", Arguments: args}) //nolint:errcheck
-		eng.Bus.Emit("tool.result", events.ToolResult{ID: id, Name: "shell", Output: output}) //nolint:errcheck
+		eng.Bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: id, Name: "shell", Arguments: args})    //nolint:errcheck
+		eng.Bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: id, Name: "shell", Output: output}) //nolint:errcheck
 	}
 	emit("a", map[string]any{"command": "ls"}, "ls output")
 	emit("b", map[string]any{"command": "pwd"}, "pwd output")

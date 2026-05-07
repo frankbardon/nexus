@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.rag.reranker.local.json",
+  "title": "nexus.rag.reranker.local",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "min_token_length":  {"type": "integer", "minimum": 1, "description": "Minimum token length kept after tokenization."},
+    "disable_stopwords": {"type": "boolean", "description": "Skip the built-in English stopword list."}
+  }
+}

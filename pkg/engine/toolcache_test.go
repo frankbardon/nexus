@@ -59,11 +59,11 @@ func TestToolCache_RoundTrip(t *testing.T) {
 		}
 	}()
 
-	tc := events.ToolCall{ID: "call-1", Name: "shell", Arguments: map[string]any{"command": "ls"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "call-1", Name: "shell", Arguments: map[string]any{"command": "ls"}}
 	if err := bus.Emit("tool.invoke", tc); err != nil {
 		t.Fatal(err)
 	}
-	res := events.ToolResult{ID: "call-1", Name: "shell", Output: "files\n"}
+	res := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "call-1", Name: "shell", Output: "files\n"}
 	if err := bus.Emit("tool.result", res); err != nil {
 		t.Fatal(err)
 	}
@@ -93,13 +93,13 @@ func TestToolCache_OverwritesOnSameArgs(t *testing.T) {
 		defer u()
 	}
 
-	tc := events.ToolCall{ID: "id-1", Name: "shell", Arguments: map[string]any{"cmd": "x"}}
-	bus.Emit("tool.invoke", tc)                                                            //nolint:errcheck
-	bus.Emit("tool.result", events.ToolResult{ID: "id-1", Name: "shell", Output: "first"}) //nolint:errcheck
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "id-1", Name: "shell", Arguments: map[string]any{"cmd": "x"}}
+	bus.Emit("tool.invoke", tc)                                                                                                     //nolint:errcheck
+	bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "id-1", Name: "shell", Output: "first"}) //nolint:errcheck
 
-	tc2 := events.ToolCall{ID: "id-2", Name: "shell", Arguments: map[string]any{"cmd": "x"}}
-	bus.Emit("tool.invoke", tc2)                                                            //nolint:errcheck
-	bus.Emit("tool.result", events.ToolResult{ID: "id-2", Name: "shell", Output: "second"}) //nolint:errcheck
+	tc2 := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "id-2", Name: "shell", Arguments: map[string]any{"cmd": "x"}}
+	bus.Emit("tool.invoke", tc2)                                                                                                     //nolint:errcheck
+	bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "id-2", Name: "shell", Output: "second"}) //nolint:errcheck
 
 	got, ok := c.Lookup("shell", map[string]any{"cmd": "x"})
 	if !ok || got.Output != "second" {
@@ -116,8 +116,8 @@ func TestToolCache_FilesLandUnderToolSubdir(t *testing.T) {
 		defer u()
 	}
 
-	bus.Emit("tool.invoke", events.ToolCall{ID: "x", Name: "shell", Arguments: map[string]any{"a": 1}}) //nolint:errcheck
-	bus.Emit("tool.result", events.ToolResult{ID: "x", Name: "shell", Output: "ok"})                    //nolint:errcheck
+	bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "x", Name: "shell", Arguments: map[string]any{"a": 1}}) //nolint:errcheck
+	bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "x", Name: "shell", Output: "ok"})                  //nolint:errcheck
 
 	entries, err := os.ReadDir(filepath.Join(cacheDir, "shell"))
 	if err != nil {
@@ -141,11 +141,11 @@ func TestReplayToolShortCircuit_PrefersCacheOverFIFO(t *testing.T) {
 	for _, u := range cache.Install(bus) {
 		defer u()
 	}
-	bus.Emit("tool.invoke", events.ToolCall{ID: "rec", Name: "shell", Arguments: map[string]any{"k": "v"}}) //nolint:errcheck
-	bus.Emit("tool.result", events.ToolResult{ID: "rec", Name: "shell", Output: "from-cache"})              //nolint:errcheck
+	bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "rec", Name: "shell", Arguments: map[string]any{"k": "v"}}) //nolint:errcheck
+	bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "rec", Name: "shell", Output: "from-cache"})            //nolint:errcheck
 
 	// Stuff something into FIFO so we can verify cache won.
-	state.Push("tool.result", events.ToolResult{Output: "from-FIFO"})
+	state.Push("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, Output: "from-FIFO"})
 
 	// Now do a replay short-circuit on a NEW invoke with the same args.
 	var (
@@ -158,7 +158,7 @@ func TestReplayToolShortCircuit_PrefersCacheOverFIFO(t *testing.T) {
 		}
 	})
 
-	tc := events.ToolCall{ID: "live-1", Name: "shell", Arguments: map[string]any{"k": "v"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "live-1", Name: "shell", Arguments: map[string]any{"k": "v"}}
 	if !ReplayToolShortCircuit(state, emitterBus, tc, nil) {
 		t.Fatal("short-circuit returned false")
 	}
@@ -186,7 +186,7 @@ func TestReplayToolShortCircuit_FallsBackToFIFO(t *testing.T) {
 	defer state.SetActive(false)
 
 	// Cache empty. FIFO has the answer.
-	state.Push("tool.result", events.ToolResult{Output: "from-FIFO"})
+	state.Push("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, Output: "from-FIFO"})
 
 	emitterBus := NewEventBus()
 	var emitted []events.ToolResult
@@ -196,7 +196,7 @@ func TestReplayToolShortCircuit_FallsBackToFIFO(t *testing.T) {
 		}
 	})
 
-	tc := events.ToolCall{ID: "live-2", Name: "shell", Arguments: map[string]any{"k": "v"}}
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "live-2", Name: "shell", Arguments: map[string]any{"k": "v"}}
 	if !ReplayToolShortCircuit(state, emitterBus, tc, nil) {
 		t.Fatal("short-circuit returned false")
 	}

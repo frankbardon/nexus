@@ -287,8 +287,7 @@ func (p *Plugin) handleRequest(event engine.Event[any]) {
 }
 
 func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
-	result := events.ToolResult{
-		ID:     tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,
@@ -312,22 +311,22 @@ func buildRequestFromToolCall(tc events.ToolCall) (events.HITLRequest, string) {
 		prompt, _ = tc.Arguments["question"].(string)
 	}
 	if prompt == "" {
-		return events.HITLRequest{}, "prompt argument is required"
+		return events.HITLRequest{SchemaVersion: events.HITLRequestVersion}, "prompt argument is required"
 	}
 
 	mode := events.HITLMode(stringArg(tc.Arguments, "mode", string(events.HITLModeFreeText)))
 	switch mode {
 	case events.HITLModeFreeText, events.HITLModeChoices, events.HITLModeBoth:
 	default:
-		return events.HITLRequest{}, fmt.Sprintf("invalid mode %q (want free_text, choices, or both)", mode)
+		return events.HITLRequest{SchemaVersion: events.HITLRequestVersion}, fmt.Sprintf("invalid mode %q (want free_text, choices, or both)", mode)
 	}
 
 	choices, err := parseChoices(tc.Arguments["choices"])
 	if err != nil {
-		return events.HITLRequest{}, err.Error()
+		return events.HITLRequest{SchemaVersion: events.HITLRequestVersion}, err.Error()
 	}
 	if (mode == events.HITLModeChoices || mode == events.HITLModeBoth) && len(choices) == 0 {
-		return events.HITLRequest{}, "choices is required when mode is choices or both"
+		return events.HITLRequest{SchemaVersion: events.HITLRequestVersion}, "choices is required when mode is choices or both"
 	}
 
 	defaultChoiceID, _ := tc.Arguments["default_choice_id"].(string)
@@ -340,12 +339,11 @@ func buildRequestFromToolCall(tc events.ToolCall) (events.HITLRequest, string) {
 			}
 		}
 		if !found {
-			return events.HITLRequest{}, fmt.Sprintf("default_choice_id %q does not match any choice id", defaultChoiceID)
+			return events.HITLRequest{SchemaVersion: events.HITLRequestVersion}, fmt.Sprintf("default_choice_id %q does not match any choice id", defaultChoiceID)
 		}
 	}
 
-	req := events.HITLRequest{
-		ID:              fmt.Sprintf("hitl-%s-%s", tc.TurnID, tc.ID),
+	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: fmt.Sprintf("hitl-%s-%s", tc.TurnID, tc.ID),
 		TurnID:          tc.TurnID,
 		RequesterPlugin: pluginID,
 		ActionKind:      "free_text",
@@ -434,11 +432,11 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		return v, true
 	case *events.HITLResponse:
 		if v == nil {
-			return events.HITLResponse{}, false
+			return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false
 		}
 		return *v, true
 	case map[string]any:
-		resp := events.HITLResponse{}
+		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion}
 		resp.RequestID, _ = v["request_id"].(string)
 		resp.ChoiceID, _ = v["choice_id"].(string)
 		resp.FreeText, _ = v["free_text"].(string)
@@ -452,6 +450,6 @@ func toHITLResponse(payload any) (events.HITLResponse, bool) {
 		}
 		return resp, true
 	default:
-		return events.HITLResponse{}, false
+		return events.HITLResponse{SchemaVersion: events.HITLResponseVersion}, false
 	}
 }

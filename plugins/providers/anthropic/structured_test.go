@@ -107,8 +107,7 @@ func TestBuildRequestBody_StructuredOutput_ToolMode(t *testing.T) {
 		},
 	}
 
-	req := events.LLMRequest{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}},
 		ResponseFormat: &events.ResponseFormat{
 			Type:   "json_schema",
 			Schema: schema,
@@ -153,8 +152,7 @@ func TestBuildRequestBody_StructuredOutput_NativeMode(t *testing.T) {
 		},
 	}
 
-	req := events.LLMRequest{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}},
 		ResponseFormat: &events.ResponseFormat{
 			Type:   "json_schema",
 			Schema: schema,
@@ -198,9 +196,8 @@ func TestBuildRequestBody_StructuredOutput_NativeMode_PreservesToolChoice(t *tes
 
 	schema := map[string]any{"type": "object"}
 
-	req := events.LLMRequest{
-		Messages: []events.Message{{Role: "user", Content: "hi"}},
-		Tools:    []events.ToolDef{{Name: "shell", Description: "run a command"}},
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "hi"}},
+		Tools: []events.ToolDef{{Name: "shell", Description: "run a command"}},
 		ToolChoice: &events.ToolChoice{
 			Mode: "tool",
 			Name: "shell",

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.llm.batch.json",
+  "title": "nexus.llm.batch",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "poll_interval":      {"type": "string",  "description": "How often to poll provider batch endpoints (Go duration)."},
+    "data_dir":           {"type": "string",  "description": "Directory for persisted batch state."},
+    "default_max_tokens": {"type": "integer", "minimum": 1, "description": "Default max_tokens applied to batched requests that omit one."},
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-provider credential block; mirrors the dedicated provider plugins.",
+      "properties": {
+        "anthropic": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key":     {"type": "string"},
+            "api_key_env": {"type": "string"}
+          }
+        },
+        "openai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key":     {"type": "string"},
+            "api_key_env": {"type": "string"}
+          }
+        }
+      }
+    },
+    "anthropic_api_key_env": {"type": "string", "description": "Flat alias: env var holding the Anthropic API key."},
+    "openai_api_key_env":    {"type": "string", "description": "Flat alias: env var holding the OpenAI API key."}
+  }
+}

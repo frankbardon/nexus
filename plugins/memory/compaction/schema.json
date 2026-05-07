@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.compaction.json",
+  "title": "nexus.memory.compaction",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "strategy":          {"type": "string", "enum": ["message_count", "token_estimate", "turn_count"]},
+    "message_threshold": {"type": "integer", "minimum": 1},
+    "token_threshold":   {"type": "integer", "minimum": 1},
+    "turn_threshold":    {"type": "integer", "minimum": 1},
+    "chars_per_token":   {"type": "number", "minimum": 0},
+    "model_role":        {"type": "string"},
+    "model":             {"type": "string"},
+    "prompt":            {"type": "string"},
+    "prompt_file":       {"type": "string"},
+    "protect_recent":    {"type": "integer", "minimum": 0},
+    "persist":           {"type": "boolean"},
+    "require_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":        {"type": "boolean"},
+        "default_choice": {"type": "string"},
+        "timeout":        {"type": "string"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size_threshold_bytes": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

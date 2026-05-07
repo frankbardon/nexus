@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.code_exec.json",
+  "title": "nexus.tool.code_exec",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "compiler":          {"type": "string", "enum": ["yaegi-host", "yaegi-wasm"]},
+    "timeout_seconds":   {"type": "integer", "minimum": 1},
+    "max_output_bytes":  {"type": "integer", "minimum": 0},
+    "max_workers":       {"type": "integer", "minimum": 1},
+    "persist_scripts":   {"type": "boolean"},
+    "reject_goroutines": {"type": "boolean"},
+    "allowed_packages":  {"type": "array", "items": {"type": "string"}},
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "backend":      {"type": "string"},
+        "cache_dir":    {"type": "string"},
+        "timeout":      {"type": "string"},
+        "net": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "policy":      {"type": "string", "enum": ["deny", "allow_hosts"]},
+            "allow_hosts": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "fs_mounts":    {"type": "array"},
+        "exec_allowed": {"type": "array", "items": {"type": "string"}},
+        "env":          {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -73,7 +73,7 @@ func TestHybridAppliesReranker(t *testing.T) {
 	}}).install())
 	t.Cleanup((&reverseReranker{bus: bus}).install())
 
-	q := &events.HybridQuery{Namespace: "docs", Query: "x", K: 5}
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs", Query: "x", K: 5}
 	_ = bus.Emit("hybrid.query", q)
 	if q.Error != "" {
 		t.Fatalf("error: %s", q.Error)
@@ -107,7 +107,7 @@ func TestHybridSurvivesRerankerFailure(t *testing.T) {
 		req.Error = "simulated failure"
 	}, engine.WithPriority(50)))
 
-	q := &events.HybridQuery{Namespace: "docs", Query: "x", K: 5}
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs", Query: "x", K: 5}
 	_ = bus.Emit("hybrid.query", q)
 	if q.Error != "" {
 		t.Fatalf("hybrid should swallow reranker errors: got %q", q.Error)

@@ -98,7 +98,7 @@ func runIngest(args []string) int {
 		go func(path string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			req := &events.RAGIngest{Path: path, Namespace: *namespace}
+			req := &events.RAGIngest{SchemaVersion: events.RAGIngestVersion, Path: path, Namespace: *namespace}
 			_ = eng.Bus.Emit("rag.ingest", req)
 			if req.Error != "" {
 				atomic.AddInt32(&failCount, 1)

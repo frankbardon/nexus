@@ -991,7 +991,7 @@ func (s *Shell) installSessionSubscriptions(eng *engine.Engine, agentID, session
 			return
 		}
 
-		resp := events.FileOutputDirResponse{RequestID: req.RequestID}
+		resp := events.FileOutputDirResponse{SchemaVersion: events.FileOutputDirResponseVersion, RequestID: req.RequestID}
 		dir, err := s.OutputDir(agentID)
 		if err != nil {
 			resp.Error = err.Error()

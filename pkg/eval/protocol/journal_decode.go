@@ -15,11 +15,11 @@ func journalDecodeLLMResponse(raw any) (events.LLMResponse, bool) {
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
-		return events.LLMResponse{}, false
+		return events.LLMResponse{SchemaVersion: events.LLMResponseVersion}, false
 	}
 	var out events.LLMResponse
 	if err := json.Unmarshal(data, &out); err != nil {
-		return events.LLMResponse{}, false
+		return events.LLMResponse{SchemaVersion: events.LLMResponseVersion}, false
 	}
 	return out, true
 }
@@ -33,11 +33,11 @@ func journalDecodeToolCall(raw any) (events.ToolCall, bool) {
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
-		return events.ToolCall{}, false
+		return events.ToolCall{SchemaVersion: events.ToolCallVersion}, false
 	}
 	var out events.ToolCall
 	if err := json.Unmarshal(data, &out); err != nil {
-		return events.ToolCall{}, false
+		return events.ToolCall{SchemaVersion: events.ToolCallVersion}, false
 	}
 	return out, true
 }
@@ -49,11 +49,11 @@ func journalDecodeToolResult(raw any) (events.ToolResult, bool) {
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	var out events.ToolResult
 	if err := json.Unmarshal(data, &out); err != nil {
-		return events.ToolResult{}, false
+		return events.ToolResult{SchemaVersion: events.ToolResultVersion}, false
 	}
 	return out, true
 }

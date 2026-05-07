@@ -165,8 +165,7 @@ func (p *Plugin) handleOpen(tc events.ToolCall) {
 }
 
 func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
-	result := events.ToolResult{
-		ID:     tc.ID,
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
 		Output: output,
 		Error:  errMsg,

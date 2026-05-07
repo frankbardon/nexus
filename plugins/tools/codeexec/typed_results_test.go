@@ -52,8 +52,7 @@ func (h *testHarness) registerTypedTool() *int {
 		}
 		calls++
 		query, _ := tc.Arguments["query"].(string)
-		_ = h.bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = h.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Output: "search result for " + query,
 			OutputStructured: map[string]any{
@@ -150,8 +149,7 @@ func TestTypedResult_FallsBackToOutputJSON(t *testing.T) {
 			return
 		}
 		// Deliberately only populate Output with legacy JSON, not OutputStructured.
-		_ = h.bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = h.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Output: `{"count":42,"label":"legacy"}`,
 			TurnID: tc.TurnID,

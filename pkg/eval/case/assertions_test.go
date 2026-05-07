@@ -59,8 +59,8 @@ func TestEventEmitted_EmptyStream(t *testing.T) {
 
 func TestEventEmitted_WithWhere(t *testing.T) {
 	stream := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell"}, Timestamp: time.Now()},
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "read_file"}, Timestamp: time.Now()},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell"}, Timestamp: time.Now()},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "read_file"}, Timestamp: time.Now()},
 	}
 	a := Assertion{
 		Kind:         "event_emitted",
@@ -141,12 +141,12 @@ func TestEventSequenceDistance_FilterIgnoresNoise(t *testing.T) {
 
 func TestToolInvocationParity_Pass(t *testing.T) {
 	g := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell", Arguments: map[string]any{"cmd": "ls"}}},
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "read_file", Arguments: map[string]any{"path": "x"}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"cmd": "ls"}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "read_file", Arguments: map[string]any{"path": "x"}}},
 	}
 	o := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell", Arguments: map[string]any{"cmd": "different"}}},
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "read_file", Arguments: map[string]any{"path": "y"}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"cmd": "different"}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "read_file", Arguments: map[string]any{"path": "y"}}},
 	}
 	a := Assertion{
 		Kind:                 "tool_invocation_parity",
@@ -160,12 +160,12 @@ func TestToolInvocationParity_Pass(t *testing.T) {
 
 func TestToolInvocationParity_CountDiff(t *testing.T) {
 	g := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell"}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell"}},
 	}
 	o := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell"}},
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell"}},
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell"}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell"}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell"}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell"}},
 	}
 	a := Assertion{
 		Kind:                 "tool_invocation_parity",
@@ -179,10 +179,10 @@ func TestToolInvocationParity_CountDiff(t *testing.T) {
 
 func TestToolInvocationParity_ArgKeysDiffer(t *testing.T) {
 	g := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell", Arguments: map[string]any{"cmd": "x"}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"cmd": "x"}}},
 	}
 	o := []ObservedEvent{
-		{Type: "tool.invoke", Payload: events.ToolCall{Name: "shell", Arguments: map[string]any{"cmd": "x", "extra": 1}}},
+		{Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "shell", Arguments: map[string]any{"cmd": "x", "extra": 1}}},
 	}
 	a := Assertion{
 		Kind:                 "tool_invocation_parity",
@@ -297,7 +297,7 @@ func TestTokenBudget_Pass(t *testing.T) {
 	t0 := time.Now()
 	stream := []ObservedEvent{
 		{Type: "agent.turn.start", Timestamp: t0},
-		{Type: "llm.response", Timestamp: t0.Add(time.Millisecond), Payload: events.LLMResponse{Usage: events.Usage{PromptTokens: 100, CompletionTokens: 50}}},
+		{Type: "llm.response", Timestamp: t0.Add(time.Millisecond), Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{PromptTokens: 100, CompletionTokens: 50}}},
 		{Type: "agent.turn.end", Timestamp: t0.Add(2 * time.Millisecond)},
 	}
 	a := Assertion{
@@ -313,7 +313,7 @@ func TestTokenBudget_Pass(t *testing.T) {
 func TestTokenBudget_SessionFails(t *testing.T) {
 	t0 := time.Now()
 	stream := []ObservedEvent{
-		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{Usage: events.Usage{PromptTokens: 1500}}},
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{PromptTokens: 1500}}},
 	}
 	a := Assertion{
 		Kind:        "token_budget",
@@ -329,10 +329,10 @@ func TestTokenBudget_PerTurn(t *testing.T) {
 	t0 := time.Now()
 	stream := []ObservedEvent{
 		{Type: "agent.turn.start", Timestamp: t0},
-		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{Usage: events.Usage{PromptTokens: 200}}},
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{PromptTokens: 200}}},
 		{Type: "agent.turn.end", Timestamp: t0},
 		{Type: "agent.turn.start", Timestamp: t0},
-		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{Usage: events.Usage{PromptTokens: 800}}},
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{PromptTokens: 800}}},
 		{Type: "agent.turn.end", Timestamp: t0},
 	}
 	a := Assertion{

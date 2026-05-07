@@ -10,7 +10,8 @@ import (
 
 // Config is the top-level configuration for the engine.
 type Config struct {
-	Core CoreConfig `yaml:"core"`
+	Core   CoreConfig   `yaml:"core"`
+	Engine EngineConfig `yaml:"engine"`
 	// Capabilities pins a capability name to a specific provider plugin ID,
 	// overriding the default resolution (first active provider, else first
 	// registered). Populated from the top-level YAML `capabilities:` block.
@@ -29,6 +30,54 @@ type Config struct {
 	// and per-plugin configs both have yaml:"-").
 	Raw []byte `yaml:"-"`
 }
+
+// EngineConfig holds top-level engine resilience knobs that are not strictly
+// "core" runtime settings (log level, tick interval) and not journal-specific.
+// Currently houses the shutdown drain timeout and the optional fsnotify-based
+// config watcher; future resilience phases will extend this struct rather than
+// scattering settings under core.
+type EngineConfig struct {
+	Shutdown    ShutdownConfig    `yaml:"shutdown"`
+	ConfigWatch ConfigWatchConfig `yaml:"config_watch"`
+}
+
+// ConfigWatchConfig governs the optional fsnotify-based hot-reload watcher.
+// Off by default — operators who want auto-reload opt in explicitly because
+// in production environments rapid YAML edits during deploys can trigger
+// undesired plugin restarts. SIGHUP and the admin HTTP endpoint remain
+// available regardless of this setting.
+type ConfigWatchConfig struct {
+	// Enabled toggles the fsnotify watcher. When false, only SIGHUP and the
+	// browser admin endpoint can trigger ReloadConfig.
+	Enabled bool `yaml:"enabled"`
+	// Debounce collapses bursts of fsnotify events on the same file into a
+	// single reload. Zero falls back to defaultConfigWatchDebounce. Editors
+	// commonly fire two or three Write events when saving — too short a
+	// debounce reads a half-written file; too long delays the reload.
+	Debounce time.Duration `yaml:"debounce"`
+}
+
+// DefaultConfigWatchDebounce balances editor save bursts (250-500ms) against
+// reload latency. Set well above the typical fsnotify Write storm so partial
+// writes never trigger validation. Exported for the CLI's watcher wiring,
+// which substitutes it when ConfigWatchConfig.Debounce is zero.
+const DefaultConfigWatchDebounce = 1 * time.Second
+
+// ShutdownConfig governs engine shutdown behavior. DrainTimeout is the wall
+// clock the engine gives in-flight bus dispatches to complete before the
+// plugin Shutdown phase begins; plugins that need a longer drain (batch
+// pollers, MCP servers) opt in via the DrainOverride interface and the
+// engine takes the larger of the two.
+type ShutdownConfig struct {
+	// DrainTimeout caps how long the engine waits for in-flight events to
+	// drain on Shutdown. Zero falls back to defaultShutdownDrainTimeout.
+	DrainTimeout time.Duration `yaml:"drain_timeout"`
+}
+
+// defaultShutdownDrainTimeout is the engine's drain ceiling when no override
+// is configured. 30s is a deliberate bump over the historical hardcoded 10s
+// to give long-running plugins (batch coordinators, MCP) headroom.
+const defaultShutdownDrainTimeout = 30 * time.Second
 
 // JournalConfig tunes the durable per-session event log. Defaults are picked
 // for the typical interactive run (turns of 5–30 events, multi-day session

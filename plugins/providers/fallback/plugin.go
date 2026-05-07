@@ -239,8 +239,7 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	_ = p.bus.Emit("io.output.clear", nil)
 
 	// Emit provider.fallback notification for UI.
-	_ = p.bus.Emit("provider.fallback", events.ProviderFallback{
-		Role:           role,
+	_ = p.bus.Emit("provider.fallback", events.ProviderFallback{SchemaVersion: events.ProviderFallbackVersion, Role: role,
 		FailedProvider: failedProvider,
 		FailedModel:    failedModel,
 		Error:          errInfo.Err.Error(),

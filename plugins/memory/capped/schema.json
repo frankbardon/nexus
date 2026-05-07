@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.capped.json",
+  "title": "nexus.memory.capped",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_messages": {"type": "integer", "minimum": 1, "description": "Sliding window size; older messages dropped."},
+    "persist":      {"type": "boolean", "description": "Persist to context/conversation.jsonl in the session workspace."}
+  }
+}

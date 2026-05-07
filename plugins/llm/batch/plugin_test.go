@@ -66,8 +66,7 @@ func TestStateRoundTrip(t *testing.T) {
 		OriginalReqs: []events.BatchRequest{
 			{
 				CustomID: "req-1",
-				Request: events.LLMRequest{
-					Model:    "claude-sonnet-4-5-20250514",
+				Request: events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5-20250514",
 					Messages: []events.Message{{Role: "user", Content: "hi"}},
 				},
 			},
@@ -161,8 +160,7 @@ func TestSubmitAnthropic_BodyShape(t *testing.T) {
 	id, err := p.submitAnthropic(context.Background(), []events.BatchRequest{
 		{
 			CustomID: "req-a",
-			Request: events.LLMRequest{
-				Model:    "claude-sonnet-4-5-20250514",
+			Request: events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5-20250514",
 				Messages: []events.Message{{Role: "user", Content: "hello"}},
 			},
 		},
@@ -242,8 +240,7 @@ func TestSubmitOpenAI_TwoStepFlow(t *testing.T) {
 	id, err := p.submitOpenAI(context.Background(), []events.BatchRequest{
 		{
 			CustomID: "req-x",
-			Request: events.LLMRequest{
-				Model:    "gpt-4o-mini",
+			Request: events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "gpt-4o-mini",
 				Messages: []events.Message{{Role: "user", Content: "hi"}},
 			},
 		},
@@ -403,7 +400,7 @@ func TestResumePersistedBatches(t *testing.T) {
 		BatchID:     "msgbatch_resume",
 		SubmittedAt: time.Now().UTC(),
 		OriginalReqs: []events.BatchRequest{
-			{CustomID: "r1", Request: events.LLMRequest{Model: "claude-sonnet-4-5-20250514"}},
+			{CustomID: "r1", Request: events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5-20250514"}},
 		},
 	}
 	if err := saveBatch(dir, state); err != nil {
@@ -583,15 +580,14 @@ func TestShutdownStopsPollersWithoutDeletingState(t *testing.T) {
 // =====================================================================
 
 func TestBuildAnthropicMessageBody_RejectsEmptyModel(t *testing.T) {
-	_, err := buildAnthropicMessageBody(events.LLMRequest{}, 1024)
+	_, err := buildAnthropicMessageBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion}, 1024)
 	if err == nil {
 		t.Fatalf("expected error for empty model")
 	}
 }
 
 func TestBuildAnthropicMessageBody_DefaultMaxTokens(t *testing.T) {
-	body, err := buildAnthropicMessageBody(events.LLMRequest{
-		Model:    "claude-sonnet-4-5",
+	body, err := buildAnthropicMessageBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5",
 		Messages: []events.Message{{Role: "user", Content: "hi"}},
 	}, 4096)
 	if err != nil {
@@ -603,8 +599,7 @@ func TestBuildAnthropicMessageBody_DefaultMaxTokens(t *testing.T) {
 }
 
 func TestBuildAnthropicMessageBody_SystemSplitOut(t *testing.T) {
-	body, err := buildAnthropicMessageBody(events.LLMRequest{
-		Model: "claude-sonnet-4-5",
+	body, err := buildAnthropicMessageBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5",
 		Messages: []events.Message{
 			{Role: "system", Content: "be terse"},
 			{Role: "user", Content: "hi"},
@@ -623,8 +618,7 @@ func TestBuildAnthropicMessageBody_SystemSplitOut(t *testing.T) {
 }
 
 func TestBuildOpenAIChatBody_BasicShape(t *testing.T) {
-	body, err := buildOpenAIChatBody(events.LLMRequest{
-		Model: "gpt-4o-mini",
+	body, err := buildOpenAIChatBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "gpt-4o-mini",
 		Messages: []events.Message{
 			{Role: "system", Content: "be terse"},
 			{Role: "user", Content: "hi"},

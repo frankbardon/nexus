@@ -74,14 +74,14 @@ func TestJournalCrashResume_RefiresPartialInput(t *testing.T) {
 	}
 	envelopes := []journal.Envelope{
 		{Seq: 1, Type: "io.session.start"},
-		{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "first message"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "first message"}},
 		{Seq: 3, Type: "agent.turn.start"},
-		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{Content: "first reply", FinishReason: "end_turn"}},
+		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "first reply", FinishReason: "end_turn"}},
 		{Seq: 5, Type: "agent.turn.end"},
 		// crash mid-turn — partial turn below
-		{Seq: 6, Type: "io.input", Payload: events.UserInput{Content: "ASK PARTIAL TURN"}},
+		{Seq: 6, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "ASK PARTIAL TURN"}},
 		{Seq: 7, Type: "agent.turn.start"},
-		{Seq: 8, Type: "tool.invoke", Payload: events.ToolCall{ID: "stuck", Name: "shell", Arguments: map[string]any{"command": "ls"}}},
+		{Seq: 8, Type: "tool.invoke", Payload: events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "stuck", Name: "shell", Arguments: map[string]any{"command": "ls"}}},
 		// no tool.result, no agent.turn.end
 	}
 	for i := range envelopes {
@@ -192,7 +192,7 @@ func TestJournalCrashResume_NoPartialIsNoop(t *testing.T) {
 		FsyncMode: journal.FsyncEveryEvent, BufferSize: 16, SessionID: sessionID,
 	})
 	w.Append(&journal.Envelope{Seq: 1, Type: "io.session.start"})
-	w.Append(&journal.Envelope{Seq: 2, Type: "io.input", Payload: events.UserInput{Content: "complete"}})
+	w.Append(&journal.Envelope{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "complete"}})
 	w.Append(&journal.Envelope{Seq: 3, Type: "agent.turn.start"})
 	w.Append(&journal.Envelope{Seq: 4, Type: "agent.turn.end"})
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.pdf.json",
+  "title": "nexus.tool.pdf",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "timeout":          {"type": "string",  "description": "Subprocess timeout (Go duration)."},
+    "pdftotext_bin":    {"type": "string",  "description": "Path to the pdftotext binary."},
+    "save_to_session":  {"type": "boolean", "description": "Persist extracted text into the session file workspace."},
+    "save_file_name":   {"type": "string",  "description": "Filename used when save_to_session is true."},
+    "pdfinfo_bin":      {"type": "string",  "description": "Path to the pdfinfo binary."}
+  }
+}

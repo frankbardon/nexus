@@ -55,8 +55,7 @@ func ReplayToolShortCircuit(replay *ReplayState, bus EventBus, tc events.ToolCal
 			logger.Warn("replay: tool.result stash empty (cache miss + FIFO miss)",
 				"tool", tc.Name, "id", tc.ID)
 		}
-		_ = bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Error:  "replay stash empty",
 			TurnID: tc.TurnID,
@@ -68,8 +67,7 @@ func ReplayToolShortCircuit(replay *ReplayState, bus EventBus, tc events.ToolCal
 		if logger != nil {
 			logger.Warn("replay: tool.result decode failed", "tool", tc.Name, "error", err)
 		}
-		_ = bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Error:  "replay decode failed: " + err.Error(),
 			TurnID: tc.TurnID,

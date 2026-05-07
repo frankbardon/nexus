@@ -94,7 +94,7 @@ func TestHybridFusesVectorAndLexical(t *testing.T) {
 	t.Cleanup(vec.install())
 	t.Cleanup(lex.install())
 
-	q := &events.HybridQuery{Namespace: "docs", Query: "beta", K: 5}
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs", Query: "beta", K: 5}
 	if err := bus.Emit("hybrid.query", q); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
@@ -133,11 +133,10 @@ func TestHybridUsesPreEmbeddedVector(t *testing.T) {
 	t.Cleanup(vec.install())
 	t.Cleanup(lex.install())
 
-	q := &events.HybridQuery{
-		Namespace: "docs",
-		Query:     "ignored",
-		Vector:    []float32{1, 2, 3},
-		K:         5,
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs",
+		Query:  "ignored",
+		Vector: []float32{1, 2, 3},
+		K:      5,
 	}
 	_ = bus.Emit("hybrid.query", q)
 	if embCalls != 0 {
@@ -158,7 +157,7 @@ func TestHybridSurvivesLexicalMissing(t *testing.T) {
 	// Intentionally no lexical handler installed — orchestrator should
 	// proceed with vector-only results.
 
-	q := &events.HybridQuery{Namespace: "docs", Query: "x", K: 5}
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs", Query: "x", K: 5}
 	_ = bus.Emit("hybrid.query", q)
 	if q.Error != "" {
 		t.Fatalf("hybrid should tolerate missing lexical: %s", q.Error)
@@ -184,7 +183,7 @@ func TestHybridRespectsK(t *testing.T) {
 	t.Cleanup(vec.install())
 	t.Cleanup(lex.install())
 
-	q := &events.HybridQuery{Namespace: "docs", Query: "x", K: 2}
+	q := &events.HybridQuery{SchemaVersion: events.HybridQueryVersion, Namespace: "docs", Query: "x", K: 2}
 	_ = bus.Emit("hybrid.query", q)
 	if len(q.Matches) != 2 {
 		t.Fatalf("K=2 returned %d matches, want 2", len(q.Matches))

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.vectorstore.chromem.json",
+  "title": "nexus.vectorstore.chromem",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "path":     {"type": "string",  "description": "Persistence directory for chromem-go collections."},
+    "compress": {"type": "boolean", "description": "Compress on-disk vectors."}
+  }
+}

@@ -143,8 +143,7 @@ func readFile(path string) (*events.LongTermMemoryEntry, error) {
 		body = content
 	}
 
-	return &events.LongTermMemoryEntry{
-		Key:           mf.Key,
+	return &events.LongTermMemoryEntry{SchemaVersion: events.LongTermMemoryEntryVersion, Key: mf.Key,
 		Content:       body,
 		Tags:          mf.Tags,
 		Created:       mf.Created,

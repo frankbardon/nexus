@@ -135,9 +135,8 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		p.warned = true
 		p.mu.Unlock()
 		remaining := p.maxIterations - count
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: fmt.Sprintf("Warning: %d iterations used, %d remaining before limit.", count, remaining),
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("Warning: %d iterations used, %d remaining before limit.", count, remaining),
+			Role: "system",
 		})
 	}
 
@@ -148,9 +147,8 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 			Vetoed: true,
 			Reason: fmt.Sprintf("Maximum iterations reached (%d)", p.maxIterations),
 		}
-		_ = p.bus.Emit("io.output", events.AgentOutput{
-			Content: fmt.Sprintf("I've reached the maximum number of iterations (%d). Stopping to prevent an endless loop.", p.maxIterations),
-			Role:    "system",
+		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: fmt.Sprintf("I've reached the maximum number of iterations (%d). Stopping to prevent an endless loop.", p.maxIterations),
+			Role: "system",
 		})
 	}
 }

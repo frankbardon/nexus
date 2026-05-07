@@ -85,11 +85,9 @@ func TestSessionCeiling_VetoesAtTotalLimit(t *testing.T) {
 	})
 
 	// Spend up to the cap.
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Usage: events.Usage{TotalTokens: 100},
-	})
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 100}})
 
-	req := &events.LLMRequest{}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if !veto.Vetoed {
 		t.Fatal("expected veto when session total at cap")
@@ -105,8 +103,8 @@ func TestSessionCeiling_NoVetoBelowLimit(t *testing.T) {
 			},
 		},
 	})
-	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 50}})
-	req := &events.LLMRequest{}
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 50}})
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if veto.Vetoed {
 		t.Fatal("must not veto below cap")
@@ -125,24 +123,22 @@ func TestSourcePluginCeiling_OnlyAffectsMatchedBucket(t *testing.T) {
 	})
 
 	// Charge tools.web up to limit, plus an unrelated bucket.
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Usage: events.Usage{TotalTokens: 50},
-		Tags:  map[string]string{"source_plugin": "tools.web"},
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 50},
+		Tags: map[string]string{"source_plugin": "tools.web"},
 	})
-	_ = bus.Emit("llm.response", events.LLMResponse{
-		Usage: events.Usage{TotalTokens: 9999},
-		Tags:  map[string]string{"source_plugin": "tools.shell"},
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 9999},
+		Tags: map[string]string{"source_plugin": "tools.shell"},
 	})
 
 	// Request from tools.web → veto.
-	webReq := &events.LLMRequest{Tags: map[string]string{"source_plugin": "tools.web"}}
+	webReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tags: map[string]string{"source_plugin": "tools.web"}}
 	veto, _ := bus.EmitVetoable("before:llm.request", webReq)
 	if !veto.Vetoed {
 		t.Fatal("tools.web request must veto")
 	}
 
 	// Request from tools.shell → must pass (different bucket).
-	shellReq := &events.LLMRequest{Tags: map[string]string{"source_plugin": "tools.shell"}}
+	shellReq := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tags: map[string]string{"source_plugin": "tools.shell"}}
 	veto, _ = bus.EmitVetoable("before:llm.request", shellReq)
 	if veto.Vetoed {
 		t.Fatal("tools.shell request must not veto under tools.web ceiling")
@@ -165,8 +161,8 @@ func TestDowngradeAction_RewritesModel(t *testing.T) {
 		},
 	})
 
-	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 10}})
-	req := &events.LLMRequest{Model: "claude-opus-4-7"}
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 10}})
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-7"}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if veto.Vetoed {
 		t.Fatal("downgrade-model must not veto")
@@ -192,8 +188,8 @@ func TestDowngradeAction_NoCandidatesLeavesAlone(t *testing.T) {
 			},
 		},
 	})
-	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 1}})
-	req := &events.LLMRequest{Model: "claude-opus-4-7"}
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 1}})
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-7"}
 	bus.EmitVetoable("before:llm.request", req)
 	if req.Model != "claude-opus-4-7" {
 		t.Fatalf("model should be untouched without candidates, got %s", req.Model)
@@ -209,8 +205,8 @@ func TestUSDCeiling(t *testing.T) {
 			},
 		},
 	})
-	_ = bus.Emit("llm.response", events.LLMResponse{CostUSD: 0.06})
-	req := &events.LLMRequest{}
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, CostUSD: 0.06})
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if !veto.Vetoed {
 		t.Fatal("expected veto when USD spend exceeds cap")
@@ -227,8 +223,8 @@ func TestWarnAction_DoesNotVeto(t *testing.T) {
 			},
 		},
 	})
-	_ = bus.Emit("llm.response", events.LLMResponse{Usage: events.Usage{TotalTokens: 100}})
-	req := &events.LLMRequest{}
+	_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Usage: events.Usage{TotalTokens: 100}})
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion}
 	veto, _ := bus.EmitVetoable("before:llm.request", req)
 	if veto.Vetoed {
 		t.Fatal("warn must not veto")

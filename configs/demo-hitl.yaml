@@ -82,7 +82,6 @@ plugins:
         {"free_text": "..."} when the user typed
         {"choice_id": "...", "free_text": "..."} in mode="both"
       Use whichever fields are present.
-    max_iterations: 8
 
   nexus.control.hitl:
     registry:

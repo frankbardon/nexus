@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.planexec.json",
+  "title": "nexus.agent.planexec",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "execution_model_role": {"type": "string", "description": "Role used to execute each step."},
+    "replan_on_failure":    {"type": "boolean", "description": "Re-plan remaining work when a step fails (max 2 replans)."},
+    "approval":             {"type": "string", "enum": ["always", "never"], "description": "Plan approval mode."},
+    "system_prompt":        {"type": "string", "description": "Inline system prompt."},
+    "system_prompt_file":   {"type": "string", "description": "Path to a file containing the system prompt."}
+  }
+}

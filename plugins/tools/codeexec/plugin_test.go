@@ -106,8 +106,7 @@ func (h *testHarness) registerFakeTool() {
 			return
 		}
 		msg, _ := tc.Arguments["message"].(string)
-		_ = h.bus.Emit("tool.result", events.ToolResult{
-			ID:     tc.ID,
+		_ = h.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 			Name:   tc.Name,
 			Output: "echoed: " + msg,
 			TurnID: tc.TurnID,
@@ -118,8 +117,7 @@ func (h *testHarness) registerFakeTool() {
 func (h *testHarness) runCode(script string) events.ToolResult {
 	h.t.Helper()
 	// Arbitrary test ID + turn.
-	tc := events.ToolCall{
-		ID:        "run-" + h.t.Name(),
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "run-" + h.t.Name(),
 		Name:      toolName,
 		Arguments: map[string]any{"script": script},
 		TurnID:    "turn-1",
@@ -434,8 +432,7 @@ func Double(x int) int { return x * 2 }
 	if err := os.WriteFile(filepath.Join(skillDir, "util.go"), []byte(helperSrc), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = h.bus.Emit("skill.loaded", events.SkillContent{
-		Name:    "math-helpers",
+	_ = h.bus.Emit("skill.loaded", events.SkillContent{SchemaVersion: events.SkillContentVersion, Name: "math-helpers",
 		BaseDir: skillDir,
 	})
 
@@ -470,8 +467,8 @@ func TestPlugin_SkillHelpersUnloadedOnDeactivate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillDir, "x.go"), []byte("package helpers\nfunc One() int { return 1 }\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_ = h.bus.Emit("skill.loaded", events.SkillContent{Name: "temp", BaseDir: skillDir})
-	_ = h.bus.Emit("skill.deactivate", events.SkillRef{Name: "temp"})
+	_ = h.bus.Emit("skill.loaded", events.SkillContent{SchemaVersion: events.SkillContentVersion, Name: "temp", BaseDir: skillDir})
+	_ = h.bus.Emit("skill.deactivate", events.SkillRef{SchemaVersion: events.SkillRefVersion, Name: "temp"})
 
 	script := `package main
 import (
