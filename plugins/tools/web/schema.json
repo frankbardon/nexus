@@ -27,6 +27,28 @@
         "follow_redirects": {"type": "boolean", "description": "Follow HTTP redirects."},
         "max_redirects":    {"type": "integer", "minimum": 0, "description": "Maximum redirect chain length."}
       }
+    },
+    "screenshot_provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "External page-screenshot service used by fetch_page_image. Absent => the tool returns a clear configuration error.",
+      "properties": {
+        "url":              {"type": "string",  "description": "Provider endpoint."},
+        "method":           {"type": "string",  "enum": ["GET", "POST"], "description": "HTTP method (default POST)."},
+        "api_key_env":      {"type": "string",  "description": "Env var holding the bearer token / api key."},
+        "url_param_name":   {"type": "string",  "description": "Field name used for the target URL in the request (default 'url')."},
+        "request_template": {"type": "object",  "additionalProperties": true, "description": "Extra fields merged into the JSON body (POST) or query string (GET)."},
+        "headers":          {"type": "object",  "additionalProperties": {"type": "string"}, "description": "Fixed headers to send with every request."}
+      }
+    },
+    "blob_store": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Settings for the per-session blob store backing fetch_page_image.",
+      "properties": {
+        "byte_budget":      {"type": "integer", "description": "Soft cap on total stored blob bytes per session. 0 = unbounded.", "default": 2147483648},
+        "inline_threshold": {"type": "integer", "description": "Payloads at or below this size are inlined on the MessagePart instead of being stored as a blob.", "default": 262144}
+      }
     }
   }
 }
