@@ -47,12 +47,15 @@ func TestToolChoice_SequenceCyclesAcrossIterations(t *testing.T) {
 		if !ok {
 			return
 		}
-		// Only inspect ReAct main-loop requests — those carry the configured
-		// tool_choice sequence. Filter by task_kind because every agent main
-		// request now also tags itself with `_source = pluginID` for cost
-		// attribution (Idea 09), so a non-empty source check would let
-		// planner / classifier probes through too.
-		if kind, _ := req.Metadata["task_kind"].(string); kind != "react_main" {
+		// Skip internal sub-requests (planner, summariser, classifier
+		// router, etc.). The agent main loop carries the configured
+		// tool_choice sequence regardless of which agent type the config
+		// activates; non-empty `_source` no longer distinguishes "internal"
+		// since Idea 09 made every agent main request tag its own pluginID
+		// for cost attribution.
+		kind, _ := req.Metadata["task_kind"].(string)
+		switch kind {
+		case "plan", "summarise", "compact", "classify":
 			return
 		}
 		mu.Lock()
