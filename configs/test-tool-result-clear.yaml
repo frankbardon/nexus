@@ -1,0 +1,82 @@
+# Test: tool-result clearing fires after a tool call ages past the
+# configured threshold and the next user turn arrives.
+#
+# Mocked LLM — no API key. Sequence:
+#   user msg #1: tool call → tool result (1500-byte payload)
+#   user msg #2: assistant text (turn ends, p.turn = 1)
+#                tool_result_clear sees the prior result is age >= 1 + size
+#                >= 50 bytes; replaces body with envelope marker.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestToolResultClear
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.memory.capped
+    - nexus.memory.tool_result_clear
+
+  nexus.io.test:
+    inputs:
+      - "Run echo to produce a long string."
+      - "Tell me a joke."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 30s
+    # Turn 1 (user msg #1):
+    #   #1: tool_call shell → echo a long string (well over 50 bytes)
+    #   #2: final assistant content closes the turn
+    # Turn 2 (user msg #2):
+    #   #3: final assistant content closes the turn — at this point
+    #       tool_result_clear sees the prior tool result is age >= 1 +
+    #       size >= 50 and replaces its body with the envelope marker.
+    mock_responses:
+      - tool_calls:
+          - name: shell
+            arguments: '{"command":"echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+      - content: "Echoed."
+      - content: "Two cows in a field, one says to the other..."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "Use the tools when asked."
+
+  nexus.gate.endless_loop:
+    max_iterations: 4
+
+  nexus.tool.shell:
+    allowed_commands: [echo]
+    timeout: 5s
+
+  nexus.memory.capped:
+    max_messages: 50
+    persist: false
+
+  # Aggressive thresholds: age 1 turn, 50 bytes — guaranteed to fire
+  # after one tool call followed by one extra user turn.
+  nexus.memory.tool_result_clear:
+    enabled: true
+    age_turns: 1
+    size_bytes_threshold: 50
+    drop_strategy: replace_with_envelope

@@ -10,6 +10,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
 )
 
 const pluginID = "nexus.memory.capped"
@@ -198,7 +199,7 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	if !ok {
 		return
 	}
-	if source, _ := resp.Metadata["_source"].(string); source != "" {
+	if internalflow.SkipForHistory(resp.Metadata) {
 		return
 	}
 	p.appendMessage(events.Message{

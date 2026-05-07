@@ -14,6 +14,12 @@
     "model_role":        {"type": "string"},
     "model":             {"type": "string"},
     "prompt":            {"type": "string"},
-    "prompt_file":       {"type": "string"}
+    "prompt_file":       {"type": "string"},
+    "quality_retry":     {"type": "boolean", "description": "When true, re-run the summariser once with a stricter prompt if the trailer omits any required preserved kind. Default false (backwards-compatible)."},
+    "require_preserved_kinds": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Preserved-kind tags that must appear in the summariser's trailer for adoption. Defaults to [\"decision\", \"rationale\"]."
+    }
   }
 }

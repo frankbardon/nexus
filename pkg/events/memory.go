@@ -20,6 +20,13 @@ const (
 	LongTermMemoryListResultVersion    = 1
 	CompactionTriggeredVersion         = 1
 	CompactionCompleteVersion          = 1
+
+	// Idea 30 — live context curation events.
+	MemoryToolResultClearedVersion  = 1
+	MemoryToolDefPrunedVersion      = 1
+	MemoryTopicShiftDetectedVersion = 1
+	MemorySummaryReplacedVersion    = 1
+	MemoryCuratedVersion            = 1
 )
 
 // MemoryEntry represents a single memory record.
@@ -167,4 +174,91 @@ type CompactionComplete struct {
 	BackupPath   string    // session-relative path to the backup file
 	MessageCount int       // number of messages after compaction
 	PrevCount    int       // number of messages before compaction
+}
+
+// --- Idea 30: live context curation events ---
+
+// MemoryToolResultCleared signals that a tool result body has been replaced
+// with an envelope marker by the live curator. The call/result pairing stays
+// in history; only the body is gone.
+type MemoryToolResultCleared struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	ToolCallID    string `json:"tool_call_id"`
+	Tool          string `json:"tool"`
+	OriginalSize  int    `json:"original_size"`
+	ClearedAtTurn int    `json:"cleared_at_turn"`
+	Reason        string `json:"reason"` // "age", "subsequent_call", "no_citation", "synthesis_detected"
+}
+
+// MemoryToolDefPruned signals that a tool definition has been demoted out
+// of the LLM-visible tool list because it has been idle too long. Restoration
+// happens implicitly via discovery on next mention.
+type MemoryToolDefPruned struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	ToolID         string `json:"tool_id"`
+	LastUsedTurn   int    `json:"last_used_turn"`
+	DefinitionSize int    `json:"definition_size"`
+}
+
+// MemoryTopicShiftDetected signals the topic pruner observed a topic
+// boundary in the conversation.
+type MemoryTopicShiftDetected struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	FromTurn   int     `json:"from_turn"`
+	ToTurn     int     `json:"to_turn"`
+	Similarity float64 `json:"similarity"`
+	Signal     string  `json:"signal"` // "embedding" | "phrase" | "user_explicit"
+}
+
+// MemorySummaryReplaced signals that a span of the conversation has been
+// replaced with a reasoning-preserving summary. Distinct from
+// CompactionComplete — that event reports a full-buffer rewrite; this one
+// reports a span-level replacement.
+type MemorySummaryReplaced struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	FromTurns      [2]int   `json:"from_turns"` // [start, end] inclusive turn range
+	OriginalTokens int      `json:"original_tokens"`
+	SummaryTokens  int      `json:"summary_tokens"`
+	PreservedKinds []string `json:"preserved_kinds"` // e.g. ["decision","rationale","error","next_step"]
+}
+
+// CurationSection describes one section of context touched by a curation
+// pass. Used by MemoryCurated to convey stability impact.
+type CurationSection struct {
+	// SectionID is an opaque identifier for the section that was edited.
+	// Convention: "<plugin-id>/<scope>" e.g. "nexus.memory.tool_result_clear/turn-12"
+	// or "nexus.memory.summary_buffer/range-3-8".
+	SectionID string `json:"section_id"`
+	// Kind is the cache-stability category. "volatile" = recent turns
+	// (no cache impact); "session" = session-long content like compaction
+	// summaries (controlled re-cache); "static" = system prompt / tool defs
+	// (curator must not touch these).
+	Kind string `json:"kind"`
+	// TokensDelta is the post-edit minus pre-edit token estimate. Negative
+	// for shrinkage (the common case); positive for replacements that grew.
+	TokensDelta int `json:"tokens_delta"`
+}
+
+// MemoryCurated is the envelope event emitted by every curation layer.
+// It carries the stability-impact descriptor consumed by the cache-aware
+// prompt builder (Idea 05) so cache invalidation cost is scoped.
+type MemoryCurated struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	// Layer names the curation layer that ran (e.g. "tool_result_clear",
+	// "tool_def_pruner", "topic_pruner", "summary_buffer").
+	Layer string `json:"layer"`
+	// SectionsTouched describes every section the layer edited.
+	SectionsTouched []CurationSection `json:"sections_touched"`
+	// CacheInvalidates is true when at least one touched section is in
+	// the cached prefix and the prompt builder must re-cache. False when
+	// every touched section is volatile (no impact).
+	CacheInvalidates bool `json:"cache_invalidates"`
+	// AtTurn is the turn boundary at which the curation ran. Curations
+	// batch at turn boundaries to keep cache invalidations predictable.
+	AtTurn int `json:"at_turn"`
 }

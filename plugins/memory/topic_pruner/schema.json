@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.topic_pruner.json",
+  "title": "nexus.memory.topic_pruner",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled":               {"type": "boolean", "description": "Enable topic-shift detection. Default true."},
+    "similarity_threshold":  {"type": "number", "minimum": 0, "maximum": 1, "description": "Cosine similarity below which a new user input is flagged as a topic shift. Only used when an embeddings.provider is active."},
+    "keep_last_topic_full":  {"type": "boolean", "description": "When true (default), the most recent topic remains verbatim while older topics may be summarised by downstream plugins. Reserved for future use."},
+    "explicit_phrases": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Lowercase substrings whose presence in a user input is treated as a topic shift signal."
+    }
+  }
+}

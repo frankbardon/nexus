@@ -79,6 +79,19 @@ func versionedPayloads() []versionedPayload {
 		{"LongTermMemoryListResult", func() any { return LongTermMemoryListResult{SchemaVersion: LongTermMemoryListResultVersion} }, LongTermMemoryListResultVersion},
 		{"CompactionTriggered", func() any { return CompactionTriggered{SchemaVersion: CompactionTriggeredVersion} }, CompactionTriggeredVersion},
 		{"CompactionComplete", func() any { return CompactionComplete{SchemaVersion: CompactionCompleteVersion} }, CompactionCompleteVersion},
+		{"MemoryToolResultCleared", func() any {
+			return MemoryToolResultCleared{SchemaVersion: MemoryToolResultClearedVersion}
+		}, MemoryToolResultClearedVersion},
+		{"MemoryToolDefPruned", func() any {
+			return MemoryToolDefPruned{SchemaVersion: MemoryToolDefPrunedVersion}
+		}, MemoryToolDefPrunedVersion},
+		{"MemoryTopicShiftDetected", func() any {
+			return MemoryTopicShiftDetected{SchemaVersion: MemoryTopicShiftDetectedVersion}
+		}, MemoryTopicShiftDetectedVersion},
+		{"MemorySummaryReplaced", func() any {
+			return MemorySummaryReplaced{SchemaVersion: MemorySummaryReplacedVersion}
+		}, MemorySummaryReplacedVersion},
+		{"MemoryCurated", func() any { return MemoryCurated{SchemaVersion: MemoryCuratedVersion} }, MemoryCuratedVersion},
 		// skill.go
 		{"SkillCatalog", func() any { return SkillCatalog{SchemaVersion: SkillCatalogVersion} }, SkillCatalogVersion},
 		{"SkillActivation", func() any { return SkillActivation{SchemaVersion: SkillActivationVersion} }, SkillActivationVersion},

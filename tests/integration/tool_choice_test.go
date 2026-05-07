@@ -47,9 +47,15 @@ func TestToolChoice_SequenceCyclesAcrossIterations(t *testing.T) {
 		if !ok {
 			return
 		}
-		// Skip non-agent requests (planner / compaction) — react agent requests
-		// are the only ones carrying the configured tool_choice sequence.
-		if src, _ := req.Metadata["_source"].(string); src != "" {
+		// Skip internal sub-requests (planner, summariser, classifier
+		// router, etc.). The agent main loop carries the configured
+		// tool_choice sequence regardless of which agent type the config
+		// activates; non-empty `_source` no longer distinguishes "internal"
+		// since Idea 09 made every agent main request tag its own pluginID
+		// for cost attribution.
+		kind, _ := req.Metadata["task_kind"].(string)
+		switch kind {
+		case "plan", "summarise", "compact", "classify":
 			return
 		}
 		mu.Lock()

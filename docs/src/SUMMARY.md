@@ -18,6 +18,7 @@
 - [Model Registry](./architecture/models.md)
 - [Prompt Registry](./architecture/prompts.md)
 - [Hot Reload](./architecture/hot-reload.md)
+- [Context Engineering](./architecture/context-engineering.md)
 
 # Desktop Shell
 
@@ -53,6 +54,9 @@
   - [Capped History](./plugins/memory/capped.md)
   - [Summary-Buffer History](./plugins/memory/summary_buffer.md)
   - [Context Compaction](./plugins/memory/compaction.md)
+  - [Tool-Result Clearing](./plugins/memory/tool_result_clear.md)
+  - [Tool-Definition Pruner](./plugins/memory/tool_def_pruner.md)
+  - [Topic-Aware Pruner](./plugins/memory/topic_pruner.md)
   - [Long-Term Memory](./plugins/memory/longterm.md)
   - [Vector Memory](./plugins/memory/vector.md)
 - [Embeddings](./plugins/embeddings/index.md)

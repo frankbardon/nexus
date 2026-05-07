@@ -92,18 +92,30 @@ func TestCompactedReplacesBuffer(t *testing.T) {
 	}
 }
 
-// TestLLMResponseWithSourceIgnored proves that llm.response events tagged
-// with Metadata["_source"] (e.g. planner or summariser replies) don't land
-// in the history buffer.
-func TestLLMResponseWithSourceIgnored(t *testing.T) {
+// TestLLMResponseInternalKindIgnored proves that llm.response events
+// produced by internal sub-flows (planner, summariser, classifier, …) —
+// identified by their task_kind — don't land in the history buffer. Main
+// agent responses are always recorded; the older non-empty `_source` check
+// would have skipped those too once Idea 09 made every agent main request
+// tag its own pluginID.
+func TestLLMResponseInternalKindIgnored(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()
 
+	// Internal — must be skipped.
 	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "internal",
-		Metadata: map[string]any{"_source": "nexus.planner.dynamic"},
+		Metadata: map[string]any{"_source": "nexus.planner.dynamic", "task_kind": "plan"},
 	}})
-
 	if got := len(p.GetHistory()); got != 0 {
-		t.Fatalf("expected sourced response ignored, got %d messages", got)
+		t.Fatalf("expected sourced internal response ignored, got %d messages", got)
+	}
+
+	// Main agent loop — must be recorded even though `_source` is non-empty.
+	p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "main",
+		Metadata: map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"},
+	}})
+	hist := p.GetHistory()
+	if len(hist) != 1 || hist[0].Content != "main" {
+		t.Fatalf("expected main agent response recorded, got %+v", hist)
 	}
 }

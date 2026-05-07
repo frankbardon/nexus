@@ -106,8 +106,12 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Skip gate-originated or planner LLM requests.
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	// Filter is meaningful only when the request actually carries tools.
+	// Requests without tools (planner, summariser, classifier router probes)
+	// fall through as no-ops — these once short-circuited via a non-empty
+	// `_source` check, but Idea 09 made every agent main request tag itself
+	// with its own pluginID, which broke that heuristic.
+	if len(req.Tools) == 0 {
 		return
 	}
 
