@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.tool_def_pruner.json",
+  "title": "nexus.memory.tool_def_pruner",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled":                {"type": "boolean", "description": "Enable per-tool definition pruning. Default true."},
+    "unused_turns_threshold": {"type": "integer", "minimum": 1, "description": "Drop a tool definition after this many consecutive turns without an invocation."},
+    "never_prune": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Tool names that are exempt from pruning. Defaults to [\"discover\", \"ask_user\"]."
+    }
+  }
+}

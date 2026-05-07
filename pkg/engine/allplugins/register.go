@@ -32,6 +32,9 @@ import (
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	"github.com/frankbardon/nexus/plugins/memory/simple"
 	"github.com/frankbardon/nexus/plugins/memory/summary_buffer"
+	tooldefpruner "github.com/frankbardon/nexus/plugins/memory/tool_def_pruner"
+	toolresultclear "github.com/frankbardon/nexus/plugins/memory/tool_result_clear"
+	topicpruner "github.com/frankbardon/nexus/plugins/memory/topic_pruner"
 	vectorplugin "github.com/frankbardon/nexus/plugins/memory/vector"
 
 	// Observer plugins.
@@ -146,6 +149,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.memory.compaction", compactionplugin.New)
 	r.Register("nexus.memory.longterm", longtermplugin.New)
 	r.Register("nexus.memory.vector", vectorplugin.New)
+	r.Register("nexus.memory.tool_result_clear", toolresultclear.New)
+	r.Register("nexus.memory.tool_def_pruner", tooldefpruner.New)
+	r.Register("nexus.memory.topic_pruner", topicpruner.New)
 
 	// Observers
 	r.Register("nexus.observe.thinking", thinkingplugin.New)

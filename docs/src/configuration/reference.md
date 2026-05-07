@@ -848,8 +848,10 @@ Source: `plugins/memory/summary_buffer/plugin.go`. Provides both
 | `max_recent`        | int    | `8`              | Messages kept verbatim; older messages are summarized. |
 | `model_role`        | string | `quick`          | Role used for the summary call. |
 | `model`             | string | *(none)*         | Explicit model ID (ignored if `model_role` is set). |
-| `prompt`            | string | *(default)*      | Inline summary prompt. |
+| `prompt`            | string | *(default)*      | Inline summary prompt. The default prompt is reasoning-preservation aware: it instructs the summariser to wrap segments in `<summary topic="…" compressed-from-turns="…">…</summary>` and end with a `## Preserved Kinds:` trailer. Overriding loses both behaviours. |
 | `prompt_file`       | string | *(none)*         | Path to a summary prompt file (overrides `prompt`). |
+| `quality_retry`     | bool   | `false`          | When `true`, the plugin re-runs the summariser once with a stricter prompt if the trailer omits any required preserved kind. Off by default for backwards compatibility. |
+| `require_preserved_kinds` | []string | `["decision", "rationale"]` | Kinds whose presence in the trailer is required when `quality_retry: true`. Allowed values: `decision`, `rationale`, `error`, `next_step`, `technical_detail`. |
 
 ### `nexus.memory.compaction`
 
@@ -913,6 +915,69 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
 | `require_approval.match.namespace_glob`       | string   | *(any)*   | Only require approval when the configured `namespace` matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the document content is at least this many bytes. |
+
+### `nexus.memory.tool_result_clear`
+
+Source: `plugins/memory/tool_result_clear/plugin.go`. Live curator that
+replaces stale tool-result bodies in outgoing `LLMRequest.Messages` with an
+inline `<tool_result … cleared="true" …/>` envelope. The original
+call/result pairing stays in history so the agent retains the fact of the
+call. Runs at priority 12 on `before:llm.request` (after
+`nexus.discovery.progressive`).
+
+| Key                    | Type     | Default                          | Description |
+|------------------------|----------|----------------------------------|-------------|
+| `enabled`              | bool     | `true`                           | Toggle the curator. |
+| `age_turns`            | int      | `5`                              | Clear tool results older than this many turns when also exceeding the size threshold. |
+| `size_bytes_threshold` | int      | `1000`                           | Skip clearing for result bodies smaller than this many bytes. |
+| `preserve_recent_kinds`| []string | `["error", "user_question"]`     | Result kinds that are never cleared regardless of age. |
+| `drop_strategy`        | string   | `replace_with_envelope`          | `replace_with_envelope` keeps the call/result pair with a marker body; `full_drop` removes the message entirely (risks tool_use/tool_result pairing breakage). |
+
+Emits `memory.tool_result_cleared` (per cleared call) and `memory.curated`
+(stability descriptor for the cache-aware prompt builder).
+
+### `nexus.memory.tool_def_pruner`
+
+Source: `plugins/memory/tool_def_pruner/plugin.go`. Drops individual tool
+definitions from outgoing `LLMRequest.Tools` when they have been idle past
+`unused_turns_threshold`. Pairs with `nexus.discovery.progressive` —
+progressive scopes by class, this scopes per tool. Runs at priority 14 on
+`before:llm.request`.
+
+| Key                      | Type     | Default                  | Description |
+|--------------------------|----------|--------------------------|-------------|
+| `enabled`                | bool     | `true`                   | Toggle the pruner. |
+| `unused_turns_threshold` | int      | `6`                      | Drop a tool definition after this many consecutive turns without an invocation. |
+| `never_prune`            | []string | `["discover","ask_user"]`| Tool names exempt from pruning (e.g. discovery's meta-tool, HITL ask-user). |
+
+Emits `memory.tool_def_pruned` and `memory.curated`. The `MemoryCurated`
+event marks `cache_invalidates: true` because the tool list is part of the
+session-cached prefix.
+
+### `nexus.memory.topic_pruner`
+
+Source: `plugins/memory/topic_pruner/plugin.go`. Detects topic boundaries
+in user input and emits `memory.topic_shift_detected`. Two signals are
+combined:
+
+- Explicit-phrase matching ("different question", "new topic", "let's
+  move on", …) — cheap, deterministic.
+- Embedding similarity drop against the rolling topic centroid — runs only
+  when an `embeddings.provider` is active.
+
+The plugin does not itself rewrite history; it surfaces the shift so other
+plugins (summary buffer, compaction) can react. Topic boundaries are
+journalled for replay determinism.
+
+| Key                    | Type     | Default                                 | Description |
+|------------------------|----------|-----------------------------------------|-------------|
+| `enabled`              | bool     | `true`                                  | Toggle the pruner. |
+| `similarity_threshold` | float    | `0.55`                                  | Cosine similarity below which a new user input flags a topic shift. Used only when an `embeddings.provider` is active. |
+| `keep_last_topic_full` | bool     | `true`                                  | Reserved — informs downstream consumers whether the most recent topic should remain verbatim. |
+| `explicit_phrases`     | []string | `["different question", "different topic", "new topic", "new question", "let's move on", "moving on", "change of subject", "switching gears", "unrelated:", "separately,", "on a different note"]` | Lowercase substrings that signal a topic shift. Replacing the list disables the defaults. |
+
+Emits `memory.topic_shift_detected` and `memory.curated`. Same-turn
+duplicate signals are debounced.
 
 ---
 

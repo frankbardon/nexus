@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.memory.tool_result_clear.json",
+  "title": "nexus.memory.tool_result_clear",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled":              {"type": "boolean", "description": "Enable the curator. Default true."},
+    "age_turns":            {"type": "integer", "minimum": 0, "description": "Clear tool results older than this many turns when also exceeding size threshold."},
+    "size_bytes_threshold": {"type": "integer", "minimum": 0, "description": "Skip clearing for result bodies smaller than this many bytes."},
+    "preserve_recent_kinds": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Result kinds (e.g. \"error\", \"user_question\") that are never cleared regardless of age."
+    },
+    "drop_strategy": {
+      "type": "string",
+      "enum": ["replace_with_envelope", "full_drop"],
+      "description": "How to drop a stale tool result. replace_with_envelope keeps the call/result pair with a marker body (default). full_drop removes the message entirely (risks tool_use/tool_result pairing breakage)."
+    }
+  }
+}
