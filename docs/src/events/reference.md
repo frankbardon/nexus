@@ -707,13 +707,27 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 **EmbeddingsRequest**
 | Field | Type | Description |
 |-------|------|-------------|
-| `Texts` | []string | Batch of strings to embed (input). |
+| `Texts` | []string | Batch of strings to embed (input). Used when `Inputs` is empty — back-compat with text-only adapters. |
+| `Inputs` | []EmbeddingsInput | Polymorphic batch (text + image inputs) for multimodal-aware providers. When non-empty, providers consume `Inputs` and ignore `Texts`. |
 | `Model` | string | Requested model; provider may echo back actual model used. |
 | `Dimensions` | int | Optional truncation hint. Zero = provider default. |
 | `Vectors` | [][]float32 | Result vectors, in input order (output). |
 | `Provider` | string | Plugin ID of the adapter that answered (output). |
 | `Usage` | EmbeddingsUsage | Token usage when reported by the provider (output). |
 | `Error` | string | Non-empty on failure (output). |
+
+**EmbeddingsInput**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Text` | string | Text snippet. Mutually exclusive with `Image` and `ImageURI`. |
+| `Image` | []byte | Inline image bytes. Mutually exclusive with `Text` and `ImageURI`. Requires `MimeType`. |
+| `ImageURI` | string | Image reference: `nexus-blob:<sha>` (engine blob store) or external URL. Mutually exclusive with `Text` and `Image`. |
+| `MimeType` | string | IANA media type (e.g. `image/png`). Required when `Image` is set; recommended for `ImageURI`. |
+
+Adapters that don't support image inputs must return a clear error when
+they encounter an image-bearing input rather than silently downgrading.
+See `nexus.embeddings.cohere_multimodal` for a multimodal-aware reference
+adapter.
 
 **EmbeddingsUsage**
 | Field | Type | Description |
