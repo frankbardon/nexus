@@ -132,7 +132,28 @@ func (p *Plugin) handleEmbeddings(event engine.Event[any]) {
 	if req.Provider != "" {
 		return
 	}
-	if len(req.Texts) == 0 {
+
+	// Multimodal-aware producers populate Inputs. OpenAI's
+	// text-embedding-3-* family is text-only — an image-bearing input is
+	// a hard error rather than a silent text fallback. Reject before any
+	// HTTP call so the caller sees a clear, deterministic message.
+	var texts []string
+	if len(req.Inputs) > 0 {
+		texts = make([]string, 0, len(req.Inputs))
+		for i, in := range req.Inputs {
+			if in.Image != nil || in.ImageURI != "" {
+				req.Provider = pluginID
+				req.Error = fmt.Sprintf(
+					"openai text-embedding-* models accept text only; use a multimodal embeddings provider for image inputs (e.g. nexus.embeddings.cohere_multimodal) [input %d]", i)
+				return
+			}
+			texts = append(texts, in.Text)
+		}
+	} else {
+		texts = req.Texts
+	}
+
+	if len(texts) == 0 {
 		req.Provider = pluginID
 		return
 	}
@@ -142,7 +163,7 @@ func (p *Plugin) handleEmbeddings(event engine.Event[any]) {
 		model = p.defaultModel
 	}
 
-	vectors, usage, err := p.embed(req.Texts, model, req.Dimensions)
+	vectors, usage, err := p.embed(texts, model, req.Dimensions)
 	req.Provider = pluginID
 	req.Model = model
 	if err != nil {
