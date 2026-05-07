@@ -740,6 +740,23 @@ Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
 | `save_to_session` | bool     | `false`                | Persist extracted text to session files. |
 | `save_file_name`  | string   | *(derived from PDF)*   | Custom filename for the saved text. |
 
+### `nexus.tool.screenshot`
+
+Source: `plugins/tools/screenshot/plugin.go`. Registers `take_screenshot`.
+Captures the full screen as PNG and emits an `image` `MessagePart` on
+`ToolResult.OutputParts`. Capture path is platform-specific:
+
+- `darwin`: `screencapture -t png -x <tmpfile>`
+- `linux`: `gnome-screenshot -f <tmpfile>`, then `grim <tmpfile>`, then
+  ImageMagick's `import -window root <tmpfile>` as fallbacks
+- other platforms: emits `ToolResult.Error: "screenshot not supported on this platform"`
+
+| Key                          | Type     | Default               | Description |
+|------------------------------|----------|-----------------------|-------------|
+| `timeout`                    | duration | `15s`                 | Per-capture subprocess timeout. |
+| `blob_store.byte_budget`     | int      | `2147483648` (2 GiB)  | Soft cap on total stored blob bytes per session. `0` = unbounded. |
+| `blob_store.inline_threshold`| int      | `262144` (256 KiB)    | Payloads at or below this size are inlined on the `MessagePart` instead of stored as a blob. |
+
 ### `nexus.tool.opener`
 
 Source: `plugins/tools/opener/plugin.go`. Registers `open_path`.

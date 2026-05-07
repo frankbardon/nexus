@@ -97,6 +97,7 @@ import (
 	knowledgesearchplugin "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
+	screenshotplugin "github.com/frankbardon/nexus/plugins/tools/screenshot"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
@@ -213,6 +214,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.file", fileio.New)
 	r.Register("nexus.tool.catalog", catalogplugin.New)
 	r.Register("nexus.tool.pdf", pdfplugin.New)
+	r.Register("nexus.tool.screenshot", screenshotplugin.New)
 	r.Register("nexus.tool.opener", openerplugin.New)
 	r.Register("nexus.control.hitl", hitlplugin.New)
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
