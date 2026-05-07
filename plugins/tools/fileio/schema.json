@@ -7,6 +7,15 @@
   "properties": {
     "base_dir":              {"type": "string", "description": "Base directory for file operations."},
     "allow_external_writes": {"type": "boolean", "description": "Permit reads/writes outside base_dir."},
+    "blob_store": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Settings for the per-session blob store backing read_image / read_document.",
+      "properties": {
+        "byte_budget":     {"type": "integer", "description": "Soft cap on total stored blob bytes per session. 0 = unbounded.", "default": 2147483648},
+        "inline_threshold": {"type": "integer", "description": "Payloads at or below this size are inlined on the MessagePart instead of being stored as a blob.", "default": 262144}
+      }
+    },
     "tools": {
       "type": "object",
       "additionalProperties": false,
@@ -15,7 +24,9 @@
         "read_file":       {"type": "boolean"},
         "write_file":      {"type": "boolean"},
         "check_file_size": {"type": "boolean"},
-        "list_files":      {"type": "boolean"}
+        "list_files":      {"type": "boolean"},
+        "read_image":      {"type": "boolean", "description": "Load an image file (.png/.jpg/.gif/.webp/.bmp) and return it as a multimodal MessagePart for the next LLM turn."},
+        "read_document":   {"type": "boolean", "description": "Load a document file (.pdf) and return it as a multimodal MessagePart for the next LLM turn."}
       }
     }
   }

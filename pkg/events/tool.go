@@ -72,5 +72,18 @@ type ToolResult struct {
 	// run_code's typed bindings) prefer this over parsing Output.
 	// Content should validate against the tool's declared OutputSchema.
 	OutputStructured map[string]any
-	TurnID           string
+
+	// OutputParts carries multimodal content the tool produced (image,
+	// audio, document, video). When non-empty, the memory plugin copies
+	// these into the resulting tool-role Message.Parts so the next LLM
+	// request includes the multimodal content alongside (or in place of)
+	// Output. Empty for text-only tools.
+	//
+	// Large payloads should be stored via pkg/engine/blobs and referenced
+	// here as `MessagePart{URI: "nexus-blob:<sha>", MimeType: "..."}` so
+	// the journal stays compact; small payloads can ride inline as Data.
+	// Provider plugins resolve nexus-blob URIs at request-assembly time.
+	OutputParts []MessagePart
+
+	TurnID string
 }

@@ -291,6 +291,19 @@ Certain metadata keys carry special meaning:
 | `CacheWriteTokens` | int | Tokens written into a prompt cache |
 | `ModalityBreakdown` | map[string]int | Per-modality token counts when the provider reports them. Lowercase keys: `text`, `image`, `audio`, `video`, `document`. Empty when the provider does not split modalities (Anthropic) or the request was text-only. Cost-attribution consumers read this to bill image / audio turns separately. |
 
+#### Multimodal tool results
+
+`ToolResult` carries an `OutputParts []MessagePart` field for tools that
+emit multimodal content (image, audio, document, video). When non-empty,
+memory plugins copy the parts onto the resulting tool-role
+`Message.Parts` so the next LLM request includes the multimodal content
+alongside (or in place of) `Output`.
+
+Large payloads should be stored via `pkg/engine/blobs` and referenced via
+`MessagePart.URI = "nexus-blob:<sha256>"` so the journal stays compact;
+small payloads can ride inline as `MessagePart.Data`. Provider plugins
+resolve `nexus-blob:` URIs at request-assembly time.
+
 **StreamChunk**
 | Field | Type | Description |
 |-------|------|-------------|

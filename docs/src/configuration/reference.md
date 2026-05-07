@@ -670,13 +670,23 @@ deprecated; removal targeted for the milestone after gVisor lands.
 ### `nexus.tool.file`
 
 Source: `plugins/tools/fileio/plugin.go`. Registers `read_file`, `write_file`,
-`check_file_size`, `list_files`.
+`check_file_size`, `list_files`, `read_image`, `read_document`.
 
-| Key                     | Type | Default                 | Description |
-|-------------------------|------|-------------------------|-------------|
-| `base_dir`              | string | *(session files dir)* | Base directory for file operations. |
-| `allow_external_writes` | bool   | `false`               | Permit reads/writes outside `base_dir`. |
-| `tools.<tool_name>`     | bool   | `true` for each       | Per-tool enable/disable: `read_file`, `write_file`, `check_file_size`, `list_files`. |
+`read_image` and `read_document` return a `MessagePart` on
+`ToolResult.OutputParts`; the memory plugin copies parts onto the resulting
+tool-role `Message.Parts` so the next LLM request sees the multimodal
+content. Provider plugins resolve `MessagePart.URI = "nexus-blob:<sha>"`
+references from the per-session blob store at `~/.nexus/sessions/<id>/blobs/`
+when the payload was stored, or use the inline `MessagePart.Data` when it
+was inlined.
+
+| Key                          | Type   | Default                 | Description |
+|------------------------------|--------|-------------------------|-------------|
+| `base_dir`                   | string | *(session files dir)* | Base directory for file operations. |
+| `allow_external_writes`      | bool   | `false`               | Permit reads/writes outside `base_dir`. |
+| `blob_store.byte_budget`     | int    | `2147483648` (2 GiB)  | Soft cap on total stored blob bytes per session. `0` = unbounded. Applied via LRU sweep after each blob put. |
+| `blob_store.inline_threshold`| int    | `262144` (256 KiB)    | Payloads at or below this size are inlined on the `MessagePart` instead of being stored as a blob. |
+| `tools.<tool_name>`          | bool   | `true` for each       | Per-tool enable/disable: `read_file`, `write_file`, `check_file_size`, `list_files`, `read_image`, `read_document`. |
 
 ### `nexus.tool.catalog`
 

@@ -11,7 +11,18 @@ import (
 	"sync/atomic"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/blobs"
 	"github.com/frankbardon/nexus/pkg/events"
+)
+
+// Default knobs for the per-session blob store backing read_image /
+// read_document. byteBudget is 2 GiB so a long session of screenshot- or
+// document-heavy turns doesn't quietly fill the home directory; payloads at
+// or under inlineThreshold ride inline on the MessagePart so a single small
+// PNG never round-trips through the blob store.
+const (
+	defaultBlobByteBudget      int64 = 2 * 1024 * 1024 * 1024
+	defaultBlobInlineThreshold int64 = 256 * 1024
 )
 
 const (
@@ -31,6 +42,9 @@ type Plugin struct {
 	allowExternalWrites bool
 	enabled             map[string]bool
 	unsubs              []func()
+
+	blobStore        *blobs.Store // nil when read_image and read_document are both disabled
+	blobInlineCutoff int64
 
 	liveCalls atomic.Uint64
 }
@@ -63,6 +77,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"write_file":      true,
 		"check_file_size": true,
 		"list_files":      true,
+		"read_image":      true,
+		"read_document":   true,
 	}
 
 	// Allow per-tool enable/disable via config.
@@ -90,6 +106,35 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// session workspace unless the user explicitly configures a base_dir.
 	if p.baseDir == "" && p.session != nil {
 		p.baseDir = p.session.FilesDir()
+	}
+
+	// Set up the per-session blob store iff at least one multimodal read
+	// tool is active. Avoids creating an empty blobs/ subdir for sessions
+	// that never call read_image / read_document.
+	budget := defaultBlobByteBudget
+	p.blobInlineCutoff = defaultBlobInlineThreshold
+	if bs, ok := ctx.Config["blob_store"].(map[string]any); ok {
+		if v, ok := bs["byte_budget"].(int); ok {
+			budget = int64(v)
+		} else if v, ok := bs["byte_budget"].(int64); ok {
+			budget = v
+		} else if v, ok := bs["byte_budget"].(float64); ok {
+			budget = int64(v)
+		}
+		if v, ok := bs["inline_threshold"].(int); ok {
+			p.blobInlineCutoff = int64(v)
+		} else if v, ok := bs["inline_threshold"].(int64); ok {
+			p.blobInlineCutoff = v
+		} else if v, ok := bs["inline_threshold"].(float64); ok {
+			p.blobInlineCutoff = int64(v)
+		}
+	}
+	if (p.enabled["read_image"] || p.enabled["read_document"]) && p.session != nil {
+		store, err := blobs.New(p.session.BlobsDir(), budget)
+		if err != nil {
+			return fmt.Errorf("fileio: blob store init: %w", err)
+		}
+		p.blobStore = store
 	}
 
 	// Register event handler.
@@ -201,6 +246,60 @@ func (p *Plugin) Ready() error {
 	})
 
 	p.registerTool(events.ToolDef{
+		Name:        "read_image",
+		Description: "Load an image file (PNG, JPEG, GIF, WebP, BMP) from the configured base directory and attach it to the next LLM turn as multimodal content. Use when the user asks about a picture, diagram, screenshot, or chart on disk.",
+		Class:       "filesystem",
+		Subclass:    "read",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Path to the image file relative to the base directory.",
+				},
+			},
+			"required": []string{"path"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":       map[string]any{"type": "string"},
+				"media_type": map[string]any{"type": "string"},
+				"size":       map[string]any{"type": "integer"},
+				"blob_uri":   map[string]any{"type": "string", "description": "nexus-blob:<sha256> reference when stored as a blob; empty when inlined."},
+			},
+			"required": []string{"path", "media_type", "size"},
+		},
+	})
+
+	p.registerTool(events.ToolDef{
+		Name:        "read_document",
+		Description: "Load a document file (currently PDF) from the configured base directory and attach it to the next LLM turn as multimodal content. Pairs with multimodal-capable providers that accept native documents (Anthropic, Gemini); other providers will see a text placeholder.",
+		Class:       "filesystem",
+		Subclass:    "read",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Path to the document file relative to the base directory.",
+				},
+			},
+			"required": []string{"path"},
+		},
+		OutputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":       map[string]any{"type": "string"},
+				"media_type": map[string]any{"type": "string"},
+				"size":       map[string]any{"type": "integer"},
+				"blob_uri":   map[string]any{"type": "string"},
+			},
+			"required": []string{"path", "media_type", "size"},
+		},
+	})
+
+	p.registerTool(events.ToolDef{
 		Name:        "list_files",
 		Description: "List files in a directory, optionally matching a glob pattern.",
 		Class:       "filesystem",
@@ -296,7 +395,138 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 		p.handleCheckFileSize(tc)
 	case "list_files":
 		p.handleListFiles(tc)
+	case "read_image":
+		p.handleReadBinary(tc, kindImage)
+	case "read_document":
+		p.handleReadBinary(tc, kindDocument)
 	}
+}
+
+// binaryKind tags whether handleReadBinary should accept image MIME types
+// (read_image) or document MIME types (read_document). Keeps a single
+// handler for the two near-identical tools.
+type binaryKind int
+
+const (
+	kindImage binaryKind = iota
+	kindDocument
+)
+
+// imageMimeByExt maps a lowercase extension to the IANA media type the
+// provider plugins expect on a MessagePart.MimeType. Limited to formats
+// Anthropic + OpenAI + Gemini all handle natively as image content.
+var imageMimeByExt = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".bmp":  "image/bmp",
+}
+
+// documentMimeByExt currently covers PDF only — the one document type all
+// three multimodal-capable providers handle as a native document block.
+// .docx / .pptx etc are out of scope for v1; add when we have a provider
+// path for them.
+var documentMimeByExt = map[string]string{
+	".pdf": "application/pdf",
+}
+
+func (p *Plugin) handleReadBinary(tc events.ToolCall, kind binaryKind) {
+	if p.blobStore == nil {
+		p.emitResult(tc, "", "binary read is unavailable: blob store not initialised (no session workspace)", nil)
+		return
+	}
+	path, _ := tc.Arguments["path"].(string)
+	if path == "" {
+		p.emitResult(tc, "", "path argument is required", nil)
+		return
+	}
+
+	resolved, err := p.resolvePath(path)
+	if err != nil {
+		p.emitResult(tc, "", err.Error(), nil)
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		p.emitResult(tc, "", fmt.Sprintf("failed to stat file: %s", err), nil)
+		return
+	}
+	if info.IsDir() {
+		p.emitResult(tc, "", fmt.Sprintf("%s is a directory, not a file", path), nil)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(resolved))
+	var (
+		mime     string
+		partKind string
+	)
+	switch kind {
+	case kindImage:
+		mime = imageMimeByExt[ext]
+		partKind = "image"
+	case kindDocument:
+		mime = documentMimeByExt[ext]
+		partKind = "file"
+	}
+	if mime == "" {
+		p.emitResult(tc, "",
+			fmt.Sprintf("unsupported extension %q for %s", ext, tc.Name),
+			nil)
+		return
+	}
+
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		p.emitResult(tc, "", fmt.Sprintf("failed to read file: %s", err), nil)
+		return
+	}
+
+	part := events.MessagePart{
+		Type:     partKind,
+		MimeType: mime,
+	}
+	structured := map[string]any{
+		"path":       path,
+		"media_type": mime,
+		"size":       int64(len(data)),
+	}
+	if int64(len(data)) <= p.blobInlineCutoff {
+		// Small payload — inline on the part. Avoids a blob round-trip for
+		// every tiny PNG icon.
+		part.Data = data
+	} else {
+		h, err := p.blobStore.Put(data, mime)
+		if err != nil {
+			p.emitResult(tc, "", fmt.Sprintf("failed to store blob: %s", err), nil)
+			return
+		}
+		// Best-effort budget enforcement. Sweep failures are logged and the
+		// load still succeeds — the freshly-Put blob is the newest and would
+		// not have been evicted anyway.
+		if _, _, err := p.blobStore.Sweep(); err != nil {
+			p.logger.Warn("fileio: blob store sweep failed", "error", err)
+		}
+		part.URI = h.URI()
+		structured["blob_uri"] = h.URI()
+	}
+
+	summary := fmt.Sprintf("Loaded %s %q (%s, %d bytes)", partKind, path, mime, len(data))
+	result := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
+		Name:             tc.Name,
+		Output:           summary,
+		OutputStructured: structured,
+		OutputParts:      []events.MessagePart{part},
+		TurnID:           tc.TurnID,
+	}
+	if veto, vErr := p.bus.EmitVetoable("before:tool.result", &result); vErr == nil && veto.Vetoed {
+		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		return
+	}
+	_ = p.bus.Emit("tool.result", result)
 }
 
 // resolvePath resolves a path relative to the base directory and ensures it

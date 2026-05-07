@@ -176,6 +176,7 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 		Role:       "tool",
 		Content:    content,
 		ToolCallID: result.ID,
+		Parts:      result.OutputParts,
 	})
 }
 

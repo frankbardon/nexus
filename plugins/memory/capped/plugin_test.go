@@ -53,6 +53,34 @@ func TestToolResult_SkipsInternalCalls(t *testing.T) {
 	}
 }
 
+// TestToolResultParts_CarriedToMessage verifies that the multimodal carrier
+// (ToolResult.OutputParts) lands on the resulting tool-role Message.Parts
+// so the next LLM request includes the multimodal content alongside the
+// tool result.
+func TestToolResultParts_CarriedToMessage(t *testing.T) {
+	p := New().(*Plugin)
+	p.logger = slog.Default()
+	p.persist = false
+
+	p.handleToolResult(engine.Event[any]{Payload: events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tm-1",
+		Name:   "read_image",
+		Output: "Loaded image diagram.png",
+		OutputParts: []events.MessagePart{
+			{Type: "image", MimeType: "image/png", URI: "nexus-blob:abc123"},
+		},
+	}})
+
+	if n := len(p.messages); n != 1 {
+		t.Fatalf("expected 1 message; got %d", n)
+	}
+	if got := len(p.messages[0].Parts); got != 1 {
+		t.Fatalf("Message.Parts len = %d, want 1", got)
+	}
+	if p.messages[0].Parts[0].URI != "nexus-blob:abc123" {
+		t.Errorf("Parts[0].URI = %q, want nexus-blob:abc123", p.messages[0].Parts[0].URI)
+	}
+}
+
 // TestPairSafeTruncation proves that when the buffer caps out on a boundary
 // that would orphan a tool result from its assistant tool_use, the plugin
 // drops the leading orphan "tool" messages so the buffer stays well-formed
