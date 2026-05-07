@@ -62,6 +62,7 @@ import (
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 
 	// Embeddings provider plugins (advertise the "embeddings.provider" capability).
+	coheremultimodalembeddings "github.com/frankbardon/nexus/plugins/embeddings/cohere_multimodal"
 	mockembeddings "github.com/frankbardon/nexus/plugins/embeddings/mock"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 
@@ -185,6 +186,10 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Embeddings providers (capability: embeddings.provider)
 	r.Register("nexus.embeddings.openai", openaiembeddings.New)
 	r.Register("nexus.embeddings.mock", mockembeddings.New)
+	// Multimodal (text + image) Cohere Embed v3 adapter. Opt-in: not in
+	// the default plugins.active list; users wire it explicitly when they
+	// want image embedding support.
+	r.Register("nexus.embeddings.cohere_multimodal", coheremultimodalembeddings.New)
 
 	// Vector stores (capability: vector.store)
 	r.Register("nexus.vectorstore.chromem", chromemvector.New)

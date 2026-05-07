@@ -1062,6 +1062,30 @@ Deterministic hash-based vectors; opt-in via `plugins.active`.
 | `dimensions` | int    | `128`            | Vector dimensionality. |
 | `model`      | string | `mock-embedding` | Model ID string returned to callers. |
 
+### `nexus.embeddings.cohere_multimodal`
+
+Source: `plugins/embeddings/cohere_multimodal/plugin.go`. Provides
+`embeddings.provider` via Cohere Embed v3 (`POST /v2/embed`). Multimodal:
+accepts text and image inputs in a single batch through
+`EmbeddingsRequest.Inputs`. Opt-in: registered but **not** in the default
+`plugins.active` list — wire it explicitly when image embeddings are
+required (e.g. `nexus.memory.vector` with `store_images: true`).
+
+For an `EmbeddingsInput` carrying `ImageURI` with the `nexus-blob:`
+scheme, the plugin resolves bytes via the per-session blob store. When
+the engine boots without a session (rare, mostly tests), the plugin
+errors clearly — callers must inline bytes via `EmbeddingsInput.Image`
+instead.
+
+| Key            | Type     | Default                       | Description |
+|----------------|----------|-------------------------------|-------------|
+| `api_key`      | string   | *(required, or via env)*      | Cohere API key. |
+| `api_key_env`  | string   | `COHERE_API_KEY`              | Override env var name. |
+| `base_url`     | string   | `https://api.cohere.com`      | Cohere API base URL. The plugin appends `/v2/embed` itself. |
+| `model`        | string   | `embed-english-v3.0`          | Cohere embedding model. |
+| `input_type`   | string   | `search_document`             | Cohere `input_type` (e.g. `search_document`, `search_query`, `classification`, `clustering`, `image`). |
+| `timeout`      | duration | `30s`                         | HTTP timeout. |
+
 ---
 
 ## Vector store

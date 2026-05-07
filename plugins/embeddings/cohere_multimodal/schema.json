@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.embeddings.cohere_multimodal.json",
+  "title": "nexus.embeddings.cohere_multimodal",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "base_url":    {"type": "string", "description": "Override Cohere API base URL (default https://api.cohere.com)."},
+    "api_key":     {"type": "string", "description": "Direct API key."},
+    "api_key_env": {"type": "string", "description": "Environment variable to read the API key from (default COHERE_API_KEY)."},
+    "model":       {"type": "string", "description": "Cohere embedding model (e.g. embed-english-v3.0)."},
+    "input_type":  {"type": "string", "description": "Cohere input_type (search_document, search_query, classification, clustering, image)."},
+    "timeout":     {"type": "string", "description": "HTTP timeout (Go duration string)."}
+  }
+}
