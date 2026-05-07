@@ -739,8 +739,18 @@ Source: `plugins/tools/knowledge_search/plugin.go`. Requires
 
 ### `nexus.tool.pdf`
 
-Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
-`pdftotext` (poppler-utils) on `PATH`.
+Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Two modes
+selectable per call via `mode` argument or `default_mode` config:
+
+- `text` (default) — extract text via `pdftotext` (poppler-utils).
+  Requires `pdftotext` on `PATH` (or `pdftotext_bin` config).
+- `document` — return the raw PDF bytes as a `file` `MessagePart` on
+  `ToolResult.OutputParts` for native multimodal providers (Anthropic,
+  Gemini). No poppler call. `first_page`, `last_page`, and `layout`
+  arguments are ignored in this mode.
+
+If `default_mode` is `document` and `pdftotext` is missing, the plugin
+boots; text mode then surfaces an actionable error per call.
 
 | Key               | Type     | Default                | Description |
 |-------------------|----------|------------------------|-------------|
@@ -749,6 +759,7 @@ Source: `plugins/tools/pdf/plugin.go`. Registers `read_pdf`. Requires
 | `timeout`         | duration | `30s`                  | Per-extraction timeout. |
 | `save_to_session` | bool     | `false`                | Persist extracted text to session files. |
 | `save_file_name`  | string   | *(derived from PDF)*   | Custom filename for the saved text. |
+| `default_mode`    | string   | `text`                 | `text` or `document`. Default `read_pdf` mode when the LLM doesn't supply one. |
 
 ### `nexus.tool.screenshot`
 

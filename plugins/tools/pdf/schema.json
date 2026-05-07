@@ -9,6 +9,7 @@
     "pdftotext_bin":    {"type": "string",  "description": "Path to the pdftotext binary."},
     "save_to_session":  {"type": "boolean", "description": "Persist extracted text into the session file workspace."},
     "save_file_name":   {"type": "string",  "description": "Filename used when save_to_session is true."},
-    "pdfinfo_bin":      {"type": "string",  "description": "Path to the pdfinfo binary."}
+    "pdfinfo_bin":      {"type": "string",  "description": "Path to the pdfinfo binary."},
+    "default_mode":     {"type": "string",  "enum": ["text", "document"], "description": "Default read_pdf mode. 'text' (default) extracts text via pdftotext. 'document' returns the raw PDF bytes as a file MessagePart for native multimodal providers."}
   }
 }
