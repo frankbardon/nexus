@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -60,7 +61,7 @@ func newPluginForTest(t *testing.T, asrURL, ttsURL string, mutate func(map[strin
 	}
 
 	t.Cleanup(func() {
-		_ = p.Shutdown(nil)
+		_ = p.Shutdown(context.Background())
 	})
 
 	return p, bus

@@ -66,15 +66,14 @@ type bargeInConfig struct {
 
 // turnBuffer accumulates audio chunks for a single utterance.
 type turnBuffer struct {
-	turnID         string
-	mimeType       string
-	audio          []byte
-	lastChunkAt    time.Time
-	lastSpeechAt   time.Time
-	hasSpeech      bool
-	flushed        bool
-	flushTimer     *time.Timer
-	expectedSeqNxt int // next expected sequence number; -1 = unknown
+	turnID       string
+	mimeType     string
+	audio        []byte
+	lastChunkAt  time.Time
+	lastSpeechAt time.Time
+	hasSpeech    bool
+	flushed      bool
+	flushTimer   *time.Timer
 }
 
 // Plugin implements engine.Plugin for nexus.io.voice.
