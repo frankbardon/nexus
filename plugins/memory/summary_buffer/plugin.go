@@ -21,6 +21,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
 )
 
 const (
@@ -292,8 +293,11 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 		p.finishSummarisation(resp.Content)
 		return
 	}
-	if source != "" {
-		// Owned by another plugin (planner etc.) — don't record.
+	// Skip outputs from other internal sub-flows (planner, classifier,
+	// compaction, subagent). Main agent loops are recorded — every agent
+	// main request now tags its own pluginID for cost attribution
+	// (Idea 09), and a non-empty `_source` no longer means "internal".
+	if internalflow.SkipForHistory(resp.Metadata) {
 		return
 	}
 	p.append(events.Message{
