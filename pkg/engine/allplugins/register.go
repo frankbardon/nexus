@@ -22,6 +22,7 @@ import (
 	oneshotplugin "github.com/frankbardon/nexus/plugins/io/oneshot"
 	testioplugin "github.com/frankbardon/nexus/plugins/io/test"
 	tuiplugin "github.com/frankbardon/nexus/plugins/io/tui"
+	voiceplugin "github.com/frankbardon/nexus/plugins/io/voice"
 
 	// LLM coordination plugins.
 	batchplugin "github.com/frankbardon/nexus/plugins/llm/batch"
@@ -137,6 +138,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
 	r.Register("nexus.io.browser", browserplugin.New)
+	r.Register("nexus.io.voice", voiceplugin.New)
 	r.Register("nexus.io.oneshot", oneshotplugin.New)
 	r.Register("nexus.io.test", testioplugin.New)
 

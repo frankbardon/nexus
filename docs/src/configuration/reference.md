@@ -696,22 +696,32 @@ Source: `plugins/tools/catalog/plugin.go`. **No configuration.** Provides the
 
 ### `nexus.tool.web`
 
-Source: `plugins/tools/web/plugin.go`. Registers `web_search` and `web_fetch`.
-Requires the `search.provider` capability for `web_search`.
+Source: `plugins/tools/web/plugin.go`. Registers `web_search`, `web_fetch`,
+and `fetch_page_image`. Requires the `search.provider` capability for
+`web_search`. `fetch_page_image` requires `screenshot_provider` config —
+without it, the tool surfaces a clear error at invoke time.
 
-| Key                          | Type     | Default                                | Description |
-|------------------------------|----------|----------------------------------------|-------------|
-| `search.default_count`       | int      | `10`                                   | Default result count for `web_search`. |
-| `search.default_safe_search` | string   | `moderate`                             | `off`, `moderate`, `strict`. |
-| `search.default_language`    | string   | *(none)*                               | BCP-47 language tag (e.g. `en`, `es-MX`). |
-| `fetch.user_agent`           | string   | `Nexus/0.1 (+https://...)`             | User-Agent header for `web_fetch`. |
-| `fetch.timeout`              | duration | `20s`                                  | HTTP timeout. |
-| `fetch.max_size`             | int      | `5242880` (5 MB)                       | Maximum response body size. |
-| `fetch.default_extract`      | string   | `readability`                          | `readability` or `raw`. |
-| `fetch.allowed_domains`      | list     | *(none — allow all)*                   | Allowlist of domains. |
-| `fetch.blocked_domains`      | list     | *(none)*                               | Blocklist of domains. |
-| `fetch.follow_redirects`     | bool     | `true`                                 | Follow HTTP redirects. |
-| `fetch.max_redirects`        | int      | `5`                                    | Maximum redirect chain length. |
+| Key                              | Type     | Default                                | Description |
+|----------------------------------|----------|----------------------------------------|-------------|
+| `search.default_count`           | int      | `10`                                   | Default result count for `web_search`. |
+| `search.default_safe_search`     | string   | `moderate`                             | `off`, `moderate`, `strict`. |
+| `search.default_language`        | string   | *(none)*                               | BCP-47 language tag (e.g. `en`, `es-MX`). |
+| `fetch.user_agent`               | string   | `Nexus/0.1 (+https://...)`             | User-Agent header for `web_fetch`. |
+| `fetch.timeout`                  | duration | `20s`                                  | HTTP timeout. |
+| `fetch.max_size`                 | int      | `5242880` (5 MB)                       | Maximum response body size. |
+| `fetch.default_extract`          | string   | `readability`                          | `readability` or `raw`. |
+| `fetch.allowed_domains`          | list     | *(none — allow all)*                   | Allowlist of domains. |
+| `fetch.blocked_domains`          | list     | *(none)*                               | Blocklist of domains. |
+| `fetch.follow_redirects`         | bool     | `true`                                 | Follow HTTP redirects. |
+| `fetch.max_redirects`            | int      | `5`                                    | Maximum redirect chain length. |
+| `screenshot_provider.url`        | string   | *(required for `fetch_page_image`)*    | Endpoint of the external screenshot service (urlbox, screenshotapi.net, browserless, …). |
+| `screenshot_provider.method`     | string   | `POST`                                 | `GET` or `POST`. |
+| `screenshot_provider.api_key_env`| string   | *(none)*                               | Env var holding the bearer token / API key. POST sends `Authorization: Bearer <key>`; GET appends `api_key=<key>` to the query. |
+| `screenshot_provider.url_param_name` | string | `url`                              | Field name carrying the target URL. |
+| `screenshot_provider.request_template` | map | *(empty)*                          | Extra fields merged into the JSON body (POST) or query string (GET). |
+| `screenshot_provider.headers`    | map      | *(empty)*                              | Fixed headers sent with every provider request. |
+| `blob_store.byte_budget`         | int      | `2147483648` (2 GiB)                   | Soft cap on total stored blob bytes per session for `fetch_page_image`. `0` = unbounded. |
+| `blob_store.inline_threshold`    | int      | `262144` (256 KiB)                     | Payloads at or below this size are inlined on the `MessagePart` instead of stored as a blob. |
 
 ### `nexus.tool.knowledge_search`
 
@@ -1208,6 +1218,73 @@ Source: `plugins/io/browser/plugin.go`.
 | `host`         | string | `localhost` | HTTP listen address. |
 | `port`         | int    | `8080`      | HTTP listen port. |
 | `open_browser` | bool   | `true`      | Auto-open the browser tab on startup (no-op when the OS lacks an opener). |
+
+### `nexus.io.realtime`
+
+Source: `plugins/io/realtime/plugin.go`. WebSocket bidirectional transport
+for low-latency clients (browser front-ends, native voice clients) that
+want raw `stream.delta` deltas, tool previews, voice audio chunks, and
+cancel envelopes without going through the `nexus.io.browser` UI hub.
+
+| Key            | Type   | Default  | Description |
+|----------------|--------|----------|-------------|
+| `listen_addr`  | string | `:7676`  | TCP address the WebSocket server binds to. |
+| `path`         | string | `/ws`    | URL path the WebSocket handler is mounted at. |
+| `max_clients`  | int    | `16`     | Concurrent connection cap. New dials past the cap receive HTTP 503. |
+
+**Outbound envelopes** (server → client, JSON): `stream.delta`, `stream.end`,
+`tool.preview`, `audio.chunk`, `cancel.complete`, `hitl.request`.
+
+**Inbound envelopes** (client → server, JSON): `input`, `audio.chunk`,
+`cancel`, `approval`.
+
+**No auth in v1.** Origin checks and bearer-token validation are tracked
+follow-ups; operators running this on a public network must front it
+with a reverse proxy that does its own authentication.
+
+### `nexus.io.voice`
+
+Source: `plugins/io/voice/plugin.go`. Bus-driven voice IO bridge:
+consumes `voice.audio.input.chunk` events (typically from
+`nexus.io.realtime`), runs simple energy-based VAD plus ASR via the
+OpenAI Whisper API, and emits `io.input`. Consumes `llm.response`,
+runs TTS via the OpenAI `/audio/speech` endpoint, and emits
+`voice.audio.output.chunk` frames back. Implements barge-in: a
+speech-energy input chunk arriving while a TTS turn is in flight emits
+`cancel.request{Source: "voice"}`.
+
+Local-model providers (`local_whisper`, `faster_whisper`,
+`distil_whisper` for ASR; `kokoro`, `local_*`, `*_local` for TTS) are
+recognized by the schema but rejected at `Init` with a clear error
+pointing at issue #92, where the local-model bootstrapping work is
+tracked separately.
+
+| Key                  | Type    | Default            | Description |
+|----------------------|---------|--------------------|-------------|
+| `asr.provider`       | string  | `openai_whisper`   | Only `openai_whisper` is wired in this PR. Local-model values rejected pending #92. |
+| `asr.api_key_env`    | string  | `OPENAI_API_KEY`   | Env var that holds the API key. |
+| `asr.api_key`        | string  | *(none)*           | Inline API key. Overrides `api_key_env`. |
+| `asr.model`          | string  | `whisper-1`        | Whisper model id. |
+| `asr.endpoint`       | string  | OpenAI default     | Override URL for the transcription endpoint (test injection). |
+| `tts.provider`       | string  | `openai`           | Only `openai` is wired in this PR. Local-model values rejected pending #92. |
+| `tts.api_key_env`    | string  | `OPENAI_API_KEY`   | Env var that holds the API key. |
+| `tts.api_key`        | string  | *(none)*           | Inline API key. Overrides `api_key_env`. |
+| `tts.model`          | string  | `tts-1`            | TTS model id. |
+| `tts.voice`          | string  | `alloy`            | Voice preset id. |
+| `tts.streaming`      | bool    | `true`             | Always true in v1; reserved for future non-streaming mode. |
+| `tts.endpoint`       | string  | OpenAI default     | Override URL for the speech endpoint (test injection). |
+| `tts.chunk_bytes`    | int     | `8192`             | Frame size in bytes for emitted output chunks. |
+| `vad.threshold`      | number  | `0.02`             | RMS energy threshold (normalized 0..1) above which the buffer is considered speech. |
+| `vad.silence_ms`     | integer | `600`              | Milliseconds of below-threshold audio that triggers an utterance flush. |
+| `barge_in.enabled`   | bool    | `true`             | Cancel an in-flight TTS turn when new speech is detected. |
+| `barge_in.threshold` | number  | `vad.threshold`    | RMS threshold above which an incoming chunk is treated as barge-in. |
+| `text_fallback`      | bool    | `true`             | Allow `io.input` from non-voice transports to flow through unchanged. |
+
+VAD energy is computed as RMS over little-endian PCM int16 samples for
+`audio/wav` / `audio/pcm` / `audio/l16`. For compressed containers
+(webm/opus, mpeg/mp3) the bytes are not PCM and we fall back to a
+byte-level energy heuristic until a proper decode is added — flagged
+with a `TODO(#91)` in `plugins/io/voice/vad.go`.
 
 ### `nexus.io.test`
 
