@@ -65,10 +65,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.resume", p.handleResumeRequest,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
-		// Priority 5 runs before the conversation memory plugin (10) so
-		// "/resume" is translated into a cancel.resume event and the raw
-		// input never lands in history as a user message.
-		p.bus.Subscribe("io.input", p.handleInputCommand,
+		// Subscribe to the vetoable before:io.input pre-emit so the
+		// handler can intercept "/resume" and similar slash-commands and
+		// veto the dispatch before any later subscriber (conversation
+		// memory, agent loop) records them as user messages.
+		p.bus.Subscribe("before:io.input", p.handleInputCommand,
 			engine.WithPriority(5), engine.WithSource(pluginID)),
 	)
 

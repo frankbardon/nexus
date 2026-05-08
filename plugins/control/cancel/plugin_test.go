@@ -47,14 +47,34 @@ func TestContract_CancelRequest_NoActiveTurn_NoOp(t *testing.T) {
 	h.AssertNotEmitted("cancel.active")
 }
 
-// CONTRACT MISMATCH SURFACED — Subscriptions() returns "before:io.input"
-// (line 93 of plugin.go) but Init wires the actual handler to "io.input"
-// (line 71). The slash-command interception is therefore broken: the
-// handler's *engine.VetoablePayload type assertion never succeeds for
-// plain io.input dispatch. Documented in
-// .planning/testing-upgrade/02-tier-2-plugin-contracts.md and intentionally
-// not asserted here so this test file stays green until the plugin is
-// fixed; the audit task (T2.6) will create a follow-up.
+// TestContract_DeclaredSubscriptionMatchesActualWiring exercises the
+// previously-broken slash-command interception: a "/resume" io.input is
+// dispatched through EmitVetoable on before:io.input so the cancel
+// handler's *VetoablePayload type assertion succeeds. Without a
+// previously-cancelled turn, the handler emits a system io.output
+// ("Nothing to resume.") and vetoes the dispatch.
 func TestContract_DeclaredSubscriptionMatchesActualWiring(t *testing.T) {
-	t.Skip("known mismatch: cancel plugin declares before:io.input but subscribes to io.input — tracked as a follow-up")
+	h := contract.NewContract(t, New)
+
+	res := h.InjectVetoable("before:io.input", &events.UserInput{Content: "/resume"})
+	if !res.Vetoed {
+		t.Fatal("expected /resume to be vetoed when no cancelled turn exists")
+	}
+	h.AssertEmitted("io.output")
+}
+
+// TestContract_ResumeAfterCancel asserts that /resume after a real cancel
+// emits a cancel.resume event and vetoes the io.input.
+func TestContract_ResumeAfterCancel(t *testing.T) {
+	h := contract.NewContract(t, New)
+
+	// Build state: turn started, cancel requested.
+	h.Inject("agent.turn.start", events.TurnInfo{TurnID: "turn-1"})
+	h.Inject("cancel.request", events.CancelRequest{TurnID: "turn-1"})
+
+	res := h.InjectVetoable("before:io.input", &events.UserInput{Content: "/resume"})
+	if !res.Vetoed {
+		t.Fatal("expected /resume to be vetoed after a cancel")
+	}
+	h.AssertEmitted("cancel.resume")
 }
