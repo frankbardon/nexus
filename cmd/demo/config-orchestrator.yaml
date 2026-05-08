@@ -1,0 +1,330 @@
+# Orchestrator — fan-out coordinator.
+#
+# This config is the canonical "one big request → many parallel workers
+# → synthesized answer" pattern in the demo. It composes:
+#
+#   - nexus.agent.orchestrator
+#       Decompose-then-fanout-then-synthesize loop. The orchestrator
+#       LLM produces a list of subtasks, then spawns parallel worker
+#       subagents (capped by max_workers), then synthesizes their
+#       outputs into one cohesive response.
+#   - nexus.agent.subagent
+#       The worker primitive the orchestrator depends on. Workers are
+#       full ReAct-loop agents in their own right — they can call tools,
+#       iterate, etc. Tool catalog is shared with the parent.
+#   - nexus.agent.react
+#       Required by subagent for the worker's inner loop.
+#   - nexus.provider.fanout (+ fanout role in core.models)
+#       Showcases the OTHER fan-out pattern: same prompt to multiple
+#       providers, pick the best response. Different from orchestrator
+#       (which fans out subtasks to workers); this one fans out the
+#       same task to multiple LLM brains.
+#   - nexus.llm.gemini
+#       Third LLM provider so the fanout vote has real diversity.
+#   - nexus.router.metadata
+#       Routes worker requests to a cheaper model role automatically.
+#       Compare with router/classifier (LLM-judge per-step) — metadata
+#       routing is deterministic and free, useful for subagent traffic
+#       where the routing decision is a config-time concern.
+#   - nexus.memory.compaction
+#       External compaction: emits memory.compacted events that history
+#       buffers adopt. Useful when the synth pass concatenates long
+#       worker outputs.
+#   - nexus.memory.topic_pruner
+#       Drops earlier turns when the user pivots — orchestrator
+#       sessions tend to span unrelated decompositions.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 200  # higher: parallel worker dispatch
+
+  models:
+    default: balanced
+
+    # Single-model role used by the orchestrator's decomposition pass.
+    # Decomposition is short and structured — an opus-level model is
+    # overkill; sonnet is fine.
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 4096
+
+    # Cheap role for worker subagents. Workers run scoped subtasks with
+    # well-defined outputs; haiku handles them fine and saves cost when
+    # max_workers=4 is firing all at once.
+    worker:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+
+    # Slightly bigger role for the synthesis pass — synth digests every
+    # worker's output and produces the user-facing answer.
+    synthesis:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 8192
+
+    # Fanout role: same request goes to all three providers in parallel.
+    # The fanout plugin coordinates the dispatch; strategy/judge below
+    # picks the winning response. Demonstrated as an alt-mode the user
+    # can invoke ("compare answers across providers").
+    vote:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-sonnet-4-6
+          max_tokens: 4096
+        - provider: nexus.llm.openai
+          model: gpt-4o
+          max_tokens: 4096
+        - provider: nexus.llm.gemini
+          model: gemini-2.5-pro
+          max_tokens: 4096
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # All three providers — workers may route to any; vote fans out to all.
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.llm.gemini
+
+    # Fanout coordinator — intercepts vote-role requests and dispatches
+    # to all providers in parallel, then runs the selection strategy.
+    - nexus.provider.fanout
+
+    # Orchestrator agent + its dependencies.
+    # subagent must be in active because orchestrator declares it as a
+    # Dependencies() entry. react is the worker's inner loop.
+    - nexus.agent.orchestrator
+    - nexus.agent.subagent
+    - nexus.agent.react
+
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Phase 1 cross-cutting
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
+    # Workers can search the KB read-only.
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.vectorstore.sqlite_fts
+    - nexus.tool.knowledge_search
+
+    # Workers can hit the web too.
+    - nexus.search.brave
+    - nexus.tool.web
+
+    # Memory: capped + external compaction + topic_pruner
+    - nexus.memory.capped
+    - nexus.memory.compaction
+    - nexus.memory.topic_pruner
+
+    # Routers — metadata for deterministic worker-traffic routing.
+    - nexus.router.metadata
+
+    # Gates
+    - nexus.gate.endless_loop
+    - nexus.gate.token_budget
+    - nexus.gate.context_window
+    - nexus.gate.tool_filter
+    - nexus.gate.tool_timeout
+    - nexus.gate.stop_words
+
+    # Observability
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+  nexus.llm.openai:
+    api_key: "${shell.openai_api_key}"
+  nexus.llm.gemini:
+    auth: api_key
+    api_key: "${gemini_api_key}"
+    # Gemini's thinking + caching are off by default for the demo so
+    # the comparison-with-anthropic/openai is apples-to-apples.
+
+  # ─── Orchestrator agent ──────────────────────────────────────────────
+
+  # max_workers caps parallelism. Higher = more provider load but faster
+  # turnaround on independent subtasks. Workers see the same tool
+  # catalog as the orchestrator's parent agent.
+  nexus.agent.orchestrator:
+    max_workers: 4
+    max_subtasks: 8
+    worker_max_iterations: 6
+    orchestrator_model_role: balanced
+    worker_model_role: worker
+    synthesis_model_role: synthesis
+    fail_fast: false
+    system_prompt: |
+      You are the Orchestrator for a research-analysis team.
+
+      Today's date: {{date}}
+      (Injected by nexus.system.dynvars at request time.)
+
+      How you operate:
+        1. Read the user's request. Decide whether it factors into 2–8
+           independent subtasks that can run in parallel. If it doesn't,
+           answer it yourself in one shot.
+        2. If it does, emit a JSON list of subtasks. Each subtask runs
+           as a worker subagent with the full tool catalog. Workers
+           can call knowledge_search, web_search, and web_fetch.
+        3. Workers run on the cheap "worker" role (Claude Haiku); the
+           orchestrator and synthesis passes use sonnet. Adjust your
+           subtask granularity accordingly — workers should handle
+           bounded retrieval / summarization, not multi-hop reasoning.
+        4. Synthesize worker outputs into one cohesive answer. Cite
+           which worker contributed which fact.
+
+      Avoid one-step "subtasks" — those should be the orchestrator's
+      direct work. Decomposition is for independent threads, not
+      sequential ones.
+
+  # subagent: workers spawned by the orchestrator share the catalog
+  # plus inherit a system prompt. The orchestrator's subtask list
+  # provides the per-worker user-prompt; this is the persistent
+  # system context.
+  nexus.agent.subagent:
+    model_role: worker
+    system_prompt: |
+      You are a research worker subagent. The orchestrator gave you one
+      bounded subtask. Use the available tools (knowledge_search,
+      web_search, web_fetch) to produce a concise, factual answer.
+      Cite sources. Do not delegate further.
+
+  # ─── Fanout: parallel-provider vote ──────────────────────────────────
+
+  # Strategy `llm_judge` runs another LLM call (the synthesis role) to
+  # pick the strongest response among the three. `deadline_ms` caps how
+  # long we wait for stragglers — slow providers don't block the user.
+  nexus.provider.fanout:
+    strategy: llm_judge
+    deadline_ms: 30000
+    judge:
+      role: synthesis
+
+  # ─── Routers ─────────────────────────────────────────────────────────
+
+  # metadata router: route subagent worker requests deterministically to
+  # the cheap `worker` role. The subagent plugin tags its llm.request
+  # with `_subagent_id` metadata; we match on that and rewrite role
+  # before the request hits the provider. No LLM-judge, no caching, just
+  # a config-time decision.
+  nexus.router.metadata:
+    rules:
+      - name: route-workers-to-cheap
+        match:
+          metadata._subagent_id: "*"  # any subagent run
+        role: worker
+    default_role: balanced
+
+  # ─── Memory ──────────────────────────────────────────────────────────
+
+  nexus.memory.capped:
+    max_messages: 80
+    persist: true
+
+  # External compaction: when history exceeds 60 messages, summarize the
+  # oldest 40, keep the newest 20 verbatim. Persisted to disk so a
+  # /resume picks up the compacted state. The "synthesis" model role
+  # writes the summary — it has the most headroom in this config.
+  nexus.memory.compaction:
+    strategy: message_count
+    message_threshold: 60
+    protect_recent: 20
+    model_role: synthesis
+    persist: true
+
+  # topic_pruner: when the user pivots to a new topic (cosine similarity
+  # below threshold against the previous turn's user input), drop earlier
+  # turns. Requires an embeddings.provider to be active (we have openai).
+  nexus.memory.topic_pruner:
+    enabled: true
+    similarity_threshold: 0.4
+    keep_last_topic_full: true
+    explicit_phrases:
+      - "new topic"
+      - "different question"
+      - "switching gears"
+
+  # ─── RAG / web (read-only over the shared KB) ────────────────────────
+
+  nexus.embeddings.openai:
+    api_key: "${shell.openai_api_key}"
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+    compress: false
+  nexus.vectorstore.sqlite_fts:
+    scope: app
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 6
+    include_metadata: true
+
+  nexus.search.brave:
+    api_key: "${brave_api_key}"
+
+  nexus.tool.web:
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  nexus.system.dynvars:
+    date: true
+    os: true
+    time: false
+    timezone: false
+    cwd: false
+    session_dir: false
+
+  nexus.control.hitl:
+    registry:
+      enabled: true
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # ─── Gates ───────────────────────────────────────────────────────────
+
+  nexus.gate.endless_loop:
+    max_iterations: 30  # higher because synth + multiple worker passes happen
+
+  nexus.gate.token_budget:
+    max_tokens: 500000  # parallel workers chew through tokens fast
+    warning_threshold: 0.85
+
+  nexus.gate.context_window:
+    max_context_tokens: 180000
+    trigger_ratio: 0.85
+
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - run_code
+      - file_write
+
+  nexus.gate.tool_timeout:
+    default_timeout: 60s
+    per_tool:
+      web_fetch: 90s
+      knowledge_search: 30s
+
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: orchestrator output contained a banned term."
+    words:
+      - "ignore-all-previous"
+      - "jailbreak"

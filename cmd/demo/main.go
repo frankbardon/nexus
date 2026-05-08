@@ -41,8 +41,10 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/desktop"
 	"github.com/frankbardon/nexus/pkg/engine"
+	orchestratoragent "github.com/frankbardon/nexus/plugins/agents/orchestrator"
 	planexecagent "github.com/frankbardon/nexus/plugins/agents/planexec"
 	reactagent "github.com/frankbardon/nexus/plugins/agents/react"
+	subagentplugin "github.com/frankbardon/nexus/plugins/agents/subagent"
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
 	hitlsynth "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
@@ -62,16 +64,20 @@ import (
 	tooltimeoutgate "github.com/frankbardon/nexus/plugins/gates/tool_timeout"
 	wailsio "github.com/frankbardon/nexus/plugins/io/wails"
 	"github.com/frankbardon/nexus/plugins/memory/capped"
+	compactionmemory "github.com/frankbardon/nexus/plugins/memory/compaction"
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	summarybuffer "github.com/frankbardon/nexus/plugins/memory/summary_buffer"
 	tooldefpruner "github.com/frankbardon/nexus/plugins/memory/tool_def_pruner"
 	toolresultclear "github.com/frankbardon/nexus/plugins/memory/tool_result_clear"
+	topicpruner "github.com/frankbardon/nexus/plugins/memory/topic_pruner"
 	vectormemory "github.com/frankbardon/nexus/plugins/memory/vector"
 	thinkingobs "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
 	staticplanner "github.com/frankbardon/nexus/plugins/planners/static"
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 	fallbackprovider "github.com/frankbardon/nexus/plugins/providers/fallback"
+	fanoutprovider "github.com/frankbardon/nexus/plugins/providers/fanout"
+	"github.com/frankbardon/nexus/plugins/providers/gemini"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
 	ragcitations "github.com/frankbardon/nexus/plugins/rag/citations"
 	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
@@ -80,6 +86,7 @@ import (
 	rerankerjina "github.com/frankbardon/nexus/plugins/rag/reranker/jina"
 	rerankerlocal "github.com/frankbardon/nexus/plugins/rag/reranker/local"
 	classifierrouter "github.com/frankbardon/nexus/plugins/router/classifier"
+	metadatarouter "github.com/frankbardon/nexus/plugins/router/metadata"
 	anthropicnativesearch "github.com/frankbardon/nexus/plugins/search/anthropic_native"
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
 	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
@@ -111,6 +118,9 @@ var drafterConfig []byte
 //go:embed config-engineer.yaml
 var engineerConfig []byte
 
+//go:embed config-orchestrator.yaml
+var orchestratorConfig []byte
+
 // commonFactories returns the plugin factories shared by every demo agent.
 //
 // Why one shared map instead of per-agent factory maps:
@@ -133,10 +143,12 @@ func commonFactories() map[string]func() engine.Plugin {
 		// nexus.io.wails: bridges the Wails webview JS runtime to the bus.
 		// nexus.agent.react: ReAct loop (think→tool→observe).
 		// nexus.control.cancel: /resume slash command + cancel capability.
-		"nexus.io.wails":       wailsio.New,
-		"nexus.agent.react":    reactagent.New,
-		"nexus.agent.planexec": planexecagent.New,
-		"nexus.control.cancel": cancelplugin.New,
+		"nexus.io.wails":           wailsio.New,
+		"nexus.agent.react":        reactagent.New,
+		"nexus.agent.planexec":     planexecagent.New,
+		"nexus.agent.orchestrator": orchestratoragent.New,
+		"nexus.agent.subagent":     subagentplugin.New,
+		"nexus.control.cancel":     cancelplugin.New,
 
 		// ─── Cross-cutting human-in-the-loop (Phase 1) ─────────────────
 		// hitl: owns the LLM-facing `ask_user` tool and the
@@ -156,9 +168,15 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.system.dynvars": dynvarsplugin.New,
 
 		// ─── Providers ─────────────────────────────────────────────────
+		// Three direct LLM providers (anthropic, openai, gemini) plus two
+		// orchestration plugins (fallback for sequential retry chains;
+		// fanout for parallel multi-provider dispatch with vote/judge
+		// selection).
 		"nexus.llm.anthropic":     anthropic.New,
 		"nexus.llm.openai":        openai.New,
+		"nexus.llm.gemini":        gemini.New,
 		"nexus.provider.fallback": fallbackprovider.New,
+		"nexus.provider.fanout":   fanoutprovider.New,
 
 		// ─── Memory ────────────────────────────────────────────────────
 		// capped/summary_buffer/longterm/vector are the four "history"
@@ -174,6 +192,16 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.memory.vector":            vectormemory.New,
 		"nexus.memory.tool_result_clear": toolresultclear.New,
 		"nexus.memory.tool_def_pruner":   tooldefpruner.New,
+		// compaction (Phase 5): event-driven external compaction
+		// orchestrator. Unlike summary_buffer (which compacts inline),
+		// compaction emits memory.compacted events that other history
+		// buffers adopt — useful when the orchestrator's synth pass
+		// processes a long worker-output transcript.
+		"nexus.memory.compaction": compactionmemory.New,
+		// topic_pruner (Phase 5): drops earlier turns when the user
+		// pivots to a new topic. Embedding-based similarity check;
+		// works with any embeddings.provider.
+		"nexus.memory.topic_pruner": topicpruner.New,
 
 		// ─── RAG primitives + consumers ────────────────────────────────
 		// chromem (vector.store) + sqlite_fts (search.lexical) + rag/hybrid
@@ -221,9 +249,15 @@ func commonFactories() map[string]func() engine.Plugin {
 
 		// ─── Routers ───────────────────────────────────────────────────
 		// classifier: per-step LLM-judge that picks the cheapest model
-		// from a candidate list capable of answering the prompt.
-		// Recursion-guarded; cache-warmed; fires on before:llm.request.
+		//   from a candidate list capable of answering the prompt.
+		//   Recursion-guarded; cache-warmed; fires on before:llm.request.
+		// metadata: deterministic rule-based routing on event metadata
+		//   (e.g., subagent worker requests get tagged and routed to a
+		//   cheaper model role than the orchestrator's main thread).
+		//   Runs at higher priority than classifier; deterministic
+		//   matches short-circuit before classifier fires.
 		"nexus.router.classifier": classifierrouter.New,
+		"nexus.router.metadata":   metadatarouter.New,
 
 		// ─── Discovery ─────────────────────────────────────────────────
 		// progressive: hierarchical tool discovery — the LLM only sees
@@ -286,6 +320,7 @@ func main() {
 			researcherAgent(),
 			drafterAgent(),
 			engineerAgent(),
+			orchestratorAgent(),
 		},
 	}); err != nil {
 		log.Fatalf("wails run: %v", err)
@@ -354,6 +389,48 @@ func researcherAgent() desktop.Agent {
 				Type:        desktop.FieldString,
 				Secret:      true,
 				Required:    false,
+			},
+		},
+	}
+}
+
+// orchestratorAgent — fan-out coordinator. Decomposes a request into
+// parallel worker subagents, then synthesizes their outputs into one
+// answer. Also showcases provider fanout (same prompt to anthropic +
+// openai + gemini, llm_judge picks the winner) and metadata-router
+// rules that route worker traffic to the cheap model role
+// deterministically.
+//
+// Compare with the other agents:
+//   - Researcher does serial multi-step retrieval inside one ReAct loop.
+//   - Engineer plans, then executes one step at a time.
+//   - Orchestrator decomposes UP FRONT and runs N steps IN PARALLEL.
+func orchestratorAgent() desktop.Agent {
+	return desktop.Agent{
+		ID:          "orchestrator",
+		Name:        "Orchestrator",
+		Description: "Decompose → parallel workers → synthesize (also: fanout-vote across 3 providers)",
+		Icon:        "fa-solid fa-diagram-project",
+		ConfigYAML:  orchestratorConfig,
+		Factories:   commonFactories(),
+		Settings: []desktop.SettingsField{
+			sharedAnthropicKey(),
+			sharedOpenAIKey(),
+			{
+				Key:         "gemini_api_key",
+				Display:     "Google Gemini API Key",
+				Description: "Required for the third leg of the fanout-vote. Free tier: https://aistudio.google.com/. Stored in OS keychain.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    true,
+			},
+			{
+				Key:         "brave_api_key",
+				Display:     "Brave Search API Key",
+				Description: "Worker subagents use this for web_search. Free tier: https://brave.com/search/api/.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    true,
 			},
 		},
 	}
