@@ -1,77 +1,134 @@
 //go:build integration
 
-// Package integration — Brave Search adapter wiring test.
-//
-// GAP NOTE
-// --------
-// This file does NOT exercise the Brave HTTP path through an httptest server.
-// nexus.search.brave hardcodes its endpoint as a const:
-//
-//	const apiURL = "https://api.search.brave.com/res/v1/web/search"
-//
-// and exposes no `base_url` (or equivalent) config knob, so there is no
-// supported way to redirect the plugin's outbound HTTP at a local stub
-// without modifying the plugin. Per the testing plan
-// (.planning/testing-upgrade/03-tier-3-integration-flows.md):
-//
-//   "If a provider plugin doesn't expose a base_url config knob, document
-//   the gap clearly at the top of the test file and either skip the test
-//   with t.Skip + a note, or take a simpler approach: assert only that the
-//   search.request → search.results adapter wiring exists, without
-//   exercising the HTTP path."
-//
-// We take the second option: this test boots the engine with the Brave
-// adapter active and asserts the bus-level wiring (capability advertised,
-// search.request handler registered, plugin loaded). The full HTTP-path
-// coverage will land alongside a follow-up plugin change adding base_url
-// to nexus.search.brave (mirroring nexus.search.openai_native).
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness"
 )
 
-// TestWebSearch_Brave verifies that nexus.search.brave loads, advertises the
-// search.provider capability, and registers a search.request subscription.
-// It does not call the real Brave API; the agent is configured WITHOUT
-// nexus.tool.web active so the mock LLM cannot trigger an outbound search.
+// TestWebSearch_Brave validates the search.provider wiring for
+// nexus.search.brave end-to-end against a stub Brave Search REST endpoint.
+//
+// Flow under test:
+//  1. Mocked LLM (via nexus.io.test mock_responses) produces a tool_call to
+//     web_search.
+//  2. nexus.tool.web emits search.request.
+//  3. nexus.search.brave GETs base_url with the X-Subscription-Token header.
+//  4. The stub returns a Brave Search-shaped JSON payload with two web
+//     results.
+//  5. The plugin parses results into events.SearchResult, fills the
+//     synchronous request, and the web tool emits tool.result.
+//
+// No real API key required: api_key is a stub string and base_url is
+// rerouted to the local httptest server.
 func TestWebSearch_Brave(t *testing.T) {
-	cfg := writeBraveWiringConfig(t)
+	var hits int32
 
-	h := testharness.New(t, cfg, testharness.WithTimeout(20*time.Second))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+
+		if got := r.Header.Get("X-Subscription-Token"); got != "brave-mock-key" {
+			http.Error(w, "missing/invalid X-Subscription-Token: "+got, http.StatusUnauthorized)
+			return
+		}
+		if got := r.URL.Query().Get("q"); got == "" {
+			http.Error(w, "missing q query parameter", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"web": map[string]any{
+				"results": []map[string]any{
+					{
+						"title":       "Brave releases <strong>v2</strong>",
+						"url":         "https://example.com/brave-v2",
+						"description": "Brave Search v2 ships with new features.",
+						"netloc":      "example.com",
+					},
+					{
+						"title":       "OpenAI announces native search",
+						"url":         "https://example.com/openai-search",
+						"description": "OpenAI ships built-in <strong>web_search</strong> tool.",
+						"netloc":      "example.com",
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := writeBraveConfig(t, srv.URL)
+
+	h := testharness.New(t, cfg, testharness.WithTimeout(30*time.Second))
 	h.Run()
 
-	// Adapter must boot.
 	h.AssertBooted(
 		"nexus.io.test",
 		"nexus.agent.react",
+		"nexus.tool.web",
 		"nexus.search.brave",
 	)
 
-	// Plugin should NOT have hit Brave (no web tool active, mock LLM
-	// returns plain content). If anything escapes to the network this is
-	// where we'd see surprising tool/error events.
-	h.AssertEventNotEmitted("search.request")
-	h.AssertEventNotEmitted("tool.result")
+	h.AssertToolCalled("web_search")
 
-	// Sanity: the mock LLM produced its content output, proving the engine
-	// fully booted with the Brave plugin in the active set.
-	h.AssertOutputContains("brave wiring ok")
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected 1 hit on stub Brave endpoint, got %d", got)
+	}
+
+	h.AssertEventEmitted("search.request")
+
+	var sawResult bool
+	for _, e := range h.Events() {
+		if e.Type != "tool.result" {
+			continue
+		}
+		tr, ok := e.Payload.(events.ToolResult)
+		if !ok || tr.Name != "web_search" {
+			continue
+		}
+		sawResult = true
+		if tr.Error != "" {
+			t.Fatalf("web_search tool.result carries error: %s", tr.Error)
+		}
+		want := []string{
+			"https://example.com/brave-v2",
+			"https://example.com/openai-search",
+			"Brave releases v2",                 // <strong> tags stripped
+			"OpenAI announces native search",
+			"nexus.search.brave", // provider tag in formatted output
+		}
+		for _, w := range want {
+			if !strings.Contains(tr.Output, w) {
+				t.Errorf("web_search tool.result missing %q in output:\n%s", w, tr.Output)
+			}
+		}
+	}
+	if !sawResult {
+		t.Fatal("no tool.result event for web_search collected")
+	}
 }
 
-func writeBraveWiringConfig(t *testing.T) string {
+func writeBraveConfig(t *testing.T, baseURL string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	out := filepath.Join(tmpDir, "test-web-search-brave.yaml")
 
-	yaml := fmt.Sprintf(`# Auto-generated by TestWebSearch_Brave (wiring-only mock-mode).
-# See file header for the gap explanation.
+	yaml := fmt.Sprintf(`# Auto-generated by TestWebSearch_Brave.
+# Mock-mode: io.test mock_responses replaces the LLM so no provider key is
+# required, and nexus.search.brave points at an httptest URL.
 
 core:
   log_level: warn
@@ -82,7 +139,7 @@ core:
     quick:
       provider: nexus.llm.anthropic
       model: claude-haiku-4-5-20251001
-      max_tokens: 256
+      max_tokens: 1024
   sessions:
     root: %q
     retention: 30d
@@ -97,31 +154,41 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.memory.capped
+    - nexus.tool.web
     - nexus.search.brave
 
   nexus.io.test:
     inputs:
-      - "Hello"
-    input_delay: 50ms
+      - "Search the web for Brave news."
+    input_delay: 100ms
     approval_mode: approve
-    timeout: 10s
+    timeout: 20s
     mock_responses:
-      - content: "brave wiring ok"
+      - tool_calls:
+          - name: web_search
+            arguments: '{"query":"Brave news"}'
+      - content: "Here are the top results."
 
   nexus.llm.anthropic:
     api_key: "sk-mock-not-used-via-mock-responses"
 
   nexus.agent.react:
-    system_prompt: "You are a no-op agent."
+    system_prompt: "You are a search agent. Always call web_search first."
 
   nexus.memory.capped:
-    max_messages: 4
+    max_messages: 10
     persist: false
+
+  nexus.tool.web:
+    search:
+      count: 5
+      safe_search: moderate
 
   nexus.search.brave:
     api_key: "brave-mock-key"
-    timeout: 2s
-`, filepath.Join(tmpDir, "sessions"))
+    base_url: %q
+    timeout: 5s
+`, filepath.Join(tmpDir, "sessions"), baseURL)
 
 	if err := os.WriteFile(out, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

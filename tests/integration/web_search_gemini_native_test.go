@@ -1,77 +1,152 @@
 //go:build integration
 
-// Package integration — Gemini Native search adapter wiring test.
-//
-// GAP NOTE
-// --------
-// This file does NOT exercise the Gemini HTTP path through an httptest server.
-// nexus.search.gemini_native builds its endpoint inline:
-//
-//	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", p.model)
-//
-// and exposes no `base_url` (or equivalent) config knob, so there is no
-// supported way to redirect the plugin's outbound HTTP at a local stub
-// without modifying the plugin. Per the testing plan
-// (.planning/testing-upgrade/03-tier-3-integration-flows.md):
-//
-//   "If a provider plugin doesn't expose a base_url config knob, document
-//   the gap clearly at the top of the test file and either skip the test
-//   with t.Skip + a note, or take a simpler approach: assert only that the
-//   search.request → search.results adapter wiring exists, without
-//   exercising the HTTP path."
-//
-// We take the second option: this test boots the engine with the Gemini
-// adapter active and asserts the bus-level wiring (capability advertised,
-// search.request handler registered, plugin loaded). The full HTTP-path
-// coverage will land alongside a follow-up plugin change adding base_url
-// to nexus.search.gemini_native (mirroring nexus.search.openai_native).
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness"
 )
 
-// TestWebSearch_GeminiNative verifies that nexus.search.gemini_native loads,
-// advertises the search.provider capability, and registers a search.request
-// subscription. It does not call the real Gemini API; the agent is
-// configured WITHOUT nexus.tool.web active so the mock LLM cannot trigger
-// an outbound search.
+// TestWebSearch_GeminiNative validates the search.provider wiring for
+// nexus.search.gemini_native end-to-end against a stub Generative Language
+// API endpoint.
+//
+// Flow under test:
+//  1. Mocked LLM (via nexus.io.test mock_responses) produces a tool_call to
+//     web_search.
+//  2. nexus.tool.web emits search.request.
+//  3. nexus.search.gemini_native POSTs to base_url/models/<model>:generateContent
+//     with the x-goog-api-key header.
+//  4. The stub returns a Gemini-shaped JSON payload with groundingChunks +
+//     groundingSupports.
+//  5. The plugin parses the grounding metadata into events.SearchResult,
+//     fills the synchronous request, and the web tool emits tool.result.
+//
+// No real API key required: api_key is a stub string and base_url is
+// rerouted to the local httptest server.
 func TestWebSearch_GeminiNative(t *testing.T) {
-	cfg := writeGeminiNativeWiringConfig(t)
+	var hits int32
+	var lastPath string
 
-	h := testharness.New(t, cfg, testharness.WithTimeout(20*time.Second))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		lastPath = r.URL.Path
+
+		if got := r.Header.Get("x-goog-api-key"); got != "gemini-mock-key" {
+			http.Error(w, "missing/invalid x-goog-api-key: "+got, http.StatusUnauthorized)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{
+				{
+					"content": map[string]any{
+						"parts": []map[string]any{
+							{"text": "Gemini grounding sample text."},
+						},
+					},
+					"groundingMetadata": map[string]any{
+						"groundingChunks": []map[string]any{
+							{"web": map[string]any{
+								"uri":   "https://example.com/gemini-news",
+								"title": "Gemini ships google_search",
+							}},
+							{"web": map[string]any{
+								"uri":   "https://example.com/google-search-tool",
+								"title": "Server-side google_search rolls out",
+							}},
+						},
+						"groundingSupports": []map[string]any{
+							{
+								"segment":               map[string]any{"text": "Gemini ships google_search."},
+								"groundingChunkIndices": []int{0},
+							},
+							{
+								"segment":               map[string]any{"text": "Server-side rollout."},
+								"groundingChunkIndices": []int{1},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := writeGeminiNativeConfig(t, srv.URL)
+
+	h := testharness.New(t, cfg, testharness.WithTimeout(30*time.Second))
 	h.Run()
 
-	// Adapter must boot.
 	h.AssertBooted(
 		"nexus.io.test",
 		"nexus.agent.react",
+		"nexus.tool.web",
 		"nexus.search.gemini_native",
 	)
 
-	// Plugin should NOT have hit Gemini (no web tool active, mock LLM
-	// returns plain content).
-	h.AssertEventNotEmitted("search.request")
-	h.AssertEventNotEmitted("tool.result")
+	h.AssertToolCalled("web_search")
 
-	// Sanity: the mock LLM produced its content output, proving the engine
-	// fully booted with the Gemini plugin in the active set.
-	h.AssertOutputContains("gemini wiring ok")
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected 1 hit on stub Gemini endpoint, got %d", got)
+	}
+	if !strings.Contains(lastPath, "/models/gemini-2.5-flash:generateContent") {
+		t.Errorf("unexpected stub path %q, want path containing /models/gemini-2.5-flash:generateContent", lastPath)
+	}
+
+	h.AssertEventEmitted("search.request")
+
+	var sawResult bool
+	for _, e := range h.Events() {
+		if e.Type != "tool.result" {
+			continue
+		}
+		tr, ok := e.Payload.(events.ToolResult)
+		if !ok || tr.Name != "web_search" {
+			continue
+		}
+		sawResult = true
+		if tr.Error != "" {
+			t.Fatalf("web_search tool.result carries error: %s", tr.Error)
+		}
+		want := []string{
+			"https://example.com/gemini-news",
+			"https://example.com/google-search-tool",
+			"Gemini ships google_search",
+			"Server-side google_search rolls out",
+			"nexus.search.gemini_native", // provider tag
+		}
+		for _, w := range want {
+			if !strings.Contains(tr.Output, w) {
+				t.Errorf("web_search tool.result missing %q in output:\n%s", w, tr.Output)
+			}
+		}
+	}
+	if !sawResult {
+		t.Fatal("no tool.result event for web_search collected")
+	}
 }
 
-func writeGeminiNativeWiringConfig(t *testing.T) string {
+func writeGeminiNativeConfig(t *testing.T, baseURL string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	out := filepath.Join(tmpDir, "test-web-search-gemini-native.yaml")
 
-	yaml := fmt.Sprintf(`# Auto-generated by TestWebSearch_GeminiNative (wiring-only mock-mode).
-# See file header for the gap explanation.
+	yaml := fmt.Sprintf(`# Auto-generated by TestWebSearch_GeminiNative.
+# Mock-mode: io.test mock_responses replaces the LLM so no provider key is
+# required, and nexus.search.gemini_native points at an httptest URL.
 
 core:
   log_level: warn
@@ -82,7 +157,7 @@ core:
     quick:
       provider: nexus.llm.anthropic
       model: claude-haiku-4-5-20251001
-      max_tokens: 256
+      max_tokens: 1024
   sessions:
     root: %q
     retention: 30d
@@ -97,32 +172,42 @@ plugins:
     - nexus.llm.anthropic
     - nexus.agent.react
     - nexus.memory.capped
+    - nexus.tool.web
     - nexus.search.gemini_native
 
   nexus.io.test:
     inputs:
-      - "Hello"
-    input_delay: 50ms
+      - "Search the web for Gemini news."
+    input_delay: 100ms
     approval_mode: approve
-    timeout: 10s
+    timeout: 20s
     mock_responses:
-      - content: "gemini wiring ok"
+      - tool_calls:
+          - name: web_search
+            arguments: '{"query":"Gemini news"}'
+      - content: "Here are the top results."
 
   nexus.llm.anthropic:
     api_key: "sk-mock-not-used-via-mock-responses"
 
   nexus.agent.react:
-    system_prompt: "You are a no-op agent."
+    system_prompt: "You are a search agent. Always call web_search first."
 
   nexus.memory.capped:
-    max_messages: 4
+    max_messages: 10
     persist: false
+
+  nexus.tool.web:
+    search:
+      count: 5
+      safe_search: moderate
 
   nexus.search.gemini_native:
     api_key: "gemini-mock-key"
+    base_url: %q
     model: gemini-2.5-flash
-    timeout: 2s
-`, filepath.Join(tmpDir, "sessions"))
+    timeout: 5s
+`, filepath.Join(tmpDir, "sessions"), baseURL)
 
 	if err := os.WriteFile(out, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
