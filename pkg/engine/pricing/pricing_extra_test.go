@@ -41,17 +41,11 @@ func TestTable_Calc_UnknownModelReturnsZero(t *testing.T) {
 	}
 }
 
-// TestTable_ConcurrentReadDuringMerge documents — and currently skips — a
-// real race between Get/Calc/Models reads and Merge writes on *Table.
-// Production callers exist for both: providers call Calc on each turn's
-// usage event (bus dispatch goroutines) while hot-reload calls Merge to
-// re-apply config overrides. The current implementation has no internal
-// synchronization. Adding the test forced this gap to surface; fixing it
-// (sync.RWMutex around t.rates) is out of scope for the testing-uplift
-// plan and tracked separately in .planning/testing-upgrade/01-tier-1-engine-core.md.
+// TestTable_ConcurrentReadDuringMerge guards the RWMutex protecting
+// t.rates. Hot-reload calls Merge while provider plugins and the budget
+// gate read via Get/Calc/Models from bus dispatch goroutines; this test
+// runs both paths concurrently and is intended to run under -race.
 func TestTable_ConcurrentReadDuringMerge(t *testing.T) {
-	t.Skip("known race: pricing.Table has no internal synchronization between Get/Calc and Merge; tracked as a follow-up")
-
 	tbl := DefaultsFor("anthropic")
 
 	stop := make(chan struct{})
