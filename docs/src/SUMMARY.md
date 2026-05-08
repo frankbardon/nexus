@@ -106,4 +106,5 @@
 - [Web Search & Fetch](./guides/web-search.md)
 - [Retrieval-Augmented Generation (RAG)](./guides/rag.md)
 - [Integration Testing](./guides/integration-testing.md)
+- [Plugin Contract Tests](./guides/plugin-contracts.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
