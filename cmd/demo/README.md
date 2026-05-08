@@ -294,8 +294,10 @@ Phase 7 ships these recipes:
 | `tui` | `io/tui` transport against the Researcher RAG showroom; same plugin set as the Wails Researcher, terminal interaction |
 | `browser-ui` | `io/browser` HTTP/WS transport (default `127.0.0.1:8889`) — a no-Wails fallback for the Researcher |
 | `batch-briefs` | `llm/batch` against Anthropic's Messages Batches API; submits N brief-generation requests, prints the batch ID, exits (real batches take 1+ hour to complete; state persists to `~/.nexus/batches`) |
+| `eval` | `pkg/eval` golden-trace runner. Loads a case from `tests/eval/cases/<id>/`, replays it under the engine's stash mode (no API calls), and prints per-assertion pass/fail. Hermetic; CI-safe. Default case: `skills-discovery`. |
+| `otel-trace` | `observe/otel` + `observe/sampler` enabled on a minimal Researcher engine. Exports OTLP spans to `127.0.0.1:4317` by default. Companion `recipe-otel-trace-docker-compose.yaml` boots Jaeger; bring it up first, then `open http://localhost:16686`. |
 
-Future phases add `eval`, `otel-trace`, `voice`, and `fanout-vote`.
+Future phases add `voice` and `fanout-vote`.
 
 API keys for recipes come from environment variables (`ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `BRAVE_API_KEY`) — recipes don't read the desktop

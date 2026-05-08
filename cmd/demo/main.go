@@ -80,6 +80,8 @@ import (
 	toolresultclear "github.com/frankbardon/nexus/plugins/memory/tool_result_clear"
 	topicpruner "github.com/frankbardon/nexus/plugins/memory/topic_pruner"
 	vectormemory "github.com/frankbardon/nexus/plugins/memory/vector"
+	otelobs "github.com/frankbardon/nexus/plugins/observe/otel"
+	samplerobs "github.com/frankbardon/nexus/plugins/observe/sampler"
 	thinkingobs "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
 	staticplanner "github.com/frankbardon/nexus/plugins/planners/static"
@@ -316,7 +318,14 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.skills": skills.New,
 
 		// ─── Observers ─────────────────────────────────────────────────
+		// thinking: persists LLM thinking blocks to JSONL.
+		// otel (Phase 8): exports spans via OTLP gRPC/HTTP to a
+		//   collector (Jaeger, Tempo, etc.).
+		// sampler (Phase 8): writes random/failed-turn JSON snapshots
+		//   to disk for offline inspection.
 		"nexus.observe.thinking": thinkingobs.New,
+		"nexus.observe.otel":     otelobs.New,
+		"nexus.observe.sampler":  samplerobs.New,
 
 		// ─── Gates ─────────────────────────────────────────────────────
 		// Most gates are per-agent opt-in (in their `plugins.active`

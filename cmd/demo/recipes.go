@@ -52,8 +52,8 @@ var recipes = map[string]recipeFn{
 	"tui":             runTUIRecipe,
 	"browser-ui":      runBrowserUIRecipe,
 	"embeddings-mock": runEmbeddingsMockRecipe,
-	// Phase 8 + 9 recipes register from their own files (eval.go,
-	// otel.go, voice.go, fanout_vote.go) via init() in those files.
+	"eval":            runEvalRecipe,      // Phase 8
+	"otel-trace":      runOTelTraceRecipe, // Phase 8
 }
 
 // runRecipe is the entry point called from main() when argv[1]=="recipe".
