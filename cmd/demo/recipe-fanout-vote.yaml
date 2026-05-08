@@ -1,0 +1,68 @@
+# fanout-vote recipe — same prompt to three providers, llm_judge picks
+# the winner.
+#
+# Required env: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: vote
+    # Fanout role: same prompt fans out to all three providers in
+    # parallel. The fanout plugin's strategy/deadline_ms below decide
+    # how to pick the winning response.
+    vote:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-sonnet-4-6
+          max_tokens: 512
+        - provider: nexus.llm.openai
+          model: gpt-4o
+          max_tokens: 512
+        - provider: nexus.llm.gemini
+          model: gemini-2.5-pro
+          max_tokens: 512
+    # The judge role used by fanout's llm_judge strategy. We reuse a
+    # single anthropic call for the synthesis — cheap and consistent.
+    judge:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 256
+
+  sessions:
+    root: /tmp/nexus-recipe-fanout-vote
+    retention: 1h
+
+plugins:
+  active:
+    - nexus.io.test
+
+    # Three providers + fanout coordinator.
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.llm.gemini
+    - nexus.provider.fanout
+
+    # Engine doesn't need agent loop / memory / etc — recipe drives
+    # llm.request directly. But control.cancel + tool.catalog are
+    # needed for clean shutdown.
+    - nexus.control.cancel
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+  nexus.llm.openai:
+    api_key_env: OPENAI_API_KEY
+  nexus.llm.gemini:
+    auth: api_key
+    api_key_env: GEMINI_API_KEY
+
+  # Fanout: judge strategy uses an extra LLM call to pick the winner.
+  # 30s deadline forces a decision even if one provider is slow.
+  nexus.provider.fanout:
+    strategy: llm_judge
+    deadline_ms: 30000
+    judge:
+      role: judge

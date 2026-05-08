@@ -296,8 +296,8 @@ Phase 7 ships these recipes:
 | `batch-briefs` | `llm/batch` against Anthropic's Messages Batches API; submits N brief-generation requests, prints the batch ID, exits (real batches take 1+ hour to complete; state persists to `~/.nexus/batches`) |
 | `eval` | `pkg/eval` golden-trace runner. Loads a case from `tests/eval/cases/<id>/`, replays it under the engine's stash mode (no API calls), and prints per-assertion pass/fail. Hermetic; CI-safe. Default case: `skills-discovery`. |
 | `otel-trace` | `observe/otel` + `observe/sampler` enabled on a minimal Researcher engine. Exports OTLP spans to `127.0.0.1:4317` by default. Companion `recipe-otel-trace-docker-compose.yaml` boots Jaeger; bring it up first, then `open http://localhost:16686`. |
-
-Future phases add `voice` and `fanout-vote`.
+| `voice` | `io/voice` (VAD + Whisper ASR + OpenAI TTS) over `io/realtime` (low-latency WebSocket). Listens on `ws://127.0.0.1:8890/`. Connect a voice client and speak. |
+| `fanout-vote` | `providers/fanout` with `llm_judge` strategy across anthropic + openai + gemini. Pure-CLI repro of the Orchestrator's vote behavior. Prints each leg's response plus the judge's pick. |
 
 API keys for recipes come from environment variables (`ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `BRAVE_API_KEY`) — recipes don't read the desktop

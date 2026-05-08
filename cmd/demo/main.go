@@ -68,8 +68,10 @@ import (
 	tooltimeoutgate "github.com/frankbardon/nexus/plugins/gates/tool_timeout"
 	browserio "github.com/frankbardon/nexus/plugins/io/browser"
 	oneshotio "github.com/frankbardon/nexus/plugins/io/oneshot"
+	realtimeio "github.com/frankbardon/nexus/plugins/io/realtime"
 	testio "github.com/frankbardon/nexus/plugins/io/test"
 	tuiio "github.com/frankbardon/nexus/plugins/io/tui"
+	voiceio "github.com/frankbardon/nexus/plugins/io/voice"
 	wailsio "github.com/frankbardon/nexus/plugins/io/wails"
 	llmbatch "github.com/frankbardon/nexus/plugins/llm/batch"
 	"github.com/frankbardon/nexus/plugins/memory/capped"
@@ -170,7 +172,13 @@ func commonFactories() map[string]func() engine.Plugin {
 		// io.test: non-interactive IO used by hermetic recipes
 		// (embeddings-mock, eval) where the recipe drives the bus
 		// directly and never goes through a chat loop.
-		"nexus.io.test":            testio.New,
+		"nexus.io.test": testio.New,
+		// io.voice + io.realtime (Phase 9): voice loop with VAD/ASR/TTS
+		// and the underlying low-latency WebSocket transport. The voice
+		// plugin emits audio frames over realtime; both plugins are
+		// loaded together when activated.
+		"nexus.io.voice":           voiceio.New,
+		"nexus.io.realtime":        realtimeio.New,
 		"nexus.agent.react":        reactagent.New,
 		"nexus.agent.planexec":     planexecagent.New,
 		"nexus.agent.orchestrator": orchestratoragent.New,
