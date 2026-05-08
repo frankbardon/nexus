@@ -55,13 +55,12 @@ type ContractHarness struct {
 	plugin engine.Plugin
 	bus    engine.EventBus
 
-	mu           sync.Mutex
-	captured     []CapturedEvent
-	injectedIDs  map[string]struct{}
-	storage      *storage.Manager
-	sessionDir   string
-	allowJournal bool
-	withSession  bool
+	mu          sync.Mutex
+	captured    []CapturedEvent
+	injectedIDs map[string]struct{}
+	storage     *storage.Manager
+	sessionDir  string
+	withSession bool
 }
 
 // ContractOption configures a ContractHarness.
