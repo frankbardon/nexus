@@ -7,7 +7,11 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	h := contract.NewContract(t, New)
+	// default_mode: document skips the pdftotext PATH lookup so the test
+	// works on CI environments without poppler installed.
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"default_mode": "document",
+	}))
 	h.AssertSubscribesTo("tool.invoke")
 	declared := map[string]bool{}
 	for _, e := range h.Plugin().Emissions() {
