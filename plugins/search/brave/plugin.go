@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	pluginID   = "nexus.search.brave"
-	pluginName = "Brave Search Provider"
-	version    = "0.1.0"
-	apiURL     = "https://api.search.brave.com/res/v1/web/search"
+	pluginID       = "nexus.search.brave"
+	pluginName     = "Brave Search Provider"
+	version        = "0.1.0"
+	defaultBaseURL = "https://api.search.brave.com/res/v1/web/search"
 )
 
 // Plugin advertises the search.provider capability and answers
@@ -34,13 +34,14 @@ type Plugin struct {
 	logger *slog.Logger
 
 	apiKey  string
+	baseURL string
 	client  *http.Client
 	unsubs  []func()
 	timeout time.Duration
 }
 
 func New() engine.Plugin {
-	return &Plugin{timeout: 15 * time.Second}
+	return &Plugin{timeout: 15 * time.Second, baseURL: defaultBaseURL}
 }
 
 func (p *Plugin) ID() string                     { return pluginID }
@@ -79,6 +80,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			return fmt.Errorf("brave: invalid timeout %q: %w", ts, err)
 		}
 		p.timeout = d
+	}
+
+	// base_url overrides the upstream Brave Search endpoint. Defaults to
+	// the production API; tests stand up an httptest.Server and point at
+	// it to exercise the full HTTP path without burning quota.
+	if u, ok := ctx.Config["base_url"].(string); ok && u != "" {
+		p.baseURL = u
 	}
 
 	p.client = &http.Client{Timeout: p.timeout}
@@ -155,7 +163,7 @@ func (p *Plugin) search(req *events.SearchRequest) ([]events.SearchResult, error
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", apiURL+"?"+q.Encode(), nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", p.baseURL+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

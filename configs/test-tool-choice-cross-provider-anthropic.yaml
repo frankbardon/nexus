@@ -1,0 +1,78 @@
+# Test: Tool choice cross-provider parity (Anthropic leg)
+# Validates: ReAct agent rotates ToolChoice through the configured sequence and
+# delivers the same choice into the LLM request payload regardless of which
+# provider the request will be routed to.
+#
+# Pair with: test-tool-choice-cross-provider-openai.yaml — same scripted
+# conversation, same tool_choice sequence, only the provider routing differs.
+#
+# Uses mocked LLM responses — no API key required.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestToolChoiceCrossProvider
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.tool.shell
+    - nexus.tool.file
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Find go.mod and explain it."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - tool_calls:
+          - name: list_files
+            arguments: '{"path":"."}'
+      - tool_calls:
+          - name: list_files
+            arguments: '{"path":"."}'
+      - content: "Done exploring."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Follow the tool_choice rotation."
+    tool_choice:
+      sequence:
+        - mode: required
+        - mode: tool
+          name: read_file
+        - mode: auto
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.tool.shell:
+    allowed_commands: [ls, cat, grep, find]
+    timeout: 15s
+    sandbox: true
+
+  nexus.tool.file:
+    allow_external_writes: false
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

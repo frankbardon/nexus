@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/events"
@@ -174,6 +176,52 @@ func TestReplayToolShortCircuit_PrefersCacheOverFIFO(t *testing.T) {
 	// FIFO should still have its entry — cache hit must not consume it.
 	if state.Remaining("tool.result") != 1 {
 		t.Errorf("FIFO drained on cache hit: remaining = %d", state.Remaining("tool.result"))
+	}
+}
+
+// TestToolCache_ConcurrentInvokeResult exercises the pendingArgs map under
+// concurrent handleInvoke + handleResult dispatch. The cache pairs every
+// invoke with its result by ID; running both handlers from many goroutines
+// must not corrupt the map. Run under `go test -race`.
+func TestToolCache_ConcurrentInvokeResult(t *testing.T) {
+	dir := t.TempDir()
+	c := NewToolCache(filepath.Join(dir, "cache"), nil)
+	bus := NewEventBus()
+	for _, u := range c.Install(bus) {
+		defer u()
+	}
+
+	const pairs = 100
+	var wg sync.WaitGroup
+	wg.Add(pairs)
+	for i := range pairs {
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("id-%d", i)
+			args := map[string]any{"i": i}
+			_ = bus.Emit("tool.invoke", events.ToolCall{
+				SchemaVersion: events.ToolCallVersion,
+				ID:            id, Name: "shell", Arguments: args,
+			})
+			_ = bus.Emit("tool.result", events.ToolResult{
+				SchemaVersion: events.ToolResultVersion,
+				ID:            id, Name: "shell", Output: id,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	// Every pair should have been persisted. Sample a few.
+	for _, i := range []int{0, pairs / 2, pairs - 1} {
+		got, ok := c.Lookup("shell", map[string]any{"i": i})
+		if !ok {
+			t.Errorf("missing cache entry for i=%d", i)
+			continue
+		}
+		want := fmt.Sprintf("id-%d", i)
+		if got.Output != want {
+			t.Errorf("i=%d output = %q, want %q", i, got.Output, want)
+		}
 	}
 }
 

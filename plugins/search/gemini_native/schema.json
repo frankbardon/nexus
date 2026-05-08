@@ -7,6 +7,7 @@
   "properties": {
     "api_key":     {"type": "string", "description": "Direct Gemini API key."},
     "api_key_env": {"type": "string", "description": "Environment variable holding the Gemini API key."},
+    "base_url":    {"type": "string", "description": "Override the Generative Language API base URL. Defaults to https://generativelanguage.googleapis.com/v1beta; primarily useful for httptest-driven integration tests."},
     "model":       {"type": "string", "description": "Gemini model used for grounding."},
     "timeout":     {"type": "string", "description": "HTTP timeout (Go duration)."}
   }

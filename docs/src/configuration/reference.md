@@ -628,17 +628,17 @@ back into the payload. They share the same shape:
 | `api_key`      | string   | *(env, see below)*                 | Direct API key.                                       |
 | `api_key_env`  | string   | provider default (see below)       | Override the env var name.                            |
 | `model`        | string   | provider default (see below)       | Only on native search providers.                      |
-| `base_url`     | string   | `https://api.openai.com/v1/responses` | Only on `openai_native`.                              |
+| `base_url`     | string   | provider default (see below)       | Override the upstream endpoint. Available on `brave`, `openai_native`, and `gemini_native`. Primarily useful for httptest-driven integration tests; OpenAI-compatible proxies can also be wired here. |
 | `timeout`      | duration | `15s` (Brave), `30s` (others)      | HTTP request timeout.                                 |
 
 Provider defaults:
 
-| Provider                          | `api_key_env`                        | `model`                          |
-|-----------------------------------|--------------------------------------|----------------------------------|
-| `nexus.search.brave`              | `BRAVE_API_KEY`                      | n/a                              |
-| `nexus.search.anthropic_native`   | `ANTHROPIC_API_KEY`                  | `claude-haiku-4-5-20251001`      |
-| `nexus.search.openai_native`      | `OPENAI_API_KEY`                     | `gpt-4o-mini`                    |
-| `nexus.search.gemini_native`      | `GEMINI_API_KEY` / `GOOGLE_API_KEY`  | `gemini-2.5-flash`               |
+| Provider                          | `api_key_env`                        | `model`                          | `base_url` default                                                       |
+|-----------------------------------|--------------------------------------|----------------------------------|--------------------------------------------------------------------------|
+| `nexus.search.brave`              | `BRAVE_API_KEY`                      | n/a                              | `https://api.search.brave.com/res/v1/web/search`                         |
+| `nexus.search.anthropic_native`   | `ANTHROPIC_API_KEY`                  | `claude-haiku-4-5-20251001`      | n/a (no override)                                                        |
+| `nexus.search.openai_native`      | `OPENAI_API_KEY`                     | `gpt-4o-mini`                    | `https://api.openai.com/v1/responses`                                    |
+| `nexus.search.gemini_native`      | `GEMINI_API_KEY` / `GOOGLE_API_KEY`  | `gemini-2.5-flash`               | `https://generativelanguage.googleapis.com/v1beta`                       |
 
 If multiple providers register the `search.provider` capability, pin one
 explicitly via the top-level `capabilities:` block.

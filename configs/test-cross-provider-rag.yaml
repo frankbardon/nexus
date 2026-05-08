@@ -1,0 +1,105 @@
+# Test: Cross-provider RAG — embeddings from one provider, LLM synthesis from
+# another, with citations validated against retrieval context.
+#
+# Validates:
+#   - nexus.embeddings.mock (deterministic, no network) supplies vectors for
+#     ingest + knowledge_search query embedding
+#   - nexus.llm.openai (mock_responses, no API key) supplies the synthesis
+#     side: tool-calls knowledge_search then emits a final answer with
+#     <cite/> tags
+#   - nexus.vectorstore.chromem stores chunks across the round-trip
+#   - nexus.rag.ingest produces chunks from a pre-populated file
+#   - nexus.tool.knowledge_search emits rag.retrieved (per-turn retrieval ctx)
+#   - nexus.rag.citations parses tags and emits llm.response.cited
+#
+# Cross-provider scope: this exercises two distinct provider plugins
+# (embeddings.provider + llm provider). Running embeddings AND synthesis from
+# *different LLM vendors* without API keys is impractical because no shipped
+# embedding adapter is purely mock except nexus.embeddings.mock — see the
+# header comment in cross_provider_rag_test.go for the rationale.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestCrossProviderRAG -v
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: synth
+    synth:
+      provider: nexus.llm.openai
+      model: gpt-4o-mini
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.openai
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.embeddings.mock
+    - nexus.vectorstore.chromem
+    - nexus.rag.ingest
+    - nexus.tool.knowledge_search
+    - nexus.rag.citations
+
+  nexus.io.test:
+    inputs:
+      - "What does the knowledge base say about Nexus?"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    # Two-iteration mock: turn 1 invokes knowledge_search; turn 2 returns the
+    # synthesized answer with a <cite/> tag pointing at the chunk we ingested.
+    mock_responses:
+      - tool_calls:
+          - name: knowledge_search
+            arguments: '{"query":"What is Nexus?","namespaces":["kb"],"k":3}'
+      - content: 'Nexus is a modular AI agent harness in pure Go.<cite source="KB_DOC_PATH" chunk="0"/>'
+
+  nexus.llm.openai:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Use knowledge_search and cite sources."
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
+
+  nexus.embeddings.mock:
+    dimensions: 64
+
+  nexus.vectorstore.chromem:
+    # Path overridden by the test harness via copyConfig to a t.TempDir() so
+    # state cannot leak between runs.
+    path: ~/.nexus/test-sessions/cross-provider-rag-vectors
+
+  nexus.rag.ingest:
+    chunker:
+      size: 400
+      overlap: 80
+    # cache_dir overridden by the test as well.
+
+  nexus.tool.knowledge_search:
+    namespaces: [kb]
+    default_namespaces: [kb]
+    top_k: 3
+    include_metadata: true
+
+  nexus.rag.citations:
+    mode: tag
+    # Non-strict: turn_id is not threaded into llm.request metadata by the
+    # ReAct agent today, so strict validation against rag.retrieved cannot
+    # match. Non-strict marks the citation unverified but still emits
+    # llm.response.cited with a populated Citations slice — exactly what we
+    # want to assert.
+    strict: false

@@ -1,0 +1,89 @@
+# Test: Multi-gate stacking with retry-then-pass sequence (T3.6)
+# Validates: gates/output_length + gates/json_schema + gates/prompt_injection
+# + gates/content_safety stacked simultaneously, with the json_schema gate
+# triggering an LLM retry that then passes.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestOneshotMultiGate -v
+#
+# Mock-mode only — no API key required.
+#
+# Notes:
+#   - Uses nexus.io.test (not nexus.io.oneshot) because mock_responses is an
+#     io.test feature and pkg/testharness only supports nexus.io.test. The
+#     point of this test is the gate stack, not the IO transport itself.
+#   - First mock response is JSON missing required fields — json_schema gate
+#     should reject it and emit a retry llm.request tagged with
+#     _source = "nexus.gate.json_schema/retry-..." metadata.
+#   - Second mock response is a valid, schema-conforming, benign payload —
+#     the retry path should accept it and the final io.output should carry it.
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.json_schema
+    - nexus.gate.output_length
+    - nexus.gate.prompt_injection
+    - nexus.gate.content_safety
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Summarize the customer feedback as JSON."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      # First response: invalid schema (missing required fields).
+      - content: '{"summary":"Looks fine"}'
+      # Second response: valid schema, benign content (no PII, short).
+      - content: '{"summary":"Customer is satisfied with delivery.","sentiment":"positive","topics":["delivery","service"]}'
+
+  nexus.llm.anthropic:
+    api_key: sk-mock-not-used
+
+  nexus.agent.react:
+    system_prompt: "You are a structured-data extractor. Always reply with JSON conforming to the schema."
+
+  nexus.gate.json_schema:
+    schema: '{"type":"object","required":["summary","sentiment","topics"],"properties":{"summary":{"type":"string"},"sentiment":{"type":"string","enum":["positive","negative","neutral","mixed"]},"topics":{"type":"array","items":{"type":"string"}}}}'
+    max_retries: 3
+
+  nexus.gate.output_length:
+    max_chars: 3000
+    max_retries: 1
+
+  nexus.gate.prompt_injection:
+    action: warn
+    message: "Potential prompt injection detected."
+
+  nexus.gate.content_safety:
+    action: block
+    check_pii_email: true
+    check_pii_phone: true
+    check_pii_ssn: true
+    check_secrets_api_key: true
+    check_secrets_private_key: true
+    check_secrets_password: true
+    check_credit_card: true
+    check_ip_internal: true
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

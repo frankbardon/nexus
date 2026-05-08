@@ -31,6 +31,7 @@ All comms via central typed event bus — plugins never call each other direct.
 - **CLI entry point** (`cmd/nexus/main.go`) — Creates engine, registers plugins, runs with signal handling.
 - **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
+- **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
 - **Integration tests** (`tests/integration/`) — Go tests behind `//go:build integration` tag. Two modes:
   - **Mock mode** (`mock_responses` set): No LLM calls, no API key, sub-second.
   - **Live mode** (no `mock_responses`): Real LLM calls via provider. Requires `ANTHROPIC_API_KEY`.

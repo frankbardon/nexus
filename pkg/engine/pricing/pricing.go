@@ -11,6 +11,7 @@ package pricing
 import (
 	"maps"
 	"strings"
+	"sync"
 
 	"github.com/frankbardon/nexus/pkg/events"
 )
@@ -46,8 +47,14 @@ type Rates struct {
 
 // Table is a per-provider price table. Construct via DefaultsFor and call
 // Merge to layer config overrides on top.
+//
+// Table is safe for concurrent use. Hot-reload calls Merge while the bus
+// dispatch path reads via Get/Calc/Models from provider plugins and the
+// budget gate, so an internal RWMutex protects rates against the resulting
+// race.
 type Table struct {
 	Provider string
+	mu       sync.RWMutex
 	rates    map[string]Rates
 }
 
@@ -78,6 +85,8 @@ func (t *Table) Get(model string) (Rates, bool) {
 	if t == nil {
 		return Rates{}, false
 	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	r, ok := t.rates[model]
 	return r, ok
 }
@@ -87,6 +96,8 @@ func (t *Table) Models() []string {
 	if t == nil {
 		return nil
 	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	out := make([]string, 0, len(t.rates))
 	for k := range t.rates {
 		out = append(out, k)
@@ -96,6 +107,8 @@ func (t *Table) Models() []string {
 
 // Set installs rates for a single model. Used by Merge and by tests.
 func (t *Table) Set(model string, rates Rates) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.rates == nil {
 		t.rates = make(map[string]Rates)
 	}
@@ -121,6 +134,8 @@ func (t *Table) Merge(overrides map[string]any) {
 	if t == nil || len(overrides) == 0 {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for model, val := range overrides {
 		entry, ok := val.(map[string]any)
 		if !ok {
@@ -156,7 +171,9 @@ func (t *Table) Calc(model string, usage events.Usage) float64 {
 	if t == nil {
 		return 0
 	}
+	t.mu.RLock()
 	rates, ok := t.rates[model]
+	t.mu.RUnlock()
 	if !ok {
 		return 0
 	}
@@ -184,6 +201,8 @@ func (t *Table) CheapestModel(candidates []string) string {
 	if t == nil || len(candidates) == 0 {
 		return ""
 	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	var best string
 	bestScore := 0.0
 	for _, m := range candidates {

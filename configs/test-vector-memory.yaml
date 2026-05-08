@@ -1,0 +1,70 @@
+# Test: vector memory plugin auto-stores compaction summaries and recalls
+# them on subsequent inputs.
+#
+# Validates: nexus.memory.vector boots with mock embeddings + chromem
+# vector store, registers as memory.vector capability, stores compaction
+# summaries on memory.compacted, and queries via embeddings.request on
+# io.input.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestVectorMemory
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.memory.vector
+    - nexus.embeddings.mock
+    - nexus.vectorstore.chromem
+
+  nexus.io.test:
+    inputs:
+      - "What is the capital of France?"
+      - "What did I just ask?"
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Paris."
+      - content: "About the capital of France."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test assistant. Respond literally."
+
+  nexus.gate.endless_loop:
+    max_iterations: 3
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
+
+  nexus.memory.vector:
+    namespace: "test-vector"
+    top_k: 3
+    auto_store_user_input: true
+
+  nexus.embeddings.mock:
+    dimensions: 64
+
+  nexus.vectorstore.chromem:
+    # Use the per-plugin session dir for the persistence path.

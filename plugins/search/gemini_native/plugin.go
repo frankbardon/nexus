@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	pluginID   = "nexus.search.gemini_native"
-	pluginName = "Gemini Native Search Provider"
-	version    = "0.1.0"
+	pluginID       = "nexus.search.gemini_native"
+	pluginName     = "Gemini Native Search Provider"
+	version        = "0.1.0"
+	defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 )
 
 // Plugin answers search.request via a one-shot generateContent call with the
@@ -34,6 +35,7 @@ type Plugin struct {
 
 	apiKey  string
 	model   string
+	baseURL string
 	client  *http.Client
 	unsubs  []func()
 	timeout time.Duration
@@ -43,6 +45,7 @@ func New() engine.Plugin {
 	return &Plugin{
 		model:   "gemini-2.5-flash",
 		timeout: 30 * time.Second,
+		baseURL: defaultBaseURL,
 	}
 }
 
@@ -90,6 +93,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			return fmt.Errorf("gemini_native: invalid timeout %q: %w", ts, err)
 		}
 		p.timeout = d
+	}
+	// base_url overrides the upstream Generative Language API host. The
+	// model path "/models/<model>:generateContent" is appended at request
+	// time so a single base_url covers every model. Defaults to
+	// https://generativelanguage.googleapis.com/v1beta; tests stand up an
+	// httptest.Server and point at it to exercise the full HTTP path.
+	if u, ok := ctx.Config["base_url"].(string); ok && u != "" {
+		p.baseURL = strings.TrimRight(u, "/")
 	}
 
 	p.client = &http.Client{Timeout: p.timeout}
@@ -162,7 +173,7 @@ func (p *Plugin) search(req *events.SearchRequest) ([]events.SearchResult, error
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", p.model)
+	url := fmt.Sprintf("%s/models/%s:generateContent", p.baseURL, p.model)
 
 	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
 	defer cancel()
