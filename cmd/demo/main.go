@@ -46,6 +46,7 @@ import (
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
 	hitlsynth "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
+	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
 	contextwindowgate "github.com/frankbardon/nexus/plugins/gates/context_window"
 	endlessloopgate "github.com/frankbardon/nexus/plugins/gates/endless_loop"
@@ -64,6 +65,7 @@ import (
 	vectormemory "github.com/frankbardon/nexus/plugins/memory/vector"
 	thinkingobs "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
+	staticplanner "github.com/frankbardon/nexus/plugins/planners/static"
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 	fallbackprovider "github.com/frankbardon/nexus/plugins/providers/fallback"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
@@ -196,8 +198,13 @@ func commonFactories() map[string]func() engine.Plugin {
 		// Recursion-guarded; cache-warmed; fires on before:llm.request.
 		"nexus.router.classifier": classifierrouter.New,
 
-		// ─── Planner ───────────────────────────────────────────────────
+		// ─── Planners ──────────────────────────────────────────────────
+		// dynamic: LLM generates the plan from the user request.
+		// static: plan steps come from YAML — used by the Drafter to
+		//   force a deterministic retrieve→outline→draft→cite pipeline
+		//   for skill-driven deliverables.
 		"nexus.planner.dynamic": dynamicplanner.New,
+		"nexus.planner.static":  staticplanner.New,
 
 		// ─── Skills ────────────────────────────────────────────────────
 		"nexus.skills": skills.New,
@@ -221,6 +228,11 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.gate.tool_filter":      toolfiltergate.New,
 		"nexus.gate.stop_words":       stopwordsgate.New,
 		"nexus.gate.tool_timeout":     tooltimeoutgate.New,
+		// approval_policy (Phase 3): config-driven HITL gate. Match a
+		// tool name → render an approval prompt → wait for the user's
+		// pick. Drafter uses this on file_write so unintended overwrites
+		// require explicit confirmation.
+		"nexus.gate.approval_policy": approvalpolicygate.New,
 	}
 }
 

@@ -9,7 +9,7 @@ the watched folder, the system prompts, and (for the Drafter) the skills.
 |---|---|---|
 | **Librarian** | Curates the KB | RAG ingestion (watch mode), longterm memory, content-safety gate (redact mode), tool-filter gate, capability auto-resolution |
 | **Researcher** | Multi-step research over web + KB | Hybrid retrieval (chromem vector + sqlite_fts BM25 with RRF fusion), search.reranker (local default; Cohere / Jina swap-in), rag/citations validation, per-step model routing via router/classifier, three search.provider options (Brave, Anthropic native, OpenAI native), provider fallback chain, parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates |
-| **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
+| **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), static planner (deterministic 5-step pipeline), approval_policy gate (HITL on file_write), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
 
 All three exercise: desktop shell framework, multi-agent isolation, agent-contributed
 settings + keychain secrets, the chat envelope protocol over `nexus.io.wails`,
