@@ -1,0 +1,145 @@
+# tui recipe — Researcher config under the io/tui transport.
+#
+# Same plugin set as the Wails Researcher (minus io/wails, plus io/tui)
+# so any RAG-side feature you can demo in the desktop app you can also
+# demo in a terminal. API keys come from env vars; no settings UI.
+
+core:
+  log_level: warn  # quiet for terminal use
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 8192
+      - provider: nexus.llm.openai
+        model: gpt-4o
+        max_tokens: 8192
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+
+capabilities:
+  search.provider: nexus.search.brave
+  search.reranker: nexus.rag.reranker.local
+
+plugins:
+  active:
+    # Transport: terminal UI (the whole point of this recipe).
+    - nexus.io.tui
+
+    # LLM providers + fallback chain.
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.provider.fallback
+
+    # Agent core
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # RAG showroom — same as the Wails Researcher.
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.vectorstore.sqlite_fts
+    - nexus.rag.hybrid
+    - nexus.rag.citations
+    - nexus.rag.reranker.local
+    - nexus.tool.knowledge_search
+
+    # Web research.
+    - nexus.search.brave
+    - nexus.tool.web
+
+    # Memory
+    - nexus.memory.summary_buffer
+    - nexus.memory.vector
+
+    # Cross-cutting
+    - nexus.control.hitl
+    - nexus.system.dynvars
+
+    # Gates
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_timeout
+    - nexus.gate.tool_filter
+
+    # Observability
+    - nexus.observe.thinking
+
+  # API keys via env. The engine's config loader expands ${env:NAME}.
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+  nexus.llm.openai:
+    api_key_env: OPENAI_API_KEY
+  nexus.embeddings.openai:
+    api_key_env: OPENAI_API_KEY
+  nexus.search.brave:
+    api_key_env: BRAVE_API_KEY
+
+  nexus.agent.react:
+    parallel_tools: true
+    max_concurrent: 4
+    system_prompt: |
+      You are a CLI Researcher running in a terminal.
+      Today: {{date}}. OS: {{os}}.
+      Use knowledge_search first, then web_search if KB is thin.
+      Always cite sources.
+
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+  nexus.vectorstore.sqlite_fts:
+    scope: app
+
+  nexus.rag.hybrid:
+    fusion: rrf
+    rrf_k: 60
+    retrieve_k: 40
+    fuse_to: 15
+    embedding_model: text-embedding-3-small
+    reranker:
+      enabled: true
+
+  nexus.rag.reranker.local:
+    min_token_length: 2
+
+  nexus.rag.citations:
+    mode: auto
+    strict: false
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 6
+
+  nexus.memory.summary_buffer:
+    strategy: message_count
+    message_threshold: 40
+    max_recent: 16
+
+  nexus.memory.vector:
+    namespace: memory-tui
+    top_k: 5
+    auto_store_compaction: true
+
+  nexus.system.dynvars:
+    date: true
+    os: true
+
+  nexus.control.hitl:
+    registry:
+      enabled: false  # no persistence in scratch terminal sessions
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+  nexus.gate.tool_timeout:
+    default_timeout: 45s
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - file_read
+      - file_write

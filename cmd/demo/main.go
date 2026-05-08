@@ -37,7 +37,9 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"log"
+	"os"
 
 	"github.com/frankbardon/nexus/pkg/desktop"
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -50,6 +52,7 @@ import (
 	hitlsynth "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 	progressivedisc "github.com/frankbardon/nexus/plugins/discovery/progressive"
 	coheremultimodal "github.com/frankbardon/nexus/plugins/embeddings/cohere_multimodal"
+	mockembeddings "github.com/frankbardon/nexus/plugins/embeddings/mock"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
@@ -63,7 +66,12 @@ import (
 	tokenbudgetgate "github.com/frankbardon/nexus/plugins/gates/token_budget"
 	toolfiltergate "github.com/frankbardon/nexus/plugins/gates/tool_filter"
 	tooltimeoutgate "github.com/frankbardon/nexus/plugins/gates/tool_timeout"
+	browserio "github.com/frankbardon/nexus/plugins/io/browser"
+	oneshotio "github.com/frankbardon/nexus/plugins/io/oneshot"
+	testio "github.com/frankbardon/nexus/plugins/io/test"
+	tuiio "github.com/frankbardon/nexus/plugins/io/tui"
 	wailsio "github.com/frankbardon/nexus/plugins/io/wails"
+	llmbatch "github.com/frankbardon/nexus/plugins/llm/batch"
 	"github.com/frankbardon/nexus/plugins/memory/capped"
 	compactionmemory "github.com/frankbardon/nexus/plugins/memory/compaction"
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
@@ -149,7 +157,18 @@ func commonFactories() map[string]func() engine.Plugin {
 		// nexus.io.wails: bridges the Wails webview JS runtime to the bus.
 		// nexus.agent.react: ReAct loop (think→tool→observe).
 		// nexus.control.cancel: /resume slash command + cancel capability.
-		"nexus.io.wails":           wailsio.New,
+		// IO transports. wails is the desktop/Wails default; the others
+		// are alternative transports used by recipes (Phase 7) so the
+		// same plugin set can run as TUI, HTTP/WS server, or scripted
+		// oneshot without changing factory wiring.
+		"nexus.io.wails":   wailsio.New,
+		"nexus.io.tui":     tuiio.New,
+		"nexus.io.oneshot": oneshotio.New,
+		"nexus.io.browser": browserio.New,
+		// io.test: non-interactive IO used by hermetic recipes
+		// (embeddings-mock, eval) where the recipe drives the bus
+		// directly and never goes through a chat loop.
+		"nexus.io.test":            testio.New,
 		"nexus.agent.react":        reactagent.New,
 		"nexus.agent.planexec":     planexecagent.New,
 		"nexus.agent.orchestrator": orchestratoragent.New,
@@ -183,6 +202,11 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.llm.gemini":        gemini.New,
 		"nexus.provider.fallback": fallbackprovider.New,
 		"nexus.provider.fanout":   fanoutprovider.New,
+		// llm/batch (Phase 7): cross-provider batch coordinator wrapping
+		// Anthropic Messages Batches and OpenAI Batch APIs. Used by the
+		// `batch-briefs` recipe to queue dozens of brief generations
+		// overnight instead of running them serially.
+		"nexus.llm.batch": llmbatch.New,
 
 		// ─── Memory ────────────────────────────────────────────────────
 		// capped/summary_buffer/longterm/vector are the four "history"
@@ -222,8 +246,10 @@ func commonFactories() map[string]func() engine.Plugin {
 		// embeddings.openai is the default text embedder. cohere_multimodal
 		// is a separate embeddings.provider — it embeds images alongside
 		// text and is used by the Multimodal Reader agent (Phase 6).
+		// embeddings.mock is for CI / hermetic recipe testing (Phase 7).
 		"nexus.embeddings.openai":            openaiembeddings.New,
 		"nexus.embeddings.cohere_multimodal": coheremultimodal.New,
+		"nexus.embeddings.mock":              mockembeddings.New,
 		"nexus.vectorstore.chromem":          chromemvector.New,
 		"nexus.vectorstore.sqlite_fts":       sqliteftsvector.New,
 		"nexus.rag.ingest":                   ragingest.New,
@@ -316,7 +342,36 @@ func commonFactories() map[string]func() engine.Plugin {
 	}
 }
 
+// main dispatches between two operating modes based on argv:
+//
+//	cmd/demo                 → launch the Wails desktop app (default)
+//	cmd/demo recipe <name>   → run a non-interactive showcase recipe
+//
+// Recipe mode reuses the same plugin factories the desktop app uses, so
+// any plugin reachable from one mode is reachable from the other. The
+// embedded webview assets are still in the binary in recipe mode but
+// never loaded (Wails isn't initialized).
+//
+// This single-binary, two-mode pattern is documented in the showcase
+// roadmap: it lets the demo cover plugins that don't fit a chat UI
+// (batch jobs, eval golden traces, voice IO, OTel exports) without
+// shipping a second binary or splitting build tags.
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "recipe" {
+		// "recipe" subcommand. argv[2] is the recipe name; argv[3:] is
+		// passed through. runRecipe owns its own context + signal
+		// handling so it doesn't fight the Wails event loop.
+		if len(os.Args) < 3 {
+			printRecipeHelp()
+			os.Exit(2)
+		}
+		if err := runRecipe(os.Args[2], os.Args[3:]); err != nil {
+			fmt.Fprintf(os.Stderr, "recipe %s: %v\n", os.Args[2], err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := desktop.Run(&desktop.Shell{
 		Title:  "Nexus Compete",
 		Width:  1200,

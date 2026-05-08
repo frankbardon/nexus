@@ -272,6 +272,35 @@ If you want to read the demo to understand a specific Nexus feature:
 | Memory hierarchy (capped + summary_buffer + longterm + vector all in use) | each `config-*.yaml` plus `commonFactories()` in [main.go](main.go) |
 | Chat envelope protocol (frontend side) | [frontend/dist/index.html](frontend/dist/index.html) — `chatView()` and `createBus()` |
 
+## CLI recipes
+
+`cmd/demo` doubles as a CLI when invoked with the `recipe` subcommand.
+Recipes are non-interactive scenarios that exercise plugins which don't
+fit a chat UI — batch jobs, alternative IO transports, eval golden
+traces, telemetry exports, voice loops, etc. They reuse the same
+plugin factories the Wails desktop app uses.
+
+```bash
+cmd/demo                          # launch the desktop app (default)
+cmd/demo recipe                   # list available recipes
+cmd/demo recipe embeddings-mock   # run the named recipe
+```
+
+Phase 7 ships these recipes:
+
+| Recipe | What it shows |
+|---|---|
+| `embeddings-mock` | `embeddings/mock` + chromem ingest pipeline; deterministic, no API key, CI-safe |
+| `tui` | `io/tui` transport against the Researcher RAG showroom; same plugin set as the Wails Researcher, terminal interaction |
+| `browser-ui` | `io/browser` HTTP/WS transport (default `127.0.0.1:8889`) — a no-Wails fallback for the Researcher |
+| `batch-briefs` | `llm/batch` against Anthropic's Messages Batches API; submits N brief-generation requests, prints the batch ID, exits (real batches take 1+ hour to complete; state persists to `~/.nexus/batches`) |
+
+Future phases add `eval`, `otel-trace`, `voice`, and `fanout-vote`.
+
+API keys for recipes come from environment variables (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `BRAVE_API_KEY`) — recipes don't read the desktop
+app's keychain settings.
+
 ## Differences from `cmd/desktop`
 
 - Three agents instead of two; all conversational ReAct, no custom domain plugins.

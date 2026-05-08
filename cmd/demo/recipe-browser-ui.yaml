@@ -1,0 +1,130 @@
+# browser-ui recipe — Researcher config under the io/browser transport.
+#
+# Same Researcher RAG showroom as the Wails app and the TUI recipe.
+# Demonstrates that the io/* transport choice is config-only.
+#
+# Default bind 127.0.0.1:8889. Override via env vars NEXUS_BROWSER_HOST
+# / NEXUS_BROWSER_PORT.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 8192
+      - provider: nexus.llm.openai
+        model: gpt-4o
+        max_tokens: 8192
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+
+capabilities:
+  search.provider: nexus.search.brave
+  search.reranker: nexus.rag.reranker.local
+
+plugins:
+  active:
+    - nexus.io.browser
+
+    - nexus.llm.anthropic
+    - nexus.llm.openai
+    - nexus.provider.fallback
+
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    - nexus.embeddings.openai
+    - nexus.vectorstore.chromem
+    - nexus.vectorstore.sqlite_fts
+    - nexus.rag.hybrid
+    - nexus.rag.citations
+    - nexus.rag.reranker.local
+    - nexus.tool.knowledge_search
+
+    - nexus.search.brave
+    - nexus.tool.web
+
+    - nexus.memory.summary_buffer
+
+    - nexus.control.hitl
+    - nexus.system.dynvars
+
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_timeout
+    - nexus.gate.tool_filter
+
+    - nexus.observe.thinking
+
+  nexus.io.browser:
+    host: "127.0.0.1"
+    port: 8889
+    open_browser: true
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+  nexus.llm.openai:
+    api_key_env: OPENAI_API_KEY
+  nexus.embeddings.openai:
+    api_key_env: OPENAI_API_KEY
+  nexus.search.brave:
+    api_key_env: BRAVE_API_KEY
+
+  nexus.agent.react:
+    parallel_tools: true
+    max_concurrent: 4
+    system_prompt: |
+      You are a Researcher running under the browser transport.
+      Today: {{date}}.
+      Use knowledge_search first, web_search second, cite sources.
+
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors
+  nexus.vectorstore.sqlite_fts:
+    scope: app
+
+  nexus.rag.hybrid:
+    fusion: rrf
+    retrieve_k: 40
+    fuse_to: 15
+    embedding_model: text-embedding-3-small
+    reranker:
+      enabled: true
+
+  nexus.rag.reranker.local: {}
+  nexus.rag.citations:
+    mode: auto
+
+  nexus.tool.knowledge_search:
+    namespaces: [compete-kb]
+    default_namespaces: [compete-kb]
+    top_k: 6
+
+  nexus.memory.summary_buffer:
+    strategy: message_count
+    message_threshold: 40
+    max_recent: 16
+
+  nexus.system.dynvars:
+    date: true
+
+  nexus.control.hitl:
+    registry:
+      enabled: false
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+  nexus.gate.tool_timeout:
+    default_timeout: 45s
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - file_read
+      - file_write
