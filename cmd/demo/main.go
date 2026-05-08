@@ -67,8 +67,16 @@ import (
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
 	fallbackprovider "github.com/frankbardon/nexus/plugins/providers/fallback"
 	"github.com/frankbardon/nexus/plugins/providers/openai"
+	ragcitations "github.com/frankbardon/nexus/plugins/rag/citations"
+	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
 	ragingest "github.com/frankbardon/nexus/plugins/rag/ingest"
+	rerankercohere "github.com/frankbardon/nexus/plugins/rag/reranker/cohere"
+	rerankerjina "github.com/frankbardon/nexus/plugins/rag/reranker/jina"
+	rerankerlocal "github.com/frankbardon/nexus/plugins/rag/reranker/local"
+	classifierrouter "github.com/frankbardon/nexus/plugins/router/classifier"
+	anthropicnativesearch "github.com/frankbardon/nexus/plugins/search/anthropic_native"
 	bravesearch "github.com/frankbardon/nexus/plugins/search/brave"
+	openainativesearch "github.com/frankbardon/nexus/plugins/search/openai_native"
 	"github.com/frankbardon/nexus/plugins/skills"
 	dynvarsplugin "github.com/frankbardon/nexus/plugins/system/dynvars"
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
@@ -76,6 +84,7 @@ import (
 	knowledgesearch "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	webtool "github.com/frankbardon/nexus/plugins/tools/web"
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
+	sqliteftsvector "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
 )
 
 //go:embed all:frontend/dist
@@ -145,10 +154,25 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.memory.vector":         vectormemory.New,
 
 		// ─── RAG primitives + consumers ────────────────────────────────
-		"nexus.embeddings.openai":     openaiembeddings.New,
-		"nexus.vectorstore.chromem":   chromemvector.New,
-		"nexus.rag.ingest":            ragingest.New,
-		"nexus.tool.knowledge_search": knowledgesearch.New,
+		// chromem (vector.store) + sqlite_fts (search.lexical) + rag/hybrid
+		// (search.hybrid orchestrator) compose into a hybrid retrieval
+		// stack. knowledge_search auto-detects search.hybrid and routes
+		// queries through it; rag/ingest auto-dual-writes to sqlite_fts
+		// when the lexical capability is active. Rerankers (local/cohere/
+		// jina) plug in via the search.reranker capability — pin the one
+		// you want under `capabilities` in the agent's YAML. citations
+		// validates `<cite/>` tags or Anthropic native Citations against
+		// rag.retrieved before the user-visible response is emitted.
+		"nexus.embeddings.openai":      openaiembeddings.New,
+		"nexus.vectorstore.chromem":    chromemvector.New,
+		"nexus.vectorstore.sqlite_fts": sqliteftsvector.New,
+		"nexus.rag.ingest":             ragingest.New,
+		"nexus.rag.hybrid":             raghybrid.New,
+		"nexus.rag.citations":          ragcitations.New,
+		"nexus.rag.reranker.local":     rerankerlocal.New,
+		"nexus.rag.reranker.cohere":    rerankercohere.New,
+		"nexus.rag.reranker.jina":      rerankerjina.New,
+		"nexus.tool.knowledge_search":  knowledgesearch.New,
 
 		// ─── Tools ─────────────────────────────────────────────────────
 		"nexus.tool.file":    fileio.New,
@@ -156,7 +180,21 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.tool.web":     webtool.New,
 
 		// ─── Search providers (search.provider capability) ─────────────
-		"nexus.search.brave": bravesearch.New,
+		// Brave is the default external search backend. The two native
+		// providers (anthropic_native / openai_native) wrap each LLM
+		// vendor's server-side web_search tool — useful as fallbacks when
+		// no Brave key is configured, or to experiment with provider-side
+		// search quality. Capability resolution picks one; pin via
+		// `capabilities.search.provider:` in YAML.
+		"nexus.search.brave":            bravesearch.New,
+		"nexus.search.anthropic_native": anthropicnativesearch.New,
+		"nexus.search.openai_native":    openainativesearch.New,
+
+		// ─── Routers ───────────────────────────────────────────────────
+		// classifier: per-step LLM-judge that picks the cheapest model
+		// from a candidate list capable of answering the prompt.
+		// Recursion-guarded; cache-warmed; fires on before:llm.request.
+		"nexus.router.classifier": classifierrouter.New,
 
 		// ─── Planner ───────────────────────────────────────────────────
 		"nexus.planner.dynamic": dynamicplanner.New,
@@ -230,10 +268,16 @@ func librarianAgent() desktop.Agent {
 }
 
 func researcherAgent() desktop.Agent {
+	// Researcher is the demo's "RAG showroom" — it ships configured for
+	// hybrid retrieval (vector + lexical) with a free local reranker by
+	// default. Cohere and Jina rerankers are loaded as factories and can
+	// be swapped in by editing `capabilities.search.reranker:` in the
+	// YAML and providing a key here. Both keys are optional — the demo
+	// runs fine without them.
 	return desktop.Agent{
 		ID:          "researcher",
 		Name:        "Researcher",
-		Description: "Multi-step research across web + KB",
+		Description: "Multi-step research across web + KB (hybrid retrieval, citations)",
 		Icon:        "fa-solid fa-magnifying-glass-chart",
 		ConfigYAML:  researcherConfig,
 		Factories:   commonFactories(),
@@ -243,10 +287,26 @@ func researcherAgent() desktop.Agent {
 			{
 				Key:         "brave_api_key",
 				Display:     "Brave Search API Key",
-				Description: "Required for web search. Free tier at https://brave.com/search/api/.",
+				Description: "Required for web search via Brave. Free tier: https://brave.com/search/api/. To swap to Anthropic or OpenAI native search, edit capabilities.search.provider in config-researcher.yaml.",
 				Type:        desktop.FieldString,
 				Secret:      true,
 				Required:    true,
+			},
+			{
+				Key:         "cohere_api_key",
+				Display:     "Cohere API Key (optional)",
+				Description: "Optional: enables Cohere Rerank v3.5 as the search.reranker. Free trial: https://cohere.com/. Set capabilities.search.reranker to nexus.rag.reranker.cohere in YAML to activate.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    false,
+			},
+			{
+				Key:         "jina_api_key",
+				Display:     "Jina API Key (optional)",
+				Description: "Optional: enables Jina Reranker v2 as the search.reranker. Free tier: https://jina.ai/reranker. Set capabilities.search.reranker to nexus.rag.reranker.jina in YAML to activate.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    false,
 			},
 		},
 	}

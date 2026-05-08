@@ -55,9 +55,16 @@ plugins:
     - nexus.memory.capped
     - nexus.memory.longterm
 
-    # RAG primitives — chromem path is shared with researcher + drafter
+    # RAG primitives — chromem path is shared with researcher + drafter.
+    # sqlite_fts is configured with scope=app (see config below) so the
+    # FTS5 db lives at ~/.nexus/plugins/nexus.vectorstore.sqlite_fts/store.db
+    # and is reachable from any agent running in this app. rag/ingest
+    # auto-detects the search.lexical capability and dual-writes each
+    # chunk into the lexical index alongside the vector upsert; the
+    # Researcher then reads the same DB at boot.
     - nexus.embeddings.openai
     - nexus.vectorstore.chromem
+    - nexus.vectorstore.sqlite_fts
     - nexus.rag.ingest
 
     # Tools the Librarian is allowed to call
@@ -126,6 +133,15 @@ plugins:
   nexus.vectorstore.chromem:
     path: ~/.nexus/demo/vectors
     compress: false
+
+  # sqlite_fts at app scope means a single FTS5 db shared across every
+  # agent in this app. The Librarian writes during ingest; Researcher
+  # reads during hybrid retrieval. Unlike chromem (which loads a snapshot
+  # at boot per engine), sqlite_fts uses the modernc.org/sqlite driver
+  # with file locking — concurrent reads from another engine see writes
+  # immediately on commit.
+  nexus.vectorstore.sqlite_fts:
+    scope: app
 
   nexus.rag.ingest:
     chunker:

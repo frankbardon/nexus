@@ -1,15 +1,27 @@
 # Researcher — multi-step research across web + KB.
 #
-# Surface area exercised:
-#   - Provider fallback (Anthropic primary, OpenAI fallback) via core.models chain
+# This config is the canonical "production-grade RAG" example in the demo.
+# It composes:
+#
+#   - Hybrid retrieval (vector + lexical with RRF fusion)
+#       chromem      → vector.store
+#       sqlite_fts   → search.lexical
+#       rag/hybrid   → search.hybrid orchestrator (knowledge_search auto-routes)
+#       reranker/local → search.reranker (free, pure Go; cohere/jina swap-in)
+#   - Citation validation (rag/citations)
+#   - Per-step model routing (router/classifier picks haiku/sonnet/opus)
+#   - Provider fallback chain (anthropic primary, openai fallback)
+#   - Three search.provider options: Brave (default), anthropic_native,
+#     openai_native — swap by editing `capabilities.search.provider:`
+#
+# Other surface area still exercised here:
 #   - Parallel tool dispatch (parallel_tools + max_concurrent)
 #   - Dynamic planner with auto approval mode
 #   - Summary-buffer memory (auto-compaction for long research sessions)
 #   - Vector memory (semantic recall across sessions)
-#   - Web tools (web_search via Brave + web_fetch)
-#   - Knowledge search over Librarian's KB (read-only)
+#   - Web tools (web_search + web_fetch)
 #   - Gates: rate_limiter, prompt_injection, token_budget, context_window, endless_loop
-#   - search.provider capability resolution (Brave)
+#   - Phase 1 cross-cutting: hitl ask_user, dynvars, stop_words, tool_timeout
 
 core:
   log_level: info
@@ -35,10 +47,19 @@ core:
     retention: 30d
     id_format: datetime_short
 
-# Pin Brave as the search.provider explicitly so the planner emits the
-# right tool spec without needing the alphabetical-fallback warning.
+# Capability pins. Each pin tells the engine "when multiple plugins
+# advertise this capability, prefer this one" — without this the engine
+# falls back to alphabetical order with a boot-time warning.
+#
+# search.provider — Brave is the default. To swap to a vendor-native
+#   provider (no extra API key beyond the LLM provider's own key), change
+#   the value to `nexus.search.anthropic_native` or `nexus.search.openai_native`.
+# search.reranker — local TF-IDF is the default (zero deps, zero cost).
+#   Swap to `nexus.rag.reranker.cohere` or `nexus.rag.reranker.jina` after
+#   filling in the corresponding API key in agent settings.
 capabilities:
   search.provider: nexus.search.brave
+  search.reranker: nexus.rag.reranker.local
 
 plugins:
   active:
@@ -71,14 +92,42 @@ plugins:
     - nexus.memory.summary_buffer
     - nexus.memory.vector
 
-    # RAG primitives — read-only from the perspective of this agent.
+    # ─── RAG showroom (Phase 2) ────────────────────────────────────
+    # Hybrid retrieval composes three primitives:
+    #   embeddings.openai → embeddings.provider capability
+    #   chromem           → vector.store capability
+    #   sqlite_fts        → search.lexical capability (BM25 over FTS5)
+    #   rag/hybrid        → search.hybrid capability; knowledge_search
+    #                       auto-detects this and emits hybrid.query
+    #                       instead of vector.query.
+    # The fused result list optionally goes through a reranker — local
+    # is free and active by default; cohere/jina are factories ready to
+    # swap in by editing `capabilities.search.reranker` plus the
+    # corresponding api_key_env setting.
+    # rag/citations validates `<cite/>` tags emitted by the LLM against
+    # the rag.retrieved chunks before the user sees the response.
     - nexus.embeddings.openai
     - nexus.vectorstore.chromem
+    - nexus.vectorstore.sqlite_fts
+    - nexus.rag.hybrid
+    - nexus.rag.citations
+    - nexus.rag.reranker.local
     - nexus.tool.knowledge_search
 
-    # Web research
+    # Web research. All three search.provider implementations are loaded
+    # so the user can swap by editing capabilities.search.provider above
+    # without touching active list. brave needs an API key; native
+    # providers reuse the existing LLM provider keys.
     - nexus.search.brave
+    - nexus.search.anthropic_native
+    - nexus.search.openai_native
     - nexus.tool.web
+
+    # ─── Per-step model routing (Phase 2) ──────────────────────────
+    # classifier picks the cheapest model that can answer this turn's
+    # prompt. The classifier itself runs on a cheap model (haiku) so
+    # the routing tax is small.
+    - nexus.router.classifier
 
     # Planning
     - nexus.planner.dynamic
@@ -207,6 +256,93 @@ plugins:
   nexus.tool.web:
     # Use the search.provider capability (resolves to Brave per `capabilities`
     # block above). web_fetch uses go-readability internally.
+
+  # ─── Phase 2 RAG showroom plugin configs ─────────────────────────────
+
+  # sqlite_fts: BM25 lexical index. App scope = a single FTS5 db shared
+  # across every agent in this app, located at
+  # ~/.nexus/plugins/nexus.vectorstore.sqlite_fts/store.db. The Librarian
+  # writes during rag/ingest dual-write; Researcher reads on
+  # search.lexical queries dispatched by rag/hybrid. Unlike chromem,
+  # sqlite_fts uses real DB file locking so writes from a sibling engine
+  # are visible immediately, removing the snapshot-at-boot caveat that
+  # the chromem store still has.
+  nexus.vectorstore.sqlite_fts:
+    scope: app
+
+  # rag/hybrid: RRF fusion is the default (weight-free, robust). `weighted`
+  # is available if you want to tilt toward vector or lexical based on
+  # query type. retrieve_k=50 pulls 50 candidates from each retriever;
+  # fuse_to=20 keeps the top 20 after fusion (and reranking, when on).
+  nexus.rag.hybrid:
+    fusion: rrf
+    rrf_k: 60
+    retrieve_k: 50
+    fuse_to: 20
+    embedding_model: text-embedding-3-small
+    reranker:
+      enabled: true
+
+  # reranker/local: pure Go TF-IDF cosine similarity. No network, no key.
+  # Quality is a baseline — Cohere/Jina rerankers are strictly better but
+  # cost money. Swap by changing `capabilities.search.reranker:` above
+  # and adding the api_key_env setting.
+  nexus.rag.reranker.local:
+    min_token_length: 2
+    disable_stopwords: false
+
+  # reranker/cohere & jina: ready to use. Provide an API key via the
+  # corresponding settings field (cohere_api_key / jina_api_key in
+  # main.go) and flip the capability pin above.
+  nexus.rag.reranker.cohere:
+    api_key: "${cohere_api_key}"
+    model: rerank-v3.5
+  nexus.rag.reranker.jina:
+    api_key: "${jina_api_key}"
+    model: jina-reranker-v2-base-multilingual
+
+  # rag/citations: parse <cite source="..." chunk="N"/> tags out of LLM
+  # responses, validate against the rag.retrieved set for the same turn,
+  # strip tags from user-visible text, emit structured llm.response.cited.
+  # `auto` mode uses Anthropic's native Citations[] field when present
+  # (Claude 4 with citations enabled), falls back to tag parsing
+  # otherwise. `strict: false` warns on hallucinated citations rather
+  # than rejecting the response — flip to true for production.
+  nexus.rag.citations:
+    mode: auto
+    strict: false
+
+  # ─── Search.provider alternatives (Phase 2) ──────────────────────────
+  # Brave already configured above. Native providers reuse the existing
+  # shell.* keys so no new settings field needed for the swap.
+  nexus.search.anthropic_native:
+    api_key: "${shell.anthropic_api_key}"
+    model: claude-sonnet-4-6
+    timeout: 30s
+  nexus.search.openai_native:
+    api_key: "${shell.openai_api_key}"
+    model: gpt-4o
+    timeout: 30s
+
+  # ─── Per-step model routing (Phase 2) ────────────────────────────────
+  # The classifier consults a cheap model (haiku) per turn to pick the
+  # cheapest candidate that can answer. Because Researcher's `balanced`
+  # role is a fallback chain (anthropic → openai), the classifier's
+  # rewrite of Model only sticks for the first attempt; if Anthropic
+  # fails and fallback retries to OpenAI, the chain entry's model wins.
+  # That's the right outcome — these are different demos exercised
+  # independently.
+  nexus.router.classifier:
+    classifier_model: claude-haiku-4-5-20251001
+    candidates:
+      - claude-haiku-4-5-20251001
+      - claude-sonnet-4-6
+      - claude-opus-4-7
+    fallback: claude-sonnet-4-6
+    prefix_chars: 256
+    latency_budget_ms: 800
+    cache_classification: true
+    cache_max_entries: 1024
 
   # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
 

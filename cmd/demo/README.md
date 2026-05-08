@@ -8,7 +8,7 @@ the watched folder, the system prompts, and (for the Drafter) the skills.
 | Agent | Role | What it shows off |
 |---|---|---|
 | **Librarian** | Curates the KB | RAG ingestion (watch mode), longterm memory, content-safety gate (redact mode), tool-filter gate, capability auto-resolution |
-| **Researcher** | Multi-step research over web + KB | Provider fallback chain (Anthropic→OpenAI), parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates, `search.provider` capability pinning |
+| **Researcher** | Multi-step research over web + KB | Hybrid retrieval (chromem vector + sqlite_fts BM25 with RRF fusion), search.reranker (local default; Cohere / Jina swap-in), rag/citations validation, per-step model routing via router/classifier, three search.provider options (Brave, Anthropic native, OpenAI native), provider fallback chain, parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates |
 | **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
 
 All three exercise: desktop shell framework, multi-agent isolation, agent-contributed
@@ -220,7 +220,9 @@ On first launch the app redirects you to Settings if anything required is missin
 |---|---|---|
 | `shell.anthropic_api_key` | All three agents (Claude Sonnet) | OS keychain |
 | `shell.openai_api_key` | All agents (embeddings) + Researcher fallback | OS keychain |
-| `researcher.brave_api_key` | Researcher (web_search) | OS keychain |
+| `researcher.brave_api_key` | Researcher (web_search via Brave; can swap to vendor-native search) | OS keychain |
+| `researcher.cohere_api_key` *(optional)* | Researcher (Cohere Rerank v3.5 — set `capabilities.search.reranker: nexus.rag.reranker.cohere` to use) | OS keychain |
+| `researcher.jina_api_key` *(optional)* | Researcher (Jina Reranker v2 — set `capabilities.search.reranker: nexus.rag.reranker.jina` to use) | OS keychain |
 | `librarian.input_dir` | Librarian (watched folder for ingest) | Plaintext setting |
 | `drafter.output_dir` | Drafter (where briefs are saved) | Plaintext setting |
 
