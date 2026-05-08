@@ -41,10 +41,12 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/desktop"
 	"github.com/frankbardon/nexus/pkg/engine"
+	planexecagent "github.com/frankbardon/nexus/plugins/agents/planexec"
 	reactagent "github.com/frankbardon/nexus/plugins/agents/react"
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
 	hitlsynth "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
+	progressivedisc "github.com/frankbardon/nexus/plugins/discovery/progressive"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
@@ -62,6 +64,8 @@ import (
 	"github.com/frankbardon/nexus/plugins/memory/capped"
 	longtermplugin "github.com/frankbardon/nexus/plugins/memory/longterm"
 	summarybuffer "github.com/frankbardon/nexus/plugins/memory/summary_buffer"
+	tooldefpruner "github.com/frankbardon/nexus/plugins/memory/tool_def_pruner"
+	toolresultclear "github.com/frankbardon/nexus/plugins/memory/tool_result_clear"
 	vectormemory "github.com/frankbardon/nexus/plugins/memory/vector"
 	thinkingobs "github.com/frankbardon/nexus/plugins/observe/thinking"
 	dynamicplanner "github.com/frankbardon/nexus/plugins/planners/dynamic"
@@ -82,8 +86,11 @@ import (
 	"github.com/frankbardon/nexus/plugins/skills"
 	dynvarsplugin "github.com/frankbardon/nexus/plugins/system/dynvars"
 	catalogplugin "github.com/frankbardon/nexus/plugins/tools/catalog"
+	codeexectool "github.com/frankbardon/nexus/plugins/tools/codeexec"
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
 	knowledgesearch "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
+	openertool "github.com/frankbardon/nexus/plugins/tools/opener"
+	shelltool "github.com/frankbardon/nexus/plugins/tools/shell"
 	webtool "github.com/frankbardon/nexus/plugins/tools/web"
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
 	sqliteftsvector "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
@@ -100,6 +107,9 @@ var researcherConfig []byte
 
 //go:embed config-drafter.yaml
 var drafterConfig []byte
+
+//go:embed config-engineer.yaml
+var engineerConfig []byte
 
 // commonFactories returns the plugin factories shared by every demo agent.
 //
@@ -125,6 +135,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		// nexus.control.cancel: /resume slash command + cancel capability.
 		"nexus.io.wails":       wailsio.New,
 		"nexus.agent.react":    reactagent.New,
+		"nexus.agent.planexec": planexecagent.New,
 		"nexus.control.cancel": cancelplugin.New,
 
 		// ─── Cross-cutting human-in-the-loop (Phase 1) ─────────────────
@@ -150,10 +161,19 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.provider.fallback": fallbackprovider.New,
 
 		// ─── Memory ────────────────────────────────────────────────────
-		"nexus.memory.capped":         capped.New,
-		"nexus.memory.summary_buffer": summarybuffer.New,
-		"nexus.memory.longterm":       longtermplugin.New,
-		"nexus.memory.vector":         vectormemory.New,
+		// capped/summary_buffer/longterm/vector are the four "history"
+		// strategies. tool_result_clear and tool_def_pruner are
+		// curators that run alongside any of them — they don't store
+		// state themselves; they trim already-stored context based on
+		// age and usage. Engineer uses both because long shell sessions
+		// tend to accumulate huge stdout transcripts that would
+		// otherwise blow the context window.
+		"nexus.memory.capped":            capped.New,
+		"nexus.memory.summary_buffer":    summarybuffer.New,
+		"nexus.memory.longterm":          longtermplugin.New,
+		"nexus.memory.vector":            vectormemory.New,
+		"nexus.memory.tool_result_clear": toolresultclear.New,
+		"nexus.memory.tool_def_pruner":   tooldefpruner.New,
 
 		// ─── RAG primitives + consumers ────────────────────────────────
 		// chromem (vector.store) + sqlite_fts (search.lexical) + rag/hybrid
@@ -177,9 +197,16 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.tool.knowledge_search":  knowledgesearch.New,
 
 		// ─── Tools ─────────────────────────────────────────────────────
-		"nexus.tool.file":    fileio.New,
-		"nexus.tool.catalog": catalogplugin.New,
-		"nexus.tool.web":     webtool.New,
+		// shell/code_exec/opener (Phase 4) are gated behind approval_policy
+		// + tool_timeout when active. They are loaded as factories here so
+		// any agent that lists them in `plugins.active` gets them; agents
+		// that don't (Librarian/Researcher/Drafter) never instantiate them.
+		"nexus.tool.file":      fileio.New,
+		"nexus.tool.catalog":   catalogplugin.New,
+		"nexus.tool.web":       webtool.New,
+		"nexus.tool.shell":     shelltool.New,
+		"nexus.tool.code_exec": codeexectool.New,
+		"nexus.tool.opener":    openertool.New,
 
 		// ─── Search providers (search.provider capability) ─────────────
 		// Brave is the default external search backend. The two native
@@ -197,6 +224,13 @@ func commonFactories() map[string]func() engine.Plugin {
 		// from a candidate list capable of answering the prompt.
 		// Recursion-guarded; cache-warmed; fires on before:llm.request.
 		"nexus.router.classifier": classifierrouter.New,
+
+		// ─── Discovery ─────────────────────────────────────────────────
+		// progressive: hierarchical tool discovery — the LLM only sees
+		// class summaries up front; it drills into a class via a
+		// "discover" meta-tool to expose the full set. Cuts tool-spec
+		// token cost on agents with many tools (Engineer, Orchestrator).
+		"nexus.discovery.progressive": progressivedisc.New,
 
 		// ─── Planners ──────────────────────────────────────────────────
 		// dynamic: LLM generates the plan from the user request.
@@ -251,6 +285,7 @@ func main() {
 			librarianAgent(),
 			researcherAgent(),
 			drafterAgent(),
+			engineerAgent(),
 		},
 	}); err != nil {
 		log.Fatalf("wails run: %v", err)
@@ -319,6 +354,32 @@ func researcherAgent() desktop.Agent {
 				Type:        desktop.FieldString,
 				Secret:      true,
 				Required:    false,
+			},
+		},
+	}
+}
+
+// engineerAgent — agent-does-work-on-disk. Runs shell commands and Go
+// code in a sandbox, plans before acting, and gates every dangerous
+// operation behind an approval prompt. Compare with Drafter (skill-driven
+// publishing) and Researcher (read-only investigation): the Engineer is
+// the side of the demo that actually mutates the filesystem.
+func engineerAgent() desktop.Agent {
+	return desktop.Agent{
+		ID:          "engineer",
+		Name:        "Engineer",
+		Description: "Plan-then-execute on shell + Go interpreter (HITL approval per call)",
+		Icon:        "fa-solid fa-screwdriver-wrench",
+		ConfigYAML:  engineerConfig,
+		Factories:   commonFactories(),
+		Settings: []desktop.SettingsField{
+			sharedAnthropicKey(),
+			{
+				Key:         "workspace_dir",
+				Display:     "Workspace folder",
+				Description: "Directory the Engineer is allowed to read, write, and run shell commands in. Treat this as a sandbox — pick a fresh folder, not your home directory.",
+				Type:        desktop.FieldPath,
+				Required:    true,
 			},
 		},
 	}

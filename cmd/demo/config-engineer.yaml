@@ -1,0 +1,348 @@
+# Engineer — agent that does work on disk.
+#
+# This config is the canonical "agent that runs shell commands and code"
+# example in the demo. It composes:
+#
+#   - nexus.agent.planexec
+#       Plan-then-execute loop. Compare with Researcher's ReAct loop —
+#       planexec generates a plan up front, optionally requires approval,
+#       then iterates step-by-step. Steps are emitted by whatever planner
+#       plugin is configured (dynamic here).
+#   - nexus.tool.shell
+#       Sandboxed shell execution via the engine's sandbox abstraction.
+#       Allowed-commands list keeps the surface tight; working_dir is
+#       configurable per-session (see settings.workspace_dir).
+#   - nexus.tool.code_exec
+#       Yaegi Go interpreter. Runs Go code without spawning a subprocess.
+#       Net policy = deny by default; allowed-stdlib whitelist enforced.
+#   - nexus.tool.opener
+#       Platform-aware "reveal in finder/browser" — useful for showing
+#       the operator the artifact a step produced.
+#   - nexus.gate.approval_policy
+#       Every shell + code_exec call goes through HITL approval. The
+#       rules block below maps tool name → approval prompt.
+#   - nexus.gate.tool_timeout
+#       Hard upper bound on each tool invocation. Runaway scripts get
+#       killed. Per-tool overrides for slow/fast tools.
+#   - nexus.discovery.progressive
+#       Hierarchical tool exposure. The LLM sees a few class summaries
+#       up front; it drills into a class via the "discover" meta-tool to
+#       reveal full tool defs. Saves prompt tokens on agents with many
+#       tools.
+#   - nexus.memory.tool_result_clear
+#       Curator: drops big stale tool results from history (replaces
+#       them with a marker). Critical for long shell sessions where
+#       stdout would otherwise dominate the context window.
+#   - nexus.memory.tool_def_pruner
+#       Curator: drops tool definitions that haven't been called for N
+#       turns. Cuts the per-turn tool-spec token cost.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  # Engineer uses a single anthropic model — code-aware, decent at
+  # sequencing tool calls. No fallback chain here; failures should
+  # surface to the operator rather than silently rerouting.
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 8192
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # LLM provider
+    - nexus.llm.anthropic
+
+    # Agent: plan-then-execute (NOT react) — the Engineer makes plans
+    # before touching anything risky.
+    - nexus.agent.planexec
+    - nexus.planner.dynamic
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Cross-cutting Phase 1 plumbing — Engineer especially benefits
+    # from hitl since approval_policy uses hitl under the hood.
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
+    # Memory + curators
+    - nexus.memory.capped
+    - nexus.memory.tool_result_clear
+    - nexus.memory.tool_def_pruner
+
+    # Tools — the working set
+    - nexus.tool.shell
+    - nexus.tool.code_exec
+    - nexus.tool.opener
+    - nexus.tool.file
+
+    # Discovery: hierarchical tool exposure
+    - nexus.discovery.progressive
+
+    # Gates — every dangerous tool goes through approval + timeout.
+    - nexus.gate.approval_policy
+    - nexus.gate.tool_timeout
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_filter
+    - nexus.gate.stop_words
+    - nexus.gate.content_safety
+
+    # Observability
+    - nexus.observe.thinking
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+
+  # planexec: plan-then-execute. approval=always means the operator sees
+  # the plan and must accept it before any step executes. Re-plan on
+  # failure: when a step errors, the agent gets one chance to revise the
+  # remaining plan before bailing out.
+  nexus.agent.planexec:
+    approval: always
+    replan_on_failure: true
+    execution_model_role: balanced
+    system_prompt: |
+      You are the Engineer for a developer workbench.
+
+      Today's date: {{date}}
+      Working directory: {{cwd}}
+      Operating system: {{os}}
+      (Variables injected by nexus.system.dynvars at request time.)
+
+      Your job: turn a user request into a small, auditable sequence of
+      shell + Go-interpreter steps that produce an artifact (a file, a
+      report, a verified result).
+
+      How you operate:
+        1. Make a plan first. The plan is shown to the operator. If
+           they reject it, refine and try again.
+        2. Each step's tool call goes through HITL approval. Be precise
+           in step descriptions — the operator approves or denies based
+           on what you say you'll run.
+        3. Prefer the Go interpreter (run_code) for anything that's
+           pure computation. Only drop to shell when you genuinely need
+           a process (build tools, git, etc.).
+        4. After a step runs, summarize what you learned in one or two
+           sentences. The tool_result_clear curator will drop the raw
+           stdout from history; your summary is what the next step
+           sees.
+
+      Hard rules:
+        - Never run destructive commands without an explicit plan-step.
+        - Never `curl | bash` or download-and-execute without approval.
+        - When in doubt, ask_user before acting.
+
+  # planner: same dynamic planner the Researcher uses. The planexec
+  # agent calls plan.request; this plugin returns plan.result with steps.
+  nexus.planner.dynamic:
+    approval: never  # planexec controls the approval flow itself.
+
+  # tool.shell: tight allowlist. The Engineer is a showcase, not a
+  # general-purpose shell. Add more commands as your use case requires.
+  # working_dir is the user-configured workspace setting; sandbox
+  # restricts env vars to a known-safe subset.
+  nexus.tool.shell:
+    working_dir: "${workspace_dir}"
+    timeout: 60s
+    sandbox:
+      env_restrict: true
+      allowed_commands:
+        - ls
+        - cat
+        - head
+        - tail
+        - wc
+        - grep
+        - find
+        - git
+        - go
+        - make
+        - tree
+        - file
+        - stat
+        - which
+        - pwd
+        - echo
+        - date
+
+  # tool.code_exec: Yaegi-host backend (no WASM dependency for the
+  # default demo build). Output capped at 1 MiB to keep history sane.
+  # blob_store inlines small results; large ones go to the per-session
+  # blob store.
+  nexus.tool.code_exec:
+    compiler: yaegi-host
+    timeout_seconds: 30
+    max_output_bytes: 1048576
+    max_workers: 2
+    persist_scripts: true
+    reject_goroutines: false
+    blob_store:
+      byte_budget: 268435456  # 256 MiB session budget
+      inline_threshold: 65536  # 64 KiB inline cutoff
+    sandbox:
+      net:
+        policy: deny
+
+  # tool.opener: 5s subprocess timeout — `open` / `xdg-open` should be
+  # near-instant. open_cmd left empty; the plugin auto-detects platform.
+  nexus.tool.opener:
+    timeout: 5s
+
+  # tool.file: bounded to the workspace. The Engineer can read+write
+  # within workspace_dir but not outside it.
+  nexus.tool.file:
+    base_dir: "${workspace_dir}"
+    allow_external_writes: false
+
+  # discovery/progressive: hybrid scope means a tool stays "discovered"
+  # for the rest of the session once the LLM uses it, but new ones must
+  # be re-discovered each turn. always_include keeps essentials always
+  # visible regardless of class.
+  nexus.discovery.progressive:
+    scope: hybrid
+    idle_prune_turns: 4
+    classless_behavior: include
+    default_depth: class
+    always_include:
+      - ask_user
+      - discover
+
+  # memory/capped: history bound so long Engineer sessions don't run
+  # away. tool_result_clear + tool_def_pruner trim the in-bound parts.
+  nexus.memory.capped:
+    max_messages: 80
+    persist: true
+
+  # tool_result_clear: drop tool results bigger than 4 KiB and older
+  # than 6 turns. Replace-with-envelope keeps the tool_use/tool_result
+  # pairing intact (Anthropic's API requires it) while jettisoning the
+  # body. error / user_question results are preserved indefinitely.
+  nexus.memory.tool_result_clear:
+    enabled: true
+    age_turns: 6
+    size_bytes_threshold: 4096
+    drop_strategy: replace_with_envelope
+    preserve_recent_kinds:
+      - error
+      - user_question
+
+  # tool_def_pruner: when a tool isn't called for 8 turns, drop its
+  # definition from the per-turn tool list. The discovery plugin can
+  # re-introduce it later if the model asks. discover + ask_user are
+  # never pruned (they're how the model recovers).
+  nexus.memory.tool_def_pruner:
+    enabled: true
+    unused_turns_threshold: 8
+    never_prune:
+      - discover
+      - ask_user
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  nexus.system.dynvars:
+    date: true
+    cwd: true
+    os: true
+    session_dir: true
+    time: false
+    timezone: false
+
+  nexus.control.hitl:
+    registry:
+      enabled: true
+
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # ─── Gates ───────────────────────────────────────────────────────────
+
+  # approval_policy: every shell + code_exec invocation pauses for
+  # explicit operator confirmation. file_write also matched (Engineer
+  # writes artifacts during plans). The synthesizer renders the prompt
+  # from the action metadata so the operator sees exactly what's about
+  # to run.
+  nexus.gate.approval_policy:
+    rules:
+      - match:
+          tool: shell
+        mode: choices
+        choices:
+          - id: allow_once
+            label: "Run this command once"
+          - id: deny
+            label: "Skip — don't run"
+        default_choice: allow_once
+        prompt_synthesizer: hitl.prompt_synthesizer
+        timeout: 10m
+      - match:
+          tool: run_code
+        mode: choices
+        choices:
+          - id: allow_once
+            label: "Run this code"
+          - id: deny
+            label: "Skip — don't run"
+        default_choice: allow_once
+        prompt_synthesizer: hitl.prompt_synthesizer
+        timeout: 10m
+      - match:
+          tool: file_write
+        mode: choices
+        choices:
+          - id: allow_once
+            label: "Write the file"
+          - id: deny
+            label: "Cancel"
+        default_choice: allow_once
+        prompt: "About to write a file in the workspace. Proceed?"
+        timeout: 5m
+
+  # tool_timeout: per-tool ceilings. shell + run_code get 90s each (the
+  # plugins themselves enforce shorter internal timeouts but this is the
+  # outer kill switch). file_write should be near-instant.
+  nexus.gate.tool_timeout:
+    default_timeout: 30s
+    per_tool:
+      shell: 90s
+      run_code: 90s
+      file_write: 10s
+      file_read: 30s
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+
+  # tool_filter: explicit deny. If you change which tools are in active
+  # above, update this list — Engineer should never have web_search.
+  nexus.gate.tool_filter:
+    exclude:
+      - web_search
+      - web_fetch
+      - knowledge_search
+
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: tool input contained a banned token."
+    words:
+      - "rm -rf /"
+      - "mkfs"
+      - ":(){ :|: & };:"
+
+  nexus.gate.content_safety:
+    action: block
+    check_pii_email: true
+    check_secrets_api_key: true
+    check_secrets_private_key: true

@@ -10,6 +10,7 @@ the watched folder, the system prompts, and (for the Drafter) the skills.
 | **Librarian** | Curates the KB | RAG ingestion (watch mode), longterm memory, content-safety gate (redact mode), tool-filter gate, capability auto-resolution |
 | **Researcher** | Multi-step research over web + KB | Hybrid retrieval (chromem vector + sqlite_fts BM25 with RRF fusion), search.reranker (local default; Cohere / Jina swap-in), rag/citations validation, per-step model routing via router/classifier, three search.provider options (Brave, Anthropic native, OpenAI native), provider fallback chain, parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates |
 | **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), static planner (deterministic 5-step pipeline), approval_policy gate (HITL on file_write), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
+| **Engineer** | Plan-then-execute on shell + Go interpreter | `nexus.agent.planexec` plan-execute loop, `tools/shell` (allowlisted commands, sandboxed env), `tools/code_exec` (Yaegi Go interpreter), `tools/opener`, approval_policy gate per call (HITL via synthesized prompts), tool_timeout per call, discovery/progressive (hierarchical tool exposure), memory/tool_result_clear (drops big stale stdout from history), memory/tool_def_pruner (drops unused tool defs from per-turn list) |
 
 All three exercise: desktop shell framework, multi-agent isolation, agent-contributed
 settings + keychain secrets, the chat envelope protocol over `nexus.io.wails`,
@@ -225,6 +226,7 @@ On first launch the app redirects you to Settings if anything required is missin
 | `researcher.jina_api_key` *(optional)* | Researcher (Jina Reranker v2 — set `capabilities.search.reranker: nexus.rag.reranker.jina` to use) | OS keychain |
 | `librarian.input_dir` | Librarian (watched folder for ingest) | Plaintext setting |
 | `drafter.output_dir` | Drafter (where briefs are saved) | Plaintext setting |
+| `engineer.workspace_dir` | Engineer (sandbox folder for shell + file_write) | Plaintext setting |
 
 Brave's free tier covers the demo: <https://brave.com/search/api/>.
 
