@@ -15,6 +15,11 @@ All three exercise: desktop shell framework, multi-agent isolation, agent-contri
 settings + keychain secrets, the chat envelope protocol over `nexus.io.wails`,
 the observe/logger + observe/thinking observers, and shared vector storage.
 
+**Cross-cutting features (every agent):** human-in-the-loop `ask_user` tool
+(`nexus.control.hitl` + `nexus.control.hitl_synthesizer`), dynamic system-prompt
+variables like `{{date}}` / `{{session_dir}}` (`nexus.system.dynvars`),
+`tool_timeout` safety net, and a `stop_words` banlist tuned per agent.
+
 ## The agents in detail
 
 ### Librarian — knowledge base curator

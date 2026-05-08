@@ -8,6 +8,8 @@
 #   - tool_filter gate (no shell, no web — Librarian is read/ingest only)
 #   - capability auto-resolution: memory.history -> capped, embeddings.provider -> openai,
 #     vector.store -> chromem, control.cancel -> cancel
+#   - Phase 1 cross-cutting: hitl ask_user, dynvars system-prompt vars,
+#     stop_words banlist, tool_timeout safety net
 
 core:
   log_level: info
@@ -39,6 +41,16 @@ plugins:
     - nexus.control.cancel
     - nexus.tool.catalog
 
+    # Cross-cutting Phase 1 plumbing.
+    # hitl + hitl_synthesizer: gives the agent the ask_user tool and lets
+    #   approval gates / memory writes synthesize prompts from action
+    #   metadata rather than hard-coded strings.
+    # dynvars: substitutes {{date}}, {{cwd}}, {{session_dir}} in the
+    #   system_prompt below.
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
     # Memory
     - nexus.memory.capped
     - nexus.memory.longterm
@@ -56,6 +68,11 @@ plugins:
     - nexus.gate.endless_loop
     - nexus.gate.content_safety
     - nexus.gate.tool_filter
+    # Phase 1 cross-cutting gates: stop_words guards against the LLM
+    # emitting forbidden vocab into KB notes; tool_timeout caps any
+    # ingest tool call that hangs (e.g., a slow filesystem read).
+    - nexus.gate.stop_words
+    - nexus.gate.tool_timeout
 
     # Observability
     - nexus.observe.thinking
@@ -67,6 +84,10 @@ plugins:
     system_prompt: |
       You are the Librarian for a competitive-intelligence knowledge base.
 
+      Today's date: {{date}}
+      Active session workspace: {{session_dir}}
+      (These values are injected by nexus.system.dynvars at request time.)
+
       Your responsibilities:
         - Help the user understand what is currently in the "compete-kb" namespace.
         - Use knowledge_search to answer "what do you have on X?" questions.
@@ -75,6 +96,9 @@ plugins:
         - Use memory_read / memory_list to recall those notes between sessions.
         - When the user drops files in your watched folder, they auto-ingest —
           confirm via knowledge_search that the new chunks are queryable.
+        - When you genuinely need a human to disambiguate (e.g., two
+          competitors share a name), call ask_user with a multi-choice
+          prompt rather than guessing.
 
       You CANNOT browse the web or run shell commands. If the user asks you to
       research something new, hand them off to the Researcher agent.
@@ -138,4 +162,53 @@ plugins:
       - shell
       - web_search
       - web_fetch
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  # dynvars: which template variables should be substituted into the
+  # system prompt at request time. The {{date}} / {{session_dir}} markers
+  # in the system_prompt above are replaced before the request hits the
+  # provider. Time/timezone left off intentionally — Librarian sessions
+  # don't need second-precision context.
+  nexus.system.dynvars:
+    date: true
+    session_dir: true
+    cwd: false
+    time: false
+    timezone: false
+    os: false
+
+  # hitl: persistent registry mirrors hitl.requested events to disk so a
+  # /resume after a crash replays them rather than dropping the prompt on
+  # the floor. Default location is the engine's data dir + "hitl".
+  nexus.control.hitl:
+    registry:
+      enabled: true
+
+  # hitl_synthesizer: when an emitter (e.g., approval gate) leaves the
+  # prompt blank, synthesize a brief approval question with the cheap
+  # role. Cache the result so an identical action signature within a
+  # session doesn't pay the LLM cost twice.
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # tool_timeout: any tool call exceeding this default is aborted. The
+  # Librarian's tool surface is small (knowledge_search, file_read,
+  # memory_*); 30s is generous.
+  nexus.gate.tool_timeout:
+    default_timeout: 30s
+    per_tool:
+      # File reads can be slow on network-mounted input_dirs.
+      file_read: 60s
+
+  # stop_words: blocks user messages and tool outputs containing the
+  # listed terms. The Librarian's banlist focuses on accidental leakage
+  # of internal-only product codenames into KB notes.
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: input/output contained a banned term."
+    words:
+      - codename-redacted
+      - internal-only-do-not-share
 

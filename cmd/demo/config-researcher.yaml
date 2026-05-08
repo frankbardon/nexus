@@ -55,6 +55,14 @@ plugins:
     - nexus.control.cancel
     - nexus.tool.catalog
 
+    # Cross-cutting Phase 1 plumbing.
+    # Researcher uses ask_user when the question is ambiguous ("which
+    # Vortex did you mean?") and dynvars to anchor research in today's
+    # date so "the last 30 days" resolves correctly.
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
     # Provider fallback orchestrator (intercepts llm.request when the
     # active model role resolves to a chain).
     - nexus.provider.fallback
@@ -82,6 +90,9 @@ plugins:
     - nexus.gate.token_budget
     - nexus.gate.context_window
     - nexus.gate.tool_filter
+    # Phase 1 cross-cutting gates.
+    - nexus.gate.stop_words
+    - nexus.gate.tool_timeout
 
     # Observability
     - nexus.observe.thinking
@@ -106,11 +117,20 @@ plugins:
     system_prompt: |
       You are the Researcher for a competitive-intelligence team.
 
+      Today's date: {{date}}
+      Operating system: {{os}}
+      (Injected at request time by nexus.system.dynvars. Use "today" as
+      {{date}} when the user asks about recency — "the last 30 days",
+      "since last quarter", etc.)
+
       Your toolkit:
         - knowledge_search → search the curated competitor knowledge base
           (the "compete-kb" namespace, maintained by the Librarian).
         - web_search → fresh web results when KB is missing context.
         - web_fetch → pull the body of a URL when you need full text.
+        - ask_user → call this when a research question is genuinely
+          ambiguous (multiple companies share a name, the user's intent
+          is unclear). Prefer ask_user over guessing.
 
       Workflow expectations:
         1. ALWAYS check knowledge_search FIRST. If the KB already has solid
@@ -187,4 +207,47 @@ plugins:
   nexus.tool.web:
     # Use the search.provider capability (resolves to Brave per `capabilities`
     # block above). web_fetch uses go-readability internally.
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  # dynvars: substitutes the {{date}} / {{os}} markers in the
+  # system_prompt above. Date matters for time-bounded research queries.
+  nexus.system.dynvars:
+    date: true
+    os: true
+    time: false
+    timezone: false
+    cwd: false
+    session_dir: false
+
+  # hitl: same registry-on-disk pattern as the Librarian.
+  nexus.control.hitl:
+    registry:
+      enabled: true
+
+  # hitl_synthesizer: route through the Researcher's balanced role (which
+  # is itself a fallback chain — see core.models above). The synthesizer's
+  # questions are short enough that the chain rarely hits its fallback.
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # tool_timeout: web_fetch can be very slow on heavy pages, so it gets a
+  # longer per-tool override. The default trims runaway calls.
+  nexus.gate.tool_timeout:
+    default_timeout: 45s
+    per_tool:
+      web_fetch: 90s
+      web_search: 30s
+      knowledge_search: 20s
+
+  # stop_words: blocks fetched-page content (and any LLM output) from
+  # carrying forbidden terms — the Researcher pulls live web pages, so
+  # this is the second line of defence behind prompt_injection.
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: a fetched page or LLM output contained a banned term."
+    words:
+      - jailbreak
+      - ignore-all-previous
 

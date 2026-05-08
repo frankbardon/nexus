@@ -40,6 +40,13 @@ plugins:
     - nexus.control.cancel
     - nexus.tool.catalog
 
+    # Cross-cutting Phase 1 plumbing.
+    # Drafter uses ask_user for "should I overwrite this file?" prompts
+    # and dynvars to stamp output filenames with today's date.
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
     # Memory
     - nexus.memory.capped
 
@@ -62,6 +69,9 @@ plugins:
     - nexus.gate.output_length
     - nexus.gate.content_safety
     - nexus.gate.tool_filter
+    # Phase 1 cross-cutting gates.
+    - nexus.gate.stop_words
+    - nexus.gate.tool_timeout
 
     # Observability
     - nexus.observe.thinking
@@ -72,6 +82,11 @@ plugins:
   nexus.agent.react:
     system_prompt: |
       You are the Drafter for a competitive-intelligence team.
+
+      Today's date: {{date}}
+      Output workspace: {{output_dir}}
+      (date injected by nexus.system.dynvars; output_dir is a
+      configured user setting.)
 
       You produce publication-ready deliverables — competitor briefs,
       comparison tables, exec summaries — by composing facts from the
@@ -146,4 +161,45 @@ plugins:
       - ./skills
     trust_project: true
     catalog_in_system_prompt: true
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  # dynvars: stamp today's date into filenames the Drafter writes.
+  nexus.system.dynvars:
+    date: true
+    time: false
+    timezone: false
+    cwd: false
+    session_dir: false
+    os: false
+
+  # hitl: persistent registry so a crashed write-confirmation prompt is
+  # replayed on resume rather than silently lost.
+  nexus.control.hitl:
+    registry:
+      enabled: true
+
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # tool_timeout: file_write should be near-instant; surface anything
+  # that hangs as an explicit failure.
+  nexus.gate.tool_timeout:
+    default_timeout: 30s
+    per_tool:
+      file_write: 10s
+      knowledge_search: 20s
+
+  # stop_words: blocks PII placeholders from leaking into published
+  # briefs (a common LLM tell when the KB is thin and the model
+  # hallucinates a placeholder).
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: brief contained a placeholder term — fill or remove before publishing."
+    words:
+      - "[redacted]"
+      - "[name]"
+      - "lorem ipsum"
+      - "tbd"
 
