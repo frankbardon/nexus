@@ -1,0 +1,246 @@
+# Multimodal Reader — vision + document pipeline.
+#
+# This config is the canonical "agent that handles non-text inputs"
+# example in the demo. It composes:
+#
+#   - nexus.tool.pdf
+#       read_pdf tool — two modes:
+#         text:     pdftotext extraction (default, lightweight)
+#         document: pass raw PDF bytes to the LLM as a file MessagePart;
+#                   only meaningful with native multimodal providers
+#                   (Gemini, Claude with PDF input).
+#       Requires poppler-utils on PATH (pdftotext + pdfinfo).
+#   - nexus.tool.screenshot
+#       take_screenshot tool. Captures the current screen, stores the
+#       PNG via the per-session blob store, and surfaces it back to the
+#       LLM as an image MessagePart. Useful for "look at this UI and
+#       tell me what's broken" workflows.
+#   - nexus.embeddings.cohere_multimodal
+#       embeddings.provider that embeds images and text into a single
+#       vector space — pair with chromem to do "find me the screenshot
+#       that looks most like X" semantic search across mixed media.
+#       Requires a Cohere API key. (The Researcher uses
+#       embeddings.openai for text-only RAG; this agent uses Cohere
+#       multimodal because it needs to embed images too.)
+#   - nexus.llm.gemini
+#       Primary LLM here because Gemini's vision is solid and it
+#       natively accepts images and PDFs in the same request.
+#       Anthropic stays as a fallback for text-heavy reasoning.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  # Two roles: Gemini for the multimodal main thread, Anthropic as a
+  # fallback for non-vision questions. The fallback chain triggers on
+  # provider error (rate limit, transient outage), not on content
+  # routing — there's no automatic "use anthropic for text, gemini for
+  # images" today; that decision lives in the system prompt + tool use.
+  models:
+    default: balanced
+    balanced:
+      - provider: nexus.llm.gemini
+        model: gemini-2.5-pro
+        max_tokens: 8192
+      - provider: nexus.llm.anthropic
+        model: claude-sonnet-4-6
+        max_tokens: 8192
+
+  sessions:
+    root: ~/.nexus/demo/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    # IO + transport
+    - nexus.io.wails
+
+    # Two providers + fallback orchestrator.
+    - nexus.llm.gemini
+    - nexus.llm.anthropic
+    - nexus.provider.fallback
+
+    # Agent core
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    # Phase 1 cross-cutting
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
+    # Memory: capped + summary_buffer for long document review sessions
+    - nexus.memory.capped
+    - nexus.memory.summary_buffer
+
+    # Multimodal embeddings + vector store. Different namespace from
+    # the text-only compete-kb because the vectors are a different
+    # space (image+text joint embedding from Cohere v3.0).
+    - nexus.embeddings.cohere_multimodal
+    - nexus.vectorstore.chromem
+
+    # Tools
+    - nexus.tool.pdf
+    - nexus.tool.screenshot
+    - nexus.tool.file
+    - nexus.tool.opener
+
+    # Gates
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_timeout
+    - nexus.gate.tool_filter
+    - nexus.gate.content_safety
+
+    # Observability
+    - nexus.observe.thinking
+
+  nexus.llm.gemini:
+    auth: api_key
+    api_key: "${gemini_api_key}"
+    # Cache enabled because re-asking about the same long document is
+    # the natural workflow here. Gemini's caching is per-request; min
+    # tokens prevents caching trivially-small prompts.
+    cache:
+      enabled: true
+      min_tokens: 4096
+      ttl: 5m
+
+  nexus.llm.anthropic:
+    api_key: "${shell.anthropic_api_key}"
+
+  nexus.agent.react:
+    parallel_tools: true
+    max_concurrent: 3
+    system_prompt: |
+      You are the Multimodal Reader.
+
+      Today's date: {{date}}
+
+      You handle inputs that aren't plain text: PDFs, screenshots,
+      diagrams, photos. Your toolkit:
+
+        - read_pdf → extract text from a PDF in `text` mode, or pass
+          the raw PDF to the LLM in `document` mode (use this when
+          layout matters, e.g. tables, math).
+        - take_screenshot → capture the current screen. Returned as an
+          image you can directly reason about.
+        - file_read → fetch any other supported file from the
+          configured input folder.
+        - file_write → save extracted text or analysis to disk.
+
+      Defaults:
+        - For "summarize this PDF" with a text-heavy doc, use `text`
+          mode — cheaper and faster.
+        - For "what does the table on page 3 say", use `document` mode
+          and ask Gemini directly.
+        - For "look at my screen and tell me what's wrong", use
+          take_screenshot.
+
+      Cite page numbers when extracting from PDFs. When showing a
+      screenshot back to the user as evidence, refer to "the
+      screenshot you took at HH:MM:SS".
+
+  # ─── Tools ───────────────────────────────────────────────────────────
+
+  # tool.pdf: pdftotext + pdfinfo are both required. The plugin auto-
+  # locates them via PATH; override the binary paths if poppler-utils
+  # is installed somewhere unusual. save_to_session=true means
+  # extracted text lands in the session file workspace so the user
+  # can grab it from disk later.
+  nexus.tool.pdf:
+    timeout: 60s
+    save_to_session: true
+    save_file_name: extracted.txt
+    default_mode: text
+
+  # tool.screenshot: blob store budget = 512 MiB per session, inline
+  # cutoff = 256 KiB (matches Gemini's image-input handling).
+  nexus.tool.screenshot:
+    timeout: 10s
+    blob_store:
+      byte_budget: 536870912
+      inline_threshold: 262144
+
+  # tool.file: bound to a user-configured folder. The Multimodal Reader
+  # is read-mostly with optional file_write for transcripts, so an
+  # input_dir is the right scope.
+  nexus.tool.file:
+    base_dir: "${input_dir}"
+    allow_external_writes: false
+
+  nexus.tool.opener:
+    timeout: 5s
+
+  # ─── Multimodal embeddings ───────────────────────────────────────────
+
+  # Cohere multimodal embeddings (model embed-v4.0 by default; v3.0 is
+  # the older text-only model). search_document is the standard mode
+  # for indexing; queries should override to search_query.
+  nexus.embeddings.cohere_multimodal:
+    api_key: "${cohere_multimodal_key}"
+    model: embed-v4.0
+    input_type: search_document
+    timeout: 30s
+
+  # Separate chromem path so the multimodal vectors don't collide with
+  # the text-only compete-kb namespace used by the other agents.
+  nexus.vectorstore.chromem:
+    path: ~/.nexus/demo/vectors-multimodal
+    compress: false
+
+  # ─── Memory ──────────────────────────────────────────────────────────
+
+  nexus.memory.capped:
+    max_messages: 50
+    persist: true
+
+  # summary_buffer sits between capped and longterm — useful for long
+  # document-review sessions where messages cycle in and out.
+  nexus.memory.summary_buffer:
+    strategy: message_count
+    message_threshold: 30
+    max_recent: 12
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  nexus.system.dynvars:
+    date: true
+    time: false
+    timezone: false
+    cwd: false
+    session_dir: false
+    os: false
+
+  nexus.control.hitl:
+    registry:
+      enabled: true
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # ─── Gates ───────────────────────────────────────────────────────────
+
+  nexus.gate.endless_loop:
+    max_iterations: 12
+
+  nexus.gate.tool_timeout:
+    default_timeout: 60s
+    per_tool:
+      read_pdf: 90s
+      take_screenshot: 15s
+
+  nexus.gate.tool_filter:
+    exclude:
+      - shell
+      - run_code
+      - web_search
+      - web_fetch
+      - knowledge_search
+
+  nexus.gate.content_safety:
+    action: block
+    check_pii_email: true
+    check_secrets_api_key: true

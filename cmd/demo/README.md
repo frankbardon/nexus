@@ -12,6 +12,7 @@ the watched folder, the system prompts, and (for the Drafter) the skills.
 | **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), static planner (deterministic 5-step pipeline), approval_policy gate (HITL on file_write), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
 | **Engineer** | Plan-then-execute on shell + Go interpreter | `nexus.agent.planexec` plan-execute loop, `tools/shell` (allowlisted commands, sandboxed env), `tools/code_exec` (Yaegi Go interpreter), `tools/opener`, approval_policy gate per call (HITL via synthesized prompts), tool_timeout per call, discovery/progressive (hierarchical tool exposure), memory/tool_result_clear (drops big stale stdout from history), memory/tool_def_pruner (drops unused tool defs from per-turn list) |
 | **Orchestrator** | Decompose → parallel workers → synthesize | `nexus.agent.orchestrator` (decomposition), `nexus.agent.subagent` (worker primitive), `nexus.agent.react` (worker inner loop), `providers/fanout` with `llm_judge` strategy (same prompt → anthropic+openai+gemini in parallel → judged synthesis), `providers/gemini` (third LLM), `router/metadata` (deterministic routing of worker traffic to the cheap haiku role), `memory/compaction` (external, event-driven), `memory/topic_pruner` (drops earlier turns on topic shift) |
+| **Multimodal Reader** | Vision + document pipeline | `tools/pdf` (pdftotext + pdfinfo, document/text modes), `tools/screenshot` (per-session blob store), `embeddings/cohere_multimodal` (image+text joint embedding), Gemini primary (native multimodal in/out), provider fallback to Anthropic, separate chromem path for the multimodal vector namespace |
 
 All three exercise: desktop shell framework, multi-agent isolation, agent-contributed
 settings + keychain secrets, the chat envelope protocol over `nexus.io.wails`,
@@ -230,6 +231,9 @@ On first launch the app redirects you to Settings if anything required is missin
 | `engineer.workspace_dir` | Engineer (sandbox folder for shell + file_write) | Plaintext setting |
 | `orchestrator.gemini_api_key` | Orchestrator (third leg of fanout-vote) | OS keychain |
 | `orchestrator.brave_api_key` | Orchestrator (web_search by worker subagents) | OS keychain |
+| `multimodal.gemini_api_key` | Multimodal Reader (primary LLM) | OS keychain |
+| `multimodal.cohere_multimodal_key` | Multimodal Reader (image+text embeddings) | OS keychain |
+| `multimodal.input_dir` | Multimodal Reader (folder of PDFs / images) | Plaintext setting |
 
 Brave's free tier covers the demo: <https://brave.com/search/api/>.
 

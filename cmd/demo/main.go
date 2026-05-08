@@ -49,6 +49,7 @@ import (
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
 	hitlsynth "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 	progressivedisc "github.com/frankbardon/nexus/plugins/discovery/progressive"
+	coheremultimodal "github.com/frankbardon/nexus/plugins/embeddings/cohere_multimodal"
 	openaiembeddings "github.com/frankbardon/nexus/plugins/embeddings/openai"
 	approvalpolicygate "github.com/frankbardon/nexus/plugins/gates/approval_policy"
 	contentsafetygate "github.com/frankbardon/nexus/plugins/gates/content_safety"
@@ -97,6 +98,8 @@ import (
 	"github.com/frankbardon/nexus/plugins/tools/fileio"
 	knowledgesearch "github.com/frankbardon/nexus/plugins/tools/knowledge_search"
 	openertool "github.com/frankbardon/nexus/plugins/tools/opener"
+	pdftool "github.com/frankbardon/nexus/plugins/tools/pdf"
+	screenshottool "github.com/frankbardon/nexus/plugins/tools/screenshot"
 	shelltool "github.com/frankbardon/nexus/plugins/tools/shell"
 	webtool "github.com/frankbardon/nexus/plugins/tools/web"
 	chromemvector "github.com/frankbardon/nexus/plugins/vectorstore/chromem"
@@ -120,6 +123,9 @@ var engineerConfig []byte
 
 //go:embed config-orchestrator.yaml
 var orchestratorConfig []byte
+
+//go:embed config-multimodal.yaml
+var multimodalConfig []byte
 
 // commonFactories returns the plugin factories shared by every demo agent.
 //
@@ -213,28 +219,34 @@ func commonFactories() map[string]func() engine.Plugin {
 		// you want under `capabilities` in the agent's YAML. citations
 		// validates `<cite/>` tags or Anthropic native Citations against
 		// rag.retrieved before the user-visible response is emitted.
-		"nexus.embeddings.openai":      openaiembeddings.New,
-		"nexus.vectorstore.chromem":    chromemvector.New,
-		"nexus.vectorstore.sqlite_fts": sqliteftsvector.New,
-		"nexus.rag.ingest":             ragingest.New,
-		"nexus.rag.hybrid":             raghybrid.New,
-		"nexus.rag.citations":          ragcitations.New,
-		"nexus.rag.reranker.local":     rerankerlocal.New,
-		"nexus.rag.reranker.cohere":    rerankercohere.New,
-		"nexus.rag.reranker.jina":      rerankerjina.New,
-		"nexus.tool.knowledge_search":  knowledgesearch.New,
+		// embeddings.openai is the default text embedder. cohere_multimodal
+		// is a separate embeddings.provider — it embeds images alongside
+		// text and is used by the Multimodal Reader agent (Phase 6).
+		"nexus.embeddings.openai":            openaiembeddings.New,
+		"nexus.embeddings.cohere_multimodal": coheremultimodal.New,
+		"nexus.vectorstore.chromem":          chromemvector.New,
+		"nexus.vectorstore.sqlite_fts":       sqliteftsvector.New,
+		"nexus.rag.ingest":                   ragingest.New,
+		"nexus.rag.hybrid":                   raghybrid.New,
+		"nexus.rag.citations":                ragcitations.New,
+		"nexus.rag.reranker.local":           rerankerlocal.New,
+		"nexus.rag.reranker.cohere":          rerankercohere.New,
+		"nexus.rag.reranker.jina":            rerankerjina.New,
+		"nexus.tool.knowledge_search":        knowledgesearch.New,
 
 		// ─── Tools ─────────────────────────────────────────────────────
 		// shell/code_exec/opener (Phase 4) are gated behind approval_policy
 		// + tool_timeout when active. They are loaded as factories here so
 		// any agent that lists them in `plugins.active` gets them; agents
 		// that don't (Librarian/Researcher/Drafter) never instantiate them.
-		"nexus.tool.file":      fileio.New,
-		"nexus.tool.catalog":   catalogplugin.New,
-		"nexus.tool.web":       webtool.New,
-		"nexus.tool.shell":     shelltool.New,
-		"nexus.tool.code_exec": codeexectool.New,
-		"nexus.tool.opener":    openertool.New,
+		"nexus.tool.file":       fileio.New,
+		"nexus.tool.catalog":    catalogplugin.New,
+		"nexus.tool.web":        webtool.New,
+		"nexus.tool.shell":      shelltool.New,
+		"nexus.tool.code_exec":  codeexectool.New,
+		"nexus.tool.opener":     openertool.New,
+		"nexus.tool.pdf":        pdftool.New,
+		"nexus.tool.screenshot": screenshottool.New,
 
 		// ─── Search providers (search.provider capability) ─────────────
 		// Brave is the default external search backend. The two native
@@ -321,6 +333,7 @@ func main() {
 			drafterAgent(),
 			engineerAgent(),
 			orchestratorAgent(),
+			multimodalAgent(),
 		},
 	}); err != nil {
 		log.Fatalf("wails run: %v", err)
@@ -389,6 +402,57 @@ func researcherAgent() desktop.Agent {
 				Type:        desktop.FieldString,
 				Secret:      true,
 				Required:    false,
+			},
+		},
+	}
+}
+
+// multimodalAgent — vision + document pipeline. Uses Gemini as primary
+// (native multimodal in / out), Claude as fallback, Cohere multimodal
+// embeddings for image+text joint vector search, and the read_pdf +
+// take_screenshot tools to ingest non-text content.
+//
+// The point of this agent in the demo is twofold:
+//   - Some plugins (PDF, screenshot, multimodal embeddings) only make
+//     sense inside a vision/document workflow. They needed a home.
+//   - Anyone evaluating Nexus for a "let me look at this" use case
+//     can read this YAML and see the wiring end-to-end.
+//
+// Cohere is required for the multimodal embeddings; without a key the
+// agent still loads, but knowledge-search style image lookups won't
+// work. The PDF tool needs poppler-utils (pdftotext + pdfinfo) on PATH.
+func multimodalAgent() desktop.Agent {
+	return desktop.Agent{
+		ID:          "multimodal",
+		Name:        "Multimodal Reader",
+		Description: "PDF + screenshot + image+text embeddings (Gemini primary)",
+		Icon:        "fa-solid fa-file-image",
+		ConfigYAML:  multimodalConfig,
+		Factories:   commonFactories(),
+		Settings: []desktop.SettingsField{
+			sharedAnthropicKey(),
+			{
+				Key:         "gemini_api_key",
+				Display:     "Google Gemini API Key",
+				Description: "Primary LLM for the Multimodal Reader (vision + PDF native input). Free tier: https://aistudio.google.com/.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    true,
+			},
+			{
+				Key:         "cohere_multimodal_key",
+				Display:     "Cohere API Key (multimodal embeddings)",
+				Description: "Required for image+text joint embeddings. Free trial: https://cohere.com/. Same key works for Cohere Rerank if you want to enable it on the Researcher.",
+				Type:        desktop.FieldString,
+				Secret:      true,
+				Required:    true,
+			},
+			{
+				Key:         "input_dir",
+				Display:     "Input folder",
+				Description: "Folder the agent is allowed to read PDFs and other documents from.",
+				Type:        desktop.FieldPath,
+				Required:    true,
 			},
 		},
 	}
