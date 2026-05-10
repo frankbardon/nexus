@@ -506,6 +506,90 @@
   </main>
 </div>
 
+<!-- ── HITL approval modal ─────────────────────────────────────────
+     Renders for two related event streams the engine emits:
+
+       1. hitl.requested   — the LLM-facing ask_user tool, the
+                              approval_policy gate's per-action prompts,
+                              memory write confirmations, etc. Mode is
+                              "free_text", "choices", or "both".
+       2. plan.approval.request — emitted by nexus.agent.planexec when
+                              its `approval` config is "always". The
+                              io/wails plugin re-broadcasts this as an
+                              "approval_request" envelope.
+
+     Both share one Alpine store (`$store.hitl`) so a single modal
+     covers every approval path. The store reads the agent's bus via
+     window._agentBuses[agentID] (set by the per-agent script blocks)
+     and emits the response back on the same bus, which the wails IO
+     plugin's accept-list converts into hitl.responded /
+     plan.approval.response events on the engine bus.
+     ───────────────────────────────────────────────────────────────── -->
+<div x-data
+     x-show="$store.hitl.active"
+     x-cloak
+     x-transition.opacity
+     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+  <div class="card bg-base-100 border border-base-300 shadow-2xl w-full max-w-lg mx-4"
+       @keydown.escape.window="$store.hitl.cancel()">
+    <div class="card-body p-5 space-y-4">
+
+      <!-- Header. Icon flips between "question" (HITL) and "list-check"
+           (plan approval) so the operator can tell what they're being
+           asked to approve at a glance. -->
+      <div class="flex items-center gap-2">
+        <i class="fa-solid"
+           :class="$store.hitl.active && $store.hitl.active.kind === 'plan' ? 'fa-list-check text-warning' : 'fa-circle-question text-primary'"></i>
+        <h3 class="font-semibold text-base"
+            x-text="$store.hitl.active && $store.hitl.active.kind === 'plan' ? 'Plan approval requested' : 'Human input requested'"></h3>
+        <span class="badge badge-ghost badge-sm font-mono ml-auto"
+              x-text="$store.hitl.active && $store.hitl.active.mode"></span>
+      </div>
+
+      <!-- Prompt body. For HITL it's the operator-facing question; for
+           plan approval it's the rendered plan summary. whitespace-pre-wrap
+           keeps multi-line plans readable. -->
+      <div class="bg-base-200 border border-base-300 rounded-lg p-3 text-sm whitespace-pre-wrap max-h-96 overflow-y-auto"
+           x-text="$store.hitl.active && $store.hitl.active.prompt"></div>
+
+      <!-- Choice buttons (mode: choices | both). Each choice posts the
+           selected id back to the engine. -->
+      <div x-show="$store.hitl.showChoices()" class="space-y-2">
+        <div class="text-xs font-semibold uppercase tracking-wider opacity-50">Choose one</div>
+        <template x-for="choice in ($store.hitl.active && $store.hitl.active.choices) || []" :key="choice.id">
+          <button class="btn btn-outline btn-sm w-full justify-start text-left"
+                  @click="$store.hitl.submit(choice.id, '')">
+            <i class="fa-solid fa-circle-chevron-right text-xs opacity-50"></i>
+            <span x-text="choice.label"></span>
+            <span class="font-mono text-xs opacity-40 ml-auto" x-text="choice.id"></span>
+          </button>
+        </template>
+      </div>
+
+      <!-- Free text input (mode: free_text | both). ⌘↵ submits. -->
+      <div x-show="$store.hitl.showFreeText()" class="space-y-2">
+        <div class="text-xs font-semibold uppercase tracking-wider opacity-50"
+             x-text="$store.hitl.active && $store.hitl.active.mode === 'both' ? 'Or write a reply' : 'Reply'"></div>
+        <textarea x-model="$store.hitl.freeText"
+                  placeholder="Type your answer..."
+                  class="textarea textarea-bordered w-full text-sm"
+                  rows="3"
+                  @keydown.meta.enter="$store.hitl.submit('', $store.hitl.freeText)"
+                  @keydown.ctrl.enter="$store.hitl.submit('', $store.hitl.freeText)"></textarea>
+        <div class="flex justify-end">
+          <button class="btn btn-primary btn-sm"
+                  :disabled="!$store.hitl.freeText.trim()"
+                  @click="$store.hitl.submit('', $store.hitl.freeText)">
+            Submit
+            <kbd class="kbd kbd-xs ml-1">⌘</kbd>
+            <kbd class="kbd kbd-xs">↵</kbd>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ── Bus helper ────────────────────────────────────────────────── -->
 <script>
 function createBus(agentID) {
@@ -934,6 +1018,167 @@ document.addEventListener('alpine:init', () => {
       return s;
     },
   });
+});
+</script>
+
+<!-- ── HITL + plan-approval store ──────────────────────────────────
+     Backs the modal at the top of the page. Listens on every agent
+     bus for two envelope types:
+
+       hitl_request      — from the wails plugin's HITLRequest path
+                           (LLM ask_user, approval_policy gate, memory
+                           confirmations, etc.).
+       approval_request  — from the wails plugin's ApprovalRequest path
+                           (planexec's plan.approval.request).
+
+     Both produce the same UI; the only difference is the modal's
+     header copy + icon, controlled by the `kind` field on the active
+     request.
+
+     Responses go back on the same bus. The wails plugin's accept-list
+     translates the JS-side bus emit into engine bus events:
+       hitl.responded         (for HITL prompts)
+       plan.approval.response (for plan approvals)
+     ────────────────────────────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('hitl', {
+    // active = the rendered request:
+    //   { kind, agentID, request_id, prompt, mode, choices }
+    // kind is "hitl" or "plan" — determines which response envelope to
+    // emit and which icon/header the modal shows.
+    active: null,
+    freeText: '',
+    queue: [],
+
+    showChoices() {
+      const a = this.active;
+      return !!(a && (a.mode === 'choices' || a.mode === 'both') && a.choices && a.choices.length);
+    },
+    showFreeText() {
+      const a = this.active;
+      return !!(a && (a.mode === 'free_text' || a.mode === 'both' || !a.mode));
+    },
+
+    // present accepts the raw payload from the wails plugin and
+    // normalizes the field names. The plugin emits both new-shape and
+    // legacy-shape payloads; we accept either by reading both
+    // capitalizations and canonicalizing on lowercase.
+    present(agentID, kind, payload) {
+      if (!payload) return;
+      const requestID = payload.request_id || payload.id || payload.ID || payload.PromptID || '';
+      const prompt    = payload.prompt || payload.Prompt || '';
+      const mode      = (payload.mode || payload.Mode || 'free_text').toLowerCase();
+      const rawChoices = payload.choices || payload.Choices || [];
+      const choices = (rawChoices || []).map(c => ({
+        id:    c.id || c.ID || '',
+        label: c.label || c.Label || c.id || c.ID || '',
+      }));
+
+      // Plan approvals from planexec come as a single accept/reject
+      // pair. If the engine didn't send choices, synthesize them so
+      // the modal still has buttons to click — otherwise the operator
+      // has nothing to do.
+      let finalMode = mode;
+      let finalChoices = choices;
+      if (kind === 'plan' && choices.length === 0) {
+        finalMode = 'choices';
+        finalChoices = [
+          { id: 'approve', label: 'Approve plan and execute' },
+          { id: 'reject',  label: 'Reject plan' },
+        ];
+      }
+
+      const req = { kind, agentID, request_id: requestID, prompt, mode: finalMode, choices: finalChoices };
+
+      if (this.active) {
+        this.queue.push(req);
+        return;
+      }
+      this.active = req;
+      this.freeText = '';
+    },
+
+    submit(choiceID, freeText) {
+      if (!this.active) return;
+      const { kind, agentID, request_id } = this.active;
+      const text = (freeText || '').trim();
+
+      const bus = window._agentBuses && window._agentBuses[agentID];
+      if (!bus) {
+        console.warn('hitl: no bus for agent', agentID);
+      } else if (kind === 'plan') {
+        // ApprovalResponseMessage shape (JSON tags lowercase):
+        //   { prompt_id, approved, always }
+        // approve=true selects the "approve" choice id; anything else
+        // is a reject. We don't expose the "always remember" toggle in
+        // the demo modal — keep it false for now.
+        const approved = (choiceID === 'approve' || choiceID === 'allow' || choiceID === 'allow_once');
+        bus.emit('approval_response', {
+          prompt_id: request_id,
+          approved:  approved,
+          always:    false,
+        });
+      } else {
+        // HITLResponseMessage shape (JSON tags lowercase):
+        //   { request_id, choice_id, free_text }
+        const payload = { request_id: request_id };
+        if (choiceID) payload.choice_id = choiceID;
+        if (text)     payload.free_text = text;
+        bus.emit('hitl_response', payload);
+      }
+
+      // Pop the next queued request, if any.
+      this.active = null;
+      this.freeText = '';
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        this.active = next;
+      }
+    },
+
+    cancel() {
+      // Operator dismissed the modal without responding. For HITL we
+      // submit empty so the engine resolves the request rather than
+      // hanging. For plan approvals we send a reject — leaving the
+      // plan pending forever would block the agent loop.
+      if (!this.active) return;
+      if (this.active.kind === 'plan') {
+        this.submit('reject', '');
+      } else {
+        this.submit('', '');
+      }
+    },
+  });
+
+  // Wire each agent's bus to the HITL store. The agent buses are
+  // registered after this script runs (in the per-agent script blocks
+  // generated by the desktop framework's HTML template), so we use a
+  // deferred attachment that polls _agentBuses then sets up listeners.
+  // Cheap and one-shot per agent.
+  function attach() {
+    const agents = window._agentBuses || {};
+    for (const [agentID, bus] of Object.entries(agents)) {
+      if (bus._hitlAttached) continue;
+      bus._hitlAttached = true;
+      // The wails plugin in config-driven mode broadcasts the raw
+      // event type ("hitl_request" / "approval_request") as the
+      // envelope `type` field. Listen for both shapes — the legacy
+      // hitl.requested / approval.request names round-trip the same
+      // payload but pre-date the underscore convention.
+      bus.on('hitl_request',     (p) => Alpine.store('hitl').present(agentID, 'hitl', p));
+      bus.on('hitl.requested',   (p) => Alpine.store('hitl').present(agentID, 'hitl', p));
+      bus.on('approval_request', (p) => Alpine.store('hitl').present(agentID, 'plan', p));
+      bus.on('plan.approval.request', (p) => Alpine.store('hitl').present(agentID, 'plan', p));
+    }
+  }
+  // Attach immediately if buses are already present, then re-attach
+  // after the per-agent scripts have finished registering. Three calls
+  // is overkill but cheap; covers reload-during-session edge cases.
+  attach();
+  setTimeout(attach, 50);
+  setTimeout(attach, 250);
+  setTimeout(attach, 1000);
 });
 </script>
 

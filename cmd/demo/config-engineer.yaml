@@ -106,12 +106,17 @@ plugins:
   nexus.llm.anthropic:
     api_key: "${shell.anthropic_api_key}"
 
-  # planexec: plan-then-execute. approval=always means the operator sees
-  # the plan and must accept it before any step executes. Re-plan on
-  # failure: when a step errors, the agent gets one chance to revise the
-  # remaining plan before bailing out.
+  # planexec: plan-then-execute. approval=never here intentionally —
+  # the demo gates HITL at a finer grain via nexus.gate.approval_policy
+  # below, which prompts on every shell / run_code / file_write call
+  # individually. Plan-level approval would double-gate the loop and
+  # make every prompt feel like a chore. Flip to "always" if you want
+  # the plan-approval modal in front of every turn (the frontend's
+  # HITL store handles both shapes — see frontend/dist/index.html).
+  # replan_on_failure: when a step errors, the agent gets one chance
+  # to revise the remaining plan before bailing out.
   nexus.agent.planexec:
-    approval: always
+    approval: never
     replan_on_failure: true
     execution_model_role: balanced
     system_prompt: |

@@ -148,6 +148,143 @@ already in the KB.
   `highlights`, `lowlights`, `metrics`, `asks`. Drop weekly-status
   exports into the KB; produce monthly investor letters.
 
+### Engineer — agent that does work on disk
+
+**What it is.** A plan-then-execute agent that runs sandboxed shell
+commands and Go code in your configured `workspace_dir`. It generates
+a plan first (via `nexus.planner.dynamic`), then executes step by step
+through `nexus.agent.planexec`. Every shell + `run_code` + `file_write`
+call goes through `nexus.gate.approval_policy`, which renders an HITL
+prompt in the chat panel so you confirm or skip before anything
+touches the filesystem. `tools/shell` is locked to a small allowlist
+(ls, cat, head, tail, wc, grep, find, git, go, make, tree, file, stat,
+which, pwd, echo, date) and runs with `env_restrict: true`.
+`tools/code_exec` uses Yaegi (in-process Go interpreter) with `net:
+deny`. The agent has no web access and no `knowledge_search`; it's a
+"bounded scratchpad" for inspecting and producing files. Long shell
+sessions trim themselves with `memory/tool_result_clear` (drops
+stdout-heavy turns) and `memory/tool_def_pruner` (drops unused tool
+defs). Tool catalog uses `discovery/progressive` so the LLM only sees
+the tools it's drilled into.
+
+**Example prompts.**
+
+- *"List the markdown files in the workspace and tell me which one
+  was modified most recently."* (Single shell step; you approve `ls`,
+  it runs, agent reports.)
+- *"Compile a quick word-count of every .md file in here."* (Multi-
+  step plan: `find` → `wc -l` → format output.)
+- *"Write a small Go function that computes Fibonacci numbers, run it
+  with input 20, and save the script to `fib.go`. Print the result."*
+  (Demonstrates `code_exec` + `file_write` + approval gates on each.)
+- *"Run `git status` and summarize what's uncommitted."*
+- *"Try `rm -rf /` on the workspace."* (Watch the `stop_words` gate
+  block it before approval is even asked.)
+
+**Adaptation ideas — change the allowlist, get a new persona.**
+
+- **Build-and-test agent.** Add `npm`, `pytest`, `cargo` to the shell
+  allowlist; point `workspace_dir` at a project root. Ask: *"Run the
+  full test suite and tell me which tests failed."*
+- **Repo migrator.** Allowlist `git`, `gofmt`, `find`, `xargs`. Ask:
+  *"Rename every occurrence of `OldType` to `NewType` across the
+  repo, then verify the build still passes."*
+- **Data wrangler.** Allowlist `jq`, `awk`, `sort`, `uniq`. Ask:
+  *"Take the JSON in `events.jsonl` and produce a CSV summary by
+  event type."*
+- **Notebook-style scratchpad.** Lean entirely on `code_exec`; ask
+  "show me a Go snippet that pretty-prints the first 100 prime
+  numbers" and watch Yaegi run it without spawning a process.
+
+### Orchestrator — fan-out coordinator
+
+**What it is.** The "decompose, fan out, synthesize" pattern made
+explicit. `nexus.agent.orchestrator` reads the user's request, splits
+it into 2–8 independent subtasks, spawns parallel worker subagents
+(via `nexus.agent.subagent`) capped by `max_workers: 4`, then runs a
+synthesis pass to merge their outputs into one cited answer. Workers
+run on the cheap `worker` model role (Claude Haiku) — `nexus.router.metadata`
+deterministically rewrites every worker `llm.request` to that role —
+so a 4-worker fan-out costs roughly the same as one Sonnet turn.
+Workers can call `knowledge_search` and `web_search`. Long sessions
+get external compaction (`memory/compaction`) and topic-shift pruning
+(`memory/topic_pruner`). The agent also exposes a `vote` model role
+that uses `nexus.provider.fanout` to send the same prompt to
+Anthropic + OpenAI + Gemini in parallel, with `strategy: llm_judge`
+picking the strongest answer.
+
+**Example prompts.**
+
+- *"Compare ACME, Vortex, Loom, and Pulp on pricing model, target
+  buyer, time-to-value, and primary wedge."* (Splits into 4 worker
+  subtasks — one per competitor — runs them in parallel, synthesizes
+  a comparison table.)
+- *"Build a market map of the agentic-RAG vendor space: group
+  vendors by pricing model and list each one's primary wedge."*
+- *"What are the three most-cited risks across our last six incident
+  postmortems?"* (Fan out across the postmortems folder, synthesize.)
+- *"Use the `vote` role to answer: 'In one sentence, what is the
+  canonical use case for retrieval-augmented generation?'"* (Fans out
+  to all three providers; the judge picks the best response.)
+
+**Adaptation ideas.**
+
+- **Multi-doc summarizer.** Drop a folder of long docs in via the
+  Librarian; ask the Orchestrator to produce one-paragraph summaries
+  per doc, then a meta-summary. The decomposition is automatic.
+- **Comparative analyst.** Watch a folder of analyst reports; ask:
+  *"What do all three analysts agree on about Vendor X, and where
+  do they disagree?"*
+- **Ensemble voting for tough questions.** Use the `vote` role on
+  ambiguous prompts where you want a "second opinion" before acting.
+- **Decompose-then-act.** Combine with the Engineer in a workflow:
+  Orchestrator produces a plan list, you copy specific items into
+  the Engineer for execution.
+
+### Multimodal Reader — vision + document pipeline
+
+**What it is.** A Gemini-primary agent built for non-text inputs.
+`tools/pdf` extracts text via `pdftotext` (fast, lightweight) or
+passes the raw PDF bytes to the LLM as a `file` MessagePart in
+`document` mode (when layout matters: tables, math, signed forms).
+`tools/screenshot` captures the current desktop and surfaces the PNG
+back to the LLM as an image part. `embeddings/cohere_multimodal`
+embeds images and text into a single vector space, stored in a
+separate chromem path so the vectors don't collide with the text-only
+`compete-kb` namespace used by the other agents. Provider fallback
+goes Gemini → Claude on errors; long document-review sessions use
+`memory/summary_buffer` to keep context fresh. Requires
+`poppler-utils` on PATH (`pdftotext`, `pdfinfo`).
+
+**Example prompts.**
+
+- *"Read `quarterly-report.pdf` and tell me the three biggest risks
+  flagged in the management discussion."* (Uses `text` mode by
+  default — fast and cheap.)
+- *"Look at the table on page 5 of `pricing-deck.pdf` and explain
+  what's changed vs page 4."* (Switches to `document` mode so Gemini
+  sees the layout natively.)
+- *"Take a screenshot of my screen and tell me what's broken in the
+  UI."* (Uses `take_screenshot`; Gemini reasons over the image.)
+- *"Compare the two contracts in `vendor-a.pdf` and `vendor-b.pdf` —
+  which one has stricter SLA terms?"* (Multi-doc, multimodal.)
+- *"I uploaded a screenshot of an architecture diagram — describe
+  what each component does."*
+
+**Adaptation ideas.**
+
+- **Receipt / invoice triage.** Watch a folder of receipt PDFs; ask
+  the agent to extract vendor + total + date for each, write them to
+  a CSV.
+- **Contract review.** Drop NDAs / MSAs into the input folder; ask
+  *"Flag any clause that limits our right to share redacted output
+  with subprocessors."*
+- **UI bug reporter.** Pair `take_screenshot` with a "describe what's
+  broken" loop; produces issue tickets with attached screenshots.
+- **Diagram explainer.** Drop architecture diagrams or flowcharts as
+  PNGs; ask: *"Walk me through the request flow from end-user to
+  database, naming every component."*
+
 ## Workflows
 
 The three agents compose. Each can also stand alone if a single
