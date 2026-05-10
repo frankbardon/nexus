@@ -1258,12 +1258,31 @@ window.chatView = function(agentID) {
         });
       });
 
+      // Plan rendering. The wails adapter broadcasts both
+      // `plan.created` (planner emits the plan) and `agent.plan`
+      // (agent picks up the plan and starts executing) under the same
+      // "plan" envelope type. That means every plan arrives twice in
+      // close succession — once from the planner, once from the
+      // agent's adoption notification. They're identical to the user.
+      //
+      // Dedup by hashing the step list and comparing against the most
+      // recent render. A 5-second window is plenty: planner→agent
+      // handoff is sub-second, and any genuinely new plan (re-plan on
+      // failure) will have different steps.
       this.bus.on('plan', (data) => {
-        if (!data) return;
-        const lines = (data.steps || []).map(s => `• ${s.description}`).join('\n');
+        if (!data || !data.steps || data.steps.length === 0) return;
+        const sig = data.steps.map(s => s.description || '').join('||');
+        const now = Date.now();
+        if (this._lastPlanSig === sig && (now - (this._lastPlanAt || 0)) < 5000) {
+          return; // duplicate of the just-rendered plan
+        }
+        this._lastPlanSig = sig;
+        this._lastPlanAt = now;
+
+        const lines = data.steps.map(s => `• ${s.description}`).join('\n');
         this.bus._appendMessage({
           role: 'system',
-          content: `Plan generated (${data.steps?.length || 0} steps):\n${lines}`,
+          content: `Plan generated (${data.steps.length} steps):\n${lines}`,
         });
       });
 
