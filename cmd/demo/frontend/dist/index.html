@@ -1489,20 +1489,28 @@ window.chatView = function(agentID) {
           return;
         }
         const dest = await window.go.desktop.Shell.CopyFileToInputDir(this.agentID, picked);
-        const filename = (dest || picked).split(/[\/\\]/).pop();
+        const fullPath = dest || picked;
+        const filename = fullPath.split(/[\/\\]/).pop();
 
-        // System bubble so the chat history shows the attachment
-        // landed (the agent's own tool call will surface again when
-        // it actually reads the file).
+        // System bubble shows just the filename for readability — the
+        // input_dir is implied per-agent and the operator already knows
+        // where it lives.
         this.appendMessage({
           role: 'system',
           content: `Attached \`${filename}\` to the agent's input folder. The agent can read it via its tools.`,
         });
 
-        // Prime the input. Don't overwrite if the operator already
-        // typed something; append instead so multi-attach workflows
-        // don't lose context.
-        const stub = `Read \`${filename}\` and `;
+        // Prime the input with the FULL ABSOLUTE PATH, not the
+        // basename. Reason: read_pdf (and similar tools that don't
+        // declare a base_dir) resolve relative paths via filepath.Abs
+        // against the process working directory — i.e., wherever the
+        // binary was launched, NOT the agent's input_dir. Passing the
+        // basename works only by accident (when the binary happens to
+        // run from the same dir as input_dir). Passing the absolute
+        // path is unambiguous everywhere. The operator can still read
+        // the basename as a quoted token in the prompt; only the path
+        // string changes.
+        const stub = `Read \`${fullPath}\` and `;
         this.input = this.input.trim()
           ? this.input.trimEnd() + ' ' + stub
           : stub;
