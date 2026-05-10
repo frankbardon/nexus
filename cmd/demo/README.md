@@ -239,12 +239,9 @@ hits its stride when N is obvious from the request.
   of public announcements in 3 bullets."* (3 workers; explicit list.)
 
 Avoid single-question prompts ("answer this in one sentence") on the
-Orchestrator — there's nothing to decompose, and a known upstream
-brittleness in the orchestrator's tool_use/tool_result history
-threading can produce an Anthropic 400 error when the LLM tries to
-call tools instead of emitting a subtask list. For single-shot
-queries use the Researcher; for multi-provider voting use the
-`fanout-vote` CLI recipe.
+Orchestrator — there's nothing to decompose. For single-shot queries
+use the Researcher; for multi-provider voting use the `fanout-vote`
+CLI recipe.
 
 **Adaptation ideas.**
 

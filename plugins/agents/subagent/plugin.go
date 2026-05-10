@@ -95,6 +95,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(p.instanceID)),
 		p.bus.Subscribe("tool.register", p.handleToolRegister,
 			engine.WithSource(p.instanceID)),
+		// subagent.spawn: programmatic spawn path used by the
+		// orchestrator agent (and any other plugin that wants to drive
+		// workers without going through the LLM-facing spawn_subagent
+		// tool). Symmetric to handleToolInvoke: build the same
+		// runSubagent inputs out of the SubagentSpawn payload, run in
+		// a goroutine so the bus dispatch loop isn't blocked, and rely
+		// on runSubagent to emit subagent.complete when finished.
+		// Without this subscription the orchestrator emits
+		// subagent.spawn into the void and waits forever for completes
+		// that never come.
+		p.bus.Subscribe("subagent.spawn", p.handleSubagentSpawn,
+			engine.WithPriority(50), engine.WithSource(p.instanceID)),
 	)
 
 	return nil
@@ -143,6 +155,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "tool.register"},
+		{EventType: "subagent.spawn", Priority: 50},
 	}
 }
 
@@ -159,6 +172,32 @@ func (p *Plugin) Emissions() []string {
 		"subagent.iteration",
 		"subagent.complete",
 	}
+}
+
+// handleSubagentSpawn drives a worker from a programmatic
+// subagent.spawn event, the way the orchestrator agent dispatches
+// parallel workers. Mirrors the logic at the end of handleToolInvoke
+// but skips the tool_use/tool_result envelope wrapping (the caller is
+// not the LLM — there's no tool to surface results back through).
+//
+// Runs in a goroutine because runSubagent is a synchronous loop that
+// can take many seconds (LLM calls, tool round-trips). The bus
+// dispatch is synchronous; blocking it would freeze the whole engine
+// for the worker's duration. Multiple concurrent spawns each get
+// their own goroutine — runSubagent has no shared mutable state
+// scoped to the plugin instance.
+func (p *Plugin) handleSubagentSpawn(event engine.Event[any]) {
+	spawn, ok := event.Payload.(events.SubagentSpawn)
+	if !ok {
+		return
+	}
+	go func() {
+		// runSubagent emits subagent.started + subagent.iteration +
+		// subagent.complete on its own; we discard the returned value
+		// since the caller correlates by SpawnID via the
+		// subagent.complete event, not via a return path.
+		_ = p.runSubagent(spawn.SpawnID, spawn.Task, spawn.SystemPrompt, spawn.ModelRole, spawn.ParentTurnID)
+	}()
 }
 
 func (p *Plugin) handleToolRegister(event engine.Event[any]) {
