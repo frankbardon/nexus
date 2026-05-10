@@ -55,6 +55,12 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "plan.approval.request", Priority: 50},
 		{EventType: "plan.created", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
+		// Subagent lifecycle: bridged so orchestrator-style agents can
+		// surface per-worker progress in the UI. Mirrors the wails
+		// plugin's set (CLAUDE.md §7a parity rule).
+		{EventType: "subagent.started", Priority: 50},
+		{EventType: "subagent.iteration", Priority: 50},
+		{EventType: "subagent.complete", Priority: 50},
 		{EventType: "provider.fallback", Priority: 50},
 		{EventType: "session.file.created", Priority: 50},
 		{EventType: "session.file.updated", Priority: 50},
@@ -159,6 +165,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.started", p.handleSubagentStarted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.iteration", p.handleSubagentIteration, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.complete", p.handleSubagentComplete, engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fallback", p.handleProviderFallback, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.created", p.handleFileChanged, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.updated", p.handleFileChanged, engine.WithSource(pluginID)),
@@ -405,6 +414,54 @@ func (p *Plugin) handleAgentPlan(e engine.Event[any]) {
 		Steps:  steps,
 		TurnID: plan.TurnID,
 		Source: "agent",
+	})
+}
+
+// handleSubagentStarted bridges the worker's start event to the UI.
+// Mirrors the wails plugin handler — see plugins/io/wails/plugin.go for
+// the rationale on why subagent lifecycle events get bridged.
+func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
+	st, ok := e.Payload.(events.SubagentStarted)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:         "started",
+		SpawnID:      st.SpawnID,
+		Task:         st.Task,
+		ParentTurnID: st.ParentTurnID,
+	})
+}
+
+// handleSubagentIteration forwards per-iteration progress to the UI.
+func (p *Plugin) handleSubagentIteration(e engine.Event[any]) {
+	it, ok := e.Payload.(events.SubagentIteration)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:      "iteration",
+		SpawnID:   it.SpawnID,
+		Iteration: it.Iteration,
+		Content:   it.Content,
+		ToolCount: len(it.ToolCalls),
+	})
+}
+
+// handleSubagentComplete forwards the worker's terminal state to the UI.
+func (p *Plugin) handleSubagentComplete(e engine.Event[any]) {
+	cm, ok := e.Payload.(events.SubagentComplete)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:         "complete",
+		SpawnID:      cm.SpawnID,
+		Result:       cm.Result,
+		Error:        cm.Error,
+		Iterations:   cm.Iterations,
+		TotalTokens:  cm.TokensUsed.TotalTokens,
+		ParentTurnID: cm.ParentTurnID,
 	})
 }
 

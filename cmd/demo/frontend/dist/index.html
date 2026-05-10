@@ -244,20 +244,86 @@
               <p class="text-sm" x-text="emptyHint(agent.id)"></p>
             </div>
 
-            <!-- Messages -->
-            <template x-for="(msg, idx) in messages" :key="idx">
+            <!-- Messages.
+                 Each entry has `role` and optional `kind`. Default rendering
+                 (no kind) is the chat bubble. Special kinds:
+                   - 'plan'    — agent execution plan; rendered as a step
+                                 list with per-step status icons. Updated
+                                 in place when a new agent.plan event for
+                                 the same turn arrives, so the list of
+                                 chat messages doesn't grow with every
+                                 status transition.
+                   - 'workers' — orchestrator subagent progress. A single
+                                 panel shows all spawned workers as chips
+                                 with iteration count + status. Updated in
+                                 place by worker_status events. -->
+            <template x-for="(msg, idx) in messages" :key="msg.id || idx">
               <div class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
-                <div class="max-w-3xl">
+                <div class="max-w-3xl w-full">
                   <!-- Role label -->
                   <div class="text-xs opacity-40 mb-1 px-1"
-                       x-text="msg.role === 'user' ? 'You' : (msg.role === 'system' ? 'System' : agent.name)"></div>
-                  <!-- Bubble: user input renders verbatim (preserves what the
-                       user typed); other roles render markdown (sanitized). -->
-                  <template x-if="msg.role === 'user'">
+                       x-text="msg.role === 'user' ? 'You'
+                         : msg.role === 'system' ? 'System'
+                         : msg.kind === 'plan' ? 'Plan'
+                         : msg.kind === 'workers' ? 'Workers'
+                         : agent.name"></div>
+
+                  <!-- Plan: status-icon list, updated in place. -->
+                  <template x-if="msg.kind === 'plan'">
+                    <div class="msg-bubble plain rounded-lg px-4 py-3 bg-base-200/60 border border-base-300 text-sm space-y-1.5">
+                      <div class="text-xs opacity-60"
+                           x-text="`${msg.steps.length} step${msg.steps.length === 1 ? '' : 's'}`"></div>
+                      <template x-for="(step, sIdx) in msg.steps" :key="sIdx">
+                        <div class="flex items-start gap-2">
+                          <i class="fa-solid mt-0.5 w-4 text-center flex-shrink-0"
+                             :class="step.status === 'completed' ? 'fa-circle-check text-success'
+                               : step.status === 'active' ? 'fa-spinner fa-spin text-warning'
+                               : step.status === 'failed' ? 'fa-circle-xmark text-error'
+                               : step.status === 'skipped' ? 'fa-forward text-base-content/40'
+                               : 'fa-circle text-base-content/30 text-[8px] mt-1.5'"></i>
+                          <span class="flex-1" x-text="step.description"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- Workers: per-spawn chips, updated in place. Each chip
+                       shows the worker's task (truncated), current state
+                       (started → running iteration N → done/failed), and
+                       a count of tools called. -->
+                  <template x-if="msg.kind === 'workers'">
+                    <div class="msg-bubble plain rounded-lg px-3 py-2 bg-base-200/40 border border-base-300 text-xs space-y-1.5">
+                      <template x-for="w in msg.workers" :key="w.spawn_id">
+                        <div class="flex items-start gap-2 px-1.5 py-1 rounded"
+                             :class="w.status === 'failed' ? 'bg-error/10 border border-error/20'
+                               : w.status === 'complete' ? 'bg-success/5 border border-success/20'
+                               : 'bg-base-100 border border-base-300/60'">
+                          <i class="fa-solid mt-0.5 w-4 text-center flex-shrink-0"
+                             :class="w.status === 'complete' ? 'fa-circle-check text-success'
+                               : w.status === 'failed' ? 'fa-circle-xmark text-error'
+                               : 'fa-spinner fa-spin text-warning'"></i>
+                          <div class="flex-1 min-w-0">
+                            <div class="font-medium truncate" x-text="w.task || w.spawn_id"></div>
+                            <div class="opacity-60 text-[11px]"
+                                 x-text="w.status === 'complete'
+                                   ? `done · ${w.iterations} iter${w.iterations === 1 ? '' : 's'}${w.total_tokens ? ` · ${w.total_tokens.toLocaleString()} tok` : ''}`
+                                   : w.status === 'failed'
+                                     ? `failed · ${w.error || 'error'}`
+                                     : w.iteration > 0
+                                       ? `iter ${w.iteration}${w.tool_count > 0 ? ` · ${w.tool_count} tool${w.tool_count === 1 ? '' : 's'}` : ' · thinking'}`
+                                       : 'starting…'"></div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- Default chat bubble (user / assistant / system / error). -->
+                  <template x-if="!msg.kind && msg.role === 'user'">
                     <div class="msg-bubble plain rounded-lg px-4 py-3 bg-primary text-primary-content"
                          x-text="msg.content"></div>
                   </template>
-                  <template x-if="msg.role !== 'user'">
+                  <template x-if="!msg.kind && msg.role !== 'user'">
                     <div class="msg-bubble md rounded-lg px-4 py-3"
                          :class="{
                            'bg-base-200 border border-base-300': msg.role === 'assistant',
@@ -1328,32 +1394,116 @@ window.chatView = function(agentID) {
         });
       });
 
-      // Plan rendering. The wails adapter broadcasts both
-      // `plan.created` (planner emits the plan) and `agent.plan`
-      // (agent picks up the plan and starts executing) under the same
-      // "plan" envelope type. That means every plan arrives twice in
-      // close succession — once from the planner, once from the
-      // agent's adoption notification. They're identical to the user.
+      // Plan rendering — render as a single live element keyed by turn_id.
       //
-      // Dedup by hashing the step list and comparing against the most
-      // recent render. A 5-second window is plenty: planner→agent
-      // handoff is sub-second, and any genuinely new plan (re-plan on
-      // failure) will have different steps.
+      // Why not a 5-second signature dedup like the previous version?
+      // The orchestrator emits agent.plan repeatedly (after decompose,
+      // before each dispatch wave, after every subagent.complete) so
+      // the user sees status transitions. The descriptions don't change
+      // across emits — only the step `status` does, which is the part
+      // a sig-based dedup specifically misses. After the 5s window
+      // expires, the same description list re-rendered as a new
+      // duplicate-looking system message. Hence "shows up multiple
+      // times… visually doesn't change."
+      //
+      // Fix: track the existing plan message for the current turn and
+      // mutate it in place. The wails adapter still bridges both
+      // plan.created and agent.plan under the same "plan" envelope,
+      // but they share a turn_id so they collapse onto the same element.
+      // A new turn (different turn_id) gets its own plan message.
       this.bus.on('plan', (data) => {
         if (!data || !data.steps || data.steps.length === 0) return;
-        const sig = data.steps.map(s => s.description || '').join('||');
-        const now = Date.now();
-        if (this._lastPlanSig === sig && (now - (this._lastPlanAt || 0)) < 5000) {
-          return; // duplicate of the just-rendered plan
-        }
-        this._lastPlanSig = sig;
-        this._lastPlanAt = now;
+        const turnID = data.turn_id || '';
+        const steps = data.steps.map(s => ({
+          description: s.description || '',
+          status: s.status || 'pending',
+        }));
 
-        const lines = data.steps.map(s => `• ${s.description}`).join('\n');
-        this.bus._appendMessage({
-          role: 'system',
-          content: `Plan generated (${data.steps.length} steps):\n${lines}`,
-        });
+        const existing = this.messages.find(
+          m => m.kind === 'plan' && m.turnID === turnID
+        );
+        if (existing) {
+          // In-place update: Alpine reactivity picks up the new array.
+          existing.steps = steps;
+          this.scrollToBottom();
+        } else {
+          this.bus._appendMessage({
+            id: 'plan-' + (turnID || ('t' + Date.now())),
+            role: 'system',
+            kind: 'plan',
+            turnID,
+            steps,
+          });
+        }
+      });
+
+      // Worker progress. Each subagent emits started/iteration*/complete
+      // events; we collapse them into a single live "workers" message
+      // per parent turn, with one chip per spawn keyed by spawn_id.
+      //
+      // Without this bridge, the orchestrator's only visible signal
+      // between "Dispatching N workers" and the final synthesis is the
+      // status text itself — workers run silently for tens of seconds.
+      // Now each worker chip shows: task (truncated), current iteration,
+      // tool-call count, and final state (done / failed).
+      this.bus.on('worker_status', (data) => {
+        if (!data || !data.spawn_id) return;
+        const turnID = data.parent_turn_id || '';
+
+        // Find or create the workers message for this turn.
+        let panel = this.messages.find(
+          m => m.kind === 'workers' && m.turnID === turnID
+        );
+        if (!panel) {
+          panel = {
+            id: 'workers-' + (turnID || ('t' + Date.now())),
+            role: 'system',
+            kind: 'workers',
+            turnID,
+            workers: [],
+          };
+          this.messages.push(panel);
+        }
+
+        // Find or create the per-spawn entry.
+        let entry = panel.workers.find(w => w.spawn_id === data.spawn_id);
+        if (!entry) {
+          entry = {
+            spawn_id: data.spawn_id,
+            task: '',
+            status: 'running',
+            iteration: 0,
+            tool_count: 0,
+            iterations: 0,
+            total_tokens: 0,
+            error: '',
+          };
+          panel.workers.push(entry);
+        }
+
+        // Apply the event. Each kind contributes the fields we trust
+        // for that lifecycle stage (`started` carries the task,
+        // `iteration` carries iteration/tool counts, `complete` carries
+        // the terminal totals).
+        switch (data.kind) {
+          case 'started':
+            if (data.task) entry.task = data.task;
+            entry.status = 'running';
+            break;
+          case 'iteration':
+            entry.iteration = data.iteration || 0;
+            entry.tool_count = data.tool_count || 0;
+            entry.status = 'running';
+            break;
+          case 'complete':
+            entry.iterations = data.iterations || entry.iteration;
+            entry.total_tokens = data.total_tokens || 0;
+            entry.error = data.error || '';
+            entry.status = data.error ? 'failed' : 'complete';
+            break;
+        }
+
+        this.scrollToBottom();
       });
 
       this.bus.on('session.file.created', (data) => {

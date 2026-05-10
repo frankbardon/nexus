@@ -106,6 +106,14 @@ func (a *Adapter) SendPlanUpdate(msg ui.PlanDisplayMessage) error {
 	return a.broadcast("plan", msg)
 }
 
+// SendWorkerStatus emits a subagent lifecycle event to the webview. One
+// envelope per bus event in the subagent.started/iteration/complete
+// sequence; the frontend correlates by SpawnID and renders each worker
+// as a single live element (avoiding scroll churn).
+func (a *Adapter) SendWorkerStatus(msg ui.WorkerStatusMessage) error {
+	return a.broadcast(ui.TypeWorkerStatus, msg)
+}
+
 // SendFileChanged notifies the webview that a session file was created or updated.
 func (a *Adapter) SendFileChanged(path string, action string) error {
 	return a.broadcast(ui.TypeFileChanged, map[string]string{

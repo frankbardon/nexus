@@ -131,6 +131,35 @@ type PlanDisplayStep struct {
 	Order       int    `json:"order"`
 }
 
+// WorkerStatusMessage carries a single subagent lifecycle event to the UI.
+//
+// One worker_status envelope is sent per bus event in the
+// subagent.started → subagent.iteration* → subagent.complete sequence,
+// keyed by SpawnID. The frontend tracks workers by SpawnID and updates
+// in place on each new envelope. Kind is the discriminator:
+//
+//	"started"   — worker just began; Task is set, Iteration=0.
+//	"iteration" — worker finished iteration N; Content/ToolCount describe
+//	              the assistant turn that just landed.
+//	"complete"  — worker finished (success or error). Result/Error/
+//	              Iterations/TotalTokens summarize the run.
+//
+// ParentTurnID lets the UI correlate workers with the orchestrator turn
+// that spawned them, so progress can clear at the start of the next turn.
+type WorkerStatusMessage struct {
+	Kind         string `json:"kind"`
+	SpawnID      string `json:"spawn_id"`
+	Task         string `json:"task,omitempty"`
+	Iteration    int    `json:"iteration,omitempty"`
+	Content      string `json:"content,omitempty"`
+	ToolCount    int    `json:"tool_count,omitempty"`
+	Result       string `json:"result,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Iterations   int    `json:"iterations,omitempty"`
+	TotalTokens  int    `json:"total_tokens,omitempty"`
+	ParentTurnID string `json:"parent_turn_id,omitempty"`
+}
+
 // SessionInfo describes a connected UI session.
 type SessionInfo struct {
 	ID           string    `json:"id"`

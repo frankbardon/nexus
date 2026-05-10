@@ -104,6 +104,14 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "plan.approval.request", Priority: 50},
 		{EventType: "plan.created", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
+		// Subagent lifecycle: bridged so orchestrator-style agents can
+		// surface per-worker progress in the UI instead of leaving the
+		// operator staring at a "dispatching N workers" status until
+		// synthesis finishes. The frontend renders one chip per spawn
+		// keyed by SpawnID and updates it in place on each event.
+		{EventType: "subagent.started", Priority: 50},
+		{EventType: "subagent.iteration", Priority: 50},
+		{EventType: "subagent.complete", Priority: 50},
 		{EventType: "provider.fallback", Priority: 50},
 		{EventType: "session.file.created", Priority: 50},
 		{EventType: "session.file.updated", Priority: 50},
@@ -274,6 +282,9 @@ func (p *Plugin) initLegacy() {
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.started", p.handleSubagentStarted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.iteration", p.handleSubagentIteration, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.complete", p.handleSubagentComplete, engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fallback", p.handleProviderFallback, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.created", p.handleFileChanged, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.updated", p.handleFileChanged, engine.WithSource(pluginID)),
@@ -499,6 +510,64 @@ func (p *Plugin) handleAgentPlan(e engine.Event[any]) {
 		Steps:  steps,
 		TurnID: plan.TurnID,
 		Source: "agent",
+	})
+}
+
+// handleSubagentStarted bridges the bus event a subagent emits when it
+// begins executing (after dispatch). Carries the assigned task so the UI
+// can render the worker chip with descriptive text instead of an opaque
+// SpawnID. The orchestrator emits subagent.spawn first; the started
+// event fires from inside the subagent's own goroutine, confirming the
+// worker actually picked up the task.
+func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
+	st, ok := e.Payload.(events.SubagentStarted)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:         "started",
+		SpawnID:      st.SpawnID,
+		Task:         st.Task,
+		ParentTurnID: st.ParentTurnID,
+	})
+}
+
+// handleSubagentIteration forwards per-iteration progress from a worker.
+// One bus event per loop pass (LLM call + tool round-trip). ToolCount
+// signals whether the worker is calling tools or wrapping up; the UI
+// uses it to show "thinking" vs "running tool…" state on the chip.
+func (p *Plugin) handleSubagentIteration(e engine.Event[any]) {
+	it, ok := e.Payload.(events.SubagentIteration)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:      "iteration",
+		SpawnID:   it.SpawnID,
+		Iteration: it.Iteration,
+		Content:   it.Content,
+		ToolCount: len(it.ToolCalls),
+	})
+}
+
+// handleSubagentComplete forwards the worker's final state. Result
+// carries the assistant's last message; Error is non-empty on failure.
+// The UI flips the chip to checkmark/X and stops the spinner; the
+// orchestrator's plan-step status (dispatched → completed/failed) is
+// updated separately via agent.plan.
+func (p *Plugin) handleSubagentComplete(e engine.Event[any]) {
+	cm, ok := e.Payload.(events.SubagentComplete)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
+		Kind:         "complete",
+		SpawnID:      cm.SpawnID,
+		Result:       cm.Result,
+		Error:        cm.Error,
+		Iterations:   cm.Iterations,
+		TotalTokens:  cm.TokensUsed.TotalTokens,
+		ParentTurnID: cm.ParentTurnID,
 	})
 }
 

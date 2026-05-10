@@ -83,6 +83,13 @@ func (a *Adapter) SendPlanUpdate(msg ui.PlanDisplayMessage) error {
 	return a.broadcast("plan", msg)
 }
 
+// SendWorkerStatus emits a subagent lifecycle event to all clients. One
+// envelope per bus event in the subagent.started/iteration/complete
+// sequence; the frontend correlates by SpawnID.
+func (a *Adapter) SendWorkerStatus(msg ui.WorkerStatusMessage) error {
+	return a.broadcast(ui.TypeWorkerStatus, msg)
+}
+
 // RequestApproval sends an approval request and blocks until the user responds.
 func (a *Adapter) RequestApproval(msg ui.ApprovalRequestMessage) (ui.ApprovalResponseMessage, error) {
 	if err := a.broadcast(ui.TypeApprovalRequest, msg); err != nil {
