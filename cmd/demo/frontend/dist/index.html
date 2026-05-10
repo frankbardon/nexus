@@ -1265,10 +1265,37 @@ window.chatView = function(agentID) {
 
       this.bus.on('output', (data) => {
         if (data && data.metadata && data.metadata.streamed) return;
-        this.bus._appendMessage({
-          role: data.role || 'assistant',
-          content: data.content || '',
-        });
+
+        // Content-safety + streaming interaction: ReAct hardcodes
+        // Stream:true on llm.request, so the chunks paint the
+        // assistant's reply live. The content_safety gate fires on
+        // before:io.output (the FINAL accumulated output) and vetoes
+        // it when PII matches, then emits a `system` io.output with
+        // a "Content blocked: ..." message. By the time that system
+        // message arrives, the streamed bubble is already committed
+        // in `messages`. Detect the gate's block message and rewind
+        // the most recent assistant bubble — otherwise the operator
+        // sees both the leaked PII AND the "blocked" notice.
+        //
+        // Detection by content prefix is fragile but matches the
+        // gate's hardcoded format (plugins/gates/content_safety/
+        // plugin.go: "Content blocked: contains sensitive..."). The
+        // proper fix is upstream metadata on the system message; not
+        // worth blocking the demo on that.
+        const role = data.role || 'assistant';
+        const content = data.content || '';
+        if (role === 'system' && /^content blocked/i.test(content.trim())) {
+          // Walk back the most recent assistant message; it was the
+          // streamed reply the gate just vetoed.
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].role === 'assistant') {
+              this.messages.splice(i, 1);
+              break;
+            }
+          }
+        }
+
+        this.bus._appendMessage({ role, content });
       });
 
       this.bus.on('stream_chunk', (data) => {
