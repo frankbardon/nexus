@@ -212,7 +212,7 @@ plugins:
 
   nexus.gate.token_budget:
     max_tokens: 200000
-    warning_threshold: 0.8
+    on_exceed: warn
 
   nexus.gate.context_window:
     max_context_tokens: 150000

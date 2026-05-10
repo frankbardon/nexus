@@ -303,8 +303,12 @@ plugins:
     max_iterations: 30  # higher because synth + multiple worker passes happen
 
   nexus.gate.token_budget:
-    max_tokens: 500000  # parallel workers chew through tokens fast
-    warning_threshold: 0.85
+    # Legacy single-session ceiling. Parallel workers chew through tokens
+    # fast; 500k is a safety net more than a budget. For real cost
+    # control use the `ceilings` block (per-dimension budgets) — see the
+    # token_budget schema for shape.
+    max_tokens: 500000
+    on_exceed: warn
 
   nexus.gate.context_window:
     max_context_tokens: 180000

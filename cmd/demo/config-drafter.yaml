@@ -179,7 +179,7 @@ plugins:
   nexus.skills:
     scan_paths:
       - ./skills
-    trust_project: true
+    trust_project: always
     catalog_in_system_prompt: true
 
   # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
