@@ -99,7 +99,7 @@ plugins:
 
   nexus.llm.gemini:
     auth: api_key
-    api_key: "${gemini_api_key}"
+    api_key: "${shell.gemini_api_key}"
     # Cache enabled because re-asking about the same long document is
     # the natural workflow here. Gemini's caching is per-request; min
     # tokens prevents caching trivially-small prompts.
@@ -180,7 +180,7 @@ plugins:
   # the older text-only model). search_document is the standard mode
   # for indexing; queries should override to search_query.
   nexus.embeddings.cohere_multimodal:
-    api_key: "${cohere_multimodal_key}"
+    api_key: "${shell.cohere_api_key}"
     model: embed-v4.0
     input_type: search_document
     timeout: 30s

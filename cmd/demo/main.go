@@ -451,22 +451,14 @@ func researcherAgent() desktop.Agent {
 		Settings: []desktop.SettingsField{
 			sharedAnthropicKey(),
 			sharedOpenAIKey(),
-			{
-				Key:         "brave_api_key",
-				Display:     "Brave Search API Key",
-				Description: "Required for web search via Brave. Free tier: https://brave.com/search/api/. To swap to Anthropic or OpenAI native search, edit capabilities.search.provider in config-researcher.yaml.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    true,
-			},
-			{
-				Key:         "cohere_api_key",
-				Display:     "Cohere API Key (optional)",
-				Description: "Optional: enables Cohere Rerank v3.5 as the search.reranker. Free trial: https://cohere.com/. Set capabilities.search.reranker to nexus.rag.reranker.cohere in YAML to activate.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    false,
-			},
+			sharedBraveKey(),
+			// Cohere is optional on Researcher (local reranker is the
+			// default). The shared helper points at the same shell-scoped
+			// keychain entry the Multimodal Reader uses.
+			sharedCohereKey(false),
+			// Jina is Researcher-specific (no other agent uses it), so
+			// it stays inline. If a second agent ever needs Jina, lift
+			// this into a sharedJinaKey() helper alongside the others.
 			{
 				Key:         "jina_api_key",
 				Display:     "Jina API Key (optional)",
@@ -503,22 +495,12 @@ func multimodalAgent() desktop.Agent {
 		Factories:   commonFactories(),
 		Settings: []desktop.SettingsField{
 			sharedAnthropicKey(),
-			{
-				Key:         "gemini_api_key",
-				Display:     "Google Gemini API Key",
-				Description: "Primary LLM for the Multimodal Reader (vision + PDF native input). Free tier: https://aistudio.google.com/.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    true,
-			},
-			{
-				Key:         "cohere_multimodal_key",
-				Display:     "Cohere API Key (multimodal embeddings)",
-				Description: "Required for image+text joint embeddings. Free trial: https://cohere.com/. Same key works for Cohere Rerank if you want to enable it on the Researcher.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    true,
-			},
+			sharedGeminiKey(),
+			// Cohere is required here (it's the embedder for the
+			// multimodal vector path). Same shared helper as Researcher
+			// uses; just flagged required: true so the framework blocks
+			// boot until the operator fills it in.
+			sharedCohereKey(true),
 			{
 				Key:         "input_dir",
 				Display:     "Input folder",
@@ -552,22 +534,8 @@ func orchestratorAgent() desktop.Agent {
 		Settings: []desktop.SettingsField{
 			sharedAnthropicKey(),
 			sharedOpenAIKey(),
-			{
-				Key:         "gemini_api_key",
-				Display:     "Google Gemini API Key",
-				Description: "Required for the third leg of the fanout-vote. Free tier: https://aistudio.google.com/. Stored in OS keychain.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    true,
-			},
-			{
-				Key:         "brave_api_key",
-				Display:     "Brave Search API Key",
-				Description: "Worker subagents use this for web_search. Free tier: https://brave.com/search/api/.",
-				Type:        desktop.FieldString,
-				Secret:      true,
-				Required:    true,
-			},
+			sharedGeminiKey(),
+			sharedBraveKey(),
 		},
 	}
 }
@@ -617,6 +585,59 @@ func drafterAgent() desktop.Agent {
 				Required:    true,
 			},
 		},
+	}
+}
+
+// sharedBraveKey is referenced by every agent that calls web_search via
+// Brave (Researcher, Orchestrator). Stored under the shell scope so a
+// single keychain entry serves the whole app — the desktop framework
+// rewrites `shell.X` into a shell-scoped lookup at config-resolve time
+// (see pkg/desktop/resolve.go). Free tier at brave.com/search/api/.
+func sharedBraveKey() desktop.SettingsField {
+	return desktop.SettingsField{
+		Key:         "shell.brave_api_key",
+		Display:     "Brave Search API Key",
+		Description: "Used by every agent that calls web_search via Brave (Researcher, Orchestrator). Free tier: https://brave.com/search/api/. Stored in OS keychain.",
+		Type:        desktop.FieldString,
+		Secret:      true,
+		Required:    true,
+	}
+}
+
+// sharedGeminiKey is referenced by Orchestrator (third leg of the
+// fanout-vote) and Multimodal Reader (primary LLM). Single keychain
+// entry; both agents resolve it via `${shell.gemini_api_key}`.
+func sharedGeminiKey() desktop.SettingsField {
+	return desktop.SettingsField{
+		Key:         "shell.gemini_api_key",
+		Display:     "Google Gemini API Key",
+		Description: "Used by the Multimodal Reader (primary LLM) and the Orchestrator's fanout-vote (third provider). Free tier: https://aistudio.google.com/. Stored in OS keychain.",
+		Type:        desktop.FieldString,
+		Secret:      true,
+		Required:    true,
+	}
+}
+
+// sharedCohereKey is one key for both Cohere consumers in the demo:
+// the Researcher's optional Cohere Rerank v3.5 (search.reranker
+// capability) and the Multimodal Reader's required Cohere multimodal
+// embeddings (embed-v4.0). The same Cohere account handles both APIs;
+// before this collapse we asked the user for two separate keys, which
+// was confusing.
+//
+// `required` is parameterized because the framework's missing-required
+// check runs per-agent: Multimodal must have a key (it's the embedder),
+// Researcher works fine without one (the local reranker is the default).
+// Same Key, different Required — the value resolves from the same shell
+// keychain entry either way.
+func sharedCohereKey(required bool) desktop.SettingsField {
+	return desktop.SettingsField{
+		Key:         "shell.cohere_api_key",
+		Display:     "Cohere API Key",
+		Description: "Used by the Multimodal Reader (image+text embeddings) and optionally by the Researcher (Cohere Rerank v3.5; activate via capabilities.search.reranker in config-researcher.yaml). Free trial: https://cohere.com/. Stored in OS keychain.",
+		Type:        desktop.FieldString,
+		Secret:      true,
+		Required:    required,
 	}
 }
 

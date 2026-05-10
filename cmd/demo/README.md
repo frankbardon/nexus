@@ -356,20 +356,22 @@ the webview — Wails-native build steps are required for the desktop shell to r
 
 On first launch the app redirects you to Settings if anything required is missing:
 
+All API keys live under the `shell.*` scope so a single keychain entry
+serves every agent that needs the same credential. Per-agent fields
+are reserved for genuinely agent-specific knobs (input/output folders,
+workspace dirs).
+
 | Setting | Used by | Where |
 |---|---|---|
-| `shell.anthropic_api_key` | All three agents (Claude Sonnet) | OS keychain |
-| `shell.openai_api_key` | All agents (embeddings) + Researcher fallback | OS keychain |
-| `researcher.brave_api_key` | Researcher (web_search via Brave; can swap to vendor-native search) | OS keychain |
-| `researcher.cohere_api_key` *(optional)* | Researcher (Cohere Rerank v3.5 — set `capabilities.search.reranker: nexus.rag.reranker.cohere` to use) | OS keychain |
-| `researcher.jina_api_key` *(optional)* | Researcher (Jina Reranker v2 — set `capabilities.search.reranker: nexus.rag.reranker.jina` to use) | OS keychain |
+| `shell.anthropic_api_key` | Every agent (Claude Sonnet/Haiku) | OS keychain |
+| `shell.openai_api_key` | Every agent (embeddings) + Researcher fallback + Voice ASR/TTS recipe | OS keychain |
+| `shell.brave_api_key` | Researcher + Orchestrator (web_search via Brave) | OS keychain |
+| `shell.gemini_api_key` | Multimodal Reader (primary LLM) + Orchestrator (third leg of fanout-vote) | OS keychain |
+| `shell.cohere_api_key` | Multimodal Reader (image+text embeddings, **required**); Researcher *(optional Cohere Rerank v3.5 — flip `capabilities.search.reranker: nexus.rag.reranker.cohere`)* | OS keychain |
+| `researcher.jina_api_key` *(optional)* | Researcher only (Jina Reranker v2 — set `capabilities.search.reranker: nexus.rag.reranker.jina` to use) | OS keychain |
 | `librarian.input_dir` | Librarian (watched folder for ingest) | Plaintext setting |
 | `drafter.output_dir` | Drafter (where briefs are saved) | Plaintext setting |
 | `engineer.workspace_dir` | Engineer (sandbox folder for shell + file_write) | Plaintext setting |
-| `orchestrator.gemini_api_key` | Orchestrator (third leg of fanout-vote) | OS keychain |
-| `orchestrator.brave_api_key` | Orchestrator (web_search by worker subagents) | OS keychain |
-| `multimodal.gemini_api_key` | Multimodal Reader (primary LLM) | OS keychain |
-| `multimodal.cohere_multimodal_key` | Multimodal Reader (image+text embeddings) | OS keychain |
 | `multimodal.input_dir` | Multimodal Reader (folder of PDFs / images) | Plaintext setting |
 
 Brave's free tier covers the demo: <https://brave.com/search/api/>.
