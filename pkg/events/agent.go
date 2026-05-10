@@ -29,9 +29,16 @@ type Plan struct {
 }
 
 // PlanStep is a single step within a plan.
+//
+// SpawnID is set by agents that delegate steps to subagents (the
+// orchestrator's parallel-worker flow); the UI uses it to fold per-worker
+// progress (iteration count, tool calls, terminal totals) into the plan
+// step instead of rendering a parallel "workers" panel. Empty for plans
+// emitted by agents that execute steps inline (planexec, etc.).
 type PlanStep struct {
 	Description string
-	Status      string // "pending", "active", "completed", "failed"
+	Status      string // "pending", "active", "completed", "failed", "skipped"
+	SpawnID     string
 }
 
 // SubagentSpawn requests spawning a new subagent.

@@ -275,9 +275,15 @@
                          : msg.role === 'system' ? 'System'
                          : agent.name"></div>
 
-                  <!-- Plan: status-icon list, updated in place. -->
+                  <!-- Plan: status-icon list, updated in place.
+                       When a step is linked to a subagent worker (its
+                       spawn_id is set, populated by the orchestrator),
+                       per-worker progress (iter / tools / done totals)
+                       renders inline beneath the description so we don't
+                       need a parallel "workers" panel restating the same
+                       set of tasks. -->
                   <template x-if="msg.kind === 'plan'">
-                    <div class="msg-bubble plain rounded-lg px-4 py-3 bg-base-200/60 border border-base-300 text-sm space-y-1.5">
+                    <div class="msg-bubble plain rounded-lg px-4 py-3 bg-base-200/60 border border-base-300 text-sm space-y-2">
                       <div class="text-xs opacity-60"
                            x-text="`${msg.steps.length} step${msg.steps.length === 1 ? '' : 's'}`"></div>
                       <template x-for="(step, sIdx) in msg.steps" :key="sIdx">
@@ -288,37 +294,29 @@
                                : step.status === 'failed' ? 'fa-circle-xmark text-error'
                                : step.status === 'skipped' ? 'fa-forward text-base-content/40'
                                : 'fa-circle text-base-content/30 text-[8px] mt-1.5'"></i>
-                          <span class="flex-1" x-text="step.description"></span>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-
-                  <!-- Workers: per-spawn chips, updated in place. Each chip
-                       shows the worker's task (truncated), current state
-                       (started → running iteration N → done/failed), and
-                       a count of tools called. -->
-                  <template x-if="msg.kind === 'workers'">
-                    <div class="msg-bubble plain rounded-lg px-3 py-2 bg-base-200/40 border border-base-300 text-xs space-y-1.5">
-                      <template x-for="w in msg.workers" :key="w.spawn_id">
-                        <div class="flex items-start gap-2 px-1.5 py-1 rounded"
-                             :class="w.status === 'failed' ? 'bg-error/10 border border-error/20'
-                               : w.status === 'complete' ? 'bg-success/5 border border-success/20'
-                               : 'bg-base-100 border border-base-300/60'">
-                          <i class="fa-solid mt-0.5 w-4 text-center flex-shrink-0"
-                             :class="w.status === 'complete' ? 'fa-circle-check text-success'
-                               : w.status === 'failed' ? 'fa-circle-xmark text-error'
-                               : 'fa-spinner fa-spin text-warning'"></i>
                           <div class="flex-1 min-w-0">
-                            <div class="font-medium truncate" x-text="w.task || w.spawn_id"></div>
-                            <div class="opacity-60 text-[11px]"
-                                 x-text="w.status === 'complete'
-                                   ? `done · ${w.iterations} iter${w.iterations === 1 ? '' : 's'}${w.total_tokens ? ` · ${w.total_tokens.toLocaleString()} tok` : ''}`
-                                   : w.status === 'failed'
-                                     ? `failed · ${w.error || 'error'}`
-                                     : w.has_iteration
-                                       ? `iter ${w.iteration + 1}${w.tool_count > 0 ? ` · ${w.tool_count} tool${w.tool_count === 1 ? '' : 's'}` : ' · thinking'}`
-                                       : 'starting…'"></div>
+                            <div x-text="step.description"></div>
+                            <!-- Inline worker progress. workers map is
+                                 keyed by spawn_id and updated by
+                                 worker_status events; we read it here
+                                 every render so step transitions reflect
+                                 the latest iter/tool counts in real time. -->
+                            <template x-if="step.spawn_id && workers[step.spawn_id]">
+                              <div class="opacity-60 text-[11px] mt-0.5"
+                                   x-text="(() => {
+                                     const w = workers[step.spawn_id];
+                                     if (w.status === 'complete') {
+                                       return `done · ${w.iterations} iter${w.iterations === 1 ? '' : 's'}${w.total_tokens ? ` · ${w.total_tokens.toLocaleString()} tok` : ''}`;
+                                     }
+                                     if (w.status === 'failed') {
+                                       return `failed · ${w.error || 'error'}`;
+                                     }
+                                     if (w.has_iteration) {
+                                       return `iter ${w.iteration + 1}${w.tool_count > 0 ? ` · ${w.tool_count} tool${w.tool_count === 1 ? '' : 's'}` : ' · thinking'}`;
+                                     }
+                                     return 'starting…';
+                                   })()"></div>
+                            </template>
                           </div>
                         </div>
                       </template>
@@ -1290,6 +1288,14 @@ window.chatView = function(agentID) {
     agentID,
     bus: null,
     messages: [],
+    // workers maps spawn_id -> { task, status, iteration, tool_count,
+    // has_iteration, iterations, total_tokens, error }. Updated by
+    // worker_status events; read by the plan template to render inline
+    // per-step progress. Lives on chatView (not messages) so plan steps
+    // can look up workers by spawn_id without searching the message
+    // history. Old turns' workers stay in the map; harmless because
+    // nothing references them once their plan scrolls off.
+    workers: {},
     input: '',
     streaming: false,
     streamBuffer: '',
@@ -1444,56 +1450,25 @@ window.chatView = function(agentID) {
         }
       });
 
-      // Worker progress. Each subagent emits started/iteration*/complete
-      // events; we collapse them into a single live "workers" message
-      // per parent turn, with one chip per spawn keyed by spawn_id.
+      // Worker progress. Each subagent emits started/iteration*/complete;
+      // we maintain a chatView-level workers map keyed by spawn_id so
+      // the plan template can render per-worker iter/tool/done state
+      // inline on the corresponding plan step.
       //
-      // Without this bridge, the orchestrator's only visible signal
-      // between "Dispatching N workers" and the final synthesis is the
-      // status text itself — workers run silently for tens of seconds.
-      // Now each worker chip shows: task (truncated), current iteration,
-      // tool-call count, and final state (done / failed).
+      // We don't push a separate "workers" panel: for the orchestrator
+      // every worker is already represented by a plan step (the
+      // decomposition produces both), so a parallel panel just restates
+      // the same set of tasks. Plan-step inline rendering is the single
+      // surface for worker progress.
+      //
+      // subagent.iteration's Iteration field is 0-indexed (the loop
+      // counter); we keep it as-is and add 1 only for display, so an
+      // event with iteration=0 still flips the chip out of "starting…"
+      // via has_iteration.
       this.bus.on('worker_status', (data) => {
         if (!data || !data.spawn_id) return;
-        const turnID = data.parent_turn_id || '';
 
-        // Locate the panel + entry. Two-step lookup so we never
-        // fragment a worker's lifecycle across multiple panels:
-        //
-        //   1. Prefer matching by spawn_id across ANY existing workers
-        //      panel. This handles the case where an event arrives
-        //      without parent_turn_id (older nexus versions, or when
-        //      iteration events fire before started in a race) — we
-        //      still want it to land on the correct chip.
-        //   2. If no panel owns this spawn yet, fall back to matching
-        //      by turn_id; create a new panel if neither match.
-        let panel = null;
-        let entry = null;
-        for (const m of this.messages) {
-          if (m.kind !== 'workers') continue;
-          const found = m.workers.find(w => w.spawn_id === data.spawn_id);
-          if (found) {
-            panel = m;
-            entry = found;
-            break;
-          }
-        }
-        if (!panel) {
-          panel = this.messages.find(
-            m => m.kind === 'workers' && m.turnID === turnID
-          );
-        }
-        if (!panel) {
-          panel = {
-            id: 'workers-' + (turnID || ('t' + Date.now())),
-            role: 'system',
-            kind: 'workers',
-            turnID,
-            workers: [],
-          };
-          this.messages.push(panel);
-        }
-
+        let entry = this.workers[data.spawn_id];
         if (!entry) {
           entry = {
             spawn_id: data.spawn_id,
@@ -1506,16 +1481,8 @@ window.chatView = function(agentID) {
             total_tokens: 0,
             error: '',
           };
-          panel.workers.push(entry);
         }
 
-        // Apply the event. Each kind contributes the fields we trust
-        // for that lifecycle stage (`started` carries the task,
-        // `iteration` carries iteration/tool counts, `complete` carries
-        // the terminal totals). subagent.iteration's Iteration field is
-        // 0-indexed (the loop counter); we keep it as-is and add 1 only
-        // for display, so an event with iteration=0 still flips the
-        // chip out of "starting…" via has_iteration.
         switch (data.kind) {
           case 'started':
             if (data.task) entry.task = data.task;
@@ -1535,7 +1502,10 @@ window.chatView = function(agentID) {
             break;
         }
 
-        this.scrollToBottom();
+        // Reassign so Alpine reactivity sees the change. Object-property
+        // mutation alone doesn't trigger re-render on x-text expressions
+        // that read through the map — we have to swap the entry reference.
+        this.workers = { ...this.workers, [data.spawn_id]: entry };
       });
 
       this.bus.on('session.file.created', (data) => {

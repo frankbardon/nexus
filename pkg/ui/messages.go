@@ -124,11 +124,16 @@ type PlanDisplayMessage struct {
 }
 
 // PlanDisplayStep is a single step for UI display.
+//
+// SpawnID, when set, links the step to a subagent worker so the UI can
+// inline progress (iteration count, tool calls, terminal totals) onto
+// the plan step. Empty when the agent executes the step inline.
 type PlanDisplayStep struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
 	Order       int    `json:"order"`
+	SpawnID     string `json:"spawn_id,omitempty"`
 }
 
 // WorkerStatusMessage carries a single subagent lifecycle event to the UI.

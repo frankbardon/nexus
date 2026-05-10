@@ -408,6 +408,7 @@ func (p *Plugin) handleAgentPlan(e engine.Event[any]) {
 			Description: s.Description,
 			Status:      s.Status,
 			Order:       i + 1,
+			SpawnID:     s.SpawnID,
 		}
 	}
 	_ = p.adapter.SendPlanUpdate(ui.PlanDisplayMessage{
