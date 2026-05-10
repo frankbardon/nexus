@@ -101,12 +101,14 @@ plugins:
     # to all providers in parallel, then runs the selection strategy.
     - nexus.provider.fanout
 
-    # Orchestrator agent + its dependencies.
+    # Orchestrator agent + its dependency.
     # subagent must be in active because orchestrator declares it as a
-    # Dependencies() entry. react is the worker's inner loop.
+    # Dependencies() entry. The subagent plugin manages its own LLM /
+    # tool loop internally — it does NOT need nexus.agent.react in the
+    # active list, and including react here would race the orchestrator
+    # on io.input and produce duplicate plans + confused output.
     - nexus.agent.orchestrator
     - nexus.agent.subagent
-    - nexus.agent.react
 
     - nexus.control.cancel
     - nexus.tool.catalog

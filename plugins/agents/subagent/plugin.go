@@ -47,7 +47,20 @@ func New() engine.Plugin {
 func (p *Plugin) ID() string                        { return p.instanceID }
 func (p *Plugin) Name() string                      { return pluginName }
 func (p *Plugin) Version() string                   { return version }
-func (p *Plugin) Dependencies() []string            { return []string{"nexus.agent.react"} }
+// Dependencies returns no plugins. Earlier versions of this plugin
+// declared a dependency on nexus.agent.react, but the runSubagent
+// loop manages its own LLM + tool dispatch directly via bus
+// subscriptions — react is never called into. The vestigial dep
+// caused a real bug when the orchestrator (which itself depends on
+// subagent) shipped a config that activated react for the orchestrator
+// agent's parent thread: react's io.input handler raced the
+// orchestrator's, producing duplicate plans + confused output.
+//
+// Deployments that legitimately want a parent ReAct alongside
+// subagent workers can still include nexus.agent.react in their
+// `plugins.active` list explicitly; that's now an opt-in choice,
+// not a side effect of using subagent.
+func (p *Plugin) Dependencies() []string { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
