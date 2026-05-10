@@ -364,11 +364,14 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			ToolCalls: resp.ToolCalls,
 		})
 
-		// Emit iteration event for observability.
+		// Emit iteration event for observability. ParentTurnID is set
+		// so UI bridges can correlate this with the started/complete
+		// events for the same worker.
 		_ = p.bus.Emit("subagent.iteration", events.SubagentIteration{SchemaVersion: events.SubagentIterationVersion, SpawnID: spawnID,
-			Iteration: iteration,
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Iteration:    iteration,
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			ParentTurnID: parentTurnID,
 		})
 
 		// No tool calls means we're done.

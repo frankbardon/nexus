@@ -260,12 +260,19 @@
             <template x-for="(msg, idx) in messages" :key="msg.id || idx">
               <div class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
                 <div class="max-w-3xl w-full">
-                  <!-- Role label -->
+                  <!-- Role label.
+                       Kind-discriminated messages take precedence so that
+                       a plan/workers panel reads "Plan" / "Workers" in the
+                       header rather than the generic "System" we use for
+                       agent-emitted notices. The role/kind split exists
+                       because plan and workers events ride on system-role
+                       messages internally (so they get the muted styling)
+                       but visually they're a distinct UI surface. -->
                   <div class="text-xs opacity-40 mb-1 px-1"
-                       x-text="msg.role === 'user' ? 'You'
-                         : msg.role === 'system' ? 'System'
-                         : msg.kind === 'plan' ? 'Plan'
+                       x-text="msg.kind === 'plan' ? 'Plan'
                          : msg.kind === 'workers' ? 'Workers'
+                         : msg.role === 'user' ? 'You'
+                         : msg.role === 'system' ? 'System'
                          : agent.name"></div>
 
                   <!-- Plan: status-icon list, updated in place. -->
@@ -309,8 +316,8 @@
                                    ? `done · ${w.iterations} iter${w.iterations === 1 ? '' : 's'}${w.total_tokens ? ` · ${w.total_tokens.toLocaleString()} tok` : ''}`
                                    : w.status === 'failed'
                                      ? `failed · ${w.error || 'error'}`
-                                     : w.iteration > 0
-                                       ? `iter ${w.iteration}${w.tool_count > 0 ? ` · ${w.tool_count} tool${w.tool_count === 1 ? '' : 's'}` : ' · thinking'}`
+                                     : w.has_iteration
+                                       ? `iter ${w.iteration + 1}${w.tool_count > 0 ? ` · ${w.tool_count} tool${w.tool_count === 1 ? '' : 's'}` : ' · thinking'}`
                                        : 'starting…'"></div>
                           </div>
                         </div>
@@ -1450,10 +1457,32 @@ window.chatView = function(agentID) {
         if (!data || !data.spawn_id) return;
         const turnID = data.parent_turn_id || '';
 
-        // Find or create the workers message for this turn.
-        let panel = this.messages.find(
-          m => m.kind === 'workers' && m.turnID === turnID
-        );
+        // Locate the panel + entry. Two-step lookup so we never
+        // fragment a worker's lifecycle across multiple panels:
+        //
+        //   1. Prefer matching by spawn_id across ANY existing workers
+        //      panel. This handles the case where an event arrives
+        //      without parent_turn_id (older nexus versions, or when
+        //      iteration events fire before started in a race) — we
+        //      still want it to land on the correct chip.
+        //   2. If no panel owns this spawn yet, fall back to matching
+        //      by turn_id; create a new panel if neither match.
+        let panel = null;
+        let entry = null;
+        for (const m of this.messages) {
+          if (m.kind !== 'workers') continue;
+          const found = m.workers.find(w => w.spawn_id === data.spawn_id);
+          if (found) {
+            panel = m;
+            entry = found;
+            break;
+          }
+        }
+        if (!panel) {
+          panel = this.messages.find(
+            m => m.kind === 'workers' && m.turnID === turnID
+          );
+        }
         if (!panel) {
           panel = {
             id: 'workers-' + (turnID || ('t' + Date.now())),
@@ -1465,8 +1494,6 @@ window.chatView = function(agentID) {
           this.messages.push(panel);
         }
 
-        // Find or create the per-spawn entry.
-        let entry = panel.workers.find(w => w.spawn_id === data.spawn_id);
         if (!entry) {
           entry = {
             spawn_id: data.spawn_id,
@@ -1474,6 +1501,7 @@ window.chatView = function(agentID) {
             status: 'running',
             iteration: 0,
             tool_count: 0,
+            has_iteration: false,
             iterations: 0,
             total_tokens: 0,
             error: '',
@@ -1484,7 +1512,10 @@ window.chatView = function(agentID) {
         // Apply the event. Each kind contributes the fields we trust
         // for that lifecycle stage (`started` carries the task,
         // `iteration` carries iteration/tool counts, `complete` carries
-        // the terminal totals).
+        // the terminal totals). subagent.iteration's Iteration field is
+        // 0-indexed (the loop counter); we keep it as-is and add 1 only
+        // for display, so an event with iteration=0 still flips the
+        // chip out of "starting…" via has_iteration.
         switch (data.kind) {
           case 'started':
             if (data.task) entry.task = data.task;
@@ -1493,10 +1524,11 @@ window.chatView = function(agentID) {
           case 'iteration':
             entry.iteration = data.iteration || 0;
             entry.tool_count = data.tool_count || 0;
+            entry.has_iteration = true;
             entry.status = 'running';
             break;
           case 'complete':
-            entry.iterations = data.iterations || entry.iteration;
+            entry.iterations = data.iterations || entry.iteration + 1;
             entry.total_tokens = data.total_tokens || 0;
             entry.error = data.error || '';
             entry.status = data.error ? 'failed' : 'complete';

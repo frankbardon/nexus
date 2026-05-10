@@ -542,11 +542,12 @@ func (p *Plugin) handleSubagentIteration(e engine.Event[any]) {
 		return
 	}
 	_ = p.adapter.SendWorkerStatus(ui.WorkerStatusMessage{
-		Kind:      "iteration",
-		SpawnID:   it.SpawnID,
-		Iteration: it.Iteration,
-		Content:   it.Content,
-		ToolCount: len(it.ToolCalls),
+		Kind:         "iteration",
+		SpawnID:      it.SpawnID,
+		Iteration:    it.Iteration,
+		Content:      it.Content,
+		ToolCount:    len(it.ToolCalls),
+		ParentTurnID: it.ParentTurnID,
 	})
 }
 
