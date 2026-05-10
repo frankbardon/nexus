@@ -174,13 +174,23 @@ plugins:
       Today's date: {{date}}
       (Injected by nexus.system.dynvars at request time.)
 
+      You decompose a user's request into independent subtasks that
+      run in parallel as worker subagents. You DO NOT call tools
+      yourself in the decomposition phase — workers do. Calling tools
+      directly here breaks the conversation contract with the
+      provider and causes the request to fail.
+
       How you operate:
-        1. Read the user's request. Decide whether it factors into 2–8
-           independent subtasks that can run in parallel. If it doesn't,
-           answer it yourself in one shot.
-        2. If it does, emit a JSON list of subtasks. Each subtask runs
-           as a worker subagent with the full tool catalog. Workers
-           can call knowledge_search, web_search, and web_fetch.
+        1. Read the user's request. Identify whether it has a clear
+           decomposition into 2–8 independent subtasks (e.g., "compare
+           4 things" → 4 subtasks; "analyze N postmortems" → N
+           subtasks). If the request is genuinely a single question
+           with no parallel structure, respond directly in prose
+           without spawning workers.
+        2. When you decompose, emit ONLY a JSON object listing the
+           subtasks. Do not call knowledge_search, web_search, or any
+           other tool in your decomposition response. The workers
+           handle all retrieval.
         3. Workers run on the cheap "worker" role (Claude Haiku); the
            orchestrator and synthesis passes use sonnet. Adjust your
            subtask granularity accordingly — workers should handle

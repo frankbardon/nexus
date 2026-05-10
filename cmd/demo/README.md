@@ -208,12 +208,24 @@ deterministically rewrites every worker `llm.request` to that role —
 so a 4-worker fan-out costs roughly the same as one Sonnet turn.
 Workers can call `knowledge_search` and `web_search`. Long sessions
 get external compaction (`memory/compaction`) and topic-shift pruning
-(`memory/topic_pruner`). The agent also exposes a `vote` model role
-that uses `nexus.provider.fanout` to send the same prompt to
-Anthropic + OpenAI + Gemini in parallel, with `strategy: llm_judge`
-picking the strongest answer.
+(`memory/topic_pruner`).
+
+The agent's YAML also defines a `vote` model role that uses
+`nexus.provider.fanout` to send the same prompt to Anthropic + OpenAI
++ Gemini in parallel with `strategy: llm_judge`. The Orchestrator
+agent doesn't dispatch to that role from chat prompts (model role
+selection is a config-time decision made by each plugin's emitter,
+not something the LLM can pick mid-conversation). To exercise the
+fanout-vote flow end-to-end, run the dedicated CLI recipe:
+
+    cmd/demo recipe fanout-vote --prompt "your question here"
 
 **Example prompts.**
+
+The Orchestrator works best on requests with a clear, fixed
+decomposition arity — N comparable items, M parallel angles. The
+decomposition prompt is an LLM call against the orchestrator role; it
+hits its stride when N is obvious from the request.
 
 - *"Compare ACME, Vortex, Loom, and Pulp on pricing model, target
   buyer, time-to-value, and primary wedge."* (Splits into 4 worker
@@ -223,9 +235,16 @@ picking the strongest answer.
   vendors by pricing model and list each one's primary wedge."*
 - *"What are the three most-cited risks across our last six incident
   postmortems?"* (Fan out across the postmortems folder, synthesize.)
-- *"Use the `vote` role to answer: 'In one sentence, what is the
-  canonical use case for retrieval-augmented generation?'"* (Fans out
-  to all three providers; the judge picks the best response.)
+- *"For each of {ACME, Vortex, Loom}: summarize their last 90 days
+  of public announcements in 3 bullets."* (3 workers; explicit list.)
+
+Avoid single-question prompts ("answer this in one sentence") on the
+Orchestrator — there's nothing to decompose, and a known upstream
+brittleness in the orchestrator's tool_use/tool_result history
+threading can produce an Anthropic 400 error when the LLM tries to
+call tools instead of emitting a subtask list. For single-shot
+queries use the Researcher; for multi-provider voting use the
+`fanout-vote` CLI recipe.
 
 **Adaptation ideas.**
 
@@ -235,8 +254,6 @@ picking the strongest answer.
 - **Comparative analyst.** Watch a folder of analyst reports; ask:
   *"What do all three analysts agree on about Vendor X, and where
   do they disagree?"*
-- **Ensemble voting for tough questions.** Use the `vote` role on
-  ambiguous prompts where you want a "second opinion" before acting.
 - **Decompose-then-act.** Combine with the Engineer in a workflow:
   Orchestrator produces a plan list, you copy specific items into
   the Engineer for execution.
