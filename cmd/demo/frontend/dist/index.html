@@ -284,9 +284,37 @@
             <div x-show="status" class="text-xs opacity-50 italic px-1" x-text="status"></div>
           </div>
 
-          <!-- Input bar -->
+          <!-- Input bar.
+               Three controls left-to-right:
+
+                 1. Attach button — only visible when the agent has an
+                    input_dir configured (Multimodal Reader, Librarian).
+                    Calls the framework's native file picker, copies the
+                    chosen file into the agent's input_dir, then primes
+                    the textarea with a "Read <filename> and..." stub.
+                    The chat envelope itself doesn't carry file bytes;
+                    the file lands on disk and the agent reads it via
+                    its own tools (read_pdf / file_read / RAG ingest
+                    watcher). This sidesteps a current limitation of
+                    the wails plugin where InputMessage.Files is
+                    accepted but never forwarded to the engine bus.
+                 2. Send button — submits the textarea content.
+                 3. Broom — clears chat / starts new session.
+
+               When the agent has no input_dir, the attach button is
+               hidden so the operator never gets a "no input directory"
+               error from clicking it.
+          -->
           <div class="flex-shrink-0 border-t border-base-300 px-4 py-3 bg-base-200/50">
             <div class="flex gap-2 max-w-5xl mx-auto">
+              <button class="btn btn-ghost btn-square"
+                      x-show="hasInputDir"
+                      @click="attachFile()"
+                      :disabled="agent.status !== 'running' || streaming || attaching"
+                      :title="`Attach a file (copies into the agent's input_dir)`">
+                <i class="fa-solid fa-paperclip" x-show="!attaching"></i>
+                <i class="fa-solid fa-spinner fa-spin" x-show="attaching"></i>
+              </button>
               <textarea x-model="input"
                         @keydown.enter.prevent="$event.shiftKey ? input += '\n' : send()"
                         rows="1"
@@ -1197,12 +1225,27 @@ window.chatView = function(agentID) {
     confirmClear: false, // confirm-clear modal visibility
     clearing: false,     // true while NewSession is in flight
 
+    // File-attach state. hasInputDir is true when the agent has an
+    // `input_dir` settings field configured — checked once on init via
+    // a try-attach probe against the framework's resolver. attaching
+    // is true while the file picker dialog is open + the copy is in
+    // flight, so the button shows a spinner and stays disabled.
+    hasInputDir: false,
+    attaching: false,
+
     init() {
       // Create bus on first activation, reuse on re-activation.
       if (!window._agentBuses[agentID]) {
         window._agentBuses[agentID] = createBus(agentID);
       }
       this.bus = window._agentBuses[agentID];
+
+      // Probe whether this agent has a configured input_dir. We can't
+      // call resolveInputDir directly from the frontend, but every
+      // agent that supports attachments has an `input_dir` settings
+      // field — and the framework's settings schema is already loaded
+      // into the settings store by the time chatView mounts. Read it.
+      this.detectInputDir();
 
       // Listen for chat-protocol events. Each handler is registered ONCE
       // per agent on first init; subsequent inits skip wiring (Alpine
@@ -1396,8 +1439,83 @@ window.chatView = function(agentID) {
           return 'Ask "compare ACME, Vortex, and Loom on pricing" — multi-step research.';
         case 'drafter':
           return 'Try "write a brief on Vortex AI" to invoke the competitor-brief skill.';
+        case 'engineer':
+          return 'Ask "list the markdown files in the workspace" — every step asks for approval.';
+        case 'orchestrator':
+          return 'Ask "compare ACME, Vortex, Loom, Pulp" — fans out to 4 parallel workers.';
+        case 'multimodal':
+          return 'Attach a PDF or screenshot, then ask the agent to read or describe it.';
         default:
           return 'Type a message…';
+      }
+    },
+
+    // detectInputDir asks the framework which settings the active
+    // agent declared. If any of them is `input_dir`, the attach
+    // button becomes available. The lookup is the same one the
+    // settings panel uses, so we don't have to teach the frontend
+    // about each agent's settings schema separately.
+    async detectInputDir() {
+      try {
+        const schema = await window.go.desktop.Shell.GetSettingsSchema();
+        // Schema shape: { shell: [...], agents: { <id>: [...] } }
+        // — agents[id] is a flat array of SettingsFieldInfo objects.
+        const fields = (schema && schema.agents && schema.agents[this.agentID]) || [];
+        this.hasInputDir = Array.isArray(fields) && fields.some(f => f.key === 'input_dir');
+      } catch (err) {
+        console.warn('detectInputDir failed', err);
+        this.hasInputDir = false;
+      }
+    },
+
+    // attachFile is the paperclip button's click handler. It opens
+    // the framework's native file picker (rooted in the agent's
+    // input_dir for convenience), copies the chosen file into that
+    // directory, and primes the textarea with a useful prompt stub
+    // so the operator can tab-complete the rest. The file lands on
+    // disk; the agent reads it via its own tools (read_pdf for the
+    // Multimodal Reader; rag/ingest's watcher for the Librarian).
+    async attachFile() {
+      if (this.attaching) return;
+      this.attaching = true;
+      try {
+        // Loose filter — pick whatever the agent's tools can ingest.
+        // Multimodal accepts PDFs + images; Librarian accepts
+        // markdown / text. We don't try to be clever per-agent.
+        const filter = '*.pdf;*.png;*.jpg;*.jpeg;*.webp;*.gif;*.txt;*.md;*.csv;*.json';
+        const picked = await window.go.desktop.Shell.PickFile(this.agentID, 'Attach a file', filter);
+        if (!picked) {
+          // User cancelled the dialog.
+          return;
+        }
+        const dest = await window.go.desktop.Shell.CopyFileToInputDir(this.agentID, picked);
+        const filename = (dest || picked).split(/[\/\\]/).pop();
+
+        // System bubble so the chat history shows the attachment
+        // landed (the agent's own tool call will surface again when
+        // it actually reads the file).
+        this.appendMessage({
+          role: 'system',
+          content: `Attached \`${filename}\` to the agent's input folder. The agent can read it via its tools.`,
+        });
+
+        // Prime the input. Don't overwrite if the operator already
+        // typed something; append instead so multi-attach workflows
+        // don't lose context.
+        const stub = `Read \`${filename}\` and `;
+        this.input = this.input.trim()
+          ? this.input.trimEnd() + ' ' + stub
+          : stub;
+      } catch (err) {
+        // Most common error: "no input directory configured for
+        // agent X" — the button shouldn't be visible in that case
+        // (hasInputDir guard) but if it does fire, surface clearly.
+        this.appendMessage({
+          role: 'system',
+          content: `Attach failed: ${err && err.message ? err.message : err}`,
+        });
+      } finally {
+        this.attaching = false;
       }
     },
 
