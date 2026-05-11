@@ -1,0 +1,95 @@
+# otel-trace recipe — minimal engine with OTel + sampler observers on.
+#
+# The recipe drives one short prompt and exits. The OTLP exporter
+# sends spans to whatever collector is listening at the configured
+# endpoint (default 127.0.0.1:4317 via env var). The sampler writes
+# JSON snapshots of every turn to disk regardless of whether OTLP
+# succeeded.
+#
+# Companion docker-compose file (recipe-otel-trace-docker-compose.yaml)
+# boots Jaeger with OTLP receivers enabled. Bring it up before running
+# this recipe to see real spans.
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 1024
+
+  sessions:
+    root: ~/.nexus/demo/otel-recipe-sessions
+    retention: 1h
+
+plugins:
+  active:
+    # Test transport — recipe drives the bus directly.
+    - nexus.io.test
+
+    # Just enough to make a real LLM call so we get spans worth looking at.
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+    - nexus.memory.capped
+
+    # The actual point of this recipe.
+    - nexus.observe.otel
+    - nexus.observe.sampler
+    - nexus.observe.thinking
+
+    # Cross-cutting (so the agent prompt has dynamic vars).
+    - nexus.system.dynvars
+
+    # Gates kept light.
+    - nexus.gate.endless_loop
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  # ─── OTel exporter ───────────────────────────────────────────────────
+
+  # endpoint: OTLP gRPC by default. Override via env var if your
+  # collector binds elsewhere.
+  # service_name: shows up in Jaeger / Tempo / etc as the "service".
+  # exclude_events: skip noisy events that would dominate the trace.
+  nexus.observe.otel:
+    endpoint: "127.0.0.1:4317"
+    protocol: grpc
+    insecure: true
+    service_name: nexus-demo-otel-recipe
+    exclude_events:
+      - tick
+      - log
+
+  # ─── Sampler ────────────────────────────────────────────────────────
+
+  # rate=1.0 + failure_capture=true: capture every turn (this is a
+  # demo recipe, not production where 0.05–0.10 + capture-failures is
+  # typical). out_dir gets one JSON file per turn; stable naming so
+  # `tail -F` plus jq is a reasonable inspection workflow.
+  nexus.observe.sampler:
+    enabled: true
+    rate: 1.0
+    failure_capture: true
+    out_dir: ~/.nexus/demo/otel-samples
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a minimal echo agent for the OTel recipe.
+      Today: {{date}}. Just answer briefly.
+
+  nexus.system.dynvars:
+    date: true
+
+  nexus.memory.capped:
+    max_messages: 20
+    persist: false
+
+  nexus.gate.endless_loop:
+    max_iterations: 4

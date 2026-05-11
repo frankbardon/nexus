@@ -1,0 +1,28 @@
+# Companion docker-compose for the otel-trace recipe.
+#
+# Boots an all-in-one Jaeger with OTLP receivers on the standard ports
+# (4317 grpc, 4318 http) and the Jaeger UI on http://localhost:16686.
+# The recipe's YAML points the OTel exporter at 127.0.0.1:4317 by
+# default — bring this up first, then run:
+#
+#     docker compose -f cmd/demo/recipe-otel-trace-docker-compose.yaml up -d
+#     cmd/demo recipe otel-trace
+#     open http://localhost:16686    # service: nexus-demo-otel-recipe
+#
+# This compose file is provided for convenience. Any OTLP collector
+# (Tempo, Honeycomb agent, OTel Collector contrib) works just as well —
+# point the recipe's `endpoint` config at it.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.55
+    container_name: nexus-demo-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      # OTLP receivers (matches the recipe's default endpoint).
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      # Jaeger UI.
+      - "16686:16686"
+    restart: unless-stopped

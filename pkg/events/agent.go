@@ -29,9 +29,16 @@ type Plan struct {
 }
 
 // PlanStep is a single step within a plan.
+//
+// SpawnID is set by agents that delegate steps to subagents (the
+// orchestrator's parallel-worker flow); the UI uses it to fold per-worker
+// progress (iteration count, tool calls, terminal totals) into the plan
+// step instead of rendering a parallel "workers" panel. Empty for plans
+// emitted by agents that execute steps inline (planexec, etc.).
 type PlanStep struct {
 	Description string
-	Status      string // "pending", "active", "completed", "failed"
+	Status      string // "pending", "active", "completed", "failed", "skipped"
+	SpawnID     string
 }
 
 // SubagentSpawn requests spawning a new subagent.
@@ -56,13 +63,19 @@ type SubagentStarted struct {
 }
 
 // SubagentIteration reports a single subagent iteration for observability.
+//
+// ParentTurnID echoes the spawning agent's turn so UI bridges can group
+// iteration events with the started/complete events for the same worker.
+// Without it, frontends that key panels by parent_turn_id end up
+// fragmenting a single worker's lifecycle across multiple UI elements.
 type SubagentIteration struct {
 	SchemaVersion int `json:"_schema_version"`
 
-	SpawnID   string
-	Iteration int
-	Content   string            // assistant text content, if any
-	ToolCalls []ToolCallRequest // tool calls made this iteration
+	SpawnID      string
+	Iteration    int
+	Content      string            // assistant text content, if any
+	ToolCalls    []ToolCallRequest // tool calls made this iteration
+	ParentTurnID string
 }
 
 // AgentToolChoice is emitted by plugins to dynamically override the agent's

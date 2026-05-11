@@ -4,11 +4,17 @@
 #   - Skills with output_schema (competitor-brief)
 #   - Structured output (JSON enforcement; on Anthropic this uses the
 #     synthetic-tool simulation path)
+#   - Static planner (Phase 3): forces a deterministic retrieve →
+#     outline → draft → cite → validate pipeline for skill-driven
+#     deliverables. Compare with the Researcher's dynamic planner.
+#   - approval_policy gate (Phase 3): rule-based HITL prompt before
+#     file_write actions, so accidental overwrites need confirmation.
 #   - json_schema gate (catches non-conforming output and retries via LLM)
 #   - output_length gate (briefs must stay slide-sized)
 #   - content_safety gate (block before publishing)
 #   - file_write tool (publish to output_dir)
 #   - knowledge_search (read-only over the shared KB)
+#   - Phase 1 cross-cutting: hitl, dynvars, tool_timeout, stop_words
 
 core:
   log_level: info
@@ -40,6 +46,13 @@ plugins:
     - nexus.control.cancel
     - nexus.tool.catalog
 
+    # Cross-cutting Phase 1 plumbing.
+    # Drafter uses ask_user for "should I overwrite this file?" prompts
+    # and dynvars to stamp output filenames with today's date.
+    - nexus.control.hitl
+    - nexus.control.hitl_synthesizer
+    - nexus.system.dynvars
+
     # Memory
     - nexus.memory.capped
 
@@ -54,6 +67,14 @@ plugins:
     # Skills (competitor-brief lives in cmd/demo/skills)
     - nexus.skills
 
+    # ─── Phase 3 Drafter upgrades ──────────────────────────────────
+    # static planner: deterministic pipeline. Steps below.
+    # approval_policy: rule-based HITL gate; rules below match
+    #   file_write specifically and ask the user to confirm before
+    #   overwriting an existing file.
+    - nexus.planner.static
+    - nexus.gate.approval_policy
+
     # Gates. The competitor-brief skill's output_schema is enforced by the
     # provider directly (Anthropic via tool-sim, OpenAI via response_format),
     # so the standalone json_schema gate isn't needed here — it would
@@ -62,6 +83,9 @@ plugins:
     - nexus.gate.output_length
     - nexus.gate.content_safety
     - nexus.gate.tool_filter
+    # Phase 1 cross-cutting gates.
+    - nexus.gate.stop_words
+    - nexus.gate.tool_timeout
 
     # Observability
     - nexus.observe.thinking
@@ -70,8 +94,19 @@ plugins:
     api_key: "${shell.anthropic_api_key}"
 
   nexus.agent.react:
+    # Enable planning so the static planner runs before the ReAct loop.
+    # The Drafter's planner is `nexus.planner.static` (configured below)
+    # which emits a fixed five-step plan whenever a request comes in.
+    # ReAct then iterates against that plan instead of free-form looping.
+    planning: true
+
     system_prompt: |
       You are the Drafter for a competitive-intelligence team.
+
+      Today's date: {{date}}
+      Output workspace: {{output_dir}}
+      (date injected by nexus.system.dynvars; output_dir is a
+      configured user setting.)
 
       You produce publication-ready deliverables — competitor briefs,
       comparison tables, exec summaries — by composing facts from the
@@ -144,6 +179,109 @@ plugins:
   nexus.skills:
     scan_paths:
       - ./skills
-    trust_project: true
+    trust_project: always
     catalog_in_system_prompt: true
+
+  # ─── Phase 1 cross-cutting plugin configs ────────────────────────────
+
+  # dynvars: stamp today's date into filenames the Drafter writes.
+  nexus.system.dynvars:
+    date: true
+    time: false
+    timezone: false
+    cwd: false
+    session_dir: false
+    os: false
+
+  # hitl: persistent registry so a crashed write-confirmation prompt is
+  # replayed on resume rather than silently lost.
+  nexus.control.hitl:
+    registry:
+      enabled: true
+
+  nexus.control.hitl_synthesizer:
+    model: balanced
+    cache_enabled: true
+
+  # tool_timeout: file_write should be near-instant; surface anything
+  # that hangs as an explicit failure.
+  nexus.gate.tool_timeout:
+    default_timeout: 30s
+    per_tool:
+      file_write: 10s
+      knowledge_search: 20s
+
+  # ─── Phase 3 Drafter plugin configs ──────────────────────────────────
+
+  # static planner: a fixed five-step pipeline that the agent follows on
+  # every request. Compare with the Researcher's `nexus.planner.dynamic`
+  # which generates a plan via LLM. Static is faster (no LLM call up
+  # front), deterministic, and obvious — exactly what you want for
+  # publication-grade deliverables that must follow the same recipe
+  # every time. `approval: never` skips the human approval prompt
+  # before plan execution since the steps are baked into config.
+  nexus.planner.static:
+    approval: never
+    summary: "Competitor brief production pipeline"
+    steps:
+      - description: "Retrieve facts from the knowledge base"
+        instructions: |
+          Use knowledge_search against the compete-kb namespace to pull
+          every chunk that mentions this competitor. Note source paths
+          for citations later.
+      - description: "Outline the brief"
+        instructions: |
+          Produce a short bullet outline mapping retrieved facts onto
+          the competitor-brief schema fields. If a required field has
+          no supporting fact, surface the gap NOW rather than draft
+          around it.
+      - description: "Draft the brief"
+        instructions: |
+          Compose the JSON object that conforms to the competitor-brief
+          output_schema. Use only facts found during retrieval. Keep
+          each field under its character budget (the output_length gate
+          will retry otherwise).
+      - description: "Cite sources"
+        instructions: |
+          For every claim in the brief, include the source path in the
+          `sources` array. The schema requires at least one source per
+          claim — do not invent paths.
+      - description: "Validate and persist"
+        instructions: |
+          Run a final self-check against the output_schema. Once the
+          brief passes the json_schema and output_length gates, call
+          file_write to save it to the configured output_dir. The
+          approval_policy gate will pause for confirmation before any
+          existing file is overwritten.
+
+  # approval_policy: rule-based HITL gate. Each rule has a `match` block
+  # against the action being approved (event metadata + tool name +
+  # arguments). The first matching rule wins. The Drafter's only risky
+  # action is file_write — every file_write triggers a confirmation
+  # prompt with two choices, defaulting to allow-once.
+  nexus.gate.approval_policy:
+    rules:
+      - match:
+          tool: file_write
+        mode: choices
+        choices:
+          - id: allow_once
+            label: "Allow this write"
+          - id: deny
+            label: "Cancel — don't overwrite"
+        default_choice: allow_once
+        prompt: "Drafter is about to write a brief to disk. Allow?"
+        timeout: 5m
+
+  # stop_words: blocks PII placeholders from leaking into published
+  # briefs (a common LLM tell when the KB is thin and the model
+  # hallucinates a placeholder).
+  nexus.gate.stop_words:
+    case_sensitive: false
+    message: "Blocked: brief contained a placeholder term — fill or remove before publishing."
+    words:
+      - "[redacted]"
+      - "[name]"
+      - "lorem ipsum"
+      - "tbd"
 

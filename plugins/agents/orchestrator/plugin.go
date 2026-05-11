@@ -880,6 +880,7 @@ func (p *Plugin) emitPlanUpdate(turnID string) {
 		steps[i] = events.PlanStep{
 			Description: t.Description,
 			Status:      status,
+			SpawnID:     t.SpawnID,
 		}
 	}
 	p.mu.Unlock()

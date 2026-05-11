@@ -47,7 +47,20 @@ func New() engine.Plugin {
 func (p *Plugin) ID() string                        { return p.instanceID }
 func (p *Plugin) Name() string                      { return pluginName }
 func (p *Plugin) Version() string                   { return version }
-func (p *Plugin) Dependencies() []string            { return []string{"nexus.agent.react"} }
+// Dependencies returns no plugins. Earlier versions of this plugin
+// declared a dependency on nexus.agent.react, but the runSubagent
+// loop manages its own LLM + tool dispatch directly via bus
+// subscriptions — react is never called into. The vestigial dep
+// caused a real bug when the orchestrator (which itself depends on
+// subagent) shipped a config that activated react for the orchestrator
+// agent's parent thread: react's io.input handler raced the
+// orchestrator's, producing duplicate plans + confused output.
+//
+// Deployments that legitimately want a parent ReAct alongside
+// subagent workers can still include nexus.agent.react in their
+// `plugins.active` list explicitly; that's now an opt-in choice,
+// not a side effect of using subagent.
+func (p *Plugin) Dependencies() []string { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
@@ -95,6 +108,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(p.instanceID)),
 		p.bus.Subscribe("tool.register", p.handleToolRegister,
 			engine.WithSource(p.instanceID)),
+		// subagent.spawn: programmatic spawn path used by the
+		// orchestrator agent (and any other plugin that wants to drive
+		// workers without going through the LLM-facing spawn_subagent
+		// tool). Symmetric to handleToolInvoke: build the same
+		// runSubagent inputs out of the SubagentSpawn payload, run in
+		// a goroutine so the bus dispatch loop isn't blocked, and rely
+		// on runSubagent to emit subagent.complete when finished.
+		// Without this subscription the orchestrator emits
+		// subagent.spawn into the void and waits forever for completes
+		// that never come.
+		p.bus.Subscribe("subagent.spawn", p.handleSubagentSpawn,
+			engine.WithPriority(50), engine.WithSource(p.instanceID)),
 	)
 
 	return nil
@@ -143,6 +168,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "tool.register"},
+		{EventType: "subagent.spawn", Priority: 50},
 	}
 }
 
@@ -159,6 +185,32 @@ func (p *Plugin) Emissions() []string {
 		"subagent.iteration",
 		"subagent.complete",
 	}
+}
+
+// handleSubagentSpawn drives a worker from a programmatic
+// subagent.spawn event, the way the orchestrator agent dispatches
+// parallel workers. Mirrors the logic at the end of handleToolInvoke
+// but skips the tool_use/tool_result envelope wrapping (the caller is
+// not the LLM — there's no tool to surface results back through).
+//
+// Runs in a goroutine because runSubagent is a synchronous loop that
+// can take many seconds (LLM calls, tool round-trips). The bus
+// dispatch is synchronous; blocking it would freeze the whole engine
+// for the worker's duration. Multiple concurrent spawns each get
+// their own goroutine — runSubagent has no shared mutable state
+// scoped to the plugin instance.
+func (p *Plugin) handleSubagentSpawn(event engine.Event[any]) {
+	spawn, ok := event.Payload.(events.SubagentSpawn)
+	if !ok {
+		return
+	}
+	go func() {
+		// runSubagent emits subagent.started + subagent.iteration +
+		// subagent.complete on its own; we discard the returned value
+		// since the caller correlates by SpawnID via the
+		// subagent.complete event, not via a return path.
+		_ = p.runSubagent(spawn.SpawnID, spawn.Task, spawn.SystemPrompt, spawn.ModelRole, spawn.ParentTurnID)
+	}()
 }
 
 func (p *Plugin) handleToolRegister(event engine.Event[any]) {
@@ -312,11 +364,14 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			ToolCalls: resp.ToolCalls,
 		})
 
-		// Emit iteration event for observability.
+		// Emit iteration event for observability. ParentTurnID is set
+		// so UI bridges can correlate this with the started/complete
+		// events for the same worker.
 		_ = p.bus.Emit("subagent.iteration", events.SubagentIteration{SchemaVersion: events.SubagentIterationVersion, SpawnID: spawnID,
-			Iteration: iteration,
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Iteration:    iteration,
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			ParentTurnID: parentTurnID,
 		})
 
 		// No tool calls means we're done.

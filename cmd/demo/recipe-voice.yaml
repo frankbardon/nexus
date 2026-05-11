@@ -1,0 +1,96 @@
+# voice recipe — minimal engine with io/voice + io/realtime active.
+#
+# The realtime plugin listens for WebSocket connections; the voice
+# plugin sits on top and runs the VAD → ASR → agent → TTS pipeline.
+# Clients push audio frames over the WS; the agent's responses come
+# back as audio.
+#
+# Required env: OPENAI_API_KEY (Whisper + TTS), ANTHROPIC_API_KEY (LLM).
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 100
+
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001  # cheap + fast for voice turns
+      max_tokens: 2048
+
+  sessions:
+    root: ~/.nexus/demo/voice-recipe-sessions
+    retention: 1h
+
+plugins:
+  active:
+    # Realtime transport (the WS server) and voice on top.
+    - nexus.io.realtime
+    - nexus.io.voice
+
+    # Minimal agent stack.
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.cancel
+    - nexus.tool.catalog
+
+    - nexus.memory.capped
+    - nexus.system.dynvars
+    - nexus.observe.thinking
+
+    # Gates kept light — voice turns should respond fast.
+    - nexus.gate.endless_loop
+    - nexus.gate.tool_timeout
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  # Realtime: bind on loopback by default. Override via env if you
+  # need to expose it. There's no auth in v1 — gate behind a reverse
+  # proxy if exposed publicly.
+  nexus.io.realtime:
+    listen_addr: "127.0.0.1:8890"
+    path: "/"
+    max_clients: 4
+
+  # Voice: default cloud providers (Whisper + TTS-1). VAD threshold
+  # tuned for typical desktop mic input. barge-in cancels in-flight
+  # TTS when the user starts talking again.
+  nexus.io.voice:
+    asr:
+      provider: openai_whisper
+      api_key_env: OPENAI_API_KEY
+      model: whisper-1
+    tts:
+      provider: openai
+      api_key_env: OPENAI_API_KEY
+      model: tts-1
+      voice: alloy
+      streaming: true
+      chunk_bytes: 8192
+    vad:
+      threshold: 0.02
+      silence_ms: 600
+    barge_in:
+      enabled: true
+      threshold: 0.02
+    text_fallback: true
+
+  nexus.agent.react:
+    system_prompt: |
+      You are a voice assistant. Today: {{date}}.
+      Keep responses short — they will be read aloud.
+      No bullet lists; full sentences.
+
+  nexus.system.dynvars:
+    date: true
+
+  nexus.memory.capped:
+    max_messages: 30
+    persist: false
+
+  nexus.gate.endless_loop:
+    max_iterations: 6
+  nexus.gate.tool_timeout:
+    default_timeout: 20s

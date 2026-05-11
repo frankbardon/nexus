@@ -1,0 +1,74 @@
+# embeddings-mock recipe — hermetic RAG pipeline test.
+#
+# No API keys required. The mock embedder produces deterministic
+# hash-based vectors so two runs over the same input return identical
+# embeddings. Useful for:
+#
+#   - CI: verify the engine + chromem + ingest path works end-to-end
+#     without touching a paid API.
+#   - Demoing the embeddings.provider abstraction itself: swap the mock
+#     for openai/cohere by editing one line.
+#
+# This recipe boots the engine, ingests one inline document, runs a
+# knowledge_search query, prints the result, and exits.
+
+core:
+  log_level: info
+  tick_interval: 1s
+  max_concurrent_events: 100
+
+  # No LLM is invoked in this recipe — we only exercise the embedding +
+  # vector + retrieval path. A models block is required by the engine
+  # config loader though, so we keep a stub that's never used.
+  models:
+    default: stub
+    stub:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 1024
+
+  sessions:
+    root: /tmp/nexus-recipe-embeddings-mock
+    retention: 1h
+
+plugins:
+  active:
+    # IO: test transport (non-interactive, no agent loop driven).
+    # The recipe drives ingest via the bus directly and exits.
+    - nexus.io.test
+
+    # Mock embedder + chromem vector store.
+    - nexus.embeddings.mock
+    - nexus.vectorstore.chromem
+
+    # Ingestion + the LLM-facing search tool.
+    - nexus.rag.ingest
+    - nexus.tool.knowledge_search
+    - nexus.tool.catalog
+
+    # Required scaffolding.
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.cancel
+
+  nexus.embeddings.mock:
+    dimensions: 384
+    model: mock-embed-v1
+
+  nexus.vectorstore.chromem:
+    path: /tmp/nexus-recipe-embeddings-mock/vectors
+
+  nexus.rag.ingest:
+    chunker:
+      size: 500
+      overlap: 100
+
+  nexus.tool.knowledge_search:
+    namespaces: [recipe-test]
+    default_namespaces: [recipe-test]
+    top_k: 3
+
+  # Stub LLM provider (never called) — engine config requires a provider
+  # to be registered for the model role above.
+  nexus.llm.anthropic:
+    api_key: "stub-key-not-used"

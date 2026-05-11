@@ -1,0 +1,55 @@
+# batch-briefs recipe — submit a batch of brief generations against
+# Anthropic's Messages Batches API.
+#
+# Single-shot: submits one batch and exits. The llm/batch plugin
+# persists state to ~/.nexus/batches so a later process can resume
+# polling. The recipe doesn't wait for completion (real batches take
+# hours).
+#
+# Requires ANTHROPIC_API_KEY.
+
+core:
+  log_level: info
+  tick_interval: 30s
+  max_concurrent_events: 100
+
+  # Models block is required by the engine even though batch requests
+  # carry their own provider/model fields. The role here is a stub.
+  models:
+    default: stub
+    stub:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 2048
+
+  sessions:
+    root: /tmp/nexus-recipe-batch-briefs
+    retention: 1h
+
+plugins:
+  active:
+    - nexus.io.oneshot
+    - nexus.llm.anthropic
+    - nexus.llm.batch
+    - nexus.agent.react
+    - nexus.control.cancel
+
+  # oneshot keeps the engine running for the duration of submit; the
+  # recipe Go code drives the bus directly and exits when done.
+  nexus.io.oneshot:
+    input: "(driver-driven; recipe submits via bus)"
+    output_file: /tmp/nexus-recipe-batch-briefs-transcript.json
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  # llm/batch reads its own anthropic key for the batch endpoint. The
+  # plugin doc explains why it doesn't share the synchronous provider's
+  # key state — direct-API auth duplication is intentional in v1.
+  nexus.llm.batch:
+    poll_interval: 5m
+    data_dir: ~/.nexus/batches
+    default_max_tokens: 2048
+    providers:
+      anthropic:
+        api_key_env: ANTHROPIC_API_KEY

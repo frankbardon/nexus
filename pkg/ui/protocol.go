@@ -26,4 +26,5 @@ const (
 	TypeCancelComplete  = "cancel_complete"
 	TypeHITLRequest     = "hitl_request"
 	TypeCodeExecStdout  = "code_exec_stdout"
+	TypeWorkerStatus    = "worker_status"
 )

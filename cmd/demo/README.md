@@ -8,12 +8,20 @@ the watched folder, the system prompts, and (for the Drafter) the skills.
 | Agent | Role | What it shows off |
 |---|---|---|
 | **Librarian** | Curates the KB | RAG ingestion (watch mode), longterm memory, content-safety gate (redact mode), tool-filter gate, capability auto-resolution |
-| **Researcher** | Multi-step research over web + KB | Provider fallback chain (Anthropic→OpenAI), parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates, `search.provider` capability pinning |
-| **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
+| **Researcher** | Multi-step research over web + KB | Hybrid retrieval (chromem vector + sqlite_fts BM25 with RRF fusion), search.reranker (local default; Cohere / Jina swap-in), rag/citations validation, per-step model routing via router/classifier, three search.provider options (Brave, Anthropic native, OpenAI native), provider fallback chain, parallel tool dispatch, dynamic planner with auto-approval, summary-buffer memory, vector memory, web tools, rate-limiter + prompt-injection + token-budget + context-window gates |
+| **Drafter** | Writes structured deliverables | Skills with `output_schema`, structured output (Anthropic tool-sim path), static planner (deterministic 5-step pipeline), approval_policy gate (HITL on file_write), json-schema gate retry loop, output-length gate, content-safety gate (block mode), file_write tool |
+| **Engineer** | Plan-then-execute on shell + Go interpreter | `nexus.agent.planexec` plan-execute loop, `tools/shell` (allowlisted commands, sandboxed env), `tools/code_exec` (Yaegi Go interpreter), `tools/opener`, approval_policy gate per call (HITL via synthesized prompts), tool_timeout per call, discovery/progressive (hierarchical tool exposure), memory/tool_result_clear (drops big stale stdout from history), memory/tool_def_pruner (drops unused tool defs from per-turn list) |
+| **Orchestrator** | Decompose → parallel workers → synthesize | `nexus.agent.orchestrator` (decomposition), `nexus.agent.subagent` (worker primitive), `nexus.agent.react` (worker inner loop), `providers/fanout` with `llm_judge` strategy (same prompt → anthropic+openai+gemini in parallel → judged synthesis), `providers/gemini` (third LLM), `router/metadata` (deterministic routing of worker traffic to the cheap haiku role), `memory/compaction` (external, event-driven), `memory/topic_pruner` (drops earlier turns on topic shift) |
+| **Multimodal Reader** | Vision + document pipeline | `tools/pdf` (pdftotext + pdfinfo, document/text modes), `tools/screenshot` (per-session blob store), `embeddings/cohere_multimodal` (image+text joint embedding), Gemini primary (native multimodal in/out), provider fallback to Anthropic, separate chromem path for the multimodal vector namespace |
 
 All three exercise: desktop shell framework, multi-agent isolation, agent-contributed
 settings + keychain secrets, the chat envelope protocol over `nexus.io.wails`,
 the observe/logger + observe/thinking observers, and shared vector storage.
+
+**Cross-cutting features (every agent):** human-in-the-loop `ask_user` tool
+(`nexus.control.hitl` + `nexus.control.hitl_synthesizer`), dynamic system-prompt
+variables like `{{date}}` / `{{session_dir}}` (`nexus.system.dynvars`),
+`tool_timeout` safety net, and a `stop_words` banlist tuned per agent.
 
 ## The agents in detail
 
@@ -140,6 +148,157 @@ already in the KB.
   `highlights`, `lowlights`, `metrics`, `asks`. Drop weekly-status
   exports into the KB; produce monthly investor letters.
 
+### Engineer — agent that does work on disk
+
+**What it is.** A plan-then-execute agent that runs sandboxed shell
+commands and Go code in your configured `workspace_dir`. It generates
+a plan first (via `nexus.planner.dynamic`), then executes step by step
+through `nexus.agent.planexec`. Every shell + `run_code` + `file_write`
+call goes through `nexus.gate.approval_policy`, which renders an HITL
+prompt in the chat panel so you confirm or skip before anything
+touches the filesystem. `tools/shell` is locked to a small allowlist
+(ls, cat, head, tail, wc, grep, find, git, go, make, tree, file, stat,
+which, pwd, echo, date) and runs with `env_restrict: true`.
+`tools/code_exec` uses Yaegi (in-process Go interpreter) with `net:
+deny`. The agent has no web access and no `knowledge_search`; it's a
+"bounded scratchpad" for inspecting and producing files. Long shell
+sessions trim themselves with `memory/tool_result_clear` (drops
+stdout-heavy turns) and `memory/tool_def_pruner` (drops unused tool
+defs). Tool catalog uses `discovery/progressive` so the LLM only sees
+the tools it's drilled into.
+
+**Example prompts.**
+
+- *"List the markdown files in the workspace and tell me which one
+  was modified most recently."* (Single shell step; you approve `ls`,
+  it runs, agent reports.)
+- *"Compile a quick word-count of every .md file in here."* (Multi-
+  step plan: `find` → `wc -l` → format output.)
+- *"Write a small Go function that computes Fibonacci numbers, run it
+  with input 20, and save the script to `fib.go`. Print the result."*
+  (Demonstrates `code_exec` + `file_write` + approval gates on each.)
+- *"Run `git status` and summarize what's uncommitted."*
+- *"Try `rm -rf /` on the workspace."* (Watch the `stop_words` gate
+  block it before approval is even asked.)
+
+**Adaptation ideas — change the allowlist, get a new persona.**
+
+- **Build-and-test agent.** Add `npm`, `pytest`, `cargo` to the shell
+  allowlist; point `workspace_dir` at a project root. Ask: *"Run the
+  full test suite and tell me which tests failed."*
+- **Repo migrator.** Allowlist `git`, `gofmt`, `find`, `xargs`. Ask:
+  *"Rename every occurrence of `OldType` to `NewType` across the
+  repo, then verify the build still passes."*
+- **Data wrangler.** Allowlist `jq`, `awk`, `sort`, `uniq`. Ask:
+  *"Take the JSON in `events.jsonl` and produce a CSV summary by
+  event type."*
+- **Notebook-style scratchpad.** Lean entirely on `code_exec`; ask
+  "show me a Go snippet that pretty-prints the first 100 prime
+  numbers" and watch Yaegi run it without spawning a process.
+
+### Orchestrator — fan-out coordinator
+
+**What it is.** The "decompose, fan out, synthesize" pattern made
+explicit. `nexus.agent.orchestrator` reads the user's request, splits
+it into 2–8 independent subtasks, spawns parallel worker subagents
+(via `nexus.agent.subagent`) capped by `max_workers: 4`, then runs a
+synthesis pass to merge their outputs into one cited answer. Workers
+run on the cheap `worker` model role (Claude Haiku) — `nexus.router.metadata`
+deterministically rewrites every worker `llm.request` to that role —
+so a 4-worker fan-out costs roughly the same as one Sonnet turn.
+Workers can call `knowledge_search` and `web_search`. Long sessions
+get external compaction (`memory/compaction`) and topic-shift pruning
+(`memory/topic_pruner`).
+
+The agent's YAML also defines a `vote` model role that uses
+`nexus.provider.fanout` to send the same prompt to Anthropic + OpenAI
++ Gemini in parallel with `strategy: llm_judge`. The Orchestrator
+agent doesn't dispatch to that role from chat prompts (model role
+selection is a config-time decision made by each plugin's emitter,
+not something the LLM can pick mid-conversation). To exercise the
+fanout-vote flow end-to-end, run the dedicated CLI recipe:
+
+    cmd/demo recipe fanout-vote --prompt "your question here"
+
+**Example prompts.**
+
+The Orchestrator works best on requests with a clear, fixed
+decomposition arity — N comparable items, M parallel angles. The
+decomposition prompt is an LLM call against the orchestrator role; it
+hits its stride when N is obvious from the request.
+
+- *"Compare ACME, Vortex, Loom, and Pulp on pricing model, target
+  buyer, time-to-value, and primary wedge."* (Splits into 4 worker
+  subtasks — one per competitor — runs them in parallel, synthesizes
+  a comparison table.)
+- *"Build a market map of the agentic-RAG vendor space: group
+  vendors by pricing model and list each one's primary wedge."*
+- *"What are the three most-cited risks across our last six incident
+  postmortems?"* (Fan out across the postmortems folder, synthesize.)
+- *"For each of {ACME, Vortex, Loom}: summarize their last 90 days
+  of public announcements in 3 bullets."* (3 workers; explicit list.)
+
+Avoid single-question prompts ("answer this in one sentence") on the
+Orchestrator — there's nothing to decompose. For single-shot queries
+use the Researcher; for multi-provider voting use the `fanout-vote`
+CLI recipe.
+
+**Adaptation ideas.**
+
+- **Multi-doc summarizer.** Drop a folder of long docs in via the
+  Librarian; ask the Orchestrator to produce one-paragraph summaries
+  per doc, then a meta-summary. The decomposition is automatic.
+- **Comparative analyst.** Watch a folder of analyst reports; ask:
+  *"What do all three analysts agree on about Vendor X, and where
+  do they disagree?"*
+- **Decompose-then-act.** Combine with the Engineer in a workflow:
+  Orchestrator produces a plan list, you copy specific items into
+  the Engineer for execution.
+
+### Multimodal Reader — vision + document pipeline
+
+**What it is.** A Gemini-primary agent built for non-text inputs.
+`tools/pdf` extracts text via `pdftotext` (fast, lightweight) or
+passes the raw PDF bytes to the LLM as a `file` MessagePart in
+`document` mode (when layout matters: tables, math, signed forms).
+`tools/screenshot` captures the current desktop and surfaces the PNG
+back to the LLM as an image part. `embeddings/cohere_multimodal`
+embeds images and text into a single vector space, stored in a
+separate chromem path so the vectors don't collide with the text-only
+`compete-kb` namespace used by the other agents. Provider fallback
+goes Gemini → Claude on errors; long document-review sessions use
+`memory/summary_buffer` to keep context fresh. Requires
+`poppler-utils` on PATH (`pdftotext`, `pdfinfo`).
+
+**Example prompts.**
+
+- *"Read `quarterly-report.pdf` and tell me the three biggest risks
+  flagged in the management discussion."* (Uses `text` mode by
+  default — fast and cheap.)
+- *"Look at the table on page 5 of `pricing-deck.pdf` and explain
+  what's changed vs page 4."* (Switches to `document` mode so Gemini
+  sees the layout natively.)
+- *"Take a screenshot of my screen and tell me what's broken in the
+  UI."* (Uses `take_screenshot`; Gemini reasons over the image.)
+- *"Compare the two contracts in `vendor-a.pdf` and `vendor-b.pdf` —
+  which one has stricter SLA terms?"* (Multi-doc, multimodal.)
+- *"I uploaded a screenshot of an architecture diagram — describe
+  what each component does."*
+
+**Adaptation ideas.**
+
+- **Receipt / invoice triage.** Watch a folder of receipt PDFs; ask
+  the agent to extract vendor + total + date for each, write them to
+  a CSV.
+- **Contract review.** Drop NDAs / MSAs into the input folder; ask
+  *"Flag any clause that limits our right to share redacted output
+  with subprocessors."*
+- **UI bug reporter.** Pair `take_screenshot` with a "describe what's
+  broken" loop; produces issue tickets with attached screenshots.
+- **Diagram explainer.** Drop architecture diagrams or flowcharts as
+  PNGs; ask: *"Walk me through the request flow from end-user to
+  database, naming every component."*
+
 ## Workflows
 
 The three agents compose. Each can also stand alone if a single
@@ -211,13 +370,23 @@ the webview — Wails-native build steps are required for the desktop shell to r
 
 On first launch the app redirects you to Settings if anything required is missing:
 
+All API keys live under the `shell.*` scope so a single keychain entry
+serves every agent that needs the same credential. Per-agent fields
+are reserved for genuinely agent-specific knobs (input/output folders,
+workspace dirs).
+
 | Setting | Used by | Where |
 |---|---|---|
-| `shell.anthropic_api_key` | All three agents (Claude Sonnet) | OS keychain |
-| `shell.openai_api_key` | All agents (embeddings) + Researcher fallback | OS keychain |
-| `researcher.brave_api_key` | Researcher (web_search) | OS keychain |
+| `shell.anthropic_api_key` | Every agent (Claude Sonnet/Haiku) | OS keychain |
+| `shell.openai_api_key` | Every agent (embeddings) + Researcher fallback + Voice ASR/TTS recipe | OS keychain |
+| `shell.brave_api_key` | Researcher + Orchestrator (web_search via Brave) | OS keychain |
+| `shell.gemini_api_key` | Multimodal Reader (primary LLM) + Orchestrator (third leg of fanout-vote) | OS keychain |
+| `shell.cohere_api_key` | Multimodal Reader (image+text embeddings, **required**); Researcher *(optional Cohere Rerank v3.5 — flip `capabilities.search.reranker: nexus.rag.reranker.cohere`)* | OS keychain |
+| `researcher.jina_api_key` *(optional)* | Researcher only (Jina Reranker v2 — set `capabilities.search.reranker: nexus.rag.reranker.jina` to use) | OS keychain |
 | `librarian.input_dir` | Librarian (watched folder for ingest) | Plaintext setting |
 | `drafter.output_dir` | Drafter (where briefs are saved) | Plaintext setting |
+| `engineer.workspace_dir` | Engineer (sandbox folder for shell + file_write) | Plaintext setting |
+| `multimodal.input_dir` | Multimodal Reader (folder of PDFs / images) | Plaintext setting |
 
 Brave's free tier covers the demo: <https://brave.com/search/api/>.
 
@@ -255,6 +424,37 @@ If you want to read the demo to understand a specific Nexus feature:
 | Tool-filter (read-only Researcher) | [config-researcher.yaml](config-researcher.yaml) — `nexus.gate.tool_filter.exclude` |
 | Memory hierarchy (capped + summary_buffer + longterm + vector all in use) | each `config-*.yaml` plus `commonFactories()` in [main.go](main.go) |
 | Chat envelope protocol (frontend side) | [frontend/dist/index.html](frontend/dist/index.html) — `chatView()` and `createBus()` |
+
+## CLI recipes
+
+`cmd/demo` doubles as a CLI when invoked with the `recipe` subcommand.
+Recipes are non-interactive scenarios that exercise plugins which don't
+fit a chat UI — batch jobs, alternative IO transports, eval golden
+traces, telemetry exports, voice loops, etc. They reuse the same
+plugin factories the Wails desktop app uses.
+
+```bash
+cmd/demo                          # launch the desktop app (default)
+cmd/demo recipe                   # list available recipes
+cmd/demo recipe embeddings-mock   # run the named recipe
+```
+
+Phase 7 ships these recipes:
+
+| Recipe | What it shows |
+|---|---|
+| `embeddings-mock` | `embeddings/mock` + chromem ingest pipeline; deterministic, no API key, CI-safe |
+| `tui` | `io/tui` transport against the Researcher RAG showroom; same plugin set as the Wails Researcher, terminal interaction |
+| `browser-ui` | `io/browser` HTTP/WS transport (default `127.0.0.1:8889`) — a no-Wails fallback for the Researcher |
+| `batch-briefs` | `llm/batch` against Anthropic's Messages Batches API; submits N brief-generation requests, prints the batch ID, exits (real batches take 1+ hour to complete; state persists to `~/.nexus/batches`) |
+| `eval` | `pkg/eval` golden-trace runner. Loads a case from `tests/eval/cases/<id>/`, replays it under the engine's stash mode (no API calls), and prints per-assertion pass/fail. Hermetic; CI-safe. Default case: `skills-discovery`. |
+| `otel-trace` | `observe/otel` + `observe/sampler` enabled on a minimal Researcher engine. Exports OTLP spans to `127.0.0.1:4317` by default. Companion `recipe-otel-trace-docker-compose.yaml` boots Jaeger; bring it up first, then `open http://localhost:16686`. |
+| `voice` | `io/voice` (VAD + Whisper ASR + OpenAI TTS) over `io/realtime` (low-latency WebSocket). Listens on `ws://127.0.0.1:8890/`. Connect a voice client and speak. |
+| `fanout-vote` | `providers/fanout` with `llm_judge` strategy across anthropic + openai + gemini. Pure-CLI repro of the Orchestrator's vote behavior. Prints each leg's response plus the judge's pick. |
+
+API keys for recipes come from environment variables (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `BRAVE_API_KEY`) — recipes don't read the desktop
+app's keychain settings.
 
 ## Differences from `cmd/desktop`
 
