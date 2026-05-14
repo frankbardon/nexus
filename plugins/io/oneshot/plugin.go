@@ -47,8 +47,9 @@ type Plugin struct {
 	endedAt   time.Time
 	turnDepth int  // number of in-flight turns (start - end)
 	turnsSeen int  // total agent.turn.start events observed after input was sent
-	inputSent bool // whether we have emitted the initial io.input
-	finalized bool // whether we have already flushed output + ended the session
+	inputSent     bool   // whether we have emitted the initial io.input
+	finalized     bool   // whether we have already flushed output + ended the session
+	pendingPrompt string // resolved prompt staged in Ready(), dispatched on core.ready
 
 	finalOutput string
 	plans       []planRecord
@@ -82,6 +83,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "agent.turn.start", Priority: 50},
 		{EventType: "agent.turn.end", Priority: 50},
 		{EventType: "core.error", Priority: 50},
+		{EventType: "core.ready", Priority: 50},
 	}
 }
 
@@ -133,16 +135,20 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("core.error", p.handleError, engine.WithSource(pluginID)),
+		p.bus.Subscribe("core.ready", p.handleCoreReady, engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("oneshot IO plugin initialized")
 	return nil
 }
 
-// Ready resolves the prompt (env > config input > config input_file > stdin),
-// emits io.session.start, then dispatches the prompt as an io.input event.
-// All subsequent work happens inside event handlers until agent.turn.end
-// triggers finalization.
+// Ready resolves the prompt (env > config input > config input_file > stdin)
+// and emits io.session.start. The io.input dispatch is deferred to the
+// core.ready handler — that guarantees every other plugin (e.g. MCP servers
+// whose Ready() blocks on a subprocess handshake) has finished registering
+// catalog entries before the first agent turn quotes the catalog. Without
+// the deferral, oneshot.Ready() can race with mcp.client.Ready() and the
+// agent sees an empty tool list.
 func (p *Plugin) Ready() error {
 	p.mu.Lock()
 	p.startedAt = time.Now()
@@ -153,7 +159,6 @@ func (p *Plugin) Ready() error {
 	prompt, err := p.resolvePrompt()
 	if err != nil {
 		p.logger.Error("oneshot: failed to resolve prompt", "error", err)
-		// Finalize with an error so the run still produces a JSON document.
 		p.mu.Lock()
 		p.errorsLog = append(p.errorsLog, errorRecord{Source: pluginID, Message: err.Error()})
 		p.mu.Unlock()
@@ -161,24 +166,37 @@ func (p *Plugin) Ready() error {
 		return nil
 	}
 
-	// Kick off the single turn asynchronously so Ready() returns and the
-	// engine can enter its main wait loop. The bus dispatches synchronously,
-	// so running Emit in-line here would block Ready for the duration of the
-	// entire agent run — which prevents the engine from installing its signal
-	// handlers and session-end listener.
-	go func() {
-		p.mu.Lock()
-		p.inputSent = true
-		p.mu.Unlock()
+	p.mu.Lock()
+	p.pendingPrompt = prompt
+	p.mu.Unlock()
+	return nil
+}
 
+// handleCoreReady fires after every plugin's Ready() returns. By the time
+// core.ready dispatches, mcp.client (and anything else with slow boot work)
+// has registered its tools, so the first io.input the agent sees yields a
+// fully populated tool catalog.
+func (p *Plugin) handleCoreReady(_ engine.Event[any]) {
+	p.mu.Lock()
+	if p.inputSent {
+		p.mu.Unlock()
+		return
+	}
+	prompt := p.pendingPrompt
+	p.inputSent = true
+	p.mu.Unlock()
+
+	if prompt == "" {
+		return
+	}
+
+	go func() {
 		input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: prompt}
 		if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 			return
 		}
 		_ = p.bus.Emit("io.input", input)
 	}()
-
-	return nil
 }
 
 // Shutdown flushes any remaining state and unsubscribes.

@@ -62,6 +62,9 @@ func versionedPayloads() []versionedPayload {
 		{"FileOutputDirResponse", func() any { return FileOutputDirResponse{SchemaVersion: FileOutputDirResponseVersion} }, FileOutputDirResponseVersion},
 		{"FileSelected", func() any { return FileSelected{SchemaVersion: FileSelectedVersion} }, FileSelectedVersion},
 		{"SessionInfo", func() any { return SessionInfo{SchemaVersion: SessionInfoVersion} }, SessionInfoVersion},
+		// mcp.go
+		{"MCPResourceUpdated", func() any { return MCPResourceUpdated{SchemaVersion: MCPResourceUpdatedVersion} }, MCPResourceUpdatedVersion},
+		{"MCPPromptsList", func() any { return MCPPromptsList{SchemaVersion: MCPPromptsListVersion} }, MCPPromptsListVersion},
 		// memory.go
 		{"MemoryEntry", func() any { return MemoryEntry{SchemaVersion: MemoryEntryVersion} }, MemoryEntryVersion},
 		{"MemoryQuery", func() any { return MemoryQuery{SchemaVersion: MemoryQueryVersion} }, MemoryQueryVersion},
@@ -222,8 +225,11 @@ func TestMissingSchemaVersionTreatedAsZero(t *testing.T) {
 	// or (b) call compat.Apply("io.input", 0, UserInputVersion, ...) to
 	// run any registered v0->v1 normalization. With the registry empty,
 	// option (a) is the implicit policy.
-	if UserInputVersion != 1 {
-		t.Fatalf("UserInputVersion drifted from 1 — update the v0==v1 rule in doc.go")
+	// The v0 (missing field) → v1 collapse rule still applies. Current
+	// emitters stamp v2 (PreloadMessages); the field is an optional slice
+	// so v1 payloads still round-trip cleanly.
+	if UserInputVersion < 1 {
+		t.Fatalf("UserInputVersion regressed below 1 — update the v0==v1 rule in doc.go")
 	}
 }
 

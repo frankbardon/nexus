@@ -79,6 +79,7 @@ plugins/
   providers/fallback/    # Automatic provider failover coordinator (config-driven fallback chains in core.models)
   providers/fanout/      # Parallel multi-provider dispatch (config-driven fanout roles in core.models)
   llm/batch/             # Cross-provider batch coordinator (Anthropic Messages Batches + OpenAI Batch API); persisted state, resumable across restarts
+  mcp/client/            # MCP (Model Context Protocol) client bridge — connects developer-configured MCP servers (stdio + streamable HTTP) and projects their tools/resources/prompts into the Nexus catalog and slash-command surface
   tools/shell/           # Sandboxed shell execution (supports working_dir, allowed_commands, timeout, sandbox config)
   tools/fileio/          # File read/write with base dir restriction
   tools/catalog/         # Shared tool registry; agents query via "tool.catalog.query"

@@ -28,6 +28,9 @@ import (
 	// LLM coordination plugins.
 	batchplugin "github.com/frankbardon/nexus/plugins/llm/batch"
 
+	// MCP integration.
+	mcpclient "github.com/frankbardon/nexus/plugins/mcp/client"
+
 	// Memory plugins.
 	"github.com/frankbardon/nexus/plugins/memory/capped"
 	compactionplugin "github.com/frankbardon/nexus/plugins/memory/compaction"
@@ -147,6 +150,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// LLM coordination
 	r.Register("nexus.llm.batch", batchplugin.New)
+
+	// MCP integration
+	r.Register("nexus.mcp.client", mcpclient.New)
 
 	// Memory
 	r.Register("nexus.memory.simple", simple.New)

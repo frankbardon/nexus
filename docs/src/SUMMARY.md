@@ -83,6 +83,7 @@
 - [Skills](./plugins/skills.md)
 - [System](./plugins/system.md)
 - [Control](./plugins/control.md)
+- [MCP Client](./plugins/mcp-client.md)
 
 # Reference
 
