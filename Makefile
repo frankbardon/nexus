@@ -5,13 +5,21 @@ BUILD_DIR=bin
 GO=go
 YAEGI_WASM=pkg/engine/sandbox/wasm/yaegi.wasm.gz
 
+# cmd/nexus has no CGO deps (modernc.org/sqlite + chromem-go are pure Go).
+# Disabling CGO + stripping symbols cuts binary ~25%. Desktop builds (Wails)
+# require CGO and use a separate build path, not this Makefile.
+CGO_ENABLED ?= 0
+export CGO_ENABLED
+BUILD_LDFLAGS=-s -w
+BUILD_FLAGS=-ldflags="$(BUILD_LDFLAGS)" -trimpath
+
 ifneq (,$(wildcard ./.env))
     include .env
     export
 endif
 
 build:
-	$(GO) build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/nexus
+	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/nexus
 
 run: build
 	$(BUILD_DIR)/$(BINARY_NAME) -config configs/default.yaml
