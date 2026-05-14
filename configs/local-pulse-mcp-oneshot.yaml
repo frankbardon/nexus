@@ -1,0 +1,81 @@
+# Manual smoke driver for nexus.mcp.client against the real `pulse mcp` server.
+#
+# **NOT a CI config.** Renamed from `test-*` so it does not match the
+# convention used by tests/integration/*.go and is never auto-loaded by
+# any automated test. The `bin/pulse` binary is an external tool that is
+# not built or guaranteed by this repo — keep this config out of CI paths.
+#
+# Usage:
+#   1. Make sure `bin/pulse` exists at the repo root (gitignored).
+#   2. mkdir -p ~/.nexus/pulse-data
+#   3. export ANTHROPIC_API_KEY=... (or set in .env)
+#   4. bin/nexus -config configs/local-pulse-mcp-oneshot.yaml
+#
+# Drives a single-shot multi-tool prompt to confirm MCP tools are registered
+# and invoked. Watch the boot log for `tool.register` entries named
+# mcp__pulse__*. For interactive workflows, use
+# configs/local-pulse-mcp-browser.yaml instead.
+core:
+  log_level: info
+  logging:
+    bootstrap_stderr: true
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 7d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.oneshot
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.mcp.client
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.io.oneshot:
+    input: "First call pulse_skills_list to find the available skill names. Then call pulse_skills_get on the one most likely to cover aggregation. Quote the first sentence of that skill verbatim."
+    read_stdin: false
+    pretty: true
+
+  nexus.agent.react:
+    system_prompt: |
+      You are an analytics assistant with access to Pulse (a tabular-data engine)
+      via MCP tools prefixed with `mcp__pulse__`. When the user asks about
+      Pulse capabilities, call the relevant tool — do not invent answers.
+
+  nexus.gate.endless_loop:
+    max_iterations: 6
+
+  nexus.memory.capped:
+    max_messages: 50
+    persist: false
+
+  nexus.mcp.client:
+    servers:
+      - name: pulse
+        transport: stdio
+        # Absolute paths — neither pulse nor the mcp.client plugin expand
+        # `~` in command/args today. Adjust if your checkout lives elsewhere.
+        command: /Users/frankbardon/Work/personal/nexus/bin/pulse
+        args: ["mcp", "--data-dir", "/Users/frankbardon/.nexus/pulse-data"]
+        lifecycle: engine
+        timeout: 30s
+        resources:
+          enabled: true
+          auto_register_static: true
+          auto_register_max: 50
+          subscribe_updates: false
+        prompts:
+          enabled: true

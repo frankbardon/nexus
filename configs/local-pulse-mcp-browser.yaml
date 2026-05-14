@@ -1,0 +1,121 @@
+# Manual interactive driver for nexus.mcp.client against the real
+# `pulse mcp` server, served over the browser UI for chat-style workflows.
+#
+# **NOT a CI config.** Filename does not start with `test-` so it is never
+# picked up by tests/integration/*.go config glob conventions. The
+# `bin/pulse` binary is an external tool that is not built or guaranteed
+# by this repo — keep this config out of CI paths.
+#
+# Usage:
+#   1. Make sure `bin/pulse` exists at the repo root (gitignored).
+#   2. mkdir -p ~/.nexus/pulse-data
+#   3. Drop a CSV / parquet / .pulse file into ~/.nexus/pulse-data so the
+#      agent has something to import / inspect.
+#   4. export ANTHROPIC_API_KEY=... (or set in .env)
+#   5. bin/nexus -config configs/local-pulse-mcp-browser.yaml
+#   6. Browser opens at http://localhost:8088. Try prompts like:
+#        "List the available pulse skills."
+#        "Fetch the aggregation-guide skill."
+#        "Import sales.csv from PULSE_DATA_DIR and show me 5 rows."
+#        "Run an OLS regression of revenue on quantity."
+#
+# All Pulse tools surface as `mcp__pulse__*` in the catalog. Resources are
+# also browseable via `mcp__pulse__list_resources` / `mcp__pulse__read_resource`.
+core:
+  log_level: info
+  # bootstrap_stderr is incompatible with visual transports like
+  # nexus.io.browser — the engine rejects the combo. Logs flow through the
+  # browser UI's events panel instead. Flip to true only if you also
+  # swap nexus.io.browser for a non-visual transport (e.g. io.test).
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/pulse-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.browser
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+    - nexus.mcp.client
+    - nexus.system.dynvars
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.io.browser:
+    host: 127.0.0.1
+    port: 8088
+    # Auto-open the browser at session start. Set to false if you're SSH'd
+    # into a remote box and want to hit the URL manually.
+    open_browser: true
+
+  nexus.agent.react:
+    system_prompt: |
+      You are an analytics assistant with access to Pulse — an embedded
+      tabular-data + statistical engine — via MCP tools prefixed
+      `mcp__pulse__`.
+
+      Workflow rules:
+      1. CALL FIRST: `mcp__pulse__pulse_manifest` once at the start of a
+         session and cache it mentally. It is the source of truth for the
+         operator catalog, accepted field types, and request shapes.
+      2. Before authoring any non-trivial request, search the example
+         library with `mcp__pulse__pulse_examples_search` and fetch the
+         runnable body with `mcp__pulse__pulse_examples_get`.
+      3. Prefer `mcp__pulse__pulse_ask` for natural-language asks against a
+         file. Fall back to the lower-level
+         pulse_import / pulse_inspect / pulse_predict / pulse_process chain
+         only when the user wants finer control.
+      4. Never invent operator names, field types, or request shapes — only
+         use what the manifest, example library, and skills pack confirm.
+      5. When you need to brief the user on operator semantics, fetch the
+         relevant skill with `mcp__pulse__pulse_skills_get` and quote it.
+      6. Cite resources with their slug-style tool names when you need to
+         pull in the embedded skill pack or documentation.
+
+      Be concise. Show the user what tool you are calling and why.
+
+  nexus.gate.endless_loop:
+    max_iterations: 20
+
+  nexus.memory.capped:
+    max_messages: 200
+    persist: true
+
+  nexus.system.dynvars:
+    date: true
+    time: true
+    session_dir: true
+
+  nexus.mcp.client:
+    servers:
+      - name: pulse
+        transport: stdio
+        # Absolute paths — neither pulse nor the mcp.client plugin expand
+        # `~` in command/args today. Adjust if your checkout lives elsewhere.
+        command: /Users/frankbardon/Work/personal/nexus/bin/pulse
+        args: ["mcp", "--data-dir", "/Users/frankbardon/.nexus/pulse-data"]
+        lifecycle: engine
+        timeout: 30s
+        resources:
+          enabled: true
+          auto_register_static: true
+          auto_register_max: 50
+          subscribe_updates: true
+        prompts:
+          enabled: true
