@@ -4,7 +4,7 @@ import "time"
 
 // Schema-version constants for io.* payloads. See doc.go.
 const (
-	UserInputVersion             = 1
+	UserInputVersion             = 2
 	AgentOutputVersion           = 1
 	OutputChunkVersion           = 1
 	StreamRefVersion             = 1
@@ -21,12 +21,29 @@ const (
 )
 
 // UserInput represents input submitted by the user.
+//
+// SchemaVersion bumped to 2 when PreloadMessages was added. Producers that
+// only set Content/Files/SessionID remain forward-compatible: the new field
+// is an optional slice, so v1 emitters that stamp SchemaVersion = 1 still
+// parse cleanly into the v2 struct (PreloadMessages is nil). Consumers that
+// emit fresh v2 payloads stamp UserInputVersion.
 type UserInput struct {
 	SchemaVersion int `json:"_schema_version"`
 
 	Content   string
 	Files     []FileAttachment
 	SessionID string
+
+	// PreloadMessages, when non-empty, are appended to memory.history in
+	// order before Content. Each message keeps its declared Role so
+	// assistant-role priming, few-shot examples, or recorded transcripts
+	// can be replayed without abusing the user channel. Multimodal parts
+	// ride on Message.Parts. Memory plugins consume PreloadMessages first,
+	// then fall through to the existing Content append + agent trigger.
+	//
+	// Added in v2 for MCP prompt expansion; also useful for scripted
+	// oneshot IO and replay.
+	PreloadMessages []Message
 }
 
 // FileAttachment is a file attached to user input.

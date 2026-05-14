@@ -178,6 +178,12 @@ func (p *Plugin) handleInput(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	for _, msg := range input.PreloadMessages {
+		p.appendMessage(msg)
+	}
+	if input.Content == "" && len(input.PreloadMessages) > 0 {
+		return
+	}
 	p.appendMessage(events.Message{
 		Role:    "user",
 		Content: input.Content,

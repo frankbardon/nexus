@@ -1629,6 +1629,83 @@ per submit; no cancellation API.
 
 ---
 
+## MCP integration
+
+### `nexus.mcp.client`
+
+Source: `plugins/mcp/client/`. Bridges one or more external Model Context
+Protocol (MCP) servers into Nexus. Tools land in the catalog under
+`mcp__<server>__<tool>`, static resources auto-register as no-arg tools,
+resource templates become parameterised tools, and prompts surface as slash
+commands. See `docs/src/plugins/mcp-client.md` for the user-facing guide.
+
+Top-level keys:
+
+| Key        | Type   | Default | Description |
+|------------|--------|---------|-------------|
+| `servers`  | list   | *(none)* | One entry per MCP server. See per-server keys below. |
+| `defaults` | map    | *(none)* | Inherited by every entry in `servers` unless overridden inline. |
+| `aliases`  | map    | *(none)* | Optional alias map: short slash command → `<server>.<prompt>`. Aliases use the configured `command_prefix` chain; e.g. `review: gh.review_pr` makes `/review` rewrite to `/mcp.gh.review_pr`. |
+
+#### `defaults`
+
+| Key                                | Type     | Default | Description |
+|------------------------------------|----------|---------|-------------|
+| `lifecycle`                        | string   | `engine` | When servers connect/disconnect. `engine` = connect on engine boot, disconnect on shutdown. `session` = connect on `io.session.start`, disconnect on `io.session.end`. |
+| `timeout`                          | duration | `30s`   | Per-RPC timeout used for `tools/call`, `resources/read`, `prompts/get`, etc. |
+| `command_prefix`                   | string   | `mcp`   | First segment of the slash command Nexus registers per prompt. With the default a server named `fake` and a prompt named `greet` becomes `/mcp.fake.greet`. |
+| `resources.enabled`                | bool     | `true`  | Toggle the entire resource surface for the server. |
+| `resources.auto_register_static`   | bool     | `true`  | When true, every static resource becomes a no-arg catalog tool. |
+| `resources.auto_register_template` | bool     | `true`  | When true, every resource template becomes a catalog tool whose inputSchema mirrors the template's variables. |
+| `resources.auto_register_max`      | int      | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. |
+| `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. |
+| `prompts.enabled`                  | bool     | `true`  | Toggle the prompt slash-command surface for the server. |
+
+#### `servers[]`
+
+| Key                | Type     | Default                       | Description |
+|--------------------|----------|-------------------------------|-------------|
+| `name`             | string   | *(required)*                  | Lowercase alpha-numeric identifier used to namespace every catalog entry and slash command (`[a-z0-9][a-z0-9_-]*`). |
+| `transport`        | string   | `stdio`                       | `stdio` (subprocess via the SDK) or `http` (streamable HTTP). |
+| `command`          | string   | *(required for stdio)*        | Executable to launch. Resolved on `PATH`; users wanting `~` expansion can write the full path. |
+| `args`             | list     | *(none)*                      | Argument list passed to `command`. |
+| `env`              | map      | *(none)*                      | Environment variables exported to the subprocess. `${VAR}` references are expanded from the host environment. |
+| `env_passthrough`  | list     | *(none)*                      | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
+| `url`              | string   | *(required for http)*         | Base URL of the streamable HTTP MCP endpoint. |
+| `headers`          | map      | *(none)*                      | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
+| `lifecycle`        | string   | inherited from `defaults`     | `engine` or `session`. |
+| `timeout`          | duration | inherited from `defaults`     | Overrides defaults per server. |
+| `tools.allow`      | list     | *(none)* (all allowed)        | If set, only listed raw MCP tool names are forwarded to the catalog. |
+| `tools.deny`       | list     | *(none)*                      | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
+| `resources.*`      | map      | inherited from `defaults`     | Same keys as `defaults.resources`. |
+| `prompts.enabled`  | bool     | inherited from `defaults`     | Disable per server when desired. |
+
+#### Events
+
+Subscribes:
+
+- `tool.invoke` — dispatches MCP tool calls for any registered `mcp__<server>__*` name.
+- `before:io.input` — intercepts slash commands; vetoes the original input, then re-emits a fresh `io.input` whose `PreloadMessages` carry the expanded prompt.
+- `io.session.start` / `io.session.end` — drive `lifecycle: session` connections.
+- `mcp.prompts.list` — synchronous query that fills `events.MCPPromptsList.Prompts` so IO plugins can render `/help`-style listings.
+
+Emits:
+
+- `tool.register`, `tool.result`, `before:tool.result` — the catalog projection.
+- `io.input` — replacement input carrying `PreloadMessages` after a prompt expansion.
+- `io.output` — system-role error messages when a slash command fails to parse or dispatch.
+- `mcp.resource.updated` — fired when a subscribed static resource changes.
+- `mcp.tools.refreshed`, `mcp.prompts.refreshed` — bookkeeping events emitted after each per-server reconcile.
+
+Deferred for phase 2 (see issue #98):
+
+- MCP sampling (server-initiated LLM calls).
+- OAuth dynamic client registration for the HTTP transport.
+- SSE legacy transport.
+- Roots beyond the session files directory.
+
+---
+
 ## Apps
 
 ### `nexus.app.helloworld`
