@@ -665,11 +665,6 @@ Source: `plugins/tools/shell/plugin.go`. Routes commands through
 | `sandbox.env_restrict`     | bool | `false`                | Strip sensitive env vars (AWS, Google, Azure, Anthropic API keys) before execution. |
 | `sandbox.timeout`          | duration | `30s`              | Per-command default; `timeout` above wins per-call. |
 
-**Legacy keys** still accepted for backwards compatibility:
-`allowed_commands`, `path_dirs`, `sandbox: <bool>` at the top level are
-auto-shimmed into the equivalent `sandbox: { ... }` block. Documented as
-deprecated; removal targeted for the milestone after gVisor lands.
-
 ### `nexus.tool.file`
 
 Source: `plugins/tools/fileio/plugin.go`. Registers `read_file`, `write_file`,

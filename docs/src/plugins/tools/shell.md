@@ -14,9 +14,13 @@ Executes shell commands in a controlled environment with optional command allowl
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `allowed_commands` | string[] | *(none)* | Whitelist of allowed command names. If empty, all commands are allowed. |
-| `timeout` | duration | `30s` | Maximum execution time per command |
-| `sandbox` | bool | `false` | Restrict environment variables when enabled |
+| `working_dir` | string | *(session files dir)* | Working directory for executions. |
+| `timeout` | duration | `30s` | Maximum execution time per command. |
+| `sandbox.backend` | string | `host` | Sandbox tier (`host`; future: `gvisor`, `firecracker`, `landlock`). |
+| `sandbox.allowed_commands` | string[] | *(none — all allowed)* | Whitelist of base command names. |
+| `sandbox.path_dirs` | string[] | *(none)* | Directories prepended to `PATH`. |
+| `sandbox.env_restrict` | bool | `false` | Strip sensitive env vars before execution. |
+| `sandbox.timeout` | duration | `30s` | Per-command default; top-level `timeout` wins per-call. |
 
 ## Tool Parameters
 
@@ -44,18 +48,19 @@ Executes shell commands in a controlled environment with optional command allowl
 
 ### Command Allowlist
 
-When `allowed_commands` is set, only commands whose base name matches the list are permitted:
+When `sandbox.allowed_commands` is set, only commands whose base name matches the list are permitted:
 
 ```yaml
 nexus.tool.shell:
-  allowed_commands: ["ls", "cat", "grep", "find", "git", "make"]
+  sandbox:
+    allowed_commands: ["ls", "cat", "grep", "find", "git", "make"]
 ```
 
 Attempting to run a command not in the list returns an error to the agent.
 
-### Sandbox Mode
+### Sandbox Environment Restriction
 
-When `sandbox: true`, the shell environment is restricted. This provides a basic layer of isolation.
+When `sandbox.env_restrict: true`, sensitive environment variables (AWS, Google, Azure, Anthropic API keys) are stripped before command execution.
 
 ### Command History
 
@@ -72,15 +77,17 @@ nexus.tool.shell:
 ### Coding assistant
 ```yaml
 nexus.tool.shell:
-  allowed_commands: ["go", "git", "ls", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "make", "docker", "npm", "cargo", "python"]
   timeout: 30s
-  sandbox: true
+  sandbox:
+    allowed_commands: ["go", "git", "ls", "cat", "grep", "find", "mkdir", "rm", "cp", "mv", "make", "docker", "npm", "cargo", "python"]
+    env_restrict: true
 ```
 
 ### Read-only exploration
 ```yaml
 nexus.tool.shell:
-  allowed_commands: ["ls", "cat", "grep", "find", "head", "tail", "wc"]
   timeout: 10s
-  sandbox: true
+  sandbox:
+    allowed_commands: ["ls", "cat", "grep", "find", "head", "tail", "wc"]
+    env_restrict: true
 ```

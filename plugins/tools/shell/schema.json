@@ -8,33 +8,16 @@
     "working_dir": {"type": "string", "description": "Working directory for executions."},
     "timeout":     {"type": "string", "description": "Per-command timeout (Go duration)."},
     "sandbox": {
-      "description": "Sandbox configuration block. Boolean form is a deprecated env-restrict shorthand.",
-      "oneOf": [
-        {"type": "boolean"},
-        {
-          "type": "object",
-          "additionalProperties": true,
-          "properties": {
-            "backend":          {"type": "string"},
-            "allowed_commands": {"type": "array", "items": {"type": "string"}},
-            "path_dirs":        {"type": "array", "items": {"type": "string"}},
-            "env_restrict":     {"type": "boolean"},
-            "timeout":          {"type": "string"}
-          }
-        }
-      ]
-    },
-    "allowed_commands": {
-      "type": "array",
-      "items": {"type": "string"},
-      "deprecated": true,
-      "description": "Deprecated: use sandbox.allowed_commands instead."
-    },
-    "path_dirs": {
-      "type": "array",
-      "items": {"type": "string"},
-      "deprecated": true,
-      "description": "Deprecated: use sandbox.path_dirs instead."
+      "type": "object",
+      "description": "Sandbox configuration block.",
+      "additionalProperties": true,
+      "properties": {
+        "backend":          {"type": "string"},
+        "allowed_commands": {"type": "array", "items": {"type": "string"}},
+        "path_dirs":        {"type": "array", "items": {"type": "string"}},
+        "env_restrict":     {"type": "boolean"},
+        "timeout":          {"type": "string"}
+      }
     }
   }
 }

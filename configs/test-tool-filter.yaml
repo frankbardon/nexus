@@ -60,8 +60,9 @@ plugins:
     include: [read_file, write_file, check_file_size, list_files]
 
   nexus.tool.shell:
-    allowed_commands: [ls, cat]
     timeout: 15s
+    sandbox:
+      allowed_commands: [ls, cat]
 
   nexus.tool.file:
     allow_external_writes: false

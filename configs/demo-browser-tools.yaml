@@ -82,9 +82,10 @@ plugins:
     max_iterations: 15
 
   nexus.tool.shell:
-    allowed_commands: [ls, cat, grep, find, echo, pwd]
     timeout: 15s
-    sandbox: true
+    sandbox:
+      allowed_commands: [ls, cat, grep, find, echo, pwd]
+      env_restrict: true
 
   nexus.tool.file:
     allow_external_writes: false

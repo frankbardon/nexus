@@ -66,8 +66,9 @@ plugins:
     max_iterations: 4
 
   nexus.tool.shell:
-    allowed_commands: [echo]
     timeout: 5s
+    sandbox:
+      allowed_commands: [echo]
 
   nexus.memory.capped:
     max_messages: 50

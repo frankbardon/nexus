@@ -53,7 +53,7 @@ The `configs/` directory holds two kinds of YAML profiles, distinguished by file
 
 | Plugin | ID | Key Config |
 |--------|----|------------|
-| Shell | `nexus.tool.shell` | `allowed_commands` ([]string), `timeout` (default `30s`), `sandbox` (default `false`) |
+| Shell | `nexus.tool.shell` | `timeout` (default `30s`), `sandbox.allowed_commands` ([]string), `sandbox.env_restrict`, `sandbox.path_dirs` |
 | File IO | `nexus.tool.file` | `base_dir`, `allow_external_writes` (default `false`), `tools` map (`read_file`, `write_file`, `check_file_size`, `list_files` — all default `true`) |
 
 ### Memory
