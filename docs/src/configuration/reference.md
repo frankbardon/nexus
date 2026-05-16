@@ -266,13 +266,16 @@ journal:
   fsync: turn-boundary       # turn-boundary | every-event | none
   retain_days: 30
   rotate_size_mb: 4
+  exclude_events:            # event types the journal must not record
+    - core.tick
 ```
 
-| Key              | Type   | Default          | Description |
-|------------------|--------|------------------|-------------|
-| `fsync`          | string | `turn-boundary`  | Disk-flush policy. `turn-boundary` fsyncs once per `agent.turn.end` (good throughput, recovers to last completed turn). `every-event` fsyncs after every envelope (strongest crash guarantee). `none` skips explicit fsync (test-only). |
-| `retain_days`    | int    | `30`             | Age in days past which a session's journal directory is removed on engine boot. `0` disables sweeping. In-flight sessions are never touched. |
-| `rotate_size_mb` | int    | `4`              | Active segment size threshold (MiB). When `agent.turn.end` lands and the active segment exceeds this, it is compressed into `events-NNN.jsonl.zst` and the active segment is truncated. |
+| Key              | Type     | Default          | Description |
+|------------------|----------|------------------|-------------|
+| `fsync`          | string   | `turn-boundary`  | Disk-flush policy. `turn-boundary` fsyncs once per `agent.turn.end` (good throughput, recovers to last completed turn). `every-event` fsyncs after every envelope (strongest crash guarantee). `none` skips explicit fsync (test-only). |
+| `retain_days`    | int      | `30`             | Age in days past which a session's journal directory is removed on engine boot. `0` disables sweeping. In-flight sessions are never touched. |
+| `rotate_size_mb` | int      | `4`              | Active segment size threshold (MiB). When `agent.turn.end` lands and the active segment exceeds this, it is compressed into `events-NNN.jsonl.zst` and the active segment is truncated. |
+| `exclude_events` | []string | `["core.tick"]`  | Event types the journal must not record. Excluded events still dispatch to bus subscribers (otel, eval, custom plugins); only the durable log skips them, and their seq is not consumed so on-disk envelopes stay gap-free. Default suppresses the engine heartbeat. Set to `[]` to record everything. |
 
 ### Disk layout
 

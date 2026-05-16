@@ -98,6 +98,15 @@ func TestJournalBasic_AllEventsRecorded(t *testing.T) {
 		t.Error("expected at least one vetoed=true envelope (before:llm.request) but found none")
 	}
 
+	// core.tick is filtered from the journal by default
+	// (JournalConfig.ExcludeEvents). Even though the engine heartbeat
+	// emits ticks on the bus, none should reach the durable log — and
+	// the seq monotonicity check above proves the bus-side seq elision
+	// keeps the on-disk sequence gap-free.
+	if counts["core.tick"] != 0 {
+		t.Errorf("expected 0 core.tick envelopes (excluded by default), got %d", counts["core.tick"])
+	}
+
 	// Header round-trip.
 	if h := r.Header(); h.SchemaVersion != journal.SchemaVersion {
 		t.Errorf("header schema_version=%q want %q", h.SchemaVersion, journal.SchemaVersion)

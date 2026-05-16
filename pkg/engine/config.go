@@ -95,6 +95,15 @@ type JournalConfig struct {
 	// active segment exceeds this many MiB. Rotated segments are
 	// zstd-compressed.
 	RotateSizeMB int `yaml:"rotate_size_mb"`
+	// ExcludeEvents lists event types that the journal must not record.
+	// Excluded events still dispatch to subscribers on the bus (so otel
+	// and other observers see them); they are simply skipped at the
+	// wildcard handler that feeds the durable log and their seq is not
+	// consumed, keeping on-disk envelopes contiguous. Default is
+	// ["core.tick"] — the engine heartbeat is high-frequency noise that
+	// replay regenerates from its own goroutine. Set to [] to disable
+	// exclusion entirely.
+	ExcludeEvents []string `yaml:"exclude_events"`
 }
 
 // CoreConfig holds engine-level settings.
@@ -180,9 +189,10 @@ func DefaultConfig() *Config {
 			Configs: make(map[string]map[string]any),
 		},
 		Journal: JournalConfig{
-			Fsync:        "turn-boundary",
-			RetainDays:   30,
-			RotateSizeMB: 4,
+			Fsync:         "turn-boundary",
+			RetainDays:    30,
+			RotateSizeMB:  4,
+			ExcludeEvents: []string{"core.tick"},
 		},
 	}
 }

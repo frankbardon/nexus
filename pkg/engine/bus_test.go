@@ -283,3 +283,79 @@ func TestDrain_ConcurrentEmitsDoNotPanic(t *testing.T) {
 		t.Fatalf("final Drain: %v", err)
 	}
 }
+
+// TestBus_ExcludedTypeSkipsSeqAndRing verifies that an excluded event type
+// (the journal's core.tick filter) skips seq assignment, the replay ring,
+// and dispatch-stack tracking, while still being delivered to typed and
+// wildcard subscribers. This is the contract startJournal relies on to
+// keep on-disk envelopes gap-free.
+func TestBus_ExcludedTypeSkipsSeqAndRing(t *testing.T) {
+	bus := NewEventBus()
+	ec, ok := bus.(ExcludeController)
+	if !ok {
+		t.Fatal("eventBus does not implement ExcludeController")
+	}
+	ec.SetExcludedTypes([]string{"core.tick"})
+
+	seqSrc, ok := bus.(interface {
+		CurrentSeq() uint64
+		ParentSeq() uint64
+	})
+	if !ok {
+		t.Fatal("eventBus does not expose CurrentSeq/ParentSeq")
+	}
+
+	var wildcardSeen []string
+	var wildcardSeqs []uint64
+	bus.SubscribeAll(func(e Event[any]) {
+		wildcardSeen = append(wildcardSeen, e.Type)
+		wildcardSeqs = append(wildcardSeqs, seqSrc.CurrentSeq())
+	})
+
+	var tickHits int
+	bus.Subscribe("core.tick", func(e Event[any]) { tickHits++ })
+
+	// Interleave excluded and non-excluded events.
+	for _, evt := range []string{"core.tick", "foo", "core.tick", "bar", "baz", "core.tick"} {
+		if err := bus.Emit(evt, nil); err != nil {
+			t.Fatalf("emit %s: %v", evt, err)
+		}
+	}
+
+	// Wildcard must see every event (excluded events still dispatch).
+	if got, want := len(wildcardSeen), 6; got != want {
+		t.Fatalf("wildcard saw %d events, want %d (%v)", got, want, wildcardSeen)
+	}
+	// Typed subscribers for excluded types still fire.
+	if tickHits != 3 {
+		t.Fatalf("core.tick typed handler fired %d times, want 3", tickHits)
+	}
+
+	// During an excluded event's dispatch, CurrentSeq must be 0 (no
+	// dispatch-stack push). During a non-excluded event, CurrentSeq must
+	// be the bus-assigned monotonic seq starting at 1 with no gaps for
+	// the excluded ones.
+	wantSeqs := []uint64{0, 1, 0, 2, 3, 0}
+	if len(wildcardSeqs) != len(wantSeqs) {
+		t.Fatalf("seq count mismatch: got %v want %v", wildcardSeqs, wantSeqs)
+	}
+	for i, s := range wildcardSeqs {
+		if s != wantSeqs[i] {
+			t.Errorf("wildcard seq[%d] type=%s got %d want %d", i, wildcardSeen[i], s, wantSeqs[i])
+		}
+	}
+
+	// Clearing the exclusion list restores seq assignment.
+	ec.SetExcludedTypes(nil)
+	if ec.IsExcluded("core.tick") {
+		t.Fatal("IsExcluded(core.tick) still true after clearing")
+	}
+	wildcardSeqs = wildcardSeqs[:0]
+	wildcardSeen = wildcardSeen[:0]
+	if err := bus.Emit("core.tick", nil); err != nil {
+		t.Fatalf("emit after clear: %v", err)
+	}
+	if len(wildcardSeqs) != 1 || wildcardSeqs[0] != 4 {
+		t.Fatalf("after clear, expected seq 4 for core.tick; got %v", wildcardSeqs)
+	}
+}
