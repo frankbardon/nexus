@@ -748,6 +748,16 @@ func (e *Engine) startJournal() error {
 	e.Journal = w
 	e.Lifecycle.journal = w
 
+	// Install the journal-exclusion set on the bus so excluded events skip
+	// seq assignment + ring append. Without this the wildcard handler below
+	// would still see them (we double-check via excluder.IsExcluded) but
+	// the on-disk seq sequence would have phantom gaps.
+	var excluder ExcludeController
+	if ec, ok := e.Bus.(ExcludeController); ok {
+		ec.SetExcludedTypes(e.Config.Journal.ExcludeEvents)
+		excluder = ec
+	}
+
 	// Tool result cache: args-keyed disk cache rooted at journal/cache/.
 	// Bus subscriptions auto-populate it on every tool.invoke / tool.result
 	// pair, so live tools require no per-plugin wiring. Replay short-
@@ -760,7 +770,13 @@ func (e *Engine) startJournal() error {
 	// Wildcard handler builds an envelope for every dispatched event. Seq
 	// + ParentSeq are pulled from the bus's per-goroutine dispatch stack
 	// (assigned at EmitEvent / EmitVetoable entry, before typed handlers).
+	// Excluded events short-circuit here as defense-in-depth — the bus
+	// already skipped their seq assignment, so an envelope built from
+	// CurrentSeq() would carry seq=0 and corrupt the on-disk stream.
 	unsub := e.Bus.SubscribeAll(func(ev Event[any]) {
+		if excluder != nil && excluder.IsExcluded(ev.Type) {
+			return
+		}
 		env := buildEnvelope(ev, bus.CurrentSeq(), bus.ParentSeq())
 		w.Append(env)
 	})

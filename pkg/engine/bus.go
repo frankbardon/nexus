@@ -16,6 +16,17 @@ type SeqController interface {
 	SetSeqFloor(seq uint64)
 }
 
+// ExcludeController is implemented by buses that can suppress journal-bound
+// bookkeeping for high-frequency, low-value event types. The engine installs
+// the list from JournalConfig.ExcludeEvents during startJournal. Excluded
+// events still dispatch to typed and wildcard subscribers — only seq
+// assignment, dispatch-stack tracking, and replay-ring append are skipped,
+// which keeps the journal's on-disk envelope sequence gap-free.
+type ExcludeController interface {
+	SetExcludedTypes(types []string)
+	IsExcluded(eventType string) bool
+}
+
 // EventBus is the central event dispatch system.
 type EventBus interface {
 	// Emit dispatches an event to all matching handlers synchronously.
@@ -109,6 +120,11 @@ type eventBus struct {
 	// triggered it. The journal writer reads this via CurrentSeq.
 	seqCounter atomic.Uint64
 
+	// excludedTypes is the set of event types the journal must not record.
+	// Loaded atomically so the hot dispatch path is lock-free. nil pointer
+	// means no exclusions (a fresh bus before startJournal sets the list).
+	excludedTypes atomic.Pointer[map[string]struct{}]
+
 	// dispatchMu guards dispatchStacks. Held only briefly during push/pop;
 	// not the same lock as mu so dispatch stack reads don't contend with
 	// handler-snapshot reads.
@@ -197,6 +213,33 @@ func (b *eventBus) SetLogger(l *slog.Logger) {
 // traces rather than swallowing them.
 func (b *eventBus) SetFailFast(v bool) {
 	b.failFast = v
+}
+
+// SetExcludedTypes replaces the bus's journal-exclusion set. Excluded events
+// still dispatch to subscribers but skip seq assignment, dispatch-stack
+// tracking, and the replay ring. The engine calls this during startJournal
+// with JournalConfig.ExcludeEvents (defaults to ["core.tick"]).
+func (b *eventBus) SetExcludedTypes(types []string) {
+	if len(types) == 0 {
+		b.excludedTypes.Store(nil)
+		return
+	}
+	set := make(map[string]struct{}, len(types))
+	for _, t := range types {
+		set[t] = struct{}{}
+	}
+	b.excludedTypes.Store(&set)
+}
+
+// IsExcluded reports whether the event type is currently in the journal-
+// exclusion set. Lock-free; safe from any goroutine.
+func (b *eventBus) IsExcluded(eventType string) bool {
+	set := b.excludedTypes.Load()
+	if set == nil {
+		return false
+	}
+	_, ok := (*set)[eventType]
+	return ok
 }
 
 // SetSeqFloor advances the dispatch seq counter to at least floor. No-op if
@@ -348,12 +391,20 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
-	// Assign the dispatch seq before any handler runs so the journal sees
-	// this event's seq in its causally-correct slot — a nested emit from a
-	// typed handler will see this seq as its ParentSeq.
-	seq := b.seqCounter.Add(1)
-	pop := b.pushDispatch(seq)
-	defer pop()
+	// Excluded events skip seq assignment, dispatch-stack tracking, and ring
+	// append. They still dispatch to typed and wildcard subscribers, so otel
+	// and other observers continue to see them — only the journal-bound
+	// bookkeeping is suppressed, which keeps the on-disk envelope sequence
+	// gap-free.
+	excluded := b.IsExcluded(event.Type)
+	if !excluded {
+		// Assign the dispatch seq before any handler runs so the journal
+		// sees this event's seq in its causally-correct slot — a nested
+		// emit from a typed handler will see this seq as its ParentSeq.
+		seq := b.seqCounter.Add(1)
+		pop := b.pushDispatch(seq)
+		defer pop()
+	}
 
 	meta := event.Meta()
 
@@ -363,7 +414,9 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 	// the replay snapshot (if it entered the ring before the subscriber was
 	// added to wildcards) or in live dispatch (if it was emitted after).
 	b.mu.Lock()
-	b.ring.append(event)
+	if !excluded {
+		b.ring.append(event)
+	}
 	typed := make([]*subscription, len(b.handlers[event.Type]))
 	copy(typed, b.handlers[event.Type])
 	wilds := make([]*subscription, len(b.wildcards))
@@ -402,9 +455,12 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
-	seq := b.seqCounter.Add(1)
-	pop := b.pushDispatch(seq)
-	defer pop()
+	excluded := b.IsExcluded(eventType)
+	if !excluded {
+		seq := b.seqCounter.Add(1)
+		pop := b.pushDispatch(seq)
+		defer pop()
+	}
 
 	// Wrap in VetoablePayload so handlers can set Veto via the shared pointer.
 	// Handlers receive the event by value, but VetoablePayload is a pointer —
@@ -419,7 +475,9 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	meta := event.Meta()
 
 	b.mu.Lock()
-	b.ring.append(event)
+	if !excluded {
+		b.ring.append(event)
+	}
 	typed := make([]*subscription, len(b.handlers[eventType]))
 	copy(typed, b.handlers[eventType])
 	wilds := make([]*subscription, len(b.wildcards))

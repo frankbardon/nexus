@@ -192,11 +192,21 @@ func validateEngineConfig(cfg *Config) *configValidationResult {
 		"plugins": map[string]any{
 			"active": cfg.Plugins.Active,
 		},
-		"journal": map[string]any{
-			"fsync":          cfg.Journal.Fsync,
-			"retain_days":    cfg.Journal.RetainDays,
-			"rotate_size_mb": cfg.Journal.RotateSizeMB,
-		},
+		"journal": func() map[string]any {
+			m := map[string]any{
+				"fsync":          cfg.Journal.Fsync,
+				"retain_days":    cfg.Journal.RetainDays,
+				"rotate_size_mb": cfg.Journal.RotateSizeMB,
+			}
+			// Only include exclude_events when non-empty so configs built
+			// in tests (without DefaultConfig) don't get a nil slice
+			// marshaled as JSON null and rejected by the schema's array
+			// constraint.
+			if len(cfg.Journal.ExcludeEvents) > 0 {
+				m["exclude_events"] = cfg.Journal.ExcludeEvents
+			}
+			return m
+		}(),
 	}
 	if cfg.Core.ModelsRaw != nil {
 		top["core"].(map[string]any)["models"] = cfg.Core.ModelsRaw

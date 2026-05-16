@@ -28,6 +28,15 @@ alongside every other event. Read them via
 `journal.Writer.SubscribeProjection` (live) or `journal.ProjectFile`
 (post-mortem).
 
+The journal records every bus event **except** the types listed in
+`journal.exclude_events` (default `["core.tick"]`). Excluded events
+still dispatch to bus subscribers — only the durable log skips them,
+and their seq is not consumed, so on-disk envelopes stay gap-free.
+The default suppresses the engine heartbeat, which replay regenerates
+from the live tick goroutine and which otel / eval already treat as
+noise. See [configuration reference](../configuration/reference.md#journal)
+for the full key.
+
 ## Session Metadata
 
 Each session tracks metadata in `metadata/session.json`:

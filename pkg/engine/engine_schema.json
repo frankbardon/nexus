@@ -118,7 +118,12 @@
           "description": "Disk-flush policy for the durable journal."
         },
         "retain_days":    {"type": "integer", "minimum": 0},
-        "rotate_size_mb": {"type": "integer", "minimum": 0}
+        "rotate_size_mb": {"type": "integer", "minimum": 0},
+        "exclude_events": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Event types the journal must not record. Bus still dispatches them to subscribers; only durable logging is suppressed. Defaults to [\"core.tick\"]. Set to [] to disable exclusion entirely."
+        }
       }
     }
   }
