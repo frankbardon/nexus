@@ -30,39 +30,39 @@ func newClassifier(t *testing.T, cfg map[string]any) (*Plugin, engine.EventBus) 
 
 func minimalCfg() map[string]any {
 	return map[string]any{
-		"classifier_model":  "tiny-judge",
-		"candidates":        []any{"haiku", "sonnet", "opus"},
-		"fallback":          "sonnet",
+		"classifier_role":   "classifier",
+		"candidate_roles":   []any{"quick", "balanced", "reasoning"},
+		"fallback_role":     "balanced",
 		"latency_budget_ms": 200,
 	}
 }
 
-func TestInit_RequiresCandidates(t *testing.T) {
+func TestInit_RequiresCandidateRoles(t *testing.T) {
 	bus := engine.NewEventBus()
 	p := New().(*Plugin)
 	err := p.Init(engine.PluginContext{Bus: bus, Logger: testLogger, Config: map[string]any{
-		"classifier_model": "x",
+		"classifier_role": "classifier",
 	}})
 	if err == nil {
-		t.Fatal("expected error on missing candidates")
+		t.Fatal("expected error on missing candidate_roles")
 	}
 }
 
-func TestInit_RequiresClassifierModel(t *testing.T) {
+func TestInit_RequiresClassifierRole(t *testing.T) {
 	bus := engine.NewEventBus()
 	p := New().(*Plugin)
 	err := p.Init(engine.PluginContext{Bus: bus, Logger: testLogger, Config: map[string]any{
-		"candidates": []any{"a"},
+		"candidate_roles": []any{"quick"},
 	}})
 	if err == nil {
-		t.Fatal("expected error on missing classifier_model")
+		t.Fatal("expected error on missing classifier_role")
 	}
 }
 
 func TestSkipsInternalSourcedRequests(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{
 			{Role: "user", Content: "hello"},
 		},
@@ -70,19 +70,18 @@ func TestSkipsInternalSourcedRequests(t *testing.T) {
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)
 
-	// _source set means classifier ignored it.
 	if req.Metadata["_routed_by"] != nil {
 		t.Fatalf("internal-sourced requests must not be routed, got _routed_by=%v", req.Metadata["_routed_by"])
 	}
-	if req.Model != "claude-sonnet-4-6-20250514" {
-		t.Fatalf("model unchanged expected, got %s", req.Model)
+	if req.Role != "balanced" {
+		t.Fatalf("role unchanged expected, got %s", req.Role)
 	}
 }
 
 func TestSkipsAlreadyRouted(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-6-20250514",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "balanced",
 		Messages: []events.Message{
 			{Role: "user", Content: "complex question"},
 		},
@@ -97,14 +96,14 @@ func TestSkipsAlreadyRouted(t *testing.T) {
 func TestCacheMissAppliesFallback(t *testing.T) {
 	_, bus := newClassifier(t, minimalCfg())
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "reasoning",
 		Messages: []events.Message{
 			{Role: "user", Content: "complex question"},
 		},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)
-	if req.Model != "sonnet" {
-		t.Fatalf("expected fallback model, got %s", req.Model)
+	if req.Role != "balanced" {
+		t.Fatalf("expected fallback role, got %s", req.Role)
 	}
 	if req.Metadata["_routed_reason"] != "fallback" {
 		t.Fatalf("expected reason=fallback, got %v", req.Metadata["_routed_reason"])
@@ -114,14 +113,14 @@ func TestCacheMissAppliesFallback(t *testing.T) {
 func TestCacheHitRoutesImmediately(t *testing.T) {
 	p, bus := newClassifier(t, minimalCfg())
 	prompt := "what is the capital of france"
-	p.cache.put(promptHash(prompt, defaultPrefixChars), "haiku")
+	p.cache.put(promptHash(prompt, defaultPrefixChars), "quick")
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "reasoning",
 		Messages: []events.Message{{Role: "user", Content: prompt}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)
-	if req.Model != "haiku" {
-		t.Fatalf("expected cache hit to route to haiku, got %s", req.Model)
+	if req.Role != "quick" {
+		t.Fatalf("expected cache hit to route to quick, got %s", req.Role)
 	}
 	if req.Metadata["_routed_reason"] != "cache" {
 		t.Fatalf("expected reason=cache, got %v", req.Metadata["_routed_reason"])
@@ -131,8 +130,6 @@ func TestCacheHitRoutesImmediately(t *testing.T) {
 func TestClassifierWarmsCacheAsync(t *testing.T) {
 	p, bus := newClassifier(t, minimalCfg())
 
-	// Stand in as the LLM provider: any llm.request from the classifier
-	// gets a synthetic response with the chosen tier.
 	var probeWG sync.WaitGroup
 	probeWG.Add(1)
 	bus.Subscribe("llm.request", func(event engine.Event[any]) {
@@ -146,21 +143,20 @@ func TestClassifierWarmsCacheAsync(t *testing.T) {
 		callID, _ := req.Metadata["_call_id"].(string)
 		go func() {
 			defer probeWG.Done()
-			_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "haiku",
+			_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "quick",
 				Metadata: map[string]any{"_call_id": callID},
 			})
 		}()
 	})
 
 	prompt := "trivial weather query"
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-6-20250602",
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: "reasoning",
 		Messages: []events.Message{{Role: "user", Content: prompt}},
 	}
 	_, _ = bus.EmitVetoable("before:llm.request", req)
 
 	probeWG.Wait()
 
-	// Allow goroutine to land the cache write.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if _, ok := p.cache.get(promptHash(prompt, defaultPrefixChars)); ok {
@@ -172,15 +168,15 @@ func TestClassifierWarmsCacheAsync(t *testing.T) {
 }
 
 func TestResolveChoiceExactMatch(t *testing.T) {
-	got := resolveChoice("haiku", []string{"haiku", "sonnet", "opus"})
-	if got != "haiku" {
+	got := resolveChoice("quick", []string{"quick", "balanced", "reasoning"})
+	if got != "quick" {
 		t.Fatalf("got %s", got)
 	}
 }
 
 func TestResolveChoiceSubstring(t *testing.T) {
-	got := resolveChoice("I'd choose: opus", []string{"haiku", "sonnet", "opus"})
-	if got != "opus" {
+	got := resolveChoice("I'd choose: reasoning", []string{"quick", "balanced", "reasoning"})
+	if got != "reasoning" {
 		t.Fatalf("got %s", got)
 	}
 }

@@ -256,7 +256,6 @@ nexus.tool.knowledge_search:
   default_namespaces: [kb]            # used when LLM omits the arg
   top_k: 5                            # default; LLM may override per-call up to maxTopK=50
   include_metadata: true              # whether to return raw metadata map
-  embedding_model: ""                 # optional pin; empty = provider default
 ```
 
 The system-prompt example in `configs/rag.yaml` nudges the LLM toward calling `knowledge_search` first on factual questions — adjust this prompt for your domain so the tool gets used at the right times. Without a hint, the LLM may try to answer from training data on questions you wanted grounded in the KB.
@@ -276,7 +275,6 @@ nexus.memory.vector:
   min_similarity: 0.3                       # filter out weak hits from the prompt
   auto_store_compaction: true               # auto-write summaries on memory.compacted
   auto_store_user_input: false              # off by default — you usually don't want this
-  embedding_model: ""                       # optional pin
   section_priority: 45                      # prompt ordering vs. other sections
 ```
 

@@ -200,7 +200,7 @@ plugins:
       enabled: true
 
   nexus.control.hitl_synthesizer:
-    model: balanced
+    model_role: balanced
     cache_enabled: true
 
   # tool_timeout: file_write should be near-instant; surface anything

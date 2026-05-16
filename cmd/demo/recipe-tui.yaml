@@ -100,7 +100,6 @@ plugins:
     rrf_k: 60
     retrieve_k: 40
     fuse_to: 15
-    embedding_model: text-embedding-3-small
     reranker:
       enabled: true
 

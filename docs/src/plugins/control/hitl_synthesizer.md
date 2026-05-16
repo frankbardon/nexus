@@ -59,7 +59,7 @@ plugins:
     - nexus.control.hitl_synthesizer
 
 nexus.control.hitl_synthesizer:
-  model: haiku                       # resolved via core.models
+  model_role: quick                  # resolved via core.models
   max_action_ref_chars: 1500
   cache_enabled: true
   fallback_prompt: "Approve action: {{.action_kind}}"
@@ -67,8 +67,7 @@ nexus.control.hitl_synthesizer:
 
 | Key                    | Type   | Default                              | Description |
 |------------------------|--------|--------------------------------------|-------------|
-| `model`                | string | `haiku`                              | Model role used for synthesis (resolved via `core.models`). |
-| `model_id`             | string | *(none)*                             | Explicit model ID; bypasses role lookup when set. |
+| `model_role`           | string | `quick`                              | Model role used for synthesis (resolved via `core.models`). |
 | `max_action_ref_chars` | int    | `1500`                               | ActionRef truncation budget (in JSON characters). |
 | `cache_enabled`        | bool   | `true`                               | Persist successful synthesis results to `cache.jsonl`. |
 | `fallback_prompt`      | string | `Approve action: {{.action_kind}}`   | `text/template` used when synthesis fails. |

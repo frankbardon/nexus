@@ -45,7 +45,6 @@ type Plugin struct {
 	defaultNS       []string // used when the LLM doesn't pick
 	topK            int
 	includeMetadata bool
-	embeddingModel  string // optional pin; otherwise provider default
 	// hasHybrid switches the query path to search.hybrid (RRF / weighted
 	// fusion of vector + lexical) when the orchestrator capability is
 	// active. Falls back to direct vector.query otherwise so single-mode
@@ -91,9 +90,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["include_metadata"].(bool); ok {
 		p.includeMetadata = v
-	}
-	if v, ok := ctx.Config["embedding_model"].(string); ok {
-		p.embeddingModel = v
 	}
 	p.allowedNS = configStrings(ctx.Config["namespaces"])
 	p.defaultNS = configStrings(ctx.Config["default_namespaces"])
@@ -234,7 +230,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 			}
 		}
 	} else {
-		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{query}, Model: p.embeddingModel}
+		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{query}}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			p.emit(tc, "", fmt.Sprintf("embed query: %s", embReq.Error))

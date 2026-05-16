@@ -67,7 +67,6 @@ type Plugin struct {
 	turnThreshold    int     // for turn_count strategy
 	charsPerToken    float64 // rough estimate for token counting
 	modelRole        string
-	model            string
 	compactionPrompt string
 	protectRecent    int  // number of recent messages to keep verbatim
 	persist          bool // persist tracked messages + archives to session workspace
@@ -196,12 +195,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.charsPerToken = v
 	}
 
-	// Parse model configuration.
+	// Parse model role.
 	if mr, ok := ctx.Config["model_role"].(string); ok {
 		p.modelRole = mr
-	}
-	if m, ok := ctx.Config["model"].(string); ok {
-		p.model = m
 	}
 
 	// Parse compaction prompt (file takes precedence over inline).
@@ -598,7 +594,6 @@ func (p *Plugin) startCompaction(reason string) {
 	}
 
 	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
-		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{

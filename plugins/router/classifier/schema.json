@@ -4,16 +4,15 @@
   "title": "nexus.router.classifier",
   "type": "object",
   "additionalProperties": false,
-  "required": ["candidates"],
+  "required": ["classifier_role", "candidate_roles"],
   "properties": {
-    "classifier_model":     {"type": "string", "description": "Direct model ID for the classifier call."},
-    "classifier_role":      {"type": "string", "description": "Role from core.models for the classifier call."},
-    "fallback":             {"type": "string", "description": "Candidate to use when classification fails."},
-    "candidates": {
+    "classifier_role":      {"type": "string", "description": "Role from core.models used for the classifier probe."},
+    "fallback_role":        {"type": "string", "description": "Candidate role used on cache miss while the cache warms."},
+    "candidate_roles": {
       "type": "array",
       "minItems": 1,
       "items": {"type": "string"},
-      "description": "Candidate model IDs the classifier may pick from."
+      "description": "Cheapest-first list of candidate model roles the classifier may pick from."
     },
     "prefix_chars":         {"type": "integer", "minimum": 1, "description": "Number of input chars passed to the classifier."},
     "latency_budget_ms":    {"type": "integer", "minimum": 1, "description": "Latency budget for classification (ms)."},

@@ -94,7 +94,6 @@ plugins:
     fusion: rrf
     retrieve_k: 40
     fuse_to: 15
-    embedding_model: text-embedding-3-small
     reranker:
       enabled: true
 

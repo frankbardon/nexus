@@ -133,12 +133,12 @@ plugins:
     default_model: claude-sonnet-4-6
 
   nexus.router.classifier:
-    classifier_model: claude-haiku-4-5-20251001
-    candidates:
-      - claude-haiku-4-5-20251001
-      - claude-sonnet-4-6
-      - claude-opus-4-7
-    fallback: claude-sonnet-4-6
+    classifier_role: quick
+    candidate_roles:
+      - quick
+      - balanced
+      - reasoning
+    fallback_role: balanced
     cache_classification: true
     cache_max_entries: 1024
     latency_budget_ms: 800

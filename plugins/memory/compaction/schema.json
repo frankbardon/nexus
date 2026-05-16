@@ -11,7 +11,6 @@
     "turn_threshold":    {"type": "integer", "minimum": 1},
     "chars_per_token":   {"type": "number", "minimum": 0},
     "model_role":        {"type": "string"},
-    "model":             {"type": "string"},
     "prompt":            {"type": "string"},
     "prompt_file":       {"type": "string"},
     "protect_recent":    {"type": "integer", "minimum": 0},

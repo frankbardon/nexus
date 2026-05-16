@@ -8,7 +8,6 @@
     "tool_name":        {"type": "string",  "description": "Override the LLM-facing tool name."},
     "top_k":            {"type": "integer", "minimum": 1, "description": "Number of top results returned per query."},
     "include_metadata": {"type": "boolean", "description": "Include vector store metadata in results."},
-    "embedding_model":  {"type": "string",  "description": "Embedding model used for query embedding."},
     "namespaces": {
       "type": "array",
       "items": {"type": "string"},

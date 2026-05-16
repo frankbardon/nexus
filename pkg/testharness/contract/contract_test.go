@@ -21,12 +21,12 @@ type stubPlugin struct {
 
 func newStubPlugin() engine.Plugin { return &stubPlugin{echoTag: "ok"} }
 
-func (s *stubPlugin) ID() string                          { return "nexus.test.contract.stub" }
-func (s *stubPlugin) Name() string                        { return "Contract Stub" }
-func (s *stubPlugin) Version() string                     { return "0.1.0" }
-func (s *stubPlugin) Dependencies() []string              { return nil }
-func (s *stubPlugin) Requires() []engine.Requirement      { return nil }
-func (s *stubPlugin) Capabilities() []engine.Capability   { return nil }
+func (s *stubPlugin) ID() string                        { return "nexus.test.contract.stub" }
+func (s *stubPlugin) Name() string                      { return "Contract Stub" }
+func (s *stubPlugin) Version() string                   { return "0.1.0" }
+func (s *stubPlugin) Dependencies() []string            { return nil }
+func (s *stubPlugin) Requires() []engine.Requirement    { return nil }
+func (s *stubPlugin) Capabilities() []engine.Capability { return nil }
 func (s *stubPlugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{{EventType: "stub.input"}}
 }
@@ -41,7 +41,7 @@ func (s *stubPlugin) Init(ctx engine.PluginContext) error {
 	}, engine.WithSource(s.ID())))
 	return nil
 }
-func (s *stubPlugin) Ready() error                  { return nil }
+func (s *stubPlugin) Ready() error { return nil }
 func (s *stubPlugin) Shutdown(_ context.Context) error {
 	for _, u := range s.unsubs {
 		u()
@@ -88,14 +88,16 @@ type leakyStub struct {
 	unsubs []func()
 }
 
-func (l *leakyStub) ID() string                                  { return "nexus.test.leaky" }
-func (l *leakyStub) Name() string                                { return "Leaky" }
-func (l *leakyStub) Version() string                             { return "0.1.0" }
-func (l *leakyStub) Dependencies() []string                      { return nil }
-func (l *leakyStub) Requires() []engine.Requirement              { return nil }
-func (l *leakyStub) Capabilities() []engine.Capability           { return nil }
-func (l *leakyStub) Subscriptions() []engine.EventSubscription   { return []engine.EventSubscription{{EventType: "stub.input"}} }
-func (l *leakyStub) Emissions() []string                         { return []string{"declared.only"} }
+func (l *leakyStub) ID() string                        { return "nexus.test.leaky" }
+func (l *leakyStub) Name() string                      { return "Leaky" }
+func (l *leakyStub) Version() string                   { return "0.1.0" }
+func (l *leakyStub) Dependencies() []string            { return nil }
+func (l *leakyStub) Requires() []engine.Requirement    { return nil }
+func (l *leakyStub) Capabilities() []engine.Capability { return nil }
+func (l *leakyStub) Subscriptions() []engine.EventSubscription {
+	return []engine.EventSubscription{{EventType: "stub.input"}}
+}
+func (l *leakyStub) Emissions() []string { return []string{"declared.only"} }
 func (l *leakyStub) Init(ctx engine.PluginContext) error {
 	l.bus = ctx.Bus
 	l.unsubs = append(l.unsubs, l.bus.Subscribe("stub.input", func(ev engine.Event[any]) {
@@ -103,7 +105,7 @@ func (l *leakyStub) Init(ctx engine.PluginContext) error {
 	}, engine.WithSource(l.ID())))
 	return nil
 }
-func (l *leakyStub) Ready() error                       { return nil }
+func (l *leakyStub) Ready() error { return nil }
 func (l *leakyStub) Shutdown(_ context.Context) error {
 	for _, u := range l.unsubs {
 		u()

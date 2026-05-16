@@ -44,9 +44,10 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string                        { return p.instanceID }
-func (p *Plugin) Name() string                      { return pluginName }
-func (p *Plugin) Version() string                   { return version }
+func (p *Plugin) ID() string      { return p.instanceID }
+func (p *Plugin) Name() string    { return pluginName }
+func (p *Plugin) Version() string { return version }
+
 // Dependencies returns no plugins. Earlier versions of this plugin
 // declared a dependency on nexus.agent.react, but the runSubagent
 // loop manages its own LLM + tool dispatch directly via bus
@@ -60,7 +61,7 @@ func (p *Plugin) Version() string                   { return version }
 // subagent workers can still include nexus.agent.react in their
 // `plugins.active` list explicitly; that's now an opt-in choice,
 // not a side effect of using subagent.
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) Dependencies() []string            { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 

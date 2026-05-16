@@ -49,8 +49,7 @@ type Plugin struct {
 
 	approval   approvalMode
 	planPrompt string
-	model      string // Explicit model ID override (backward compat)
-	modelRole  string // Model role for role-based selection
+	modelRole  string
 	maxSteps   int
 
 	mu             sync.Mutex
@@ -104,12 +103,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.planPrompt = prompt
 	}
 
-	// Parse model role (preferred) or explicit model override (backward compat).
 	if mr, ok := ctx.Config["model_role"].(string); ok {
 		p.modelRole = mr
-	}
-	if m, ok := ctx.Config["model"].(string); ok {
-		p.model = m
 	}
 
 	// Parse max steps.
@@ -129,7 +124,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
-	p.logger.Info("dynamic planner initialized", "approval", p.approval, "model_role", p.modelRole, "model", p.model)
+	p.logger.Info("dynamic planner initialized", "approval", p.approval, "model_role", p.modelRole)
 	return nil
 }
 
@@ -233,7 +228,6 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 
 	// Emit LLM request tagged for this plugin.
 	llmReq := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
-		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{

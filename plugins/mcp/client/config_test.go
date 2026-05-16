@@ -8,10 +8,10 @@ import (
 func TestParseConfig_DefaultsApplyToServer(t *testing.T) {
 	cfg, err := parseConfig(map[string]any{
 		"defaults": map[string]any{
-			"timeout":         "10s",
-			"lifecycle":       "session",
-			"command_prefix":  "x",
-			"resources":       map[string]any{"auto_register_max": 7},
+			"timeout":        "10s",
+			"lifecycle":      "session",
+			"command_prefix": "x",
+			"resources":      map[string]any{"auto_register_max": 7},
 		},
 		"servers": []any{
 			map[string]any{

@@ -63,11 +63,11 @@ type PromptConfig struct {
 
 // Defaults applied to every ServerConfig unless overridden inline.
 type Defaults struct {
-	Lifecycle       string
-	Timeout         time.Duration
-	Resources       ResourceConfig
-	Prompts         PromptConfig
-	CommandPrefix   string // slash prefix; default "mcp"
+	Lifecycle     string
+	Timeout       time.Duration
+	Resources     ResourceConfig
+	Prompts       PromptConfig
+	CommandPrefix string // slash prefix; default "mcp"
 }
 
 // parseConfig converts the raw YAML map into a typed Config. ${ENV_VAR}

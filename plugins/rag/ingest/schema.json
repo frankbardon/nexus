@@ -35,8 +35,7 @@
       "description": "Optional per-chunk LLM-generated situating prefix.",
       "properties": {
         "enabled":              {"type": "boolean"},
-        "model":                {"type": "string"},
-        "model_id":             {"type": "string"},
+        "model_role":           {"type": "string", "description": "Model role from core.models for prefix generation."},
         "max_chars_doc_window": {"type": "integer", "minimum": 1},
         "max_chars_prefix":     {"type": "integer", "minimum": 1},
         "timeout_ms":           {"type": "integer", "minimum": 1}

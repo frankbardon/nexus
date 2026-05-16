@@ -34,6 +34,10 @@ core:
   # provider.fallback event.
   models:
     default: balanced
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
     balanced:
       - provider: nexus.llm.anthropic
         model: claude-sonnet-4-6
@@ -41,6 +45,10 @@ core:
       - provider: nexus.llm.openai
         model: gpt-4o
         max_tokens: 8192
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+      max_tokens: 8192
 
   sessions:
     root: ~/.nexus/demo/sessions
@@ -279,7 +287,6 @@ plugins:
     rrf_k: 60
     retrieve_k: 50
     fuse_to: 20
-    embedding_model: text-embedding-3-small
     reranker:
       enabled: true
 
@@ -334,12 +341,12 @@ plugins:
   # That's the right outcome — these are different demos exercised
   # independently.
   nexus.router.classifier:
-    classifier_model: claude-haiku-4-5-20251001
-    candidates:
-      - claude-haiku-4-5-20251001
-      - claude-sonnet-4-6
-      - claude-opus-4-7
-    fallback: claude-sonnet-4-6
+    classifier_role: quick
+    candidate_roles:
+      - quick
+      - balanced
+      - reasoning
+    fallback_role: balanced
     prefix_chars: 256
     latency_budget_ms: 800
     cache_classification: true
@@ -366,7 +373,7 @@ plugins:
   # is itself a fallback chain — see core.models above). The synthesizer's
   # questions are short enough that the chain rarely hits its fallback.
   nexus.control.hitl_synthesizer:
-    model: balanced
+    model_role: balanced
     cache_enabled: true
 
   # tool_timeout: web_fetch can be very slow on heavy pages, so it gets a

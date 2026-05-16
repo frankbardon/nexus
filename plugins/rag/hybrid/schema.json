@@ -18,7 +18,6 @@
     },
     "retrieve_k":      {"type": "integer", "minimum": 1, "description": "Pre-fusion candidate count from each retriever."},
     "fuse_to":         {"type": "integer", "minimum": 1, "description": "Final result count after fusion."},
-    "embedding_model": {"type": "string",  "description": "Embedding model used for the vector leg."},
     "reranker": {
       "type": "object",
       "additionalProperties": false,
