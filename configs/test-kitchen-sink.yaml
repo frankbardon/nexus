@@ -91,9 +91,10 @@ plugins:
     exclude: []
 
   nexus.tool.shell:
-    allowed_commands: [echo]
     timeout: 10s
-    sandbox: true
+    sandbox:
+      allowed_commands: [echo]
+      env_restrict: true
 
   nexus.tool.file:
     allow_external_writes: false

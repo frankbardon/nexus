@@ -75,17 +75,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.timeout = d
 	}
 
-	// Backwards-compatible legacy config: when the plugin has no `sandbox:`
-	// block but does have any of `allowed_commands`, `path_dirs`, or
-	// `sandbox: <bool>`, synthesise an equivalent host-backend config and
-	// replace the engine-supplied default sandbox. Documented as deprecated;
-	// removal targeted for the milestone after gVisor lands.
-	if needsLegacyShim(ctx.Config) {
-		shim, err := buildLegacyShim(ctx.Config)
-		if err != nil {
-			return err
-		}
-		p.sandbox = shim
+	if err := rejectLegacyKeys(ctx.Config); err != nil {
+		return err
 	}
 
 	p.unsubs = append(p.unsubs,
@@ -96,58 +87,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	return nil
 }
 
-// needsLegacyShim reports whether the plugin config carries pre-Sandbox keys
-// (`allowed_commands`, `path_dirs`, top-level `sandbox: <bool>`). A new
-// `sandbox:` map block opts back into the structured path even if the legacy
-// keys are also present, since callers that bothered to write the new block
-// are unambiguously asking for it.
-func needsLegacyShim(cfg map[string]any) bool {
+// rejectLegacyKeys fails fast on configs that still use the pre-Sandbox
+// top-level keys. The previous shim auto-translated them; it was removed in
+// favour of a single nested `sandbox:` shape.
+func rejectLegacyKeys(cfg map[string]any) error {
 	if cfg == nil {
-		return false
-	}
-	if _, ok := cfg["sandbox"].(map[string]any); ok {
-		return false
+		return nil
 	}
 	if _, ok := cfg["allowed_commands"]; ok {
-		return true
+		return fmt.Errorf("shell: top-level `allowed_commands` is no longer supported — move it under `sandbox.allowed_commands`")
 	}
 	if _, ok := cfg["path_dirs"]; ok {
-		return true
+		return fmt.Errorf("shell: top-level `path_dirs` is no longer supported — move it under `sandbox.path_dirs`")
 	}
 	if _, ok := cfg["sandbox"].(bool); ok {
-		return true
+		return fmt.Errorf("shell: `sandbox: <bool>` shorthand is no longer supported — use `sandbox: { env_restrict: <bool> }`")
 	}
-	return false
-}
-
-// buildLegacyShim translates the deprecated top-level keys into a host
-// backend so existing configs keep working without the new sandbox block.
-func buildLegacyShim(cfg map[string]any) (sandbox.Sandbox, error) {
-	block := map[string]any{}
-	if v, ok := cfg["allowed_commands"]; ok {
-		block["allowed_commands"] = v
-	}
-	if v, ok := cfg["path_dirs"]; ok {
-		// path_dirs in the legacy shape are pre-expansion strings — pass
-		// through; the host backend doesn't expand, the caller does.
-		raw, ok := v.([]any)
-		if ok {
-			expanded := make([]any, 0, len(raw))
-			for _, entry := range raw {
-				if s, ok := entry.(string); ok {
-					expanded = append(expanded, engine.ExpandPath(s))
-				}
-			}
-			block["path_dirs"] = expanded
-		}
-	}
-	if v, ok := cfg["sandbox"].(bool); ok {
-		block["env_restrict"] = v
-	}
-	if ts, ok := cfg["timeout"].(string); ok {
-		block["timeout"] = ts
-	}
-	return sandbox.New(sandbox.BackendHost, block)
+	return nil
 }
 
 func (p *Plugin) Ready() error {

@@ -75,5 +75,6 @@ plugins:
     drop_strategy: replace_with_envelope
 
   nexus.tool.shell:
-    allowed_commands: [ls, cat, pwd, echo, head, wc, find]
     timeout: 10s
+    sandbox:
+      allowed_commands: [ls, cat, pwd, echo, head, wc, find]
