@@ -52,7 +52,6 @@ type Plugin struct {
 	namespace           string
 	topK                int
 	minSimilarity       float32
-	embeddingModel      string
 	autoStoreCompaction bool
 	autoStoreUserInput  bool // default false — conservative
 	storeImages         bool // default false — opt-in; only useful when a multimodal embeddings.provider is active
@@ -127,9 +126,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["min_similarity"].(float64); ok {
 		p.minSimilarity = float32(v)
-	}
-	if v, ok := ctx.Config["embedding_model"].(string); ok {
-		p.embeddingModel = v
 	}
 	if v, ok := ctx.Config["auto_store_compaction"].(bool); ok {
 		p.autoStoreCompaction = v
@@ -279,7 +275,6 @@ func (p *Plugin) storeImageAttachments(in events.UserInput) {
 		}
 		req := &events.EmbeddingsRequest{
 			SchemaVersion: events.EmbeddingsRequestVersion,
-			Model:         p.embeddingModel,
 			Inputs: []events.EmbeddingsInput{{
 				Image:    f.Data,
 				MimeType: f.MimeType,
@@ -501,7 +496,7 @@ func (p *Plugin) storeDoc(content, source string, extra map[string]string, vec [
 
 // embedOne embeds a single string via the embeddings.provider capability.
 func (p *Plugin) embedOne(text string) ([]float32, error) {
-	req := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{text}, Model: p.embeddingModel}
+	req := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{text}}
 	_ = p.bus.Emit("embeddings.request", req)
 	if req.Error != "" {
 		return nil, fmt.Errorf("embed: %s", req.Error)

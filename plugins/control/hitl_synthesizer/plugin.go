@@ -74,7 +74,6 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 
 	// Configuration.
-	model               string
 	modelRole           string
 	maxActionRefChars   int
 	cacheEnabled        bool
@@ -132,15 +131,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.cacheEnabled = true
 	p.fallbackTemplateRaw = defaultFallbackTemplate
 
-	if v, ok := ctx.Config["model"].(string); ok && v != "" {
-		// "model" can be a model role (resolved via core.models) or a
-		// raw model ID. The provider plugins handle either via
-		// LLMRequest.Role / LLMRequest.Model.
+	if v, ok := ctx.Config["model_role"].(string); ok && v != "" {
 		p.modelRole = v
-	}
-	if v, ok := ctx.Config["model_id"].(string); ok && v != "" {
-		// Optional override: explicit model ID, bypassing role lookup.
-		p.model = v
 	}
 	if v, ok := ctx.Config["max_action_ref_chars"].(int); ok && v > 0 {
 		p.maxActionRefChars = v
@@ -160,8 +152,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.fallbackTemplate = tmpl
 
-	if p.modelRole == "" && p.model == "" {
-		p.modelRole = "haiku"
+	if p.modelRole == "" {
+		p.modelRole = "quick"
 	}
 
 	if err := p.loadCache(); err != nil {
@@ -186,7 +178,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.logger.Info("hitl prompt synthesizer initialized",
 		"model_role", p.modelRole,
-		"model", p.model,
 		"max_action_ref_chars", p.maxActionRefChars,
 		"cache_enabled", p.cacheEnabled,
 		"cache_entries", len(p.cache),
@@ -309,7 +300,6 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 	userMsg := buildUserPrompt(req, p.maxActionRefChars)
 
 	emitErr := p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
-		Model: p.model,
 		Messages: []events.Message{
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: userMsg},

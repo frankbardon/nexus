@@ -11,15 +11,15 @@ import (
 // occurs so the methods only need to satisfy the interface.
 type registryStub struct{ id string }
 
-func (r *registryStub) ID() string                          { return r.id }
-func (r *registryStub) Name() string                        { return r.id }
-func (r *registryStub) Version() string                     { return "test" }
-func (r *registryStub) Dependencies() []string              { return nil }
-func (r *registryStub) Requires() []Requirement             { return nil }
-func (r *registryStub) Capabilities() []Capability          { return nil }
-func (r *registryStub) Init(PluginContext) error            { return nil }
-func (r *registryStub) Ready() error                        { return nil }
-func (r *registryStub) Shutdown(context.Context) error      { return nil }
+func (r *registryStub) ID() string                         { return r.id }
+func (r *registryStub) Name() string                       { return r.id }
+func (r *registryStub) Version() string                    { return "test" }
+func (r *registryStub) Dependencies() []string             { return nil }
+func (r *registryStub) Requires() []Requirement            { return nil }
+func (r *registryStub) Capabilities() []Capability         { return nil }
+func (r *registryStub) Init(PluginContext) error           { return nil }
+func (r *registryStub) Ready() error                       { return nil }
+func (r *registryStub) Shutdown(context.Context) error     { return nil }
 func (r *registryStub) Subscriptions() []EventSubscription { return nil }
 func (r *registryStub) Emissions() []string                { return nil }
 

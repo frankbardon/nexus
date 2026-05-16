@@ -1,13 +1,13 @@
-// Package classifier implements an LLM-judge per-step model router.
+// Package classifier implements an LLM-judge per-step model-role router.
 //
 // The classifier sees the user's most recent message, asks a small fast
-// model to rank the difficulty among the configured candidates, and
-// caches the answer keyed by a prompt-prefix hash so repeat prompts
+// model to rank the difficulty among the configured candidate roles,
+// and caches the answer keyed by a prompt-prefix hash so repeat prompts
 // don't re-pay the classifier latency budget.
 //
 // Routing happens synchronously on before:llm.request:
-//   - Cache hit: rewrite Model immediately. Zero added latency.
-//   - Cache miss: leave Model unchanged (default routing), and spawn a
+//   - Cache hit: rewrite Role immediately. Zero added latency.
+//   - Cache miss: leave Role unchanged (default routing), and spawn a
 //     background goroutine that classifies via the LLM and warms the
 //     cache for the next call. This avoids paying the classifier
 //     round-trip on the very first request — the trade-off documented
@@ -34,11 +34,11 @@ import (
 
 const pluginID = "nexus.router.classifier"
 
-const defaultClassifierPrompt = `You are a routing classifier. Given the user prompt below, decide which model tier should answer.
+const defaultClassifierPrompt = `You are a routing classifier. Given the user prompt below, decide which model role should answer.
 
 Respond with EXACTLY one word from this list and nothing else: %s
 
-The candidates are ordered cheapest first. Pick the cheapest tier that can answer the prompt correctly. Use a stronger tier only when the prompt requires multi-step reasoning, complex tool use, long-context analysis, or nuanced creative output.
+The roles are ordered cheapest first. Pick the cheapest role that can answer the prompt correctly. Use a stronger role only when the prompt requires multi-step reasoning, complex tool use, long-context analysis, or nuanced creative output.
 
 Prompt:
 %s
@@ -62,14 +62,13 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	classifierModel string
-	classifierRole  string
-	candidates      []string
-	fallback        string
-	prefixChars     int
-	latencyMs       int
-	prompt          string
-	cacheEnabled    bool
+	classifierRole string
+	candidateRoles []string
+	fallbackRole   string
+	prefixChars    int
+	latencyMs      int
+	prompt         string
+	cacheEnabled   bool
 
 	cache *cache
 
@@ -90,27 +89,24 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.pending = make(map[string]chan events.LLMResponse)
 
-	if v, ok := ctx.Config["classifier_model"].(string); ok {
-		p.classifierModel = v
-	}
 	if v, ok := ctx.Config["classifier_role"].(string); ok {
 		p.classifierRole = v
 	}
-	if v, ok := ctx.Config["fallback"].(string); ok {
-		p.fallback = v
+	if v, ok := ctx.Config["fallback_role"].(string); ok {
+		p.fallbackRole = v
 	}
-	if rawCands, ok := ctx.Config["candidates"].([]any); ok {
+	if rawCands, ok := ctx.Config["candidate_roles"].([]any); ok {
 		for _, c := range rawCands {
 			if s, ok := c.(string); ok && s != "" {
-				p.candidates = append(p.candidates, s)
+				p.candidateRoles = append(p.candidateRoles, s)
 			}
 		}
 	}
-	if len(p.candidates) == 0 {
-		return fmt.Errorf("router.classifier: candidates list is required")
+	if len(p.candidateRoles) == 0 {
+		return fmt.Errorf("router.classifier: candidate_roles list is required")
 	}
-	if p.classifierModel == "" && p.classifierRole == "" {
-		return fmt.Errorf("router.classifier: either classifier_model or classifier_role is required")
+	if p.classifierRole == "" {
+		return fmt.Errorf("router.classifier: classifier_role is required")
 	}
 
 	p.prefixChars = defaultPrefixChars
@@ -147,10 +143,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	)
 
 	p.logger.Info("classifier router initialized",
-		"classifier_model", p.classifierModel,
 		"classifier_role", p.classifierRole,
-		"candidates", strings.Join(p.candidates, ","),
-		"fallback", p.fallback,
+		"candidate_roles", strings.Join(p.candidateRoles, ","),
+		"fallback_role", p.fallbackRole,
 		"cache_enabled", p.cacheEnabled,
 		"latency_budget_ms", p.latencyMs)
 	return nil
@@ -212,35 +207,42 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	key := promptHash(prompt, p.prefixChars)
 
 	if p.cacheEnabled {
-		if model, ok := p.cache.get(key); ok {
-			p.applyDecision(req, model, "cache")
+		if role, ok := p.cache.get(key); ok {
+			p.applyDecision(req, role, "cache")
 			return
 		}
 	}
 
 	// Cache miss: route to fallback now and warm the cache asynchronously.
-	if p.fallback != "" {
-		p.applyDecision(req, p.fallback, "fallback")
+	if p.fallbackRole != "" {
+		p.applyDecision(req, p.fallbackRole, "fallback")
 	}
 	go p.classifyAndCache(prompt, key)
 }
 
-// applyDecision rewrites the request and records the routing trail.
-func (p *Plugin) applyDecision(req *events.LLMRequest, model, why string) {
-	if model == "" || model == req.Model {
+// applyDecision rewrites the request's Role and records the routing trail.
+// Clears Model so the role takes effect (Model takes precedence over Role
+// in provider resolution).
+func (p *Plugin) applyDecision(req *events.LLMRequest, role, why string) {
+	if role == "" || role == req.Role {
 		return
 	}
-	prev := req.Model
-	req.Model = model
+	prevRole := req.Role
+	prevModel := req.Model
+	req.Role = role
+	req.Model = ""
 	if req.Metadata == nil {
 		req.Metadata = make(map[string]any)
 	}
 	req.Metadata["_routed_by"] = pluginID
 	req.Metadata["_routed_reason"] = why
-	if prev != "" {
-		req.Metadata["_routed_from_model"] = prev
+	if prevRole != "" {
+		req.Metadata["_routed_from_role"] = prevRole
 	}
-	p.logger.Debug("classifier routed", "reason", why, "from", prev, "to", model)
+	if prevModel != "" {
+		req.Metadata["_routed_from_model"] = prevModel
+	}
+	p.logger.Debug("classifier routed", "reason", why, "from_role", prevRole, "to_role", role)
 }
 
 // classifyAndCache emits a classification request, awaits the response
@@ -260,9 +262,8 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 	}()
 
 	probe := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.classifierRole,
-		Model: p.classifierModel,
 		Messages: []events.Message{
-			{Role: "user", Content: fmt.Sprintf(p.prompt, strings.Join(p.candidates, ", "), prompt)},
+			{Role: "user", Content: fmt.Sprintf(p.prompt, strings.Join(p.candidateRoles, ", "), prompt)},
 		},
 		MaxTokens: 32,
 		Metadata: map[string]any{
@@ -283,7 +284,7 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		if !ok {
 			return
 		}
-		choice := resolveChoice(resp.Content, p.candidates)
+		choice := resolveChoice(resp.Content, p.candidateRoles)
 		if choice == "" {
 			p.logger.Debug("classifier returned unparseable choice", "content", resp.Content)
 			return
@@ -340,7 +341,7 @@ func promptHash(prompt string, n int) string {
 }
 
 // resolveChoice maps the classifier's free-text answer to one of the
-// candidate model ids. Falls back to substring matching since small models
+// candidate roles. Falls back to substring matching since small models
 // sometimes return verbose answers despite the "EXACTLY one word" prompt.
 func resolveChoice(text string, candidates []string) string {
 	t := strings.TrimSpace(text)

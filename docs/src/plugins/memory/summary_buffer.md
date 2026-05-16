@@ -33,7 +33,6 @@ summarised view is what the ReAct agent sees on the next request.
 | `chars_per_token` | float64 | `4.0` | Rough per-token char ratio for token estimation |
 | `max_recent` | int | `8` | Number of recent messages kept verbatim after summarisation |
 | `model_role` | string | `"quick"` | Role used to dispatch the summarisation LLM request |
-| `model` | string | `""` | Explicit model override; otherwise inferred from the role |
 | `prompt` | string | _built-in_ | Inline override of the summarisation system prompt. The default prompt is reasoning-preservation aware: it instructs the summariser to wrap segments in `<summary topic="…" compressed-from-turns="…">…</summary>` and end with a `## Preserved Kinds:` trailer. Overriding loses both behaviours. |
 | `prompt_file` | string | _unset_ | Path to a file containing the summarisation prompt (takes precedence over `prompt`) |
 | `quality_retry` | bool | `false` | Re-run the summariser once with a stricter prompt when the trailer omits any required preserved kind. Off by default for backwards compatibility. |

@@ -202,4 +202,3 @@ func (p *Plugin) handlePromptsListQuery(e engine.Event[any]) {
 	}
 	q.Prompts = p.listPrompts()
 }
-

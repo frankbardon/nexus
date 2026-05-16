@@ -2,10 +2,10 @@
 // small, deterministic surface so the Nexus mcp.client plugin can be exercised
 // end-to-end over stdio:
 //
-//   tools:     echo (string -> string), add (a+b -> int)
-//   resources: readme (text), tiny-image (binary)
-//   template:  doc://{name}
-//   prompts:   greet (no args), review (one required arg)
+//	tools:     echo (string -> string), add (a+b -> int)
+//	resources: readme (text), tiny-image (binary)
+//	template:  doc://{name}
+//	prompts:   greet (no args), review (one required arg)
 //
 // Not built as part of normal go build — the integration test compiles it on
 // demand via `go build`. Lives outside the main module path so it doesn't

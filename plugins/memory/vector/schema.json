@@ -8,7 +8,6 @@
     "namespace":             {"type": "string"},
     "top_k":                 {"type": "integer", "minimum": 1},
     "min_similarity":        {"type": "number", "minimum": 0, "maximum": 1},
-    "embedding_model":       {"type": "string"},
     "auto_store_compaction": {"type": "boolean"},
     "auto_store_user_input": {"type": "boolean"},
     "section_priority":      {"type": "integer"},

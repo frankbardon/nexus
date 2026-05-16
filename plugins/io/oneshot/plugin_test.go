@@ -35,9 +35,9 @@ func TestOneshot_DefersInputUntilCoreReady(t *testing.T) {
 	}))
 
 	var (
-		mu        sync.Mutex
-		inputs    []events.UserInput
-		gotInput  = make(chan struct{}, 1)
+		mu       sync.Mutex
+		inputs   []events.UserInput
+		gotInput = make(chan struct{}, 1)
 	)
 	h.Bus().Subscribe("io.input", func(ev engine.Event[any]) {
 		ui, ok := ev.Payload.(events.UserInput)

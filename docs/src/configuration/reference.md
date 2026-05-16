@@ -731,9 +731,12 @@ Source: `plugins/tools/knowledge_search/plugin.go`. Requires
 | `tool_name`          | string | `knowledge_search` | Name of the registered tool. |
 | `top_k`              | int    | `5`                | Default chunks to return (LLM may override; capped at 50). |
 | `include_metadata`   | bool   | `true`             | Include vector metadata alongside chunks. |
-| `embedding_model`    | string | *(none)*           | Override the default embedding model. |
 | `namespaces`         | list   | *(required)*       | Allowed vector store namespaces. |
 | `default_namespaces` | list   | *(required)*       | Namespaces searched when the LLM doesn't specify. |
+
+The active `embeddings.provider` plugin owns the model choice — there is
+no consumer-side override. Configure the model once on the provider
+plugin (e.g. `nexus.embeddings.openai.model`).
 
 ### `nexus.tool.pdf`
 
@@ -820,8 +823,7 @@ Synthesised prompts are cached on disk under
 
 | Key                    | Type   | Default                              | Description |
 |------------------------|--------|--------------------------------------|-------------|
-| `model`                | string | `haiku`                              | Model role (resolved via `core.models`) used for synthesis. |
-| `model_id`             | string | *(none)*                             | Explicit model ID; bypasses role lookup when set. |
+| `model_role`           | string | `quick`                              | Model role (resolved via `core.models`) used for synthesis. |
 | `max_action_ref_chars` | int    | `1500`                               | ActionRef truncation budget (in JSON characters) before sending to the model. |
 | `cache_enabled`        | bool   | `true`                               | Toggle the on-disk cache. Disable for debugging or strict-determinism runs. |
 | `fallback_prompt`      | string | `Approve action: {{.action_kind}}`   | Go `text/template` over `{action_kind, action_ref, requester_plugin, request_id}` used when synthesis fails. |
@@ -960,7 +962,6 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `namespace`             | string | `memory-{instanceID}`  | Vector store namespace. |
 | `top_k`                 | int    | `5`                    | Recalled matches per query. |
 | `min_similarity`        | float  | `0.0`                  | Minimum cosine similarity (0 disables filtering). |
-| `embedding_model`       | string | *(none)*               | Override the embedding model. |
 | `auto_store_compaction` | bool   | `true`                 | Store summaries when `memory.compacted` fires. |
 | `auto_store_user_input` | bool   | `false`                | Store user messages on every input (opt-in). |
 | `section_priority`      | int    | `45`                   | Priority of the recalled-memory section in the system prompt. |
@@ -1136,7 +1137,6 @@ results via Reciprocal Rank Fusion or weighted score combination.
 | `weights.lexical`  | float  | `0.3`   | Per-backend bias for `weighted` fusion. |
 | `retrieve_k`       | int    | `50`    | Per-backend candidate count gathered before fusion. |
 | `fuse_to`          | int    | `20`    | Default post-fusion top-N when the caller does not specify K. |
-| `embedding_model`  | string | *(provider default)* | Embedding model used when callers fire `hybrid.query` without a pre-embedded vector. |
 | `reranker.enabled` | bool   | `false` | Apply a post-fusion reranker pass via the `search.reranker` capability. Off by default — enable when a reranker provider is active and the latency budget allows. |
 
 Requires `embeddings.provider`, `vector.store`, and `search.lexical`. Per-query
@@ -1230,8 +1230,7 @@ and the `rag.ingest` event handler.
 | `watch[].glob`        | string | *(empty — match all)*    | Glob pattern for files to ingest. |
 | `watch[].namespace`   | string | *(required)*             | Vector store namespace. |
 | `contextual_retrieval.enabled`              | bool   | `false`                    | Per-chunk LLM-generated situating prefix (Anthropic contextual retrieval). Adds one LLM call per uncached chunk during ingest; ~49% reported recall improvement. Stored content stays the raw chunk; only the embed/lexical text is prefixed. |
-| `contextual_retrieval.model`                | string | *(role default)*           | Model role to use for prefix generation (e.g. `cheap`, `balanced`). Combined with `model_id` to override `core.models` at the call site. |
-| `contextual_retrieval.model_id`             | string | *(role default)*           | Concrete model identifier override. |
+| `contextual_retrieval.model_role`           | string | *(role default)*           | Model role used for prefix generation (resolved via `core.models`). |
 | `contextual_retrieval.max_chars_doc_window` | int    | `2000`                     | Max characters of surrounding document context handed to the LLM. |
 | `contextual_retrieval.max_chars_prefix`     | int    | `400`                      | Truncate generated prefix to this many characters before concatenation. |
 | `contextual_retrieval.timeout_ms`           | int    | `30000`                    | Per-call timeout. On timeout the prefix is dropped and the raw chunk is used. |
@@ -1563,22 +1562,22 @@ Each entry under `rules`:
 ### `nexus.router.classifier`
 
 Source: `plugins/router/classifier/plugin.go`. Small LLM judges the
-difficulty of the user's most recent prompt and picks one of `candidates`.
-The decision is cached by prompt-prefix hash (LRU). Cache hits route
-synchronously; misses route to `fallback` immediately and warm the cache
-asynchronously via a probe `llm.request` tagged `_source: nexus.router.classifier`.
+difficulty of the user's most recent prompt and picks one of
+`candidate_roles`. The decision is cached by prompt-prefix hash (LRU).
+Cache hits rewrite `LLMRequest.Role` synchronously; misses route to
+`fallback_role` immediately and warm the cache asynchronously via a
+probe `llm.request` tagged `_source: nexus.router.classifier`.
 
-| Key                    | Type   | Default     | Description |
-|------------------------|--------|-------------|-------------|
-| `classifier_model`     | string | *(one of)*  | Model id used for the classification probe. |
-| `classifier_role`      | string | *(one of)*  | Alternative to `classifier_model`. |
-| `candidates`           | list   | *(required)* | Cheapest-first list of model ids the classifier picks among. |
-| `fallback`             | string | *(none)*    | Model id used on cache miss while the cache warms. |
-| `prompt`               | string | *(default)* | Classifier prompt template (`%s` for candidates list and prompt). |
-| `prefix_chars`         | int    | `256`       | Number of leading prompt characters folded into the cache key. |
-| `cache_classification` | bool   | `true`      | Whether to cache decisions at all. |
-| `cache_max_entries`    | int    | `1024`      | LRU capacity. |
-| `latency_budget_ms`    | int    | `800`       | Drop the warm if the probe doesn't return within this window. |
+| Key                    | Type   | Default      | Description |
+|------------------------|--------|--------------|-------------|
+| `classifier_role`      | string | *(required)* | Model role (resolved via `core.models`) used for the classification probe. |
+| `candidate_roles`      | list   | *(required)* | Cheapest-first list of model roles the classifier picks among. |
+| `fallback_role`        | string | *(none)*     | Model role used on cache miss while the cache warms. |
+| `prompt`               | string | *(default)*  | Classifier prompt template (`%s` for the candidate-role list and prompt). |
+| `prefix_chars`         | int    | `256`        | Number of leading prompt characters folded into the cache key. |
+| `cache_classification` | bool   | `true`       | Whether to cache decisions at all. |
+| `cache_max_entries`    | int    | `1024`       | LRU capacity. |
+| `latency_budget_ms`    | int    | `800`        | Drop the warm if the probe doesn't return within this window. |
 
 ---
 

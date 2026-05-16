@@ -24,7 +24,6 @@ nexus.tool.knowledge_search:
   top_k: 5
   include_metadata: true
   # tool_name: knowledge_search       # rename the LLM-visible tool if you want
-  # embedding_model: ""               # pin a specific model; empty = provider default
 ```
 
 | Key | Type | Default | Description |
@@ -34,7 +33,10 @@ nexus.tool.knowledge_search:
 | `top_k` | int | `5` | Default max results. LLM may override per call up to `maxTopK = 50`. |
 | `include_metadata` | bool | `true` | Whether to return the full metadata map alongside structured fields. |
 | `tool_name` | string | `knowledge_search` | LLM-visible tool name. Override if it collides with another tool. |
-| `embedding_model` | string | *(empty)* | Pin a specific model; empty = use provider default. Should match the model used to ingest. |
+
+The active `embeddings.provider` plugin owns the model choice. Configure
+it on that plugin (e.g. `nexus.embeddings.openai.model`); the model used
+to ingest must match the model used to query.
 
 If `namespaces` is empty or unset, **boot fails** — the tool refuses to register without a defined allow-list.
 

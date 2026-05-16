@@ -306,7 +306,7 @@ plugins:
     registry:
       enabled: true
   nexus.control.hitl_synthesizer:
-    model: balanced
+    model_role: balanced
     cache_enabled: true
 
   # ─── Gates ───────────────────────────────────────────────────────────

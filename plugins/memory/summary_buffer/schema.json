@@ -12,7 +12,6 @@
     "chars_per_token":   {"type": "number", "minimum": 0},
     "max_recent":        {"type": "integer", "minimum": 0, "description": "Messages kept verbatim; older messages are summarized."},
     "model_role":        {"type": "string"},
-    "model":             {"type": "string"},
     "prompt":            {"type": "string"},
     "prompt_file":       {"type": "string"},
     "quality_retry":     {"type": "boolean", "description": "When true, re-run the summariser once with a stricter prompt if the trailer omits any required preserved kind. Default false (backwards-compatible)."},

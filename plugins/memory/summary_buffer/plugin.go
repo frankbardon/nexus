@@ -91,7 +91,6 @@ type Plugin struct {
 	charsPerToken    float64
 	maxRecent        int
 	modelRole        string
-	model            string
 	summaryPrompt    string
 	// requirePreservedKinds enumerates Preserved-Kinds tags that must be
 	// reported by the summariser before adoption. When the trailer is
@@ -206,9 +205,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if mr, ok := ctx.Config["model_role"].(string); ok {
 		p.modelRole = mr
-	}
-	if m, ok := ctx.Config["model"].(string); ok {
-		p.model = m
 	}
 
 	if promptFile, ok := ctx.Config["prompt_file"].(string); ok && promptFile != "" {
@@ -524,7 +520,6 @@ func (p *Plugin) triggerSummarisation(reason string) {
 	}
 
 	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
-		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
@@ -664,7 +659,6 @@ func (p *Plugin) dispatchSummaryRetry(startTurn, endTurn int) {
 	}
 
 	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
-		Model:    p.model,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{

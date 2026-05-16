@@ -30,7 +30,6 @@ nexus.memory.vector:
   # namespace: memory-default               # default: "memory-{InstanceID}"
   top_k: 5
   min_similarity: 0.3
-  embedding_model: ""                       # optional pin
   auto_store_compaction: true               # auto-write summaries on memory.compacted
   auto_store_user_input: false              # off by default; turning on makes every turn a memory
   section_priority: 45                      # PromptRegistry priority for the recalled-memory block
@@ -41,10 +40,13 @@ nexus.memory.vector:
 | `namespace` | string | `memory-{InstanceID}` | Vector store namespace for this agent. The default sanitizes the InstanceID for filesystem safety (`/` → `-`, `:` → `-`). Multi-agent desktop shells isolate automatically. |
 | `top_k` | int | `5` | Max hits queried per turn. |
 | `min_similarity` | float | `0.0` | Hits below this similarity are dropped from the prompt. `0` disables filtering. |
-| `embedding_model` | string | *(provider default)* | Pin a specific embedding model. Should match the model used to populate the namespace. |
 | `auto_store_compaction` | bool | `true` | Write the compaction summary on `memory.compacted`. |
 | `auto_store_user_input` | bool | `false` | Write every user message. Off by default — usually too noisy. |
 | `section_priority` | int | `45` | `PromptRegistry` priority. Higher numbers append later. |
+
+The active `embeddings.provider` plugin owns the model choice — set the
+embedding model on that plugin. The model used to populate a namespace
+must match the model used to query it.
 
 ## Behavior
 

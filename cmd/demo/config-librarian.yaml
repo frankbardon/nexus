@@ -206,7 +206,7 @@ plugins:
   # role. Cache the result so an identical action signature within a
   # session doesn't pay the LLM cost twice.
   nexus.control.hitl_synthesizer:
-    model: balanced
+    model_role: balanced
     cache_enabled: true
 
   # tool_timeout: any tool call exceeding this default is aborted. The

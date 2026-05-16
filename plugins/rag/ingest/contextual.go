@@ -26,7 +26,6 @@ type contextualizer struct {
 	bus            engine.EventBus
 	logger         *slog.Logger
 	enabled        bool
-	model          string
 	modelRole      string
 	maxDocChars    int
 	maxPrefixChars int
@@ -55,11 +54,8 @@ func newContextualizer(bus engine.EventBus, logger *slog.Logger, cfg map[string]
 	if v, ok := cfg["enabled"].(bool); ok {
 		c.enabled = v
 	}
-	if v, ok := cfg["model"].(string); ok && v != "" {
+	if v, ok := cfg["model_role"].(string); ok && v != "" {
 		c.modelRole = v
-	}
-	if v, ok := cfg["model_id"].(string); ok && v != "" {
-		c.model = v
 	}
 	if v, ok := cfg["max_chars_doc_window"].(int); ok && v > 0 {
 		c.maxDocChars = v
@@ -128,7 +124,6 @@ func (c *contextualizer) generate(docContext, chunk string) (string, error) {
 
 	prompt := buildContextPrompt(docContext, chunk, c.maxDocChars)
 	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: c.modelRole,
-		Model: c.model,
 		Messages: []events.Message{
 			{Role: "system", Content: contextSystemPrompt},
 			{Role: "user", Content: prompt},

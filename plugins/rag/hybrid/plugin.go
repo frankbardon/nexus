@@ -36,13 +36,12 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	fusion         string  // "rrf" | "weighted"
-	rrfK           float64 // RRF smoothing constant
-	weightVector   float64
-	weightLexical  float64
-	retrieveK      int // per-backend candidate count
-	fuseTo         int // post-fusion top-N
-	embeddingModel string
+	fusion        string  // "rrf" | "weighted"
+	rrfK          float64 // RRF smoothing constant
+	weightVector  float64
+	weightLexical float64
+	retrieveK     int // per-backend candidate count
+	fuseTo        int // post-fusion top-N
 	// reranker enables a post-fusion reranker pass via the search.reranker
 	// capability. Off by default so single-mode + hybrid-only deployments
 	// keep their existing latency profile. When on and no provider is
@@ -123,9 +122,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if v, ok := ctx.Config["fuse_to"].(float64); ok && v > 0 {
 		p.fuseTo = int(v)
 	}
-	if v, ok := ctx.Config["embedding_model"].(string); ok {
-		p.embeddingModel = v
-	}
 	if r, ok := ctx.Config["reranker"].(map[string]any); ok {
 		if v, ok := r["enabled"].(bool); ok {
 			p.rerankerEnabled = v
@@ -193,7 +189,7 @@ func (p *Plugin) handleQuery(event engine.Event[any]) {
 	// Embed if the caller did not pre-embed.
 	vec := req.Vector
 	if len(vec) == 0 {
-		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{req.Query}, Model: p.embeddingModel}
+		embReq := &events.EmbeddingsRequest{SchemaVersion: events.EmbeddingsRequestVersion, Texts: []string{req.Query}}
 		_ = p.bus.Emit("embeddings.request", embReq)
 		if embReq.Error != "" {
 			req.Error = fmt.Sprintf("embed query: %s", embReq.Error)

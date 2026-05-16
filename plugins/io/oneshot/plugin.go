@@ -42,11 +42,11 @@ type Plugin struct {
 	readStdin  bool   // whether to read stdin when no other input source supplied
 
 	// State captured during the run
-	mu        sync.Mutex
-	startedAt time.Time
-	endedAt   time.Time
-	turnDepth int  // number of in-flight turns (start - end)
-	turnsSeen int  // total agent.turn.start events observed after input was sent
+	mu            sync.Mutex
+	startedAt     time.Time
+	endedAt       time.Time
+	turnDepth     int    // number of in-flight turns (start - end)
+	turnsSeen     int    // total agent.turn.start events observed after input was sent
 	inputSent     bool   // whether we have emitted the initial io.input
 	finalized     bool   // whether we have already flushed output + ended the session
 	pendingPrompt string // resolved prompt staged in Ready(), dispatched on core.ready
