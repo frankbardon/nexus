@@ -69,6 +69,9 @@ plugins/
   agents/planexec/       # Plan-then-execute agent
   agents/subagent/       # Multi-instance subagent (spawn_* tool per instance)
   agents/orchestrator/   # Decompose → parallel workers → synthesis pipeline
+  agents/postures/       # AgentPosture registry: loads YAML from scan_dirs, fsnotify hot reload, advertises posture.registry capability
+  agents/delegate/       # Sub-agent invocation primitive: 'delegate' tool, posture-driven budgets+depth+cache
+  scene/                 # Scene store: scene_create/patch/get/list/delete tools, JSONL patch journal under <session>/plugins/nexus.scene/
   apps/helloworld/       # Built-in hello-world placeholder agent
   control/cancel/        # control.cancel capability + /resume slash command
   control/hitl/          # human-in-the-loop registry; owns ask_user tool, emits hitl.requested, routes hitl.responded

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.delegate.json",
+  "title": "nexus.agent.delegate",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_depth": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum sub-agent recursion depth across all postures. Defaults to 3."
+    },
+    "cache_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "In-process LRU cache capacity for delegate results. Defaults to 256. Zero disables eviction."
+    },
+    "cache": {
+      "type": "boolean",
+      "description": "Set false to disable result caching entirely."
+    }
+  }
+}
