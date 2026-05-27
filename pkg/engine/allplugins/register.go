@@ -14,6 +14,9 @@ import (
 	"github.com/frankbardon/nexus/plugins/agents/react"
 	"github.com/frankbardon/nexus/plugins/agents/subagent"
 
+	// Scene plugin.
+	sceneplugin "github.com/frankbardon/nexus/plugins/scene"
+
 	// Control plugins.
 	cancelplugin "github.com/frankbardon/nexus/plugins/control/cancel"
 	hitlplugin "github.com/frankbardon/nexus/plugins/control/hitl"
@@ -139,6 +142,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.agent.orchestrator", orchestrator.New)
 	r.Register("nexus.agent.postures", postures.New)
 	r.Register("nexus.agent.subagent", subagent.New)
+	r.Register("nexus.scene", sceneplugin.New)
 
 	// Control
 	r.Register("nexus.control.cancel", cancelplugin.New)

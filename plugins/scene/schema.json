@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.scene.json",
+  "title": "nexus.scene",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}
