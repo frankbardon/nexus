@@ -12,10 +12,9 @@ import (
 )
 
 type fakeTool struct {
-	name   string
-	emit   []ToolEvent
-	delay  time.Duration
-	stream func() error
+	name  string
+	emit  []ToolEvent
+	delay time.Duration
 }
 
 func (f *fakeTool) Name() string { return f.name }
