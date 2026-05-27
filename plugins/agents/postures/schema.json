@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.postures.json",
+  "title": "nexus.agent.postures",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scan_dirs": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Directories scanned for *.yaml posture files. Watched for live edits when fsnotify is available."
+    },
+    "debounce_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Reload debounce in milliseconds. Defaults to 250ms."
+    }
+  }
+}
