@@ -176,6 +176,15 @@ type PluginContext struct {
 	// code call Sandbox.Exec rather than reaching for os/exec or an
 	// in-process interpreter directly. Always non-nil during Init.
 	Sandbox sandbox.Sandbox
+
+	// LookupPlugin resolves a plugin by its instance ID (including the
+	// "/suffix" if instanced) and returns the live Plugin value, or nil
+	// when no such plugin is active. Provided so plugins that need a
+	// typed handle on another plugin (delegate runtime reaching for the
+	// posture registry, orchestrators introspecting subagent state) can
+	// avoid event-based handoffs that race plugin Init ordering. Always
+	// non-nil during Init; the lookup itself returns nil for unknown IDs.
+	LookupPlugin func(id string) Plugin
 }
 
 // LateShutdown is an optional marker interface. A plugin that implements it

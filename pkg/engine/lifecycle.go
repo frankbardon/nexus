@@ -198,6 +198,9 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Replay:       lm.replay,
 			Journal:      lm.journal,
 			Sandbox:      sb,
+			LookupPlugin: func(id string) Plugin {
+				return pluginMap[id]
+			},
 		}
 
 		lm.logger.Info("initializing plugin", "plugin", configuredID, "version", p.Version())

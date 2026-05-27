@@ -7,6 +7,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 
 	// Agent plugins.
+	delegateagent "github.com/frankbardon/nexus/plugins/agents/delegate"
 	"github.com/frankbardon/nexus/plugins/agents/orchestrator"
 	"github.com/frankbardon/nexus/plugins/agents/planexec"
 	"github.com/frankbardon/nexus/plugins/agents/postures"
@@ -134,6 +135,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// Agents
 	r.Register("nexus.agent.react", react.New)
 	r.Register("nexus.agent.planexec", planexec.New)
+	r.Register("nexus.agent.delegate", delegateagent.New)
 	r.Register("nexus.agent.orchestrator", orchestrator.New)
 	r.Register("nexus.agent.postures", postures.New)
 	r.Register("nexus.agent.subagent", subagent.New)
