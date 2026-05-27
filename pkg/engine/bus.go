@@ -27,6 +27,16 @@ type ExcludeController interface {
 	IsExcluded(eventType string) bool
 }
 
+// CausationController is implemented by buses that propagate per-goroutine
+// CausationContext into emitted events. Plugins and runtimes (agent loops,
+// sub-agent dispatch, IO transports binding to a session) push a context
+// for the duration of their work; nested events automatically carry the
+// SessionID, AgentID, and Depth without each emitter wiring them by hand.
+type CausationController interface {
+	PushCausationContext(c CausationContext) func()
+	SetDefaultCausationContext(c CausationContext)
+}
+
 // EventBus is the central event dispatch system.
 type EventBus interface {
 	// Emit dispatches an event to all matching handlers synchronously.
@@ -125,11 +135,19 @@ type eventBus struct {
 	// means no exclusions (a fresh bus before startJournal sets the list).
 	excludedTypes atomic.Pointer[map[string]struct{}]
 
-	// dispatchMu guards dispatchStacks. Held only briefly during push/pop;
-	// not the same lock as mu so dispatch stack reads don't contend with
-	// handler-snapshot reads.
-	dispatchMu     sync.Mutex
-	dispatchStacks map[int64][]uint64
+	// defaultCausation is the bus-wide fallback for SessionID/AgentID/Depth
+	// applied when the calling goroutine has no pushed CausationContext.
+	// Engine.StartSession installs the SessionID here so every dispatched
+	// event records session attribution even when emitters never call
+	// PushCausationContext.
+	defaultCausation atomic.Pointer[CausationContext]
+
+	// dispatchMu guards dispatchStacks and causationStacks. Held only
+	// briefly during push/pop; not the same lock as mu so dispatch stack
+	// reads don't contend with handler-snapshot reads.
+	dispatchMu      sync.Mutex
+	dispatchStacks  map[int64][]dispatchFrame
+	causationStacks map[int64][]CausationContext
 
 	// logger is used by the panic-recovery wrapper to record plugin panics
 	// with structured fields. Wired post-construction by the engine via
@@ -152,6 +170,23 @@ type eventBus struct {
 // register a SubscribeAll handler at engine construction time.
 const DefaultEventRingSize = 64
 
+// CausationContext is the session/agent/depth scope pushed onto the bus by
+// callers so events emitted on a goroutine carry their owning session and
+// agent automatically. See EventBus.PushCausationContext.
+type CausationContext struct {
+	SessionID string
+	AgentID   string
+	Depth     int
+}
+
+// dispatchFrame records the per-event provenance needed to fill the
+// EventCausation of any nested emission. Pushed on EmitEvent/EmitVetoable
+// entry; popped after handlers return.
+type dispatchFrame struct {
+	seq     uint64
+	eventID string
+}
+
 // NewEventBus creates a new in-process EventBus with the default-sized
 // replay ring (DefaultEventRingSize). Pass NewEventBusWithRingSize to
 // override — typical callers do not.
@@ -166,9 +201,10 @@ func NewEventBusWithRingSize(capacity int) EventBus {
 		capacity = DefaultEventRingSize
 	}
 	return &eventBus{
-		handlers:       make(map[string][]*subscription),
-		ring:           newEventRing(capacity),
-		dispatchStacks: make(map[int64][]uint64),
+		handlers:        make(map[string][]*subscription),
+		ring:            newEventRing(capacity),
+		dispatchStacks:  make(map[int64][]dispatchFrame),
+		causationStacks: make(map[int64][]CausationContext),
 	}
 }
 
@@ -177,12 +213,13 @@ func (b *eventBus) nextSubID() uint64 {
 	return b.nextID
 }
 
-// pushDispatch records the seq for the goroutine that is about to run an
-// event's handlers. Returns a pop function the caller defers.
-func (b *eventBus) pushDispatch(seq uint64) func() {
+// pushDispatch records the seq and event ID for the goroutine that is about
+// to run an event's handlers. Returns a pop function the caller defers.
+func (b *eventBus) pushDispatch(seq uint64, eventID string) func() {
 	gid := goroutineID()
+	frame := dispatchFrame{seq: seq, eventID: eventID}
 	b.dispatchMu.Lock()
-	b.dispatchStacks[gid] = append(b.dispatchStacks[gid], seq)
+	b.dispatchStacks[gid] = append(b.dispatchStacks[gid], frame)
 	b.dispatchMu.Unlock()
 	return func() {
 		b.dispatchMu.Lock()
@@ -197,6 +234,105 @@ func (b *eventBus) pushDispatch(seq uint64) func() {
 		}
 		b.dispatchMu.Unlock()
 	}
+}
+
+// PushCausationContext installs SessionID/AgentID/Depth on the calling
+// goroutine. Any events emitted on this goroutine until the returned function
+// is invoked carry these values on their Event.Causation. Stacked: a nested
+// push shadows the outer until popped. The agent runtime, session bootstrap,
+// and sub-agent dispatch use this so plugin authors don't have to thread
+// session identity through every emit site.
+func (b *eventBus) PushCausationContext(c CausationContext) func() {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	b.causationStacks[gid] = append(b.causationStacks[gid], c)
+	b.dispatchMu.Unlock()
+	return func() {
+		b.dispatchMu.Lock()
+		stack := b.causationStacks[gid]
+		if n := len(stack); n > 0 {
+			stack = stack[:n-1]
+			if len(stack) == 0 {
+				delete(b.causationStacks, gid)
+			} else {
+				b.causationStacks[gid] = stack
+			}
+		}
+		b.dispatchMu.Unlock()
+	}
+}
+
+// currentCausationContext returns the top CausationContext for the calling
+// goroutine, falling back to the bus-wide default when the goroutine has
+// nothing pushed.
+func (b *eventBus) currentCausationContext() CausationContext {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	stack := b.causationStacks[gid]
+	if len(stack) > 0 {
+		top := stack[len(stack)-1]
+		b.dispatchMu.Unlock()
+		return top
+	}
+	b.dispatchMu.Unlock()
+	if def := b.defaultCausation.Load(); def != nil {
+		return *def
+	}
+	return CausationContext{}
+}
+
+// SetDefaultCausationContext installs a bus-wide fallback applied when the
+// calling goroutine has no pushed CausationContext. Engine.StartSession
+// uses this to attach the SessionID to every dispatched event without
+// requiring every emitter to call PushCausationContext.
+func (b *eventBus) SetDefaultCausationContext(c CausationContext) {
+	b.defaultCausation.Store(&c)
+}
+
+// currentDispatchFrame returns the top dispatchFrame for the calling
+// goroutine, or the zero value if no dispatch is in flight.
+func (b *eventBus) currentDispatchFrame() (dispatchFrame, bool) {
+	gid := goroutineID()
+	b.dispatchMu.Lock()
+	defer b.dispatchMu.Unlock()
+	stack := b.dispatchStacks[gid]
+	if len(stack) == 0 {
+		return dispatchFrame{}, false
+	}
+	return stack[len(stack)-1], true
+}
+
+// fillCausation populates an event's Causation field from the active
+// dispatch and causation contexts. Caller-set fields are respected: any
+// non-empty/non-zero field on event.Causation overrides the derived value,
+// so emitters that already know the right values (sub-agents propagating
+// the parent's ID across a sub-session boundary, replay tools restoring
+// stored events) keep control. seq is the bus-assigned sequence for this
+// event, or 0 for excluded types.
+func (b *eventBus) fillCausation(event *Event[any], seq uint64) {
+	cur := event.Causation
+	if frame, ok := b.currentDispatchFrame(); ok {
+		if cur.ParentID == "" {
+			cur.ParentID = frame.eventID
+		}
+		if cur.ParentSeq == 0 {
+			cur.ParentSeq = frame.seq
+		}
+	}
+	ctx := b.currentCausationContext()
+	if cur.SessionID == "" {
+		cur.SessionID = ctx.SessionID
+	}
+	if cur.AgentID == "" {
+		cur.AgentID = ctx.AgentID
+	}
+	if cur.Depth == 0 {
+		cur.Depth = ctx.Depth
+	}
+	if cur.Sequence == 0 {
+		cur.Sequence = seq
+	}
+	event.Causation = cur
 }
 
 // SetLogger installs a logger used by the panic-recovery wrapper to record
@@ -269,7 +405,7 @@ func (b *eventBus) CurrentSeq() uint64 {
 	if len(stack) == 0 {
 		return 0
 	}
-	return stack[len(stack)-1]
+	return stack[len(stack)-1].seq
 }
 
 // ParentSeq returns the seq of the event whose handler triggered the current
@@ -283,7 +419,7 @@ func (b *eventBus) ParentSeq() uint64 {
 	if len(stack) < 2 {
 		return 0
 	}
-	return stack[len(stack)-2]
+	return stack[len(stack)-2].seq
 }
 
 func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) func() {
@@ -391,6 +527,13 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
+	if event.ID == "" {
+		event.ID = GenerateID()
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
 	// Excluded events skip seq assignment, dispatch-stack tracking, and ring
 	// append. They still dispatch to typed and wildcard subscribers, so otel
 	// and other observers continue to see them — only the journal-bound
@@ -402,8 +545,11 @@ func (b *eventBus) EmitEvent(event Event[any]) error {
 		// sees this event's seq in its causally-correct slot — a nested
 		// emit from a typed handler will see this seq as its ParentSeq.
 		seq := b.seqCounter.Add(1)
-		pop := b.pushDispatch(seq)
+		b.fillCausation(&event, seq)
+		pop := b.pushDispatch(seq, event.ID)
 		defer pop()
+	} else {
+		b.fillCausation(&event, 0)
 	}
 
 	meta := event.Meta()
@@ -455,13 +601,6 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	b.drainMu.Unlock()
 	defer b.inflight.Done()
 
-	excluded := b.IsExcluded(eventType)
-	if !excluded {
-		seq := b.seqCounter.Add(1)
-		pop := b.pushDispatch(seq)
-		defer pop()
-	}
-
 	// Wrap in VetoablePayload so handlers can set Veto via the shared pointer.
 	// Handlers receive the event by value, but VetoablePayload is a pointer —
 	// mutations to vp.Veto propagate back here.
@@ -472,6 +611,17 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 		Timestamp: time.Now(),
 		Payload:   vp,
 	}
+
+	excluded := b.IsExcluded(eventType)
+	if !excluded {
+		seq := b.seqCounter.Add(1)
+		b.fillCausation(&event, seq)
+		pop := b.pushDispatch(seq, event.ID)
+		defer pop()
+	} else {
+		b.fillCausation(&event, 0)
+	}
+
 	meta := event.Meta()
 
 	b.mu.Lock()

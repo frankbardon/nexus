@@ -66,6 +66,20 @@ type Envelope struct {
 	// ParentSeq is the seq of the event whose handler emitted this one,
 	// best-effort. Zero means no detectable parent.
 	ParentSeq uint64 `json:"parent_seq,omitempty"`
+	// ParentID is the EventID of the event whose handler emitted this one.
+	// Empty for root events. Mirrors ParentSeq via the event identifier so
+	// replay can rebuild the causation DAG without re-resolving seq → ID.
+	ParentID string `json:"parent_id,omitempty"`
+	// SessionID is the session the event belongs to. Carried per-envelope
+	// so external aggregators that flatten multi-session journals retain
+	// session attribution without re-reading header.json.
+	SessionID string `json:"session_id,omitempty"`
+	// AgentID identifies the agent that produced the event. For sub-agent
+	// activity this is the sub-agent's identity, not the parent's.
+	AgentID string `json:"agent_id,omitempty"`
+	// Depth is the sub-agent recursion depth at emission time. Zero for
+	// the top-level agent.
+	Depth int `json:"depth,omitempty"`
 	// SideEffect marks events whose handlers performed real-world I/O
 	// (LLM call billed, file written, shell run). Replay must short-circuit
 	// these. Computed from event type, not the handler.

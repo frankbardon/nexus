@@ -788,9 +788,26 @@ func (e *Engine) startJournal() error {
 // Detects vetoable events via the *VetoablePayload wrapper so the journal
 // records the veto outcome without a separate envelope.
 func buildEnvelope(ev Event[any], seq, parentSeq uint64) *journal.Envelope {
+	// Prefer values from ev.Causation when populated — the bus auto-fills
+	// them on EmitEvent/EmitVetoable so handlers see the same chain replay
+	// will reconstruct. Fall back to the wildcard-context seqs only when
+	// the event was emitted before causation was attached (synthetic events
+	// from older callers, test fixtures).
+	effectiveSeq := ev.Causation.Sequence
+	if effectiveSeq == 0 {
+		effectiveSeq = seq
+	}
+	effectiveParentSeq := ev.Causation.ParentSeq
+	if effectiveParentSeq == 0 {
+		effectiveParentSeq = parentSeq
+	}
 	env := &journal.Envelope{
-		Seq:        seq,
-		ParentSeq:  parentSeq,
+		Seq:        effectiveSeq,
+		ParentSeq:  effectiveParentSeq,
+		ParentID:   ev.Causation.ParentID,
+		SessionID:  ev.Causation.SessionID,
+		AgentID:    ev.Causation.AgentID,
+		Depth:      ev.Causation.Depth,
 		Ts:         ev.Timestamp,
 		Type:       ev.Type,
 		EventID:    ev.ID,
@@ -879,6 +896,9 @@ func (e *Engine) prepareResumeSession(sessionID string) error {
 	}
 	e.Session = session
 	e.Lifecycle.session = session
+	if cc, ok := e.Bus.(CausationController); ok {
+		cc.SetDefaultCausationContext(CausationContext{SessionID: session.ID})
+	}
 	return nil
 }
 
@@ -1005,6 +1025,9 @@ func (e *Engine) prepareSession() error {
 	}
 	e.Session = session
 	e.Lifecycle.session = session
+	if cc, ok := e.Bus.(CausationController); ok {
+		cc.SetDefaultCausationContext(CausationContext{SessionID: session.ID})
+	}
 	return nil
 }
 
