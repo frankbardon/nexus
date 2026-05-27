@@ -469,6 +469,46 @@ Source: `plugins/agents/orchestrator/plugin.go`.
 
 Depends on `nexus.agent.subagent`.
 
+### `nexus.agent.postures`
+
+Source: `plugins/agents/postures/plugin.go`. Loads `AgentPosture` YAML files
+from the configured directories and advertises the `posture.registry`
+capability consumed by `nexus.agent.delegate`. fsnotify watches each directory
+for live edits; active sub-sessions keep their old posture, new invocations
+resolve the new one. See [Postures](../architecture/postures.md) for the
+`AgentPosture` schema.
+
+| Key           | Type      | Default | Description |
+|---------------|-----------|---------|-------------|
+| `scan_dirs`   | []string  | `[]`    | Directories scanned for `*.yaml` / `*.yml` posture files. Each entry runs through `engine.ExpandPath` so `~` expands. |
+| `debounce_ms` | int       | `250`   | fsnotify reload debounce in milliseconds. |
+
+### `nexus.agent.delegate`
+
+Source: `plugins/agents/delegate/plugin.go`. Exposes the `delegate` tool that
+the LLM calls to invoke a registered posture. Requires the `posture.registry`
+capability (typically provided by `nexus.agent.postures`). Enforces budgets
+and recursion depth defined on each posture; results cached by posture
+version + task + context hash so posture edits invalidate stale entries.
+See [Sub-agent delegation](../architecture/delegate.md).
+
+| Key          | Type | Default | Description |
+|--------------|------|---------|-------------|
+| `max_depth`  | int  | `3`     | Hard cap on sub-agent recursion depth across all postures. Individual postures may set a lower cap via `max_recursion_depth`. |
+| `cache_size` | int  | `256`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction; the cache grows unbounded. |
+| `cache`      | bool | `true`  | Set `false` to disable result caching entirely. |
+
+### `nexus.scene`
+
+Source: `plugins/scene/plugin.go`. Owns the per-session `Scene` store and
+registers the `scene_create` / `scene_patch` / `scene_get` / `scene_list` /
+`scene_delete` tools. Every patch is journaled to
+`<session>/plugins/nexus.scene/scenes.jsonl` so the replay primitive can
+reconstruct historical scene state. See [Scenes](../architecture/scenes.md).
+
+No config keys today; activate the plugin in `plugins.active` and the
+default tools register at boot.
+
 ---
 
 ## LLM providers

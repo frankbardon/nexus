@@ -18,17 +18,25 @@ type EventBus interface {
 
 ## Events
 
-Every event is a typed container with metadata:
+Every event is a typed container with metadata and a `Causation` block that
+records its provenance:
 
 ```go
 type Event[T any] struct {
-    Type      string    // Dotted namespace (e.g., "llm.request")
-    ID        string    // Random hex identifier
-    Timestamp time.Time // When the event was created
-    Source    string    // Plugin ID that emitted this event
-    Payload   T         // The event-specific data
+    Type      string         // Dotted namespace (e.g., "llm.request")
+    ID        string         // Random hex identifier
+    Timestamp time.Time      // When the event was created
+    Source    string         // Plugin ID that emitted this event
+    Payload   T              // The event-specific data
+    Causation EventCausation // Auto-filled by the bus — see Causation, below
 }
 ```
+
+See [Causation](./causation.md) for the full discussion of how `ParentID`,
+`SessionID`, `AgentID`, `Sequence`, and `Depth` are populated and how
+plugins push their own `CausationContext`. The short version: the bus does
+the bookkeeping. Plugin authors don't have to thread session identity
+through every emit site.
 
 Event types follow a dotted namespace convention:
 

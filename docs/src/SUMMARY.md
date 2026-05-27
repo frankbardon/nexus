@@ -12,6 +12,7 @@
 - [Overview](./architecture/overview.md)
 - [Event Bus](./architecture/event-bus.md)
 - [Events](./architecture/events.md)
+- [Causation](./architecture/causation.md)
 - [Plugin System](./architecture/plugin-system.md)
 - [Sessions](./architecture/sessions.md)
 - [Per-Plugin Storage](./architecture/storage.md)
@@ -19,6 +20,11 @@
 - [Prompt Registry](./architecture/prompts.md)
 - [Hot Reload](./architecture/hot-reload.md)
 - [Context Engineering](./architecture/context-engineering.md)
+- [Postures](./architecture/postures.md)
+- [Sub-agent Delegation](./architecture/delegate.md)
+- [Scenes](./architecture/scenes.md)
+- [Streaming Tools](./architecture/streaming-tools.md)
+- [Replay](./architecture/replay.md)
 
 # Desktop Shell
 
@@ -36,6 +42,8 @@
   - [Plan & Execute Agent](./plugins/agents/planexec.md)
   - [Subagent](./plugins/agents/subagent.md)
   - [Orchestrator](./plugins/agents/orchestrator.md)
+  - [Posture Registry](./plugins/agents/postures.md)
+  - [Delegate](./plugins/agents/delegate.md)
 - [LLM Providers](./plugins/providers/index.md)
   - [Anthropic (Claude)](./plugins/providers/anthropic.md)
   - [OpenAI](./plugins/providers/openai.md)
@@ -81,6 +89,7 @@
   - [Static Planner](./plugins/planners/static.md)
 - [Gates](./plugins/gates/index.md)
 - [Skills](./plugins/skills.md)
+- [Scenes](./plugins/scene.md)
 - [System](./plugins/system.md)
 - [Control](./plugins/control.md)
 - [MCP Client](./plugins/mcp-client.md)

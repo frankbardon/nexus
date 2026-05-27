@@ -844,6 +844,49 @@ All four are pointer-fill — adapter sets `Provider` / `Error` (and `Matches` o
 
 ---
 
+## Delegate Events
+
+Emitted by `nexus.agent.delegate` when a parent agent invokes a posture via
+the `delegate` tool. Payloads are `map[string]any` records — see
+`pkg/delegate.Runtime` for the canonical fields.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `delegate.start` | map | Sub-session is starting. Keys: `sub_session_id`, `posture`, `posture_ver`, `task`, `parent_turn`, `depth`. |
+| `delegate.complete` | map | Sub-session finished. Keys: `sub_session_id`, `posture`, `posture_ver`, `status` (`success`/`partial`/`error`/`timeout`/`cancelled`/`cache_hit`), `error`, `tokens_used`, `tool_calls_used`, `elapsed_ms`, `result`, `depth`. |
+
+## Posture Events
+
+Emitted by `nexus.agent.postures` as posture YAML loads or changes.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `posture.registered` | map | A posture was installed or updated. Keys: `name`, `version`, `source` (file path or scan dir). |
+| `posture.removed` | map | A posture was removed (file deleted / load error). Keys: `name`. |
+
+## Scene Events
+
+Emitted by `nexus.scene` on every mutation. `agent_id` on the payload comes
+from `Event.Causation.AgentID` — sub-agent contributions remain attributable
+in the journal.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `scene.created` | map | New Scene created. Keys: `session_id`, `scene_id`, `schema`, `version`, `agent_id`. |
+| `scene.patched` | map | Scene content updated. Keys: `session_id`, `scene_id`, `version`, `agent_id`. |
+| `scene.deleted` | map | Scene removed. Keys: `session_id`, `scene_id`, `agent_id`. |
+
+## Tool Stream Events
+
+Emitted by `pkg/streamtool.Bridge` while a `ChannelTool` runs. Consumers
+that only need the final value still subscribe to `tool.result`; UIs and
+observability collectors that want incremental progress subscribe here.
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `tool.stream.progress` | map | Status-only update from a streaming tool. Keys: `tool_name`, `tool_id`, `turn_id`, `sequence`, `progress` (0.0–1.0 or -1), `payload`. |
+| `tool.stream.partial` | map | Incremental data the consumer can render now. Keys: `tool_name`, `tool_id`, `turn_id`, `sequence`, `payload`. |
+
 ## Thinking Events
 
 | Event Type | Payload | Description |
