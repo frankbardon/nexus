@@ -563,11 +563,18 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 				// callers may emit synthetic IDs equal to the tool name.
 				name = msg.ToolCallID
 			}
-			// Gemini expects response.content to be a structured object. Wrap
-			// raw text in {output: ...} for round-trip safety.
+			// Gemini expects functionResponse.response to be a structured object
+			// (a protobuf Struct). Wrap raw text in {output: ...} for round-trip
+			// safety, and likewise wrap any valid-JSON result that is not an
+			// object — a top-level array or scalar (e.g. a tool returning a list
+			// of matches) is otherwise rejected with "Proto field is not
+			// repeating, cannot start list".
 			var responseObj any
 			if err := json.Unmarshal([]byte(msg.Content), &responseObj); err != nil {
 				responseObj = map[string]any{"output": msg.Content}
+			}
+			if _, isObj := responseObj.(map[string]any); !isObj {
+				responseObj = map[string]any{"output": responseObj}
 			}
 			out = append(out, map[string]any{
 				"role": "user",
