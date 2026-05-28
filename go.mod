@@ -12,7 +12,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/klauspost/compress v1.18.6
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
-	github.com/mark3labs/mcp-go v0.54.0
+	github.com/mark3labs/mcp-go v0.54.1
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/tetratelabs/wazero v1.11.0
