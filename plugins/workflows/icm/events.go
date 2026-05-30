@@ -1,5 +1,7 @@
 package icm
 
+import "github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
+
 // Schema-version constants for icm.* event payloads. ICM emits these on
 // top of the generic plan.created/plan.progress surface so basic UIs see
 // stage-level transitions while richer UIs render iteration/turn/item
@@ -18,15 +20,11 @@ const (
 	ICMPredicateFailedVersion  = 1
 )
 
-// ConditionResult is the persisted form of a predicate outcome. It
-// appears in icm.* events and in the per-artifact .icm.json sidecar.
-type ConditionResult struct {
-	Type     string   `json:"type"`
-	Name     string   `json:"name,omitempty"`
-	Verdict  string   `json:"verdict"`
-	Feedback string   `json:"feedback,omitempty"`
-	Score    *float64 `json:"score,omitempty"`
-}
+// ConditionResult is re-exported from icmtypes so existing
+// icm.ConditionResult references in this package and its sub-packages
+// keep working. The canonical definition lives in icmtypes to avoid a
+// cycle with the session sub-package.
+type ConditionResult = icmtypes.ConditionResult
 
 // ICMRunStarted is emitted after workspace load + plan.created, before
 // the first stage dispatches.
