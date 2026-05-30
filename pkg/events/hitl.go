@@ -6,6 +6,7 @@ import "time"
 const (
 	HITLRequestVersion  = 1
 	HITLResponseVersion = 1
+	HITLCancelVersion   = 1
 )
 
 // HITLMode controls what shape of response a HITLRequest accepts.
@@ -130,4 +131,19 @@ type HITLResponse struct {
 	Cancelled bool `json:"cancelled,omitempty"`
 	// CancelReason carries the cancellation reason when Cancelled.
 	CancelReason string `json:"cancel_reason,omitempty"`
+}
+
+// HITLCancel is emitted by the requesting plugin to retract a pending
+// HITLRequest. The control/hitl plugin subscribes, removes any persisted
+// request file, and emits a synthetic hitl.responded{Cancelled: true,
+// CancelReason: Reason} so any in-flight waiter unblocks cleanly.
+//
+// Use when the requester decides the prompt is no longer needed (parent
+// context cancelled, upstream stage failed, deadline elapsed in caller
+// code, etc.). Idempotent: subsequent HITLCancel events for the same ID
+// are no-ops once the request has been resolved.
+type HITLCancel struct {
+	SchemaVersion int    `json:"_schema_version"`
+	RequestID     string `json:"request_id"`
+	Reason        string `json:"reason,omitempty"`
 }

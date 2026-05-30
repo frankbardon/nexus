@@ -124,6 +124,7 @@ func versionedPayloads() []versionedPayload {
 		// hitl.go
 		{"HITLRequest", func() any { return HITLRequest{SchemaVersion: HITLRequestVersion} }, HITLRequestVersion},
 		{"HITLResponse", func() any { return HITLResponse{SchemaVersion: HITLResponseVersion} }, HITLResponseVersion},
+		{"HITLCancel", func() any { return HITLCancel{SchemaVersion: HITLCancelVersion} }, HITLCancelVersion},
 		// hybrid.go
 		{"HybridQuery", func() any { return HybridQuery{SchemaVersion: HybridQueryVersion} }, HybridQueryVersion},
 		// lexical.go
