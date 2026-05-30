@@ -260,6 +260,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if err := builtins.RegisterAll(p.evaluator); err != nil {
 		return fmt.Errorf("icm: register builtin native predicates: %w", err)
 	}
+	p.installPredicateDispatchers()
 
 	// Workspace load: the on-disk contract is parsed + validated up front
 	// so subsequent Ready()-time posture registration can fail fast on
@@ -300,6 +301,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 // tool. Halts boot on any failure so an invalid workspace contract never
 // reaches dispatch.
 func (p *Plugin) Ready() error {
+	if err := p.registerJudgeResponseSchema(); err != nil {
+		return err
+	}
 	if err := p.registerSchemas(); err != nil {
 		return err
 	}
