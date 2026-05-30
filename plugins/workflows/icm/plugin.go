@@ -33,6 +33,7 @@ import (
 	"github.com/frankbardon/nexus/plugins/workflows/icm/predicates"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/predicates/builtins"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/runtime"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/session"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
 )
 
@@ -84,6 +85,12 @@ type Plugin struct {
 	hitlMu   sync.Mutex
 	hitlWait map[string]chan events.HITLResponse
 
+	// orchestrators tracks active runs keyed by run ID. Populated lazily
+	// by buildOrchestrator; the entry-point (handleInput) is responsible
+	// for cleaning up entries when a run terminates.
+	orchMu        sync.Mutex
+	orchestrators map[string]*runtime.Orchestrator
+
 	unsubs []func()
 }
 
@@ -128,8 +135,9 @@ func New() engine.Plugin {
 			PredicateCommandTimeoutSecs:   30,
 			EmitProgressThinkingSteps:     true,
 		},
-		inflight: make(map[string]*invocationState),
-		hitlWait: make(map[string]chan events.HITLResponse),
+		inflight:      make(map[string]*invocationState),
+		hitlWait:      make(map[string]chan events.HITLResponse),
+		orchestrators: make(map[string]*runtime.Orchestrator),
 	}
 }
 
@@ -576,6 +584,39 @@ func (p *Plugin) registerSchemaFile(name, relPath string) error {
 	p.schemas.Register(name, schema, "icm")
 	p.registeredSchemas = append(p.registeredSchemas, name)
 	return nil
+}
+
+// buildOrchestrator constructs a runtime.Orchestrator wired against the
+// plugin's resolved state. The session is supplied by the caller (the
+// io.input entry point creates it once per run). The orchestrator is
+// tracked on p.orchestrators so the run can be looked up by ID.
+func (p *Plugin) buildOrchestrator(runID string, sess *session.Session) *runtime.Orchestrator {
+	payload := &runtime.PayloadBuilder{
+		Workflow:                 p.workflow,
+		Session:                  sess,
+		InlineArtifactLimitBytes: p.cfg.InlineArtifactLimitBytes,
+		Logger:                   p.logger,
+	}
+	o := &runtime.Orchestrator{
+		Workflow:        p.workflow,
+		Session:         sess,
+		Runtime:         p.runtime,
+		Evaluator:       p.evaluator,
+		Payload:         payload,
+		PostureBuilder:  p.postureBuilder,
+		Bus:             p.bus,
+		Logger:          p.logger,
+		HITLDispatch:    p.emitHITLAndWait,
+		NewHITLID:       newHITLID,
+		InstanceID:      p.instanceID,
+		RunID:           runID,
+		LoopMaxRestarts: p.cfg.LoopMaxRestarts,
+		EmitThinkingSteps: p.cfg.EmitProgressThinkingSteps,
+	}
+	p.orchMu.Lock()
+	p.orchestrators[runID] = o
+	p.orchMu.Unlock()
+	return o
 }
 
 // registerPostures derives + installs an AgentPosture per stage and
