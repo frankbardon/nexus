@@ -16,9 +16,13 @@ package icm
 
 import (
 	"context"
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -26,7 +30,14 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/posture"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/predicates"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/predicates/builtins"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/runtime"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
 )
+
+//go:embed defaults/operator.md
+var defaultOperatorBytes []byte
 
 const (
 	defaultPluginID = "nexus.workflows.icm"
@@ -47,10 +58,22 @@ type Plugin struct {
 
 	// Resolved at Init.
 	cfg            Config
-	postureID      string                       // capability provider for posture.registry
+	postureID      string // capability provider for posture.registry
 	postureReg     posture.Registry
 	runtime        *delegate.Runtime
+	evaluator      *predicates.Evaluator
 	skillToolName  string
+	schemas        *engine.SchemaRegistry
+	workflow       *workspace.Workflow
+	postureBuilder *runtime.PostureBuilder
+
+	// registeredPostures lists names registered with postureReg, in
+	// registration order. Shutdown deregisters them in reverse.
+	registeredPostures []string
+	// registeredSchemas lists names registered with schemas. The
+	// SchemaRegistry's engine teardown handles cleanup; tracking is kept
+	// for diagnostics and forward-compatibility.
+	registeredSchemas []string
 
 	// In-flight invocation tracking (populated by runtime, read by tool
 	// handlers like read_skill_reference).
@@ -190,7 +213,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if ctx.InstanceID != "" {
 		p.instanceID = ctx.InstanceID
 	}
-	p.skillToolName = deriveSkillToolName(p.instanceID)
+	p.skillToolName = runtime.SkillToolName(p.instanceID)
+	p.schemas = ctx.Schemas
 
 	if err := p.parseConfig(ctx.Config); err != nil {
 		return err
@@ -228,6 +252,35 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.runtime.Cache = delegate.NewMemoryCache(p.cfg.CacheSize)
 	}
 
+	// Predicate evaluator + baked-in native handlers. Judge/Human
+	// dispatchers stay nil until later wiring steps; the four built-in
+	// native handlers are usable today.
+	p.evaluator = predicates.NewEvaluator(ctx.Schemas, ctx.Sandbox, p.bus, p.logger)
+	p.evaluator.CommandTimeoutSecs = p.cfg.PredicateCommandTimeoutSecs
+	if err := builtins.RegisterAll(p.evaluator); err != nil {
+		return fmt.Errorf("icm: register builtin native predicates: %w", err)
+	}
+
+	// Workspace load: the on-disk contract is parsed + validated up front
+	// so subsequent Ready()-time posture registration can fail fast on
+	// shape errors. Embedded operator.md serves as the fallback when the
+	// workspace omits its own.
+	wf, err := workspace.LoadWorkspace(p.cfg.Workspace,
+		workspace.WithDefaultOperatorBytes(defaultOperatorBytes))
+	if err != nil {
+		return fmt.Errorf("icm: workspace load: %w", err)
+	}
+	p.workflow = wf
+
+	p.postureBuilder = &runtime.PostureBuilder{
+		Workflow:             wf,
+		InstanceID:           p.instanceID,
+		DefaultBasePosture:   p.cfg.DefaultWorkflowPosture,
+		Registry:             p.postureReg,
+		SkillToolName:        p.skillToolName,
+		AutoIncludeSkillTool: p.cfg.AutoIncludeSkillReferenceTool,
+	}
+
 	// Bus subscriptions. Per-event handlers are stubs in the skeleton —
 	// later steps wire them.
 	p.unsubs = append(p.unsubs,
@@ -242,12 +295,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	return nil
 }
 
-// Ready loads the workspace, registers derived postures, and registers
-// LLM-facing tools. Skeleton implementation: just registers the
-// validate tool.
+// Ready registers per-stage output schemas, derives + registers a posture
+// per stage and verifier, then registers the LLM-facing icm_validate
+// tool. Halts boot on any failure so an invalid workspace contract never
+// reaches dispatch.
 func (p *Plugin) Ready() error {
-	// Tools come online once at Ready. Workspace load + posture
-	// registration land in capability (g) + (a) steps.
+	if err := p.registerSchemas(); err != nil {
+		return err
+	}
+	if err := p.registerPostures(); err != nil {
+		return err
+	}
 	if err := p.registerValidateTool(); err != nil {
 		return err
 	}
@@ -255,16 +313,24 @@ func (p *Plugin) Ready() error {
 }
 
 // Shutdown unsubscribes from the bus and deregisters any postures the
-// plugin owns. Best-effort; non-nil errors are logged but do not block
-// shutdown of peer plugins.
+// plugin owns. Schemas are not deregistered here — the engine teardown
+// drops the SchemaRegistry wholesale, and there is no per-source removal
+// in the public surface.
 func (p *Plugin) Shutdown(_ context.Context) error {
 	for _, unsub := range p.unsubs {
 		unsub()
 	}
 	p.unsubs = nil
 
-	// Posture deregistration happens once capability (a) populates the
-	// derived posture name set. Skeleton has nothing to remove.
+	// Reverse-order deregistration mirrors construction so any layered
+	// caches keyed by posture name see a coherent teardown.
+	for i := len(p.registeredPostures) - 1; i >= 0; i-- {
+		name := p.registeredPostures[i]
+		if err := p.postureReg.Remove(name); err != nil && p.logger != nil {
+			p.logger.Warn("icm: deregister posture", "name", name, "err", err)
+		}
+	}
+	p.registeredPostures = nil
 	return nil
 }
 
@@ -370,16 +436,6 @@ func intConfig(raw map[string]any, key string) (int, bool) {
 	return 0, false
 }
 
-// deriveSkillToolName returns the instance-scoped name for the
-// read_skill_reference tool. Default instance gets the bare name;
-// suffixed instances get _<suffix>.
-func deriveSkillToolName(instanceID string) string {
-	if i := strings.LastIndexByte(instanceID, '/'); i >= 0 && i+1 < len(instanceID) {
-		return "read_skill_reference_" + instanceID[i+1:]
-	}
-	return "read_skill_reference"
-}
-
 // validateToolName returns the instance-scoped name for icm_validate.
 func (p *Plugin) validateToolName() string {
 	if i := strings.LastIndexByte(p.instanceID, '/'); i >= 0 && i+1 < len(p.instanceID) {
@@ -423,4 +479,127 @@ func (p *Plugin) handleValidateInvoke(tc events.ToolCall) {
 		return
 	}
 	_ = p.bus.Emit("tool.result", res)
+}
+
+// registerSchemas reads + registers JSON schemas referenced by stages
+// and verifiers. The plugin owns three classes of registration:
+//
+//  1. Stage output schemas (output.format=json, output.schema set) under
+//     "icm.[<suffix>.]<stageID>.output".
+//  2. Validator schemas (output.validators with type=schema) under
+//     "icm.[<suffix>.]<stageID>.<predicateName>".
+//  3. Loop exit-condition schemas (loop.until with type=schema) under the
+//     same predicate-scoped key.
+//
+// All schema paths are resolved relative to the workspace root and read
+// from disk. Read or parse failures halt boot.
+func (p *Plugin) registerSchemas() error {
+	if p.workflow == nil || p.schemas == nil {
+		return nil
+	}
+	for i := range p.workflow.Stages {
+		stage := &p.workflow.Stages[i]
+		if err := p.registerStageSchemas(stage); err != nil {
+			return err
+		}
+	}
+	for _, verifier := range p.workflow.Verifiers {
+		if err := p.registerStageSchemas(verifier); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// registerStageSchemas handles a single stage's output + predicate
+// schemas. Verifiers reuse the same code because they share the Stage
+// type.
+func (p *Plugin) registerStageSchemas(stage *workspace.Stage) error {
+	if stage.Output.Format == workspace.OutputJSON && stage.Output.Schema != "" {
+		name := p.postureBuilder.SchemaName(stage.ID)
+		if err := p.registerSchemaFile(name, stage.Output.Schema); err != nil {
+			return fmt.Errorf("icm: stage %q output schema: %w", stage.ID, err)
+		}
+	}
+	for i := range stage.Output.Validators {
+		pred := &stage.Output.Validators[i]
+		if pred.Type != workspace.PredSchema || pred.SchemaPath == "" {
+			continue
+		}
+		predName := pred.Name
+		if predName == "" {
+			predName = fmt.Sprintf("validator_%d", i)
+		}
+		name := p.postureBuilder.PredicateSchemaName(stage.ID, predName)
+		if err := p.registerSchemaFile(name, pred.SchemaPath); err != nil {
+			return fmt.Errorf("icm: stage %q validator %q: %w", stage.ID, predName, err)
+		}
+	}
+	if stage.Loop != nil {
+		for i := range stage.Loop.Until {
+			pred := &stage.Loop.Until[i]
+			if pred.Type != workspace.PredSchema || pred.SchemaPath == "" {
+				continue
+			}
+			predName := pred.Name
+			if predName == "" {
+				predName = fmt.Sprintf("until_%d", i)
+			}
+			name := p.postureBuilder.PredicateSchemaName(stage.ID, predName)
+			if err := p.registerSchemaFile(name, pred.SchemaPath); err != nil {
+				return fmt.Errorf("icm: stage %q loop.until %q: %w", stage.ID, predName, err)
+			}
+		}
+	}
+	return nil
+}
+
+// registerSchemaFile reads a JSON schema from a workspace-relative path
+// and installs it under name in the engine schema registry.
+func (p *Plugin) registerSchemaFile(name, relPath string) error {
+	abs := relPath
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(p.workflow.Root, relPath)
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", relPath, err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return fmt.Errorf("parse %s: %w", relPath, err)
+	}
+	p.schemas.Register(name, schema, "icm")
+	p.registeredSchemas = append(p.registeredSchemas, name)
+	return nil
+}
+
+// registerPostures derives + installs an AgentPosture per stage and
+// verifier. Names are tracked so Shutdown can deregister them.
+func (p *Plugin) registerPostures() error {
+	if p.workflow == nil || p.postureBuilder == nil {
+		return nil
+	}
+	for i := range p.workflow.Stages {
+		stage := &p.workflow.Stages[i]
+		ap, err := p.postureBuilder.Build(stage)
+		if err != nil {
+			return fmt.Errorf("icm: derive posture for stage %q: %w", stage.ID, err)
+		}
+		if err := p.postureReg.Register(ap); err != nil {
+			return fmt.Errorf("icm: register posture %q: %w", ap.Name, err)
+		}
+		p.registeredPostures = append(p.registeredPostures, ap.Name)
+	}
+	for id, verifier := range p.workflow.Verifiers {
+		ap, err := p.postureBuilder.BuildVerifier(verifier)
+		if err != nil {
+			return fmt.Errorf("icm: derive posture for verifier %q: %w", id, err)
+		}
+		if err := p.postureReg.Register(ap); err != nil {
+			return fmt.Errorf("icm: register posture %q: %w", ap.Name, err)
+		}
+		p.registeredPostures = append(p.registeredPostures, ap.Name)
+	}
+	return nil
 }
