@@ -76,11 +76,6 @@ type Plugin struct {
 	// for diagnostics and forward-compatibility.
 	registeredSchemas []string
 
-	// In-flight invocation tracking (populated by runtime, read by tool
-	// handlers like read_skill_reference).
-	inflightMu sync.RWMutex
-	inflight   map[string]*invocationState // keyed by TurnID
-
 	// HITL wait correlation (capability b).
 	hitlMu   sync.Mutex
 	hitlWait map[string]chan events.HITLResponse
@@ -114,17 +109,6 @@ type Config struct {
 	EmitProgressThinkingSteps     bool
 }
 
-// invocationState is the per-stage, per-turn snapshot kept on the
-// in-flight table. The read_skill_reference tool handler reads this to
-// correlate a tool.invoke back to the active stage's skill set.
-type invocationState struct {
-	runID   string
-	stageID string
-	itemID  string
-	// skills is populated lazily by capability g; nil during skeleton.
-	skills map[string]any
-}
-
 // New returns a default-configured Plugin.
 func New() engine.Plugin {
 	return &Plugin{
@@ -138,7 +122,6 @@ func New() engine.Plugin {
 			PredicateCommandTimeoutSecs:   30,
 			EmitProgressThinkingSteps:     true,
 		},
-		inflight:      make(map[string]*invocationState),
 		hitlWait:      make(map[string]chan events.HITLResponse),
 		orchestrators: make(map[string]*runtime.Orchestrator),
 	}
@@ -325,6 +308,9 @@ func (p *Plugin) Ready() error {
 	if err := p.registerValidateTool(); err != nil {
 		return err
 	}
+	if err := p.registerSkillReferenceTool(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -367,8 +353,10 @@ func (p *Plugin) handleInput(ev engine.Event[any]) {
 	go p.runWorkflow(in)
 }
 
-// handleToolInvoke dispatches read_skill_reference + icm_validate. Skeleton
-// only handles validate; skills tool wires in capability (g).
+// handleToolInvoke dispatches the LLM-facing tools ICM owns:
+// icm_validate (workspace validator) and read_skill_reference (skill
+// reference reader). Both names are per-instance suffixed when ICM
+// runs as a non-default instance.
 func (p *Plugin) handleToolInvoke(ev engine.Event[any]) {
 	tc, ok := ev.Payload.(events.ToolCall)
 	if !ok {
@@ -377,6 +365,8 @@ func (p *Plugin) handleToolInvoke(ev engine.Event[any]) {
 	switch tc.Name {
 	case p.validateToolName():
 		p.handleValidateInvoke(tc)
+	case p.skillToolName:
+		p.handleSkillReferenceInvoke(tc)
 	}
 }
 

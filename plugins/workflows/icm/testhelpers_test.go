@@ -98,7 +98,6 @@ func newTestPlugin(bus engine.EventBus) *Plugin {
 		bus:           bus,
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		hitlWait:      map[string]chan events.HITLResponse{},
-		inflight:      map[string]*invocationState{},
 		orchestrators: map[string]*icmruntime.Orchestrator{},
 	}
 }
