@@ -91,6 +91,9 @@ type Plugin struct {
 	orchMu        sync.Mutex
 	orchestrators map[string]*runtime.Orchestrator
 
+	// dataDir is ctx.DataDir captured at Init for run-tree placement.
+	dataDir string
+
 	unsubs []func()
 }
 
@@ -223,6 +226,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.skillToolName = runtime.SkillToolName(p.instanceID)
 	p.schemas = ctx.Schemas
+	p.dataDir = ctx.DataDir
 
 	if err := p.parseConfig(ctx.Config); err != nil {
 		return err
@@ -346,8 +350,22 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// handleInput is the io.input entry point. Skeleton stub.
-func (p *Plugin) handleInput(_ engine.Event[any]) {}
+// handleInput is the io.input entry point. Each io.input begins a new
+// ICM run: a fresh runID + session dir, optional initial-input copy,
+// plan.created emission, orchestrator construction, and Run dispatched
+// in its own goroutine so the bus is not blocked across the
+// (potentially long) workflow.
+func (p *Plugin) handleInput(ev engine.Event[any]) {
+	in, ok := ev.Payload.(events.UserInput)
+	if !ok {
+		return
+	}
+	if p.workflow == nil {
+		p.logger.Warn("icm: io.input received but workflow not loaded; ignoring")
+		return
+	}
+	go p.runWorkflow(in)
+}
 
 // handleToolInvoke dispatches read_skill_reference + icm_validate. Skeleton
 // only handles validate; skills tool wires in capability (g).
@@ -477,20 +495,44 @@ func (p *Plugin) registerValidateTool() error {
 	return p.bus.Emit("tool.register", def)
 }
 
-// handleValidateInvoke is the skeleton stub. Step 12 wires the actual
-// workspace loader call.
+// handleValidateInvoke runs the workspace loader against the supplied
+// path (or the plugin's configured workspace when absent) and returns
+// the aggregated load errors as the tool output. "ok" on success.
 func (p *Plugin) handleValidateInvoke(tc events.ToolCall) {
+	target, _ := tc.Arguments["workspace"].(string)
+	if target == "" {
+		target = p.cfg.Workspace
+	} else {
+		target = engine.ExpandPath(target)
+	}
+
+	output := "ok"
+	if err := workspace.Validate(target, workspace.WithDefaultOperatorBytes(defaultOperatorBytes)); err != nil {
+		output = formatLoadErrors(err)
+	}
+
 	res := events.ToolResult{
 		SchemaVersion: events.ToolResultVersion,
 		ID:            tc.ID,
 		Name:          tc.Name,
-		Output:        "icm_validate not yet implemented",
+		Output:        output,
 		TurnID:        tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &res); err == nil && veto.Vetoed {
 		return
 	}
 	_ = p.bus.Emit("tool.result", res)
+}
+
+// formatLoadErrors renders a workspace.LoadErrors as a multi-line
+// summary suitable for human + LLM consumption. Single-error cases
+// collapse onto one line.
+func formatLoadErrors(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	// LoadErrors.Error() already renders nicely; pass through.
+	return err.Error()
 }
 
 // registerSchemas reads + registers JSON schemas referenced by stages
