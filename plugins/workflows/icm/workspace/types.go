@@ -306,6 +306,13 @@ type Predicate struct {
 // Nil for non-regex predicates or when the pattern failed to compile.
 func (p *Predicate) CompiledRegex() *regexp.Regexp { return p.compiledRegex }
 
+// SetCompiledRegex installs a pre-compiled regex on the predicate. The
+// loader calls this internally; callers synthesizing predicates outside
+// the loader (e.g. tests, or future stage-output predicate
+// synthesizers) use it to wire the regex without re-exporting the
+// field.
+func (p *Predicate) SetCompiledRegex(re *regexp.Regexp) { p.compiledRegex = re }
+
 // PredicateType enumerates the six predicate kinds.
 type PredicateType string
 

@@ -8,23 +8,32 @@ import "github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
 // detail.
 
 const (
-	ICMRunStartedVersion       = 1
-	ICMRunCompletedVersion     = 1
-	ICMRunHaltedVersion        = 1
-	ICMStageStartedVersion     = 1
-	ICMStageCompletedVersion   = 1
-	ICMStageFailedVersion      = 1
-	ICMStageIterationVersion   = 1
-	ICMTurnVersion             = 1
-	ICMFanoutItemVersion       = 1
-	ICMPredicateFailedVersion  = 1
+	ICMRunStartedVersion     = 1
+	ICMRunCompletedVersion   = 1
+	ICMRunHaltedVersion      = 1
+	ICMStageStartedVersion   = 1
+	ICMStageCompletedVersion = 1
+	ICMStageFailedVersion    = 1
+	ICMStageIterationVersion = 1
+	ICMTurnVersion           = 1
+	ICMFanoutItemVersion     = 1
 )
+
+// ICMPredicateFailedVersion re-exports the canonical version constant
+// from icmtypes for callers used to the icm.ICMPredicateFailedVersion
+// name.
+const ICMPredicateFailedVersion = icmtypes.ICMPredicateFailedVersion
 
 // ConditionResult is re-exported from icmtypes so existing
 // icm.ConditionResult references in this package and its sub-packages
 // keep working. The canonical definition lives in icmtypes to avoid a
 // cycle with the session sub-package.
 type ConditionResult = icmtypes.ConditionResult
+
+// ICMPredicateFailed is re-exported from icmtypes. The predicates
+// sub-package emits values of this type; subscribers can keep using the
+// short icm.ICMPredicateFailed name.
+type ICMPredicateFailed = icmtypes.ICMPredicateFailed
 
 // ICMRunStarted is emitted after workspace load + plan.created, before
 // the first stage dispatches.
@@ -126,16 +135,3 @@ type ICMFanoutItem struct {
 	Error         string `json:"error,omitempty"`
 }
 
-// ICMPredicateFailed fires whenever any predicate evaluation returns
-// Verdict=false. Single source of truth for failure visibility — pass
-// paths are not emitted.
-type ICMPredicateFailed struct {
-	SchemaVersion int    `json:"_schema_version"`
-	RunID         string `json:"run_id"`
-	StageID       string `json:"stage_id"`
-	ItemID        string `json:"item_id,omitempty"`
-	Container     string `json:"container"` // output.validators | loop.until | verifier
-	PredicateName string `json:"predicate_name"`
-	PredicateType string `json:"predicate_type"`
-	Feedback      string `json:"feedback,omitempty"`
-}
