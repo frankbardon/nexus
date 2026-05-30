@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.workflows.icm.json",
+  "title": "nexus.workflows.icm",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "workspace": {
+      "type": "string",
+      "description": "Absolute or ~-relative path to the ICM workspace folder. Required. Validated at boot."
+    },
+    "default_judge_posture": {
+      "type": "string",
+      "description": "Posture name (registered via nexus.agent.postures) used for `type: llm` predicates when the predicate does not name an explicit `model:` posture. Required when any predicate uses type: llm."
+    },
+    "default_workflow_posture": {
+      "type": "string",
+      "description": "Optional base posture name. When a stage's contract does not name an `agent.posture:`, ICM inherits Model/AllowedTools/Budget/MaxRecursionDepth from this posture before applying stage overrides."
+    },
+    "cache_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-run delegate cache capacity. 0 (default) disables caching — ICM stages typically have tool side effects, predicate retries, and HITL gates that make cached cross-run results hostile."
+    },
+    "inline_artifact_limit_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum size for inlining an artifact body into the XML payload. Above this threshold ICM emits <artifact_ref/> and the LLM uses read_file. Default 32768."
+    },
+    "loop_max_restarts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-stage cap on loop-exhaustion restarts. 0 = unlimited. Default 3. Prevents infinite restart cycles when a workspace cannot converge."
+    },
+    "input_filename": {
+      "type": "string",
+      "description": "Name for the file written into <runID>/00_input/ when io.input carries direct content (not a file path). Default `input.txt`."
+    },
+    "treat_input_as_path_if_exists": {
+      "type": "boolean",
+      "description": "When true, io.input.Content is interpreted as a file path if os.Stat succeeds, and the file is copied into 00_input/. Otherwise io.input.Content is written as input_filename. Default true."
+    },
+    "workspace_inputs_dir": {
+      "type": "string",
+      "description": "Optional directory whose regular files are copied into <runID>/00_input/ at run start, before any io.input content. Useful for workspaces with static initial-input fixtures."
+    },
+    "auto_include_skill_reference_tool": {
+      "type": "boolean",
+      "description": "When true (default), ICM automatically appends the read_skill_reference tool to each derived stage posture whose contract declares inputs.skills. Set false to require explicit listing in agent.tools."
+    },
+    "predicate_command_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default timeout for `type: command` predicates when neither the predicate nor the stage budget specifies one. Default 30."
+    },
+    "emit_progress_thinking_steps": {
+      "type": "boolean",
+      "description": "When true (default), ICM emits thinking.step events with Phase=\"icm.<stage_id>\" so UIs that render thinking surfaces show stage transitions inline."
+    }
+  },
+  "required": ["workspace"]
+}

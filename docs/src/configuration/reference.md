@@ -1522,7 +1522,37 @@ Source: `plugins/planners/static/plugin.go`. Approval auto-defaults to `never`
 
 ---
 
-## Skills
+## Workflows
+
+### `nexus.workflows.icm`
+
+Source: `plugins/workflows/icm/plugin.go`. File-driven multi-stage workflow
+runner. A workspace is a folder containing `operator.md`, `workspace.md`, and
+a `stages/` tree of contracts; each stage runs as a sub-agent dispatched via
+the posture registry. Multi-instance: pin distinct workspaces per instance
+via the `nexus.workflows.icm/<suffix>` form (e.g.
+`nexus.workflows.icm/script`). See `docs/src/plugins/workflows-icm.md` for
+the full plugin guide.
+
+Requires the `posture.registry` capability (provided by
+`nexus.agent.postures`). Strongly recommended companions:
+`nexus.control.hitl` (human gates + judge approvals), `nexus.skills`
+(workspace skills authoring tooling).
+
+| Key                                  | Type   | Default       | Description |
+|--------------------------------------|--------|---------------|-------------|
+| `workspace`                          | string | *(required)*  | Path to the ICM workspace folder. Expanded via `~`. Loaded + validated at boot; load errors fail boot. |
+| `default_judge_posture`              | string | *(empty)*     | Registered posture name used for `type: llm` predicates that do not name an explicit `model:` posture. Required when any predicate uses `type: llm`. |
+| `default_workflow_posture`           | string | *(empty)*     | Optional base posture name. Stages without an `agent.posture:` inherit Model / AllowedTools / Budget / MaxRecursionDepth from this posture before applying stage-level overrides. |
+| `cache_size`                         | int    | `0`           | Per-run delegate cache capacity. `0` disables caching (recommended — ICM stages typically have tool side effects + predicate retries that make cross-run caching hostile). |
+| `inline_artifact_limit_bytes`        | int    | `32768`       | Maximum size for inlining an artifact body into the XML payload. Above this threshold ICM emits `<artifact_ref/>` and the LLM uses `read_file`. |
+| `loop_max_restarts`                  | int    | `3`           | Per-stage cap on `loop.on_exhausted: human_gate` `restart` choices. `0` = unlimited. Prevents infinite restart cycles when a workspace cannot converge. |
+| `input_filename`                     | string | `input.txt`   | Filename written into `<runID>/00_input/` when `io.input` carries direct content (not a file path). |
+| `treat_input_as_path_if_exists`      | bool   | `true`        | When true, `io.input.Content` is interpreted as a file path if `os.Stat` succeeds and the file is copied into `00_input/`; otherwise the content is written verbatim. |
+| `workspace_inputs_dir`               | string | *(empty)*     | Optional directory whose regular files are copied into `<runID>/00_input/` at run start, before `io.input` content is processed. Useful for static fixtures. |
+| `auto_include_skill_reference_tool`  | bool   | `true`        | When true, ICM automatically appends the `read_skill_reference[_<suffix>]` tool to each derived stage posture whose contract declares `inputs.skills`. Set false to require explicit listing in `agent.tools`. |
+| `predicate_command_timeout_seconds`  | int    | `30`          | Default timeout for `type: command` predicates when neither the predicate nor the stage budget specifies one. |
+| `emit_progress_thinking_steps`       | bool   | `true`        | When true, ICM emits `thinking.step` events with `Phase="icm.<stage_id>"` so UIs that render thinking surfaces show inline stage transitions. |
 
 ### `nexus.skills`
 
