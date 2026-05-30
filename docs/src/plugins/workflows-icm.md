@@ -7,7 +7,11 @@ workspace at boot, registers one `AgentPosture` per stage, and dispatches each
 stage as a sub-agent via a private `delegate.Runtime` whenever an `io.input`
 arrives.
 
-> Source: `plugins/workflows/icm/`. Configuration table:
+> Source: `plugins/workflows/icm/`. New to ICM? Start with the
+> [overview](../icm/overview.md) for the rationale + mental model, then
+> follow the [end-to-end walkthrough](../icm/walkthrough.md) to build a
+> workspace from scratch. This page is the field-by-field reference.
+> Configuration table:
 > [configuration reference](../configuration/reference.md#nexusworkflowsicm).
 
 ## Overview
