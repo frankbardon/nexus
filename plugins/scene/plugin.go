@@ -59,11 +59,11 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string                         { return pluginID }
-func (p *Plugin) Name() string                       { return name }
-func (p *Plugin) Version() string                    { return version }
-func (p *Plugin) Dependencies() []string             { return nil }
-func (p *Plugin) Requires() []engine.Requirement     { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return name }
+func (p *Plugin) Version() string                { return version }
+func (p *Plugin) Dependencies() []string         { return nil }
+func (p *Plugin) Requires() []engine.Requirement { return nil }
 func (p *Plugin) Capabilities() []engine.Capability {
 	return []engine.Capability{{Name: capScene, Description: "Session-scoped scene store with patch history."}}
 }

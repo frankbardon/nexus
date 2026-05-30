@@ -32,15 +32,15 @@ type DelegateMeta struct {
 // <artifact>.icm.json beside every artifact. The orchestrator populates
 // it from the run state + the invocation that produced the artifact.
 type ArtifactMeta struct {
-	StageID           string                      `json:"stage_id"`
-	IterationsRun     int                         `json:"iterations_run,omitempty"`
-	ConvergenceFailed bool                        `json:"convergence_failed,omitempty"`
-	UnmetConditions   []icmtypes.ConditionResult  `json:"unmet_conditions,omitempty"`
-	ValidatorsPassed  []icmtypes.ConditionResult  `json:"validators_passed,omitempty"`
-	GroundingHashes   map[string]string           `json:"grounding_hashes,omitempty"`
-	ParentArtifacts   []string                    `json:"parent_artifacts,omitempty"`
-	Delegate          DelegateMeta                `json:"delegate,omitempty"`
-	WrittenAt         time.Time                   `json:"written_at"`
+	StageID           string                     `json:"stage_id"`
+	IterationsRun     int                        `json:"iterations_run,omitempty"`
+	ConvergenceFailed bool                       `json:"convergence_failed,omitempty"`
+	UnmetConditions   []icmtypes.ConditionResult `json:"unmet_conditions,omitempty"`
+	ValidatorsPassed  []icmtypes.ConditionResult `json:"validators_passed,omitempty"`
+	GroundingHashes   map[string]string          `json:"grounding_hashes,omitempty"`
+	ParentArtifacts   []string                   `json:"parent_artifacts,omitempty"`
+	Delegate          DelegateMeta               `json:"delegate,omitempty"`
+	WrittenAt         time.Time                  `json:"written_at"`
 }
 
 // ConditionResult is re-exported from icmtypes for callers that already

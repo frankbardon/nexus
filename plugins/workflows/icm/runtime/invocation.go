@@ -109,13 +109,13 @@ func (o *Orchestrator) runInvocationFull(ctx context.Context, ic invocationCtx) 
 		}
 
 		payload, err := o.Payload.Build(PayloadInputs{
-			Stage:           stage,
-			Iteration:       ic.iteration,
-			Turn:            turn,
-			ItemID:          ic.itemID,
-			ItemValue:       ic.itemValue,
-			RunID:           o.RunID,
-			PreviousAttempt: prevAttempt,
+			Stage:             stage,
+			Iteration:         ic.iteration,
+			Turn:              turn,
+			ItemID:            ic.itemID,
+			ItemValue:         ic.itemValue,
+			RunID:             o.RunID,
+			PreviousAttempt:   prevAttempt,
 			PreviousIteration: previousIterationFromCtx(ic),
 		})
 		if err != nil {
@@ -530,4 +530,3 @@ func isDelegateFailure(out delegate.Output) bool {
 	}
 	return false
 }
-

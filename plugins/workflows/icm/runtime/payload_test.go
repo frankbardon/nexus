@@ -172,9 +172,9 @@ func TestBuild_HappyPath(t *testing.T) {
 	}
 
 	out, err := f.builder().Build(PayloadInputs{
-		Stage:  stage,
-		Turn:   1,
-		RunID:  "run_test",
+		Stage: stage,
+		Turn:  1,
+		RunID: "run_test",
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)

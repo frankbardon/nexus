@@ -309,4 +309,3 @@ func makeStageStarted(runID, stageID, posture string, order int) icmtypes.ICMSta
 		Order:         order,
 	}
 }
-

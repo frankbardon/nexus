@@ -24,12 +24,12 @@ func TestWorkspaceName(t *testing.T) {
 
 func TestFirstLine(t *testing.T) {
 	cases := map[string]string{
-		"":                                  "",
-		"\n\n":                              "",
-		"line1\nline2":                      "line1",
-		"   leading whitespace\nrest":      "leading whitespace",
-		"\n   line after empty\n":          "line after empty",
-		"no newline at all":                "no newline at all",
+		"":                            "",
+		"\n\n":                        "",
+		"line1\nline2":                "line1",
+		"   leading whitespace\nrest": "leading whitespace",
+		"\n   line after empty\n":     "line after empty",
+		"no newline at all":           "no newline at all",
 	}
 	for in, want := range cases {
 		if got := firstLine(in); got != want {

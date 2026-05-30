@@ -118,9 +118,9 @@ type Config struct {
 // in-flight table. The read_skill_reference tool handler reads this to
 // correlate a tool.invoke back to the active stage's skill set.
 type invocationState struct {
-	runID    string
-	stageID  string
-	itemID   string
+	runID   string
+	stageID string
+	itemID  string
 	// skills is populated lazily by capability g; nil during skeleton.
 	skills map[string]any
 }
@@ -640,19 +640,19 @@ func (p *Plugin) buildOrchestrator(runID string, sess *session.Session) *runtime
 		Logger:                   p.logger,
 	}
 	o := &runtime.Orchestrator{
-		Workflow:        p.workflow,
-		Session:         sess,
-		Runtime:         p.runtime,
-		Evaluator:       p.evaluator,
-		Payload:         payload,
-		PostureBuilder:  p.postureBuilder,
-		Bus:             p.bus,
-		Logger:          p.logger,
-		HITLDispatch:    p.emitHITLAndWait,
-		NewHITLID:       newHITLID,
-		InstanceID:      p.instanceID,
-		RunID:           runID,
-		LoopMaxRestarts: p.cfg.LoopMaxRestarts,
+		Workflow:          p.workflow,
+		Session:           sess,
+		Runtime:           p.runtime,
+		Evaluator:         p.evaluator,
+		Payload:           payload,
+		PostureBuilder:    p.postureBuilder,
+		Bus:               p.bus,
+		Logger:            p.logger,
+		HITLDispatch:      p.emitHITLAndWait,
+		NewHITLID:         newHITLID,
+		InstanceID:        p.instanceID,
+		RunID:             runID,
+		LoopMaxRestarts:   p.cfg.LoopMaxRestarts,
 		EmitThinkingSteps: p.cfg.EmitProgressThinkingSteps,
 	}
 	p.orchMu.Lock()

@@ -52,5 +52,5 @@ type (
 	ICMStageFailed    = icmtypes.ICMStageFailed
 	ICMStageIteration = icmtypes.ICMStageIteration
 	ICMTurn           = icmtypes.ICMTurn
-	ICMFanoutItem    = icmtypes.ICMFanoutItem
+	ICMFanoutItem     = icmtypes.ICMFanoutItem
 )

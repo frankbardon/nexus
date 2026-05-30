@@ -291,7 +291,6 @@ func makeStage(id string) workspace.Stage {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -508,10 +507,10 @@ func TestOrchestrator_FanOutContinue(t *testing.T) {
 	// array. The source stage only needs to *produce* JSON content.
 	sourceBody := `["alpha","beta","gamma"]`
 	f.disp.outputs = []delegate.Output{
-		{Result: sourceBody, Status: delegate.StatusSuccess},  // 00_src
-		{Result: "ok-alpha", Status: delegate.StatusSuccess},  // item 0
+		{Result: sourceBody, Status: delegate.StatusSuccess},            // 00_src
+		{Result: "ok-alpha", Status: delegate.StatusSuccess},            // item 0
 		{Result: "", Status: delegate.StatusError, Error: "rate limit"}, // item 1
-		{Result: "ok-gamma", Status: delegate.StatusSuccess},  // item 2
+		{Result: "ok-gamma", Status: delegate.StatusSuccess},            // item 2
 	}
 	f.disp.errs = []error{nil, nil, errors.New("rate limit"), nil}
 
@@ -632,27 +631,37 @@ func TestOrchestrator_EmitsLifecycleEvents(t *testing.T) {
 		{Result: "B", Status: delegate.StatusSuccess},
 	}
 	var (
-		mu          sync.Mutex
-		started     int
-		stageStart  int
-		stageDone   int
-		completed   int
-		turnEvents  int
+		mu         sync.Mutex
+		started    int
+		stageStart int
+		stageDone  int
+		completed  int
+		turnEvents int
 	)
 	f.bus.Subscribe("icm.run.started", func(_ engine.Event[any]) {
-		mu.Lock(); started++; mu.Unlock()
+		mu.Lock()
+		started++
+		mu.Unlock()
 	})
 	f.bus.Subscribe("icm.run.completed", func(_ engine.Event[any]) {
-		mu.Lock(); completed++; mu.Unlock()
+		mu.Lock()
+		completed++
+		mu.Unlock()
 	})
 	f.bus.Subscribe("icm.stage.started", func(_ engine.Event[any]) {
-		mu.Lock(); stageStart++; mu.Unlock()
+		mu.Lock()
+		stageStart++
+		mu.Unlock()
 	})
 	f.bus.Subscribe("icm.stage.completed", func(_ engine.Event[any]) {
-		mu.Lock(); stageDone++; mu.Unlock()
+		mu.Lock()
+		stageDone++
+		mu.Unlock()
 	})
 	f.bus.Subscribe("icm.turn", func(_ engine.Event[any]) {
-		mu.Lock(); turnEvents++; mu.Unlock()
+		mu.Lock()
+		turnEvents++
+		mu.Unlock()
 	})
 
 	if err := f.orch.Run(context.Background()); err != nil {

@@ -69,9 +69,9 @@ func (JSONPathExists) Evaluate(_ context.Context, args map[string]any, artifact 
 
 	iter := query.Run(doc)
 	var (
-		anyResult       bool
-		anyNonEmpty     bool
-		lastEvalErr     error
+		anyResult   bool
+		anyNonEmpty bool
+		lastEvalErr error
 	)
 	for {
 		v, ok := iter.Next()

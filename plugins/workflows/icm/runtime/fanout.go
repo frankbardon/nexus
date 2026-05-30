@@ -397,4 +397,3 @@ func marshalTextAggregate(records []fanOutItemRecord) []byte {
 	}
 	return []byte(sb.String())
 }
-
