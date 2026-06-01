@@ -27,4 +27,5 @@ const (
 	TypeHITLRequest     = "hitl_request"
 	TypeCodeExecStdout  = "code_exec_stdout"
 	TypeWorkerStatus    = "worker_status"
+	TypeWorkflowStatus  = "workflow_status"
 )

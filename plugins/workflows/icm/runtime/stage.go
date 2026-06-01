@@ -26,6 +26,11 @@ func (o *Orchestrator) runStage(ctx context.Context, stage *workspace.Stage, ord
 		if o.Bus != nil {
 			_ = o.Bus.Emit("icm.stage.started", makeStageStarted(o.RunID, stage.ID, o.PostureBuilder.PostureName(stage.ID), order))
 			o.emitPlanProgress(stage.ID, "active", "")
+			o.emitWorkflowProgress(events.WorkflowProgress{
+				Stage:  stage.ID,
+				Status: events.WorkflowStatusRunning,
+				Detail: "stage started",
+			})
 		}
 
 		gate := o.humanGateFor(stage)
@@ -89,9 +94,26 @@ func (o *Orchestrator) runStage(ctx context.Context, stage *workspace.Stage, ord
 			}
 			_ = o.Bus.Emit("icm.stage.completed", completed)
 			o.emitPlanProgress(stage.ID, "completed", artifactPath)
+			o.emitWorkflowProgress(events.WorkflowProgress{
+				Stage:         stage.ID,
+				Iteration:     completed.IterationsRun,
+				MaxIterations: loopMaxIterations(stage),
+				Status:        events.WorkflowStatusRunning,
+				Detail:        "stage done",
+			})
 		}
 		return nil
 	}
+}
+
+// loopMaxIterations returns the configured max for a looping stage or 0
+// otherwise. Lives next to runStage because workflow.progress payloads
+// quote it on stage-completed events to give panels the final tally.
+func loopMaxIterations(s *workspace.Stage) int {
+	if s == nil || s.Loop == nil {
+		return 0
+	}
+	return s.Loop.MaxIterations
 }
 
 // emitPlanProgress bridges ICM's stage lifecycle into the engine-generic
@@ -294,6 +316,11 @@ func (o *Orchestrator) failStage(stage *workspace.Stage, cause error) error {
 			Reason:        cause.Error(),
 		})
 		o.emitPlanProgress(stage.ID, "failed", cause.Error())
+		o.emitWorkflowProgress(events.WorkflowProgress{
+			Stage:  stage.ID,
+			Status: events.WorkflowStatusFailed,
+			Detail: cause.Error(),
+		})
 	}
 	return cause
 }

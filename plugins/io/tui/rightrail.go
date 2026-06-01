@@ -7,6 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/frankbardon/nexus/pkg/ui"
 )
 
 type rightRail struct {
@@ -18,12 +20,37 @@ type rightRail struct {
 	// Thinking
 	thinkingSteps []thinkingStep
 
+	// Workflow status
+	workflow *workflowState
+
 	planViewport     viewport.Model
 	thinkingViewport viewport.Model
 
 	width, height int
 	focused       bool
 	features      map[string]bool
+}
+
+// workflowState captures the latest workflow.progress payload for the
+// dedicated workflow panel. Updated in place: each new event replaces
+// the prior snapshot rather than scrolling, so the panel always shows
+// "where are we right now".
+type workflowState struct {
+	Name          string
+	Stage         string
+	StageLabel    string
+	StageIndex    int
+	StageTotal    int
+	Iteration     int
+	MaxIterations int
+	Turn          int
+	MaxTurns      int
+	ItemsDone     int
+	ItemsTotal    int
+	CurrentItem   string
+	Status        string
+	Detail        string
+	Failures      []string
 }
 
 type planState struct {
@@ -55,7 +82,57 @@ func newRightRail(styles *Styles) rightRail {
 }
 
 func (r *rightRail) Visible() bool {
-	return r.plan != nil
+	return r.plan != nil || r.workflow != nil
+}
+
+// SetWorkflowStatus stores the latest workflow progress snapshot. The
+// panel updates in place (no scrollback) so users see the current state
+// at a glance.
+func (r *rightRail) SetWorkflowStatus(msg workflowStatusMsg) {
+	r.workflow = &workflowState{
+		Name:          msg.WorkflowName,
+		Stage:         msg.Stage,
+		StageLabel:    msg.StageLabel,
+		StageIndex:    msg.StageIndex,
+		StageTotal:    msg.StageTotal,
+		Iteration:     msg.Iteration,
+		MaxIterations: msg.MaxIterations,
+		Turn:          msg.Turn,
+		MaxTurns:      msg.MaxTurns,
+		ItemsDone:     msg.ItemsDone,
+		ItemsTotal:    msg.ItemsTotal,
+		CurrentItem:   msg.CurrentItem,
+		Status:        msg.Status,
+		Detail:        msg.Detail,
+		Failures:      msg.Failures,
+	}
+}
+
+// workflowStatusLine builds a one-line summary suitable for the chat
+// header / status bar. Used by the model when it sets the chat status
+// alongside the right-rail update.
+func workflowStatusLine(msg ui.WorkflowStatusMessage) string {
+	var parts []string
+	if msg.WorkflowName != "" {
+		parts = append(parts, msg.WorkflowName)
+	}
+	if msg.Stage != "" {
+		stage := msg.Stage
+		if msg.StageIndex > 0 && msg.StageTotal > 0 {
+			stage = fmt.Sprintf("%s (%d/%d)", stage, msg.StageIndex, msg.StageTotal)
+		}
+		parts = append(parts, stage)
+	}
+	switch {
+	case msg.Iteration > 0 && msg.MaxIterations > 0:
+		parts = append(parts, fmt.Sprintf("iter %d/%d", msg.Iteration, msg.MaxIterations))
+	case msg.ItemsTotal > 0:
+		parts = append(parts, fmt.Sprintf("items %d/%d", msg.ItemsDone, msg.ItemsTotal))
+	}
+	if msg.Detail != "" {
+		parts = append(parts, msg.Detail)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (r *rightRail) SetSize(w, h int) {
@@ -238,6 +315,18 @@ func (r *rightRail) stepStyle(status string) (string, lipgloss.Style) {
 func (r *rightRail) View() string {
 	var sections []string
 
+	// Workflow status section — sticky panel at the top showing the
+	// current workflow state at a glance. Updated in place on each
+	// workflow.progress event; no scrollback.
+	if r.workflow != nil {
+		header := r.styles.Bold.Render(" Workflow")
+		if r.workflow.Status != "" {
+			header += " " + r.styles.Dim.Render("("+r.workflow.Status+")")
+		}
+		sections = append(sections, header)
+		sections = append(sections, r.renderWorkflowContent())
+	}
+
 	// Plan section
 	if r.plan != nil {
 		header := r.styles.Bold.Render(" Plan")
@@ -257,4 +346,45 @@ func (r *rightRail) View() string {
 
 	body := lipgloss.JoinVertical(lipgloss.Left, sections...)
 	return r.styles.RightRail.Height(r.height).Render(body)
+}
+
+func (r *rightRail) renderWorkflowContent() string {
+	if r.workflow == nil {
+		return ""
+	}
+	var b strings.Builder
+	w := r.workflow
+	if w.Name != "" {
+		b.WriteString(r.styles.Dim.Render(" "+w.Name) + "\n")
+	}
+	if w.Stage != "" {
+		stage := w.Stage
+		if w.StageLabel != "" && w.StageLabel != w.Stage {
+			stage = w.StageLabel
+		}
+		if w.StageIndex > 0 && w.StageTotal > 0 {
+			stage = fmt.Sprintf("%s  %d/%d", stage, w.StageIndex, w.StageTotal)
+		}
+		b.WriteString(" " + stage + "\n")
+	}
+	if w.MaxIterations > 0 {
+		b.WriteString(r.styles.Dim.Render(fmt.Sprintf("  iter %d/%d", w.Iteration, w.MaxIterations)) + "\n")
+	}
+	if w.MaxTurns > 0 {
+		b.WriteString(r.styles.Dim.Render(fmt.Sprintf("  turn %d/%d", w.Turn, w.MaxTurns)) + "\n")
+	}
+	if w.ItemsTotal > 0 {
+		line := fmt.Sprintf("  items %d/%d", w.ItemsDone, w.ItemsTotal)
+		if w.CurrentItem != "" {
+			line += "  " + w.CurrentItem
+		}
+		b.WriteString(r.styles.Dim.Render(line) + "\n")
+	}
+	if w.Detail != "" {
+		b.WriteString(" " + wordWrap(w.Detail, r.width-3) + "\n")
+	}
+	if len(w.Failures) > 0 {
+		b.WriteString(r.styles.Dim.Render(" last fail: "+strings.Join(w.Failures, ", ")) + "\n")
+	}
+	return b.String()
 }

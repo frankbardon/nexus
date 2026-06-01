@@ -721,11 +721,32 @@ following typed events surface richer detail. All payloads carry a
 | `icm.turn` | After each turn within an invocation. | Richer-UI feed only; basic UIs already see stage transitions via `plan.progress`. |
 | `icm.fanout.item` | Item lifecycle boundary in a fan-out stage. | `Status` is `active` / `completed` / `failed`. |
 | `icm.predicate.failed` | Any predicate evaluation returns `Verdict=false`. | Single source of truth for failure visibility — pass paths are not emitted. |
+| `workflow.progress` | Run start, stage start, every iteration, every fan-out item completion, stage / run completion, halt / failure. | Engine-generic structured payload (`events.WorkflowProgress`). Powers the dedicated workflow status panel in `nexus.io.tui` and the indicator chip in `nexus.io.browser`. Emitted *alongside* the `icm.*` family, not in place of it. |
 
 In addition, with `emit_progress_thinking_steps: true` (default) ICM emits
 `thinking.step` events tagged `Phase="icm.<stage_id>"` so UIs that render
 thinking surfaces show inline stage transitions without subscribing to the
 typed event family.
+
+### UI feedback surfaces
+
+Both bundled IO plugins (`nexus.io.tui`, `nexus.io.browser`) wire ICM
+progress directly so users see real-time feedback during long runs
+without enabling extra observers:
+
+- **Scrollback (thinking-step stream)** — every `icm.*` event is formatted
+  into a one-line audit row via the helpers in
+  `plugins/workflows/icm/icmtypes/format.go` and rendered alongside other
+  thinking steps. Long runs leave a complete trail of stage transitions,
+  iteration retries, predicate failures, and fan-out item ticks.
+- **Dedicated workflow panel** — the generic `workflow.progress` event
+  drives a sticky surface (TUI right-rail panel, browser chip indicator)
+  that updates in place: workflow name, stage X/Y, iter N/M, turn N/M,
+  fan-out items done/total, status badge, and the names of any predicate
+  failures from the last iteration.
+
+The two surfaces complement each other: scrollback for "what happened",
+dedicated panel for "where are we now".
 
 ## Session layout + artifacts
 

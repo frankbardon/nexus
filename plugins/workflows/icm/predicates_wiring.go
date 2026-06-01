@@ -167,8 +167,15 @@ func (p *Plugin) dispatchJudgePredicate(ctx context.Context, pr *workspace.Predi
 		return false, fmt.Sprintf("judge status %s: %s", out.Status, out.Error), nil, nil
 	}
 
+	// LLM judges (especially small/cheap models) habitually wrap the
+	// verdict JSON in a Markdown code fence even when the rubric asks
+	// for raw JSON. Strip that defensively so a stylistic quirk does
+	// not cause an unrecoverable loop failure. Falls back to extracting
+	// the first `{...}` substring when the response still contains
+	// commentary around the JSON document.
+	raw := unwrapJudgeJSON(out.Result)
 	var parsed judgeResponse
-	if err := json.Unmarshal([]byte(out.Result), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return false, fmt.Sprintf("judge output malformed (not JSON): %v", err), nil, nil
 	}
 	if parsed.Verdict != "pass" && parsed.Verdict != "fail" {

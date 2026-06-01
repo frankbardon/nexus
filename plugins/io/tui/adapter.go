@@ -112,6 +112,16 @@ func (a *Adapter) SendThinking(msg ui.ThinkingMessage) error {
 	return nil
 }
 
+// SendWorkflowStatus sends a structured workflow progress update to the TUI.
+// The TUI renders the message as a dedicated workflow status panel in the
+// right rail and as a one-line status indicator in the chat header.
+func (a *Adapter) SendWorkflowStatus(msg ui.WorkflowStatusMessage) error {
+	if a.program != nil {
+		a.program.Send(workflowStatusMsg{msg})
+	}
+	return nil
+}
+
 // SendCodeExecStdout streams a chunk of run_code script stdout to the TUI.
 func (a *Adapter) SendCodeExecStdout(msg ui.CodeExecStdoutMessage) error {
 	if a.program != nil {

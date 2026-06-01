@@ -141,17 +141,18 @@ func TestEvalSchema_UnknownName(t *testing.T) {
 
 func TestEvalSchema_CompileCache(t *testing.T) {
 	e := newEvaluator(t)
-	name := "icm.test.s3.v"
+	sc := StageEvalContext{InstanceID: "nexus.workflows.icm", StageID: "s3"}
+	name := PredicateSchemaName(sc.InstanceID, sc.StageID, "v")
 	e.Schemas.Register(name, map[string]any{"type": "object"}, "test")
 	p := &workspace.Predicate{Type: workspace.PredSchema, Name: "v", SchemaPath: name}
 
-	_ = e.Evaluate(context.Background(), p, []byte(`{}`), StageEvalContext{})
+	_ = e.Evaluate(context.Background(), p, []byte(`{}`), sc)
 	if _, ok := e.schemaCompileCache[name]; !ok {
 		t.Fatalf("schema not cached after first evaluation")
 	}
 	firstPtr := e.schemaCompileCache[name]
 
-	_ = e.Evaluate(context.Background(), p, []byte(`{}`), StageEvalContext{})
+	_ = e.Evaluate(context.Background(), p, []byte(`{}`), sc)
 	secondPtr := e.schemaCompileCache[name]
 	if firstPtr != secondPtr {
 		t.Errorf("expected cached schema to be reused; got distinct compile result")
@@ -635,9 +636,18 @@ func TestEvaluateAll_NilBusSkipsEmission(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestPredicateSchemaName(t *testing.T) {
+	// Suffixed instance: only the segment after the last "/" enters the
+	// name. This keeps registration (PostureBuilder) and dispatch
+	// (evaluator) in lockstep with the canonical icmtypes helper.
 	got := PredicateSchemaName("nexus.workflows.icm/research", "02_script", "schema_0")
-	want := "icm.nexus.workflows.icm/research.02_script.schema_0"
+	want := "icm.research.02_script.schema_0"
 	if got != want {
-		t.Errorf("name mismatch: got %q want %q", got, want)
+		t.Errorf("suffixed: got %q want %q", got, want)
+	}
+	// Default instance (no slash): no suffix segment.
+	got = PredicateSchemaName("nexus.workflows.icm", "01_intake", "v")
+	want = "icm.01_intake.v"
+	if got != want {
+		t.Errorf("default: got %q want %q", got, want)
 	}
 }

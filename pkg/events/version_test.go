@@ -138,6 +138,8 @@ func versionedPayloads() []versionedPayload {
 		{"PlanRequest", func() any { return PlanRequest{SchemaVersion: PlanRequestVersion} }, PlanRequestVersion},
 		{"PlanResult", func() any { return PlanResult{SchemaVersion: PlanResultVersion} }, PlanResultVersion},
 		{"PlanProgress", func() any { return PlanProgress{SchemaVersion: PlanProgressVersion} }, PlanProgressVersion},
+		// workflow.go
+		{"WorkflowProgress", func() any { return WorkflowProgress{SchemaVersion: WorkflowProgressVersion} }, WorkflowProgressVersion},
 		// provider.go
 		{"ProviderFallback", func() any { return ProviderFallback{SchemaVersion: ProviderFallbackVersion} }, ProviderFallbackVersion},
 		{"ProviderFanoutStart", func() any { return ProviderFanoutStart{SchemaVersion: ProviderFanoutStartVersion} }, ProviderFanoutStartVersion},

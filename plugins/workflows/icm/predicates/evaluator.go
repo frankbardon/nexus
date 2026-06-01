@@ -258,12 +258,13 @@ func (e *Evaluator) emitFailure(p *workspace.Predicate, r Result, sc StageEvalCo
 // PredicateSchemaName returns the canonical schema-registry name for a
 // predicate. The icm plugin uses this helper at Ready() to register
 // every output schema; the evaluator uses it at lookup time. Both
-// halves must agree on the format — keep changes in lockstep.
+// halves stay in lockstep by delegating to the icmtypes canonical
+// helper.
 //
-// Format: "icm.<instanceID>.<stageID>.<predName>". When predName is
-// "output" (the synthesized stage-output schema predicate) the result
-// still includes it, so output schemas and named schema predicates
-// share one namespace.
+// Format: "icm.[<instance suffix>.]<stageID>.<predName>". When predName
+// is "output" (the synthesized stage-output schema predicate) the
+// result is the same as StageOutputSchemaName so output schemas and
+// named schema predicates share one namespace.
 func PredicateSchemaName(instanceID, stageID, predName string) string {
-	return "icm." + instanceID + "." + stageID + "." + predName
+	return icmtypes.PredicateSchemaName(instanceID, stageID, predName)
 }

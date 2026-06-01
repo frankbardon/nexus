@@ -83,6 +83,14 @@ func (a *Adapter) SendPlanUpdate(msg ui.PlanDisplayMessage) error {
 	return a.broadcast("plan", msg)
 }
 
+// SendWorkflowStatus emits a structured workflow progress update to all
+// clients. One envelope per workflow.progress bus event; the frontend
+// renders the latest payload in a sticky workflow indicator at the top
+// of the chat surface.
+func (a *Adapter) SendWorkflowStatus(msg ui.WorkflowStatusMessage) error {
+	return a.broadcast(ui.TypeWorkflowStatus, msg)
+}
+
 // SendWorkerStatus emits a subagent lifecycle event to all clients. One
 // envelope per bus event in the subagent.started/iteration/complete
 // sequence; the frontend correlates by SpawnID.
