@@ -337,8 +337,47 @@ count, the iteration writes its best attempt to `02_brief/iter_01/brief.md`
 and the LLM judge runs against the `coverage.md` rubric. If the judge says
 no, iteration 2 starts.
 
-When the loop exits — convergent or exhausted — `human_gate: end` fires
-again. Approve, and:
+### What if the loop exhausts?
+
+Likely on the first run. The `coverage.md` rubric in this walkthrough
+is deliberately strict — *"every numbered point in the outline is
+addressed in its own paragraph"* — and small judge models often read
+that too literally and reject an otherwise fine brief. When the loop
+hits `loop.max_iterations: 3` without converging, `on_exhausted:
+human_gate` fires a HITL prompt:
+
+```
+Loop on stage Expand the outline... did not converge after 3 iterations.
+
+  1. Accept handoff   — take the last iteration's brief as the artifact
+  2. Restart loop     — wipe iter_*/, run the whole loop again
+  3. Reject           — fail the stage and halt the run
+```
+
+Pick **Accept handoff** if the actual brief reads well. The judge being
+picky shouldn't gate you. Before deciding, inspect the per-iteration
+artifacts and the judge's verdicts on disk:
+
+```bash
+ls ~/.nexus/sessions/*/plugins/nexus.workflows.icm/r_*/02_brief/iter_*/
+cat ~/.nexus/sessions/*/plugins/nexus.workflows.icm/r_*/02_brief/iter_03/brief.md.icm.json
+```
+
+The `.icm.json` sidecar carries each iteration's `verdict` + `feedback`
+so you can tell whether the brief is genuinely weak or the rubric is
+unreasonable. If you keep hitting this every run, three knobs (in
+ascending effort):
+
+1. **Loosen the rubric** in `rubrics/coverage.md` — *"each outline point
+   is addressed somewhere in the body; interleaved coverage is fine."*
+2. **Use a stronger judge** — point the `judge` `model_role` at a more
+   capable model. Judge calls are single-shot, so cost impact is small.
+3. **Drop the LLM rubric from `loop.until`** and keep only the
+   word-count native validators. Move the LLM check to a `verifiers/`
+   entry instead — failures get logged but don't loop.
+
+When the loop exits — convergent or exhausted-then-accepted —
+`human_gate: end` fires again. Approve, and:
 
 ```
 icm.stage.completed                 { stage_id: 02_brief, iterations_run: 2, convergence_failed: false }
