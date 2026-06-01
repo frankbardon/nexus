@@ -245,12 +245,15 @@ artifact and must return JSON conforming to the baked-in
 ```yaml
 core:
   models:
+    default: writer
     writer:
-      provider: anthropic
-      model: claude-sonnet-4-6
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
     judge:
-      provider: anthropic
-      model: claude-sonnet-4-6
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 2048
 
 plugins:
   active:
@@ -276,6 +279,17 @@ Note what's **not** here: no `nexus.agent.react`, no
 `nexus.agent.orchestrator`, no separate planner. ICM is itself the agent
 loop — when `io.input` arrives it owns the conversation until the run
 completes.
+
+Two config details worth double-checking before you run:
+
+- The `provider:` value in each `core.models` entry takes the **full
+  plugin ID** (`nexus.llm.anthropic`), not a short name like `anthropic`.
+  Wrong provider IDs surface at runtime as
+  *"delegate status error: no LLM response (provider not active for this
+  role?)"*.
+- Every role a posture references must be defined. The `writer_base`
+  posture above declares `model_role: writer`, and `judge_basic`
+  declares `model_role: judge`, so `core.models` must define both.
 
 ## Step 4 — Run it
 
