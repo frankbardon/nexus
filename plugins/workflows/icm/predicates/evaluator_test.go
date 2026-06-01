@@ -311,8 +311,11 @@ func TestEvalCommand_Timeout(t *testing.T) {
 	if r.Verdict {
 		t.Errorf("expected fail on timeout")
 	}
-	if elapsed > 3*time.Second {
-		t.Errorf("timeout took too long: %s (expected ~1s)", elapsed)
+	// Allow up to ~5s: 1s context timeout + 2s sandbox WaitDelay + slack
+	// for slow CI. The point of the assertion is that the timeout fired,
+	// not that the kill is instantaneous.
+	if elapsed > 5*time.Second {
+		t.Errorf("timeout took too long: %s (expected ~1s + WaitDelay)", elapsed)
 	}
 	if r.Feedback == "" {
 		t.Errorf("expected non-empty feedback on timeout")
