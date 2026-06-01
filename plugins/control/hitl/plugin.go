@@ -77,6 +77,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.responded", p.handleResponse,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.cancel", p.handleCancel,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
 	if cfg, ok := ctx.Config["registry"].(map[string]any); ok {
@@ -165,6 +167,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "hitl.responded", Priority: 50},
+		{EventType: "hitl.cancel", Priority: 50},
 	}
 	if p.reg != nil {
 		subs = append(subs, engine.EventSubscription{EventType: "hitl.requested", Priority: 50})
@@ -179,6 +182,7 @@ func (p *Plugin) Emissions() []string {
 		"tool.register",
 		"before:hitl.requested",
 		"hitl.requested",
+		"hitl.responded",
 	}
 }
 
@@ -269,6 +273,38 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 		// Channel already drained — first-response-wins. The duplicate is a
 		// no-op rather than a warning to keep the async-channel path quiet.
 	}
+}
+
+// handleCancel resolves a pending HITLRequest from the requester side. It
+// removes any persisted request file and emits a synthetic hitl.responded
+// with Cancelled=true so the in-flight waiter in the requesting plugin
+// unblocks cleanly. Idempotent: a hitl.cancel for an already-resolved
+// request is a silent no-op (the synthetic response will not match any
+// pending channel and handleResponse drops it).
+func (p *Plugin) handleCancel(event engine.Event[any]) {
+	c, ok := event.Payload.(events.HITLCancel)
+	if !ok {
+		// Also accept map[string]any for permissive emitters.
+		m, ok2 := event.Payload.(map[string]any)
+		if !ok2 {
+			return
+		}
+		id, _ := m["request_id"].(string)
+		reason, _ := m["reason"].(string)
+		c = events.HITLCancel{SchemaVersion: events.HITLCancelVersion, RequestID: id, Reason: reason}
+	}
+	if c.RequestID == "" {
+		return
+	}
+	if p.reg != nil {
+		p.reg.removeRequest(c.RequestID)
+	}
+	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion,
+		RequestID:    c.RequestID,
+		Cancelled:    true,
+		CancelReason: c.Reason,
+	}
+	_ = p.bus.Emit("hitl.responded", resp)
 }
 
 // handleRequest mirrors hitl.requested to the on-disk registry. Only wired

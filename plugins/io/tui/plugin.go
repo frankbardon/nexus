@@ -45,6 +45,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "code.exec.stdout", Priority: 50},
 		{EventType: "plan.approval.request", Priority: 50},
 		{EventType: "plan.created", Priority: 50},
+		{EventType: "plan.progress", Priority: 50},
 		{EventType: "agent.plan", Priority: 50},
 		{EventType: "provider.fallback", Priority: 50},
 		{EventType: "session.file.created", Priority: 50},
@@ -118,6 +119,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("code.exec.stdout", p.handleCodeExecStdout, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.created", p.handlePlanCreated, engine.WithSource(pluginID)),
+		p.bus.Subscribe("plan.progress", p.handlePlanProgress, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.plan", p.handleAgentPlan, engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fallback", p.handleProviderFallback, engine.WithSource(pluginID)),
 		p.bus.Subscribe("session.file.created", p.handleFileChanged, engine.WithSource(pluginID)),
@@ -308,6 +310,19 @@ func (p *Plugin) handlePlanCreated(e engine.Event[any]) {
 		Steps:   steps,
 		Source:  result.Source,
 		TurnID:  result.TurnID,
+	})
+}
+
+func (p *Plugin) handlePlanProgress(e engine.Event[any]) {
+	pp, ok := e.Payload.(events.PlanProgress)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendPlanStepStatus(planStepStatusMsg{
+		PlanID: pp.PlanID,
+		StepID: pp.StepID,
+		Status: pp.Status,
+		Detail: pp.Detail,
 	})
 }
 

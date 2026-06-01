@@ -56,10 +56,10 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string           { return pluginID }
-func (p *Plugin) Name() string         { return name }
-func (p *Plugin) Version() string      { return version }
-func (p *Plugin) Dependencies() []string { return nil }
+func (p *Plugin) ID() string                     { return pluginID }
+func (p *Plugin) Name() string                   { return name }
+func (p *Plugin) Version() string                { return version }
+func (p *Plugin) Dependencies() []string         { return nil }
 func (p *Plugin) Requires() []engine.Requirement { return nil }
 func (p *Plugin) Capabilities() []engine.Capability {
 	return []engine.Capability{
@@ -162,9 +162,9 @@ func (p *Plugin) watch(dir string) error {
 		defer w.Close()
 
 		var (
-			timer    *time.Timer
-			pending  = make(map[string]struct{})
-			pendMu   sync.Mutex
+			timer   *time.Timer
+			pending = make(map[string]struct{})
+			pendMu  sync.Mutex
 		)
 		fire := func() {
 			pendMu.Lock()

@@ -24,9 +24,9 @@ const (
 	name     = "Delegate Runtime"
 	version  = "0.1.0"
 
-	toolName       = "delegate"
-	defaultMaxDepth   = 3
-	defaultCacheSize  = 256
+	toolName           = "delegate"
+	defaultMaxDepth    = 3
+	defaultCacheSize   = 256
 	capPostureRegistry = "posture.registry"
 )
 

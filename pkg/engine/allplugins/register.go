@@ -98,6 +98,9 @@ import (
 	// Skill plugins.
 	"github.com/frankbardon/nexus/plugins/skills"
 
+	// Workflow plugins.
+	icmworkflow "github.com/frankbardon/nexus/plugins/workflows/icm"
+
 	// System plugins.
 	dynvarsplugin "github.com/frankbardon/nexus/plugins/system/dynvars"
 
@@ -228,6 +231,9 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Skills
 	r.Register("nexus.skills", skills.New)
+
+	// Workflows
+	r.Register("nexus.workflows.icm", icmworkflow.New)
 
 	// System
 	r.Register("nexus.system.dynvars", dynvarsplugin.New)

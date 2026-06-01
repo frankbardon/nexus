@@ -118,6 +118,11 @@ func (b *Backend) execShell(ctx context.Context, req sandbox.ExecRequest) (sandb
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
+	// SIGKILL on the shell does not propagate to grandchildren (`sleep`,
+	// long-running tools, etc.), which keep stdout/stderr open and stall
+	// Wait in awaitGoroutines. WaitDelay forces the I/O pipes shut a
+	// bounded time after context cancel so Wait returns promptly.
+	cmd.WaitDelay = 2 * time.Second
 
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir

@@ -34,6 +34,12 @@
 - [Design System (Brief)](./desktop/design-system-brief.md)
 - [Design System (Full Reference)](./desktop/design-system.md)
 
+# ICM Workflows
+
+- [Overview](./icm/overview.md)
+- [End-to-End Walkthrough](./icm/walkthrough.md)
+- [Plugin Reference](./plugins/workflows-icm.md)
+
 # Plugin Reference
 
 - [Overview](./plugins/overview.md)

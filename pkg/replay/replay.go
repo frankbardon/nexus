@@ -31,15 +31,15 @@ import (
 // Event is one node in the reconstructed causation DAG. Mirrors the journal
 // Envelope with the fields callers walk explicitly.
 type Event struct {
-	Seq       uint64    `json:"seq"`
-	ParentSeq uint64    `json:"parent_seq,omitempty"`
-	ParentID  string    `json:"parent_id,omitempty"`
-	EventID   string    `json:"event_id,omitempty"`
-	Type      string    `json:"type"`
-	AgentID   string    `json:"agent_id,omitempty"`
-	Depth     int       `json:"depth,omitempty"`
-	Vetoed    bool      `json:"vetoed,omitempty"`
-	Payload   any       `json:"payload,omitempty"`
+	Seq       uint64 `json:"seq"`
+	ParentSeq uint64 `json:"parent_seq,omitempty"`
+	ParentID  string `json:"parent_id,omitempty"`
+	EventID   string `json:"event_id,omitempty"`
+	Type      string `json:"type"`
+	AgentID   string `json:"agent_id,omitempty"`
+	Depth     int    `json:"depth,omitempty"`
+	Vetoed    bool   `json:"vetoed,omitempty"`
+	Payload   any    `json:"payload,omitempty"`
 }
 
 // SceneSnap is the rebuilt content of a scene at a specific point in the

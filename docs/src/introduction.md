@@ -18,6 +18,7 @@ This means you can assemble exactly the agent you need by choosing which plugins
 - **Research agents** with large context windows and no tool access
 - **Multi-agent workflows** using the orchestrator to decompose tasks across worker subagents
 - **Document analysis pipelines** with PDF extraction and skill-based instructions
+- **File-driven multi-stage workflows** with the [ICM plugin](./icm/overview.md) — a folder on disk is the workflow, contracts per stage, loops + fan-out + human gates included
 - **Custom domain agents** by writing your own plugins and skills
 
 ## How This Documentation is Organized
@@ -26,6 +27,7 @@ This means you can assemble exactly the agent you need by choosing which plugins
 |---------|-----------------|
 | **Getting Started** | Installation, building from source, and creating your first config |
 | **Architecture** | Deep dive into the engine, event bus, plugin system, and session management |
+| **[ICM Workflows](./icm/overview.md)** | File-driven multi-stage agent workflows — rationale, mental model, end-to-end walkthrough |
 | **Plugin Reference** | Every built-in plugin with its configuration, events, and use cases |
 | **Reference** | Complete event type catalog and configuration reference |
 | **[Eval Harness](./eval/overview.md)** | Golden-trace replay, baseline diffs, online sampling, Inspect-AI-compatible JSON protocol |

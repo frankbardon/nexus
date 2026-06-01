@@ -283,6 +283,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rightRail.UpdateSteps(msg)
 		m.recalcLayout()
 
+	case planStepStatusMsg:
+		m.rightRail.UpdateStepStatus(msg)
+		m.recalcLayout()
+
 	case approvalRequestMsg:
 		m.approval = &approvalState{
 			request: msg,

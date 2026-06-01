@@ -901,3 +901,126 @@ observability collectors that want incremental progress subscribe here.
 | `Content` | string | Thinking content |
 | `Phase` | string | `"planning"`, `"executing"`, `"reasoning"` |
 | `Timestamp` | time.Time | When this occurred |
+
+---
+
+## ICM Workflow Events
+
+Emitted by `nexus.workflows.icm` on top of the generic `plan.created` /
+`plan.progress` surface. Every payload carries a `_schema_version` field
+(constants in `plugins/workflows/icm/icmtypes/types.go`).
+
+| Event Type | Payload | Description |
+|------------|---------|-------------|
+| `icm.run.started` | `ICMRunStarted` | Workspace loaded; run created; before stage 1 dispatches. |
+| `icm.run.completed` | `ICMRunCompleted` | All stages finished without halt. |
+| `icm.run.halted` | `ICMRunHalted` | Stage error policy halted, gate rejected, or run context cancelled. |
+| `icm.stage.started` | `ICMStageStarted` | Stage execution begins, before any `human_gate: start`. |
+| `icm.stage.completed` | `ICMStageCompleted` | Artifact written; any end gate resolved. |
+| `icm.stage.failed` | `ICMStageFailed` | Stage halted (dispatch error, rejected gate, or `loop.on_exhausted: error`). |
+| `icm.stage.iteration` | `ICMStageIteration` | One per loop iteration, immediately before the iteration's invocation. |
+| `icm.turn` | `ICMTurn` | After each turn within an invocation (richer-UI feed; basic UIs already see `plan.progress`). |
+| `icm.fanout.item` | `ICMFanoutItem` | Item lifecycle boundary in a fan-out stage (`active` → `completed` \| `failed`). |
+| `icm.predicate.failed` | `ICMPredicateFailed` | Any predicate evaluation returns `verdict=false`. Pass paths are not emitted. |
+
+**ICMRunStarted**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier (`r_<id>`); also the on-disk dir under the plugin's session data dir. |
+| `InstanceID` | string | Plugin instance ID (`nexus.workflows.icm` or `nexus.workflows.icm/<suffix>`). |
+| `WorkspaceRoot` | string | Absolute path to the loaded workspace. |
+| `WorkspaceName` | string | Last folder name of the workspace path. |
+| `Stages` | int | Stage count. |
+
+**ICMRunCompleted**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StagesRun` | int | Number of stages that completed. |
+| `AggregatePath` | string | Optional run aggregate path (set when a top-level aggregate is produced). |
+| `ElapsedSeconds` | int64 | Wall-clock seconds from `icm.run.started`. |
+
+**ICMRunHalted**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `Reason` | string | Free-text halt reason. |
+| `HaltedAtStage` | string | Stage ID where the halt fired (empty for pre-stage halts). |
+| `Cancelled` | bool | `true` when the halt was a context cancellation rather than a gate reject. |
+| `ElapsedSeconds` | int64 | Wall-clock seconds from `icm.run.started`. |
+
+**ICMStageStarted**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name (e.g. `02_brief`). |
+| `PostureName` | string | Derived posture name registered for this stage (`icm.<runID>.<stage_id>`). |
+| `Order` | int | 1-based stage order in the workspace. |
+
+**ICMStageCompleted**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `ArtifactPath` | string | Path to the final artifact. |
+| `IterationsRun` | int | Loop iterations executed (0 for non-looping stages). |
+| `ConvergenceFailed` | bool | `true` when the loop exhausted without satisfying `until`. |
+
+**ICMStageFailed**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `Reason` | string | Free-text failure reason. |
+
+**ICMStageIteration**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `ItemID` | string | Fan-out item ID (empty for non-fan-out stages). |
+| `Iteration` | int | 1-based iteration index. |
+| `MaxIterations` | int | `loop.max_iterations`. |
+| `ExitFailures` | []ConditionResult | Previous iteration's failing `until` predicates (empty on iteration 1). |
+
+**ICMTurn**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `ItemID` | string | Fan-out item ID (empty for non-fan-out stages). |
+| `Iteration` | int | Loop iteration index (0 for non-looping stages). |
+| `Turn` | int | 1-based turn index. |
+| `MaxTurns` | int | `turns.max`. |
+| `LastFailures` | []ConditionResult | Previous turn's failing validators (drives `until_valid` retry). |
+
+**ICMFanoutItem**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `ItemID` | string | Per-item ID (from `fan_out.item_id` gojq or fallback index). |
+| `Index` | int | 1-based item index. |
+| `Total` | int | Total items in the fan-out. |
+| `Status` | string | `"active"` \| `"completed"` \| `"failed"`. |
+| `Error` | string | Failure reason when `Status="failed"`. |
+
+**ICMPredicateFailed**
+| Field | Type | Description |
+|-------|------|-------------|
+| `RunID` | string | Run identifier. |
+| `StageID` | string | Stage folder name. |
+| `ItemID` | string | Fan-out item ID (empty for non-fan-out stages). |
+| `Container` | string | `"output.validators"` \| `"loop.until"` \| `"verifier"`. |
+| `PredicateName` | string | Predicate `name:` (or `<type>_<index>` fallback). |
+| `PredicateType` | string | `"schema"` \| `"regex"` \| `"native"` \| `"command"` \| `"llm"` \| `"human"`. |
+| `Feedback` | string | Predicate-supplied failure feedback. |
+
+**ConditionResult** (shared by `ICMStageIteration.ExitFailures` and `ICMTurn.LastFailures`)
+| Field | Type | Description |
+|-------|------|-------------|
+| `Type` | string | Predicate type. |
+| `Name` | string | Predicate name. |
+| `Verdict` | string | `"pass"` \| `"fail"`. |
+| `Feedback` | string | Predicate-supplied feedback. |
+| `Score` | *float64 | Optional numeric score (LLM judges typically populate this). |
