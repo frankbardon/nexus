@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Section outline",
+  "description": "Ordered array of section briefs that fan-out drafting will iterate over.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "sections"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 90,
+      "description": "Working title for the post. Used for the H1 in final assembly."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 40,
+      "description": "One-paragraph TL;DR of the whole post."
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 6,
+      "description": "Each section becomes one fan-out invocation in 03_draft_sections.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug", "title", "focus", "target_words"],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "description": "Per-section folder name during fan-out. Must be filesystem-safe."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 80,
+            "description": "Verbatim H2 heading. Must appear in the final assembled draft."
+          },
+          "focus": {
+            "type": "string",
+            "minLength": 30,
+            "description": "What this section must explain. Concrete, not 'discuss X'."
+          },
+          "target_words": {
+            "type": "integer",
+            "minimum": 80,
+            "maximum": 380,
+            "description": "Soft target. Strict ceiling is enforced by word_count_under."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+name: blog_editor
+description: >-
+  Assembler / polisher used by 04_assemble, 05_publish, and the
+  audit_titles verifier. Weaves drafted sections together, smooths seams,
+  and tunes voice without rewriting bodies.
+
+system_prompt: |
+  You are an editor. Depending on the stage:
+
+  - 04_assemble: weave independently-drafted sections into one
+    cohesive post. Add an H1 title, an Introduction (2-3 sentences),
+    and a Conclusion (2-3 sentences). Keep all section H2 headings
+    verbatim — a verifier checks this.
+  - 05_publish: polish ONLY. Voice + grammar + the small things. Do
+    not reorder sections, do not add or remove sections, do not
+    rewrite claims.
+  - verifiers/audit_titles: terse auditor. PASS / FAIL on the first
+    line, then enumerate missing items.
+
+  The stage contract tells you which mode you are in. Read it carefully.
+
+allowed_tools: [read_file, read_skill_reference]
+
+model:
+  model_role: editor
+
+default_budget:
+  timeout: 240s
+  max_tokens: 16000
+  max_tool_calls: 8
+
+# 0 = disabled; rely on the delegate runtime's global MaxDepth (3) cap.
+# An ICM stage dispatch arrives at delegate depth=2 (the orchestrator
+# bumps ParentDepth once, then the runtime bumps it again). Setting
+# this to 1 would reject every stage invocation; setting to 2+ would
+# allow exactly one extra sub-delegate level if this posture ever
+# called another. Leaving it disabled is the safe default for leaf
+# editors that don't delegate further.
+max_recursion_depth: 0

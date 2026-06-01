@@ -1,0 +1,28 @@
+# Blog Pipeline — workspace defaults.
+#
+# Postures referenced here must exist in the posture registry that
+# nexus.agent.postures loads at boot. The four names below are the
+# minimum set; per-stage contracts override agent.posture / model_role
+# where they need something different.
+
+defaults:
+  turn_policy: fixed
+  human_gate: none
+  on_error: halt
+
+  # Posture name (NOT a raw model identifier) for every type:llm
+  # predicate that omits its own model: field. A small, cheap posture
+  # is the right default — pass/fail judgment doesn't need a frontier
+  # model.
+  judge_posture: blog_small_judge
+
+  # Workspace-wide agent baseline. Per-stage agent blocks override
+  # per-field; absent fields here fall through to the workspace-level
+  # default_workflow_posture in plugin config.
+  agent:
+    posture: blog_workflow_default
+    model_role: writer
+    budget:
+      timeout_seconds: 180
+      max_tokens: 12000
+      max_tool_calls: 30
