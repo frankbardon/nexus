@@ -25,6 +25,17 @@ type planUpdateStep struct {
 	Status      string
 }
 
+// planStepStatusMsg carries a single-step status delta keyed by step ID,
+// the shape emitted by plan.progress events. Distinct from planUpdateMsg
+// (which carries the full ordered list from agent.plan) so step status
+// can transition without re-sending every other step.
+type planStepStatusMsg struct {
+	PlanID string
+	StepID string
+	Status string
+	Detail string
+}
+
 type fileChangedMsg struct {
 	Path   string
 	Action string

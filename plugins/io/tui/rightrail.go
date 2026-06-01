@@ -122,6 +122,26 @@ func (r *rightRail) UpdateSteps(msg planUpdateMsg) {
 	r.rebuildPlanViewport()
 }
 
+// UpdateStepStatus mutates one step's status by matching StepID. Used
+// by plan.progress events whose payload is keyed by step ID, not index.
+// Plans that arrived from a different PlanID are ignored — a stale
+// progress event must not stomp the current plan.
+func (r *rightRail) UpdateStepStatus(msg planStepStatusMsg) {
+	if r.plan == nil {
+		return
+	}
+	if msg.PlanID != "" && r.plan.PlanID != "" && msg.PlanID != r.plan.PlanID {
+		return
+	}
+	for i := range r.plan.Steps {
+		if r.plan.Steps[i].ID == msg.StepID {
+			r.plan.Steps[i].Status = msg.Status
+			r.rebuildPlanViewport()
+			return
+		}
+	}
+}
+
 func (r *rightRail) AddThinking(msg thinkingMsg) {
 	phase := msg.Phase
 	if phase == "" {

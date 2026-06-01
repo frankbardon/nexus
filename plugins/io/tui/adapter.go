@@ -136,6 +136,15 @@ func (a *Adapter) SendPlanUpdate(turnID string, steps []planUpdateStep) error {
 	return nil
 }
 
+// SendPlanStepStatus sends a single-step status delta to the TUI, the
+// shape emitted by plan.progress. Right rail matches by StepID.
+func (a *Adapter) SendPlanStepStatus(msg planStepStatusMsg) error {
+	if a.program != nil {
+		a.program.Send(msg)
+	}
+	return nil
+}
+
 // SendFileChanged notifies the TUI that a session file changed.
 func (a *Adapter) SendFileChanged(path, action string) error {
 	if a.program != nil {
