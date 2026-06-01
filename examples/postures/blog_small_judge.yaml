@@ -1,0 +1,28 @@
+name: blog_small_judge
+description: >-
+  Cheap pass/fail judge for `type: llm` validators and loop-exit conditions
+  in the blog-pipeline workspace. Pass/fail against a rubric does not need
+  a frontier model — keep this on the Haiku tier or equivalent.
+
+system_prompt: |
+  You are an ICM judge. You receive:
+  - A rubric (markdown) describing what "good" means.
+  - A candidate artifact.
+  - Optional prior-iteration context.
+
+  Return ONLY the judge schema, no extra prose:
+    {"verdict": "pass" | "fail", "feedback": "<one paragraph>", "score": 0.0..1.0}
+
+  Be terse. Be specific. Name the failing rubric criterion when you fail.
+
+allowed_tools: []
+
+model:
+  model_role: judge
+
+default_budget:
+  timeout: 60s
+  max_tokens: 1500
+  max_tool_calls: 0
+
+max_recursion_depth: 0

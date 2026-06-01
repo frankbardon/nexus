@@ -13,6 +13,7 @@ type codeExecStdoutMsg struct{ ui.CodeExecStdoutMessage }
 type planDisplayMsg struct{ ui.PlanDisplayMessage }
 type approvalRequestMsg struct{ ui.ApprovalRequestMessage }
 type askUserMsg struct{ ui.HITLRequestMessage }
+type workflowStatusMsg struct{ ui.WorkflowStatusMessage }
 
 // planUpdateMsg carries step status updates from the agent during execution.
 type planUpdateMsg struct {

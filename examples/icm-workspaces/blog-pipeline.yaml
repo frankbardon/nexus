@@ -1,0 +1,118 @@
+# Blog Pipeline — runnable Nexus config.
+#
+# Boots the example ICM workspace at examples/icm-workspaces/blog-pipeline/
+# against the Anthropic provider, with the six blog_* postures from
+# examples/postures/.
+#
+# Prerequisites:
+#   - ANTHROPIC_API_KEY in env or .env
+#   - Run from the repo root so the relative paths below resolve:
+#       bin/nexus -config examples/icm-workspaces/blog-pipeline.yaml
+#
+# What happens:
+#   1. nexus.agent.postures scans examples/postures/ and registers all
+#      six blog_* postures.
+#   2. nexus.workflows.icm loads the workspace and registers one derived
+#      posture per stage + verifier.
+#   3. nexus.io.tui collects user input on stdin. Drop a paragraph
+#      describing the topic; the workflow expands it into a full post.
+#   4. Stage 02_outline pauses at human_gate: start; review the outline
+#      via the HITL prompt before drafting begins.
+#   5. Stage 04_assemble loops up to 4 times until all exit predicates
+#      pass; a human check fires each iteration.
+#   6. Stage 05_publish pauses at human_gate: end; approve before the
+#      final post.md is finalized.
+#
+# Tip: to use the oneshot IO instead of the TUI (e.g. for scripted runs),
+# swap nexus.io.tui for nexus.io.oneshot and pass input_file:
+#     nexus.io.oneshot:
+#       input_file: ./examples/icm-workspaces/blog-pipeline/inputs/example_brief.md
+
+core:
+  log_level: info
+  tick_interval: 5s
+  max_concurrent_events: 200
+
+  # Model roles referenced by postures via model.model_role. The roles
+  # below are the union of every model_role declared in blog_*.yaml.
+  # Tune per-role as you see fit; the postures will pick up the change
+  # without edits.
+  models:
+    default: writer
+
+    writer:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 8192
+
+    editor:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 8192
+
+    researcher:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 8192
+
+    planner:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-6
+      max_tokens: 6144
+
+    judge:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 2048
+
+  sessions:
+    root: ~/.nexus/sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.tui              # interactive input + transcript display
+    - nexus.llm.anthropic       # provider for every model role
+    - nexus.agent.postures      # scans examples/postures/ for blog_*.yaml
+    - nexus.agent.delegate      # sub-agent runtime ICM dispatches each stage through
+    - nexus.control.hitl        # human_gate + type: human predicates
+    - nexus.workflows.icm       # the workflow engine itself
+
+  nexus.io.tui:
+    # Defaults are fine for a single-user interactive demo.
+
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+
+  nexus.agent.postures:
+    # Scan the bundled posture set. The plugin watches this directory
+    # with fsnotify, so edits to any blog_*.yaml hot-reload without a
+    # restart.
+    scan_dirs:
+      - ./examples/postures
+    debounce_ms: 250
+
+  nexus.workflows.icm:
+    workspace: ./examples/icm-workspaces/blog-pipeline
+    default_workflow_posture: blog_workflow_default
+    default_judge_posture: blog_small_judge
+
+    # 32 KB inline limit is the plugin default; bumped a little here so
+    # the assembled draft fits inline for downstream stages without a
+    # round-trip through read_file.
+    inline_artifact_limit_bytes: 49152
+
+    # Cap on loop-exhaustion restarts at the stage level. The example
+    # workspace has loop.max_iterations: 4 in 04_assemble; this caps the
+    # restart cycle on top of that.
+    loop_max_restarts: 2
+
+    # io.input content is interpreted as a file path when the path
+    # exists; otherwise it is written into 00_input/ as the raw brief.
+    treat_input_as_path_if_exists: true
+    input_filename: brief.md
+
+    # Emit thinking.step events scoped to each stage so any thinking-
+    # surface UI shows stage transitions inline.
+    emit_progress_thinking_steps: true

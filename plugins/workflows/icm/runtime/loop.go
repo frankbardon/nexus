@@ -58,6 +58,14 @@ func (o *Orchestrator) runLoopInner(ctx context.Context, stage *workspace.Stage,
 				MaxIterations: loop.MaxIterations,
 				ExitFailures:  prevFails,
 			})
+			o.emitWorkflowProgress(events.WorkflowProgress{
+				Stage:         stage.ID,
+				Iteration:     iter,
+				MaxIterations: loop.MaxIterations,
+				Status:        events.WorkflowStatusIterating,
+				Failures:      failureNamesFromConds(prevFails),
+				CurrentItem:   itemID,
+			})
 		}
 
 		// Record iteration state.

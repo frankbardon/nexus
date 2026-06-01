@@ -52,6 +52,22 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "session.file.updated", Priority: 50},
 		{EventType: "io.history.replay", Priority: 50},
 		{EventType: "cancel.complete", Priority: 50},
+		// ICM workflow progress — render each as a thinking-step row so
+		// long runs leave a readable audit trail in the scrollback.
+		{EventType: "icm.run.started", Priority: 50},
+		{EventType: "icm.run.completed", Priority: 50},
+		{EventType: "icm.run.halted", Priority: 50},
+		{EventType: "icm.stage.started", Priority: 50},
+		{EventType: "icm.stage.completed", Priority: 50},
+		{EventType: "icm.stage.failed", Priority: 50},
+		{EventType: "icm.stage.iteration", Priority: 50},
+		{EventType: "icm.turn", Priority: 50},
+		{EventType: "icm.fanout.item", Priority: 50},
+		{EventType: "icm.predicate.failed", Priority: 50},
+		// Generic, workflow-agnostic progress surface. Powers the
+		// right-rail workflow status panel; rendered identically
+		// regardless of which workflow plugin emits the event.
+		{EventType: "workflow.progress", Priority: 50},
 	}
 }
 
@@ -126,6 +142,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("session.file.updated", p.handleFileChanged, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.history.replay", p.handleHistoryReplay, engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.complete", p.handleCancelComplete, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.run.started", p.handleICMRunStarted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.run.completed", p.handleICMRunCompleted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.run.halted", p.handleICMRunHalted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.stage.started", p.handleICMStageStarted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.stage.completed", p.handleICMStageCompleted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.stage.failed", p.handleICMStageFailed, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.stage.iteration", p.handleICMStageIteration, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.turn", p.handleICMTurn, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.fanout.item", p.handleICMFanoutItem, engine.WithSource(pluginID)),
+		p.bus.Subscribe("icm.predicate.failed", p.handleICMPredicateFailed, engine.WithSource(pluginID)),
+		p.bus.Subscribe("workflow.progress", p.handleWorkflowProgress, engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("terminal IO plugin initialized")

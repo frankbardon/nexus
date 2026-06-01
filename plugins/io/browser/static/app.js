@@ -34,6 +34,11 @@ document.addEventListener('alpine:init', () => {
     // Plan (right rail)
     currentPlan: null,
 
+    // Workflow status — latest workflow.progress payload. Rendered as a
+    // sticky panel above the chat. Updated in place per envelope (no
+    // history); set to null on session reset.
+    workflowStatus: null,
+
     // Files
     files: [],
     viewingFile: null,  // { name, path, content, loading }
@@ -164,6 +169,31 @@ document.addEventListener('alpine:init', () => {
           });
           break;
 
+        case 'workflow_status':
+          // Replace prior snapshot — workflow status is "now", not history.
+          // Detail string already arrives human-friendly; this view just
+          // composes a line.
+          this.workflowStatus = {
+            workflowId: payload.workflow_id,
+            workflowName: payload.workflow_name || '',
+            runId: payload.run_id || '',
+            stage: payload.stage || '',
+            stageLabel: payload.stage_label || '',
+            stageIndex: payload.stage_index || 0,
+            stageTotal: payload.stage_total || 0,
+            iteration: payload.iteration || 0,
+            maxIterations: payload.max_iterations || 0,
+            turn: payload.turn || 0,
+            maxTurns: payload.max_turns || 0,
+            itemsDone: payload.items_done || 0,
+            itemsTotal: payload.items_total || 0,
+            currentItem: payload.current_item || '',
+            status: payload.status || '',
+            detail: payload.detail || '',
+            failures: payload.failures || [],
+          };
+          break;
+
         case 'code_exec_stdout':
           this._handleCodeExecStdout(payload, env);
           break;
@@ -204,6 +234,7 @@ document.addEventListener('alpine:init', () => {
         case 'session_reset':
           this.messages = [];
           this.currentPlan = null;
+          this.workflowStatus = null;
           this.status = { state: 'idle', detail: '' };
           break;
 

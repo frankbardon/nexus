@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/posture"
+	"github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
 )
 
@@ -120,23 +121,20 @@ func (b *PostureBuilder) BuildVerifier(verifier *workspace.Stage) (posture.Agent
 // registered under. Default instance: `icm.<stageID>`. Suffixed instance
 // (`nexus.workflows.icm/<suffix>`): `icm.<suffix>.<stageID>`.
 func (b *PostureBuilder) PostureName(stageID string) string {
-	if suffix := instanceSuffix(b.InstanceID); suffix != "" {
-		return "icm." + suffix + "." + stageID
-	}
-	return "icm." + stageID
+	return icmtypes.StagePostureName(b.InstanceID, stageID)
 }
 
 // SchemaName returns the engine SchemaRegistry key used for a stage's
 // `output` schema. Default instance: `icm.<stageID>.output`. Suffixed:
 // `icm.<suffix>.<stageID>.output`.
 func (b *PostureBuilder) SchemaName(stageID string) string {
-	return b.PostureName(stageID) + ".output"
+	return icmtypes.StageOutputSchemaName(b.InstanceID, stageID)
 }
 
 // PredicateSchemaName returns the schema registry key used for a per-
 // predicate JSON schema (output validator or loop `until` condition).
 func (b *PostureBuilder) PredicateSchemaName(stageID, predicateName string) string {
-	return b.PostureName(stageID) + "." + predicateName
+	return icmtypes.PredicateSchemaName(b.InstanceID, stageID, predicateName)
 }
 
 // build is the shared implementation of Build/BuildVerifier.
@@ -259,23 +257,10 @@ func (b *PostureBuilder) renderOperatorPrompt(stage *workspace.Stage) (string, e
 // `read_skill_reference_<suffix>` so multi-instance ICM configurations
 // don't collide on a shared tool name.
 func SkillToolName(instanceID string) string {
-	if suffix := instanceSuffix(instanceID); suffix != "" {
+	if suffix := icmtypes.InstanceSuffix(instanceID); suffix != "" {
 		return "read_skill_reference_" + suffix
 	}
 	return "read_skill_reference"
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// instanceSuffix returns the portion of an instance ID after the last
-// '/', or empty when the instance is the default (no suffix).
-func instanceSuffix(instanceID string) string {
-	if i := strings.LastIndexByte(instanceID, '/'); i >= 0 && i+1 < len(instanceID) {
-		return instanceID[i+1:]
-	}
-	return ""
 }
 
 // applyAgentOverrides layers stage AgentSpec fields onto the derived

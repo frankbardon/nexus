@@ -130,6 +130,60 @@
       <template x-if="$store.app.activeView === 'chat'">
         <div class="flex flex-col h-full">
 
+          <!-- Workflow status indicator — sticky panel above the chat
+               that updates in place on every workflow.progress envelope.
+               Hidden when no workflow is active. -->
+          <div x-show="$store.app.workflowStatus"
+               class="workflow-status px-4 py-2 border-b border-base-300 bg-base-200/40 text-xs flex items-center gap-3 flex-wrap">
+            <span class="font-semibold opacity-70">Workflow</span>
+            <template x-if="$store.app.workflowStatus">
+              <span class="flex items-center gap-3 flex-wrap">
+                <span class="badge badge-sm"
+                      :class="{
+                        'badge-success': $store.app.workflowStatus.status === 'completed',
+                        'badge-error':   $store.app.workflowStatus.status === 'halted' || $store.app.workflowStatus.status === 'failed',
+                        'badge-info':    $store.app.workflowStatus.status === 'started' || $store.app.workflowStatus.status === 'running',
+                        'badge-warning': $store.app.workflowStatus.status === 'iterating',
+                        'badge-ghost':   $store.app.workflowStatus.status === 'item_done'
+                      }"
+                      x-text="$store.app.workflowStatus.status"></span>
+                <span x-show="$store.app.workflowStatus.workflowName"
+                      class="opacity-70"
+                      x-text="$store.app.workflowStatus.workflowName"></span>
+                <span x-show="$store.app.workflowStatus.stage" class="flex items-center gap-1">
+                  <span class="opacity-50">stage</span>
+                  <span class="font-mono"
+                        x-text="$store.app.workflowStatus.stageLabel || $store.app.workflowStatus.stage"></span>
+                  <span x-show="$store.app.workflowStatus.stageTotal > 0"
+                        class="opacity-50"
+                        x-text="$store.app.workflowStatus.stageIndex + '/' + $store.app.workflowStatus.stageTotal"></span>
+                </span>
+                <span x-show="$store.app.workflowStatus.maxIterations > 0" class="opacity-70">
+                  iter <span class="font-mono"
+                              x-text="$store.app.workflowStatus.iteration + '/' + $store.app.workflowStatus.maxIterations"></span>
+                </span>
+                <span x-show="$store.app.workflowStatus.maxTurns > 0" class="opacity-70">
+                  turn <span class="font-mono"
+                              x-text="$store.app.workflowStatus.turn + '/' + $store.app.workflowStatus.maxTurns"></span>
+                </span>
+                <span x-show="$store.app.workflowStatus.itemsTotal > 0" class="opacity-70">
+                  items <span class="font-mono"
+                               x-text="$store.app.workflowStatus.itemsDone + '/' + $store.app.workflowStatus.itemsTotal"></span>
+                  <span x-show="$store.app.workflowStatus.currentItem" class="opacity-50"
+                        x-text="' (' + $store.app.workflowStatus.currentItem + ')'"></span>
+                </span>
+                <span x-show="$store.app.workflowStatus.detail"
+                      class="opacity-50 italic"
+                      x-text="$store.app.workflowStatus.detail"></span>
+                <span x-show="$store.app.workflowStatus.failures && $store.app.workflowStatus.failures.length > 0"
+                      class="opacity-60">
+                  last fail: <span class="font-mono"
+                                    x-text="(($store.app.workflowStatus.failures || []).join(', '))"></span>
+                </span>
+              </span>
+            </template>
+          </div>
+
           <!-- Messages -->
           <div x-ref="chatScroll" class="flex-1 overflow-y-auto chat-scroll px-4 py-4 space-y-1"
                x-effect="$nextTick(() => { if ($refs.chatScroll) $refs.chatScroll.scrollTop = $refs.chatScroll.scrollHeight })">

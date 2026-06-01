@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/session"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
@@ -137,6 +138,18 @@ func (o *Orchestrator) runFanOut(ctx context.Context, stage *workspace.Stage) (s
 					Total:         len(items),
 					Status:        status,
 					Error:         errMsg,
+				})
+				detail := "item done"
+				if status == "failed" {
+					detail = "item failed"
+				}
+				o.emitWorkflowProgress(events.WorkflowProgress{
+					Stage:       stage.ID,
+					ItemsDone:   i + 1,
+					ItemsTotal:  len(items),
+					CurrentItem: itemID,
+					Status:      events.WorkflowStatusItemDone,
+					Detail:      detail,
 				})
 			}
 

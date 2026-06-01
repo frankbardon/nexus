@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research output",
+  "description": "Structured research notes produced by 01_research from the input brief.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["topic", "audience", "key_concepts", "claims", "sources"],
+  "properties": {
+    "topic": {
+      "type": "string",
+      "minLength": 4,
+      "description": "Restatement of the topic in the researcher's own words."
+    },
+    "audience": {
+      "type": "string",
+      "minLength": 4,
+      "description": "Who the post is for. Specific roles + seniority, not 'developers'."
+    },
+    "key_concepts": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "definition"],
+        "properties": {
+          "name": { "type": "string", "minLength": 2 },
+          "definition": { "type": "string", "minLength": 20 }
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["statement", "support"],
+        "properties": {
+          "statement": { "type": "string", "minLength": 10 },
+          "support": { "type": "string", "minLength": 10 }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "url"],
+        "properties": {
+          "title": { "type": "string", "minLength": 2 },
+          "url": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  }
+}

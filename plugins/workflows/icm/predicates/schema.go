@@ -23,12 +23,12 @@ func (e *Evaluator) evalSchema(p *workspace.Predicate, artifact []byte, sc Stage
 		res.Feedback = "schema registry not configured"
 		return res
 	}
-	name := p.SchemaPath
-	if name == "" {
-		// The output-schema synthesizer names its predicate "output";
-		// look that up under the canonical PredicateSchemaName.
-		name = PredicateSchemaName(sc.InstanceID, sc.StageID, p.Name)
-	}
+	// SchemaPath in the workspace YAML is a file path consumed at
+	// registration time. The runtime lookup key is the canonical
+	// synthesized name — using SchemaPath here would miss the registry
+	// every time a contract sets `schema:` on its `type: schema`
+	// predicate.
+	name := PredicateSchemaName(sc.InstanceID, sc.StageID, p.Name)
 	schema, err := e.compileSchema(name)
 	if err != nil {
 		res.Verdict = false

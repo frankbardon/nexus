@@ -1524,6 +1524,40 @@ Source: `plugins/planners/static/plugin.go`. Approval auto-defaults to `never`
 
 ## Workflows
 
+### Generic workflow surface
+
+Workflow plugins (currently `nexus.workflows.icm`; planned to extend to other
+multi-stage runners) emit a workflow-agnostic event class so IO plugins can
+render a dedicated progress surface (a sticky panel in the TUI right rail; a
+status indicator chip in the browser) without subscribing to plugin-specific
+event taxonomies.
+
+**Event**: `workflow.progress` — payload `events.WorkflowProgress`
+(`pkg/events/workflow.go`).
+
+| Field            | Type            | Description |
+|------------------|-----------------|-------------|
+| `workflow_id`    | string          | Producer plugin instance ID (`nexus.workflows.icm`, `nexus.workflows.icm/script`, …). |
+| `workflow_name`  | string          | Human-readable workflow label (workspace name for ICM). |
+| `run_id`         | string          | Identifier for this particular run. |
+| `stage` / `stage_label` | string   | Machine ID + display label for the current stage. Empty at run start / end. |
+| `stage_index` / `stage_total` | int | 1-based position in the stage sequence. |
+| `iteration` / `max_iterations` | int | Loop iteration counters. `0` when the stage is not looping. |
+| `turn` / `max_turns` | int         | Inner-turn counters. `0` when not tracked. |
+| `items_done` / `items_total` | int | Fan-out progress. `0` when not a fan-out stage. |
+| `current_item`   | string          | Most recently completed item ID for fan-out. |
+| `status`         | string          | One of `started`, `running`, `iterating`, `item_done`, `completed`, `failed`, `halted`. |
+| `detail`         | string          | Short free-form one-liner suitable for display. |
+| `failures`       | list of strings | Names of predicates whose failure prevented this iteration / turn from converging. |
+
+ICM emits `workflow.progress` *alongside* its detailed `icm.*` events: the
+`icm.*` family feeds scrollback audit rows; `workflow.progress` feeds the
+dedicated status surface. Future workflow plugins can emit only the generic
+event and inherit the same UI treatment without per-plugin subscriptions.
+
+The TUI (`nexus.io.tui`) and browser (`nexus.io.browser`) subscribe to
+`workflow.progress` automatically when active.
+
 ### `nexus.workflows.icm`
 
 Source: `plugins/workflows/icm/plugin.go`. File-driven multi-stage workflow
@@ -1553,6 +1587,25 @@ Requires the `posture.registry` capability (provided by
 | `auto_include_skill_reference_tool`  | bool   | `true`        | When true, ICM automatically appends the `read_skill_reference[_<suffix>]` tool to each derived stage posture whose contract declares `inputs.skills`. Set false to require explicit listing in `agent.tools`. |
 | `predicate_command_timeout_seconds`  | int    | `30`          | Default timeout for `type: command` predicates when neither the predicate nor the stage budget specifies one. |
 | `emit_progress_thinking_steps`       | bool   | `true`        | When true, ICM emits `thinking.step` events with `Phase="icm.<stage_id>"` so UIs that render thinking surfaces show inline stage transitions. |
+
+#### Events
+
+Subscribes:
+
+- `io.input` — entry point. Each input begins a new workflow run.
+- `hitl.responded` — resumes a run paused at a human gate or `type: human` predicate.
+
+Emits (workflow lifecycle):
+
+- `icm.run.started` / `icm.run.completed` / `icm.run.halted` — overall run boundaries.
+- `icm.stage.started` / `icm.stage.completed` / `icm.stage.failed` — per-stage transitions.
+- `icm.stage.iteration` — fires once per loop iteration with the prior iteration's `exit_failures`.
+- `icm.turn` — fires once per inner turn with the turn's validator failures.
+- `icm.fanout.item` — per-item lifecycle in a fan-out stage (`active`, `completed`, `failed`).
+- `icm.predicate.failed` — fires for every predicate evaluation whose verdict is `fail`.
+- `plan.created` / `plan.progress` — generic plan surface mirrored for any UI that already renders ReAct plans.
+- `workflow.progress` — engine-generic structured progress (see [Generic workflow surface](#generic-workflow-surface) below).
+- `hitl.requested` — human gates and `type: human` predicates dispatch through HITL.
 
 ### `nexus.skills`
 

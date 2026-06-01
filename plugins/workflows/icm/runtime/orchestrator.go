@@ -110,6 +110,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.emitRunStarted()
+	o.emitWorkflowProgress(events.WorkflowProgress{
+		Status: events.WorkflowStatusStarted,
+		Detail: "workflow started",
+	})
 
 	for i := range o.Workflow.Stages {
 		stage := &o.Workflow.Stages[i]
@@ -136,6 +140,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			RunID:          o.RunID,
 			StagesRun:      len(o.Workflow.Stages),
 			ElapsedSeconds: elapsed,
+		})
+		o.emitWorkflowProgress(events.WorkflowProgress{
+			Status: events.WorkflowStatusCompleted,
+			Detail: "workflow completed",
 		})
 	}
 	return nil
@@ -215,6 +223,11 @@ func (o *Orchestrator) haltRun(stageID, reason string, cancelled bool, startedAt
 			Cancelled:      cancelled,
 			ElapsedSeconds: int64(time.Since(startedAt).Seconds()),
 		})
+		o.emitWorkflowProgress(events.WorkflowProgress{
+			Stage:  stageID,
+			Status: events.WorkflowStatusHalted,
+			Detail: reason,
+		})
 	}
 	return cause
 }
@@ -262,19 +275,25 @@ func (o *Orchestrator) withState(fn func(*session.RunState)) {
 	fn(o.state)
 }
 
-// stageStateRef returns a mutable pointer into o.state.Stages keyed by ID.
-// Panics on missing — the orchestrator must initialize every stage in
-// initState, so a miss is a programming error. Callers that mutate
-// through the returned pointer in a goroutine must wrap the access in
-// withState; sequential callers (top-level Run, runStage, runLoop) can
-// rely on the in-order semantics of the surrounding code.
+// stageStateRef returns a mutable pointer into o.state.Stages keyed by ID,
+// or nil when the ID is not a primary stage. Verifiers run through the same
+// runInvocation surface as stages but their state lives in o.state.Verifiers
+// rather than o.state.Stages, so a verifier ID is a legitimate miss here.
+// Callers that mutate through the returned pointer in a goroutine must wrap
+// the access in withState; sequential callers (top-level Run, runStage,
+// runLoop) can rely on the in-order semantics of the surrounding code.
+//
+// Stage-only callers (runStage, runLoop, runFanOut, runOutput) expect a
+// non-nil return — those paths never touch verifiers, so a nil here would
+// indicate a programming error and the subsequent nil-deref is the
+// intended fail-fast.
 func (o *Orchestrator) stageStateRef(stageID string) *session.StageState {
 	for i := range o.state.Stages {
 		if o.state.Stages[i].ID == stageID {
 			return &o.state.Stages[i]
 		}
 	}
-	panic(fmt.Sprintf("orchestrator: stage %q not registered in state", stageID))
+	return nil
 }
 
 // cloneState returns a deep-enough copy of the RunState for marshalling.

@@ -165,6 +165,33 @@ type WorkerStatusMessage struct {
 	ParentTurnID string `json:"parent_turn_id,omitempty"`
 }
 
+// WorkflowStatusMessage powers a dedicated workflow status surface in the
+// UI — a sticky panel in the TUI right rail; a header indicator in the
+// browser. One message per workflow.progress bus event.
+//
+// IO plugins translate events.WorkflowProgress into this shape so the
+// UI rendering code is provider-agnostic: ICM, planexec, and any future
+// workflow plugin look the same in the panel.
+type WorkflowStatusMessage struct {
+	WorkflowID    string   `json:"workflow_id"`
+	WorkflowName  string   `json:"workflow_name,omitempty"`
+	RunID         string   `json:"run_id"`
+	Stage         string   `json:"stage,omitempty"`
+	StageLabel    string   `json:"stage_label,omitempty"`
+	StageIndex    int      `json:"stage_index,omitempty"`
+	StageTotal    int      `json:"stage_total,omitempty"`
+	Iteration     int      `json:"iteration,omitempty"`
+	MaxIterations int      `json:"max_iterations,omitempty"`
+	Turn          int      `json:"turn,omitempty"`
+	MaxTurns      int      `json:"max_turns,omitempty"`
+	ItemsDone     int      `json:"items_done,omitempty"`
+	ItemsTotal    int      `json:"items_total,omitempty"`
+	CurrentItem   string   `json:"current_item,omitempty"`
+	Status        string   `json:"status"`
+	Detail        string   `json:"detail,omitempty"`
+	Failures      []string `json:"failures,omitempty"`
+}
+
 // SessionInfo describes a connected UI session.
 type SessionInfo struct {
 	ID           string    `json:"id"`

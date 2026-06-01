@@ -1,0 +1,32 @@
+name: blog_workflow_default
+description: >-
+  Baseline posture for every stage in the blog-pipeline ICM workspace. Stage
+  contracts override per-field; this provides defaults for system prompt,
+  tools, and budget.
+
+system_prompt: |
+  You are a sub-agent inside the blog-pipeline ICM workflow. You see one
+  stage at a time. Each invocation arrives as an <icm_turn> XML envelope
+  carrying grounding, prior artifacts, and the current stage instructions.
+
+  Rules that apply across every stage:
+  - Output ONLY what the stage contract asks for. No commentary. No "I'll
+    now produce..." preambles.
+  - Respect the artifact format declared in <output>. If the stage emits
+    JSON, emit ONLY the JSON document — no Markdown fence, no prose.
+  - Treat the house_rules.md grounding as binding. Other layers override
+    it only when they say so explicitly.
+
+allowed_tools: [read_file]
+
+model:
+  model_role: writer
+
+default_budget:
+  timeout: 180s
+  max_tokens: 12000
+  max_tool_calls: 30
+
+# 0 = disabled. The delegate runtime's MaxDepth (3) covers the cap.
+# See blog_editor.yaml for the depth-math explanation.
+max_recursion_depth: 0

@@ -1,0 +1,30 @@
+name: blog_writer
+description: >-
+  Section drafter used by 03_draft_sections. Writes ONE section of a blog
+  post in isolation, holding the focus + word cap given in the fan-out item.
+
+system_prompt: |
+  You are a section drafter. Each invocation produces exactly one body
+  section of a blog post. You do not introduce the post, you do not
+  conclude it, and you do not refer to adjacent sections — they are
+  being drafted by other instances in parallel.
+
+  The first line of your output is the verbatim H2 from the fan-out
+  item's `title` field. Stay under the word cap declared by the stage's
+  word_count_under validator. Aim for the section's target_words ± 20%.
+
+  Consult the section-writer skill before drafting. Use
+  read_skill_reference to pull the section_examples when you need a
+  shape reference.
+
+allowed_tools: [read_file, read_skill_reference]
+
+model:
+  model_role: writer
+
+default_budget:
+  timeout: 180s
+  max_tokens: 6000
+  max_tool_calls: 6
+
+max_recursion_depth: 0

@@ -275,6 +275,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case codeExecStdoutMsg:
 		m.chat.AppendCodeExecStdout(msg.CallID, msg.TurnID, msg.Chunk, msg.Final, msg.Truncated)
 
+	case workflowStatusMsg:
+		m.rightRail.SetWorkflowStatus(msg)
+		m.chat.SetStatus(statusMsg{ui.StatusMessage{
+			State:  "workflow." + msg.Status,
+			Detail: workflowStatusLine(msg.WorkflowStatusMessage),
+		}})
+		m.agentBusy = msg.Status != "completed" && msg.Status != "halted" && msg.Status != "failed"
+		m.recalcLayout()
+
 	case planDisplayMsg:
 		m.rightRail.SetPlan(msg)
 		m.recalcLayout()

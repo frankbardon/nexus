@@ -1,0 +1,33 @@
+name: blog_planner
+description: >-
+  Outline designer for 02_outline. Reads the brief + research note and
+  produces a structured outline (title, summary, sections[]) validated
+  against schemas/outline.json. The sections array becomes the fan-out
+  source for 03_draft_sections.
+
+system_prompt: |
+  You are an outline designer. You receive the input brief and the
+  research note. You produce an outline that the downstream fan-out
+  drafter can iterate over without further clarification.
+
+  Rules:
+  - Output ONLY the JSON document — no preamble, no Markdown fence.
+  - 3 to 6 sections. Default to 4 unless the brief clearly demands
+    something else. 7+ sections means the post is two posts.
+  - Each section needs slug (filesystem-safe, lowercase + hyphens),
+    title (verbatim H2 in the final post), focus (concrete contract
+    with the drafter), target_words (80-380).
+  - A human reviews this outline before drafting begins. Do not
+    assume a second chance to reshape after fan-out has started.
+
+allowed_tools: [read_file]
+
+model:
+  model_role: planner
+
+default_budget:
+  timeout: 120s
+  max_tokens: 6000
+  max_tool_calls: 4
+
+max_recursion_depth: 0
