@@ -322,6 +322,58 @@ func TestOrchestrator_HappyPath(t *testing.T) {
 	}
 }
 
+// TestOrchestrator_PlanProgressEmitted verifies that every stage
+// transition fires a plan.progress event so generic UIs (TUI plan
+// widget, browser plan view) flip step status without subscribing to
+// the icm.* event family. Expectation: one "active" + one "completed"
+// per stage, in execution order.
+func TestOrchestrator_PlanProgressEmitted(t *testing.T) {
+	f := newFixture(t, "01_a", "02_b")
+	f.disp.outputs = []delegate.Output{
+		{Result: "A output", Status: delegate.StatusSuccess},
+		{Result: "B output", Status: delegate.StatusSuccess},
+	}
+
+	var mu sync.Mutex
+	var got []events.PlanProgress
+	f.bus.Subscribe("plan.progress", func(ev engine.Event[any]) {
+		pp, ok := ev.Payload.(events.PlanProgress)
+		if !ok {
+			return
+		}
+		mu.Lock()
+		got = append(got, pp)
+		mu.Unlock()
+	})
+
+	if err := f.orch.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 4 {
+		t.Fatalf("plan.progress count = %d (%+v); want 4 (active+completed per stage)", len(got), got)
+	}
+	want := []struct {
+		StepID string
+		Status string
+	}{
+		{"01_a", "active"},
+		{"01_a", "completed"},
+		{"02_b", "active"},
+		{"02_b", "completed"},
+	}
+	for i, w := range want {
+		if got[i].StepID != w.StepID || got[i].Status != w.Status {
+			t.Errorf("plan.progress[%d] = {%q,%q}; want {%q,%q}", i, got[i].StepID, got[i].Status, w.StepID, w.Status)
+		}
+		if got[i].PlanID != f.orch.RunID {
+			t.Errorf("plan.progress[%d].PlanID = %q; want RunID %q", i, got[i].PlanID, f.orch.RunID)
+		}
+	}
+}
+
 // 2. Until-valid turn loop: first turn fails validator, second turn
 // passes. One stage, two turns.
 func TestOrchestrator_TurnsUntilValid_PassesOnRetry(t *testing.T) {

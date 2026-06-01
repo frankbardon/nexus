@@ -25,6 +25,7 @@ func (o *Orchestrator) runStage(ctx context.Context, stage *workspace.Stage, ord
 
 		if o.Bus != nil {
 			_ = o.Bus.Emit("icm.stage.started", makeStageStarted(o.RunID, stage.ID, o.PostureBuilder.PostureName(stage.ID), order))
+			o.emitPlanProgress(stage.ID, "active", "")
 		}
 
 		gate := o.humanGateFor(stage)
@@ -87,9 +88,28 @@ func (o *Orchestrator) runStage(ctx context.Context, stage *workspace.Stage, ord
 				completed.IterationsRun = len(state.Iterations)
 			}
 			_ = o.Bus.Emit("icm.stage.completed", completed)
+			o.emitPlanProgress(stage.ID, "completed", artifactPath)
 		}
 		return nil
 	}
+}
+
+// emitPlanProgress bridges ICM's stage lifecycle into the engine-generic
+// plan.progress surface so any UI that already renders plan.created sees
+// stage transitions without subscribing to the icm.* family. PlanID
+// mirrors RunID — the same ID surfaced by emitPlanCreated in run.go.
+func (o *Orchestrator) emitPlanProgress(stageID, status, detail string) {
+	if o.Bus == nil {
+		return
+	}
+	_ = o.Bus.Emit("plan.progress", events.PlanProgress{
+		SchemaVersion: events.PlanProgressVersion,
+		TurnID:        o.ParentTurnID,
+		PlanID:        o.RunID,
+		StepID:        stageID,
+		Status:        status,
+		Detail:        detail,
+	})
 }
 
 // dispatchStage selects the right execution shape for a stage. Returns the
@@ -273,6 +293,7 @@ func (o *Orchestrator) failStage(stage *workspace.Stage, cause error) error {
 			StageID:       stage.ID,
 			Reason:        cause.Error(),
 		})
+		o.emitPlanProgress(stage.ID, "failed", cause.Error())
 	}
 	return cause
 }
