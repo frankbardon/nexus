@@ -296,13 +296,7 @@ func TestEvalCommand_StderrFallback(t *testing.T) {
 
 func TestEvalCommand_Timeout(t *testing.T) {
 	dir := t.TempDir()
-	// Drain stdin before sleeping so the host sandbox's stdin copy
-	// goroutine can finish quickly when the process is killed. (See
-	// https://pkg.go.dev/os/exec#Cmd.Cancel: when Stdin is a non-File,
-	// Wait blocks on the copy goroutine even after the process dies
-	// unless WaitDelay is set on the host backend, which today it
-	// isn't.)
-	writeScript(t, dir, "slow.sh", "#!/bin/sh\ncat >/dev/null\nwhile true; do sleep 1; done\n")
+	writeScript(t, dir, "slow.sh", "#!/bin/sh\nwhile true; do sleep 1; done\n")
 	e := newEvaluator(t)
 	p := &workspace.Predicate{
 		Type:           workspace.PredCommand,
