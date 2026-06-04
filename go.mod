@@ -16,7 +16,7 @@ require (
 	github.com/mark3labs/mcp-go v0.54.1
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	github.com/tetratelabs/wazero v1.11.0
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/traefik/yaegi v0.16.1
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/yosida95/uritemplate/v3 v3.0.2
