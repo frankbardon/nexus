@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/coder/websocket v1.8.14
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/itchyny/gojq v0.12.16
+	github.com/itchyny/gojq v0.12.19
 	github.com/klauspost/compress v1.18.6
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mark3labs/mcp-go v0.54.1
@@ -65,7 +65,7 @@ require (
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
-	github.com/itchyny/timefmt-go v0.1.6 // indirect
+	github.com/itchyny/timefmt-go v0.1.8 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
 	github.com/labstack/echo/v4 v4.13.3 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect
