@@ -151,8 +151,14 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 9 — rate limiter pauses the goroutine
+	// until quota is available; deferring it past the cheap structural
+	// vetoers (endless_loop=6, token_budget=7) avoids wasting a pause on
+	// requests that are about to be vetoed anyway. Sits below
+	// tool_filter (=10) so a request reshaped to drop disallowed tools
+	// still gets rate-limited normally. See #121.
 	return []engine.EventSubscription{
-		{EventType: "before:llm.request", Priority: 8},
+		{EventType: "before:llm.request", Priority: 9},
 	}
 }
 

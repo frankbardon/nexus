@@ -86,6 +86,10 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 10 — mutates the request tool list after
+	// rate_limiter (=9) has released the goroutine but before input
+	// scanners (prompt_injection=11, stop_words=12) read the final shape.
+	// See #121 for the before:llm.request priority map.
 	return []engine.EventSubscription{
 		{EventType: "before:llm.request", Priority: 10},
 	}

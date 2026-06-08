@@ -200,8 +200,12 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 7 — cheap counter check + reservation
+	// (estimate_factor headroom). Runs right after endless_loop (=6) so a
+	// budget-exceeded veto short-circuits rate_limiter (=9), mutators, and
+	// HITL approval (=13). See #121.
 	return []engine.EventSubscription{
-		{EventType: "before:llm.request", Priority: 10},
+		{EventType: "before:llm.request", Priority: 7},
 		{EventType: "llm.response", Priority: 0},
 		{EventType: "core.error", Priority: 0},
 	}

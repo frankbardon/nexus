@@ -1845,6 +1845,43 @@ Gates are vetoable handlers that subscribe to `before:*` events and may block
 or transform them. See [`.claude/docs/gates.md`](../../../.claude/docs/gates.md)
 for the underlying veto mechanics.
 
+### Pipeline ordering on `before:*` events
+
+Handlers on a `before:*` event run in ascending `Priority` (lower runs first);
+dispatch breaks at the first veto. Handlers that share a priority fall back
+to **subscription order** — the first `Subscribe` call runs first, and the
+bus uses a stable sort so this tiebreak is deterministic across rebuilds
+and reorders of `plugins.active`. The engine logs one `WARN` at boot for
+every `(before:*, priority)` tuple shared by two or more handlers — re-space
+the priorities or accept the registration-order tiebreak knowingly.
+
+The shipped gates encode an explicit policy in their priorities so safety
+outcomes don't depend on activation order. The values below are the
+authoritative pipeline; treat them as a contract when adding a new gate.
+
+`before:io.output` — mutate-then-veto pipeline:
+
+| Priority | Gate | Role |
+|---|---|---|
+| 8 | `nexus.gate.content_safety` | Redact (mutate) first, or veto if `action=block` |
+| 9 | `nexus.gate.json_schema` | Validate / retry on post-redaction content; may mutate |
+| 10 | `nexus.gate.stop_words` | Final ban check on the content that will ship |
+| 12 | `nexus.gate.output_length` | Truncate-retry mutation last |
+
+`before:llm.request` — cheap-structural → mutators → input-scanners → HITL:
+
+| Priority | Gate | Role |
+|---|---|---|
+| 6 | `nexus.gate.endless_loop` | Iteration counter; structural exit |
+| 7 | `nexus.gate.token_budget` | Budget reservation; structural |
+| 8 | `nexus.tool.discovery.progressive` | Mutates tool list (drill-down) |
+| 9 | `nexus.gate.rate_limiter` | Pause until quota available |
+| 10 | `nexus.gate.tool_filter` | Mutates tool list (allow/block) |
+| 11 | `nexus.gate.prompt_injection` | Pattern-scan input |
+| 12 | `nexus.gate.stop_words` | Pattern-scan input |
+| 13 | `nexus.gate.approval_policy` | May trigger HITL — most expensive |
+| 15 | `nexus.gate.context_window` | Compaction trigger |
+
 ### `nexus.gate.endless_loop`
 
 Source: `plugins/gates/endless_loop/plugin.go`.

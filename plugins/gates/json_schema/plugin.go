@@ -138,8 +138,11 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// Priority 9 places json_schema between content_safety (8) and
+	// stop_words (10) on before:io.output, so schema retry/validation runs
+	// on post-redaction content but before the final ban check. See #121.
 	return []engine.EventSubscription{
-		{EventType: "before:io.output", Priority: 10},
+		{EventType: "before:io.output", Priority: 9},
 		{EventType: "llm.response", Priority: 99},
 	}
 }

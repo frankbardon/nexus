@@ -86,8 +86,12 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 6 — pure iteration counter, structural
+	// exit condition. Runs ahead of every other gate so a loop-cap veto
+	// short-circuits costlier checks (token_budget, rate_limiter, HITL).
+	// See #121 for the before:llm.request priority map.
 	return []engine.EventSubscription{
-		{EventType: "before:llm.request", Priority: 10},
+		{EventType: "before:llm.request", Priority: 6},
 		{EventType: "agent.turn.start", Priority: 5},
 		{EventType: "io.input", Priority: 5},
 	}

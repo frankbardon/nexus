@@ -90,8 +90,14 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 12 places stop_words after the cheap
+	// structural gates (endless_loop=6, token_budget=7) and request-shape
+	// mutators (rate_limiter=9, tool_filter=10), but before approval_policy
+	// (=13) which may trigger HITL. before:io.output priority 10 keeps
+	// stop_words as the final ban check after content_safety (=8) redaction
+	// and json_schema (=9) format-retry. See #121.
 	return []engine.EventSubscription{
-		{EventType: "before:llm.request", Priority: 10},
+		{EventType: "before:llm.request", Priority: 12},
 		{EventType: "before:io.output", Priority: 10},
 	}
 }

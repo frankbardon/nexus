@@ -110,8 +110,11 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 11 — input scanner; runs after request
+	// mutators (tool_filter=10) so it scans the final outbound shape, and
+	// ahead of stop_words (=12) and approval_policy (=13). See #121.
 	return []engine.EventSubscription{
-		{EventType: "before:llm.request", Priority: 10},
+		{EventType: "before:llm.request", Priority: 11},
 	}
 }
 
