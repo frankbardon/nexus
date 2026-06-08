@@ -98,6 +98,10 @@ type Plugin struct {
 	subtasks    []subtask
 	spawnToTask map[string]int // spawnID -> subtask index
 	activeCount int            // number of currently running workers
+	// completedSpawns dedups subagent.complete events by SpawnID. A duplicate
+	// completion (mis-emitted by a flaky integration, a replay tool, etc.)
+	// would otherwise double-decrement activeCount and re-fire synthesis.
+	completedSpawns map[string]struct{}
 
 	unsubs []func()
 }
@@ -112,6 +116,7 @@ func New() engine.Plugin {
 		workerModelRole:       defaultWorkerRole,
 		synthesisModelRole:    defaultSynthesisRole,
 		spawnToTask:           make(map[string]int),
+		completedSpawns:       make(map[string]struct{}),
 	}
 }
 
@@ -351,6 +356,7 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.streamed = false
 	p.subtasks = nil
 	p.spawnToTask = make(map[string]int)
+	p.completedSpawns = make(map[string]struct{})
 	p.activeCount = 0
 	p.phase = phaseDecomposing
 
@@ -584,6 +590,14 @@ func (p *Plugin) dispatchReadyWorkers() {
 	// Update phase based on what we found.
 	if len(toDispatch) == 0 && p.activeCount == 0 {
 		// Nothing left to dispatch or wait for — move to synthesis.
+		// Guard: only transition from dispatching/executing. A duplicate
+		// subagent.complete event arriving after synthesis already started
+		// would otherwise re-fire sendSynthesizeRequest, double-emitting
+		// the synthesis turn.
+		if p.phase == phaseSynthesizing || p.phase == phaseIdle {
+			p.mu.Unlock()
+			return
+		}
 		p.phase = phaseSynthesizing
 		turnID := p.currentTurnID
 		p.mu.Unlock()
@@ -644,9 +658,11 @@ func (p *Plugin) dispatchReadyWorkers() {
 
 	p.emitStatus("thinking", fmt.Sprintf("Dispatching %d worker(s)", len(spawns)))
 
-	// Spawn workers. The subagent plugin handles these events synchronously,
-	// so each spawn blocks until the subagent completes. We emit them and rely
-	// on subagent.complete events to track progress.
+	// Spawn workers. Each subagent.spawn event is fire-and-forget: the subagent
+	// plugin handles it in its own goroutine (plugins/agents/subagent/plugin.go
+	// handleSubagentSpawn) and Emit returns immediately. Workers therefore run
+	// concurrently up to maxWorkers; progress is tracked via subagent.complete
+	// events which decrement activeCount and re-enter dispatchReadyWorkers.
 	for _, s := range spawns {
 		// Build a focused system prompt for the worker with XML boundaries.
 		var workerPrompt strings.Builder
@@ -664,12 +680,18 @@ func (p *Plugin) dispatchReadyWorkers() {
 			"task", s.task,
 		)
 
-		_ = p.bus.Emit("subagent.spawn", events.SubagentSpawn{SchemaVersion: events.SubagentSpawnVersion, SpawnID: s.spawnID,
-			Task:         s.task,
-			SystemPrompt: workerPrompt.String(),
-			Tools:        s.tools,
-			ModelRole:    workerRole,
-			ParentTurnID: turnID,
+		_ = p.bus.Emit("subagent.spawn", events.SubagentSpawn{
+			SchemaVersion: events.SubagentSpawnVersion,
+			SpawnID:       s.spawnID,
+			Task:          s.task,
+			SystemPrompt:  workerPrompt.String(),
+			Tools:         s.tools,
+			ModelRole:     workerRole,
+			ParentTurnID:  turnID,
+			// Orchestrator is a top-level agent — its workers are depth 1.
+			// If a worker recursively spawns its own subagents the chain
+			// continues via subagent's own ParentDepth-aware push.
+			ParentDepth: 0,
 		})
 	}
 }
@@ -684,6 +706,16 @@ func (p *Plugin) handleSubagentComplete(complete events.SubagentComplete) {
 		p.mu.Unlock()
 		return
 	}
+
+	// Dedup: a duplicate subagent.complete (replay tool, mis-emitting
+	// integration, network retry on a hosted runner) would otherwise
+	// double-decrement activeCount below zero and re-fire synthesis.
+	if _, already := p.completedSpawns[complete.SpawnID]; already {
+		p.logger.Warn("duplicate subagent.complete ignored", "spawn_id", complete.SpawnID)
+		p.mu.Unlock()
+		return
+	}
+	p.completedSpawns[complete.SpawnID] = struct{}{}
 
 	delete(p.spawnToTask, complete.SpawnID)
 

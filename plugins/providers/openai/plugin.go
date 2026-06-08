@@ -61,12 +61,13 @@ type Plugin struct {
 	filesAPIURL string
 	fileCache   *fileCache
 
-	mu                 sync.Mutex
-	currentRequestMeta map[string]any
-	currentRequestTags map[string]string // copied to llm.response for cost attribution
-	cancelFunc         context.CancelFunc
-	requestSeq         int
-	sessionFileIDs     []string // file_ids uploaded this session (for delete_on_shutdown)
+	mu sync.Mutex
+	// cancels indexes in-flight HTTP request cancel functions by
+	// LLMRequest.RequestID; see the matching field on the Anthropic and
+	// Gemini providers for the concurrent-fan-out rationale.
+	cancels        map[string]context.CancelFunc
+	requestSeq     int
+	sessionFileIDs []string // file_ids uploaded this session (for delete_on_shutdown)
 }
 
 // New creates a new OpenAI provider plugin.
@@ -218,12 +219,15 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 
 func (p *Plugin) handleCancel(event engine.Event[any]) {
 	p.mu.Lock()
-	cancel := p.cancelFunc
-	p.cancelFunc = nil
+	cancels := p.cancels
+	p.cancels = make(map[string]context.CancelFunc)
 	p.mu.Unlock()
 
-	if cancel != nil {
-		p.logger.Info("cancelling in-flight LLM request")
+	if len(cancels) == 0 {
+		return
+	}
+	p.logger.Info("cancelling in-flight LLM requests", "count", len(cancels))
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -337,8 +341,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	reqCtx, cancel := context.WithCancel(context.Background())
+	if req.RequestID == "" {
+		req.RequestID = engine.GenerateID()
+	}
 	p.mu.Lock()
-	p.cancelFunc = cancel
+	if p.cancels == nil {
+		p.cancels = make(map[string]context.CancelFunc)
+	}
+	p.cancels[req.RequestID] = cancel
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
@@ -356,7 +366,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	resp, err := p.doWithRetry(reqCtx, makeReq)
 	if err != nil {
 		p.mu.Lock()
-		p.cancelFunc = nil
+		delete(p.cancels, req.RequestID)
 		p.mu.Unlock()
 		if reqCtx.Err() == context.Canceled {
 			p.logger.Info("LLM request cancelled")
@@ -366,6 +376,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
+			RequestID:        req.RequestID,
 		})
 		return
 	}
@@ -376,12 +387,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
+			RequestID:   req.RequestID,
 		})
 		return
 	}
 
-	// Store request metadata for passthrough to response.
-	// Flag native structured output so downstream consumers know enforcement was used.
+	// Build per-request meta locally so concurrent in-flight requests cannot
+	// clobber each other's tags/meta via shared plugin slots.
 	meta := req.Metadata
 	if req.ResponseFormat != nil && req.ResponseFormat.Type != "text" {
 		if meta == nil {
@@ -389,10 +401,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		}
 		meta["_structured_output"] = true
 	}
-	p.mu.Lock()
-	p.currentRequestMeta = meta
-	p.currentRequestTags = req.Tags
-	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
 	var debugBuf *bytes.Buffer
@@ -402,9 +410,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	if req.Stream {
-		p.handleStreamResponse(responseBody)
+		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
 	} else {
-		p.handleSyncResponse(responseBody)
+		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}
 
 	if debugBuf != nil {
@@ -412,7 +420,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	p.mu.Lock()
-	p.cancelFunc = nil
+	delete(p.cancels, req.RequestID)
 	p.mu.Unlock()
 }
 
@@ -654,7 +662,7 @@ type apiUsage struct {
 	} `json:"completion_tokens_details"`
 }
 
-func (p *Plugin) handleSyncResponse(body io.Reader) {
+func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
 	var apiResp apiResponse
 	if err := json.NewDecoder(body).Decode(&apiResp); err != nil {
 		p.emitError(fmt.Errorf("openai: failed to decode response: %w", err))
@@ -662,13 +670,12 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	}
 
 	resp := p.convertAPIResponse(apiResp)
+	resp.RequestID = requestID
 
 	// Merge request-passthrough metadata (e.g. _structured_output) onto any
 	// metadata convertAPIResponse already attached (e.g. prediction_acceptance).
-	p.mu.Lock()
-	resp.Metadata = mergeMetadata(resp.Metadata, p.currentRequestMeta)
-	resp.Tags = p.currentRequestTags
-	p.mu.Unlock()
+	resp.Metadata = mergeMetadata(resp.Metadata, meta)
+	resp.Tags = tags
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
 		p.logger.Error("failed to emit llm.response", "error", err)
@@ -766,7 +773,7 @@ type streamDelta struct {
 	ToolCalls []apiToolCall `json:"tool_calls,omitempty"`
 }
 
-func (p *Plugin) handleStreamResponse(body io.Reader) {
+func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestMeta map[string]any, tags map[string]string) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -916,19 +923,19 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		}
 	}
 
-	p.mu.Lock()
-	mergedMeta := mergeMetadata(streamMeta, p.currentRequestMeta)
-	tags := p.currentRequestTags
-	p.mu.Unlock()
+	mergedMeta := mergeMetadata(streamMeta, requestMeta)
 
-	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: fullContent.String(),
-		ToolCalls:    toolCalls,
-		Usage:        finalUsage,
-		CostUSD:      p.costForModel(model, finalUsage),
-		Model:        model,
-		FinishReason: finishReason,
-		Metadata:     mergedMeta,
-		Tags:         tags,
+	_ = p.bus.Emit("llm.response", events.LLMResponse{
+		SchemaVersion: events.LLMResponseVersion,
+		RequestID:     requestID,
+		Content:       fullContent.String(),
+		ToolCalls:     toolCalls,
+		Usage:         finalUsage,
+		CostUSD:       p.costForModel(model, finalUsage),
+		Model:         model,
+		FinishReason:  finishReason,
+		Metadata:      mergedMeta,
+		Tags:          tags,
 	})
 }
 

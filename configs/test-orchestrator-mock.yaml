@@ -1,0 +1,72 @@
+# Test: Orchestrator + parallel workers under mock LLM (no API key).
+# Validates: concurrent subagent dispatch carries correct causation provenance
+# (AgentID prefix + Depth=1) per the 2026-06 audit fix.
+#
+# Mock sequence: 1 decompose JSON → 3 worker turns (one each) → 1 synthesis.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestOrchestrator_Mock
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 1024
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.orchestrator
+    - nexus.agent.subagent
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Run three parallel checks."
+    input_delay: 100ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - content: |
+          {"subtasks":[
+            {"id":"a","description":"check A"},
+            {"id":"b","description":"check B"},
+            {"id":"c","description":"check C"}
+          ]}
+      - content: "Worker A done."
+      - content: "Worker B done."
+      - content: "Worker C done."
+      - content: "Synthesis: A, B, C all done."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.orchestrator:
+    max_workers: 3
+    max_subtasks: 3
+    orchestrator_model_role: mock
+    worker_model_role: mock
+    synthesis_model_role: mock
+    fail_fast: false
+    worker_max_iterations: 2
+    system_prompt: "You are a test orchestrator."
+
+  nexus.agent.subagent:
+    model_role: mock
+
+  nexus.gate.endless_loop:
+    max_iterations: 4
+
+  nexus.memory.capped:
+    max_messages: 20
+    persist: false

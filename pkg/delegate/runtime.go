@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -307,31 +306,14 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 
 // requestLLM emits an llm.request tagged with the sub-session source so the
 // parent agent's response handler ignores it, then waits synchronously for
-// the matching llm.response. Bus dispatch is synchronous, so the response
-// lands during Emit and is buffered in respCh before Emit returns.
+// the matching llm.response via SyncLLM.
 func (r *Runtime) requestLLM(ctx context.Context, source string, post posture.AgentPosture, history []events.Message, tools []events.ToolDef) (events.LLMResponse, error) {
-	respCh := make(chan events.LLMResponse, 1)
-	unsub := r.Bus.Subscribe("llm.response", func(ev engine.Event[any]) {
-		resp, ok := ev.Payload.(events.LLMResponse)
-		if !ok {
-			return
-		}
-		if s, _ := resp.Metadata["_source"].(string); s == source {
-			select {
-			case respCh <- resp:
-			default:
-			}
-		}
-	}, engine.WithPriority(1))
-	defer unsub()
-
 	req := events.LLMRequest{
-		SchemaVersion: events.LLMRequestVersion,
-		Role:          post.Model.ModelRole,
-		Model:         post.Model.Model,
-		MaxTokens:     post.Model.MaxTokens,
-		Messages:      history,
-		Tools:         tools,
+		Role:      post.Model.ModelRole,
+		Model:     post.Model.Model,
+		MaxTokens: post.Model.MaxTokens,
+		Messages:  history,
+		Tools:     tools,
 		Metadata: map[string]any{
 			"_source":   source,
 			"task_kind": "delegate",
@@ -343,23 +325,7 @@ func (r *Runtime) requestLLM(ctx context.Context, source string, post posture.Ag
 		t := post.Model.Temperature
 		req.Temperature = &t
 	}
-	if veto, vErr := r.Bus.EmitVetoable("before:llm.request", &req); vErr == nil && veto.Vetoed {
-		return events.LLMResponse{}, fmt.Errorf("llm.request vetoed: %s", veto.Reason)
-	}
-	if err := r.Bus.Emit("llm.request", req); err != nil {
-		return events.LLMResponse{}, err
-	}
-
-	select {
-	case resp := <-respCh:
-		return resp, nil
-	case <-ctx.Done():
-		return events.LLMResponse{}, ctx.Err()
-	default:
-		// Synchronous bus: if nothing landed during Emit, no handler is
-		// wired. Surface as a hard error rather than spinning forever.
-		return events.LLMResponse{}, errors.New("no LLM response (provider not active for this role?)")
-	}
+	return SyncLLM(ctx, r.Bus, req)
 }
 
 // invokeTools dispatches a batch of tool calls with TurnID set to the

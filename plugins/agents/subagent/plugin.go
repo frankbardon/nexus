@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/frankbardon/nexus/pkg/delegate"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 )
@@ -200,18 +201,50 @@ func (p *Plugin) Emissions() []string {
 // for the worker's duration. Multiple concurrent spawns each get
 // their own goroutine — runSubagent has no shared mutable state
 // scoped to the plugin instance.
+//
+// PushCausationContext is called inside the goroutine (not on the
+// caller goroutine) so the bus's per-goroutine causation stack
+// reflects the worker's identity for every event the worker emits.
+// Mirrors pkg/delegate/runtime.go. Without this push, events from
+// runSubagent fall back to the bus-wide default — losing AgentID
+// and Depth — and the causation tree blank-spots out on exactly the
+// concurrent path it's built to attribute.
 func (p *Plugin) handleSubagentSpawn(event engine.Event[any]) {
 	spawn, ok := event.Payload.(events.SubagentSpawn)
 	if !ok {
 		return
 	}
 	go func() {
+		if cc, ok := p.bus.(engine.CausationController); ok {
+			pop := cc.PushCausationContext(engine.CausationContext{
+				AgentID: p.subagentAgentID(spawn.SpawnID),
+				Depth:   spawn.ParentDepth + 1,
+			})
+			defer pop()
+		}
 		// runSubagent emits subagent.started + subagent.iteration +
 		// subagent.complete on its own; we discard the returned value
 		// since the caller correlates by SpawnID via the
 		// subagent.complete event, not via a return path.
 		_ = p.runSubagent(spawn.SpawnID, spawn.Task, spawn.SystemPrompt, spawn.ModelRole, spawn.ParentTurnID)
 	}()
+}
+
+// subagentAgentID composes the AgentID stamped on every event emitted from
+// this worker's goroutine. Pattern mirrors delegate's "delegate/<posture>/<id>"
+// shape: "<instanceID>/<spawnID>" (e.g. "nexus.agent.subagent/researcher/abc123").
+func (p *Plugin) subagentAgentID(spawnID string) string {
+	return p.instanceID + "/" + spawnID
+}
+
+// currentDepth reads the calling goroutine's causation depth so a synchronous
+// subagent run can derive Depth = parent.Depth + 1. Returns 0 when the bus
+// doesn't implement CausationController (e.g. in unit tests with a stub bus).
+func (p *Plugin) currentDepth() int {
+	if cc, ok := p.bus.(engine.CausationController); ok {
+		return cc.CurrentCausationContext().Depth
+	}
+	return 0
 }
 
 func (p *Plugin) handleToolRegister(event engine.Event[any]) {
@@ -249,7 +282,16 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	modelRole, _ := tc.Arguments["model_role"].(string)
 
 	spawnID := generateSpawnID()
-	subResult := p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
+	subResult := func() events.SubagentComplete {
+		if cc, ok := p.bus.(engine.CausationController); ok {
+			pop := cc.PushCausationContext(engine.CausationContext{
+				AgentID: p.subagentAgentID(spawnID),
+				Depth:   p.currentDepth() + 1,
+			})
+			defer pop()
+		}
+		return p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
+	}()
 
 	toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 		Name:   tc.Name,
@@ -311,46 +353,20 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 	for iteration := 0; ; iteration++ {
 		logger.Info("subagent iteration", "iteration", iteration)
 
-		// Subscribe to llm.response BEFORE emitting llm.request, because the
-		// bus dispatches synchronously — the response fires during Emit.
-		respCh := make(chan events.LLMResponse, 1)
-		unsubResp := p.bus.Subscribe("llm.response", func(event engine.Event[any]) {
-			resp, ok := event.Payload.(events.LLMResponse)
-			if !ok {
-				return
-			}
-			if s, _ := resp.Metadata["_source"].(string); s == source {
-				select {
-				case respCh <- resp:
-				default:
-				}
-			}
-		}, engine.WithPriority(1))
-
-		// Send LLM request tagged with our source so the parent ReAct ignores it.
-		req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: modelRole,
+		req := events.LLMRequest{
+			Role:     modelRole,
 			Messages: history,
 			Tools:    tools,
-			Stream:   false,
 			Metadata: map[string]any{
 				"_source":   source,
 				"task_kind": "subagent",
 			},
 			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}
-		if veto, vErr := p.bus.EmitVetoable("before:llm.request", &req); vErr == nil && veto.Vetoed {
-			logger.Info("llm.request vetoed", "reason", veto.Reason)
-			break
-		}
-		_ = p.bus.Emit("llm.request", req)
-
-		unsubResp()
-
-		var resp events.LLMResponse
-		select {
-		case resp = <-respCh:
-		default:
-			return p.completeSubagent(spawnID, parentTurnID, "", "no LLM response received", iteration, totalUsage, totalCost)
+		resp, err := delegate.SyncLLM(context.Background(), p.bus, req)
+		if err != nil {
+			logger.Info("subagent llm error", "err", err)
+			return p.completeSubagent(spawnID, parentTurnID, "", err.Error(), iteration, totalUsage, totalCost)
 		}
 
 		totalUsage.PromptTokens += resp.Usage.PromptTokens
@@ -394,16 +410,6 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			})
 		}
 	}
-
-	// Loop exited via break (veto or error). Return last content.
-	lastContent := ""
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && history[i].Content != "" {
-			lastContent = history[i].Content
-			break
-		}
-	}
-	return p.completeSubagent(spawnID, parentTurnID, lastContent, "loop terminated", 0, totalUsage, totalCost)
 }
 
 // executeToolCalls invokes tools and collects their results.

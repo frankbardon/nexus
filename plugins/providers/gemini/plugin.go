@@ -60,11 +60,12 @@ type Plugin struct {
 	codeExecution bool
 	cache         *cacheState
 
-	mu                 sync.Mutex
-	currentRequestMeta map[string]any
-	currentRequestTags map[string]string // copied to llm.response for cost attribution
-	cancelFunc         context.CancelFunc
-	requestSeq         int
+	mu sync.Mutex
+	// cancels indexes in-flight HTTP request cancel functions by
+	// LLMRequest.RequestID; see matching field on Anthropic/OpenAI providers
+	// for the concurrent-fan-out rationale.
+	cancels    map[string]context.CancelFunc
+	requestSeq int
 }
 
 // New creates a new Gemini provider plugin.
@@ -197,12 +198,15 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 
 func (p *Plugin) handleCancel(_ engine.Event[any]) {
 	p.mu.Lock()
-	cancel := p.cancelFunc
-	p.cancelFunc = nil
+	cancels := p.cancels
+	p.cancels = make(map[string]context.CancelFunc)
 	p.mu.Unlock()
 
-	if cancel != nil {
-		p.logger.Info("cancelling in-flight LLM request")
+	if len(cancels) == 0 {
+		return
+	}
+	p.logger.Info("cancelling in-flight LLM requests", "count", len(cancels))
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -307,8 +311,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	url := p.auth.apiURL(model, op)
 
 	reqCtx, cancel := context.WithCancel(context.Background())
+	if req.RequestID == "" {
+		req.RequestID = engine.GenerateID()
+	}
 	p.mu.Lock()
-	p.cancelFunc = cancel
+	if p.cancels == nil {
+		p.cancels = make(map[string]context.CancelFunc)
+	}
+	p.cancels[req.RequestID] = cancel
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
@@ -326,7 +336,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	resp, err := p.doWithRetry(reqCtx, makeReq)
 	if err != nil {
 		p.mu.Lock()
-		p.cancelFunc = nil
+		delete(p.cancels, req.RequestID)
 		p.mu.Unlock()
 		if reqCtx.Err() == context.Canceled {
 			p.logger.Info("LLM request cancelled")
@@ -336,6 +346,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
+			RequestID:        req.RequestID,
 		})
 		return
 	}
@@ -346,10 +357,13 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("gemini: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
+			RequestID:   req.RequestID,
 		})
 		return
 	}
 
+	// Build per-request meta locally so concurrent in-flight requests cannot
+	// clobber each other's tags/meta via shared plugin slots.
 	meta := req.Metadata
 	if req.ResponseFormat != nil && req.ResponseFormat.Type != "text" {
 		if meta == nil {
@@ -357,10 +371,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		}
 		meta["_structured_output"] = true
 	}
-	p.mu.Lock()
-	p.currentRequestMeta = meta
-	p.currentRequestTags = req.Tags
-	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
 	var debugBuf *bytes.Buffer
@@ -370,9 +380,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	if req.Stream {
-		p.handleStreamResponse(responseBody)
+		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
 	} else {
-		p.handleSyncResponse(responseBody)
+		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}
 
 	if debugBuf != nil {
@@ -380,7 +390,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	p.mu.Lock()
-	p.cancelFunc = nil
+	delete(p.cancels, req.RequestID)
 	p.mu.Unlock()
 }
 
@@ -698,7 +708,7 @@ type apiModalityDetail struct {
 	TokenCount int    `json:"tokenCount"`
 }
 
-func (p *Plugin) handleSyncResponse(body io.Reader) {
+func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
 	var apiResp apiResponse
 	if err := json.NewDecoder(body).Decode(&apiResp); err != nil {
 		p.emitError(fmt.Errorf("gemini: decode response: %w", err))
@@ -706,11 +716,9 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	}
 
 	resp := p.convertAPIResponse(apiResp, generateTurnID())
-
-	p.mu.Lock()
-	resp.Metadata = p.currentRequestMeta
-	resp.Tags = p.currentRequestTags
-	p.mu.Unlock()
+	resp.RequestID = requestID
+	resp.Metadata = meta
+	resp.Tags = tags
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
 		p.logger.Error("failed to emit llm.response", "error", err)
@@ -808,7 +816,7 @@ func generateTurnID() string {
 
 // SSE streaming.
 
-func (p *Plugin) handleStreamResponse(body io.Reader) {
+func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -944,19 +952,17 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		Usage:        finalUsage,
 	})
 
-	p.mu.Lock()
-	meta := p.currentRequestMeta
-	tags := p.currentRequestTags
-	p.mu.Unlock()
-
-	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: fullContent.String(),
-		ToolCalls:    toolCalls,
-		Usage:        finalUsage,
-		CostUSD:      p.costForModel(model, finalUsage),
-		Model:        model,
-		FinishReason: finishReason,
-		Metadata:     meta,
-		Tags:         tags,
+	_ = p.bus.Emit("llm.response", events.LLMResponse{
+		SchemaVersion: events.LLMResponseVersion,
+		RequestID:     requestID,
+		Content:       fullContent.String(),
+		ToolCalls:     toolCalls,
+		Usage:         finalUsage,
+		CostUSD:       p.costForModel(model, finalUsage),
+		Model:         model,
+		FinishReason:  finishReason,
+		Metadata:      meta,
+		Tags:          tags,
 	})
 }
 

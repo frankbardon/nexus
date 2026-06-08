@@ -78,6 +78,7 @@ type CollectedEvent struct {
 	Source    string
 	Timestamp time.Time
 	Payload   any
+	Causation engine.EventCausation
 }
 
 // New creates a new test IO plugin instance.
@@ -347,6 +348,7 @@ func (p *Plugin) collectEvent(e engine.Event[any]) {
 		Source:    e.Source,
 		Timestamp: e.Timestamp,
 		Payload:   e.Payload,
+		Causation: e.Causation,
 	})
 }
 
@@ -366,6 +368,8 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 		return
 	}
 
+	req, _ := vp.Original.(*events.LLMRequest)
+
 	mock := p.nextMockResponse()
 
 	// Veto the real LLM request so it never reaches the provider.
@@ -376,8 +380,19 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 
 	// Emit synthetic llm.response in a goroutine — we're inside a vetoable
 	// handler, and emitting synchronously could cause ordering issues.
+	// Propagate metadata + RequestID so downstream correlation (orchestrator
+	// _source dispatch, token-budget reserve/commit) matches real provider
+	// behavior — see also handleMockLLMRequest below.
+	var meta map[string]any
+	var requestID string
+	if req != nil {
+		meta = req.Metadata
+		requestID = req.RequestID
+	}
 	go func() {
-		_ = p.bus.Emit("llm.response", p.buildMockResponse(mock, nil))
+		resp := p.buildMockResponse(mock, meta)
+		resp.RequestID = requestID
+		_ = p.bus.Emit("llm.response", resp)
 	}()
 }
 

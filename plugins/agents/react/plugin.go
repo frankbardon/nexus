@@ -60,6 +60,12 @@ type Plugin struct {
 	// and short-circuit the outer turn. Conversation history filtering is
 	// a separate concern owned by nexus.memory.capped.
 	internalCallIDs map[string]struct{}
+	// seenResults dedups tool.result events by ID per turn. Bus replay,
+	// retried integrations, and any tool plugin that double-emits would
+	// otherwise drive pendingToolCalls negative and double-trigger the
+	// next sendLLMRequest. Reset whenever pendingToolCalls is initialized
+	// for a new batch of tool calls.
+	seenResults map[string]struct{}
 	// turnCtx is cancelled on user interrupt or new turn. Workers queued
 	// behind the semaphore check it before emitting tool.invoke so calls
 	// that never got a slot unwind with a synthetic error.
@@ -72,6 +78,7 @@ type Plugin struct {
 func New() engine.Plugin {
 	return &Plugin{
 		internalCallIDs: make(map[string]struct{}),
+		seenResults:     make(map[string]struct{}),
 	}
 }
 
@@ -463,6 +470,9 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	if len(resp.ToolCalls) > 0 {
 		// Iteration limiting handled by nexus.gate.endless_loop plugin.
 		p.pendingToolCalls = len(resp.ToolCalls)
+		// Reset per-batch dedup so a recycled tool-call ID across turns
+		// can't accidentally short-circuit the new batch.
+		p.seenResults = make(map[string]struct{})
 
 		parallel := p.parallelTools && len(resp.ToolCalls) > 1
 		if parallel {
@@ -667,6 +677,16 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 		p.mu.Unlock()
 		return
 	}
+
+	// Dedup against double-fired results. Without this guard a duplicate
+	// would decrement pendingToolCalls a second time and re-fire
+	// sendLLMRequest below.
+	if _, seen := p.seenResults[result.ID]; seen {
+		p.logger.Warn("duplicate tool.result ignored", "id", result.ID, "name", result.Name)
+		p.mu.Unlock()
+		return
+	}
+	p.seenResults[result.ID] = struct{}{}
 
 	// Conversation plugin records the result at priority 10; ReAct at 50
 	// only needs to track the in-flight count so it knows when to proceed.

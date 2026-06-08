@@ -39,6 +39,11 @@ type ErrorInfo struct {
 	Retryable        bool           // whether this error class is retryable (429, 5xx)
 	RetriesExhausted bool           // provider's own retry logic gave up
 	RequestMeta      map[string]any // echo of LLMRequest.Metadata for correlation
+	// RequestID is set on errors that originated from a specific LLMRequest
+	// so subscribers (token budget reservations, cancel registries) can
+	// release per-request state without scanning RequestMeta. Empty for
+	// errors not tied to a specific request.
+	RequestID string
 	// EventType is set when ErrorInfo describes a panic recovered during
 	// event dispatch — names the event whose handler panicked. Empty for
 	// errors that did not originate from a recovered handler panic.

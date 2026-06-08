@@ -196,10 +196,9 @@ func TestStreamFinalize_PredictionAcceptanceSurfaces(t *testing.T) {
 	defer unsub()
 
 	p := &Plugin{
-		bus:                bus,
-		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
-		pricing:            pricing.DefaultsFor(pricing.ProviderOpenAI),
-		currentRequestMeta: map[string]any{"_structured_output": true},
+		bus:     bus,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		pricing: pricing.DefaultsFor(pricing.ProviderOpenAI),
 	}
 
 	// Synthetic SSE stream: content delta, then final chunk with usage,
@@ -211,7 +210,7 @@ func TestStreamFinalize_PredictionAcceptanceSurfaces(t *testing.T) {
 		``,
 	}, "\n")
 
-	p.handleStreamResponse(strings.NewReader(stream))
+	p.handleStreamResponse(strings.NewReader(stream), "test-req", map[string]any{"_structured_output": true}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()

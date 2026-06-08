@@ -1880,6 +1880,7 @@ session total-token ceiling.
 | `on_exceed`            | string | `block`                                     | Default action when a ceiling fires (`block` \| `warn` \| `downgrade-model`). Each ceiling can override. |
 | `downgrade_candidates` | list   | *(empty)*                                   | Model IDs the `downgrade-model` action picks the cheapest entry from (priced via `pkg/engine/pricing`). |
 | `pricing`              | map    | *(merged provider defaults)*                | Per-model overrides applied to the unified pricing table; same shape as the per-provider `pricing` block. |
+| `estimate_factor`      | float  | `1.5`                                       | Multiplier on the prompt-length token estimate the gate deducts upfront at `before:llm.request` (reserve/commit). Tightens the TOCTOU window under concurrent fan-out by booking estimated headroom before any in-flight request returns; the response handler then subtracts the reservation and adds the actual usage so the net effect is exactly the realized spend. Increase to err on the side of overshoot-prevention; decrease to tolerate more in-flight headroom. |
 | `ceilings`             | list   | *(empty)*                                   | List of ceiling rules. See below. |
 
 Each entry under `ceilings`:
@@ -1987,6 +1988,7 @@ to enabled.
 |------------------------------|------|---------------------------------------------------------------|-------------|
 | `action`                     | string | `block`                                                     | `block` or `redact`. |
 | `message`                    | string | `Content blocked: contains sensitive information ({checks}).` | Block/redact message; `{checks}` lists triggered checks. |
+| `scan_tool_results`          | bool | `false`                                                       | Also subscribe to `before:tool.result` and apply checks to tool output. Required to cover sub-agent / delegate output (which reaches the parent via `tool.result`, not `io.output`). Off by default because legitimate external tools (`web_fetch`, `knowledge_search`) often surface phone numbers / addresses that aren't leaks; enable for orchestrator-style topologies. |
 | `check_pii_email`            | bool | `true`                                                        | Detect email addresses. |
 | `check_pii_phone`            | bool | `true`                                                        | Detect phone numbers. |
 | `check_pii_ssn`              | bool | `true`                                                        | Detect US SSNs. |

@@ -45,13 +45,28 @@ func New() engine.Plugin {
 
 // Plugin gates before:io.output events by running multiple programmatic checks
 // for PII, secrets, and other sensitive content. Each check individually toggleable.
+//
+// Surface coverage:
+//   - before:io.output is always scanned. This is the egress edge for top-level
+//     agents (ReAct, planexec, orchestrator synthesis).
+//   - before:tool.result is scanned only when ScanToolResults is true. The audit
+//     surfaced this as the egress edge for sub-agent / delegate output, which
+//     reaches the parent agent through tool results rather than io.output —
+//     so without this opt-in, PII produced by a worker is invisible to the
+//     gate. Default-off preserves prior behavior: tool results from
+//     legitimately external sources (web_fetch, knowledge_search) can carry
+//     phone numbers / addresses that aren't PII leaks, and enabling scanning
+//     blanket-wide would generate false positives. Operators that ship
+//     orchestrator topologies (worker outputs feeding parent) should turn
+//     this on.
 type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	checks  []check
-	action  string // "block" or "redact"
-	message string
+	checks          []check
+	action          string // "block" or "redact"
+	message         string
+	scanToolResults bool
 
 	unsubs []func()
 }
@@ -72,6 +87,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["message"].(string); ok && v != "" {
 		p.message = v
+	}
+	if v, ok := ctx.Config["scan_tool_results"].(bool); ok {
+		p.scanToolResults = v
 	}
 
 	// Enable builtin checks (all on by default).
@@ -100,6 +118,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("before:io.output", p.handleBeforeOutput,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 	)
+	if p.scanToolResults {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe("before:tool.result", p.handleBeforeToolResult,
+				engine.WithPriority(10), engine.WithSource(pluginID)),
+		)
+	}
 
 	checkNames := make([]string, len(p.checks))
 	for i, c := range p.checks {
@@ -107,7 +131,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.logger.Info("content safety gate initialized",
 		"checks", strings.Join(checkNames, ","),
-		"action", p.action)
+		"action", p.action,
+		"scan_tool_results", p.scanToolResults)
 	return nil
 }
 
@@ -121,9 +146,13 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	return []engine.EventSubscription{
+	subs := []engine.EventSubscription{
 		{EventType: "before:io.output", Priority: 10},
 	}
+	if p.scanToolResults {
+		subs = append(subs, engine.EventSubscription{EventType: "before:tool.result", Priority: 10})
+	}
+	return subs
 }
 
 func (p *Plugin) Emissions() []string {
@@ -182,6 +211,67 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		}
 		output.Content = content
 		// Don't veto — modified output proceeds.
+	}
+}
+
+// handleBeforeToolResult mirrors handleBeforeOutput against a tool.result
+// payload. Only active when scan_tool_results is enabled; rationale on the
+// Plugin type doc-comment. Scans the textual Output field — binary OutputData
+// and structured OutputStructured are not scanned (regex on bytes/maps is
+// unreliable and adds false-positive risk).
+func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	result, ok := vp.Original.(*events.ToolResult)
+	if !ok {
+		return
+	}
+	if result.Output == "" {
+		return
+	}
+
+	var matched []string
+	for _, c := range p.checks {
+		if c.pattern.MatchString(result.Output) {
+			matched = append(matched, c.name)
+		}
+	}
+	if len(matched) == 0 {
+		return
+	}
+
+	checkList := strings.Join(matched, ", ")
+	p.logger.Warn("content safety checks triggered on tool.result",
+		"tool", result.Name, "id", result.ID,
+		"checks", checkList, "action", p.action)
+
+	switch p.action {
+	case "block":
+		vp.Veto = engine.VetoResult{
+			Vetoed: true,
+			Reason: fmt.Sprintf("Content safety (tool.result): %s", checkList),
+		}
+		// Surface a synthetic error result so the calling agent sees something
+		// concrete instead of a silent veto.
+		_ = p.bus.Emit("tool.result", events.ToolResult{
+			SchemaVersion: events.ToolResultVersion,
+			ID:            result.ID,
+			Name:          result.Name,
+			Error:         "blocked by content_safety: " + checkList,
+			TurnID:        result.TurnID,
+		})
+	case "redact":
+		content := result.Output
+		for _, c := range p.checks {
+			for _, name := range matched {
+				if c.name == name {
+					content = c.pattern.ReplaceAllString(content, "[REDACTED]")
+				}
+			}
+		}
+		result.Output = content
 	}
 }
 
