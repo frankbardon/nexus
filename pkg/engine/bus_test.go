@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,118 @@ func TestEmitVetoable_PriorityOrder(t *testing.T) {
 	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
 		t.Fatalf("expected order [1, 2], got %v", order)
 	}
+}
+
+// Equal-priority handlers must run in subscription order — the first
+// Subscribe at a given priority runs first. This is the deterministic
+// tiebreak that issue #121 introduces; before the fix, sort.Slice could
+// reorder them on every Subscribe call, silently flipping which veto wins.
+func TestEmitVetoable_StableTiebreakBySubscriptionOrder(t *testing.T) {
+	bus := NewEventBus()
+
+	var order []string
+
+	unsubA := bus.Subscribe("before:test.action", func(e Event[any]) {
+		order = append(order, "A")
+	}, WithPriority(10))
+	bus.Subscribe("before:test.action", func(e Event[any]) {
+		order = append(order, "B")
+	}, WithPriority(10))
+	bus.Subscribe("before:test.action", func(e Event[any]) {
+		order = append(order, "C")
+	}, WithPriority(10))
+
+	msg := "test"
+	_, _ = bus.EmitVetoable("before:test.action", &msg)
+
+	if len(order) != 3 || order[0] != "A" || order[1] != "B" || order[2] != "C" {
+		t.Fatalf("expected order [A B C], got %v", order)
+	}
+
+	// Unsubscribe B then add D. Stable sort must keep [A, C] in registration
+	// order; D appended afterward and re-sorted should land at the end.
+	unsubA() // also exercise unsubscribe path on a tied-priority sub
+	bus.Subscribe("before:test.action", func(e Event[any]) {
+		order = append(order, "D")
+	}, WithPriority(10))
+
+	order = nil
+	_, _ = bus.EmitVetoable("before:test.action", &msg)
+	if len(order) != 3 || order[0] != "B" || order[1] != "C" || order[2] != "D" {
+		t.Fatalf("expected order [B C D] after unsub A + add D, got %v", order)
+	}
+}
+
+// WarnVetoableCollisions must surface (event, priority) tuples that have
+// 2+ subscribers on a before:* event, and ignore non-vetoable events
+// regardless of duplicates.
+func TestBus_WarnVetoableCollisions(t *testing.T) {
+	bus := NewEventBus().(*eventBus)
+
+	rec := &recordingHandler{}
+	bus.SetLogger(slog.New(rec))
+
+	bus.Subscribe("before:io.output", func(Event[any]) {}, WithPriority(10), WithSource("plugin.a"))
+	bus.Subscribe("before:io.output", func(Event[any]) {}, WithPriority(10), WithSource("plugin.b"))
+	bus.Subscribe("before:io.output", func(Event[any]) {}, WithPriority(12), WithSource("plugin.c")) // no collision
+	// Non-vetoable duplicate — must be ignored.
+	bus.Subscribe("tool.invoke", func(Event[any]) {}, WithPriority(50), WithSource("plugin.d"))
+	bus.Subscribe("tool.invoke", func(Event[any]) {}, WithPriority(50), WithSource("plugin.e"))
+
+	bus.WarnVetoableCollisions()
+
+	var hits []slog.Record
+	for _, r := range rec.records {
+		if r.Level == slog.LevelWarn {
+			hits = append(hits, r)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 WARN, got %d (records: %+v)", len(hits), rec.records)
+	}
+
+	got := recordAttrs(hits[0])
+	if got["event"] != "before:io.output" {
+		t.Errorf("event = %v, want before:io.output", got["event"])
+	}
+	if got["priority"] != int64(10) {
+		t.Errorf("priority = %v, want 10", got["priority"])
+	}
+	sources, ok := got["sources"].([]string)
+	if !ok {
+		t.Fatalf("sources missing or wrong type: %T %v", got["sources"], got["sources"])
+	}
+	if len(sources) != 2 || sources[0] != "plugin.a" || sources[1] != "plugin.b" {
+		t.Errorf("sources = %v, want [plugin.a plugin.b]", sources)
+	}
+}
+
+type recordingHandler struct {
+	records []slog.Record
+}
+
+func (r *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (r *recordingHandler) Handle(_ context.Context, rec slog.Record) error {
+	r.records = append(r.records, rec)
+	return nil
+}
+func (r *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *recordingHandler) WithGroup(string) slog.Handler      { return r }
+
+func recordAttrs(r slog.Record) map[string]any {
+	out := make(map[string]any)
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Value.Kind() {
+		case slog.KindInt64:
+			out[a.Key] = a.Value.Int64()
+		case slog.KindAny:
+			out[a.Key] = a.Value.Any()
+		default:
+			out[a.Key] = a.Value.Any()
+		}
+		return true
+	})
+	return out
 }
 
 func TestEmitVetoable_OriginalPayloadAccessible(t *testing.T) {

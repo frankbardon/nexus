@@ -159,6 +159,78 @@ func TestContentSafety_DetectsPassword(t *testing.T) {
 	}
 }
 
+// Policy lock for issue #121. content_safety subscribes before:io.output at
+// priority 8 (redact-mode mutator); a stop-words-style vetoer at priority 10
+// must see the post-redaction content, so a banned token that only existed
+// inside the redacted span never trips the veto. If the priorities ever
+// drift back together — or the bus loses its stable tiebreak — this test
+// flips.
+func TestContentSafety_RedactBeatsBanCheckOnOutputGate(t *testing.T) {
+	_, bus := newTestPluginAtRealPriority("redact", "email")
+
+	// Simulated stop_words veto-only gate at the real downstream priority.
+	bannedWordVetoed := false
+	bus.Subscribe("before:io.output", func(e engine.Event[any]) {
+		vp := e.Payload.(*engine.VetoablePayload)
+		out := vp.Original.(*events.AgentOutput)
+		if strings.Contains(out.Content, "badword") {
+			bannedWordVetoed = true
+			vp.Veto = engine.VetoResult{Vetoed: true, Reason: "stop_word: badword"}
+		}
+	}, engine.WithPriority(10))
+
+	output := events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       "Contact me at badword@example.com for help.",
+		Role:          "assistant",
+	}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+
+	if bannedWordVetoed {
+		t.Fatalf("downstream ban-check fired on un-redacted content — content_safety priority must run first; got %q", output.Content)
+	}
+	if result.Vetoed {
+		t.Fatalf("redact mode + post-redaction-clean content should not veto, got reason %q", result.Reason)
+	}
+	if !strings.Contains(output.Content, "[REDACTED]") {
+		t.Fatalf("expected redacted content, got: %s", output.Content)
+	}
+	if strings.Contains(output.Content, "badword@example.com") {
+		t.Fatal("email containing the banned word should have been redacted")
+	}
+}
+
+// newTestPluginAtRealPriority mirrors newTestPlugin but uses the priority
+// the plugin actually advertises in Subscriptions(), so this test is
+// sensitive to drift in the production wiring.
+func newTestPluginAtRealPriority(action string, checks ...string) (*Plugin, engine.EventBus) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	p.bus = bus
+	p.logger = slog.Default()
+	p.action = action
+	p.checks = nil
+	for _, name := range checks {
+		for _, bc := range builtinChecks {
+			if bc.name == name {
+				re, _ := regexp.Compile(bc.pattern)
+				p.checks = append(p.checks, check{name: bc.name, pattern: re})
+				break
+			}
+		}
+	}
+	subs := p.Subscriptions()
+	var outputPriority int
+	for _, s := range subs {
+		if s.EventType == "before:io.output" {
+			outputPriority = s.Priority
+			break
+		}
+	}
+	bus.Subscribe("before:io.output", p.handleBeforeOutput, engine.WithPriority(outputPriority))
+	return p, bus
+}
+
 func TestLuhnValid(t *testing.T) {
 	tests := []struct {
 		number string

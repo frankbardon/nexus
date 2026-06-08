@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,18 @@ type SeqController interface {
 type ExcludeController interface {
 	SetExcludedTypes(types []string)
 	IsExcluded(eventType string) bool
+}
+
+// VetoableCollisionReporter is implemented by buses that can scan their
+// handler table for equal-priority subscribers on vetoable (before:*)
+// events. Equal-priority handlers on a veto-breaking event have their
+// relative order decided by subscription sequence, so a benign plugin
+// reorder or activation-set change can silently flip a safety decision.
+// The engine calls WarnVetoableCollisions after all plugins finish Init
+// so operators see the collisions in the boot log; bus-internal logger
+// (SetLogger) is used.
+type VetoableCollisionReporter interface {
+	WarnVetoableCollisions()
 }
 
 // CausationController is implemented by buses that propagate per-goroutine
@@ -56,6 +69,15 @@ type EventBus interface {
 	EmitAsync(eventType string, payload any) <-chan error
 	// Subscribe registers a handler for an event type.
 	// Returns an unsubscribe function.
+	//
+	// Handlers run in ascending Priority order (lower runs first). Handlers
+	// that share a Priority run in subscription order — the first Subscribe
+	// call runs first. On vetoable (before:*) events, dispatch breaks at the
+	// first veto, so the tiebreak determines which veto reason wins. To
+	// encode an intentional pipeline, give each handler a distinct Priority
+	// rather than relying on registration order; the engine logs a WARN at
+	// boot for every (before:*, priority) tuple shared by two or more
+	// handlers.
 	Subscribe(eventType string, handler HandlerFunc, opts ...SubscribeOption) (unsubscribe func())
 	// SubscribeAll registers a wildcard handler that receives all events
 	// emitted from this point forward. Pre-subscription events are not seen.
@@ -453,7 +475,12 @@ func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...Subs
 		source:   cfg.source,
 	}
 	b.handlers[eventType] = append(b.handlers[eventType], sub)
-	sort.Slice(b.handlers[eventType], func(i, j int) bool {
+	// SliceStable preserves insertion order for equal priorities. Combined
+	// with monotonic sub IDs (b.nextSubID) and an Unsubscribe that keeps
+	// relative order, this gives a deterministic tiebreak: the handler
+	// subscribed first runs first. See the Subscribe doc on EventBus for
+	// why this matters on vetoable (before:*) events.
+	sort.SliceStable(b.handlers[eventType], func(i, j int) bool {
 		return b.handlers[eventType][i].priority < b.handlers[eventType][j].priority
 	})
 	subID := sub.id
@@ -468,6 +495,48 @@ func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...Subs
 				b.handlers[eventType] = append(subs[:i], subs[i+1:]...)
 				break
 			}
+		}
+	}
+}
+
+// WarnVetoableCollisions scans every before:* event in the handler table
+// and logs one WARN per (event, priority) tuple that has two or more
+// subscribers. The engine calls this once at boot after every plugin
+// finishes Init; the log line lists the colliding plugin sources so
+// operators can decide whether to re-space priorities or accept the
+// (now-stable) registration-order tiebreak.
+func (b *eventBus) WarnVetoableCollisions() {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.logger == nil {
+		return
+	}
+	for eventType, subs := range b.handlers {
+		if !strings.HasPrefix(eventType, "before:") {
+			continue
+		}
+		groups := make(map[int][]string)
+		for _, s := range subs {
+			source := s.source
+			if source == "" {
+				source = "(unknown)"
+			}
+			groups[s.priority] = append(groups[s.priority], source)
+		}
+		priorities := make([]int, 0, len(groups))
+		for p := range groups {
+			priorities = append(priorities, p)
+		}
+		sort.Ints(priorities)
+		for _, p := range priorities {
+			sources := groups[p]
+			if len(sources) < 2 {
+				continue
+			}
+			b.logger.Warn("multiple handlers share priority on a vetoable event — tiebreak is subscription order; consider distinct priorities",
+				"event", eventType,
+				"priority", p,
+				"sources", sources)
 		}
 	}
 }

@@ -209,6 +209,13 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		}
 	}
 
+	// All subscribes have landed by end of Init. Surface any equal-priority
+	// collisions on vetoable (before:*) events — those are the cases where
+	// tiebreak determines which veto wins (dispatch breaks on first veto).
+	if reporter, ok := lm.bus.(VetoableCollisionReporter); ok {
+		reporter.WarnVetoableCollisions()
+	}
+
 	// Ready phase (parallel, per PRD 4.5).
 	var readyWg sync.WaitGroup
 	readyErrs := make(chan error, len(lm.plugins))

@@ -99,9 +99,14 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	// before:llm.request priority 13 — last in the request pipeline. May
+	// trigger HITL (most expensive side-effect), so we want every cheaper
+	// veto (loop cap, budget, input scanners) to have already had a chance
+	// to short-circuit. before:tool.invoke priority 10 is unchanged; that
+	// pipeline only has approval_policy at this tier today. See #121.
 	return []engine.EventSubscription{
 		{EventType: "before:tool.invoke", Priority: 10},
-		{EventType: "before:llm.request", Priority: 10},
+		{EventType: "before:llm.request", Priority: 13},
 		{EventType: "hitl.responded", Priority: 50},
 	}
 }
