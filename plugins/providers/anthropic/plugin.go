@@ -67,12 +67,16 @@ type Plugin struct {
 	filesAPIURL string
 	fileCache   *fileCache
 
-	mu                 sync.Mutex
-	currentRequestMeta map[string]any
-	currentRequestTags map[string]string  // copied to llm.response for cost attribution
-	cancelFunc         context.CancelFunc // cancels the in-flight HTTP request
-	requestSeq         int                // monotonic counter for debug log filenames
-	sessionFileIDs     []string           // file_ids uploaded this session (for delete_on_shutdown)
+	mu sync.Mutex
+	// cancels indexes in-flight HTTP request cancel functions by
+	// LLMRequest.RequestID. Concurrent subagents (orchestrator fan-out)
+	// generate concurrent llm.request events that all land on this single
+	// plugin instance; without per-request keying a single-slot cancelFunc
+	// would point at whichever goroutine wrote last, so cancels could fire
+	// against the wrong request and stale entries would be left dangling.
+	cancels        map[string]context.CancelFunc
+	requestSeq     int      // monotonic counter for debug log filenames
+	sessionFileIDs []string // file_ids uploaded this session (for delete_on_shutdown)
 }
 
 // New creates a new Anthropic provider plugin.
@@ -247,12 +251,15 @@ func (p *Plugin) handleEvent(event engine.Event[any]) {
 
 func (p *Plugin) handleCancel(event engine.Event[any]) {
 	p.mu.Lock()
-	cancel := p.cancelFunc
-	p.cancelFunc = nil
+	cancels := p.cancels
+	p.cancels = make(map[string]context.CancelFunc)
 	p.mu.Unlock()
 
-	if cancel != nil {
-		p.logger.Info("cancelling in-flight LLM request")
+	if len(cancels) == 0 {
+		return
+	}
+	p.logger.Info("cancelling in-flight LLM requests", "count", len(cancels))
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -373,8 +380,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	reqCtx, cancel := context.WithCancel(context.Background())
+	if req.RequestID == "" {
+		req.RequestID = engine.GenerateID()
+	}
 	p.mu.Lock()
-	p.cancelFunc = cancel
+	if p.cancels == nil {
+		p.cancels = make(map[string]context.CancelFunc)
+	}
+	p.cancels[req.RequestID] = cancel
 	p.mu.Unlock()
 
 	requestURL := p.auth.buildURL(model, req.Stream)
@@ -408,7 +421,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	resp, err := p.doWithRetry(reqCtx, makeReq)
 	if err != nil {
 		p.mu.Lock()
-		p.cancelFunc = nil
+		delete(p.cancels, req.RequestID)
 		p.mu.Unlock()
 		if reqCtx.Err() == context.Canceled {
 			p.logger.Info("LLM request cancelled")
@@ -418,6 +431,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			Retryable:        true,
 			RetriesExhausted: true,
 			RequestMeta:      req.Metadata,
+			RequestID:        req.RequestID,
 		})
 		return
 	}
@@ -428,12 +442,16 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, string(respBody)),
 			Retryable:   false,
 			RequestMeta: req.Metadata,
+			RequestID:   req.RequestID,
 		})
 		return
 	}
 
-	// Store request metadata for passthrough to response.
-	// Flag simulated structured output so downstream consumers know enforcement was attempted.
+	// Build per-request metadata for passthrough to the response. Flag
+	// simulated structured output so downstream consumers know enforcement
+	// was attempted. Kept as locals (not stored on the plugin) so concurrent
+	// in-flight requests can't clobber each other's tags/meta — see the
+	// audit's P1-A finding for the prior single-slot race.
 	meta := req.Metadata
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_schema" {
 		if meta == nil {
@@ -441,10 +459,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		}
 		meta["_structured_output"] = true
 	}
-	p.mu.Lock()
-	p.currentRequestMeta = meta
-	p.currentRequestTags = req.Tags
-	p.mu.Unlock()
 
 	var responseBody io.Reader = resp.Body
 	var debugBuf *bytes.Buffer
@@ -454,9 +468,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	if req.Stream {
-		p.handleStreamResponse(responseBody)
+		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
 	} else {
-		p.handleSyncResponse(responseBody)
+		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}
 
 	if debugBuf != nil {
@@ -464,7 +478,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 
 	p.mu.Lock()
-	p.cancelFunc = nil
+	delete(p.cancels, req.RequestID)
 	p.mu.Unlock()
 }
 
@@ -763,7 +777,7 @@ type apiUsage struct {
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
-func (p *Plugin) handleSyncResponse(body io.Reader) {
+func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
 	var apiResp apiResponse
 	if err := json.NewDecoder(body).Decode(&apiResp); err != nil {
 		p.emitError(fmt.Errorf("anthropic: failed to decode response: %w", err))
@@ -771,15 +785,12 @@ func (p *Plugin) handleSyncResponse(body io.Reader) {
 	}
 
 	resp := p.convertAPIResponse(apiResp)
+	resp.RequestID = requestID
 
 	// Merge passthrough request metadata with any provider-attached fields
 	// (e.g. thinking_blocks). Passthrough wins on key collision so
 	// upstream-set flags like _structured_output aren't masked, but
 	// provider-attached keys are preserved.
-	p.mu.Lock()
-	meta := p.currentRequestMeta
-	tags := p.currentRequestTags
-	p.mu.Unlock()
 	if resp.Metadata == nil {
 		resp.Metadata = meta
 	} else {
@@ -957,7 +968,7 @@ type streamState struct {
 	chunkIndex   int
 }
 
-func (p *Plugin) handleStreamResponse(body io.Reader) {
+func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -1011,10 +1022,6 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 	// Also emit the complete llm.response for downstream consumers. Merge
 	// passthrough request metadata with thinking_blocks captured from the
 	// stream — round-trip preservation requires both to coexist.
-	p.mu.Lock()
-	meta := p.currentRequestMeta
-	p.mu.Unlock()
-
 	respMeta := meta
 	if len(st.thinkingBlocks) > 0 || len(st.serverToolResults) > 0 {
 		respMeta = make(map[string]any, len(meta)+2)
@@ -1029,18 +1036,18 @@ func (p *Plugin) handleStreamResponse(body io.Reader) {
 		}
 	}
 
-	p.mu.Lock()
-	tags := p.currentRequestTags
-	p.mu.Unlock()
-	_ = p.bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: st.fullContent.String(),
-		ToolCalls:    st.toolCalls,
-		Usage:        finalUsage,
-		CostUSD:      p.costForModel(st.model, finalUsage),
-		Model:        st.model,
-		FinishReason: st.finishReason,
-		Citations:    st.citations,
-		Metadata:     respMeta,
-		Tags:         tags,
+	_ = p.bus.Emit("llm.response", events.LLMResponse{
+		SchemaVersion: events.LLMResponseVersion,
+		RequestID:     requestID,
+		Content:       st.fullContent.String(),
+		ToolCalls:     st.toolCalls,
+		Usage:         finalUsage,
+		CostUSD:       p.costForModel(st.model, finalUsage),
+		Model:         st.model,
+		FinishReason:  st.finishReason,
+		Citations:     st.citations,
+		Metadata:      respMeta,
+		Tags:          tags,
 	})
 }
 

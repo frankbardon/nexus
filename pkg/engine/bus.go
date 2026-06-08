@@ -35,6 +35,13 @@ type ExcludeController interface {
 type CausationController interface {
 	PushCausationContext(c CausationContext) func()
 	SetDefaultCausationContext(c CausationContext)
+	// CurrentCausationContext returns the active CausationContext for the
+	// calling goroutine — the top of its push stack, or the bus-wide
+	// default when nothing has been pushed. Callers that need to derive a
+	// nested context (e.g. a subagent spawned synchronously inside a
+	// parent agent's goroutine) read this to set Depth = parent.Depth + 1
+	// without having to thread depth through every API.
+	CurrentCausationContext() CausationContext
 }
 
 // EventBus is the central event dispatch system.
@@ -260,6 +267,15 @@ func (b *eventBus) PushCausationContext(c CausationContext) func() {
 		}
 		b.dispatchMu.Unlock()
 	}
+}
+
+// CurrentCausationContext is the public accessor for the per-goroutine
+// causation context — see the CausationController interface for usage. It
+// delegates to currentCausationContext (which has the same fallback rules)
+// and is exposed so plugins outside the engine package can read Depth/AgentID
+// without holding a *eventBus reference.
+func (b *eventBus) CurrentCausationContext() CausationContext {
+	return b.currentCausationContext()
 }
 
 // currentCausationContext returns the top CausationContext for the calling

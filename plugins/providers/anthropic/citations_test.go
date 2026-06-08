@@ -254,7 +254,7 @@ func TestStream_CitationsRoundTrip(t *testing.T) {
 		pricing: pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
-	p.handleStreamResponse(strings.NewReader(canonicalCitationsStream))
+	p.handleStreamResponse(strings.NewReader(canonicalCitationsStream), "test-req", nil, nil)
 
 	resps := rec.byType("llm.response")
 	if len(resps) != 1 {

@@ -410,7 +410,7 @@ func TestStream_ExtendedThinkingRoundTrip(t *testing.T) {
 		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
-	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream))
+	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream), "test-req", nil, nil)
 
 	// Assert: thinking.step emitted twice (one per thinking_delta).
 	steps := rec.byType("thinking.step")
@@ -474,7 +474,7 @@ func TestStream_IncludeThoughtsFalseSilencesEvents(t *testing.T) {
 		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
-	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream))
+	p.handleStreamResponse(strings.NewReader(canonicalThinkingStream), "test-req", nil, nil)
 
 	if got := len(rec.byType("thinking.step")); got != 0 {
 		t.Errorf("thinking.step suppressed but %d emitted", got)

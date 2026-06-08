@@ -72,13 +72,33 @@ type Plugin struct {
 	downgradeCandidates []string
 	pricing             *pricing.Table
 	warningEmitted      map[string]bool
+	estimateFactor      float64
 
 	// in-memory accumulators for session-scoped buckets:
 	// key = dimension|bucketKey -> totals.
 	mu     sync.Mutex
 	totals map[string]*usageTotals
+	// reservations holds per-request estimated deductions made at
+	// handleBeforeLLMRequest so the check + commit happens under one lock
+	// rather than racing across two events. Reconciled (subtract estimate,
+	// add actual) at handleLLMResponse; cleaned up on core.error.
+	reservations map[string]*reservation
 
 	unsubs []func()
+}
+
+// reservation records the estimated deductions applied to each session-scoped
+// bucket for an in-flight request. Tenant ceilings persist via SQLite and
+// don't reserve — their commit path is transactional already.
+type reservation struct {
+	entries []reservationEntry
+}
+
+type reservationEntry struct {
+	cacheKey string
+	input    int
+	output   int
+	total    int
 }
 
 // ceiling holds one limit. Exactly one of MaxInputTokens / MaxOutputTokens /
@@ -119,6 +139,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.session = ctx.Session
 	p.totals = make(map[string]*usageTotals)
 	p.warningEmitted = make(map[string]bool)
+	p.reservations = make(map[string]*reservation)
+	p.estimateFactor = 1.5
+	if v, ok := numericFloat(ctx.Config["estimate_factor"]); ok && v > 0 {
+		p.estimateFactor = v
+	}
 	p.pricing = mergedPricing(ctx.Config)
 
 	ceilings, err := parseCeilings(ctx.Config)
@@ -152,6 +177,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleLLMResponse,
 			engine.WithPriority(0), engine.WithSource(pluginID)),
+		// core.error releases any reservation held for the failed request
+		// so an HTTP-failed call doesn't leak budget headroom.
+		p.bus.Subscribe("core.error", p.handleCoreError,
+			engine.WithPriority(0), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("token budget gate initialized",
@@ -174,12 +203,18 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "before:llm.request", Priority: 10},
 		{EventType: "llm.response", Priority: 0},
+		{EventType: "core.error", Priority: 0},
 	}
 }
 
 func (p *Plugin) Emissions() []string { return []string{"io.output"} }
 
-// handleBeforeLLMRequest checks every ceiling against the request's tags.
+// handleBeforeLLMRequest checks every ceiling against the request's tags and
+// atomically reserves estimated tokens for every passing session-scoped
+// ceiling so concurrent in-flight requests can't all slip under the ceiling
+// before any of them books actual usage. Tenant ceilings rely on SQLite's
+// transactional UPSERT instead of an in-memory reservation.
+//
 // Block ceilings veto with a reason; downgrade-model ceilings rewrite
 // req.Model to the cheapest available candidate.
 func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
@@ -192,45 +227,230 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
+	estInput, estOutput, estTotal := p.estimateRequest(req)
+
+	// First pass: tenant ceilings (storage-backed, separate atomic path).
 	for _, c := range p.ceilings {
+		if c.Dimension != dimTenant {
+			continue
+		}
 		bucketKey, ok := bucketKeyFor(c, req)
 		if !ok {
 			continue
 		}
 		totals := p.snapshotTotals(c, bucketKey)
-		exceeded, reason := c.exceeded(totals)
-		if !exceeded {
+		if exceeded, reason := c.exceeded(totals); exceeded {
+			switch c.OnExceed {
+			case actionWarn:
+				p.emitOutput(c.message(reason))
+			case actionDowngrade:
+				p.applyDowngrade(req, c, reason)
+			default:
+				vp.Veto = engine.VetoResult{Vetoed: true, Reason: reason}
+				p.emitOutput(c.message(reason))
+				return
+			}
+		} else {
 			c.maybeWarn(p, bucketKey, totals)
+		}
+	}
+
+	// Second pass: session-scoped ceilings, atomic check + reserve under p.mu
+	// so concurrent fan-out can't double-book the same headroom.
+	p.mu.Lock()
+	var res *reservation
+	for _, c := range p.ceilings {
+		if c.Dimension == dimTenant {
 			continue
 		}
-		switch c.OnExceed {
-		case actionWarn:
-			p.emitOutput(c.message(reason))
-		case actionDowngrade:
-			p.applyDowngrade(req, c, reason)
-		default: // block
-			vp.Veto = engine.VetoResult{Vetoed: true, Reason: reason}
-			p.emitOutput(c.message(reason))
-			return
+		bucketKey, ok := bucketKeyFor(c, req)
+		if !ok {
+			continue
+		}
+		ck := c.cacheKey(bucketKey)
+		t := p.getOrInitTotalsLocked(ck, c.Window)
+		// Project totals with this request's estimate to evaluate the
+		// ceiling as if the request had landed.
+		projected := *t
+		projected.InputTokens += estInput
+		projected.OutputTokens += estOutput
+		projected.TotalTokens += estTotal
+		exceeded, reason := c.exceeded(projected)
+		if exceeded {
+			switch c.OnExceed {
+			case actionWarn:
+				p.mu.Unlock()
+				p.emitOutput(c.message(reason))
+				p.mu.Lock()
+				continue
+			case actionDowngrade:
+				p.mu.Unlock()
+				p.applyDowngrade(req, c, reason)
+				p.mu.Lock()
+				continue
+			default:
+				// Block: roll back any reservations we already booked for
+				// earlier ceilings so the veto is side-effect free.
+				if res != nil {
+					p.rollbackReservationLocked(res)
+				}
+				p.mu.Unlock()
+				vp.Veto = engine.VetoResult{Vetoed: true, Reason: reason}
+				p.emitOutput(c.message(reason))
+				return
+			}
+		}
+		// Reserve: add the estimate to the bucket now so a concurrent
+		// request sees the headroom already consumed.
+		t.InputTokens += estInput
+		t.OutputTokens += estOutput
+		t.TotalTokens += estTotal
+		if res == nil {
+			res = &reservation{}
+		}
+		res.entries = append(res.entries, reservationEntry{
+			cacheKey: ck,
+			input:    estInput,
+			output:   estOutput,
+			total:    estTotal,
+		})
+		// Take a snapshot for warn-emission outside the lock.
+		c.maybeWarn(p, bucketKey, *t)
+	}
+	if res != nil && req.RequestID != "" {
+		p.reservations[req.RequestID] = res
+	}
+	p.mu.Unlock()
+}
+
+// rollbackReservationLocked subtracts a reservation's deltas from the totals
+// it modified. Must be called with p.mu held.
+func (p *Plugin) rollbackReservationLocked(res *reservation) {
+	for _, e := range res.entries {
+		if t := p.totals[e.cacheKey]; t != nil {
+			t.InputTokens -= e.input
+			t.OutputTokens -= e.output
+			t.TotalTokens -= e.total
 		}
 	}
 }
 
-// handleLLMResponse adds the response's usage to every bucket the request
-// belongs to. We re-derive bucket keys from req.Tags via the response's
-// Tags (provider copies them onto the response).
+// getOrInitTotalsLocked returns the totals pointer for cacheKey, creating
+// (or resetting on day-window rollover) when needed. Caller holds p.mu.
+func (p *Plugin) getOrInitTotalsLocked(cacheKey, window string) *usageTotals {
+	t, ok := p.totals[cacheKey]
+	if !ok || (window == windowDay && hasRolledOver(t.WindowStart)) {
+		t = &usageTotals{WindowStart: time.Now()}
+		p.totals[cacheKey] = t
+	}
+	return t
+}
+
+// estimateRequest produces a (input, output, total) token estimate for the
+// reserve/commit accounting. Output is bounded by req.MaxTokens when set;
+// input is a character-count heuristic scaled by EstimateFactor.
+func (p *Plugin) estimateRequest(req *events.LLMRequest) (int, int, int) {
+	chars := 0
+	for _, m := range req.Messages {
+		chars += len(m.Content)
+		for _, part := range m.Parts {
+			chars += len(part.Text)
+		}
+	}
+	// ~4 chars per token, then headroom multiplier.
+	input := int(float64(chars) / 4.0 * p.estimateFactor)
+	output := req.MaxTokens
+	if output < 0 {
+		output = 0
+	}
+	return input, output, input + output
+}
+
+// handleCoreError releases any reservation held for a failed request so the
+// in-flight headroom isn't leaked. Reads the ErrorInfo.RequestID set by the
+// provider error path.
+func (p *Plugin) handleCoreError(event engine.Event[any]) {
+	ei, ok := event.Payload.(events.ErrorInfo)
+	if !ok || ei.RequestID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	res, ok := p.reservations[ei.RequestID]
+	if !ok {
+		return
+	}
+	p.rollbackReservationLocked(res)
+	delete(p.reservations, ei.RequestID)
+}
+
+// handleLLMResponse reconciles the request's reservation against actual usage:
+// subtract the estimated deductions booked at handleBeforeLLMRequest, then
+// add the response's reported usage. Net effect on each bucket is exactly
+// the actual spend. Tenant ceilings still use the SQLite UPSERT path; they
+// don't reserve so they just accumulate.
 func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
 	resp, ok := event.Payload.(events.LLMResponse)
 	if !ok {
 		return
 	}
+
+	// Tenant ceilings: storage-backed, no reservation path.
 	for _, c := range p.ceilings {
+		if c.Dimension != dimTenant {
+			continue
+		}
 		bucketKey, ok := bucketKeyForResponse(c, resp)
 		if !ok {
 			continue
 		}
 		p.addUsage(c, bucketKey, resp)
 	}
+
+	// Session-scoped ceilings: reservation reconciliation.
+	p.mu.Lock()
+	res := p.reservations[resp.RequestID]
+	if res != nil {
+		delete(p.reservations, resp.RequestID)
+	}
+	// Build a per-cacheKey lookup for the reservation entries so we can
+	// reconcile each ceiling against its corresponding reservation slice.
+	reservedByKey := map[string]reservationEntry{}
+	if res != nil {
+		for _, e := range res.entries {
+			reservedByKey[e.cacheKey] = e
+		}
+	}
+	for _, c := range p.ceilings {
+		if c.Dimension == dimTenant {
+			continue
+		}
+		bucketKey, ok := bucketKeyForResponse(c, resp)
+		if !ok {
+			continue
+		}
+		ck := c.cacheKey(bucketKey)
+		t := p.getOrInitTotalsLocked(ck, c.Window)
+		if rsv, ok := reservedByKey[ck]; ok {
+			t.InputTokens -= rsv.input
+			t.OutputTokens -= rsv.output
+			t.TotalTokens -= rsv.total
+			if t.InputTokens < 0 {
+				t.InputTokens = 0
+			}
+			if t.OutputTokens < 0 {
+				t.OutputTokens = 0
+			}
+			if t.TotalTokens < 0 {
+				t.TotalTokens = 0
+			}
+		}
+		t.InputTokens += resp.Usage.PromptTokens
+		t.OutputTokens += resp.Usage.CompletionTokens
+		t.TotalTokens += resp.Usage.TotalTokens
+		t.CostUSD += resp.CostUSD
+	}
+	p.mu.Unlock()
 }
 
 // snapshotTotals returns the current totals for (dim, key). Loads from

@@ -42,6 +42,11 @@ type PlanStep struct {
 }
 
 // SubagentSpawn requests spawning a new subagent.
+//
+// ParentDepth is the causation depth of the spawning context (0 for a
+// top-level agent, N for a subagent nested at depth N). The subagent plugin
+// pushes a CausationContext with Depth = ParentDepth+1 onto its worker
+// goroutine so emitted events carry accurate AgentID and Depth provenance.
 type SubagentSpawn struct {
 	SchemaVersion int `json:"_schema_version"`
 
@@ -51,6 +56,7 @@ type SubagentSpawn struct {
 	Tools        []string // allowed tool names (empty = all available)
 	ModelRole    string   // model role override (empty = plugin default)
 	ParentTurnID string
+	ParentDepth  int
 }
 
 // SubagentStarted signals that a subagent has begun execution.

@@ -38,6 +38,13 @@ type ResponseFormat struct {
 type LLMRequest struct {
 	SchemaVersion int `json:"_schema_version"`
 
+	// RequestID correlates an LLMRequest with its LLMResponse and any related
+	// gate state (cancel registries, token reservations). Providers MUST copy
+	// it onto the response. Originators may leave it empty; providers generate
+	// one when absent. Required for correctness under concurrent in-flight
+	// requests on the same provider instance.
+	RequestID string
+
 	Role           string // Model role (e.g., "reasoning", "balanced", "quick")
 	Model          string // Explicit model ID override (takes precedence over Role)
 	Messages       []Message
@@ -129,6 +136,12 @@ type ToolDef struct {
 // LLMResponse is the complete response from a language model.
 type LLMResponse struct {
 	SchemaVersion int `json:"_schema_version"`
+
+	// RequestID is copied verbatim from LLMRequest.RequestID. Subscribers that
+	// must correlate request and response (provider in-flight tracking, the
+	// blocking sync-RPC helper, the token-budget reserve/commit gate) key on
+	// it.
+	RequestID string
 
 	Content      string
 	ToolCalls    []ToolCallRequest
