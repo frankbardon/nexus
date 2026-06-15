@@ -46,3 +46,7 @@ Thumbs.db
 # Claude
 .claude/settings.local.json
 .planning/
+
+# Legacy from earlier per-epic-worktree flow (flow-implement no longer creates these,
+# safe to keep ignored).
+.worktrees/
