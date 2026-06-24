@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.tool.docs_search.json",
+  "title": "nexus.tool.docs_search",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tool_name": {"type": "string",  "description": "Override the LLM-facing tool name (default 'search_docs')."},
+    "namespace": {"type": "string",  "description": "Lexical namespace to search (default 'docs')."},
+    "top_k":     {"type": "integer", "minimum": 1, "description": "Default number of sections returned per query."}
+  }
+}
