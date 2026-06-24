@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.index.markdown.json",
+  "title": "nexus.index.markdown",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "docs_dir":  {"type": "string", "description": "Directory of markdown docs to index (recursively)."},
+    "namespace": {"type": "string", "description": "Lexical store namespace to write into (default 'docs')."},
+    "glob":      {"type": "string", "description": "Filename glob to match, e.g. '*.md' (default)."}
+  },
+  "required": ["docs_dir"]
+}

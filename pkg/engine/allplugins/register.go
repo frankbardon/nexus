@@ -80,6 +80,10 @@ import (
 	// Lexical store plugins (advertise the "search.lexical" capability).
 	sqlitefts "github.com/frankbardon/nexus/plugins/vectorstore/sqlite_fts"
 
+	// Lexical docs Q&A plugins (no embeddings / vector store).
+	markdownindex "github.com/frankbardon/nexus/plugins/index/markdown"
+	docssearch "github.com/frankbardon/nexus/plugins/tools/docs_search"
+
 	// RAG plugins.
 	ragcitations "github.com/frankbardon/nexus/plugins/rag/citations"
 	raghybrid "github.com/frankbardon/nexus/plugins/rag/hybrid"
@@ -213,6 +217,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 
 	// Lexical stores (capability: search.lexical)
 	r.Register("nexus.vectorstore.sqlite_fts", sqlitefts.New)
+	r.Register("nexus.index.markdown", markdownindex.New)
 
 	// RAG
 	r.Register("nexus.rag.ingest", ragingest.New)
@@ -249,6 +254,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.code_exec", codeexecplugin.New)
 	r.Register("nexus.tool.web", webplugin.New)
 	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
+	r.Register("nexus.tool.docs_search", docssearch.New)
 
 	// Gates
 	r.Register("nexus.gate.approval_policy", approvalpolicygate.New)
