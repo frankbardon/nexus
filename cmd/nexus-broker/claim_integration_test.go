@@ -495,6 +495,88 @@ func TestQueuedClaimTimesOut(t *testing.T) {
 	}
 }
 
+// TestLeasesListsLiveLeaseThenGoneAfterRelease proves the E4-S1 introspection
+// surface end to end: after a claim, GET /leases lists the live lease with its
+// session id and an active state; after POST /release the lease no longer
+// appears and the slot is freed. Uses the stub instance, so no LLM and no API
+// key.
+func TestLeasesListsLiveLeaseThenGoneAfterRelease(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin, withMaxConcurrent(3))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+
+	// GET /leases lists the live lease with the right id, session id, an active
+	// state, and the capacity aggregates.
+	snap := getLeasesIntegration(t, base)
+	if snap.MaxConcurrent != 3 {
+		t.Errorf("max_concurrent = %d, want 3", snap.MaxConcurrent)
+	}
+	if snap.SlotsInUse != 1 {
+		t.Errorf("slots_in_use = %d, want 1", snap.SlotsInUse)
+	}
+	if snap.QueueDepth != 0 {
+		t.Errorf("queue_depth = %d, want 0", snap.QueueDepth)
+	}
+	if len(snap.Leases) != 1 {
+		t.Fatalf("leases len = %d, want 1", len(snap.Leases))
+	}
+	got := snap.Leases[0]
+	if got.ID != cr.LeaseID {
+		t.Errorf("lease_id = %q, want %q", got.ID, cr.LeaseID)
+	}
+	if got.SessionID != cr.SessionID || got.SessionID == "" {
+		t.Errorf("session_id = %q, want %q", got.SessionID, cr.SessionID)
+	}
+	if got.State != surfaceStateActive {
+		t.Errorf("state = %q, want %q", got.State, surfaceStateActive)
+	}
+	if got.PID == 0 {
+		t.Error("pid not populated")
+	}
+
+	// Release the lease; it must drop off the surface and free its slot.
+	resp, err := http.Post("http://"+base+"/release/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("release status = %d, want 200", resp.StatusCode)
+	}
+	waitFor(t, func() bool { return !reg.Has(cr.LeaseID) })
+
+	after := getLeasesIntegration(t, base)
+	if len(after.Leases) != 0 {
+		t.Fatalf("leases len after release = %d, want 0", len(after.Leases))
+	}
+	if after.SlotsInUse != 0 {
+		t.Errorf("slots_in_use after release = %d, want 0", after.SlotsInUse)
+	}
+}
+
+// getLeasesIntegration performs GET /leases against a running stub broker and
+// decodes the snapshot.
+func getLeasesIntegration(t *testing.T, base string) RegistrySnapshot {
+	t.Helper()
+	resp, err := http.Get("http://" + base + "/leases")
+	if err != nil {
+		t.Fatalf("GET /leases: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /leases status = %d, want 200", resp.StatusCode)
+	}
+	var snap RegistrySnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode leases snapshot: %v", err)
+	}
+	return snap
+}
+
 // postClaimRaw posts a claim body and returns the raw response without asserting
 // status, so a test can inspect a non-200 (e.g. a 503 capacity rejection).
 func postClaimRaw(t *testing.T, base, body string) *http.Response {
@@ -561,11 +643,13 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
+	leases := NewLeasesServer(logger, registry)
 
 	mux := http.NewServeMux()
 	gateway.Register(mux)
 	claims.Register(mux)
 	releases.Register(mux)
+	leases.Register(mux)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 

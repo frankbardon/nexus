@@ -56,6 +56,7 @@ func run() error {
 	gateway := NewGateway(logger, registry)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
+	leases := NewLeasesServer(logger, registry)
 
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
@@ -74,6 +75,7 @@ func run() error {
 	gateway.Register(mux)
 	claims.Register(mux)
 	releases.Register(mux)
+	leases.Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
