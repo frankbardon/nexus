@@ -48,6 +48,11 @@ func main() {
 		sessionID = newSessionID
 	}
 
+	// When STUB_IGNORE_SHUTDOWN=1 the stub deliberately ignores shutdown
+	// frames so the broker's force-kill grace path can be exercised end to
+	// end. The default stub exits cleanly on a shutdown frame (graceful path).
+	ignoreShutdown := os.Getenv("STUB_IGNORE_SHUTDOWN") == "1"
+
 	ctx := context.Background()
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, addr, nil)
@@ -88,6 +93,11 @@ func main() {
 				Payload: frame.Payload,
 			})
 		case brokerframe.SignalShutdown:
+			if ignoreShutdown {
+				// Simulate a stuck instance: keep the connection open and do
+				// not exit, forcing the broker to fall back to a force-kill.
+				continue
+			}
 			return
 		}
 	}

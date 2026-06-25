@@ -46,6 +46,7 @@ func run() error {
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
+		"release_grace", cfg.ReleaseGrace,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -54,6 +55,7 @@ func run() error {
 	registry := NewRegistry(logger)
 	gateway := NewGateway(logger, registry)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
+	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -63,6 +65,7 @@ func run() error {
 	})
 	gateway.Register(mux)
 	claims.Register(mux)
+	releases.Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

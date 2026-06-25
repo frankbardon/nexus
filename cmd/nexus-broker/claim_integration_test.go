@@ -95,10 +95,107 @@ func TestClaimResumePassesRecall(t *testing.T) {
 	}
 }
 
+// TestReleaseGracefulShutdown proves POST /release tears a live instance down
+// cleanly: the broker sends a shutdown frame, the stub exits on it (graceful
+// path), and the lease is freed so a client can no longer connect. Uses the
+// stub instance, so no LLM and no API key.
+func TestReleaseGracefulShutdown(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin)
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	if !reg.Has(cr.LeaseID) {
+		t.Fatal("lease missing after claim")
+	}
+
+	resp, err := http.Post("http://"+base+"/release/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("release status = %d, want 200", resp.StatusCode)
+	}
+
+	// The lease/slot is freed.
+	if reg.Has(cr.LeaseID) {
+		t.Error("lease still present after release")
+	}
+	// A client can no longer connect to the released lease.
+	dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dcancel()
+	if c, _, err := websocket.Dial(dctx, cr.WSURL, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Error("client unexpectedly connected to a released lease")
+	}
+
+	// Releasing an already-gone lease is a clean 404, not a panic.
+	again, err := http.Post("http://"+base+"/release/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("second POST /release: %v", err)
+	}
+	again.Body.Close()
+	if again.StatusCode != http.StatusNotFound {
+		t.Errorf("second release status = %d, want 404", again.StatusCode)
+	}
+}
+
+// TestReleaseForceKillsStubbornInstance proves the bounded-grace force-kill
+// backstop: with STUB_IGNORE_SHUTDOWN=1 the stub ignores the shutdown frame, so
+// the broker must force-kill it after the (short) release grace. The release
+// still succeeds and the lease is freed.
+func TestReleaseForceKillsStubbornInstance(t *testing.T) {
+	t.Setenv("STUB_IGNORE_SHUTDOWN", "1")
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin, withReleaseGrace(150*time.Millisecond))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+
+	start := time.Now()
+	resp, err := http.Post("http://"+base+"/release/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	resp.Body.Close()
+	elapsed := time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("release status = %d, want 200", resp.StatusCode)
+	}
+	// The grace must have elapsed before the force-kill (proving the fallback
+	// ran rather than a graceful exit).
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("release returned in %v, want >= grace (150ms) — graceful path, not force-kill", elapsed)
+	}
+	if reg.Has(cr.LeaseID) {
+		t.Error("lease still present after forced release")
+	}
+}
+
+// stubBrokerOption tweaks the broker wiring used by startStubBrokerWithRegistry.
+type stubBrokerOption func(*Config)
+
+// withReleaseGrace overrides the release grace period for a stub broker.
+func withReleaseGrace(d time.Duration) stubBrokerOption {
+	return func(c *Config) { c.ReleaseGrace = d }
+}
+
 // startStubBroker binds a real listener, wires the gateway + claim handler over
 // it pointing nexus_binary_path at the stub, serves it, and returns the broker's
 // base host:port. The server is torn down via t.Cleanup.
 func startStubBroker(t *testing.T, stubBin string) string {
+	base, _ := startStubBrokerWithRegistry(t, stubBin)
+	return base
+}
+
+// startStubBrokerWithRegistry is startStubBroker plus the shared registry, so a
+// test can assert lease presence directly. It also wires the release endpoint.
+func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBrokerOption) (string, *Registry) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry := NewRegistry(logger)
@@ -110,20 +207,25 @@ func startStubBroker(t *testing.T, stubBin string) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	cfg := Config{ListenAddr: ln.Addr().String(), NexusBinaryPath: stubBin}
+	cfg := Config{ListenAddr: ln.Addr().String(), NexusBinaryPath: stubBin, ReleaseGrace: defaultReleaseGrace}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	claims.readyTimeout = 15 * time.Second
+	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 
 	mux := http.NewServeMux()
 	gateway.Register(mux)
 	claims.Register(mux)
+	releases.Register(mux)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() {
 		_ = srv.Close()
 		gateway.Shutdown()
 	})
-	return ln.Addr().String()
+	return ln.Addr().String(), registry
 }
 
 // postClaimJSON posts a claim body to the broker and returns the decoded

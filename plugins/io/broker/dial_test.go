@@ -83,7 +83,7 @@ func newTestPlugin(t *testing.T, addr, leaseID, sessionID string) (*Plugin, engi
 	p.brokerAddr = addr
 	p.leaseID = leaseID
 	p.sessionID = sessionID
-	p.client = newClient(logger, addr, leaseID, sessionID, p.handleInbound)
+	p.client = newClient(logger, addr, leaseID, sessionID, p.handleInbound, p.handleShutdown)
 
 	p.unsubs = append(p.unsubs,
 		bus.Subscribe("io.output", p.handleOutput),
@@ -229,5 +229,47 @@ func TestInboundInputEmitsUserInput(t *testing.T) {
 	defer mu.Unlock()
 	if seen.Content != "hi there" {
 		t.Fatalf("want content 'hi there', got %q", seen.Content)
+	}
+}
+
+func TestInboundShutdownEmitsSessionEnd(t *testing.T) {
+	stub := newStubBroker(t)
+	p, bus := newTestPlugin(t, stub.wsURL(), "lease-1", "sess-shut")
+
+	ended := make(chan events.SessionInfo, 1)
+	bus.Subscribe("io.session.end", func(e engine.Event[any]) {
+		if si, ok := e.Payload.(events.SessionInfo); ok {
+			select {
+			case ended <- si:
+			default:
+			}
+		}
+	})
+
+	p.client.Start()
+	conn := waitConn(t, stub)
+
+	data, _ := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: "lease-1",
+		Signal:  brokerframe.SignalShutdown,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write shutdown frame: %v", err)
+	}
+
+	select {
+	case si := <-ended:
+		if si.Transport != "broker" || si.ID != "sess-shut" {
+			t.Fatalf("unexpected session.end payload: %+v", si)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown frame did not trigger io.session.end")
+	}
+
+	// The shutdown latch must stop the reconnect loop rather than re-dialing.
+	if !p.client.shutdownRequested.Load() {
+		t.Error("shutdownRequested not latched after shutdown frame")
 	}
 }

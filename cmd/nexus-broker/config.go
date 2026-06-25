@@ -35,6 +35,12 @@ type Config struct {
 	// QueueWaitTimeout is how long a claim waits for capacity before being
 	// rejected. Placeholder for the queueing story.
 	QueueWaitTimeout time.Duration `yaml:"queue_wait_timeout"`
+
+	// ReleaseGrace bounds how long a release (manual, idle, or crash teardown)
+	// waits for an instance to shut its engine down cleanly before the broker
+	// force-kills it. The session is always persisted by the graceful path; the
+	// kill is the orphan-prevention backstop.
+	ReleaseGrace time.Duration `yaml:"release_grace"`
 }
 
 // DefaultConfig returns a Config populated with sane defaults. LoadConfig and
@@ -46,6 +52,7 @@ func DefaultConfig() Config {
 		MaxConcurrent:    8,
 		IdleTimeout:      5 * time.Minute,
 		QueueWaitTimeout: 30 * time.Second,
+		ReleaseGrace:     defaultReleaseGrace,
 	}
 }
 

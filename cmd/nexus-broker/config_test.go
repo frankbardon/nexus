@@ -24,6 +24,7 @@ nexus_binary_path: "/opt/nexus/bin/nexus"
 max_concurrent: 32
 idle_timeout: 2m
 queue_wait_timeout: 10s
+release_grace: 20s
 `
 	cfg, err := LoadConfigFromBytes([]byte(yaml))
 	if err != nil {
@@ -43,6 +44,9 @@ queue_wait_timeout: 10s
 	}
 	if cfg.QueueWaitTimeout != 10*time.Second {
 		t.Errorf("QueueWaitTimeout = %v", cfg.QueueWaitTimeout)
+	}
+	if cfg.ReleaseGrace != 20*time.Second {
+		t.Errorf("ReleaseGrace = %v", cfg.ReleaseGrace)
 	}
 }
 

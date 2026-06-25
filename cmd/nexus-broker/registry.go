@@ -68,10 +68,14 @@ func (c *wsConn) queue(data []byte) bool {
 }
 
 // shutdown closes the underlying WebSocket exactly once with the given status.
+// A nil conn is tolerated so leases can be torn down in tests without a live
+// socket.
 func (c *wsConn) shutdown(status websocket.StatusCode, reason string) {
 	c.once.Do(func() {
 		close(c.closed)
-		_ = c.conn.Close(status, reason)
+		if c.conn != nil {
+			_ = c.conn.Close(status, reason)
+		}
 	})
 }
 
@@ -109,6 +113,22 @@ type lease struct {
 	// process lifecycle; pid is cached for logging and inspection.
 	process processHandle
 	pid     int
+
+	// exited is closed exactly once (via the single reaper goroutine started
+	// in SetProcess) after the instance process has been wait()ed and reaped.
+	// exitErr holds that wait()'s result, valid once exited is closed. Both
+	// claim (waiting for an early exit / reaping after a kill) and release
+	// (waiting out the graceful grace period) observe exited; routing every
+	// wait() through one goroutine avoids calling wait() twice on a process.
+	// exited is created in NewLease so it is always non-nil.
+	exited   chan struct{}
+	exitErr  error
+	exitOnce sync.Once
+
+	// releasing latches once a teardown (manual release, idle, crash) has
+	// begun for this lease, so a concurrent release is a clean no-op rather
+	// than a double shutdown/kill.
+	releasing bool
 }
 
 // Registry is the gateway's shared, mutex-guarded map of lease id → lease.
@@ -152,6 +172,7 @@ func (r *Registry) NewLease() (string, error) {
 		createdAt:       time.Now(),
 		ready:           make(chan struct{}),
 		sessionReported: make(chan struct{}),
+		exited:          make(chan struct{}),
 	}
 	return id, nil
 }
@@ -226,19 +247,61 @@ func (r *Registry) SessionID(id string) string {
 	return l.sessionID
 }
 
-// SetProcess records the spawned instance's process handle on a lease so the
-// broker can track and later manage it. It is a no-op for an unknown lease.
+// SetProcess records the spawned instance's process handle on a lease and
+// starts the single reaper goroutine that wait()s the process exactly once,
+// stores its exit error, and closes the lease's exited channel. Both the claim
+// path and the release path observe that channel, so the process is wait()ed
+// in exactly one place. It is a no-op for an unknown lease or a nil handle.
 func (r *Registry) SetProcess(id string, p processHandle) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
+		r.mu.Unlock()
 		return
 	}
 	l.process = p
 	if p != nil {
 		l.pid = p.pid()
 	}
+	exited := l.exited
+	r.mu.Unlock()
+	if p == nil {
+		return
+	}
+	go func() {
+		err := p.wait()
+		r.mu.Lock()
+		l.exitErr = err
+		r.mu.Unlock()
+		l.exitOnce.Do(func() { close(exited) })
+	}()
+}
+
+// ExitedChan returns the lease's exit channel, closed once the instance
+// process has been reaped. It returns nil for an unknown lease; a select on a
+// nil channel blocks forever, so callers should also guard with a timeout or a
+// known-lease check.
+func (r *Registry) ExitedChan(id string) <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return nil
+	}
+	return l.exited
+}
+
+// ExitErr returns the instance process's wait() error for a lease, valid once
+// ExitedChan is closed. It returns nil for an unknown lease or one that has
+// not exited yet.
+func (r *Registry) ExitErr(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return nil
+	}
+	return l.exitErr
 }
 
 // PID returns the OS process id tracked for a lease, or 0 if the lease is

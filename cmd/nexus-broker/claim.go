@@ -133,23 +133,22 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusInternalServerError, "spawning instance", err)
 		return
 	}
+	// SetProcess starts the single reaper that wait()s the process and closes
+	// the lease's exited channel; both this handler and a later release observe
+	// it, so the process is wait()ed in exactly one place.
 	s.registry.SetProcess(leaseID, handle)
-
-	// Reap the process exactly once on a single goroutine; its result is
-	// consumed below (success leaves it for later-story supervision).
-	exitCh := make(chan error, 1)
-	go func() { exitCh <- handle.wait() }()
 
 	select {
 	case <-s.registry.ReadyChan(leaseID):
 		// Instance booted and signalled ready.
-	case exitErr := <-exitCh:
+	case <-s.registry.ExitedChan(leaseID):
+		exitErr := s.registry.ExitErr(leaseID)
 		s.registry.Remove(leaseID)
 		s.fail(w, http.StatusBadGateway, "instance exited before signalling ready", exitErr)
 		return
 	case <-time.After(s.readyTimeout):
 		_ = handle.kill()
-		<-exitCh // reap the killed process so nothing leaks
+		<-s.registry.ExitedChan(leaseID) // reap the killed process so nothing leaks
 		s.registry.Remove(leaseID)
 		s.fail(w, http.StatusGatewayTimeout, "instance did not become ready in time", nil)
 		return

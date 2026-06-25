@@ -1350,9 +1350,13 @@ payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
 **Inbound IO messages** (client → broker → instance): `input`,
 `approval.response`, `hitl.response`, `cancel`.
 
-The connection reconnects with exponential backoff until shutdown. There is
-**no auth in the plugin itself** — the broker gateway owns lease validation and
-any transport-level authentication.
+The connection reconnects with exponential backoff until shutdown. On an
+inbound `shutdown` frame (sent by the broker for `POST /release` and later
+idle/crash teardown) the plugin emits `io.session.end`, which drives a clean
+engine `Stop` that flushes and persists the session before the process exits;
+the reconnect loop is latched off so the graceful teardown is not undone. There
+is **no auth in the plugin itself** — the broker gateway owns lease validation
+and any transport-level authentication.
 
 ### `nexus.io.voice`
 
@@ -2226,6 +2230,7 @@ nexus_binary_path: "nexus"
 max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
+release_grace: 10s
 ```
 
 | Key                  | Type     | Default  | Description                                                                 |
@@ -2235,6 +2240,7 @@ queue_wait_timeout: 30s
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances. *(Placeholder — consumed by the capacity story.)* |
 | `idle_timeout`       | duration | `5m`     | How long an idle instance survives before teardown. *(Placeholder — consumed by the lifecycle story.)* |
 | `queue_wait_timeout` | duration | `30s`    | How long a claim waits for capacity before being rejected. *(Placeholder — consumed by the queueing story.)* |
+| `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
 
 The spawned-instance side is configured by the `nexus.io.broker` plugin
 (`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
@@ -2272,6 +2278,26 @@ exited before signalling ready") rather than silently starting a new session.
                                              // or the requested id echoed back on resume
 }
 ```
+
+### `POST /release/{lease_id}` (HTTP API, not YAML)
+
+`POST /release/{lease_id}` tears a live instance down gracefully. The broker
+sends a `shutdown` frame to the instance, whose `nexus.io.broker` plugin emits
+`io.session.end` so the engine performs a clean `Stop` — flushing and
+persisting the session before exit. The broker then waits up to `release_grace`
+for the process to exit and **force-kills it** if that window elapses (no
+orphan). The lease is removed and its slot freed. The session directory under
+`~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
+
+| Outcome                         | Status | Body                                         |
+|---------------------------------|--------|----------------------------------------------|
+| Released (graceful or killed)   | `200`  | `{"status":"released","lease_id":"…"}`      |
+| Unknown / already-released lease | `404`  | `{"error":"unknown lease"}`                  |
+| Missing lease id in path        | `400`  | `{"error":"release requires a lease id"}`    |
+
+Release is idempotent: releasing an already-gone lease returns `404` rather than
+erroring, and concurrent releases of the same lease collapse to a single
+teardown.
 
 ---
 

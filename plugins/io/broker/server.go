@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -62,16 +63,22 @@ type ioMessage struct {
 // IO frames in both directions. It reconnects with backoff until its context
 // is cancelled.
 type client struct {
-	logger    *slog.Logger
-	addr      string
-	leaseID   string
-	sessionID string
-	onIO      func(ioMessage)
+	logger     *slog.Logger
+	addr       string
+	leaseID    string
+	sessionID  string
+	onIO       func(ioMessage)
+	onShutdown func()
 
 	// minBackoff/maxBackoff bound the reconnect loop. Broken out as fields
 	// so tests can shrink them.
 	minBackoff time.Duration
 	maxBackoff time.Duration
+
+	// shutdownRequested is set once the broker sends a SignalShutdown frame.
+	// It tells runLoop to stop instead of reconnecting after the session
+	// ends, so a graceful teardown is not undone by the reconnect backoff.
+	shutdownRequested atomic.Bool
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -82,7 +89,9 @@ type client struct {
 }
 
 // newClient constructs a dial-back client. It does not dial until Start.
-func newClient(logger *slog.Logger, addr, leaseID, sessionID string, onIO func(ioMessage)) *client {
+// onShutdown is invoked (once) when the broker sends a SignalShutdown frame so
+// the plugin can trigger a graceful engine shutdown; it may be nil.
+func newClient(logger *slog.Logger, addr, leaseID, sessionID string, onIO func(ioMessage), onShutdown func()) *client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -92,6 +101,7 @@ func newClient(logger *slog.Logger, addr, leaseID, sessionID string, onIO func(i
 		leaseID:    leaseID,
 		sessionID:  sessionID,
 		onIO:       onIO,
+		onShutdown: onShutdown,
 		minBackoff: 250 * time.Millisecond,
 		maxBackoff: 5 * time.Second,
 		done:       make(chan struct{}),
@@ -124,7 +134,7 @@ func (c *client) runLoop() {
 	defer close(c.done)
 	backoff := c.minBackoff
 	for {
-		if c.runCtx.Err() != nil {
+		if c.runCtx.Err() != nil || c.shutdownRequested.Load() {
 			return
 		}
 		if err := c.session(); err != nil && c.runCtx.Err() == nil {
@@ -218,6 +228,13 @@ func (c *client) readPump(conn *websocket.Conn) error {
 			c.onIO(msg)
 		case brokerframe.SignalShutdown:
 			c.logger.Info("broker requested shutdown")
+			// Latch shutdown so runLoop does not reconnect, then trigger the
+			// plugin's graceful engine shutdown. Returning ends the read pump
+			// cleanly; the engine flushes/persists the session before exit.
+			c.shutdownRequested.Store(true)
+			if c.onShutdown != nil {
+				c.onShutdown()
+			}
 			return nil
 		default:
 			c.logger.Debug("ignoring inbound broker signal", "signal", frame.Signal)

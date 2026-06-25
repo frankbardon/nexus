@@ -73,7 +73,9 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	}
 }
 
-// Emissions declares the bus events injected from inbound broker IO frames.
+// Emissions declares the bus events injected from inbound broker IO frames,
+// plus io.session.end which the plugin emits when the broker requests a
+// graceful shutdown of this instance.
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"io.input",
@@ -81,6 +83,7 @@ func (p *Plugin) Emissions() []string {
 		"io.approval.response",
 		"hitl.responded",
 		"cancel.request",
+		"io.session.end",
 	}
 }
 
@@ -104,7 +107,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.sessionID = ctx.Session.ID
 	}
 
-	p.client = newClient(p.logger, p.brokerAddr, p.leaseID, p.sessionID, p.handleInbound)
+	p.client = newClient(p.logger, p.brokerAddr, p.leaseID, p.sessionID, p.handleInbound, p.handleShutdown)
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
@@ -290,6 +293,22 @@ func (p *Plugin) handleInbound(msg ioMessage) {
 	default:
 		p.logger.Debug("unknown inbound broker io message", "type", msg.Type)
 	}
+}
+
+// handleShutdown runs when the broker sends a SignalShutdown frame. It emits
+// io.session.end on the bus, which the engine's run loop observes to begin a
+// graceful Stop — flushing and persisting the session before the process
+// exits. It does NOT hard-exit mid-write; the engine owns teardown ordering.
+// The broker bounds how long it waits for the process to exit and force-kills
+// it if this graceful path overruns.
+func (p *Plugin) handleShutdown() {
+	p.logger.Info("broker requested instance shutdown; ending session",
+		"lease_id", p.leaseID, "session_id", p.sessionID)
+	_ = p.bus.Emit("io.session.end", events.SessionInfo{
+		SchemaVersion: events.SessionInfoVersion,
+		ID:            p.sessionID,
+		Transport:     "broker",
+	})
 }
 
 // configString reads a string config key, returning "" when absent/empty.
