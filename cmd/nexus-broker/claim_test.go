@@ -71,7 +71,7 @@ func testLogger() *slog.Logger {
 
 func newClaimTestServer(t *testing.T, runner commandRunner, cfg Config) (*httptest.Server, *Registry, *ClaimServer) {
 	t.Helper()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner)
 	mux := http.NewServeMux()
 	cs.Register(mux)

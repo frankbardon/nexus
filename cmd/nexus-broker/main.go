@@ -52,7 +52,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	registry := NewRegistry(logger)
+	registry := NewRegistry(logger, cfg.MaxConcurrent)
 	gateway := NewGateway(logger, registry)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)

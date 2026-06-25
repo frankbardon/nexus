@@ -20,7 +20,7 @@ import (
 func newTestGateway(t *testing.T) (string, *Registry) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	registry := NewRegistry(logger)
+	registry := NewRegistry(logger, 0)
 	gateway := NewGateway(logger, registry)
 
 	mux := http.NewServeMux()

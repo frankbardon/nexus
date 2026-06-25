@@ -316,6 +316,68 @@ func TestIdleTimeoutReleasesInstance(t *testing.T) {
 	waitFor(t, func() bool { return !reg.Has(cr.LeaseID) })
 }
 
+// TestMaxConcurrentCapRejectsOverCapClaim proves the E3-S1 capacity cap end to
+// end with cap=1: a first claim goes live and holds the only slot, a second
+// claim arriving at capacity is rejected with a distinct 503 (no instance
+// spawned past the cap), and once the first lease is released a third claim
+// succeeds — proving the slot was freed and re-acquirable. Deterministic, no
+// LLM and no API key (stub instance).
+func TestMaxConcurrentCapRejectsOverCapClaim(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin, withMaxConcurrent(1))
+
+	// First claim takes the only slot and goes live.
+	first := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if first.LeaseID == "" {
+		t.Fatalf("incomplete first claim: %+v", first)
+	}
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after first claim = %d, want 1", got)
+	}
+
+	// Second claim arrives at capacity: it must be rejected with 503 and NOT
+	// consume a slot or spawn an instance.
+	resp := postClaimRaw(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("over-cap claim status = %d, want 503", resp.StatusCode)
+	}
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after rejected claim = %d, want 1 (no drift)", got)
+	}
+
+	// Release the first lease, freeing its slot.
+	rel, err := http.Post("http://"+base+"/release/"+first.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	rel.Body.Close()
+	if rel.StatusCode != http.StatusOK {
+		t.Fatalf("release status = %d, want 200", rel.StatusCode)
+	}
+	waitFor(t, func() bool { return reg.SlotsInUse() == 0 })
+
+	// A third claim now succeeds against the freed slot.
+	third := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if third.LeaseID == "" {
+		t.Fatalf("incomplete third claim after release: %+v", third)
+	}
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after third claim = %d, want 1", got)
+	}
+}
+
+// postClaimRaw posts a claim body and returns the raw response without asserting
+// status, so a test can inspect a non-200 (e.g. a 503 capacity rejection).
+func postClaimRaw(t *testing.T, base, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post("http://"+base+"/claim", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /claim: %v", err)
+	}
+	return resp
+}
+
 // stubBrokerOption tweaks the broker wiring used by startStubBrokerWithRegistry.
 type stubBrokerOption func(*Config)
 
@@ -328,6 +390,12 @@ func withReleaseGrace(d time.Duration) stubBrokerOption {
 // sweeper. A non-positive value disables idle reaping.
 func withIdleTimeout(d time.Duration) stubBrokerOption {
 	return func(c *Config) { c.IdleTimeout = d }
+}
+
+// withMaxConcurrent caps the number of live instances for a stub broker. A
+// non-positive value means unlimited.
+func withMaxConcurrent(n int) stubBrokerOption {
+	return func(c *Config) { c.MaxConcurrent = n }
 }
 
 // startStubBroker binds a real listener, wires the gateway + claim handler over
@@ -343,8 +411,6 @@ func startStubBroker(t *testing.T, stubBin string) string {
 func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBrokerOption) (string, *Registry) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	registry := NewRegistry(logger)
-	gateway := NewGateway(logger, registry)
 
 	// Bind a real listener first so we know the broker's address before wiring
 	// the claim handler (it needs it to build the instance dial-back URL).
@@ -356,6 +422,8 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	registry := NewRegistry(logger, cfg.MaxConcurrent)
+	gateway := NewGateway(logger, registry)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)

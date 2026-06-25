@@ -15,7 +15,7 @@ import (
 // returning the server and the shared registry so a test can pre-seed leases.
 func newReleaseTestServer(t *testing.T, grace time.Duration) (*httptest.Server, *Registry) {
 	t.Helper()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	rs := NewReleaseServer(testLogger(), reg, grace)
 	mux := http.NewServeMux()
 	rs.Register(mux)
@@ -42,7 +42,7 @@ func seedLease(t *testing.T, reg *Registry, proc processHandle) (string, *wsConn
 }
 
 func TestReleaseLease_GracefulSendsShutdownAndRemoves(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(100)
 	id, wc := seedLease(t, reg, proc)
 
@@ -85,7 +85,7 @@ func TestReleaseLease_GracefulSendsShutdownAndRemoves(t *testing.T) {
 }
 
 func TestReleaseLease_ForceKillsOnGraceTimeout(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(101) // never exits on its own
 	id, _ := seedLease(t, reg, proc)
 
@@ -113,7 +113,7 @@ func TestReleaseLease_ForceKillsOnGraceTimeout(t *testing.T) {
 }
 
 func TestReleaseLease_UnknownLeaseErrors(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	err := reg.releaseLease("does-not-exist", "test", time.Second)
 	if !errors.Is(err, errUnknownLease) {
 		t.Fatalf("releaseLease(unknown) = %v, want errUnknownLease", err)
@@ -121,7 +121,7 @@ func TestReleaseLease_UnknownLeaseErrors(t *testing.T) {
 }
 
 func TestReleaseLease_IdempotentDoubleRelease(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(102)
 	id, _ := seedLease(t, reg, proc)
 	close(proc.exited)

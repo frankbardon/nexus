@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -103,8 +104,16 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// NewLease acquires a capacity slot before the lease exists, so a claim
+	// that arrives at max_concurrent is rejected here — before any process is
+	// spawned. Without queueing yet (E3-S2), that rejection is an immediate,
+	// distinct 503 "no capacity" rather than a generic 5xx.
 	leaseID, err := s.registry.NewLease()
 	if err != nil {
+		if errors.Is(err, errNoCapacity) {
+			s.fail(w, http.StatusServiceUnavailable, "no capacity", nil)
+			return
+		}
 		s.fail(w, http.StatusInternalServerError, "minting lease", err)
 		return
 	}

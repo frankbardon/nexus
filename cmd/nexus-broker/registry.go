@@ -146,6 +146,12 @@ type lease struct {
 	// than a double shutdown/kill.
 	releasing bool
 
+	// hasSlot records that this lease holds a capacity slot acquired in
+	// NewLease. It is freed exactly once when the lease is Removed (see
+	// Remove → releaseSlotLocked), so the slot count can never drift: a slot
+	// is held iff a lease exists. Guarded by Registry.mu.
+	hasSlot bool
+
 	// reason records why the lease is being (or was) torn down: "" while live,
 	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
 	// set under Registry.mu at the moment releasing latches, so it is a
@@ -167,19 +173,32 @@ type Registry struct {
 	// sleeps.
 	now func() time.Time
 
+	// maxConcurrent is the capacity ceiling: the most live leases (and thus
+	// spawned instances) the registry permits at once. A non-positive value
+	// means UNLIMITED (no cap). It is read under mu by tryAcquireSlotLocked.
+	maxConcurrent int
+
+	// slotsInUse is the number of capacity slots currently held — one per live
+	// lease. Guarded by mu; mutated only via tryAcquireSlotLocked /
+	// releaseSlotLocked, the single slot-accounting primitives (see slots.go).
+	slotsInUse int
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
 
-// NewRegistry constructs an empty lease registry.
-func NewRegistry(logger *slog.Logger) *Registry {
+// NewRegistry constructs an empty lease registry with the given capacity
+// ceiling. A non-positive maxConcurrent means unlimited (no cap) — the
+// least-surprising meaning for an unconfigured value.
+func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Registry{
-		logger: logger,
-		now:    time.Now,
-		leases: make(map[string]*lease),
+		logger:        logger,
+		now:           time.Now,
+		maxConcurrent: maxConcurrent,
+		leases:        make(map[string]*lease),
 	}
 }
 
@@ -197,6 +216,15 @@ func (r *Registry) NewLease() (string, error) {
 	if _, exists := r.leases[id]; exists {
 		return "", fmt.Errorf("lease id collision: %s", id)
 	}
+	// Acquire a capacity slot BEFORE the lease exists, so a claim can never
+	// spawn an instance past max_concurrent. The slot is bound to the lease
+	// (hasSlot) and freed exactly once when the lease is Removed, so every
+	// teardown path AND every claim error path frees it simply by removing the
+	// lease — no separate slot bookkeeping to leak. At capacity this returns
+	// errNoCapacity and no slot is consumed; the claim handler maps it to 503.
+	if !r.tryAcquireSlotLocked() {
+		return "", errNoCapacity
+	}
 	now := r.now()
 	r.leases[id] = &lease{
 		id:              id,
@@ -206,6 +234,7 @@ func (r *Registry) NewLease() (string, error) {
 		ready:           make(chan struct{}),
 		sessionReported: make(chan struct{}),
 		exited:          make(chan struct{}),
+		hasSlot:         true,
 	}
 	return id, nil
 }
@@ -494,6 +523,13 @@ func (r *Registry) Remove(id string) {
 	l, ok := r.leases[id]
 	if ok {
 		l.state = leaseStateClosed
+		// Free the lease's capacity slot exactly once. Map deletion below
+		// guarantees a second Remove finds nothing, so the slot is never
+		// double-freed; clearing hasSlot is belt-and-braces.
+		if l.hasSlot {
+			l.hasSlot = false
+			r.releaseSlotLocked()
+		}
 		delete(r.leases, id)
 	}
 	r.mu.Unlock()

@@ -69,7 +69,7 @@ func TestSweepInterval(t *testing.T) {
 
 func TestIdleLeases_SelectsOnlyStaleLeases(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(400))
@@ -89,7 +89,7 @@ func TestIdleLeases_SelectsOnlyStaleLeases(t *testing.T) {
 
 func TestMarkActivity_ResetsIdleTimer(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(401))
@@ -115,7 +115,7 @@ func TestMarkActivity_ResetsIdleTimer(t *testing.T) {
 
 func TestMarkActivity_IgnoresReleasingLease(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(402))
@@ -135,7 +135,7 @@ func TestMarkActivity_IgnoresReleasingLease(t *testing.T) {
 // crash.
 func TestIdleSweeper_ReleasesIdleLease(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	proc := newFakeProcess(403)
@@ -170,7 +170,7 @@ func TestIdleSweeper_ReleasesIdleLease(t *testing.T) {
 // window keeps the lease alive across a sweep.
 func TestIdleSweeper_ActivityKeepsLeaseAlive(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(404))
@@ -191,7 +191,7 @@ func TestIdleSweeper_ActivityKeepsLeaseAlive(t *testing.T) {
 // reaping entirely: Run returns immediately and no lease is released.
 func TestIdleSweeper_DisabledByNonPositiveTimeout(t *testing.T) {
 	clk := newFakeClock()
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	reg.now = clk.now
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(405))

@@ -35,7 +35,7 @@ func seedLiveLease(t *testing.T, reg *Registry, proc processHandle) (string, *le
 // exits with no deliberate teardown latched, watchExit frees the slot, records
 // a crash reason, and closes the client with the distinguishable crash status.
 func TestWatchExit_UnexpectedExitIsCrash(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(300)
 	id, l, client := seedLiveLease(t, reg, proc)
 
@@ -76,7 +76,7 @@ func TestWatchExit_UnexpectedExitIsCrash(t *testing.T) {
 // and must not close the client. The owning release path keeps that
 // responsibility.
 func TestWatchExit_GracefulReleaseNotCrash(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(301)
 	id, l, client := seedLiveLease(t, reg, proc)
 
@@ -111,7 +111,7 @@ func TestWatchExit_GracefulReleaseNotCrash(t *testing.T) {
 // closes the client with the going-away (non-crash) status, so a crash and a
 // graceful release remain distinguishable on the wire.
 func TestReleaseLease_ClosesClientWithGracefulStatus(t *testing.T) {
-	reg := NewRegistry(testLogger())
+	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(302)
 	id, _, client := seedLiveLease(t, reg, proc)
 	close(proc.exited)
