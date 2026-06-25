@@ -18,6 +18,20 @@ import (
 // breaking change to the wire shape so both ends can detect a mismatch.
 const Version = 1
 
+// Environment variable names the broker injects when spawning an instance
+// and the nexus.io.broker plugin reads to discover its dial-back target.
+// They are defined here so the spawner (cmd/nexus-broker) and the plugin
+// (plugins/io/broker) share a single source of truth.
+const (
+	// EnvBrokerAddr holds the WebSocket address of the broker's instance
+	// dial-back endpoint (e.g. "ws://127.0.0.1:8080/instance").
+	EnvBrokerAddr = "NEXUS_BROKER_ADDR"
+
+	// EnvLeaseID holds the lease ID the broker assigned to the spawned
+	// instance. The plugin echoes it in its register frame.
+	EnvLeaseID = "NEXUS_BROKER_LEASE_ID"
+)
+
 // Signal identifies the lifecycle phase or payload kind a Frame carries.
 type Signal string
 

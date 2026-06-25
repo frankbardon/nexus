@@ -1325,6 +1325,35 @@ cancel envelopes without going through the `nexus.io.browser` UI hub.
 follow-ups; operators running this on a public network must front it
 with a reverse proxy that does its own authentication.
 
+### `nexus.io.broker`
+
+Source: `plugins/io/broker/plugin.go`. Dial-back IO transport for Nexus
+instances spawned by the session broker (`cmd/nexus-broker`). Unlike
+`nexus.io.browser` / `nexus.io.realtime`, which LISTEN, this plugin DIALS OUT
+to the broker's instance gateway over WebSocket — the broker is the only
+listening socket. On `Ready` it dials `broker_addr`, sends a `register` frame
+keyed by `lease_id`, announces readiness, and reports the engine session id
+(for later `-recall` resume) before bridging IO frames in both directions.
+
+Config keys fall back to environment variables the broker injects at spawn, so
+operators normally set neither by hand:
+
+| Key           | Type   | Default                     | Description |
+|---------------|--------|-----------------------------|-------------|
+| `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
+| `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
+
+**Outbound IO messages** (instance → broker → client, JSON inside the frame
+payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
+`hitl.request`, `cancel.complete`.
+
+**Inbound IO messages** (client → broker → instance): `input`,
+`approval.response`, `hitl.response`, `cancel`.
+
+The connection reconnects with exponential backoff until shutdown. There is
+**no auth in the plugin itself** — the broker gateway owns lease validation and
+any transport-level authentication.
+
 ### `nexus.io.voice`
 
 Source: `plugins/io/voice/plugin.go`. Bus-driven voice IO bridge:
@@ -2208,8 +2237,10 @@ queue_wait_timeout: 30s
 | `queue_wait_timeout` | duration | `30s`    | How long a claim waits for capacity before being rejected. *(Placeholder — consumed by the queueing story.)* |
 
 The spawned-instance side is configured by the `nexus.io.broker` plugin
-(`broker_addr`, `lease_id`) — documented in the I/O section once that plugin
-lands.
+(`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
+I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
+`NEXUS_BROKER_LEASE_ID` environment variables the broker injects at spawn
+(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID`).
 
 ---
 
