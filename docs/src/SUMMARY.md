@@ -86,6 +86,7 @@
   - [Oneshot](./plugins/io/oneshot.md)
   - [Test IO](./plugins/io/test.md)
   - [Wails Desktop](./plugins/io/wails.md)
+  - [Broker IO (dial-back)](./plugins/io/broker.md)
 - [Observers](./plugins/observers/index.md)
   - [Thinking Persistence](./plugins/observers/thinking.md)
   - [OpenTelemetry](./plugins/observers/otel.md)
@@ -123,4 +124,5 @@
 - [Retrieval-Augmented Generation (RAG)](./guides/rag.md)
 - [Integration Testing](./guides/integration-testing.md)
 - [Plugin Contract Tests](./guides/plugin-contracts.md)
+- [Session Broker](./guides/session-broker.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
