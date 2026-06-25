@@ -53,6 +53,7 @@ func run() error {
 
 	registry := NewRegistry(logger)
 	gateway := NewGateway(logger, registry)
+	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -61,6 +62,7 @@ func run() error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	gateway.Register(mux)
+	claims.Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

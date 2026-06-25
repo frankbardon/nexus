@@ -118,8 +118,14 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 
 	go g.writePump(ctx, wc)
 	// Instance read pump: forward decoded frames to the lease's client conn.
+	// Lifecycle signals from the instance are observed here so the gateway can
+	// unblock POST /claim when the engine reports ready.
 	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
 		return g.registry.ClientConn(id)
+	}, func(f brokerframe.Frame) {
+		if f.Signal == brokerframe.SignalReady {
+			g.registry.MarkReady(leaseID)
+		}
 	})
 
 	g.registry.DetachInstance(leaseID, wc)
@@ -160,7 +166,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// Client read pump: forward decoded frames to the lease's instance conn.
 	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
 		return g.registry.InstanceConn(id)
-	})
+	}, nil)
 
 	g.registry.DetachClient(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")
@@ -168,9 +174,11 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 }
 
 // readPump reads frames from wc, decodes them (protocol-aware), and forwards
-// each to the peer connection resolved by peerFor. It returns when the
-// connection closes or its context is cancelled.
-func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peerFor func(string) *wsConn) {
+// each to the peer connection resolved by peerFor. The optional observe
+// callback is invoked for every decoded frame before forwarding, letting the
+// caller react to lifecycle signals (e.g. ready) without disturbing routing.
+// It returns when the connection closes or its context is cancelled.
+func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peerFor func(string) *wsConn, observe func(brokerframe.Frame)) {
 	for {
 		_, data, err := wc.conn.Read(ctx)
 		if err != nil {
@@ -184,6 +192,9 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peer
 		if err != nil {
 			g.logger.Warn("dropping undecodable frame", "lease_id", leaseID, "error", err)
 			continue
+		}
+		if observe != nil {
+			observe(frame)
 		}
 		if frame.LeaseID != "" && frame.LeaseID != leaseID {
 			g.logger.Warn("dropping frame with mismatched lease",

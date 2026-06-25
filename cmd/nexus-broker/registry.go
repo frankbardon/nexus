@@ -77,13 +77,28 @@ func (c *wsConn) shutdown(status websocket.StatusCode, reason string) {
 
 // lease holds the paired connections plus bookkeeping for a single claimed
 // instance. Fields are guarded by Registry.mu — never read or mutate them
-// outside a Registry method.
+// outside a Registry method (with the documented exception of ready/readyOnce,
+// which are signalled via MarkReady and observed through the channel returned
+// by ReadyChan).
 type lease struct {
 	id        string
 	state     leaseState
 	createdAt time.Time
 	instance  *wsConn
 	client    *wsConn
+
+	// ready is closed exactly once (via MarkReady) when the spawned instance
+	// signals it has booted and can accept IO. POST /claim blocks on this
+	// channel before responding so callers never connect before the engine
+	// is live. The channel is created in NewLease so it is always non-nil.
+	ready     chan struct{}
+	readyOnce sync.Once
+
+	// process is the broker's handle on the spawned instance process. It is
+	// stored so later stories (release, crash, capacity) can manage the
+	// process lifecycle; pid is cached for logging and inspection.
+	process processHandle
+	pid     int
 }
 
 // Registry is the gateway's shared, mutex-guarded map of lease id → lease.
@@ -125,8 +140,63 @@ func (r *Registry) NewLease() (string, error) {
 		id:        id,
 		state:     leaseStatePending,
 		createdAt: time.Now(),
+		ready:     make(chan struct{}),
 	}
 	return id, nil
+}
+
+// MarkReady closes the lease's readiness channel exactly once. The gateway
+// calls it when an instance's dial-back connection delivers a ready signal,
+// unblocking the POST /claim handler waiting in ReadyChan. It is a no-op for
+// an unknown lease or a lease already marked ready.
+func (r *Registry) MarkReady(id string) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	l.readyOnce.Do(func() { close(l.ready) })
+}
+
+// ReadyChan returns the lease's readiness channel, closed once the instance
+// signals ready. It returns nil for an unknown lease; a select on a nil
+// channel blocks forever, so callers should also guard with a timeout.
+func (r *Registry) ReadyChan(id string) <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return nil
+	}
+	return l.ready
+}
+
+// SetProcess records the spawned instance's process handle on a lease so the
+// broker can track and later manage it. It is a no-op for an unknown lease.
+func (r *Registry) SetProcess(id string, p processHandle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return
+	}
+	l.process = p
+	if p != nil {
+		l.pid = p.pid()
+	}
+}
+
+// PID returns the OS process id tracked for a lease, or 0 if the lease is
+// unknown or has no process recorded yet.
+func (r *Registry) PID(id string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return 0
+	}
+	return l.pid
 }
 
 // AttachInstance binds an instance's dial-back connection to a known lease.
