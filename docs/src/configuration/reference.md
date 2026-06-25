@@ -2183,6 +2183,36 @@ Tags are populated by:
 
 ---
 
+## Session broker (`nexus-broker`)
+
+The `nexus-broker` binary (`cmd/nexus-broker`) is a **standalone service**, not
+an engine plugin. It reads its own YAML config file (default path
+`broker.yaml`, override with `-config <path>`) and fronts OS-isolated Nexus
+instances behind an HTTP/WebSocket gateway.
+
+```yaml
+# broker.yaml
+listen_addr: ":8080"
+nexus_binary_path: "nexus"
+max_concurrent: 8
+idle_timeout: 5m
+queue_wait_timeout: 30s
+```
+
+| Key                  | Type     | Default  | Description                                                                 |
+|----------------------|----------|----------|-----------------------------------------------------------------------------|
+| `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
+| `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
+| `max_concurrent`     | int      | `8`      | Maximum number of live instances. *(Placeholder — consumed by the capacity story.)* |
+| `idle_timeout`       | duration | `5m`     | How long an idle instance survives before teardown. *(Placeholder — consumed by the lifecycle story.)* |
+| `queue_wait_timeout` | duration | `30s`    | How long a claim waits for capacity before being rejected. *(Placeholder — consumed by the queueing story.)* |
+
+The spawned-instance side is configured by the `nexus.io.broker` plugin
+(`broker_addr`, `lease_id`) — documented in the I/O section once that plugin
+lands.
+
+---
+
 ## Cross-references
 
 - [Plugin System](../../../.claude/docs/plugin-system.md) — plugin lifecycle,
