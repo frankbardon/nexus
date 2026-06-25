@@ -2238,7 +2238,7 @@ release_grace: 10s
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances. *(Placeholder — consumed by the capacity story.)* |
-| `idle_timeout`       | duration | `5m`     | How long an idle instance survives before teardown. *(Placeholder — consumed by the lifecycle story.)* |
+| `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long a claim waits for capacity before being rejected. *(Placeholder — consumed by the queueing story.)* |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
 

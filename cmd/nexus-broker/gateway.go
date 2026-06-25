@@ -167,9 +167,16 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 
 	go g.writePump(ctx, wc)
 	// Client read pump: forward decoded frames to the lease's instance conn.
+	// Stamp last-activity ONLY for real user input (io frames flowing client →
+	// instance) so the idle sweeper resets on genuine activity and not on
+	// instance output, pings, or control frames.
 	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
 		return g.registry.InstanceConn(id)
-	}, nil)
+	}, func(f brokerframe.Frame) {
+		if f.Signal == brokerframe.SignalIO {
+			g.registry.markActivity(leaseID)
+		}
+	})
 
 	g.registry.DetachClient(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")

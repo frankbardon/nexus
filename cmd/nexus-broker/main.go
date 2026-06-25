@@ -57,6 +57,14 @@ func run() error {
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 
+	// The idle sweeper releases leases with no real client input for
+	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
+	// disables it. It runs until sweepCtx is cancelled on shutdown.
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	go sweeper.Run(sweepCtx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -94,6 +102,7 @@ func run() error {
 		return nil
 	}
 
+	stopSweep()
 	gateway.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

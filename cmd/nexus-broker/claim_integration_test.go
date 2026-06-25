@@ -267,12 +267,67 @@ func TestCrashDetectionFreesSlotAndClosesClient(t *testing.T) {
 	}
 }
 
+// TestIdleTimeoutReleasesInstance proves the E2-S3 idle path end to end: a
+// claimed instance with a connected-but-silent client (no io frames) is released
+// once it sits idle past a short idle_timeout. The instance process is gone, the
+// lease is removed, and the client's WS is closed with the graceful going-away
+// status — distinct from the crash status — proving the idle teardown went
+// through the shared release path and not crash detection. Instance → client
+// lifecycle frames (register/ready/session-id) do NOT reset the timer, which is
+// exactly why a never-typing client still gets reaped. Deterministic, no LLM.
+func TestIdleTimeoutReleasesInstance(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withIdleTimeout(300*time.Millisecond),
+		withReleaseGrace(2*time.Second))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+
+	// Connect a client but send NO io frames: the lease must go idle despite an
+	// open client connection and any instance-side output.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, _, err := websocket.Dial(ctx, cr.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws_url %s: %v", cr.WSURL, err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+
+	// The idle sweeper releases the lease; reading drains any instance output and
+	// then surfaces the close. The close status must be going-away (idle), never
+	// the crash status.
+	for {
+		if _, _, rerr := client.Read(ctx); rerr != nil {
+			cs := websocket.CloseStatus(rerr)
+			if cs == crashCloseStatus {
+				t.Fatalf("idle release closed client with crash status %v (err=%v)", cs, rerr)
+			}
+			if cs != websocket.StatusGoingAway {
+				t.Fatalf("idle close status = %v, want going-away (err=%v)", cs, rerr)
+			}
+			break
+		}
+	}
+
+	// The instance process is gone and the lease/slot is freed.
+	waitFor(t, func() bool { return !reg.Has(cr.LeaseID) })
+}
+
 // stubBrokerOption tweaks the broker wiring used by startStubBrokerWithRegistry.
 type stubBrokerOption func(*Config)
 
 // withReleaseGrace overrides the release grace period for a stub broker.
 func withReleaseGrace(d time.Duration) stubBrokerOption {
 	return func(c *Config) { c.ReleaseGrace = d }
+}
+
+// withIdleTimeout overrides the idle timeout for a stub broker, arming the idle
+// sweeper. A non-positive value disables idle reaping.
+func withIdleTimeout(d time.Duration) stubBrokerOption {
+	return func(c *Config) { c.IdleTimeout = d }
 }
 
 // startStubBroker binds a real listener, wires the gateway + claim handler over
@@ -311,7 +366,14 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	releases.Register(mux)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
+
+	// Arm the idle sweeper exactly as main.go does when an idle timeout is set.
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	go sweeper.Run(sweepCtx)
+
 	t.Cleanup(func() {
+		stopSweep()
 		_ = srv.Close()
 		gateway.Shutdown()
 	})

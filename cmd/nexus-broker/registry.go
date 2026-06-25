@@ -100,6 +100,13 @@ type lease struct {
 	instance  *wsConn
 	client    *wsConn
 
+	// lastActivity is the time of the most recent REAL client activity on this
+	// lease — i.e. an inbound io frame flowing client → instance (user input).
+	// It is NOT bumped by instance → client output, pings, or control frames, so
+	// the idle sweeper measures genuine inactivity. Guarded by Registry.mu;
+	// stamped via markActivity from the gateway's client read pump.
+	lastActivity time.Time
+
 	// ready is closed exactly once (via MarkReady) when the spawned instance
 	// signals it has booted and can accept IO. POST /claim blocks on this
 	// channel before responding so callers never connect before the engine
@@ -154,6 +161,12 @@ type lease struct {
 type Registry struct {
 	logger *slog.Logger
 
+	// now is the clock used for lease timestamps (createdAt, lastActivity) and
+	// the idle sweeper's cutoff comparison. It defaults to time.Now; tests swap
+	// it for a deterministic clock so idle reaping can be exercised without real
+	// sleeps.
+	now func() time.Time
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
@@ -165,6 +178,7 @@ func NewRegistry(logger *slog.Logger) *Registry {
 	}
 	return &Registry{
 		logger: logger,
+		now:    time.Now,
 		leases: make(map[string]*lease),
 	}
 }
@@ -183,15 +197,48 @@ func (r *Registry) NewLease() (string, error) {
 	if _, exists := r.leases[id]; exists {
 		return "", fmt.Errorf("lease id collision: %s", id)
 	}
+	now := r.now()
 	r.leases[id] = &lease{
 		id:              id,
 		state:           leaseStatePending,
-		createdAt:       time.Now(),
+		createdAt:       now,
+		lastActivity:    now,
 		ready:           make(chan struct{}),
 		sessionReported: make(chan struct{}),
 		exited:          make(chan struct{}),
 	}
 	return id, nil
+}
+
+// markActivity stamps a lease's last-activity time with the registry clock. The
+// gateway calls it ONLY for real client input — inbound io frames flowing
+// client → instance — so the idle sweeper resets on genuine user activity and
+// not on instance output, pings, or control frames. It is a no-op for an
+// unknown lease.
+func (r *Registry) markActivity(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, ok := r.leases[id]; ok {
+		l.lastActivity = r.now()
+	}
+}
+
+// idleLeases returns the ids of every live lease whose last client activity is
+// strictly before cutoff and which is not already being torn down. The idle
+// sweeper computes cutoff as now-idle_timeout and releases the returned ids.
+func (r *Registry) idleLeases(cutoff time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for id, l := range r.leases {
+		if l.releasing {
+			continue
+		}
+		if l.lastActivity.Before(cutoff) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // MarkReady closes the lease's readiness channel exactly once. The gateway
