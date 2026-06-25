@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,12 @@ type ClaimServer struct {
 	runner             commandRunner
 	readyTimeout       time.Duration
 	sessionReportGrace time.Duration
+
+	// queueWaitTimeout bounds how long an over-capacity claim parks in the FIFO
+	// capacity queue before returning a timeout error. It is sourced from the
+	// broker config's queue_wait_timeout. A non-positive value disables waiting:
+	// an at-capacity claim is rejected immediately with "no capacity".
+	queueWaitTimeout time.Duration
 }
 
 // NewClaimServer constructs a claim handler. A nil runner defaults to the
@@ -80,6 +87,7 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 		runner:             runner,
 		readyTimeout:       defaultReadyTimeout,
 		sessionReportGrace: defaultSessionReportGrace,
+		queueWaitTimeout:   cfg.QueueWaitTimeout,
 	}
 }
 
@@ -104,17 +112,29 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NewLease acquires a capacity slot before the lease exists, so a claim
-	// that arrives at max_concurrent is rejected here — before any process is
-	// spawned. Without queueing yet (E3-S2), that rejection is an immediate,
-	// distinct 503 "no capacity" rather than a generic 5xx.
-	leaseID, err := s.registry.NewLease()
+	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
+	// claim can never spawn an instance past max_concurrent. At capacity it
+	// parks the claim in a FIFO queue (E3-S2) and proceeds when a slot frees:
+	//
+	//   - errQueueTimeout: the claim waited past queue_wait_timeout → a distinct
+	//     503 "capacity wait timed out" (told apart from the immediate
+	//     "no capacity" below by its message).
+	//   - errNoCapacity: the cap is full AND queue_wait_timeout <= 0 (waiting
+	//     disabled) → immediate 503 "no capacity".
+	//   - context cancelled: the client hung up while queued → no response (the
+	//     connection is gone); the waiter is already dropped from the queue.
+	leaseID, err := s.registry.NewLeaseQueued(r.Context(), s.queueWaitTimeout)
 	if err != nil {
-		if errors.Is(err, errNoCapacity) {
+		switch {
+		case errors.Is(err, errQueueTimeout):
+			s.fail(w, http.StatusServiceUnavailable, "capacity wait timed out", nil)
+		case errors.Is(err, errNoCapacity):
 			s.fail(w, http.StatusServiceUnavailable, "no capacity", nil)
-			return
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			s.logger.Info("claim cancelled while queued for capacity", "error", err)
+		default:
+			s.fail(w, http.StatusInternalServerError, "minting lease", err)
 		}
-		s.fail(w, http.StatusInternalServerError, "minting lease", err)
 		return
 	}
 

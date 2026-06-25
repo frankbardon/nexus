@@ -367,6 +367,134 @@ func TestMaxConcurrentCapRejectsOverCapClaim(t *testing.T) {
 	}
 }
 
+// TestQueuedClaimProceedsWhenSlotFrees proves the E3-S2 FIFO wait queue end to
+// end with cap=1: a first claim goes live and holds the only slot, a second
+// claim arriving at capacity PARKS in the queue (it does not 503), and once the
+// first lease is released the queued claim is granted the slot, spawns, becomes
+// ready, and can converse through the gateway. Deterministic, no LLM (stub).
+func TestQueuedClaimProceedsWhenSlotFrees(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withMaxConcurrent(1),
+		withQueueWaitTimeout(10*time.Second))
+
+	// Claim A takes the only slot and goes live.
+	first := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if first.LeaseID == "" {
+		t.Fatalf("incomplete first claim: %+v", first)
+	}
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after first claim = %d, want 1", got)
+	}
+
+	// Claim B arrives at capacity: it must PARK in the queue, not get 503'd.
+	bCh := make(chan claimResponse, 1)
+	go func() { bCh <- postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`) }()
+	waitFor(t, func() bool { return reg.QueueLen() == 1 })
+	select {
+	case <-bCh:
+		t.Fatal("queued claim B returned before a slot freed")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Release A, freeing its slot → B is granted it and proceeds.
+	rel, err := http.Post("http://"+base+"/release/"+first.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	rel.Body.Close()
+	if rel.StatusCode != http.StatusOK {
+		t.Fatalf("release status = %d, want 200", rel.StatusCode)
+	}
+
+	var second claimResponse
+	select {
+	case second = <-bCh:
+	case <-time.After(20 * time.Second):
+		t.Fatal("queued claim B never proceeded after the slot freed")
+	}
+	if second.LeaseID == "" || second.LeaseID == first.LeaseID {
+		t.Fatalf("queued claim B lease = %q (first = %q)", second.LeaseID, first.LeaseID)
+	}
+
+	// B is live: a client can converse through it (echo round-trip).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, _, err := websocket.Dial(ctx, second.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial B ws_url %s: %v", second.WSURL, err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+
+	out, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: second.LeaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"hello":"queued"}`),
+	})
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	_, data, err := client.Read(ctx)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	echo, err := brokerframe.Decode(data)
+	if err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"queued"}` {
+		t.Fatalf("unexpected echo frame: %+v", echo)
+	}
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after B proceeds = %d, want 1 (no drift)", got)
+	}
+}
+
+// TestQueuedClaimTimesOut proves a queued claim that never gets a slot returns a
+// distinct 503 "capacity wait timed out" after queue_wait_timeout, leaves the
+// holder untouched, and leaks no waiter. Deterministic, no LLM (stub).
+func TestQueuedClaimTimesOut(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withMaxConcurrent(1),
+		withQueueWaitTimeout(200*time.Millisecond))
+
+	first := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if first.LeaseID == "" {
+		t.Fatalf("incomplete first claim: %+v", first)
+	}
+
+	// Second claim queues and then times out because no slot ever frees.
+	start := time.Now()
+	resp := postClaimRaw(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("queue-timeout status = %d, want 503", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body["error"] != "capacity wait timed out" {
+		t.Fatalf("error = %q, want %q (distinct timeout message)", body["error"], "capacity wait timed out")
+	}
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("queued claim returned in %v, want >= queue_wait_timeout (200ms)", elapsed)
+	}
+
+	// No drift, no leaked waiter, the holder is untouched.
+	if got := reg.SlotsInUse(); got != 1 {
+		t.Fatalf("slots in use after queue timeout = %d, want 1 (no drift)", got)
+	}
+	waitFor(t, func() bool { return reg.QueueLen() == 0 })
+	if !reg.Has(first.LeaseID) {
+		t.Error("first lease vanished during the queued claim's timeout")
+	}
+}
+
 // postClaimRaw posts a claim body and returns the raw response without asserting
 // status, so a test can inspect a non-200 (e.g. a 503 capacity rejection).
 func postClaimRaw(t *testing.T, base, body string) *http.Response {
@@ -396,6 +524,12 @@ func withIdleTimeout(d time.Duration) stubBrokerOption {
 // non-positive value means unlimited.
 func withMaxConcurrent(n int) stubBrokerOption {
 	return func(c *Config) { c.MaxConcurrent = n }
+}
+
+// withQueueWaitTimeout sets how long an over-capacity claim parks in the FIFO
+// queue before timing out. A non-positive value disables waiting.
+func withQueueWaitTimeout(d time.Duration) stubBrokerOption {
+	return func(c *Config) { c.QueueWaitTimeout = d }
 }
 
 // startStubBroker binds a real listener, wires the gateway + claim handler over

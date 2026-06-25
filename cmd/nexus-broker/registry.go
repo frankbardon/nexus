@@ -1,6 +1,8 @@
 package main
 
 import (
+	"container/list"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -183,6 +185,12 @@ type Registry struct {
 	// releaseSlotLocked, the single slot-accounting primitives (see slots.go).
 	slotsInUse int
 
+	// waiters is the FIFO queue of claims parked because the registry is at
+	// capacity (see slots.go). A freed slot is handed to the front waiter
+	// rather than decrementing the count, so a longer-queued claim is never
+	// barged past. Guarded by mu.
+	waiters *list.List
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
@@ -198,14 +206,17 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 		logger:        logger,
 		now:           time.Now,
 		maxConcurrent: maxConcurrent,
+		waiters:       list.New(),
 		leases:        make(map[string]*lease),
 	}
 }
 
 // NewLease creates a fresh, pending lease with a randomly generated id and
-// returns the id. E1-S4's POST /claim calls this before spawning the
-// instance, then hands the id to the instance so its dial-back register
-// frame matches. Use ClientWSPath(id) to learn where the client connects.
+// returns the id, acquiring a capacity slot WITHOUT waiting. At capacity it
+// returns errNoCapacity immediately and consumes no slot. NewLeaseQueued is the
+// claim path's entry point (it adds bounded FIFO waiting on top); NewLease is
+// the non-waiting primitive used by tests and any caller that wants the old
+// immediate-rejection semantics.
 func (r *Registry) NewLease() (string, error) {
 	id, err := newLeaseID()
 	if err != nil {
@@ -213,9 +224,6 @@ func (r *Registry) NewLease() (string, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.leases[id]; exists {
-		return "", fmt.Errorf("lease id collision: %s", id)
-	}
 	// Acquire a capacity slot BEFORE the lease exists, so a claim can never
 	// spawn an instance past max_concurrent. The slot is bound to the lease
 	// (hasSlot) and freed exactly once when the lease is Removed, so every
@@ -224,6 +232,50 @@ func (r *Registry) NewLease() (string, error) {
 	// errNoCapacity and no slot is consumed; the claim handler maps it to 503.
 	if !r.tryAcquireSlotLocked() {
 		return "", errNoCapacity
+	}
+	if err := r.insertLeaseLocked(id); err != nil {
+		r.releaseSlotLocked()
+		return "", err
+	}
+	return id, nil
+}
+
+// NewLeaseQueued creates a fresh, pending lease, waiting in FIFO order for a
+// capacity slot if the registry is at max_concurrent. E3-S2's POST /claim calls
+// it instead of NewLease so an over-cap claim queues rather than failing
+// outright. The slot is reserved on the SAME counter as NewLease — the queue
+// adds no second accounting path.
+//
+// Returns errNoCapacity if the cap is full and timeout <= 0 (no waiting),
+// errQueueTimeout if the wait exceeds timeout, or the wrapped ctx error if the
+// request context is cancelled while queued. On any error no slot is held.
+func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration) (string, error) {
+	id, err := newLeaseID()
+	if err != nil {
+		return "", err
+	}
+	if err := r.acquireSlot(ctx, timeout); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	insertErr := r.insertLeaseLocked(id)
+	r.mu.Unlock()
+	if insertErr != nil {
+		// We hold a slot we could not bind to a lease; hand it back to the
+		// queue (or decrement) so nothing leaks.
+		r.releaseSlot()
+		return "", insertErr
+	}
+	return id, nil
+}
+
+// insertLeaseLocked inserts a fresh pending lease for an ALREADY-acquired
+// capacity slot. Caller MUST hold r.mu and MUST have reserved a slot (the lease
+// is created with hasSlot=true, never incrementing the counter itself). Returns
+// an error on the astronomically unlikely id collision.
+func (r *Registry) insertLeaseLocked(id string) error {
+	if _, exists := r.leases[id]; exists {
+		return fmt.Errorf("lease id collision: %s", id)
 	}
 	now := r.now()
 	r.leases[id] = &lease{
@@ -236,7 +288,7 @@ func (r *Registry) NewLease() (string, error) {
 		exited:          make(chan struct{}),
 		hasSlot:         true,
 	}
-	return id, nil
+	return nil
 }
 
 // markActivity stamps a lease's last-activity time with the registry clock. The

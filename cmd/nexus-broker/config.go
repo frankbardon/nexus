@@ -12,10 +12,9 @@ import (
 // Config holds the nexus-broker service configuration. It is loaded from a
 // YAML file at startup, mirroring the engine's file-based config style.
 //
-// Only listen_addr and nexus_binary_path are consumed by this story's
-// scaffold; max_concurrent, idle_timeout, and queue_wait_timeout are
-// placeholders wired into the schema now and consumed by later stories
-// (capacity, lifecycle, queueing).
+// All keys are live: listen_addr / nexus_binary_path (gateway + spawn),
+// max_concurrent (capacity cap), idle_timeout (idle reaping), release_grace
+// (graceful-shutdown grace), and queue_wait_timeout (FIFO capacity wait).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
 	ListenAddr string `yaml:"listen_addr"`
@@ -32,8 +31,9 @@ type Config struct {
 	// Placeholder for the lifecycle story.
 	IdleTimeout time.Duration `yaml:"idle_timeout"`
 
-	// QueueWaitTimeout is how long a claim waits for capacity before being
-	// rejected. Placeholder for the queueing story.
+	// QueueWaitTimeout is how long an over-capacity claim parks in the FIFO
+	// capacity wait queue before returning a timeout error. A non-positive value
+	// disables waiting: an at-capacity claim is rejected immediately.
 	QueueWaitTimeout time.Duration `yaml:"queue_wait_timeout"`
 
 	// ReleaseGrace bounds how long a release (manual, idle, or crash teardown)
