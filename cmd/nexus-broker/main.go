@@ -51,12 +51,16 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	registry := NewRegistry(logger)
+	gateway := NewGateway(logger, registry)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	gateway.Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -84,6 +88,8 @@ func run() error {
 		}
 		return nil
 	}
+
+	gateway.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
