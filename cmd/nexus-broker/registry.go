@@ -42,6 +42,13 @@ type wsConn struct {
 	send   chan []byte
 	closed chan struct{}
 	once   sync.Once
+
+	// closeStatus and closeReason record the status code and reason the conn
+	// was shut down with. They are written exactly once inside shutdown's
+	// once.Do, so reading them after observing closed is race-free. They let a
+	// crash teardown be told apart from a graceful one without a live socket.
+	closeStatus websocket.StatusCode
+	closeReason string
 }
 
 // newWSConn wraps an accepted WebSocket connection.
@@ -72,6 +79,8 @@ func (c *wsConn) queue(data []byte) bool {
 // socket.
 func (c *wsConn) shutdown(status websocket.StatusCode, reason string) {
 	c.once.Do(func() {
+		c.closeStatus = status
+		c.closeReason = reason
 		close(c.closed)
 		if c.conn != nil {
 			_ = c.conn.Close(status, reason)
@@ -129,6 +138,14 @@ type lease struct {
 	// begun for this lease, so a concurrent release is a clean no-op rather
 	// than a double shutdown/kill.
 	releasing bool
+
+	// reason records why the lease is being (or was) torn down: "" while live,
+	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
+	// set under Registry.mu at the moment releasing latches, so it is a
+	// non-timing signal that distinguishes an unexpected crash from a graceful
+	// release. Remove uses it to pick the client's close status, and a future
+	// /leases endpoint (E4-S1) can surface it.
+	reason string
 }
 
 // Registry is the gateway's shared, mutex-guarded map of lease id → lease.
@@ -440,7 +457,12 @@ func (r *Registry) Remove(id string) {
 		l.instance.shutdown(websocket.StatusGoingAway, "lease closed")
 	}
 	if l.client != nil {
-		l.client.shutdown(websocket.StatusGoingAway, "lease closed")
+		// The client's close status is derived from the teardown reason so a
+		// connected client can tell a crash apart from a normal release. The
+		// reason was set under mu before Remove was called; the lock/unlock
+		// above is the barrier that publishes it.
+		status, reason := clientCloseForReason(l.reason)
+		l.client.shutdown(status, reason)
 	}
 }
 

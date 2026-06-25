@@ -53,6 +53,14 @@ func main() {
 	// end. The default stub exits cleanly on a shutdown frame (graceful path).
 	ignoreShutdown := os.Getenv("STUB_IGNORE_SHUTDOWN") == "1"
 
+	// When STUB_CRASH_AFTER_READY=1 the stub simulates an unexpected crash: on
+	// the first inbound IO frame it exits abnormally (non-zero, no graceful
+	// shutdown handshake), letting the broker's crash-detection path be
+	// exercised on demand. Triggering on an IO frame keeps it deterministic —
+	// the crash happens only once a client deliberately pokes this instance, so
+	// sibling instances stay untouched.
+	crashAfterReady := os.Getenv("STUB_CRASH_AFTER_READY") == "1"
+
 	ctx := context.Background()
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	conn, _, err := websocket.Dial(dialCtx, addr, nil)
@@ -87,6 +95,11 @@ func main() {
 		}
 		switch frame.Signal {
 		case brokerframe.SignalIO:
+			if crashAfterReady {
+				// Simulate an unexpected crash mid-session: exit abnormally
+				// without the graceful shutdown handshake.
+				os.Exit(7)
+			}
 			_ = write(ctx, conn, brokerframe.Frame{
 				LeaseID: leaseID,
 				Signal:  brokerframe.SignalIO,

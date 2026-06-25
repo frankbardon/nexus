@@ -177,6 +177,13 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The instance is live: from here an unexpected exit is a crash, not a
+	// pre-ready spawn failure (which this handler's earlier paths own). Start
+	// the crash watcher. It latches the lease's releasing flag only if no
+	// deliberate teardown beats it, so a later POST /release is never
+	// misclassified as a crash.
+	go s.registry.watchExit(leaseID)
+
 	wsURL := "ws://" + clientWSHost(s.cfg.ListenAddr, r.Host) + ClientWSPath(leaseID)
 	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL, "session_id", sessionID)
 

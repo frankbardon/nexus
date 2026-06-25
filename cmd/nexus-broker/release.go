@@ -45,6 +45,7 @@ func (r *Registry) releaseLease(id, reason string, grace time.Duration) error {
 		return nil
 	}
 	l.releasing = true
+	l.reason = reason
 	instance := l.instance
 	process := l.process
 	exited := l.exited

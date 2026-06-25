@@ -177,6 +177,96 @@ func TestReleaseForceKillsStubbornInstance(t *testing.T) {
 	}
 }
 
+// TestCrashDetectionFreesSlotAndClosesClient proves the E2-S4 crash path end to
+// end: a live instance dies UNEXPECTEDLY (not via POST /release), and the broker
+// frees its slot, removes the lease, and closes that client's WS with the
+// distinguishable crash status — while a SECOND concurrent lease is untouched.
+// It uses the stub instance in STUB_CRASH_AFTER_READY mode (it exits abnormally
+// on the first IO frame), so it is deterministic with no LLM and no API key.
+func TestCrashDetectionFreesSlotAndClosesClient(t *testing.T) {
+	// Both spawned stubs inherit this, but only the one that receives an IO
+	// frame crashes — so the sibling lease stays alive.
+	t.Setenv("STUB_CRASH_AFTER_READY", "1")
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin)
+
+	crashCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	keepCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if crashCR.LeaseID == "" || keepCR.LeaseID == "" {
+		t.Fatalf("incomplete claim responses: %+v %+v", crashCR, keepCR)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Connect a client to each lease.
+	crashClient, _, err := websocket.Dial(ctx, crashCR.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial crash lease: %v", err)
+	}
+	defer crashClient.Close(websocket.StatusNormalClosure, "")
+	keepClient, _, err := websocket.Dial(ctx, keepCR.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial keep lease: %v", err)
+	}
+	defer keepClient.Close(websocket.StatusNormalClosure, "")
+
+	// Capture the crashing lease pointer so we can read its terminal reason
+	// after it is removed from the registry map (the object outlives the entry).
+	reg.mu.Lock()
+	crashLease := reg.leases[crashCR.LeaseID]
+	reg.mu.Unlock()
+	if crashLease == nil {
+		t.Fatal("crash lease missing from registry after claim")
+	}
+
+	// Poke the crashing instance with an IO frame; the stub exits abnormally.
+	trigger, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: crashCR.LeaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"crash":"now"}`),
+	})
+	if err != nil {
+		t.Fatalf("encode trigger frame: %v", err)
+	}
+	if err := crashClient.Write(ctx, websocket.MessageText, trigger); err != nil {
+		t.Fatalf("write trigger frame: %v", err)
+	}
+
+	// The crashing client's WS is closed with the distinguishable crash status.
+	if _, _, rerr := crashClient.Read(ctx); rerr == nil {
+		t.Fatal("expected the crashed lease's client WS to close")
+	} else if cs := websocket.CloseStatus(rerr); cs != crashCloseStatus {
+		t.Errorf("crash close status = %v, want %v (err=%v)", cs, crashCloseStatus, rerr)
+	}
+
+	// Slot freed: the lease is gone from the registry (no orphaned entry).
+	waitFor(t, func() bool { return !reg.Has(crashCR.LeaseID) })
+
+	// Lease reason reflects a crash, not a graceful release.
+	reg.mu.Lock()
+	gotReason := crashLease.reason
+	reg.mu.Unlock()
+	if gotReason != reasonCrash {
+		t.Errorf("crashed lease reason = %q, want %q", gotReason, reasonCrash)
+	}
+
+	// The OTHER lease is untouched: still present and its client still open.
+	if !reg.Has(keepCR.LeaseID) {
+		t.Error("the sibling lease was removed by the crash")
+	}
+	// A short read on the sibling client should TIME OUT (still connected),
+	// not return a close error. CloseStatus returns -1 for a non-close error.
+	rctx, rcancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, _, rerr := keepClient.Read(rctx)
+	rcancel()
+	if rerr == nil {
+		t.Error("unexpected frame on the sibling lease's client")
+	} else if cs := websocket.CloseStatus(rerr); cs != -1 {
+		t.Errorf("sibling lease client was closed (status %v); want still-open", cs)
+	}
+}
+
 // stubBrokerOption tweaks the broker wiring used by startStubBrokerWithRegistry.
 type stubBrokerOption func(*Config)
 
