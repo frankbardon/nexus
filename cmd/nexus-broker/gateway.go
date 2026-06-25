@@ -123,8 +123,11 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
 		return g.registry.ClientConn(id)
 	}, func(f brokerframe.Frame) {
-		if f.Signal == brokerframe.SignalReady {
+		switch f.Signal {
+		case brokerframe.SignalReady:
 			g.registry.MarkReady(leaseID)
+		case brokerframe.SignalSessionIDReport:
+			g.registry.MarkSessionID(leaseID, f.SessionID)
 		}
 	})
 

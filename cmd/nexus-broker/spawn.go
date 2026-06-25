@@ -17,6 +17,11 @@ type spawnSpec struct {
 	configPath string
 	leaseID    string
 	brokerAddr string // ws:// URL of the broker's instance dial-back endpoint
+
+	// recallSessionID, when non-empty, resumes a persisted session: the
+	// instance is spawned with -recall <id> so the engine reloads that
+	// session and replays its history instead of starting fresh.
+	recallSessionID string
 }
 
 // processHandle is the broker's minimal view of a spawned instance process.
@@ -60,7 +65,11 @@ func (execRunner) start(_ context.Context, spec spawnSpec) (processHandle, error
 // cmd/nexus/main.go) and is handed its dial-back target through the shared
 // brokerframe env constants — the single source of truth for these names.
 func buildCommand(spec spawnSpec) *exec.Cmd {
-	cmd := exec.Command(spec.binaryPath, "-config", spec.configPath)
+	args := []string{"-config", spec.configPath}
+	if spec.recallSessionID != "" {
+		args = append(args, "-recall", spec.recallSessionID)
+	}
+	cmd := exec.Command(spec.binaryPath, args...)
 	cmd.Env = append(os.Environ(),
 		brokerframe.EnvBrokerAddr+"="+spec.brokerAddr,
 		brokerframe.EnvLeaseID+"="+spec.leaseID,

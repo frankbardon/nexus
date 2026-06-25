@@ -110,6 +110,22 @@ func TestBuildCommand_ArgsAndEnv(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_RecallSession(t *testing.T) {
+	spec := spawnSpec{
+		binaryPath:      "/opt/nexus/bin/nexus",
+		configPath:      "/tmp/claim-123.yaml",
+		leaseID:         "lease-abc",
+		brokerAddr:      "ws://127.0.0.1:8080/instance",
+		recallSessionID: "sess-resume-9",
+	}
+	cmd := buildCommand(spec)
+
+	wantArgs := []string{"/opt/nexus/bin/nexus", "-config", "/tmp/claim-123.yaml", "-recall", "sess-resume-9"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("cmd.Args = %v, want %v", cmd.Args, wantArgs)
+	}
+}
+
 func envHas(env []string, kv string) bool {
 	for _, e := range env {
 		if e == kv {
@@ -156,8 +172,15 @@ func TestClaim_NewSession_ReadyRoundTrip(t *testing.T) {
 		t.Errorf("temp config = %q, want %q", string(data), wantConfig)
 	}
 
-	// Simulate the instance dialing back and signalling ready.
+	// New session: no recall arg should be requested.
+	if spec.recallSessionID != "" {
+		t.Errorf("recallSessionID = %q, want empty for a new session", spec.recallSessionID)
+	}
+
+	// Simulate the instance dialing back, signalling ready, then reporting
+	// the engine-generated session id.
 	reg.MarkReady(spec.leaseID)
+	reg.MarkSessionID(spec.leaseID, "engine-sess-7")
 
 	resp := <-respCh
 	defer resp.Body.Close()
@@ -170,6 +193,9 @@ func TestClaim_NewSession_ReadyRoundTrip(t *testing.T) {
 	}
 	if cr.LeaseID != spec.leaseID {
 		t.Errorf("lease_id = %q, want %q", cr.LeaseID, spec.leaseID)
+	}
+	if cr.SessionID != "engine-sess-7" {
+		t.Errorf("session_id = %q, want %q (engine-generated id reported back)", cr.SessionID, "engine-sess-7")
 	}
 	if want := ClientWSPath(spec.leaseID); !strings.HasSuffix(cr.WSURL, want) {
 		t.Errorf("ws_url = %q, want suffix %q", cr.WSURL, want)
@@ -259,14 +285,44 @@ func TestClaim_SpawnError(t *testing.T) {
 	}
 }
 
-func TestClaim_RejectsResume(t *testing.T) {
-	runner := &fakeRunner{started: make(chan spawnSpec, 1)}
-	ts, _, _ := newClaimTestServer(t, runner, Config{ListenAddr: ":8080"})
+func TestClaim_Resume_PassesRecallAndEchoesSessionID(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(5555)}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
+	ts, reg, _ := newClaimTestServer(t, runner, cfg)
 
-	resp := postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"abc"}`)
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"prior-sess-3"}`)
+	}()
+
+	var spec spawnSpec
+	select {
+	case spec = <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.start was never called")
+	}
+
+	// Resume must hand the engine -recall <id> via the spawn spec.
+	if spec.recallSessionID != "prior-sess-3" {
+		t.Errorf("recallSessionID = %q, want %q", spec.recallSessionID, "prior-sess-3")
+	}
+
+	// Instance boots, signals ready, and reports the recalled session id.
+	reg.MarkReady(spec.leaseID)
+	reg.MarkSessionID(spec.leaseID, "prior-sess-3")
+
+	resp := <-respCh
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var cr claimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// For a resume the returned id matches the requested one.
+	if cr.SessionID != "prior-sess-3" {
+		t.Errorf("session_id = %q, want %q", cr.SessionID, "prior-sess-3")
 	}
 }
 

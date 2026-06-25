@@ -2242,6 +2242,37 @@ I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
 `NEXUS_BROKER_LEASE_ID` environment variables the broker injects at spawn
 (defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID`).
 
+### `POST /claim` (HTTP API, not YAML)
+
+`POST /claim` mints a lease, spawns an instance with the supplied config, waits
+for it to dial back and signal ready, and returns the lease coordinates. The
+request is a small JSON envelope; `session_id` is optional.
+
+```jsonc
+// request body
+{
+  "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
+  "session_id": "prior-session-id"          // optional: resume a persisted session
+}
+```
+
+When `session_id` is set the broker spawns the instance with `-recall <id>` so
+the engine reloads that session and replays its history; when omitted it starts
+a fresh session. An unknown/invalid `session_id` makes the engine fail to boot,
+so the instance never signals ready and the claim returns `502` ("instance
+exited before signalling ready") rather than silently starting a new session.
+
+```jsonc
+// success response (200)
+{
+  "lease_id": "…",                          // lease handle for this instance
+  "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
+  "session_id": "…"                          // engine session id: the generated id for a
+                                             // new session (capture it to -recall later),
+                                             // or the requested id echoed back on resume
+}
+```
+
 ---
 
 ## Cross-references

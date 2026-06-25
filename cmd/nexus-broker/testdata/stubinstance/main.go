@@ -1,9 +1,15 @@
 // Command stubinstance is a tiny stand-in for the real nexus binary used by the
 // broker's integration test. It imports pkg/brokerframe, reads the broker
 // dial-back env the broker injects at spawn, connects to the broker's instance
-// endpoint, registers its lease, signals ready, and then echoes any inbound IO
-// frame straight back. This proves the broker's claim/spawn/proxy mechanics
-// end to end without booting a real engine or requiring an LLM API key.
+// endpoint, registers its lease, signals ready, reports a session id, and then
+// echoes any inbound IO frame straight back. This proves the broker's
+// claim/spawn/proxy mechanics end to end without booting a real engine or
+// requiring an LLM API key.
+//
+// It mirrors the real engine's resume contract just enough for the test: when
+// spawned with -recall <id> it reports that id back as its session id (proving
+// the broker passed the recall arg); otherwise it synthesizes a deterministic
+// new-session id the broker returns to the caller.
 //
 // It lives under testdata/ so the normal `go build ./...` ignores it; the
 // integration test builds it on demand and points nexus_binary_path at it.
@@ -11,6 +17,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"time"
 
@@ -19,11 +26,26 @@ import (
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 )
 
+// newSessionID is the deterministic id the stub reports for a fresh session
+// (no -recall). The integration test asserts the claim response echoes it.
+const newSessionID = "stub-new-session"
+
 func main() {
+	recall := flag.String("recall", "", "session id to resume")
+	// The stub also receives -config <path>; accept and ignore it so flag
+	// parsing does not fail on the real spawn args.
+	_ = flag.String("config", "", "config path (ignored by the stub)")
+	flag.Parse()
+
 	addr := os.Getenv(brokerframe.EnvBrokerAddr)
 	leaseID := os.Getenv(brokerframe.EnvLeaseID)
 	if addr == "" || leaseID == "" {
 		os.Exit(2)
+	}
+
+	sessionID := *recall
+	if sessionID == "" {
+		sessionID = newSessionID
 	}
 
 	ctx := context.Background()
@@ -39,6 +61,13 @@ func main() {
 		os.Exit(1)
 	}
 	if err := write(ctx, conn, brokerframe.Frame{LeaseID: leaseID, Signal: brokerframe.SignalReady}); err != nil {
+		os.Exit(1)
+	}
+	if err := write(ctx, conn, brokerframe.Frame{
+		LeaseID:   leaseID,
+		Signal:    brokerframe.SignalSessionIDReport,
+		SessionID: sessionID,
+	}); err != nil {
 		os.Exit(1)
 	}
 

@@ -94,6 +94,16 @@ type lease struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
+	// sessionID is the engine session id the instance reported via a
+	// session-id-report frame. For a new session this is the engine's
+	// generated id (returned to the caller so it can -recall later); for a
+	// resume it echoes the requested id. sessionReported is closed exactly
+	// once (via MarkSessionID) when the report arrives, so POST /claim can
+	// wait briefly for it. Both are created in NewLease so they are non-nil.
+	sessionID       string
+	sessionReported chan struct{}
+	sessionOnce     sync.Once
+
 	// process is the broker's handle on the spawned instance process. It is
 	// stored so later stories (release, crash, capacity) can manage the
 	// process lifecycle; pid is cached for logging and inspection.
@@ -137,10 +147,11 @@ func (r *Registry) NewLease() (string, error) {
 		return "", fmt.Errorf("lease id collision: %s", id)
 	}
 	r.leases[id] = &lease{
-		id:        id,
-		state:     leaseStatePending,
-		createdAt: time.Now(),
-		ready:     make(chan struct{}),
+		id:              id,
+		state:           leaseStatePending,
+		createdAt:       time.Now(),
+		ready:           make(chan struct{}),
+		sessionReported: make(chan struct{}),
 	}
 	return id, nil
 }
@@ -170,6 +181,49 @@ func (r *Registry) ReadyChan(id string) <-chan struct{} {
 		return nil
 	}
 	return l.ready
+}
+
+// MarkSessionID records the engine session id an instance reported via a
+// session-id-report frame and closes the lease's sessionReported channel
+// exactly once, unblocking any POST /claim handler waiting in
+// SessionReportedChan. It is a no-op for an unknown lease.
+func (r *Registry) MarkSessionID(id, sessionID string) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	if ok {
+		l.sessionID = sessionID
+	}
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	l.sessionOnce.Do(func() { close(l.sessionReported) })
+}
+
+// SessionReportedChan returns the lease's session-report channel, closed once
+// the instance reports its session id. It returns nil for an unknown lease; a
+// select on a nil channel blocks forever, so callers should also guard with a
+// timeout.
+func (r *Registry) SessionReportedChan(id string) <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return nil
+	}
+	return l.sessionReported
+}
+
+// SessionID returns the engine session id reported for a lease, or "" if the
+// lease is unknown or has not reported yet.
+func (r *Registry) SessionID(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return ""
+	}
+	return l.sessionID
 }
 
 // SetProcess records the spawned instance's process handle on a lease so the

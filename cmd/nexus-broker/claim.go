@@ -15,6 +15,13 @@ import (
 // returning an error. Kept as a constant (not a config key) for this story.
 const defaultReadyTimeout = 30 * time.Second
 
+// defaultSessionReportGrace bounds how long POST /claim waits, after the
+// instance signals ready, for its session-id-report frame to arrive. The
+// plugin sends the report immediately after ready, so this is a short grace
+// window: if it elapses the claim still succeeds, just without a session id in
+// the response. Kept as a constant (not a config key) for this story.
+const defaultSessionReportGrace = 5 * time.Second
+
 // maxClaimBody caps the size of a claim request body to avoid unbounded reads.
 const maxClaimBody = 1 << 20 // 1 MiB
 
@@ -25,8 +32,10 @@ type claimRequest struct {
 	// a temp file the spawned instance reads via -config.
 	Config string `json:"config"`
 
-	// SessionID requests resuming an existing session. Resume lands in E2-S1;
-	// this story handles the new-session case only and rejects a set value.
+	// SessionID, when set, resumes an existing persisted session: the broker
+	// spawns the instance with -recall <id> so the engine reloads that
+	// session and replays its history. When empty the broker starts a fresh
+	// session and returns the engine-generated id in the response.
 	SessionID string `json:"session_id,omitempty"`
 }
 
@@ -34,17 +43,24 @@ type claimRequest struct {
 type claimResponse struct {
 	LeaseID string `json:"lease_id"`
 	WSURL   string `json:"ws_url"`
+
+	// SessionID is the engine session id the instance is running. For a new
+	// session it is the engine's generated id (capture it to -recall later);
+	// for a resume it echoes the requested id. It may be empty if the
+	// instance did not report one within the grace window.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // ClaimServer handles POST /claim: it mints a lease, spawns a nexus instance
 // with the per-claim config, waits for the instance to dial back and signal
 // ready, then returns the lease id and the broker's client WebSocket URL.
 type ClaimServer struct {
-	logger       *slog.Logger
-	registry     *Registry
-	cfg          Config
-	runner       commandRunner
-	readyTimeout time.Duration
+	logger             *slog.Logger
+	registry           *Registry
+	cfg                Config
+	runner             commandRunner
+	readyTimeout       time.Duration
+	sessionReportGrace time.Duration
 }
 
 // NewClaimServer constructs a claim handler. A nil runner defaults to the
@@ -57,11 +73,12 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 		runner = execRunner{}
 	}
 	return &ClaimServer{
-		logger:       logger,
-		registry:     registry,
-		cfg:          cfg,
-		runner:       runner,
-		readyTimeout: defaultReadyTimeout,
+		logger:             logger,
+		registry:           registry,
+		cfg:                cfg,
+		runner:             runner,
+		readyTimeout:       defaultReadyTimeout,
+		sessionReportGrace: defaultSessionReportGrace,
 	}
 }
 
@@ -79,10 +96,6 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBody))
 	if err := dec.Decode(&req); err != nil {
 		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
-		return
-	}
-	if req.SessionID != "" {
-		s.fail(w, http.StatusBadRequest, "session resume is not supported yet; omit session_id", nil)
 		return
 	}
 	if req.Config == "" {
@@ -109,10 +122,11 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 
 	brokerAddr := "ws://" + instanceDialHost(s.cfg.ListenAddr) + instanceWSPath
 	handle, err := s.runner.start(r.Context(), spawnSpec{
-		binaryPath: s.cfg.NexusBinaryPath,
-		configPath: configPath,
-		leaseID:    leaseID,
-		brokerAddr: brokerAddr,
+		binaryPath:      s.cfg.NexusBinaryPath,
+		configPath:      configPath,
+		leaseID:         leaseID,
+		brokerAddr:      brokerAddr,
+		recallSessionID: req.SessionID,
 	})
 	if err != nil {
 		s.registry.Remove(leaseID)
@@ -141,12 +155,35 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the session id to return. The instance reports it via a
+	// session-id-report frame just after ready; wait a bounded grace for it.
+	// For a resume, the requested id is authoritative for the response (and
+	// is what the caller already holds); a mismatching report is logged but
+	// not fatal. For a new session, the reported id is the only way the
+	// caller learns the engine-generated id to -recall later.
+	sessionID := req.SessionID
+	select {
+	case <-s.registry.SessionReportedChan(leaseID):
+		reported := s.registry.SessionID(leaseID)
+		if req.SessionID == "" {
+			sessionID = reported
+		} else if reported != "" && reported != req.SessionID {
+			s.logger.Warn("instance reported a different session id than requested",
+				"lease_id", leaseID, "requested", req.SessionID, "reported", reported)
+		}
+	case <-time.After(s.sessionReportGrace):
+		if req.SessionID == "" {
+			s.logger.Warn("instance did not report a session id within grace window",
+				"lease_id", leaseID)
+		}
+	}
+
 	wsURL := "ws://" + clientWSHost(s.cfg.ListenAddr, r.Host) + ClientWSPath(leaseID)
-	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL)
+	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL, "session_id", sessionID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(claimResponse{LeaseID: leaseID, WSURL: wsURL})
+	_ = json.NewEncoder(w).Encode(claimResponse{LeaseID: leaseID, WSURL: wsURL, SessionID: sessionID})
 }
 
 // fail writes a JSON error response and logs the cause.
