@@ -29,6 +29,7 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
 - **Desktop app** (`cmd/desktop/`) — Reference multi-agent desktop app hosting hello-world + staffing-match agents.
 - **CLI entry point** (`cmd/nexus/main.go`) — Creates engine, registers plugins, runs with signal handling.
+- **Session broker** (`cmd/nexus-broker/`) — Standalone HTTP/WS gateway service (NOT a plugin) that fronts OS-isolated `nexus` instances behind one ingress: clients `claim` a lease, the broker cold-spawns a `nexus` subprocess that dials back via the `nexus.io.broker` plugin, and instances `release` on demand/idle/crash with sessions persisted on disk. See `docs/src/guides/session-broker.md`.
 - **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
@@ -100,6 +101,7 @@ plugins/
   io/oneshot/            # Scripting/batch IO; reads stdin/file/inline prompt, writes JSON transcript
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
+  io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
   memory/summary_buffer/ # Inline auto-compacting history; keeps recent N verbatim, LLM-summarizes older (memory.history + memory.compaction)

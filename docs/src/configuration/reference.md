@@ -2299,6 +2299,39 @@ Release is idempotent: releasing an already-gone lease returns `404` rather than
 erroring, and concurrent releases of the same lease collapse to a single
 teardown.
 
+### `GET /leases` (HTTP API, not YAML)
+
+`GET /leases` is a read-only introspection surface: it reports the capacity and
+queue aggregates plus a snapshot of every live lease, sorted by `created_at`
+then `lease_id`. It performs no mutation.
+
+```jsonc
+// response (200)
+{
+  "max_concurrent": 8,     // configured cap (0 = unlimited)
+  "slots_in_use": 2,       // live instances currently holding a slot
+  "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "leases": [
+    {
+      "lease_id": "…",
+      "session_id": "…",                       // omitted until reported by the instance
+      "pid": 41234,
+      "state": "active",                        // "spawning" | "active" | "draining"
+      "reason": "manual release",               // teardown reason once draining; omitted otherwise
+      "last_activity": "2026-06-25T12:00:00Z",  // RFC3339
+      "created_at": "2026-06-25T11:59:30Z"      // RFC3339
+    }
+  ]
+}
+```
+
+Surface states: `spawning` (lease exists, instance not yet registered),
+`active` (registered, frames can flow), `draining` (a teardown has latched).
+
+Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
+deployment caveats live in the
+[Session Broker guide](../guides/session-broker.md).
+
 ---
 
 ## Cross-references
