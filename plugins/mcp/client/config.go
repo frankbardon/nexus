@@ -18,7 +18,7 @@ type Config struct {
 // ServerConfig describes one MCP server connection.
 type ServerConfig struct {
 	Name      string
-	Transport string // "stdio" | "http"
+	Transport string // "stdio" | "http" | "inprocess"
 
 	// stdio
 	Command        string
@@ -29,6 +29,11 @@ type ServerConfig struct {
 	// http (streamable HTTP transport)
 	URL     string
 	Headers map[string]string
+
+	// inprocess — key of a live *mcp.Server the host registered via
+	// RegisterInProcessServer before engine.Boot(). The connection is wired
+	// over an in-memory transport instead of a subprocess or HTTP dial.
+	InjectedServer string
 
 	Lifecycle string        // "engine" | "session"
 	Timeout   time.Duration // per-request timeout
@@ -169,10 +174,10 @@ func parseServer(m map[string]any, defaults Defaults) (ServerConfig, error) {
 		transport = "stdio"
 	}
 	switch transport {
-	case "stdio", "http":
+	case "stdio", "http", "inprocess":
 		sc.Transport = transport
 	default:
-		return sc, fmt.Errorf("transport %q must be stdio or http", transport)
+		return sc, fmt.Errorf("transport %q must be stdio, http, or inprocess", transport)
 	}
 
 	if v, ok := m["lifecycle"].(string); ok && v != "" {
@@ -224,6 +229,8 @@ func parseServer(m map[string]any, defaults Defaults) (ServerConfig, error) {
 		}
 	}
 
+	sc.InjectedServer, _ = m["server"].(string)
+
 	switch sc.Transport {
 	case "stdio":
 		if sc.Command == "" {
@@ -232,6 +239,10 @@ func parseServer(m map[string]any, defaults Defaults) (ServerConfig, error) {
 	case "http":
 		if sc.URL == "" {
 			return sc, fmt.Errorf("http transport requires url")
+		}
+	case "inprocess":
+		if sc.InjectedServer == "" {
+			return sc, fmt.Errorf("inprocess transport requires server (host-injected server key)")
 		}
 	}
 
