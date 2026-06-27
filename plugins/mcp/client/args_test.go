@@ -3,11 +3,11 @@ package client
 import (
 	"testing"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestParseSlashArgs_Positional(t *testing.T) {
-	decl := []mcp.PromptArgument{
+	decl := []*mcp.PromptArgument{
 		{Name: "pr", Required: true},
 		{Name: "verbose"},
 	}
@@ -21,7 +21,7 @@ func TestParseSlashArgs_Positional(t *testing.T) {
 }
 
 func TestParseSlashArgs_KeyValue(t *testing.T) {
-	decl := []mcp.PromptArgument{
+	decl := []*mcp.PromptArgument{
 		{Name: "pr", Required: true},
 		{Name: "verbose"},
 	}
@@ -35,7 +35,7 @@ func TestParseSlashArgs_KeyValue(t *testing.T) {
 }
 
 func TestParseSlashArgs_Mixed(t *testing.T) {
-	decl := []mcp.PromptArgument{
+	decl := []*mcp.PromptArgument{
 		{Name: "pr", Required: true},
 		{Name: "verbose"},
 		{Name: "comment"},
@@ -50,28 +50,28 @@ func TestParseSlashArgs_Mixed(t *testing.T) {
 }
 
 func TestParseSlashArgs_MissingRequired(t *testing.T) {
-	decl := []mcp.PromptArgument{{Name: "pr", Required: true}}
+	decl := []*mcp.PromptArgument{{Name: "pr", Required: true}}
 	if _, err := parseSlashArgs("", decl); err == nil {
 		t.Fatal("expected error for missing required argument")
 	}
 }
 
 func TestParseSlashArgs_UnknownKey(t *testing.T) {
-	decl := []mcp.PromptArgument{{Name: "pr"}}
+	decl := []*mcp.PromptArgument{{Name: "pr"}}
 	if _, err := parseSlashArgs("pr=1 bogus=2", decl); err == nil {
 		t.Fatal("expected error for unknown key")
 	}
 }
 
 func TestParseSlashArgs_UnterminatedQuote(t *testing.T) {
-	decl := []mcp.PromptArgument{{Name: "comment"}}
+	decl := []*mcp.PromptArgument{{Name: "comment"}}
 	if _, err := parseSlashArgs(`comment="missing`, decl); err == nil {
 		t.Fatal("expected unterminated quote error")
 	}
 }
 
 func TestParseSlashArgs_PositionalSkipsExplicitlySet(t *testing.T) {
-	decl := []mcp.PromptArgument{
+	decl := []*mcp.PromptArgument{
 		{Name: "a", Required: true},
 		{Name: "b", Required: true},
 	}
