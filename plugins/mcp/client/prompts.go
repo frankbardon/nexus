@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -14,12 +14,12 @@ import (
 // refreshPrompts pulls the server's prompt set and reconciles the slash
 // command registry. Removed prompts have their commands unregistered.
 func (s *server) refreshPrompts(ctx context.Context) error {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	res, err := c.ListPrompts(ctx, mcp.ListPromptsRequest{})
+	res, err := sess.ListPrompts(ctx, &mcp.ListPromptsParams{})
 	if err != nil {
 		return fmt.Errorf("prompts/list: %w", err)
 	}
@@ -48,7 +48,7 @@ func (s *server) refreshPrompts(ctx context.Context) error {
 	return nil
 }
 
-func (s *server) registerMCPPrompt(p mcp.Prompt, prefix string) {
+func (s *server) registerMCPPrompt(p *mcp.Prompt, prefix string) {
 	s.mu.Lock()
 	s.prompts[p.Name] = p
 	s.mu.Unlock()
@@ -111,18 +111,17 @@ func (p *Plugin) handleInputIntercept(e engine.Event[any]) {
 	ctx, cancel := context.WithTimeout(context.Background(), srv.cfg.Timeout)
 	defer cancel()
 
-	c := srv.getClient()
-	if c == nil {
+	sess := srv.getSession()
+	if sess == nil {
 		p.reportSlashError(cmd, fmt.Errorf("server %q is not connected", route.server))
 		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "mcp server disconnected"}
 		return
 	}
 
-	req := mcp.GetPromptRequest{}
-	req.Params.Name = route.prompt
-	req.Params.Arguments = args
-
-	resp, err := c.GetPrompt(ctx, req)
+	resp, err := sess.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      route.prompt,
+		Arguments: args,
+	})
 	if err != nil {
 		p.reportSlashError(cmd, fmt.Errorf("mcp prompts/get: %w", err))
 		vp.Veto = engine.VetoResult{Vetoed: true, Reason: "mcp prompts/get failed"}
@@ -146,7 +145,7 @@ func (p *Plugin) handleInputIntercept(e engine.Event[any]) {
 // Each MCP message carries a single content block; we map text inline, and
 // route image/audio/embedded resources through MessagePart with blob-store
 // offload above the inline threshold.
-func (p *Plugin) promptMessagesToPreload(msgs []mcp.PromptMessage) []events.Message {
+func (p *Plugin) promptMessagesToPreload(msgs []*mcp.PromptMessage) []events.Message {
 	out := make([]events.Message, 0, len(msgs))
 	for _, m := range msgs {
 		role := string(m.Role)
@@ -155,17 +154,17 @@ func (p *Plugin) promptMessagesToPreload(msgs []mcp.PromptMessage) []events.Mess
 		}
 		msg := events.Message{Role: role}
 		switch c := m.Content.(type) {
-		case mcp.TextContent:
+		case *mcp.TextContent:
 			msg.Content = c.Text
-		case mcp.ImageContent:
-			msg.Parts = []events.MessagePart{p.partFromBase64("image", c.MIMEType, c.Data)}
-		case mcp.AudioContent:
-			msg.Parts = []events.MessagePart{p.partFromBase64("audio", c.MIMEType, c.Data)}
-		case mcp.EmbeddedResource:
-			text, parts := p.renderResourceContents([]mcp.ResourceContents{c.Resource})
+		case *mcp.ImageContent:
+			msg.Parts = []events.MessagePart{p.partFromBytes("image", c.MIMEType, c.Data)}
+		case *mcp.AudioContent:
+			msg.Parts = []events.MessagePart{p.partFromBytes("audio", c.MIMEType, c.Data)}
+		case *mcp.EmbeddedResource:
+			text, parts := p.renderResourceContents([]*mcp.ResourceContents{c.Resource})
 			msg.Content = text
 			msg.Parts = parts
-		case mcp.ResourceLink:
+		case *mcp.ResourceLink:
 			msg.Content = fmt.Sprintf("[resource: %s] %s", c.URI, firstNonEmpty(c.Name, c.URI))
 		}
 		out = append(out, msg)

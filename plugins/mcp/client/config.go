@@ -325,7 +325,7 @@ func expandEnv(s string) string {
 }
 
 // envSlice converts a ServerConfig's env + passthrough into the "K=V"
-// slice that os/exec consumes via mcp-go's stdio transport. Order: explicit
+// slice that os/exec consumes via the MCP SDK's stdio transport. Order: explicit
 // env entries first, then passthrough values inherited from the host.
 func envSlice(sc ServerConfig) []string {
 	var out []string
