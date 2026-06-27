@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // parseSlashArgs parses a slash-command argument string against a prompt's
@@ -18,7 +18,7 @@ import (
 // Quoted arguments are supported with a small shell-style tokenizer that
 // honours double quotes; backslash escapes inside quotes are passed through
 // literally to keep the parser predictable for non-shell users.
-func parseSlashArgs(raw string, decl []mcp.PromptArgument) (map[string]string, error) {
+func parseSlashArgs(raw string, decl []*mcp.PromptArgument) (map[string]string, error) {
 	tokens, err := tokenizeArgs(raw)
 	if err != nil {
 		return nil, err

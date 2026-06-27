@@ -1,6 +1,7 @@
-.PHONY: build run clean test fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
+.PHONY: build build-broker run clean test fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
 
 BINARY_NAME=nexus
+BROKER_BINARY_NAME=nexus-broker
 BUILD_DIR=bin
 GO=go
 YAEGI_WASM=pkg/engine/sandbox/wasm/yaegi.wasm.gz
@@ -18,8 +19,14 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-build:
+build: build-broker
 	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/nexus
+
+# nexus-broker: standalone service fronting OS-isolated Nexus instances.
+# Pure Go (stdlib net/http + coder/websocket), so the same CGO_ENABLED=0
+# build path applies.
+build-broker:
+	$(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BROKER_BINARY_NAME) ./cmd/nexus-broker
 
 run: build
 	$(BUILD_DIR)/$(BINARY_NAME) -config configs/default.yaml

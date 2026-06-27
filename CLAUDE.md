@@ -29,6 +29,7 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
 - **Desktop app** (`cmd/desktop/`) — Reference multi-agent desktop app hosting hello-world + staffing-match agents.
 - **CLI entry point** (`cmd/nexus/main.go`) — Creates engine, registers plugins, runs with signal handling.
+- **Session broker** (`cmd/nexus-broker/`) — Standalone HTTP/WS gateway service (NOT a plugin) that fronts OS-isolated `nexus` instances behind one ingress: clients `claim` a lease, the broker cold-spawns a `nexus` subprocess that dials back via the `nexus.io.broker` plugin, and instances `release` on demand/idle/crash with sessions persisted on disk. See `docs/src/guides/session-broker.md`.
 - **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
@@ -100,6 +101,7 @@ plugins/
   io/oneshot/            # Scripting/batch IO; reads stdin/file/inline prompt, writes JSON transcript
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
+  io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
   memory/summary_buffer/ # Inline auto-compacting history; keeps recent N verbatim, LLM-summarizes older (memory.history + memory.compaction)
@@ -172,7 +174,7 @@ Discovered exclusively from directories listed in the `nexus.skills` plugin's `s
 - **Event types**: Dotted namespace — `core.boot`, `llm.request`, `tool.result`, etc.
 - **Config**: YAML, loaded at startup. Plugin config passed as `map[string]any` during init.
 - **No direct plugin-to-plugin calls**: All comms via event bus.
-- **Dependencies**: Core engine and LLM providers are raw `net/http` — no provider SDKs. Beyond stdlib, direct deps include: `gopkg.in/yaml.v3` (config), `github.com/santhosh-tekuri/jsonschema/v6` (JSON schema gate), `github.com/philippgille/chromem-go` (vector store, pure Go), `modernc.org/sqlite` (per-plugin storage, pure Go, FTS5 included), `github.com/wailsapp/wails/v2` + `github.com/zalando/go-keyring` + `github.com/fsnotify/fsnotify` (desktop shell), OpenTelemetry SDK (observe), `github.com/charmbracelet/bubbletea` (TUI), `github.com/traefik/yaegi` (codeexec), `github.com/tetratelabs/wazero` (wasm sandbox), `github.com/mark3labs/mcp-go` (MCP client). See `go.mod` for the canonical list (~28 direct deps as of 2026-06).
+- **Dependencies**: Core engine and LLM providers are raw `net/http` — no provider SDKs. Beyond stdlib, direct deps include: `gopkg.in/yaml.v3` (config), `github.com/santhosh-tekuri/jsonschema/v6` (JSON schema gate), `github.com/philippgille/chromem-go` (vector store, pure Go), `modernc.org/sqlite` (per-plugin storage, pure Go, FTS5 included), `github.com/wailsapp/wails/v2` + `github.com/zalando/go-keyring` + `github.com/fsnotify/fsnotify` (desktop shell), OpenTelemetry SDK (observe), `github.com/charmbracelet/bubbletea` (TUI), `github.com/traefik/yaegi` (codeexec), `github.com/tetratelabs/wazero` (wasm sandbox), `github.com/modelcontextprotocol/go-sdk` (official MCP client SDK). See `go.mod` for the canonical list (~28 direct deps as of 2026-06).
 - **Prompt construction**: All content injected into LLM prompts must use XML tag boundaries to separate structural sections. Use semantic tags (`<execution_plan>`, `<current_task>`, `<prior_results>`, `<user_request>`, `<skill_context>`, etc.) not markdown headers or bare concatenation. See `plugins/skills/catalog.go` for reference pattern. Shared XML helpers live in `pkg/engine/`.
 - **Path expansion**: Every config-supplied filesystem path must be funneled through `engine.ExpandPath` (`pkg/engine/paths.go`) at the read site so users can write `~` or `~/...` anywhere a path is accepted. There is exactly one helper — do not add new local `expandHome` copies.
 

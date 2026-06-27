@@ -121,9 +121,9 @@ Failures during boot are logged at error but do not block the rest of the engine
 
 ## Transports
 
-`stdio` (default) launches a subprocess and speaks JSON-RPC over its stdin/stdout. The `mark3labs/mcp-go` SDK handles framing and lifecycle.
+`stdio` (default) launches a subprocess and speaks JSON-RPC over its stdin/stdout. The official `modelcontextprotocol/go-sdk` handles framing and lifecycle.
 
-`http` uses the streamable HTTP transport. The SDK negotiates the session header; configure auth headers via `headers`. The legacy SSE transport is deliberately not exposed.
+`http` uses the streamable HTTP transport. The SDK negotiates the session header; configure auth headers via `headers` (injected on every request through a wrapping `http.RoundTripper`). The legacy SSE transport is deliberately not exposed.
 
 ## Sampling
 

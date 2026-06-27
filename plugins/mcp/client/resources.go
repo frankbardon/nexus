@@ -2,11 +2,10 @@ package client
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
 	"github.com/frankbardon/nexus/pkg/events"
@@ -18,17 +17,17 @@ import (
 // templates always auto-register because the count is typically small and
 // each template requires args that the LLM should see.
 func (s *server) refreshResources(ctx context.Context) error {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	resList, err := c.ListResources(ctx, mcp.ListResourcesRequest{})
+	resList, err := sess.ListResources(ctx, &mcp.ListResourcesParams{})
 	if err != nil {
 		return fmt.Errorf("resources/list: %w", err)
 	}
 
-	tmplList, err := c.ListResourceTemplates(ctx, mcp.ListResourceTemplatesRequest{})
+	tmplList, err := sess.ListResourceTemplates(ctx, &mcp.ListResourceTemplatesParams{})
 	if err != nil {
 		// Some servers don't implement templates; log and continue.
 		s.logger.Debug("mcp: resources/templates/list failed", "error", err)
@@ -90,7 +89,7 @@ func (s *server) registerGenericResourceTools() {
 	})
 }
 
-func (s *server) reconcileStaticResources(ctx context.Context, resources []mcp.Resource) {
+func (s *server) reconcileStaticResources(ctx context.Context, resources []*mcp.Resource) {
 	limit := s.cfg.Resources.AutoRegisterMax
 	if limit <= 0 || len(resources) > limit {
 		s.logger.Info("mcp: skipping static-resource auto-registration above limit",
@@ -99,7 +98,7 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []mcp.R
 		for slug := range s.staticResources {
 			s.parent.unregisterToolRoute(staticResourceToolName(s.cfg.Name, slug))
 		}
-		s.staticResources = map[string]mcp.Resource{}
+		s.staticResources = map[string]*mcp.Resource{}
 		s.resourceURIs = map[string]string{}
 		s.mu.Unlock()
 		return
@@ -112,10 +111,8 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []mcp.R
 		s.registerStaticResource(slug, r)
 		if s.cfg.Resources.SubscribeUpdates {
 			subCtx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-			req := mcp.SubscribeRequest{}
-			req.Params.URI = r.URI
-			if c := s.getClient(); c != nil {
-				if err := c.Subscribe(subCtx, req); err != nil {
+			if sess := s.getSession(); sess != nil {
+				if err := sess.Subscribe(subCtx, &mcp.SubscribeParams{URI: r.URI}); err != nil {
 					s.logger.Debug("mcp: resources/subscribe failed", "uri", r.URI, "error", err)
 				}
 			}
@@ -134,7 +131,7 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []mcp.R
 	s.mu.Unlock()
 }
 
-func (s *server) registerStaticResource(slug string, r mcp.Resource) {
+func (s *server) registerStaticResource(slug string, r *mcp.Resource) {
 	s.mu.Lock()
 	s.staticResources[slug] = r
 	s.resourceURIs[slug] = r.URI
@@ -161,7 +158,7 @@ func (s *server) registerStaticResource(slug string, r mcp.Resource) {
 	})
 }
 
-func (s *server) reconcileTemplates(templates []mcp.ResourceTemplate) {
+func (s *server) reconcileTemplates(templates []*mcp.ResourceTemplate) {
 	seen := map[string]bool{}
 	for _, t := range templates {
 		slug := resourceSlug(t.Title, t.Name, templateString(t))
@@ -179,7 +176,7 @@ func (s *server) reconcileTemplates(templates []mcp.ResourceTemplate) {
 	s.mu.Unlock()
 }
 
-func (s *server) registerTemplate(slug string, t mcp.ResourceTemplate) {
+func (s *server) registerTemplate(slug string, t *mcp.ResourceTemplate) {
 	s.mu.Lock()
 	s.templates[slug] = t
 	s.mu.Unlock()
@@ -249,35 +246,33 @@ func (s *server) templateForCatalog(catalog string) (string, bool) {
 }
 
 // templateString returns the canonical URI-template expression for an MCP
-// ResourceTemplate. mcp-go wraps the parsed template inside a URITemplate
-// pointer whose String() representation is the original RFC 6570 template.
-func templateString(t mcp.ResourceTemplate) string {
-	if t.URITemplate == nil || t.URITemplate.Template == nil {
-		return ""
-	}
-	return t.URITemplate.Template.Raw()
+// ResourceTemplate. The official SDK exposes the RFC 6570 template as a plain
+// string field.
+func templateString(t *mcp.ResourceTemplate) string {
+	return t.URITemplate
 }
 
 // templateVarNames extracts variable names from an RFC 6570 URI template.
-func templateVarNames(t mcp.ResourceTemplate) []string {
-	if t.URITemplate == nil || t.URITemplate.Template == nil {
+func templateVarNames(t *mcp.ResourceTemplate) []string {
+	parsed, err := uritemplate.New(t.URITemplate)
+	if err != nil {
 		return nil
 	}
-	return t.URITemplate.Template.Varnames()
+	return parsed.Varnames()
 }
 
 // dispatchListResources answers the generic per-server list tool by sending
 // resources/list and rendering the result as a JSON catalog.
 func (p *Plugin) dispatchListResources(s *server, tc events.ToolCall) {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		p.emitToolError(tc, "mcp.client: server not connected")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout)
 	defer cancel()
 
-	res, err := c.ListResources(ctx, mcp.ListResourcesRequest{})
+	res, err := sess.ListResources(ctx, &mcp.ListResourcesParams{})
 	if err != nil {
 		p.emitToolError(tc, fmt.Sprintf("mcp resources/list: %v", err))
 		return
@@ -322,17 +317,15 @@ func (p *Plugin) dispatchReadResource(s *server, tc events.ToolCall) {
 }
 
 func (p *Plugin) dispatchReadResourceURI(s *server, tc events.ToolCall, uri string) {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		p.emitToolError(tc, "mcp.client: server not connected")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout)
 	defer cancel()
 
-	req := mcp.ReadResourceRequest{}
-	req.Params.URI = uri
-	res, err := c.ReadResource(ctx, req)
+	res, err := sess.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
 	if err != nil {
 		p.emitToolError(tc, fmt.Sprintf("mcp resources/read: %v", err))
 		return
@@ -371,28 +364,21 @@ func (p *Plugin) dispatchTemplateResource(s *server, tc events.ToolCall, slug st
 	p.dispatchReadResourceURI(s, tc, uri)
 }
 
-func (p *Plugin) renderResourceContents(contents []mcp.ResourceContents) (string, []events.MessagePart) {
+func (p *Plugin) renderResourceContents(contents []*mcp.ResourceContents) (string, []events.MessagePart) {
 	var text string
 	var parts []events.MessagePart
 	for _, rc := range contents {
-		switch v := rc.(type) {
-		case mcp.TextResourceContents:
-			if text != "" {
-				text += "\n"
-			}
-			text += v.Text
-		case mcp.BlobResourceContents:
-			data, err := base64.StdEncoding.DecodeString(v.Blob)
-			if err != nil {
-				if text != "" {
-					text += "\n"
-				}
-				text += "[mcp.client: invalid blob payload: " + err.Error() + "]"
-				continue
-			}
-			part := events.MessagePart{Type: classifyMime(v.MIMEType), MimeType: v.MIMEType}
+		if rc == nil {
+			continue
+		}
+		// The official SDK unifies text and blob into one struct, delivering
+		// blob bytes pre-decoded. Treat a non-empty Blob as binary content;
+		// otherwise fall back to the text field.
+		if len(rc.Blob) > 0 {
+			data := rc.Blob
+			part := events.MessagePart{Type: classifyMime(rc.MIMEType), MimeType: rc.MIMEType}
 			if p.blobs != nil && int64(len(data)) > defaultBlobInlineCutoff {
-				h, err := p.blobs.Put(data, v.MIMEType)
+				h, err := p.blobs.Put(data, rc.MIMEType)
 				if err == nil {
 					part.URI = h.URI()
 					parts = append(parts, part)
@@ -402,7 +388,12 @@ func (p *Plugin) renderResourceContents(contents []mcp.ResourceContents) (string
 			}
 			part.Data = data
 			parts = append(parts, part)
+			continue
 		}
+		if text != "" {
+			text += "\n"
+		}
+		text += rc.Text
 	}
 	return text, parts
 }
@@ -427,16 +418,21 @@ func startsWith(s, prefix string) bool {
 }
 
 // expandURITemplate fills the template's variables with the supplied
-// arguments using the SDK's underlying RFC 6570 implementation.
-func expandURITemplate(t mcp.ResourceTemplate, args map[string]string) (string, error) {
-	if t.URITemplate == nil || t.URITemplate.Template == nil {
+// arguments using an RFC 6570 implementation. The official SDK exposes the
+// template only as a string, so we parse it here.
+func expandURITemplate(t *mcp.ResourceTemplate, args map[string]string) (string, error) {
+	if t.URITemplate == "" {
 		return "", fmt.Errorf("template has no expression")
+	}
+	parsed, err := uritemplate.New(t.URITemplate)
+	if err != nil {
+		return "", fmt.Errorf("parse template: %w", err)
 	}
 	values := uritemplate.Values{}
 	for k, v := range args {
 		values.Set(k, uritemplate.String(v))
 	}
-	return t.URITemplate.Template.Expand(values)
+	return parsed.Expand(values)
 }
 
 // jsonString marshals a payload with stable formatting for tool output.

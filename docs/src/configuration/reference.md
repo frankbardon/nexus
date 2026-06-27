@@ -1325,6 +1325,39 @@ cancel envelopes without going through the `nexus.io.browser` UI hub.
 follow-ups; operators running this on a public network must front it
 with a reverse proxy that does its own authentication.
 
+### `nexus.io.broker`
+
+Source: `plugins/io/broker/plugin.go`. Dial-back IO transport for Nexus
+instances spawned by the session broker (`cmd/nexus-broker`). Unlike
+`nexus.io.browser` / `nexus.io.realtime`, which LISTEN, this plugin DIALS OUT
+to the broker's instance gateway over WebSocket — the broker is the only
+listening socket. On `Ready` it dials `broker_addr`, sends a `register` frame
+keyed by `lease_id`, announces readiness, and reports the engine session id
+(for later `-recall` resume) before bridging IO frames in both directions.
+
+Config keys fall back to environment variables the broker injects at spawn, so
+operators normally set neither by hand:
+
+| Key           | Type   | Default                     | Description |
+|---------------|--------|-----------------------------|-------------|
+| `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
+| `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
+
+**Outbound IO messages** (instance → broker → client, JSON inside the frame
+payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
+`hitl.request`, `cancel.complete`.
+
+**Inbound IO messages** (client → broker → instance): `input`,
+`approval.response`, `hitl.response`, `cancel`.
+
+The connection reconnects with exponential backoff until shutdown. On an
+inbound `shutdown` frame (sent by the broker for `POST /release` and later
+idle/crash teardown) the plugin emits `io.session.end`, which drives a clean
+engine `Stop` that flushes and persists the session before the process exits;
+the reconnect loop is latched off so the graceful teardown is not undone. There
+is **no auth in the plugin itself** — the broker gateway owns lease validation
+and any transport-level authentication.
+
 ### `nexus.io.voice`
 
 Source: `plugins/io/voice/plugin.go`. Bus-driven voice IO bridge:
@@ -2180,6 +2213,124 @@ Tags are populated by:
 - The engine's `before:llm.request` seeder (`session_id`, plus `tenant`/`project`/`user` from `SessionMeta.Labels`).
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
+
+---
+
+## Session broker (`nexus-broker`)
+
+The `nexus-broker` binary (`cmd/nexus-broker`) is a **standalone service**, not
+an engine plugin. It reads its own YAML config file (default path
+`broker.yaml`, override with `-config <path>`) and fronts OS-isolated Nexus
+instances behind an HTTP/WebSocket gateway.
+
+```yaml
+# broker.yaml
+listen_addr: ":8080"
+nexus_binary_path: "nexus"
+max_concurrent: 8
+idle_timeout: 5m
+queue_wait_timeout: 30s
+release_grace: 10s
+```
+
+| Key                  | Type     | Default  | Description                                                                 |
+|----------------------|----------|----------|-----------------------------------------------------------------------------|
+| `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
+| `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
+| `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
+| `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
+| `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
+| `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
+
+The spawned-instance side is configured by the `nexus.io.broker` plugin
+(`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
+I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
+`NEXUS_BROKER_LEASE_ID` environment variables the broker injects at spawn
+(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID`).
+
+### `POST /claim` (HTTP API, not YAML)
+
+`POST /claim` mints a lease, spawns an instance with the supplied config, waits
+for it to dial back and signal ready, and returns the lease coordinates. The
+request is a small JSON envelope; `session_id` is optional.
+
+```jsonc
+// request body
+{
+  "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
+  "session_id": "prior-session-id"          // optional: resume a persisted session
+}
+```
+
+When `session_id` is set the broker spawns the instance with `-recall <id>` so
+the engine reloads that session and replays its history; when omitted it starts
+a fresh session. An unknown/invalid `session_id` makes the engine fail to boot,
+so the instance never signals ready and the claim returns `502` ("instance
+exited before signalling ready") rather than silently starting a new session.
+
+```jsonc
+// success response (200)
+{
+  "lease_id": "…",                          // lease handle for this instance
+  "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
+  "session_id": "…"                          // engine session id: the generated id for a
+                                             // new session (capture it to -recall later),
+                                             // or the requested id echoed back on resume
+}
+```
+
+### `POST /release/{lease_id}` (HTTP API, not YAML)
+
+`POST /release/{lease_id}` tears a live instance down gracefully. The broker
+sends a `shutdown` frame to the instance, whose `nexus.io.broker` plugin emits
+`io.session.end` so the engine performs a clean `Stop` — flushing and
+persisting the session before exit. The broker then waits up to `release_grace`
+for the process to exit and **force-kills it** if that window elapses (no
+orphan). The lease is removed and its slot freed. The session directory under
+`~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
+
+| Outcome                         | Status | Body                                         |
+|---------------------------------|--------|----------------------------------------------|
+| Released (graceful or killed)   | `200`  | `{"status":"released","lease_id":"…"}`      |
+| Unknown / already-released lease | `404`  | `{"error":"unknown lease"}`                  |
+| Missing lease id in path        | `400`  | `{"error":"release requires a lease id"}`    |
+
+Release is idempotent: releasing an already-gone lease returns `404` rather than
+erroring, and concurrent releases of the same lease collapse to a single
+teardown.
+
+### `GET /leases` (HTTP API, not YAML)
+
+`GET /leases` is a read-only introspection surface: it reports the capacity and
+queue aggregates plus a snapshot of every live lease, sorted by `created_at`
+then `lease_id`. It performs no mutation.
+
+```jsonc
+// response (200)
+{
+  "max_concurrent": 8,     // configured cap (0 = unlimited)
+  "slots_in_use": 2,       // live instances currently holding a slot
+  "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "leases": [
+    {
+      "lease_id": "…",
+      "session_id": "…",                       // omitted until reported by the instance
+      "pid": 41234,
+      "state": "active",                        // "spawning" | "active" | "draining"
+      "reason": "manual release",               // teardown reason once draining; omitted otherwise
+      "last_activity": "2026-06-25T12:00:00Z",  // RFC3339
+      "created_at": "2026-06-25T11:59:30Z"      // RFC3339
+    }
+  ]
+}
+```
+
+Surface states: `spawning` (lease exists, instance not yet registered),
+`active` (registered, frames can flow), `draining` (a teardown has latched).
+
+Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
+deployment caveats live in the
+[Session Broker guide](../guides/session-broker.md).
 
 ---
 

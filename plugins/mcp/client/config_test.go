@@ -118,6 +118,32 @@ func TestParseConfig_StdioRequiresCommand(t *testing.T) {
 	}
 }
 
+func TestParseConfig_InProcessRequiresServer(t *testing.T) {
+	_, err := parseConfig(map[string]any{
+		"servers": []any{map[string]any{"name": "x", "transport": "inprocess"}},
+	})
+	if err == nil {
+		t.Fatal("expected inprocess-requires-server error")
+	}
+}
+
+func TestParseConfig_InProcessParsesServerKey(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"servers": []any{
+			map[string]any{"name": "host", "transport": "inprocess", "server": "lattice"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers[0].Transport != "inprocess" {
+		t.Fatalf("transport = %q, want inprocess", cfg.Servers[0].Transport)
+	}
+	if cfg.Servers[0].InjectedServer != "lattice" {
+		t.Fatalf("InjectedServer = %q, want lattice", cfg.Servers[0].InjectedServer)
+	}
+}
+
 func TestParseConfig_HTTPRequiresURL(t *testing.T) {
 	_, err := parseConfig(map[string]any{
 		"servers": []any{map[string]any{"name": "x", "transport": "http"}},

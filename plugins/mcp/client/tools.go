@@ -2,11 +2,10 @@ package client
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -16,12 +15,12 @@ import (
 // Nexus catalog projection. Newly visible tools emit tool.register; tools
 // that vanished are dropped from the routing table.
 func (s *server) refreshTools(ctx context.Context) error {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	res, err := c.ListTools(ctx, mcp.ListToolsRequest{})
+	res, err := sess.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
 		return fmt.Errorf("tools/list: %w", err)
 	}
@@ -54,7 +53,7 @@ func (s *server) refreshTools(ctx context.Context) error {
 // registerMCPTool emits a tool.register for one MCP tool, after wrapping its
 // inputSchema into the Nexus-flavoured Parameters map. Tool names land
 // under mcp__<server>__<raw> so they never collide with native tools.
-func (s *server) registerMCPTool(t mcp.Tool) {
+func (s *server) registerMCPTool(t *mcp.Tool) {
 	s.mu.Lock()
 	s.tools[t.Name] = t
 	s.mu.Unlock()
@@ -75,17 +74,13 @@ func (s *server) registerMCPTool(t mcp.Tool) {
 }
 
 // schemaFromTool produces a JSON Schema map from an MCP tool definition.
-// Prefers RawInputSchema when the server supplied one (some servers serve
-// hand-written JSON Schema that doesn't round-trip through the SDK's typed
-// representation), and falls back to InputSchema otherwise.
-func schemaFromTool(t mcp.Tool) map[string]any {
-	if len(t.RawInputSchema) > 0 {
-		var out map[string]any
-		if err := json.Unmarshal(t.RawInputSchema, &out); err == nil {
-			return out
-		}
+// From the client the SDK delivers InputSchema as the server's raw JSON
+// schema (typically a map[string]any), so we marshal+unmarshal it into a
+// plain map regardless of its concrete type.
+func schemaFromTool(t *mcp.Tool) map[string]any {
+	if t.InputSchema == nil {
+		return map[string]any{"type": "object"}
 	}
-	// Marshal+unmarshal the typed schema so consumers see a plain map.
 	data, err := json.Marshal(t.InputSchema)
 	if err != nil {
 		return map[string]any{"type": "object"}
@@ -139,8 +134,8 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 
 // dispatchTool sends an MCP tools/call and emits the resulting tool.result.
 func (p *Plugin) dispatchTool(s *server, tc events.ToolCall) {
-	c := s.getClient()
-	if c == nil {
+	sess := s.getSession()
+	if sess == nil {
 		p.emitToolError(tc, "mcp.client: server not connected")
 		return
 	}
@@ -154,11 +149,10 @@ func (p *Plugin) dispatchTool(s *server, tc events.ToolCall) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout)
 	defer cancel()
 
-	req := mcp.CallToolRequest{}
-	req.Params.Name = rawName
-	req.Params.Arguments = tc.Arguments
-
-	res, err := c.CallTool(ctx, req)
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      rawName,
+		Arguments: tc.Arguments,
+	})
 	if err != nil {
 		p.emitToolError(tc, fmt.Sprintf("mcp tools/call: %v", err))
 		return
@@ -196,22 +190,22 @@ func (p *Plugin) renderToolContent(blocks []mcp.Content) (string, []events.Messa
 	var parts []events.MessagePart
 	for _, b := range blocks {
 		switch c := b.(type) {
-		case mcp.TextContent:
+		case *mcp.TextContent:
 			if output != "" {
 				output += "\n"
 			}
 			output += c.Text
-		case mcp.ImageContent:
-			parts = append(parts, p.partFromBase64("image", c.MIMEType, c.Data))
-		case mcp.AudioContent:
-			parts = append(parts, p.partFromBase64("audio", c.MIMEType, c.Data))
-		case mcp.ResourceLink:
+		case *mcp.ImageContent:
+			parts = append(parts, p.partFromBytes("image", c.MIMEType, c.Data))
+		case *mcp.AudioContent:
+			parts = append(parts, p.partFromBytes("audio", c.MIMEType, c.Data))
+		case *mcp.ResourceLink:
 			if output != "" {
 				output += "\n"
 			}
 			output += fmt.Sprintf("[resource: %s] %s", c.URI, firstNonEmpty(c.Name, c.URI))
-		case mcp.EmbeddedResource:
-			text, embedParts := p.renderResourceContents([]mcp.ResourceContents{c.Resource})
+		case *mcp.EmbeddedResource:
+			text, embedParts := p.renderResourceContents([]*mcp.ResourceContents{c.Resource})
 			if text != "" {
 				if output != "" {
 					output += "\n"
@@ -224,16 +218,12 @@ func (p *Plugin) renderToolContent(blocks []mcp.Content) (string, []events.Messa
 	return output, parts
 }
 
-// partFromBase64 decodes a base64 MCP payload and either inlines the bytes
-// or routes them through the blob store, depending on the configured cutoff.
-func (p *Plugin) partFromBase64(kind, mime, b64 string) events.MessagePart {
+// partFromBytes takes a decoded MCP payload and either inlines the bytes or
+// routes them through the blob store, depending on the configured cutoff.
+// The official SDK delivers image/audio data pre-decoded as []byte, so no
+// base64 step is needed.
+func (p *Plugin) partFromBytes(kind, mime string, data []byte) events.MessagePart {
 	part := events.MessagePart{Type: kind, MimeType: mime}
-	data, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		part.Text = "[mcp.client: invalid base64 payload: " + err.Error() + "]"
-		part.Type = "text"
-		return part
-	}
 	if p.blobs != nil && int64(len(data)) > defaultBlobInlineCutoff {
 		h, err := p.blobs.Put(data, mime)
 		if err == nil {
