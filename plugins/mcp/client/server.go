@@ -26,6 +26,12 @@ type server struct {
 	session   *mcp.ClientSession
 	connected bool
 
+	// serverSession is the host-injected server's side of an in-memory
+	// transport pair (inprocess transport only). Retained so disconnect can
+	// tear down the server end alongside the client session. nil for stdio
+	// and http transports, where the server is a separate process/endpoint.
+	serverSession *mcp.ServerSession
+
 	tools           map[string]*mcp.Tool             // raw name -> Tool
 	staticResources map[string]*mcp.Resource         // catalog slug -> Resource
 	templates       map[string]*mcp.ResourceTemplate // catalog slug -> Template
@@ -58,7 +64,7 @@ func (s *server) connect(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	transport, err := s.newTransport()
+	transport, err := s.newTransport(ctx)
 	if err != nil {
 		return err
 	}
@@ -81,6 +87,16 @@ func (s *server) connect(ctx context.Context) error {
 	// negotiation internally; there is no manual Initialize step.
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
+		// For the inprocess transport the server side is already connected
+		// (it must be, before the client). Tear it down so a failed client
+		// connect doesn't leak the host-injected server's session.
+		s.mu.Lock()
+		srvSess := s.serverSession
+		s.serverSession = nil
+		s.mu.Unlock()
+		if srvSess != nil {
+			_ = srvSess.Close()
+		}
 		return fmt.Errorf("connect: %w", err)
 	}
 
@@ -109,8 +125,9 @@ func (s *server) connect(ctx context.Context) error {
 
 // newTransport builds the SDK client transport for the configured mode.
 // stdio launches a subprocess; http dials a streamable HTTP endpoint and
-// injects any configured headers via a wrapping RoundTripper.
-func (s *server) newTransport() (mcp.Transport, error) {
+// injects any configured headers via a wrapping RoundTripper; inprocess
+// wires a host-injected *mcp.Server to an in-memory transport pair.
+func (s *server) newTransport(ctx context.Context) (mcp.Transport, error) {
 	switch s.cfg.Transport {
 	case "stdio":
 		cmd := exec.Command(s.cfg.Command, s.cfg.Args...)
@@ -127,6 +144,26 @@ func (s *server) newTransport() (mcp.Transport, error) {
 			}
 		}
 		return t, nil
+	case "inprocess":
+		injected, ok := lookupInProcessServer(s.cfg.InjectedServer)
+		if !ok {
+			return nil, fmt.Errorf("inprocess transport: no host-injected server registered under key %q", s.cfg.InjectedServer)
+		}
+		// NewInMemoryTransports returns a connected (net.Pipe-backed) pair.
+		// The official SDK requires the SERVER to be connected before the
+		// CLIENT, because the client initializes the MCP session during its
+		// own Connect. Connect the server end here and retain its session so
+		// disconnect can tear it down; the caller then connects the client
+		// end via the returned transport.
+		clientT, serverT := mcp.NewInMemoryTransports()
+		serverSession, err := injected.Connect(ctx, serverT, nil)
+		if err != nil {
+			return nil, fmt.Errorf("inprocess server connect: %w", err)
+		}
+		s.mu.Lock()
+		s.serverSession = serverSession
+		s.mu.Unlock()
+		return clientT, nil
 	default:
 		return nil, fmt.Errorf("unknown transport %q", s.cfg.Transport)
 	}
@@ -158,7 +195,9 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 func (s *server) disconnect() {
 	s.mu.Lock()
 	sess := s.session
+	srvSess := s.serverSession
 	s.session = nil
+	s.serverSession = nil
 	s.connected = false
 	for catalog := range s.tools {
 		s.parent.unregisterToolRoute(toolName(s.cfg.Name, catalog))
@@ -181,6 +220,12 @@ func (s *server) disconnect() {
 
 	if sess != nil {
 		_ = sess.Close()
+	}
+	// inprocess only: close the host-injected server's session end of the
+	// in-memory pair. Closing the client session above does not tear down
+	// the server end, which the host handed us live.
+	if srvSess != nil {
+		_ = srvSess.Close()
 	}
 }
 
