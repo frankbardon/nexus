@@ -160,7 +160,23 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 func (p *Plugin) handleCreate(tc events.ToolCall, ev engine.Event[any]) {
 	schema, _ := tc.Arguments["schema"].(string)
 	initial := tc.Arguments["content"]
-	handle, err := p.store.Create(p.sessionID, schema, initial, ev.Causation.AgentID)
+	// An optional scene_id lets a caller (the AG-UI inbound-state reconciler,
+	// E3-S2) seed a scene under a known id so a subsequent scene_get finds it.
+	// When the id already exists this is a patch, not a create, so the existing
+	// content is preserved and merged (matching scene_patch semantics).
+	id, _ := tc.Arguments["scene_id"].(string)
+	if id != "" {
+		if _, gErr := p.store.Get(p.sessionID, id); gErr == nil {
+			p.handlePatch(events.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Name,
+				TurnID:    tc.TurnID,
+				Arguments: map[string]any{"scene_id": id, "patch": initial},
+			}, ev)
+			return
+		}
+	}
+	handle, err := p.store.CreateWithID(p.sessionID, id, schema, initial, ev.Causation.AgentID)
 	if err != nil {
 		p.respondError(tc, err.Error())
 		return
@@ -371,6 +387,10 @@ func builtinTools() []events.ToolDef {
 					},
 					"content": map[string]any{
 						"description": "Initial content. Free-form — the runtime is schema-agnostic.",
+					},
+					"scene_id": map[string]any{
+						"type":        "string",
+						"description": "Optional explicit scene id. When omitted the store assigns one. When supplied and a scene with that id already exists, the content is merged as a patch instead.",
 					},
 				},
 				"required": []string{"schema"},

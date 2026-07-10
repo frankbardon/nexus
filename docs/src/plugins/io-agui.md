@@ -271,10 +271,45 @@ and track agent state. The mapping is:
   Patch computed from full content.
 
 The document is session-scoped and persists across runs on the listener, so a
-later run's snapshot reflects scenes created by an earlier run. Inbound state
-application (a client-authored state document or patches on a continuation
-`RunAgentInput`) is **not** handled yet — that is a separate follow-up; a clean
-seam (`applyClientState`) is reserved for it.
+later run's snapshot reflects scenes created by an earlier run.
+
+#### Inbound state (client → agent)
+
+A client may send a shared-state document on `RunAgentInput.state` to seed or
+edit state the agent then observes. The document uses the **same scene-keyed
+shape** the transport emits outbound: a JSON object whose keys are `scene_id`s
+and whose values are that scene's content.
+
+- Inbound state is applied at run start (and on a resume/continuation run)
+  **before** the initial `StateSnapshot` is emitted, so the snapshot reflects the
+  client's view and the agent's first turn observes it.
+- To make a client write real (not just a mirror update), each `scene_id →
+  content` entry is pushed into the scene store via a bus-emitted `scene_create`
+  `tool.invoke` carrying an explicit `scene_id`. The scene plugin creates the
+  scene under that id, or **shallow-merges** the content as a patch when the scene
+  already exists (client edits a scene the agent created preserve keys the client
+  did not send). The agent then reads the seeded state through the normal
+  `scene_get` / `scene_list` tools. No direct plugin-to-plugin call is made — the
+  bus is the only channel.
+- A non-object state document (or otherwise malformed) is logged and skipped; it
+  never fails the run. Inbound state is a no-op when `emit_state` is off.
+
+**Conflict / ordering semantics — client-state-seeds-then-agent-wins.** The
+client seed is fully applied before the run's `io.input` is emitted, so the agent
+always starts from the seeded state. For the rest of the run, agent-side scene
+mutations are **last-writer** over the same `scene_id`: a later `scene_patch`
+overwrites the client's value per the scene store's shallow-merge semantics, and
+that change flows back out as a `StateDelta` (completing the round-trip). The
+transport's `stateMu` and the scene store's own lock serialize concurrent client
+and agent mutations, so ordering is deterministic (client seed first, then agent
+writes in bus order) and no half-applied document is ever observed.
+
+Because the mirror is seeded to the same value the scene store echoes back, the
+seed itself produces **no** `StateDelta` — only genuine agent mutations do.
+
+The `scene_create` tool accepts an optional `scene_id` argument to support this
+seeding; when omitted the store assigns an id as before, so existing agent usage
+is unchanged.
 
 ### Example configuration
 

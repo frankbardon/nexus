@@ -147,6 +147,7 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 		messages: input.Messages,
 		resume:   input.Resume,
 		tools:    input.Tools,
+		state:    input.State,
 	}
 
 	var run *run

@@ -1347,9 +1347,15 @@ after `RunStarted`; each subsequent scene mutation during the run emits a
 `StateDelta` whose `delta` is an RFC 6902 JSON Patch from the prior document to
 the new one, so a client applying the deltas in order reconstructs the snapshot.
 The document is session-scoped and persists across runs on the listener (a later
-run's snapshot reflects scenes created earlier). Inbound state application
-(client-authored state / patches on a continuation `RunAgentInput`) is not yet
-handled.
+run's snapshot reflects scenes created earlier). Inbound state
+(`RunAgentInput.state`, same scene-keyed shape) is applied at run start — and on
+a resume/continuation run — **before** the initial `StateSnapshot`, seeding the
+scene store via a `scene_create` `tool.invoke` per scene so the agent observes it
+through `scene_get` / `scene_list`. Conflict semantics are
+client-state-seeds-then-agent-wins: the client seed lands before the agent's
+first turn, then agent-side `scene_patch` mutations are last-writer and flow back
+out as `StateDelta`. See
+[Shared state](../plugins/io-agui.md#shared-state).
 
 ### `nexus.io.realtime`
 

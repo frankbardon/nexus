@@ -218,6 +218,10 @@ func (p *Plugin) Emissions() []string {
 		// the ToolCallResult carried in resume[] is fed back to the still-parked
 		// agent as the tool.result it was waiting on.
 		"tool.result",
+		// Inbound shared state (E3-S2) seeds the scene store by emitting a
+		// scene_create tool.invoke per client-authored scene, so the agent
+		// observes the client's state via scene_get/scene_list.
+		"tool.invoke",
 	}
 }
 
@@ -368,6 +372,12 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
+
+	// Inbound shared state (E3-S2): a client-authored RunAgentInput.state is
+	// reconciled into the scene store and the mirror BEFORE the initial snapshot
+	// so the agent observes the client's view and the snapshot reflects it. No-op
+	// when shared-state is disabled or no state is sent.
+	p.applyInboundState(input.threadID, input.state)
 
 	// When shared-state is enabled, a StateSnapshot immediately follows
 	// RunStarted so the client can render the agent's current scene state before

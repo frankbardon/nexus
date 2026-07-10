@@ -25,12 +25,11 @@ import (
 // arrive between runs still update the model (so the next snapshot is correct)
 // but emit no delta because there is no SSE stream to carry it.
 //
-// Inbound state application (RunAgentInput.state / client patches) is NOT
-// handled here — that is E3-S2. The reserved seam is startRun/resumeRun: a
-// future E3-S2 will, before emitting the initial snapshot, reconcile any
-// client-authored state carried on the RunAgentInput into p.sharedState (under
-// stateMu) so the snapshot reflects the client's view. No such field is read
-// today; the shared-state model is derived solely from the scene store.
+// Inbound state application (RunAgentInput.state) lives in inbound_state.go
+// (E3-S2): startRun/resumeRun call applyInboundState before emitInitialSnapshot,
+// reconciling the client-authored state into both p.sharedState (under stateMu,
+// so the snapshot reflects the client's view) and the scene store (so the agent
+// observes it via scene_get/scene_list).
 
 // sceneCreatedType, scenePatchedType, sceneDeletedType are the scene store bus
 // event types the shared-state mirror consumes. Declared here so both Init's

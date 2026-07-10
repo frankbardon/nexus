@@ -81,6 +81,11 @@ type runInput struct {
 	runID    string
 	messages []agui.Message
 	resume   []agui.ResumeItem
+	// state is the client-authored AG-UI shared-state document (RunAgentInput.
+	// state): a scene_id -> content JSON object the inbound-state reconciler
+	// (E3-S2) applies to the scene store and the mirror before the run's first
+	// turn. Empty when the client sends no state.
+	state json.RawMessage
 	// tools are the client-executed (frontend) tools advertised for this run via
 	// RunAgentInput.tools. They are surfaced to the agent for the duration of the
 	// run and a call to one suspends the run awaiting the client's result.

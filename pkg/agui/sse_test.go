@@ -144,6 +144,27 @@ func TestRunAgentInputRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRunAgentInputStatePresent(t *testing.T) {
+	// A client-authored shared-state document must decode into State off the
+	// "state" wire tag (E3-S2 inbound state).
+	raw := `{"threadId":"t","runId":"r","state":{"scene_1":{"title":"draft"}}}`
+	in, err := DecodeRunAgentInput([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.State) == 0 {
+		t.Fatal("State empty; expected client state document")
+	}
+	var m map[string]any
+	if err := json.Unmarshal(in.State, &m); err != nil {
+		t.Fatalf("State is not a JSON object: %v", err)
+	}
+	s1, ok := m["scene_1"].(map[string]any)
+	if !ok || s1["title"] != "draft" {
+		t.Fatalf("State = %s, want scene_1.title=draft", in.State)
+	}
+}
+
 func TestRunAgentInputResumePresent(t *testing.T) {
 	// resume[] must survive JSON with the exact field names.
 	raw := `{"threadId":"t","runId":"r","resume":[{"interruptId":"i1","status":"resolved","payload":{"a":1}}]}`
