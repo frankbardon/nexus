@@ -1302,6 +1302,27 @@ Source: `plugins/io/browser/plugin.go`.
 | `port`         | int    | `8080`      | HTTP listen port. |
 | `open_browser` | bool   | `true`      | Auto-open the browser tab on startup (no-op when the OS lacks an opener). |
 
+### `nexus.io.agui`
+
+Source: `plugins/io/agui/plugin.go`. AG-UI ("Agent-User Interaction") serve
+transport. Clients `POST` a `RunAgentInput` to `/agui` and receive a
+`text/event-stream` SSE response (one stream per run), using the pkg/agui wire
+format rather than the browser/wails Envelope. Safe by default: binds loopback,
+optional bearer-token auth, and configurable CORS for browser AG-UI clients.
+
+| Key                | Type         | Default            | Description |
+|--------------------|--------------|--------------------|-------------|
+| `bind`             | string       | `127.0.0.1:8090`   | `host:port` the HTTP listener binds to. Defaults to loopback so the endpoint is not network-exposed without explicit opt-in. |
+| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. |
+| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
+| `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
+
+**Note:** the transport shell and config surface land here; the bus ↔ SSE event
+mapping (translating `RunAgentInput` into `io.input` and bridging bus events
+into AG-UI events) is wired in a later story. Until then the `POST /agui`
+handler validates the input and returns a well-formed terminal stream
+(`RunStarted` + `RunError`).
+
 ### `nexus.io.realtime`
 
 Source: `plugins/io/realtime/plugin.go`. WebSocket bidirectional transport

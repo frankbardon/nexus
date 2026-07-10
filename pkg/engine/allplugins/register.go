@@ -23,6 +23,7 @@ import (
 	hitlsynthplugin "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 
 	// IO plugins.
+	aguiplugin "github.com/frankbardon/nexus/plugins/io/agui"
 	brokerplugin "github.com/frankbardon/nexus/plugins/io/broker"
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
 	oneshotplugin "github.com/frankbardon/nexus/plugins/io/oneshot"
@@ -159,6 +160,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
 	r.Register("nexus.io.browser", browserplugin.New)
+	r.Register("nexus.io.agui", aguiplugin.New)
 	r.Register("nexus.io.broker", brokerplugin.New)
 	r.Register("nexus.io.realtime", realtimeplugin.New)
 	r.Register("nexus.io.voice", voiceplugin.New)
