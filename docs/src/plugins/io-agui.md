@@ -34,7 +34,7 @@ quoted above.
 
 A client `POST`s a `RunAgentInput` JSON body to `/agui` and receives a
 `text/event-stream` (SSE) response carrying one **run**: a well-formed AG-UI
-lifecycle from `RunStarted` to `RunFinished` (or `RunError`). The stream flushes
+lifecycle from `RUN_STARTED` to `RUN_FINISHED` (or `RUN_ERROR`). The stream flushes
 incrementally as bus events arrive — nothing is buffered until the end.
 
 **Inbound (client → bus).** The request's `messages` are mapped to a Nexus
@@ -47,7 +47,7 @@ incrementally as bus events arrive — nothing is buffered until the end.
   **turn**.
 
 `io.input` is published vetoably (`before:io.input` first); a veto ends the run
-with `RunError`.
+with `RUN_ERROR`.
 
 **Outbound (bus → client).** The plugin subscribes to the same engine bus
 events as the browser transport and translates each into canonical AG-UI SSE.
@@ -57,30 +57,32 @@ race-free.
 
 ## Event mapping
 
-Nexus bus events map near-1:1 onto the canonical AG-UI event taxonomy:
+Nexus bus events map near-1:1 onto the canonical AG-UI event taxonomy. The
+AG-UI wire `type` discriminator is UPPER_SNAKE_CASE (per the AG-UI protocol);
+the values below are the exact strings emitted on the SSE stream:
 
 | Nexus bus event | AG-UI event(s) | Notes |
 |---|---|---|
-| *(run accepted)* | `RunStarted` | Emitted eagerly on accept so even an agent-less run is well-formed. `threadId` / `runId` echoed. |
-| `agent.turn.start` | `StepStarted` | Each turn/iteration opens a step; the step name derives from `TurnID`. |
-| `agent.turn.end` | `StepFinished`, then `RunFinished` | A top-level turn end closes the open step **and** terminates the run/stream. |
-| `llm.stream.chunk` | `TextMessageStart` → `TextMessageContent` | `TextMessageStart` (role `assistant`) is emitted lazily on the first non-empty delta; subsequent deltas append content. |
-| `llm.stream.end` | `TextMessageEnd` | Closes the open streamed text message. |
-| `io.output` | `TextMessageStart` → `TextMessageContent` → `TextMessageEnd` | Self-contained triple. Skipped when the same content was already streamed via `llm.stream.chunk`; still rendered when a non-streaming provider (mock / batch) flags output `streamed` but emitted no chunks, so text is never dropped. |
-| `tool.invoke` | `ToolCallStart` → `ToolCallArgs` → `ToolCallEnd` | The agent emits `tool.invoke` (not `tool.call`) to run a tool. Arguments are fully resolved on the bus (not streamed), so the three events are emitted together; args are JSON-encoded. Internal sub-calls (non-empty `ParentCallID`) still render but never suspend the run. |
-| `tool.result` | `ToolCallResult` | Correlated to the call by `toolCallId`; `Error` content is surfaced in place of `Output` when present. |
-| `thinking.step` | `ReasoningStart` → `ReasoningMessageContent` | `ReasoningStart` opens lazily on the first step; `ReasoningEnd` is emitted at turn end. |
-| *(failure / disconnect / veto / concurrent run)* | `RunError` | Terminal; ends the stream. |
+| *(run accepted)* | `RUN_STARTED` | Emitted eagerly on accept so even an agent-less run is well-formed. `threadId` / `runId` echoed. |
+| `agent.turn.start` | `STEP_STARTED` | Each turn/iteration opens a step; the step name derives from `TurnID`. |
+| `agent.turn.end` | `STEP_FINISHED`, then `RUN_FINISHED` | A top-level turn end closes the open step **and** terminates the run/stream. |
+| `llm.stream.chunk` | `TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` | `TEXT_MESSAGE_START` (role `assistant`) is emitted lazily on the first non-empty delta; subsequent deltas append content. |
+| `llm.stream.end` | `TEXT_MESSAGE_END` | Closes the open streamed text message. |
+| `io.output` | `TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` → `TEXT_MESSAGE_END` | Self-contained triple. Skipped when the same content was already streamed via `llm.stream.chunk`; still rendered when a non-streaming provider (mock / batch) flags output `streamed` but emitted no chunks, so text is never dropped. |
+| `tool.invoke` | `TOOL_CALL_START` → `TOOL_CALL_ARGS` → `TOOL_CALL_END` | The agent emits `tool.invoke` (not `tool.call`) to run a tool. Arguments are fully resolved on the bus (not streamed), so the three events are emitted together; args are JSON-encoded. Internal sub-calls (non-empty `ParentCallID`) still render but never suspend the run. |
+| `tool.result` | `TOOL_CALL_RESULT` | Correlated to the call by `toolCallId`; `Error` content is surfaced in place of `Output` when present. |
+| `thinking.step` | `REASONING_START` → `REASONING_MESSAGE_CONTENT` | `REASONING_START` opens lazily on the first step; `REASONING_END` is emitted at turn end. |
+| *(failure / disconnect / veto / concurrent run)* | `RUN_ERROR` | Terminal; ends the stream. |
 
-Both `RunFinished` and `RunError` are terminal — the SSE stream ends on either.
+Both `RUN_FINISHED` and `RUN_ERROR` are terminal — the SSE stream ends on either.
 
-### Non-canonical events: the `Custom` superset
+### Non-canonical events: the `CUSTOM` superset
 
 Nexus emits rich events that have **no** canonical AG-UI equivalent. Rather than
-drop them, they ride the AG-UI `Custom` event as a documented **superset**: the
+drop them, they ride the AG-UI `CUSTOM` event as a documented **superset**: the
 `Custom.name` is the Nexus bus event type and `Custom.value` is the JSON-encoded
 payload. Stock AG-UI clients that only understand canonical events can safely
-ignore `Custom` without losing the run's canonical lifecycle; Nexus-aware
+ignore `CUSTOM` without losing the run's canonical lifecycle; Nexus-aware
 clients can opt in.
 
 The bridged bus events are:
@@ -91,9 +93,9 @@ The bridged bus events are:
 - `subagent.complete`
 - `code.exec.stdout`
 
-> AG-UI also defines a `Raw` event for passthrough of an upstream provider's
-> native event shape. Nexus-specific events use `Custom` (name + JSON value)
-> consistently; `Raw` is available in `pkg/agui` for future passthrough needs.
+> AG-UI also defines a `RAW` event for passthrough of an upstream provider's
+> native event shape. Nexus-specific events use `CUSTOM` (name + JSON value)
+> consistently; `RAW` is available in `pkg/agui` for future passthrough needs.
 
 ## Interrupts: HITL and client-executed tools
 
@@ -112,11 +114,11 @@ resume opens a *new* run over the *same* thread until the turn finally completes
 
 ```text
 POST /agui  { threadId: T, runId: R1, messages:[…] }        ← run 1 begins the turn
-  … RunStarted … StepStarted … (agent calls ask_user) …
-  … StateSnapshot … MessagesSnapshot … RunFinished(interrupt)  ← run 1 ends, agent PARKED
+  … RUN_STARTED … STEP_STARTED … (agent calls ask_user) …
+  … STATE_SNAPSHOT … MESSAGES_SNAPSHOT … RUN_FINISHED(interrupt)  ← run 1 ends, agent PARKED
 
 POST /agui  { threadId: T, runId: R2, resume:[…] }          ← run 2 continues the SAME turn
-  … RunStarted … (agent unblocks, finishes) … RunFinished     ← turn complete
+  … RUN_STARTED … (agent unblocks, finishes) … RUN_FINISHED     ← turn complete
 ```
 
 The `threadId` is identical across the runs; each continuation uses a **fresh
@@ -128,27 +130,27 @@ Nexus instance across its runs (see `threadId` / `runId` semantics below).
 Two flows ride the identical suspend/resume machinery:
 
 - **Human-in-the-loop (HITL).** A `hitl.requested` during a run (e.g. the agent
-  calling the `ask_user` tool) emits a `StateSnapshot` + `MessagesSnapshot` then
-  `RunFinished(interrupt)`; the resume emits `hitl.responded` to unblock the
+  calling the `ask_user` tool) emits a `STATE_SNAPSHOT` + `MESSAGES_SNAPSHOT` then
+  `RUN_FINISHED(interrupt)`; the resume emits `hitl.responded` to unblock the
   waiter.
 - **Client-executed (frontend) tools.** Tools the client advertises via
   `RunAgentInput.tools` are surfaced to the agent (the plugin appends them to the
   synchronous `tool.catalog.query` snapshot, scoped to exactly the advertising
   run — they never leak into later runs or shadow a same-named server tool). When
-  the agent calls one, its `tool.invoke` streams the `ToolCallStart/Args/End`
+  the agent calls one, its `tool.invoke` streams the `TOOL_CALL_START/ARGS/END`
   sequence and then the run ends interrupt-style: there is no in-process handler
   to produce a `tool.result`, so the **client** runs the tool and resumes with a
   tool result. The plugin feeds that result back to the parked agent as the
   `tool.result` it was waiting on, and the continuation streams on a fresh run.
 
 A server-side Nexus catalog tool is never intercepted: its own handler runs
-inline and produces the `tool.result` that streams as a normal `ToolCallResult`.
+inline and produces the `tool.result` that streams as a normal `TOOL_CALL_RESULT`.
 Client tools are distinguished purely by **origin** (they came from
 `RunAgentInput.tools`).
 
 ### The interrupt anchor
 
-`RunFinished(interrupt)` carries an `Interrupt` payload in its `result` field.
+`RUN_FINISHED(interrupt)` carries an `Interrupt` payload in its `result` field.
 The client renders it and echoes its `interruptId` in the resume. It provides:
 
 | Field | Meaning |
@@ -158,9 +160,9 @@ The client renders it and echoes its `interruptId` in the resume. It provides:
 | `mode` | `free_text`, `choices`, or `both` — controls the response affordance. |
 | `choices` / `defaultChoiceId` | The options (and deadline default) for a `choices`/`both` interrupt. |
 
-The interrupt kind (HITL vs client tool) is also mirrored in the `StateSnapshot`
+The interrupt kind (HITL vs client tool) is also mirrored in the `STATE_SNAPSHOT`
 under an `interrupt` (HITL) or `toolCall` (client tool) anchor, so a client that
-restores from state alone — rather than replaying `MessagesSnapshot` — still has
+restores from state alone — rather than replaying `MESSAGES_SNAPSHOT` — still has
 everything it needs to resume.
 
 ### The `resume[]` wire shape
@@ -193,13 +195,13 @@ Each `resume[]` item names an `interruptId`, a `status`, and an optional
 As AG-UI requires, **all** open interrupts on a thread must be addressed in one
 resume request: a resume that references an unknown/expired interrupt, addresses
 one twice, or leaves an open interrupt unaddressed is rejected with a clean
-terminal `RunError` stream and leaves the parked agent untouched for a corrected
+terminal `RUN_ERROR` stream and leaves the parked agent untouched for a corrected
 retry.
 
 The reusable pure-Go conformance client (`pkg/agui/aguiclient`) provides
 constructors for these payloads — `ResumeInput`, `ResolveChoice`, `ResolveText`,
 `ResolveToolResult`, and `Cancel` — plus `Result.Interrupt()` to extract the
-anchor from a `RunFinished(interrupt)`. The end-to-end interrupt/resume and
+anchor from a `RUN_FINISHED(interrupt)`. The end-to-end interrupt/resume and
 client-tool round-trips are exercised in
 `tests/integration/agui_hitl_test.go`.
 
@@ -218,8 +220,8 @@ client-tool round-trips are exercised in
 
 One in-flight run per listener (single engine/session per listener, mirroring
 `nexus.io.browser`). A second `POST` while a run is active receives a terminal
-`RunStarted` + `RunError` stream rather than interleaving into the live run. On
-client disconnect or engine shutdown, the active run fails with `RunError` and
+`RUN_STARTED` + `RUN_ERROR` stream rather than interleaving into the live run. On
+client disconnect or engine shutdown, the active run fails with `RUN_ERROR` and
 its handler returns promptly, releasing the slot.
 
 ## Exposure, auth, and CORS
@@ -248,7 +250,7 @@ are summarized here for convenience:
 | `bearer_token` | string | *(empty)* | Inline bearer token. Takes precedence over `bearer_token_env`. |
 | `bearer_token_env` | string | *(empty)* | Env var name to read the bearer token from (used only when `bearer_token` is empty). |
 | `cors_origins` | list&lt;string&gt; | *(empty)* | Allowed CORS origins. `*` echoes any Origin; a list echoes only matches; empty means same-origin only. Also accepts a comma-separated string. |
-| `emit_state` | bool | `false` | Opt-in AG-UI shared-state emission: mirror the scene store as a shared-state document and emit `StateSnapshot`/`StateDelta` on the run stream. See [Shared state](#shared-state) below. |
+| `emit_state` | bool | `false` | Opt-in AG-UI shared-state emission: mirror the scene store as a shared-state document and emit `STATE_SNAPSHOT`/`STATE_DELTA` on the run stream. See [Shared state](#shared-state) below. |
 
 ### Shared state
 
@@ -261,14 +263,14 @@ and track agent state. The mapping is:
   tracks these into a document keyed by `scene_id` (value = the scene's current
   content). It never calls the scene plugin directly — the bus events are the
   sole input.
-- On run start, a `StateSnapshot` of the current document is emitted right after
-  `RunStarted`.
-- Each scene mutation during the run emits a `StateDelta` whose `delta` is an
+- On run start, a `STATE_SNAPSHOT` of the current document is emitted right after
+  `RUN_STARTED`.
+- Each scene mutation during the run emits a `STATE_DELTA` whose `delta` is an
   **RFC 6902 JSON Patch** from the previous document to the new one. The
-  `StateSnapshot` always precedes any `StateDelta` on the stream, and applying the
+  `STATE_SNAPSHOT` always precedes any `STATE_DELTA` on the stream, and applying the
   deltas in order to the snapshot reconstructs the state (verified end to end by
   the `TestAGUIState_*` integration tests as well as the `pkg/agui` unit tests).
-  This aligns AG-UI's `StateDelta` with the scene store's patch model while
+  This aligns AG-UI's `STATE_DELTA` with the scene store's patch model while
   normalizing the scene store's shallow-merge semantics into a valid JSON Patch
   computed from full content.
 
@@ -283,7 +285,7 @@ shape** the transport emits outbound: a JSON object whose keys are `scene_id`s
 and whose values are that scene's content.
 
 - Inbound state is applied at run start (and on a resume/continuation run)
-  **before** the initial `StateSnapshot` is emitted, so the snapshot reflects the
+  **before** the initial `STATE_SNAPSHOT` is emitted, so the snapshot reflects the
   client's view and the agent's first turn observes it.
 - To make a client write real (not just a mirror update), each `scene_id →
   content` entry is pushed into the scene store via a bus-emitted `scene_create`
@@ -301,19 +303,19 @@ client seed is fully applied before the run's `io.input` is emitted, so the agen
 always starts from the seeded state. For the rest of the run, agent-side scene
 mutations are **last-writer** over the same `scene_id`: a later `scene_patch`
 overwrites the client's value per the scene store's shallow-merge semantics, and
-that change flows back out as a `StateDelta` (completing the round-trip). The
+that change flows back out as a `STATE_DELTA` (completing the round-trip). The
 transport's `stateMu` and the scene store's own lock serialize concurrent client
 and agent mutations, so ordering is deterministic (client seed first, then agent
 writes in bus order) and no half-applied document is ever observed.
 
 Because the mirror is seeded to the same value the scene store echoes back, the
-seed itself produces **no** `StateDelta` — only genuine agent mutations do. The
+seed itself produces **no** `STATE_DELTA` — only genuine agent mutations do. The
 `TestAGUIState_InboundSeedObserved` and `TestAGUIState_ConflictAgentWins`
 integration tests exercise this round-trip: the client seed appears in the
-initial `StateSnapshot` and is read back through `scene_get`, and a subsequent
+initial `STATE_SNAPSHOT` and is read back through `scene_get`, and a subsequent
 agent `scene_patch` on the same `scene_id` wins on the overlapping key (with the
 client's untouched keys preserved by shallow-merge) and surfaces as exactly one
-`StateDelta`.
+`STATE_DELTA`.
 
 The `scene_create` tool accepts an optional `scene_id` argument to support this
 seeding; when omitted the store assigns an id as before, so existing agent usage

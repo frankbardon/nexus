@@ -56,11 +56,11 @@ func TestSSEWriterRecordFormat(t *testing.T) {
 func TestSSEReaderSkipsCommentsAndBlanks(t *testing.T) {
 	stream := ": heartbeat\n" +
 		"\n" +
-		"data: {\"type\":\"StepStarted\",\"stepName\":\"a\"}\n" +
+		"data: {\"type\":\"STEP_STARTED\",\"stepName\":\"a\"}\n" +
 		"\n" +
 		": another comment\n" +
 		"event: ignored\n" +
-		"data: {\"type\":\"StepFinished\",\"stepName\":\"a\"}\n" +
+		"data: {\"type\":\"STEP_FINISHED\",\"stepName\":\"a\"}\n" +
 		"\n"
 
 	r := NewSSEReader(strings.NewReader(stream))
@@ -77,7 +77,7 @@ func TestSSEReaderSkipsCommentsAndBlanks(t *testing.T) {
 }
 
 func TestSSEReaderTrailingRecordNoBlankLine(t *testing.T) {
-	stream := "data: {\"type\":\"RunError\",\"message\":\"x\"}"
+	stream := "data: {\"type\":\"RUN_ERROR\",\"message\":\"x\"}"
 	r := NewSSEReader(strings.NewReader(stream))
 	e, err := r.Next()
 	if err != nil {

@@ -11,47 +11,47 @@ type EventType string
 // Canonical AG-UI event types.
 const (
 	// Lifecycle.
-	EventRunStarted   EventType = "RunStarted"
-	EventRunFinished  EventType = "RunFinished"
-	EventRunError     EventType = "RunError"
-	EventStepStarted  EventType = "StepStarted"
-	EventStepFinished EventType = "StepFinished"
+	EventRunStarted   EventType = "RUN_STARTED"
+	EventRunFinished  EventType = "RUN_FINISHED"
+	EventRunError     EventType = "RUN_ERROR"
+	EventStepStarted  EventType = "STEP_STARTED"
+	EventStepFinished EventType = "STEP_FINISHED"
 
 	// Text message.
-	EventTextMessageStart   EventType = "TextMessageStart"
-	EventTextMessageContent EventType = "TextMessageContent"
-	EventTextMessageEnd     EventType = "TextMessageEnd"
-	EventTextMessageChunk   EventType = "TextMessageChunk"
+	EventTextMessageStart   EventType = "TEXT_MESSAGE_START"
+	EventTextMessageContent EventType = "TEXT_MESSAGE_CONTENT"
+	EventTextMessageEnd     EventType = "TEXT_MESSAGE_END"
+	EventTextMessageChunk   EventType = "TEXT_MESSAGE_CHUNK"
 
 	// Tool call.
-	EventToolCallStart  EventType = "ToolCallStart"
-	EventToolCallArgs   EventType = "ToolCallArgs"
-	EventToolCallEnd    EventType = "ToolCallEnd"
-	EventToolCallResult EventType = "ToolCallResult"
-	EventToolCallChunk  EventType = "ToolCallChunk"
+	EventToolCallStart  EventType = "TOOL_CALL_START"
+	EventToolCallArgs   EventType = "TOOL_CALL_ARGS"
+	EventToolCallEnd    EventType = "TOOL_CALL_END"
+	EventToolCallResult EventType = "TOOL_CALL_RESULT"
+	EventToolCallChunk  EventType = "TOOL_CALL_CHUNK"
 
 	// State.
-	EventStateSnapshot    EventType = "StateSnapshot"
-	EventStateDelta       EventType = "StateDelta"
-	EventMessagesSnapshot EventType = "MessagesSnapshot"
+	EventStateSnapshot    EventType = "STATE_SNAPSHOT"
+	EventStateDelta       EventType = "STATE_DELTA"
+	EventMessagesSnapshot EventType = "MESSAGES_SNAPSHOT"
 
 	// Activity.
-	EventActivitySnapshot EventType = "ActivitySnapshot"
-	EventActivityDelta    EventType = "ActivityDelta"
+	EventActivitySnapshot EventType = "ACTIVITY_SNAPSHOT"
+	EventActivityDelta    EventType = "ACTIVITY_DELTA"
 
 	// Reasoning (thinking).
-	EventReasoningStart          EventType = "ReasoningStart"
-	EventReasoningMessageStart   EventType = "ReasoningMessageStart"
-	EventReasoningMessageContent EventType = "ReasoningMessageContent"
-	EventReasoningMessageEnd     EventType = "ReasoningMessageEnd"
-	EventReasoningMessageChunk   EventType = "ReasoningMessageChunk"
-	EventReasoningEnd            EventType = "ReasoningEnd"
-	EventReasoningEncryptedValue EventType = "ReasoningEncryptedValue"
+	EventReasoningStart          EventType = "REASONING_START"
+	EventReasoningMessageStart   EventType = "REASONING_MESSAGE_START"
+	EventReasoningMessageContent EventType = "REASONING_MESSAGE_CONTENT"
+	EventReasoningMessageEnd     EventType = "REASONING_MESSAGE_END"
+	EventReasoningMessageChunk   EventType = "REASONING_MESSAGE_CHUNK"
+	EventReasoningEnd            EventType = "REASONING_END"
+	EventReasoningEncryptedValue EventType = "REASONING_ENCRYPTED_VALUE"
 
 	// Special.
-	EventRaw    EventType = "Raw"
-	EventCustom EventType = "Custom"
-	EventMeta   EventType = "MetaEvent"
+	EventRaw    EventType = "RAW"
+	EventCustom EventType = "CUSTOM"
+	EventMeta   EventType = "META_EVENT"
 )
 
 // Event is implemented by every AG-UI event struct. Type returns the value
