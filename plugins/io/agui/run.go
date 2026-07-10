@@ -371,10 +371,7 @@ func (r *run) onOutput(o events.AgentOutput) {
 		r.mu.Unlock()
 		return
 	}
-	role := o.Role
-	if role == "" {
-		role = "assistant"
-	}
+	role := sanitizeRole(o.Role)
 	r.textSeq++
 	id := messageID(r.runID, r.textSeq)
 	r.messages = append(r.messages, agui.Message{ID: id, Role: role, Content: o.Content})
@@ -461,6 +458,23 @@ func stepName(t events.TurnInfo) string {
 		return t.TurnID
 	}
 	return "turn"
+}
+
+// sanitizeRole constrains any Nexus-derived role to the closed set of roles the
+// AG-UI Message/TextMessage schema permits (developer|system|assistant|user|
+// tool). The official @ag-ui/client validates roles with a Zod literal union and
+// rejects the entire stream on any value outside that set — Nexus uses roles
+// such as "error" for failed LLM calls / guardrail output that would otherwise
+// break the client. Unknown, empty, and "error" roles all map to "assistant" so
+// the content stays visible to the user as assistant text rather than being
+// dropped or terminating the run.
+func sanitizeRole(role string) string {
+	switch role {
+	case "developer", "system", "assistant", "user", "tool":
+		return role
+	default:
+		return "assistant"
+	}
 }
 
 // messageID builds a deterministic message id for a run and sequence number.
