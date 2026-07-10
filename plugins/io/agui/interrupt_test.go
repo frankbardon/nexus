@@ -19,7 +19,7 @@ func newInterruptTestPlugin(t *testing.T, threadID, runID string) (*Plugin, *run
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		pending: make(map[string]pendingInterrupt),
 	}
-	r := newRun(threadID, runID)
+	r := newRun(threadID, runID, nil)
 	p.active = r
 	return p, r
 }

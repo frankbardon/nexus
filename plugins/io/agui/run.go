@@ -62,6 +62,13 @@ type run struct {
 	// message so it can be finalized into messages on stream/turn end. Empty
 	// when no streamed text is in flight.
 	streamBuf string
+
+	// clientTools holds the ToolDefs the client advertised for this run via
+	// RunAgentInput.tools. They are appended to the catalog snapshot the agent
+	// assembles so the LLM may call them; a call to one suspends the run awaiting
+	// the client's ToolCallResult. Keyed by tool name for O(1) origin checks.
+	// Read-only after newRun, so no lock is needed.
+	clientTools map[string]events.ToolDef
 }
 
 // runInput carries the fields of a decoded RunAgentInput that the plugin needs
@@ -74,6 +81,10 @@ type runInput struct {
 	runID    string
 	messages []agui.Message
 	resume   []agui.ResumeItem
+	// tools are the client-executed (frontend) tools advertised for this run via
+	// RunAgentInput.tools. They are surfaced to the agent for the duration of the
+	// run and a call to one suspends the run awaiting the client's result.
+	tools []agui.Tool
 }
 
 // newRunStarted builds a RunStarted event for a run.
@@ -81,15 +92,45 @@ func newRunStarted(threadID, runID string) agui.RunStartedEvent {
 	return agui.NewRunStarted(threadID, runID)
 }
 
-// newRun builds a run for the given thread/run identifiers.
-func newRun(threadID, runID string) *run {
-	return &run{
+// newRun builds a run for the given thread/run identifiers. clientTools are the
+// frontend-executed tools advertised for the run (nil for a run with none); they
+// are surfaced to the agent and drive the client-tool suspend/resume path.
+func newRun(threadID, runID string, clientTools []agui.Tool) *run {
+	r := &run{
 		threadID:  threadID,
 		runID:     runID,
 		out:       make(chan agui.Event, 256),
 		done:      make(chan struct{}),
 		openTools: make(map[string]bool),
 	}
+	if len(clientTools) > 0 {
+		r.clientTools = make(map[string]events.ToolDef, len(clientTools))
+		for _, t := range clientTools {
+			if t.Name == "" {
+				continue
+			}
+			r.clientTools[t.Name] = clientToolDef(t)
+		}
+	}
+	return r
+}
+
+// clientToolDef maps an AG-UI client Tool onto the events.ToolDef the tool
+// catalog and agent expect. The client's JSON-Schema Parameters are decoded into
+// the map[string]any the agent hands the provider; a malformed schema degrades
+// to an empty (permissive) parameter set rather than dropping the tool.
+func clientToolDef(t agui.Tool) events.ToolDef {
+	td := events.ToolDef{
+		Name:        t.Name,
+		Description: t.Description,
+	}
+	if len(t.Parameters) > 0 {
+		var params map[string]any
+		if err := json.Unmarshal(t.Parameters, &params); err == nil {
+			td.Parameters = params
+		}
+	}
+	return td
 }
 
 // queue pushes a translated event onto the run's channel unless the run has

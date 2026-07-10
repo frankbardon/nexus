@@ -67,7 +67,7 @@ Nexus bus events map near-1:1 onto the canonical AG-UI event taxonomy:
 | `llm.stream.chunk` | `TextMessageStart` → `TextMessageContent` | `TextMessageStart` (role `assistant`) is emitted lazily on the first non-empty delta; subsequent deltas append content. |
 | `llm.stream.end` | `TextMessageEnd` | Closes the open streamed text message. |
 | `io.output` | `TextMessageStart` → `TextMessageContent` → `TextMessageEnd` | Self-contained triple. Skipped when the same content was already streamed via `llm.stream.chunk`; still rendered when a non-streaming provider (mock / batch) flags output `streamed` but emitted no chunks, so text is never dropped. |
-| `tool.call` | `ToolCallStart` → `ToolCallArgs` → `ToolCallEnd` | Arguments are fully resolved on the bus (not streamed), so the three events are emitted together; args are JSON-encoded. |
+| `tool.invoke` | `ToolCallStart` → `ToolCallArgs` → `ToolCallEnd` | The agent emits `tool.invoke` (not `tool.call`) to run a tool. Arguments are fully resolved on the bus (not streamed), so the three events are emitted together; args are JSON-encoded. Internal sub-calls (non-empty `ParentCallID`) still render but never suspend the run. |
 | `tool.result` | `ToolCallResult` | Correlated to the call by `toolCallId`; `Error` content is surfaced in place of `Output` when present. |
 | `thinking.step` | `ReasoningStart` → `ReasoningMessageContent` | `ReasoningStart` opens lazily on the first step; `ReasoningEnd` is emitted at turn end. |
 | *(failure / disconnect / veto / concurrent run)* | `RunError` | Terminal; ends the stream. |
@@ -94,6 +94,39 @@ The bridged bus events are:
 > AG-UI also defines a `Raw` event for passthrough of an upstream provider's
 > native event shape. Nexus-specific events use `Custom` (name + JSON value)
 > consistently; `Raw` is available in `pkg/agui` for future passthrough needs.
+
+## Interrupts: HITL and client-executed tools
+
+AG-UI uses a **terminal-run** model for anything that needs input mid-run: the
+run *ends* with an interrupt outcome and the client starts a **continuation run**
+carrying `resume[]`. Nexus emulates this as *virtual runs* over one persistent
+in-process session — the agent stays parked in-process and a continuation `POST`
+unblocks it. Two flows ride the identical suspend/resume machinery:
+
+- **Human-in-the-loop (HITL).** A `hitl.requested` during a run emits a
+  `StateSnapshot` + `MessagesSnapshot` then `RunFinished(interrupt)`; the resume
+  emits `hitl.responded` to unblock the waiter.
+- **Client-executed (frontend) tools.** Tools the client advertises via
+  `RunAgentInput.tools` are surfaced to the agent (the plugin appends them to the
+  synchronous `tool.catalog.query` snapshot, scoped to exactly the advertising
+  run — they never leak into later runs or shadow a same-named server tool). When
+  the agent calls one, its `tool.invoke` streams the `ToolCallStart/Args/End`
+  sequence and then the run ends interrupt-style: there is no in-process handler
+  to produce a `tool.result`, so the **client** runs the tool and resumes with a
+  `ToolCallResult`. The plugin feeds that result back to the parked agent as the
+  `tool.result` it was waiting on, and the continuation streams on a fresh run.
+
+A server-side Nexus catalog tool is never intercepted: its own handler runs
+inline and produces the `tool.result` that streams as a normal `ToolCallResult`.
+Client tools are distinguished purely by **origin** (they came from
+`RunAgentInput.tools`).
+
+The `resume[]` payload shape depends on the interrupt kind: a HITL interrupt
+accepts `{choiceId, freeText, editedPayload}`; a client-tool interrupt accepts
+`{output, error}`. A `cancelled` status resolves either kind without an answer
+(HITL abandonment / an error `tool.result` so the agent's loop still advances).
+As AG-UI requires, **all** open interrupts on a thread must be addressed in one
+resume request.
 
 ## `threadId` / `runId` semantics
 

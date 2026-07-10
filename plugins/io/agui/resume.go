@@ -46,25 +46,40 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("a run is already in flight on this listener")
 	}
-	r := newRun(input.threadID, input.runID)
+	r := newRun(input.threadID, input.runID, input.tools)
 	p.active = r
 	p.mu.Unlock()
 
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
 
-	// Resolve each interrupt: emit hitl.responded to unblock the waiter, then
-	// drop the pending mapping. Emission is asynchronous so this handler returns
-	// promptly and the HTTP goroutine can start draining the run channel.
+	// Resolve each interrupt, then drop the pending mapping. A HITL interrupt
+	// emits hitl.responded to unblock the waiter; a client-tool interrupt emits
+	// the tool.result the parked agent is waiting on. Emission is asynchronous so
+	// this handler returns promptly and the HTTP goroutine can start draining the
+	// run channel.
 	go func() {
 		for _, m := range items {
-			resp := buildHITLResponse(m.pending, m.item)
-			if err := p.bus.Emit("hitl.responded", resp); err != nil {
-				p.logger.Warn("emit hitl.responded on resume failed",
-					"error", err,
-					"request_id", m.pending.RequestID,
-					"interrupt_id", m.pending.InterruptID,
-				)
+			switch m.pending.Kind {
+			case interruptClientTool:
+				result := buildToolResult(m.pending, m.item)
+				if err := p.bus.Emit("tool.result", result); err != nil {
+					p.logger.Warn("emit tool.result on client-tool resume failed",
+						"error", err,
+						"tool", m.pending.ToolName,
+						"tool_call_id", m.pending.ToolCallID,
+						"interrupt_id", m.pending.InterruptID,
+					)
+				}
+			default:
+				resp := buildHITLResponse(m.pending, m.item)
+				if err := p.bus.Emit("hitl.responded", resp); err != nil {
+					p.logger.Warn("emit hitl.responded on resume failed",
+						"error", err,
+						"request_id", m.pending.RequestID,
+						"interrupt_id", m.pending.InterruptID,
+					)
+				}
 			}
 			p.pendingMu.Lock()
 			delete(p.pending, m.pending.InterruptID)
@@ -73,6 +88,7 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 			p.logger.Info("agui interrupt resumed",
 				"interrupt_id", m.pending.InterruptID,
 				"request_id", m.pending.RequestID,
+				"tool_call_id", m.pending.ToolCallID,
 				"thread_id", input.threadID,
 				"run_id", input.runID,
 				"status", string(m.item.Status),
@@ -81,6 +97,42 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	}()
 
 	return r, nil
+}
+
+// toolResultPayload is the JSON shape a client sends in a ResumeItem.Payload for
+// a resolved client-executed tool call. It mirrors the fields of ToolResult the
+// agent consumes; all are optional. An empty payload resolves the call with an
+// empty output (the agent still advances past the call).
+type toolResultPayload struct {
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// buildToolResult maps a client's resume item onto the ToolResult the parked
+// agent awaits. A "cancelled" status yields an error result so the agent's tool
+// loop advances rather than hanging; a "resolved" status decodes the client's
+// tool output. The TurnID is carried through from the pending interrupt so the
+// ReAct agent matches the result to the turn that issued the call.
+func buildToolResult(pi pendingInterrupt, item agui.ResumeItem) events.ToolResult {
+	result := events.ToolResult{
+		SchemaVersion: events.ToolResultVersion,
+		ID:            pi.ToolCallID,
+		Name:          pi.ToolName,
+		TurnID:        pi.TurnID,
+	}
+	if item.Status == agui.ResumeCancelled {
+		result.Error = "client tool call cancelled"
+		return result
+	}
+	var payload toolResultPayload
+	if len(item.Payload) > 0 {
+		// A malformed payload is not fatal: fall through with an empty output
+		// rather than rejecting a resolve the client considers complete.
+		_ = json.Unmarshal(item.Payload, &payload)
+	}
+	result.Output = payload.Output
+	result.Error = payload.Error
+	return result
 }
 
 // matchedResume pairs a resume item with the pending interrupt it resolves.

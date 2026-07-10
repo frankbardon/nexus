@@ -93,9 +93,14 @@ type Plugin struct {
 // ResumeItem.InterruptID it looks up the RequestID to emit hitl.responded, and
 // the SessionID/TurnID to open the continuation run against the right thread.
 type pendingInterrupt struct {
+	// Kind distinguishes a HITL suspension (resolved via hitl.responded) from a
+	// client-executed-tool suspension (resolved by feeding a tool.result back to
+	// the parked agent). It selects which unblock event the resume path emits.
+	Kind interruptKind
 	// InterruptID is the AG-UI-facing id echoed by the client on resume.
 	InterruptID string
 	// RequestID is the underlying HITLRequest.ID to resolve via hitl.responded.
+	// Empty for a client-tool interrupt.
 	RequestID string
 	// SessionID / TurnID / ThreadID / RunID scope the interrupt to the thread
 	// and turn it suspended so the continuation run targets the same session.
@@ -104,9 +109,25 @@ type pendingInterrupt struct {
 	ThreadID  string
 	RunID     string
 	// Mode is the HITL response shape, carried so the resume side can validate
-	// a ResumeItem payload against what the request accepts.
+	// a ResumeItem payload against what the request accepts. Unused for a
+	// client-tool interrupt.
 	Mode events.HITLMode
+	// ToolCallID / ToolName identify the client-executed tool call this interrupt
+	// suspended, so the resume path can synthesize the tool.result the agent
+	// awaits. Empty for a HITL interrupt.
+	ToolCallID string
+	ToolName   string
 }
+
+// interruptKind selects the unblock mechanism a pending interrupt uses on
+// resume: a HITL interrupt emits hitl.responded; a client-tool interrupt emits
+// a synthetic tool.result.
+type interruptKind int
+
+const (
+	interruptHITL interruptKind = iota
+	interruptClientTool
+)
 
 // New creates a new AG-UI serve plugin.
 func New() engine.Plugin {
@@ -130,7 +151,11 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "llm.stream.chunk", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "io.output", Priority: 50},
-		{EventType: "tool.call", Priority: 50},
+		// The agent emits tool.invoke (not tool.call) to run a tool; that is the
+		// event that carries the resolved arguments and drives ToolCallStart/
+		// Args/End. A client-executed tool (advertised via RunAgentInput.tools)
+		// rides the same event and additionally suspends the run.
+		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "tool.result", Priority: 50},
 		{EventType: "thinking.step", Priority: 50},
 		// HITL suspends the run at the transport boundary (virtual-run model):
@@ -139,6 +164,12 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		// agent — that is the resume side's job (E2-S2).
 		{EventType: "hitl.requested", Priority: 50},
 		{EventType: "hitl.cancel", Priority: 50},
+		// Client-executed frontend tools (E2-S3) are advertised per-run via
+		// RunAgentInput.tools. The plugin appends them to the catalog snapshot the
+		// agent assembles, so it subscribes to the catalog query at a priority
+		// that runs after nexus.tool.catalog (priority 10) has filled the base
+		// list.
+		{EventType: "tool.catalog.query", Priority: 60},
 	}
 	for _, et := range customBridgedEvents {
 		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
@@ -157,6 +188,10 @@ func (p *Plugin) Emissions() []string {
 		"before:io.input",
 		"io.input",
 		"hitl.responded",
+		// A client-executed tool's result rides tool.result on resume (E2-S3):
+		// the ToolCallResult carried in resume[] is fed back to the still-parked
+		// agent as the tool.result it was waiting on.
+		"tool.result",
 	}
 }
 
@@ -207,11 +242,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
-		p.bus.Subscribe("tool.call", p.handleToolCall, engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.requested", p.handleHITLRequested, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.cancel", p.handleHITLCancel, engine.WithSource(pluginID)),
+		// Append per-run client tools to the catalog snapshot the agent builds.
+		// Priority 60 runs after nexus.tool.catalog (10) fills the base list.
+		p.bus.Subscribe("tool.catalog.query", p.handleCatalogQuery,
+			engine.WithPriority(60), engine.WithSource(pluginID)),
 	)
 	for _, et := range customBridgedEvents {
 		eventType := et
@@ -277,7 +316,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 		p.mu.Unlock()
 		return nil, false
 	}
-	r := newRun(input.threadID, input.runID)
+	r := newRun(input.threadID, input.runID, input.tools)
 	p.active = r
 	p.mu.Unlock()
 
@@ -432,7 +471,20 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 	r.onOutput(o)
 }
 
-func (p *Plugin) handleToolCall(e engine.Event[any]) {
+// handleToolInvoke translates a tool.invoke into the ToolCallStart/Args/End
+// sequence on the AG-UI stream. This fires for every real agent tool call
+// (fixing the earlier tool.call vs tool.invoke mismatch, which meant no
+// ToolCall* events came from real turns).
+//
+// When the invoked tool is a client-executed (frontend) tool advertised for
+// this run via RunAgentInput.tools, there is no in-process handler to produce a
+// tool.result — the CLIENT runs it. So after emitting the ToolCall* sequence the
+// plugin suspends the run interrupt-style (E2-S1 machinery) and records a pending
+// client-tool entry. The client's resume carries the ToolCallResult, which the
+// resume path feeds back as the tool.result the parked agent is waiting on. A
+// server-side Nexus catalog tool is left untouched: its own handler runs inline
+// and produces the tool.result that streams via handleToolResult.
+func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
 		return
@@ -441,7 +493,22 @@ func (p *Plugin) handleToolCall(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	// Internal sub-calls (dispatched by another tool, e.g. run_code) are not part
+	// of the agent's own tool loop and must not suspend the run.
+	if tc.ParentCallID != "" {
+		r.onToolCall(tc)
+		return
+	}
+
+	// Emit the ToolCallStart/Args/End sequence for the call regardless of origin.
 	r.onToolCall(tc)
+
+	// If this is a client-executed tool for the active run, suspend awaiting the
+	// client's result. Otherwise the in-process tool handler produces the result.
+	if !p.isClientTool(r, tc.Name) {
+		return
+	}
+	p.suspendForClientTool(r, tc)
 }
 
 func (p *Plugin) handleToolResult(e engine.Event[any]) {

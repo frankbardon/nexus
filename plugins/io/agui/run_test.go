@@ -25,7 +25,7 @@ func drainTypes(r *run) []agui.EventType {
 // TestOnOutput_NonStreamedRendersTriple covers the common non-streamed output:
 // it must produce a TextMessage start/content/end triple.
 func TestOnOutput_NonStreamedRendersTriple(t *testing.T) {
-	r := newRun("t", "r")
+	r := newRun("t", "r", nil)
 	r.onOutput(events.AgentOutput{Content: "hello", Role: "assistant"})
 
 	types := drainTypes(r)
@@ -37,7 +37,7 @@ func TestOnOutput_NonStreamedRendersTriple(t *testing.T) {
 // llm.stream.chunk ever arrived, so the text must still be rendered rather than
 // dropped. Without the textStreamed guard this triple would be silently lost.
 func TestOnOutput_StreamedWithoutChunksRendersTriple(t *testing.T) {
-	r := newRun("t", "r")
+	r := newRun("t", "r", nil)
 	r.onOutput(events.AgentOutput{
 		Content:  "high noon",
 		Role:     "assistant",
@@ -52,7 +52,7 @@ func TestOnOutput_StreamedWithoutChunksRendersTriple(t *testing.T) {
 // (chunks already rendered) is NOT re-rendered by onOutput, avoiding duplicate
 // text.
 func TestOnOutput_StreamedWithChunksSkips(t *testing.T) {
-	r := newRun("t", "r")
+	r := newRun("t", "r", nil)
 	// Simulate the streamed path.
 	r.onStreamChunk(events.StreamChunk{Content: "high "})
 	r.onStreamChunk(events.StreamChunk{Content: "noon"})

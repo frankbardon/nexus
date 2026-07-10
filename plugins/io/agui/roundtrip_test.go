@@ -81,7 +81,7 @@ func TestRoundTrip(t *testing.T) {
 		_ = bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: "Hi ", TurnID: "turn-1"})
 		_ = bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: "there", TurnID: "turn-1"})
 		_ = bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: "turn-1"})
-		_ = bus.Emit("tool.call", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "tc1", Name: "search", Arguments: map[string]any{"q": "x"}, TurnID: "turn-1"})
+		_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "tc1", Name: "search", Arguments: map[string]any{"q": "x"}, TurnID: "turn-1"})
 		_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "tc1", Name: "search", Output: "result", TurnID: "turn-1"})
 		_ = bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, Content: "pondering", TurnID: "turn-1"})
 		_ = bus.Emit("workflow.progress", map[string]any{"pct": 50})
