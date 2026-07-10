@@ -264,11 +264,13 @@ and track agent state. The mapping is:
 - On run start, a `StateSnapshot` of the current document is emitted right after
   `RunStarted`.
 - Each scene mutation during the run emits a `StateDelta` whose `delta` is an
-  **RFC 6902 JSON Patch** from the previous document to the new one. Applying the
-  deltas in order to the snapshot reconstructs the state (verified in unit
-  tests). This aligns AG-UI's `StateDelta` with the scene store's patch model
-  while normalizing the scene store's shallow-merge semantics into a valid JSON
-  Patch computed from full content.
+  **RFC 6902 JSON Patch** from the previous document to the new one. The
+  `StateSnapshot` always precedes any `StateDelta` on the stream, and applying the
+  deltas in order to the snapshot reconstructs the state (verified end to end by
+  the `TestAGUIState_*` integration tests as well as the `pkg/agui` unit tests).
+  This aligns AG-UI's `StateDelta` with the scene store's patch model while
+  normalizing the scene store's shallow-merge semantics into a valid JSON Patch
+  computed from full content.
 
 The document is session-scoped and persists across runs on the listener, so a
 later run's snapshot reflects scenes created by an earlier run.
@@ -305,7 +307,13 @@ and agent mutations, so ordering is deterministic (client seed first, then agent
 writes in bus order) and no half-applied document is ever observed.
 
 Because the mirror is seeded to the same value the scene store echoes back, the
-seed itself produces **no** `StateDelta` — only genuine agent mutations do.
+seed itself produces **no** `StateDelta` — only genuine agent mutations do. The
+`TestAGUIState_InboundSeedObserved` and `TestAGUIState_ConflictAgentWins`
+integration tests exercise this round-trip: the client seed appears in the
+initial `StateSnapshot` and is read back through `scene_get`, and a subsequent
+agent `scene_patch` on the same `scene_id` wins on the overlapping key (with the
+client's untouched keys preserved by shallow-merge) and surfaces as exactly one
+`StateDelta`.
 
 The `scene_create` tool accepts an optional `scene_id` argument to support this
 seeding; when omitted the store assigns an id as before, so existing agent usage

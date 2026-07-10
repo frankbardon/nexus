@@ -678,6 +678,19 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 		return
 	}
 
+	// Ignore tool results that arrive with no active turn. A result can reach
+	// the agent outside a turn when another plugin drives the tool bus directly
+	// — e.g. the AG-UI inbound-state reconciler (E3-S2) seeds the scene store via
+	// a scene_create tool.invoke before io.input, whose scene.* tool.result
+	// carries an empty TurnID. Without this guard that phantom result would
+	// decrement pendingToolCalls below zero and fire a spurious, turn-less
+	// sendLLMRequest, which races the real turn and leaves an in-flight LLM
+	// exchange that stalls shutdown drain.
+	if p.currentTurnID == "" {
+		p.mu.Unlock()
+		return
+	}
+
 	// Dedup against double-fired results. Without this guard a duplicate
 	// would decrement pendingToolCalls a second time and re-fire
 	// sendLLMRequest below.
