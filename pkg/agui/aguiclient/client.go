@@ -112,27 +112,9 @@ func (r Result) Count(t agui.EventType) int {
 // callers can assert auth/CORS rejections. A transport failure or a malformed
 // SSE record does return an error.
 func (c *Client) Run(ctx context.Context, input agui.RunAgentInput) (Result, error) {
-	body, err := input.Encode()
+	resp, err := c.post(ctx, input)
 	if err != nil {
-		return Result{}, fmt.Errorf("aguiclient: encode input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
-	if err != nil {
-		return Result{}, fmt.Errorf("aguiclient: new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", agui.ContentType)
-	if c.bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+c.bearer)
-	}
-	if c.origin != "" {
-		req.Header.Set("Origin", c.origin)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Result{}, fmt.Errorf("aguiclient: do request: %w", err)
+		return Result{}, err
 	}
 	defer resp.Body.Close()
 
@@ -151,6 +133,36 @@ func (c *Client) Run(ctx context.Context, input agui.RunAgentInput) (Result, err
 	}
 	res.Events = events
 	return res, nil
+}
+
+// post encodes the input, builds the POST request with auth/CORS/accept
+// headers, and performs it. It returns the live *http.Response; the caller owns
+// closing the body. Encoding, request-construction, and transport failures are
+// returned as wrapped errors.
+func (c *Client) post(ctx context.Context, input agui.RunAgentInput) (*http.Response, error) {
+	body, err := input.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("aguiclient: encode input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("aguiclient: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", agui.ContentType)
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+	if c.origin != "" {
+		req.Header.Set("Origin", c.origin)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("aguiclient: do request: %w", err)
+	}
+	return resp, nil
 }
 
 // UserMessage is a convenience for building a single-user-message RunAgentInput.
