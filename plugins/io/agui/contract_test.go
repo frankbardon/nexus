@@ -27,6 +27,9 @@ func TestContract_Subscriptions(t *testing.T) {
 		"tool.call",
 		"tool.result",
 		"thinking.step",
+		// Virtual-run interrupt/cancel at the transport boundary.
+		"hitl.requested",
+		"hitl.cancel",
 	)
 	// Non-canonical bus events ride the AG-UI Custom event and must be declared.
 	h.AssertSubscribesTo(customBridgedEvents...)

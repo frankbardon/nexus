@@ -53,6 +53,15 @@ type run struct {
 	// reasoningOpen tracks whether a ReasoningStart is unmatched by a
 	// ReasoningEnd.
 	reasoningOpen bool
+	// messages accumulates the finalized conversation messages this run has
+	// rendered (assistant text, tool results). It backs the MessagesSnapshot
+	// emitted on interrupt so a resuming client has the conversation state.
+	// Guarded by mu; only appended to.
+	messages []agui.Message
+	// streamBuf accumulates the deltas of the currently-open streamed text
+	// message so it can be finalized into messages on stream/turn end. Empty
+	// when no streamed text is in flight.
+	streamBuf string
 }
 
 // runInput carries the fields of a decoded RunAgentInput that the plugin needs
@@ -118,6 +127,67 @@ func (r *run) fail(msg string) {
 	})
 }
 
+// snapshotMessages returns a copy of the conversation messages this run has
+// rendered so far, safe to hand off without holding the run's lock.
+func (r *run) snapshotMessages() []agui.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.messages) == 0 {
+		return nil
+	}
+	out := make([]agui.Message, len(r.messages))
+	copy(out, r.messages)
+	return out
+}
+
+// interrupt terminates the run per AG-UI's terminal-run model: it emits a
+// StateSnapshot and a MessagesSnapshot (so the client can replay state on
+// resume) BEFORE a RunFinished carrying the interrupt outcome, then closes the
+// stream — exactly once. The in-process agent is NOT unblocked here; it stays
+// waiting on the pending hitl.responded and the Nexus session stays alive. A
+// continuation run (E2-S2) reopens a fresh SSE and resolves the interrupt.
+//
+// snapshot is the JSON state handoff; messages is the conversation snapshot.
+// Both are emitted unconditionally so the client always has a resume anchor,
+// even when empty.
+func (r *run) interrupt(snapshot []byte, messages []agui.Message, payload agui.Interrupt) {
+	r.closeOne.Do(func() {
+		if snapshot == nil {
+			snapshot = []byte("{}")
+		}
+		if messages == nil {
+			messages = []agui.Message{}
+		}
+		// Ordering is load-bearing: StateSnapshot and MessagesSnapshot MUST
+		// precede the RunFinished(interrupt) so a client replaying the stream
+		// has the resume anchor before the terminal event.
+		for _, e := range []agui.Event{
+			agui.NewStateSnapshot(snapshot),
+			agui.NewMessagesSnapshot(messages),
+			agui.NewRunFinishedInterrupt(r.threadID, r.runID, payload),
+		} {
+			select {
+			case r.out <- e:
+			default:
+			}
+		}
+		close(r.done)
+	})
+}
+
+// cancelTerminal terminates the run with a cancelled outcome, used when the
+// pending interrupt is retracted (hitl.cancel) before the run had a chance to
+// end normally. Closes the stream exactly once.
+func (r *run) cancelTerminal() {
+	r.closeOne.Do(func() {
+		select {
+		case r.out <- agui.NewRunFinishedCancelled(r.threadID, r.runID):
+		default:
+		}
+		close(r.done)
+	})
+}
+
 // markStarted emits RunStarted at most once for the run and returns whether it
 // performed the emission.
 func (r *run) markStarted() bool {
@@ -163,6 +233,11 @@ func (r *run) onTurnEnd(t events.TurnInfo) {
 	// Close any open streamed text before the step ends.
 	openText := r.activeText
 	r.activeText = ""
+	buf := r.streamBuf
+	r.streamBuf = ""
+	if openText != "" && buf != "" {
+		r.messages = append(r.messages, agui.Message{ID: openText, Role: "assistant", Content: buf})
+	}
 	name := r.stepName
 	wasOpen := r.stepOpen
 	r.stepOpen = false
@@ -193,6 +268,7 @@ func (r *run) onStreamChunk(c events.StreamChunk) {
 	}
 	r.mu.Lock()
 	r.textStreamed = true
+	r.streamBuf += c.Content
 	if r.activeText == "" {
 		r.textSeq++
 		r.activeText = messageID(r.runID, r.textSeq)
@@ -213,6 +289,11 @@ func (r *run) onStreamEnd(_ events.StreamEnd) {
 	r.mu.Lock()
 	id := r.activeText
 	r.activeText = ""
+	buf := r.streamBuf
+	r.streamBuf = ""
+	if id != "" && buf != "" {
+		r.messages = append(r.messages, agui.Message{ID: id, Role: "assistant", Content: buf})
+	}
 	r.mu.Unlock()
 	if id != "" {
 		r.queue(agui.NewTextMessageEnd(id))
@@ -247,6 +328,7 @@ func (r *run) onOutput(o events.AgentOutput) {
 	}
 	r.textSeq++
 	id := messageID(r.runID, r.textSeq)
+	r.messages = append(r.messages, agui.Message{ID: id, Role: role, Content: o.Content})
 	r.mu.Unlock()
 	r.queue(agui.NewTextMessageStart(id, role))
 	r.queue(agui.NewTextMessageContent(id, o.Content))
@@ -274,17 +356,24 @@ func (r *run) onToolCall(tc events.ToolCall) {
 // onToolResult maps tool.result to ToolCallResult, closing an open tool call if
 // tool.call did not already do so.
 func (r *run) onToolResult(tr events.ToolResult) {
-	r.mu.Lock()
-	if r.openTools[tr.ID] {
-		delete(r.openTools, tr.ID)
-	}
-	r.mu.Unlock()
-
 	content := tr.Output
 	if tr.Error != "" {
 		content = tr.Error
 	}
 	msgID := messageID(r.runID, 0) + "-tool-" + tr.ID
+
+	r.mu.Lock()
+	if r.openTools[tr.ID] {
+		delete(r.openTools, tr.ID)
+	}
+	r.messages = append(r.messages, agui.Message{
+		ID:         msgID,
+		Role:       "tool",
+		Content:    content,
+		ToolCallID: tr.ID,
+	})
+	r.mu.Unlock()
+
 	r.queue(agui.NewToolCallResult(msgID, tr.ID, content))
 }
 

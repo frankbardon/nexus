@@ -76,7 +76,36 @@ type Plugin struct {
 	mu     sync.Mutex
 	active *run
 
+	// pendingMu guards pending. A virtual-run interrupt records the mapping
+	// from the AG-UI interruptId to the underlying HITL request so the resume
+	// side (E2-S2) can correlate a ResumeItem back to the still-blocked
+	// in-process hitl and emit the matching hitl.responded. Populated on
+	// hitl.requested; the resume handler (E2-S2) is the sole consumer/remover.
+	pendingMu sync.Mutex
+	pending   map[string]pendingInterrupt
+
 	unsubs []func()
+}
+
+// pendingInterrupt records the correlation between an AG-UI interrupt (surfaced
+// to the client via a RunFinished(interrupt) outcome) and the in-process HITL
+// request it suspended. It is the seam E2-S2 uses on resume: given a
+// ResumeItem.InterruptID it looks up the RequestID to emit hitl.responded, and
+// the SessionID/TurnID to open the continuation run against the right thread.
+type pendingInterrupt struct {
+	// InterruptID is the AG-UI-facing id echoed by the client on resume.
+	InterruptID string
+	// RequestID is the underlying HITLRequest.ID to resolve via hitl.responded.
+	RequestID string
+	// SessionID / TurnID / ThreadID / RunID scope the interrupt to the thread
+	// and turn it suspended so the continuation run targets the same session.
+	SessionID string
+	TurnID    string
+	ThreadID  string
+	RunID     string
+	// Mode is the HITL response shape, carried so the resume side can validate
+	// a ResumeItem payload against what the request accepts.
+	Mode events.HITLMode
 }
 
 // New creates a new AG-UI serve plugin.
@@ -104,6 +133,12 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "tool.call", Priority: 50},
 		{EventType: "tool.result", Priority: 50},
 		{EventType: "thinking.step", Priority: 50},
+		// HITL suspends the run at the transport boundary (virtual-run model):
+		// hitl.requested ends the SSE with an interrupt outcome; hitl.cancel
+		// ends it with a cancelled outcome. Neither unblocks the in-process
+		// agent — that is the resume side's job (E2-S2).
+		{EventType: "hitl.requested", Priority: 50},
+		{EventType: "hitl.cancel", Priority: 50},
 	}
 	for _, et := range customBridgedEvents {
 		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
@@ -125,6 +160,7 @@ func (p *Plugin) Emissions() []string {
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.pending = make(map[string]pendingInterrupt)
 
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
@@ -168,6 +204,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("tool.call", p.handleToolCall, engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleHITLRequested, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.cancel", p.handleHITLCancel, engine.WithSource(pluginID)),
 	)
 	for _, et := range customBridgedEvents {
 		eventType := et
