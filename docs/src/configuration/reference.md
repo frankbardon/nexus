@@ -1317,11 +1317,26 @@ optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 | `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
 | `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
 
-**Note:** the transport shell and config surface land here; the bus ↔ SSE event
-mapping (translating `RunAgentInput` into `io.input` and bridging bus events
-into AG-UI events) is wired in a later story. Until then the `POST /agui`
-handler validates the input and returns a well-formed terminal stream
-(`RunStarted` + `RunError`).
+**Round-trip:** a `POST /agui` maps the request `messages` to a Nexus
+`io.input` (the trailing `user` message drives the turn; earlier messages ride
+as `PreloadMessages`; `threadId` is recorded as the session id, `runId`
+identifies the turn). The plugin subscribes to the same bus events as the
+browser transport and translates them to canonical AG-UI SSE:
+`agent.turn.start`→`StepStarted`, `llm.stream.chunk`→`TextMessage*`,
+`tool.call`/`tool.result`→`ToolCall*`, `thinking.step`→`Reasoning*`,
+`agent.turn.end`→`StepFinished`/`RunFinished`. The stream flushes incrementally
+and terminates at `RunFinished` (or `RunError` on failure/disconnect).
+
+**Non-canonical events:** Nexus bus events with no canonical AG-UI equivalent
+(`workflow.progress`, `subagent.started`/`iteration`/`complete`,
+`code.exec.stdout`) consistently ride the AG-UI `Custom` event, with `name` set
+to the bus event type and `value` the JSON-encoded payload. This is a
+documented superset — conformance clients that only understand canonical events
+can ignore `Custom` without losing the run's canonical lifecycle.
+
+**Scope:** one in-flight run per listener (single engine/session per listener,
+mirroring `nexus.io.browser`). A second `POST` while a run is active receives a
+terminal `RunStarted`+`RunError` stream rather than interleaving.
 
 ### `nexus.io.realtime`
 

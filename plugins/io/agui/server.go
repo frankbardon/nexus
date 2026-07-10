@@ -15,12 +15,22 @@ import (
 // AG-UI SSE stream.
 const agentPath = "/agui"
 
+// bridge is the seam between the HTTP server and the plugin's bus wiring. The
+// server hands a decoded RunAgentInput to startRun (which registers the active
+// run and emits io.input) and calls endRun when the SSE stream terminates. It
+// is satisfied by *Plugin.
+type bridge interface {
+	startRun(input runInput) (*run, bool)
+	endRun(r *run)
+}
+
 // serverConfig carries the resolved settings for the embedded HTTP server.
 type serverConfig struct {
 	addr        string
 	bearerToken string
 	corsOrigins []string
 	logger      *slog.Logger
+	bridge      bridge
 }
 
 // Server is the embedded AG-UI HTTP server. It owns an *http.Server bound to a
@@ -87,9 +97,14 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleRunAgent parses a RunAgentInput and (for now) streams a not-yet-wired
-// RunError. The bus <-> SSE mapping is wired in a later story; this handler is
-// the seam for that work.
+// handleRunAgent decodes a RunAgentInput, drives one Nexus agent turn via the
+// bus, and streams the resulting bus events back as canonical AG-UI SSE. It
+// registers the active run (emitting io.input), then drains the run's channel —
+// the single source of translated AG-UI events — writing each to the SSE
+// stream and flushing incrementally until RunFinished/RunError terminates it.
+//
+// This goroutine is the sole writer to the SSE stream; bus handlers only push
+// onto the run channel, so the SSEWriter is never touched concurrently.
 func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 	s.applyCORS(w, r)
 
@@ -115,20 +130,82 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	sse := agui.NewSSEWriter(w)
 
-	// TODO(E1-S3): translate the RunAgentInput into an io.input on the bus,
-	// bridge the resulting bus events (io.output, llm.stream.chunk/end,
-	// tool.call/result, thinking.step, hitl.*, agent.turn.*) into AG-UI events
-	// on this SSE stream, and end with RunFinished. Until then, acknowledge the
-	// run start and emit a RunError so conformance clients get a well-formed,
-	// terminal stream rather than a hung connection.
-	_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
-	_ = sse.Write(agui.NewRunError("agui serve transport not yet wired (E1-S3)"))
+	if s.cfg.bridge == nil {
+		// Defensive: a server built without a bridge cannot drive the bus.
+		_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
+		_ = sse.Write(agui.NewRunError("agui serve transport not wired"))
+		return
+	}
 
-	s.cfg.logger.Debug("agui run received (transport not yet wired)",
+	run, ok := s.cfg.bridge.startRun(runInput{
+		threadID: input.ThreadID,
+		runID:    input.RunID,
+		messages: input.Messages,
+	})
+	if !ok {
+		// Another run is already in flight for this listener (one run per
+		// listener for this scope). Return a well-formed terminal stream.
+		_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
+		_ = sse.Write(agui.NewRunError("a run is already in flight on this listener"))
+		return
+	}
+	defer s.cfg.bridge.endRun(run)
+
+	s.cfg.logger.Debug("agui run started",
 		"thread_id", input.ThreadID,
 		"run_id", input.RunID,
 		"messages", len(input.Messages),
 	)
+
+	// Client disconnect: fail the run so the drain loop stops promptly and the
+	// active-run slot is released for the next request.
+	ctx := r.Context()
+	go func() {
+		<-ctx.Done()
+		run.fail("client disconnected")
+	}()
+
+	// Drain translated AG-UI events until the terminal event closes the run.
+	for {
+		select {
+		case ev := <-run.out:
+			if err := sse.Write(ev); err != nil {
+				s.cfg.logger.Debug("agui sse write failed; ending run", "error", err)
+				run.fail("sse write failed")
+				return
+			}
+			if isTerminal(ev) {
+				// Drain any events queued before the terminal one, then stop.
+				drain(sse, run)
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// drain flushes any events already queued after a terminal event was observed,
+// then returns. It never blocks: it stops as soon as the channel is empty.
+func drain(sse *agui.SSEWriter, run *run) {
+	for {
+		select {
+		case ev := <-run.out:
+			_ = sse.Write(ev)
+		default:
+			return
+		}
+	}
+}
+
+// isTerminal reports whether an AG-UI event ends the SSE stream.
+func isTerminal(e agui.Event) bool {
+	switch e.EventType() {
+	case agui.EventRunFinished, agui.EventRunError:
+		return true
+	default:
+		return false
+	}
 }
 
 // authorized reports whether the request satisfies bearer auth. When no token

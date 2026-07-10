@@ -4,11 +4,24 @@
 // run. The wire format is defined by pkg/agui (not the pkg/ui Envelope used by
 // the browser/wails transports).
 //
-// This file is the transport shell and config surface. The actual bus <-> SSE
-// event mapping (io.input/io.output/llm.stream.chunk/... <-> AG-UI events) is
-// wired in a later story; the POST handler currently parses and validates the
-// RunAgentInput and returns a not-yet-wired RunError stream, leaving a clear
-// seam for that work.
+// # Round-trip
+//
+// Inbound: a POST RunAgentInput maps its messages to a Nexus io.input on the
+// bus (threadId selects/records the session, runId identifies the turn).
+// Outbound: the plugin subscribes to the same bus events as the browser
+// transport and translates them to canonical AG-UI SSE events for the single
+// in-flight run, terminating the stream at RunFinished.
+//
+// Concurrency model: bus handlers run on arbitrary engine goroutines and never
+// touch the SSE writer. Each handler translates its payload and pushes AG-UI
+// events onto the active run's buffered channel; the HTTP handler goroutine is
+// the sole reader of that channel and the sole writer to the SSE stream. A
+// mutex guards the "active run" pointer. This keeps the SSEWriter race-free.
+//
+// Non-canonical Nexus bus events (workflow.progress, subagent.*,
+// code.exec.stdout, ...) have no canonical AG-UI equivalent; they consistently
+// ride the AG-UI Custom event (name = bus event type). See
+// docs/src/plugins/io-agui.md.
 package agui
 
 import (
@@ -17,9 +30,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 const pluginID = "nexus.io.agui"
@@ -28,18 +43,40 @@ const pluginID = "nexus.io.agui"
 // the network without explicit operator opt-in.
 const defaultBindAddr = "127.0.0.1:8090"
 
+// customBridgedEvents are Nexus-specific bus events with no canonical AG-UI
+// equivalent. They ride the AG-UI Custom event (name = bus event type) so a
+// conformance client sees a documented superset rather than silently dropping
+// them. This is the single, consistent approach chosen for non-canonical events.
+var customBridgedEvents = []string{
+	"workflow.progress",
+	"subagent.started",
+	"subagent.iteration",
+	"subagent.complete",
+	"code.exec.stdout",
+}
+
 // Plugin is the AG-UI serve plugin. It stands up an embedded *http.Server that
 // exposes the AG-UI POST endpoint with safe-by-default exposure: loopback bind,
-// optional bearer-token auth, and configurable CORS.
+// optional bearer-token auth, and configurable CORS. It also owns the bus
+// subscriptions that feed the outbound SSE translation.
 type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
 	server *Server
 
+	sessionID string
+
 	bindAddr    string
 	bearerToken string
 	corsOrigins []string
+
+	// mu guards active: at most one run is in flight per listener for this
+	// scope (single engine/session per listener, mirroring io/browser).
+	mu     sync.Mutex
+	active *run
+
+	unsubs []func()
 }
 
 // New creates a new AG-UI serve plugin.
@@ -54,19 +91,44 @@ func (p *Plugin) Dependencies() []string            { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
-// Subscriptions is empty in the skeleton: the bus -> SSE mapping lands in a
-// later story. Declaring it accurately keeps the contract harness honest.
-func (p *Plugin) Subscriptions() []engine.EventSubscription { return nil }
+// Subscriptions declares every bus event the outbound translator consumes. It
+// must stay in lockstep with the Subscribe calls in Init (the contract harness
+// enforces this).
+func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	subs := []engine.EventSubscription{
+		{EventType: "agent.turn.start", Priority: 50},
+		{EventType: "agent.turn.end", Priority: 50},
+		{EventType: "llm.stream.chunk", Priority: 50},
+		{EventType: "llm.stream.end", Priority: 50},
+		{EventType: "io.output", Priority: 50},
+		{EventType: "tool.call", Priority: 50},
+		{EventType: "tool.result", Priority: 50},
+		{EventType: "thinking.step", Priority: 50},
+	}
+	for _, et := range customBridgedEvents {
+		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
+	}
+	return subs
+}
 
-// Emissions is empty in the skeleton: the SSE -> bus mapping (io.input etc.)
-// lands in a later story.
-func (p *Plugin) Emissions() []string { return nil }
+// Emissions declares the event types the inbound handler emits onto the bus.
+func (p *Plugin) Emissions() []string {
+	return []string{
+		"before:io.input",
+		"io.input",
+	}
+}
 
-// Init reads config and constructs the server. Nothing binds a socket here; the
-// listener starts in Ready so all plugins have finished Init first.
+// Init reads config, constructs the server, and wires the outbound bus
+// subscriptions. Nothing binds a socket here; the listener starts in Ready so
+// all plugins have finished Init first.
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+
+	if ctx.Session != nil {
+		p.sessionID = ctx.Session.ID
+	}
 
 	p.bindAddr = defaultBindAddr
 	if v, ok := ctx.Config["bind"].(string); ok && strings.TrimSpace(v) != "" {
@@ -92,7 +154,31 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		bearerToken: p.bearerToken,
 		corsOrigins: p.corsOrigins,
 		logger:      p.logger,
+		bridge:      p,
 	})
+
+	// Wire outbound bus subscriptions (engine -> AG-UI SSE). Handlers translate
+	// and enqueue onto the active run; they never write the SSE directly.
+	p.unsubs = append(p.unsubs,
+		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
+		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
+		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.call", p.handleToolCall, engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithSource(pluginID)),
+		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
+	)
+	for _, et := range customBridgedEvents {
+		eventType := et
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe(eventType, func(e engine.Event[any]) {
+				if r := p.currentRun(); r != nil {
+					r.onCustom(eventType, e.Payload)
+				}
+			}, engine.WithSource(pluginID)),
+		)
+	}
 
 	p.logger.Info("agui serve plugin initialized",
 		"bind", p.bindAddr,
@@ -110,8 +196,18 @@ func (p *Plugin) Ready() error {
 	return nil
 }
 
-// Shutdown gracefully stops the HTTP server.
+// Shutdown gracefully stops the HTTP server and unsubscribes from the bus.
 func (p *Plugin) Shutdown(_ context.Context) error {
+	for _, unsub := range p.unsubs {
+		unsub()
+	}
+	p.unsubs = nil
+
+	// Fail any in-flight run so its HTTP handler returns promptly.
+	if r := p.currentRun(); r != nil {
+		r.fail("agui server shutting down")
+	}
+
 	if p.server == nil {
 		return nil
 	}
@@ -123,6 +219,209 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 		return fmt.Errorf("shutting down agui server: %w", err)
 	}
 	return nil
+}
+
+// --- bridge: inbound (server -> bus) and run lifecycle ---
+
+// startRun registers a new run as the single active run and emits the inbound
+// io.input on the bus. It returns the run and an ok flag; ok is false when
+// another run is already in flight (one run per listener for this scope), in
+// which case the caller must reject with a RunError.
+func (p *Plugin) startRun(input runInput) (*run, bool) {
+	p.mu.Lock()
+	if p.active != nil {
+		p.mu.Unlock()
+		return nil, false
+	}
+	r := newRun(input.threadID, input.runID)
+	p.active = r
+	p.mu.Unlock()
+
+	// RunStarted is emitted eagerly so even a run with no agent produces a
+	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
+	r.markStarted()
+	r.queue(newRunStarted(input.threadID, input.runID))
+
+	// Map messages -> io.input and publish. The last user message drives the
+	// turn; earlier messages are preloaded so resume/history stays intact.
+	ui := p.buildUserInput(input)
+	go func() {
+		if veto, err := p.bus.EmitVetoable("before:io.input", &ui); err == nil && veto.Vetoed {
+			r.fail("io.input vetoed")
+			return
+		}
+		if err := p.bus.Emit("io.input", ui); err != nil {
+			r.fail(fmt.Sprintf("emit io.input: %v", err))
+		}
+	}()
+	return r, true
+}
+
+// endRun clears the active run pointer if it still points at r.
+func (p *Plugin) endRun(r *run) {
+	p.mu.Lock()
+	if p.active == r {
+		p.active = nil
+	}
+	p.mu.Unlock()
+}
+
+// currentRun returns the active run or nil.
+func (p *Plugin) currentRun() *run {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.active
+}
+
+// buildUserInput maps a RunAgentInput's messages to a Nexus UserInput. The
+// trailing user message becomes Content; any earlier messages ride as
+// PreloadMessages so a resumed thread keeps prior context.
+func (p *Plugin) buildUserInput(input runInput) events.UserInput {
+	sessionID := input.threadID
+	if sessionID == "" {
+		sessionID = p.sessionID
+	}
+	ui := events.UserInput{
+		SchemaVersion: events.UserInputVersion,
+		SessionID:     sessionID,
+	}
+	msgs := input.messages
+	// Find the trailing user message to use as the live turn Content.
+	last := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if strings.EqualFold(msgs[i].Role, "user") {
+			last = i
+			break
+		}
+	}
+	for i, m := range msgs {
+		if i == last {
+			ui.Content = m.Content
+			continue
+		}
+		ui.PreloadMessages = append(ui.PreloadMessages, events.Message{
+			Role:    normalizeRole(m.Role),
+			Content: m.Content,
+		})
+	}
+	if last == -1 && len(msgs) > 0 {
+		// No user message at all: fall back to the last message's content.
+		ui.Content = msgs[len(msgs)-1].Content
+		if len(ui.PreloadMessages) > 0 {
+			ui.PreloadMessages = ui.PreloadMessages[:len(ui.PreloadMessages)-1]
+		}
+	}
+	return ui
+}
+
+// normalizeRole maps AG-UI message roles onto Nexus roles.
+func normalizeRole(role string) string {
+	switch strings.ToLower(role) {
+	case "assistant", "system", "tool", "user":
+		return strings.ToLower(role)
+	default:
+		return "user"
+	}
+}
+
+// --- bus handlers (engine -> run channel). Never touch the SSE writer. ---
+
+func (p *Plugin) handleTurnStart(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	t, ok := e.Payload.(events.TurnInfo)
+	if !ok {
+		return
+	}
+	r.onTurnStart(t)
+}
+
+func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	t, ok := e.Payload.(events.TurnInfo)
+	if !ok {
+		return
+	}
+	r.onTurnEnd(t)
+	// A top-level turn end terminates the run and the SSE stream.
+	r.finish()
+}
+
+func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	c, ok := e.Payload.(events.StreamChunk)
+	if !ok {
+		return
+	}
+	r.onStreamChunk(c)
+}
+
+func (p *Plugin) handleStreamEnd(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	end, ok := e.Payload.(events.StreamEnd)
+	if !ok {
+		return
+	}
+	r.onStreamEnd(end)
+}
+
+func (p *Plugin) handleOutput(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	o, ok := e.Payload.(events.AgentOutput)
+	if !ok {
+		return
+	}
+	r.onOutput(o)
+}
+
+func (p *Plugin) handleToolCall(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	tc, ok := e.Payload.(events.ToolCall)
+	if !ok {
+		return
+	}
+	r.onToolCall(tc)
+}
+
+func (p *Plugin) handleToolResult(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	tr, ok := e.Payload.(events.ToolResult)
+	if !ok {
+		return
+	}
+	r.onToolResult(tr)
+}
+
+func (p *Plugin) handleThinkingStep(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	s, ok := e.Payload.(events.ThinkingStep)
+	if !ok {
+		return
+	}
+	r.onThinkingStep(s)
 }
 
 // parseCORSOrigins normalizes the cors_origins config value into a slice of
