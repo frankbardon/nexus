@@ -102,6 +102,7 @@ plugins/
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
+  io/agui/               # AG-UI serve transport: POST /agui accepts RunAgentInput, streams canonical AG-UI SSE (RunStarted→text/tool/reasoning→RunFinished); external-facing interop via pkg/agui wire, loopback+bearer+CORS
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
   memory/summary_buffer/ # Inline auto-compacting history; keeps recent N verbatim, LLM-summarizes older (memory.history + memory.compaction)
