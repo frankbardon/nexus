@@ -91,8 +91,9 @@ plugins:
     - nexus.tool.shell
 
   nexus.tool.shell:
-    allowed_commands: [ls]
     timeout: 5s
+    sandbox:
+      allowed_commands: [ls]
 `, sessionsRoot)
 
 	eng, err := engine.NewFromBytes([]byte(cfgYAML))
