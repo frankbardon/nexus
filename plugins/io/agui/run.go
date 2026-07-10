@@ -66,11 +66,14 @@ type run struct {
 
 // runInput carries the fields of a decoded RunAgentInput that the plugin needs
 // to start a run, decoupling the plugin from the transport (server) package
-// boundary.
+// boundary. When resume is non-empty the input is a continuation of an
+// interrupted run: the plugin resolves the pending interrupts rather than
+// starting a fresh turn.
 type runInput struct {
 	threadID string
 	runID    string
 	messages []agui.Message
+	resume   []agui.ResumeItem
 }
 
 // newRunStarted builds a RunStarted event for a run.

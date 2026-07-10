@@ -147,10 +147,16 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 }
 
 // Emissions declares the event types the inbound handler emits onto the bus.
+// hitl.responded is emitted by the resume path (E2-S2): a continuation
+// RunAgentInput carrying resume[] resolves the pending interrupt(s) that ended a
+// prior run, unblocking the still-parked in-process agent. Both the resolved and
+// the cancelled resume statuses ride hitl.responded (Cancelled:true for the
+// latter) — the shape the control/hitl waiter matches on.
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"before:io.input",
 		"io.input",
+		"hitl.responded",
 	}
 }
 

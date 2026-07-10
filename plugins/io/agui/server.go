@@ -17,10 +17,14 @@ const agentPath = "/agui"
 
 // bridge is the seam between the HTTP server and the plugin's bus wiring. The
 // server hands a decoded RunAgentInput to startRun (which registers the active
-// run and emits io.input) and calls endRun when the SSE stream terminates. It
-// is satisfied by *Plugin.
+// run and emits io.input) and calls endRun when the SSE stream terminates. For
+// a continuation RunAgentInput carrying resume[], it calls resumeRun instead,
+// which validates the resume against the pending interrupts, emits the matching
+// hitl.responded events to unblock the in-process agent, and registers a fresh
+// run for the continuation stream. It is satisfied by *Plugin.
 type bridge interface {
 	startRun(input runInput) (*run, bool)
+	resumeRun(input runInput) (*run, error)
 	endRun(r *run)
 }
 
@@ -137,17 +141,36 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, ok := s.cfg.bridge.startRun(runInput{
+	in := runInput{
 		threadID: input.ThreadID,
 		runID:    input.RunID,
 		messages: input.Messages,
-	})
-	if !ok {
-		// Another run is already in flight for this listener (one run per
-		// listener for this scope). Return a well-formed terminal stream.
-		_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
-		_ = sse.Write(agui.NewRunError("a run is already in flight on this listener"))
-		return
+		resume:   input.Resume,
+	}
+
+	var run *run
+	if len(in.resume) > 0 {
+		// Continuation of an interrupted run: resolve the pending interrupts
+		// (emitting hitl.responded to unblock the in-process agent) and register
+		// a fresh run for the continuation stream. A validation failure (unknown/
+		// expired interrupt, or a partial resume) yields a clean terminal stream.
+		var err error
+		run, err = s.cfg.bridge.resumeRun(in)
+		if err != nil {
+			_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
+			_ = sse.Write(agui.NewRunError(err.Error()))
+			return
+		}
+	} else {
+		var ok bool
+		run, ok = s.cfg.bridge.startRun(in)
+		if !ok {
+			// Another run is already in flight for this listener (one run per
+			// listener for this scope). Return a well-formed terminal stream.
+			_ = sse.Write(agui.NewRunStarted(input.ThreadID, input.RunID))
+			_ = sse.Write(agui.NewRunError("a run is already in flight on this listener"))
+			return
+		}
 	}
 	defer s.cfg.bridge.endRun(run)
 
