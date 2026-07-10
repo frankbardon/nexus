@@ -53,6 +53,11 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
 
+	// Re-emit the current shared state at the head of the continuation stream so
+	// a resuming client re-anchors on the agent's scene state (no-op when
+	// shared-state is disabled).
+	p.emitInitialSnapshot(r)
+
 	// Resolve each interrupt, then drop the pending mapping. A HITL interrupt
 	// emits hitl.responded to unblock the waiter; a client-tool interrupt emits
 	// the tool.result the parked agent is waiting on. Emission is asynchronous so

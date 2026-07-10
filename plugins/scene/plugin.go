@@ -165,12 +165,17 @@ func (p *Plugin) handleCreate(tc events.ToolCall, ev engine.Event[any]) {
 		p.respondError(tc, err.Error())
 		return
 	}
+	// content carries the scene's full materialized content so bus consumers
+	// (e.g. the AG-UI transport's shared-state sync) can track scene state
+	// without going through a tool call. It is the post-create content, which
+	// for a create is the initial value.
 	_ = p.bus.Emit("scene.created", map[string]any{
 		"session_id": handle.SessionID,
 		"scene_id":   handle.ID,
 		"schema":     handle.Schema,
 		"version":    handle.Version,
 		"agent_id":   ev.Causation.AgentID,
+		"content":    p.currentContent(handle.ID),
 	})
 	p.journalEvent("created", handle, initial, ev.Causation.AgentID)
 	body, _ := json.Marshal(handle)
@@ -189,11 +194,16 @@ func (p *Plugin) handlePatch(tc events.ToolCall, ev engine.Event[any]) {
 		p.respondError(tc, err.Error())
 		return
 	}
+	// content carries the scene's full materialized content AFTER the patch is
+	// applied (the scene store's patch semantics are shallow-merge, not RFC
+	// 6902, so consumers that need an RFC 6902 delta diff the full content
+	// themselves). See scene.created for rationale.
 	_ = p.bus.Emit("scene.patched", map[string]any{
 		"session_id": handle.SessionID,
 		"scene_id":   handle.ID,
 		"version":    handle.Version,
 		"agent_id":   ev.Causation.AgentID,
+		"content":    p.currentContent(handle.ID),
 	})
 	p.journalEvent("patched", handle, patch, ev.Causation.AgentID)
 	body, _ := json.Marshal(handle)
@@ -230,6 +240,17 @@ func (p *Plugin) handleDelete(tc events.ToolCall, ev engine.Event[any]) {
 	})
 	p.journalEvent("deleted", scene.SceneHandle{ID: id, SessionID: p.sessionID}, nil, ev.Causation.AgentID)
 	p.respondOK(tc, `{"deleted":true}`)
+}
+
+// currentContent returns the scene's current materialized content, or nil if
+// the scene cannot be read. It is used to attach the post-mutation content to
+// scene.created / scene.patched bus events.
+func (p *Plugin) currentContent(id string) any {
+	sc, err := p.store.Get(p.sessionID, id)
+	if err != nil {
+		return nil
+	}
+	return sc.Content
 }
 
 func (p *Plugin) respondOK(tc events.ToolCall, body string) {

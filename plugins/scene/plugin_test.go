@@ -38,6 +38,21 @@ func TestPlugin_CreateAndPatchViaTools(t *testing.T) {
 		}
 	})
 
+	// Capture scene.created / scene.patched to assert they carry post-mutation
+	// content (the AG-UI shared-state mirror relies on this).
+	created := make(chan map[string]any, 1)
+	patched := make(chan map[string]any, 1)
+	bus.Subscribe("scene.created", func(ev engine.Event[any]) {
+		if m, ok := ev.Payload.(map[string]any); ok {
+			created <- m
+		}
+	})
+	bus.Subscribe("scene.patched", func(ev engine.Event[any]) {
+		if m, ok := ev.Payload.(map[string]any); ok {
+			patched <- m
+		}
+	})
+
 	// scene_create
 	_ = bus.Emit("tool.invoke", events.ToolCall{
 		SchemaVersion: events.ToolCallVersion,
@@ -52,6 +67,11 @@ func TestPlugin_CreateAndPatchViaTools(t *testing.T) {
 	r1 := <-results
 	if r1.Error != "" {
 		t.Fatalf("create error: %s", r1.Error)
+	}
+	// scene.created must carry the initial content.
+	c1 := <-created
+	if content, ok := c1["content"].(map[string]any); !ok || content["text"] != "hello" {
+		t.Fatalf("scene.created content = %v, want text=hello", c1["content"])
 	}
 	var handle1 map[string]any
 	_ = json.Unmarshal([]byte(r1.Output), &handle1)
@@ -74,6 +94,11 @@ func TestPlugin_CreateAndPatchViaTools(t *testing.T) {
 	r2 := <-results
 	if r2.Error != "" {
 		t.Fatalf("patch error: %s", r2.Error)
+	}
+	// scene.patched must carry the full post-patch content (shallow-merged).
+	p2 := <-patched
+	if content, ok := p2["content"].(map[string]any); !ok || content["text"] != "world" {
+		t.Fatalf("scene.patched content = %v, want text=world", p2["content"])
 	}
 
 	// scene_get

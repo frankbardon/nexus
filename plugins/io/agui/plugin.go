@@ -26,6 +26,7 @@ package agui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -70,6 +71,22 @@ type Plugin struct {
 	bindAddr    string
 	bearerToken string
 	corsOrigins []string
+
+	// emitState gates the AG-UI shared-state feature (E3-S1). When true the
+	// plugin mirrors the session's scene store as an AG-UI shared-state document,
+	// emitting a StateSnapshot at run start and ordered StateDeltas as scenes
+	// mutate. Off by default because it adds bus subscriptions and per-mutation
+	// diffing overhead most transports do not need.
+	emitState bool
+
+	// stateMu guards sharedState. Scene bus events arrive on arbitrary engine
+	// goroutines; serializing them here keeps the snapshot and the deltas
+	// consistent and ordered.
+	stateMu sync.Mutex
+	// sharedState is the AG-UI shared-state document: scene_id -> the scene's
+	// current content (JSON-encoded). It lives on the plugin (not the run)
+	// because scenes are session-scoped and persist across runs on this listener.
+	sharedState map[string]json.RawMessage
 
 	// mu guards active: at most one run is in flight per listener for this
 	// scope (single engine/session per listener, mirroring io/browser).
@@ -174,6 +191,15 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	for _, et := range customBridgedEvents {
 		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
 	}
+	// Shared-state (E3-S1) is opt-in: only when emit_state is enabled does the
+	// plugin subscribe to the scene store's mutation events to mirror them as
+	// AG-UI StateSnapshot/StateDelta. Subscriptions() is read after Init, so this
+	// reflects the resolved config and stays in lockstep with the Subscribe calls.
+	if p.emitState {
+		for _, et := range stateEventTypes {
+			subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
+		}
+	}
 	return subs
 }
 
@@ -226,6 +252,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.corsOrigins = parseCORSOrigins(ctx.Config["cors_origins"])
 
+	// Shared-state emission (E3-S1) is opt-in. When enabled the plugin mirrors
+	// the scene store as an AG-UI shared-state document.
+	if v, ok := ctx.Config["emit_state"].(bool); ok {
+		p.emitState = v
+	}
+	p.sharedState = make(map[string]json.RawMessage)
+
 	p.server = NewServer(serverConfig{
 		addr:        p.bindAddr,
 		bearerToken: p.bearerToken,
@@ -263,10 +296,21 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
+	// Shared-state mirror (E3-S1): only wired when opt-in. These translate scene
+	// store mutations into AG-UI StateSnapshot/StateDelta on the active run.
+	if p.emitState {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe(sceneCreatedType, p.handleSceneCreated, engine.WithSource(pluginID)),
+			p.bus.Subscribe(scenePatchedType, p.handleScenePatched, engine.WithSource(pluginID)),
+			p.bus.Subscribe(sceneDeletedType, p.handleSceneDeleted, engine.WithSource(pluginID)),
+		)
+	}
+
 	p.logger.Info("agui serve plugin initialized",
 		"bind", p.bindAddr,
 		"auth", p.bearerToken != "",
 		"cors_origins", len(p.corsOrigins),
+		"emit_state", p.emitState,
 	)
 	return nil
 }
@@ -324,6 +368,11 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
+
+	// When shared-state is enabled, a StateSnapshot immediately follows
+	// RunStarted so the client can render the agent's current scene state before
+	// any StateDelta. No-op when disabled.
+	p.emitInitialSnapshot(r)
 
 	// Map messages -> io.input and publish. The last user message drives the
 	// turn; earlier messages are preloaded so resume/history stays intact.

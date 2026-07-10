@@ -1316,6 +1316,7 @@ optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 | `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. |
 | `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
 | `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
+| `emit_state`       | bool         | `false`            | Opt-in AG-UI shared-state emission. When `true`, the transport mirrors the session's scene store (`nexus.scene`) as an AG-UI shared-state document and emits a `StateSnapshot` at run start plus ordered `StateDelta` events (RFC 6902 JSON Patch) as scenes mutate. Off by default because it adds scene-event subscriptions and per-mutation diffing overhead most clients do not need. Requires the `nexus.scene` plugin to be active to produce any state. |
 
 **Round-trip:** a `POST /agui` maps the request `messages` to a Nexus
 `io.input` (the trailing `user` message drives the turn; earlier messages ride
@@ -1337,6 +1338,18 @@ can ignore `Custom` without losing the run's canonical lifecycle.
 **Scope:** one in-flight run per listener (single engine/session per listener,
 mirroring `nexus.io.browser`). A second `POST` while a run is active receives a
 terminal `RunStarted`+`RunError` stream rather than interleaving.
+
+**Shared state (`emit_state: true`):** the transport tracks the scene store's
+`scene.created` / `scene.patched` / `scene.deleted` bus events (each carrying the
+scene's full post-mutation content) into a shared-state document keyed by
+`scene_id`. A `StateSnapshot` of the current document is emitted immediately
+after `RunStarted`; each subsequent scene mutation during the run emits a
+`StateDelta` whose `delta` is an RFC 6902 JSON Patch from the prior document to
+the new one, so a client applying the deltas in order reconstructs the snapshot.
+The document is session-scoped and persists across runs on the listener (a later
+run's snapshot reflects scenes created earlier). Inbound state application
+(client-authored state / patches on a continuation `RunAgentInput`) is not yet
+handled.
 
 ### `nexus.io.realtime`
 

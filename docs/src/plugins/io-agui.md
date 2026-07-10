@@ -248,6 +248,33 @@ are summarized here for convenience:
 | `bearer_token` | string | *(empty)* | Inline bearer token. Takes precedence over `bearer_token_env`. |
 | `bearer_token_env` | string | *(empty)* | Env var name to read the bearer token from (used only when `bearer_token` is empty). |
 | `cors_origins` | list&lt;string&gt; | *(empty)* | Allowed CORS origins. `*` echoes any Origin; a list echoes only matches; empty means same-origin only. Also accepts a comma-separated string. |
+| `emit_state` | bool | `false` | Opt-in AG-UI shared-state emission: mirror the scene store as a shared-state document and emit `StateSnapshot`/`StateDelta` on the run stream. See [Shared state](#shared-state) below. |
+
+### Shared state
+
+With `emit_state: true`, the transport mirrors the session's scene store
+(`nexus.scene`) as the AG-UI **shared state** document so a frontend can render
+and track agent state. The mapping is:
+
+- The scene store emits `scene.created` / `scene.patched` / `scene.deleted` on
+  the bus, each carrying the scene's full post-mutation content. The transport
+  tracks these into a document keyed by `scene_id` (value = the scene's current
+  content). It never calls the scene plugin directly — the bus events are the
+  sole input.
+- On run start, a `StateSnapshot` of the current document is emitted right after
+  `RunStarted`.
+- Each scene mutation during the run emits a `StateDelta` whose `delta` is an
+  **RFC 6902 JSON Patch** from the previous document to the new one. Applying the
+  deltas in order to the snapshot reconstructs the state (verified in unit
+  tests). This aligns AG-UI's `StateDelta` with the scene store's patch model
+  while normalizing the scene store's shallow-merge semantics into a valid JSON
+  Patch computed from full content.
+
+The document is session-scoped and persists across runs on the listener, so a
+later run's snapshot reflects scenes created by an earlier run. Inbound state
+application (a client-authored state document or patches on a continuation
+`RunAgentInput`) is **not** handled yet — that is a separate follow-up; a clean
+seam (`applyClientState`) is reserved for it.
 
 ### Example configuration
 
