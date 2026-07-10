@@ -1,0 +1,71 @@
+# Test: nexus.io.agui serve endpoint, end to end.
+#
+# The AG-UI HTTP endpoint drives the turn: a POSTed RunAgentInput becomes an
+# io.input, the ReAct agent runs, and the resulting bus events stream back as
+# canonical AG-UI SSE terminating at RunFinished.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses (mock_responses)
+# so no API key is needed — it has no scripted inputs; the agui POST is the
+# sole driver of the turn. Remove the mock_responses block to run live against
+# a real provider (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIServe
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    # Two mock LLM responses:
+    #   1. Tool call: shell `echo` — a REGISTERED tool, so tool.result flows
+    #      back through the bus and the react turn completes deterministically.
+    #   2. Final content message closing the turn.
+    mock_responses:
+      - tool_calls:
+          - name: shell
+            arguments: '{"command":"echo noon"}'
+      - content: "The current time in UTC is high noon."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use tools when asked."
+
+  nexus.tool.shell:
+    timeout: 5s
+    sandbox:
+      allowed_commands: ["echo"]
+      env_restrict: true
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

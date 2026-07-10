@@ -41,6 +41,12 @@ type run struct {
 	activeText string
 	// textSeq disambiguates successive streamed messages within one run.
 	textSeq int
+	// textStreamed records whether any llm.stream.chunk delta was rendered as a
+	// TextMessage since the last one closed. It lets onOutput distinguish a
+	// genuinely-streamed final output (already rendered, skip) from one flagged
+	// "streamed" by a non-streaming provider (mock / batch) where no chunk ever
+	// arrived, so the text would otherwise be silently dropped.
+	textStreamed bool
 	// openTools tracks tool-call ids that have had a ToolCallStart but no
 	// ToolCallEnd yet, so tool.result can close them before emitting the result.
 	openTools map[string]bool
@@ -186,6 +192,7 @@ func (r *run) onStreamChunk(c events.StreamChunk) {
 		return
 	}
 	r.mu.Lock()
+	r.textStreamed = true
 	if r.activeText == "" {
 		r.textSeq++
 		r.activeText = messageID(r.runID, r.textSeq)
@@ -212,21 +219,32 @@ func (r *run) onStreamEnd(_ events.StreamEnd) {
 	}
 }
 
-// onOutput maps a non-streamed io.output message to a self-contained
-// TextMessage start/content/end triple. Streamed outputs are ignored here — the
-// llm.stream.chunk path already rendered them.
+// onOutput maps an io.output message to a self-contained TextMessage
+// start/content/end triple, UNLESS the same content was already rendered
+// incrementally via the llm.stream.chunk path (a genuinely streamed output). A
+// "streamed"-flagged output whose stream produced no chunks (non-streaming
+// providers such as mock or batch) is rendered here so its text is never
+// silently dropped.
 func (r *run) onOutput(o events.AgentOutput) {
-	if streamed, _ := o.Metadata["streamed"].(bool); streamed {
+	if o.Content == "" {
 		return
 	}
-	if o.Content == "" {
+	// A "streamed" output was already rendered by the llm.stream.chunk path —
+	// but only if a chunk actually arrived. Non-streaming providers (mock,
+	// batch) still flag the output "streamed" while emitting no chunks, so fall
+	// through and render a self-contained triple when nothing was streamed.
+	r.mu.Lock()
+	streamed, _ := o.Metadata["streamed"].(bool)
+	alreadyRendered := streamed && r.textStreamed
+	r.textStreamed = false
+	if alreadyRendered {
+		r.mu.Unlock()
 		return
 	}
 	role := o.Role
 	if role == "" {
 		role = "assistant"
 	}
-	r.mu.Lock()
 	r.textSeq++
 	id := messageID(r.runID, r.textSeq)
 	r.mu.Unlock()
