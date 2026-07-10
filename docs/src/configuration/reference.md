@@ -498,6 +498,39 @@ See [Sub-agent delegation](../architecture/delegate.md).
 | `cache_size` | int  | `256`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction; the cache grows unbounded. |
 | `cache`      | bool | `true`  | Set `false` to disable result caching entirely. |
 
+### `nexus.agent.agui_remote`
+
+Source: `plugins/agents/aguiremote/plugin.go`. Surfaces one or more **remote
+AG-UI agents** as delegate/subagent targets. Each configured agent registers an
+LLM-facing tool (default `delegate_agui_<name>`); when the parent agent calls
+it, the plugin builds an AG-UI `RunAgentInput` from the delegated task, runs the
+remote agent over the AG-UI wire (HTTP POST + SSE) via the reusable AG-UI
+client, maps the remote run's event stream onto the Nexus bus (text deltas →
+`io.output`; tool activity + message boundaries → `subagent.*`), and returns the
+remote run's terminal outcome as the tool result. Failures (remote `RunError`,
+timeout, transport error, auth rejection, unresolved interrupt) surface as a
+clean tool error. Per-call timeout enforces budget; results are cached by
+endpoint + task + context hash. See [Sub-agent delegation](../architecture/delegate.md).
+
+| Key               | Type | Default | Description |
+|-------------------|------|---------|-------------|
+| `agents`          | list | *(required)* | Non-empty list of remote AG-UI agents to expose. Each entry is a mapping (see below). |
+| `timeout_seconds` | int  | `120`   | Default per-call timeout (seconds) applied to every remote agent. Overridable per agent and per call. |
+| `cache_size`      | int  | `128`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction; the cache grows unbounded. |
+| `cache`           | bool | `true`  | Set `false` to disable result caching entirely. |
+
+Each `agents[]` entry:
+
+| Key                | Type   | Default                  | Description |
+|--------------------|--------|--------------------------|-------------|
+| `name`             | string | *(required)*             | Human-friendly identifier; used to derive the default tool name. |
+| `endpoint`         | string | *(required)*             | Full AG-UI POST endpoint URL (e.g. `https://host/agui`). |
+| `tool_name`        | string | `delegate_agui_<name>`   | Override the LLM-facing tool name. |
+| `description`      | string | *(auto)*                 | Override the tool description shown to the LLM. |
+| `bearer_token`     | string | *(none)*                 | Static bearer token for the `Authorization` header. Prefer `bearer_token_env`. |
+| `bearer_token_env` | string | *(none)*                 | Name of an environment variable holding the bearer token. Read at `Init`; used only when `bearer_token` is unset. |
+| `timeout_seconds`  | int    | *(plugin default)*       | Per-agent default timeout (seconds), overriding the plugin-level `timeout_seconds`. |
+
 ### `nexus.scene`
 
 Source: `plugins/scene/plugin.go`. Owns the per-session `Scene` store and
