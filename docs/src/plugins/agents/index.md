@@ -10,6 +10,7 @@ Agents are the brain of a Nexus harness. They receive user input, orchestrate LL
 | [Plan & Execute](./planexec.md) | `nexus.agent.planexec` | Create a plan first, then execute step by step |
 | [Subagent](./subagent.md) | `nexus.agent.subagent` | Spawns child agents as tools |
 | [Orchestrator](./orchestrator.md) | `nexus.agent.orchestrator` | Decomposes tasks and dispatches to parallel workers |
+| [Remote AG-UI Agents](./agui-remote.md) | `nexus.agent.agui_remote` | Delegates to a remote AG-UI agent as a tool |
 
 ## Choosing an Agent
 

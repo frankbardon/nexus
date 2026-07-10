@@ -50,6 +50,7 @@
   - [Orchestrator](./plugins/agents/orchestrator.md)
   - [Posture Registry](./plugins/agents/postures.md)
   - [Delegate](./plugins/agents/delegate.md)
+  - [Remote AG-UI Agents](./plugins/agents/agui-remote.md)
 - [LLM Providers](./plugins/providers/index.md)
   - [Anthropic (Claude)](./plugins/providers/anthropic.md)
   - [OpenAI](./plugins/providers/openai.md)
