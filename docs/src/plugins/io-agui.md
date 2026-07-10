@@ -101,11 +101,36 @@ AG-UI uses a **terminal-run** model for anything that needs input mid-run: the
 run *ends* with an interrupt outcome and the client starts a **continuation run**
 carrying `resume[]`. Nexus emulates this as *virtual runs* over one persistent
 in-process session — the agent stays parked in-process and a continuation `POST`
-unblocks it. Two flows ride the identical suspend/resume machinery:
+unblocks it.
 
-- **Human-in-the-loop (HITL).** A `hitl.requested` during a run emits a
-  `StateSnapshot` + `MessagesSnapshot` then `RunFinished(interrupt)`; the resume
-  emits `hitl.responded` to unblock the waiter.
+### One Nexus turn spans multiple AG-UI runs
+
+The load-bearing consequence of the terminal-run model is that **a single Nexus
+turn can span several AG-UI runs**. When an agent needs input, the current run
+ends — but the Nexus session (and the parked agent) stays alive. Each subsequent
+resume opens a *new* run over the *same* thread until the turn finally completes:
+
+```text
+POST /agui  { threadId: T, runId: R1, messages:[…] }        ← run 1 begins the turn
+  … RunStarted … StepStarted … (agent calls ask_user) …
+  … StateSnapshot … MessagesSnapshot … RunFinished(interrupt)  ← run 1 ends, agent PARKED
+
+POST /agui  { threadId: T, runId: R2, resume:[…] }          ← run 2 continues the SAME turn
+  … RunStarted … (agent unblocks, finishes) … RunFinished     ← turn complete
+```
+
+The `threadId` is identical across the runs; each continuation uses a **fresh
+`runId`**. No `messages` are needed on a resume — the `resume[]` items are the
+payload the server correlates back to its pending interrupt(s). Because the
+session is persistent and in-process, a `threadId` must route to the **same**
+Nexus instance across its runs (see `threadId` / `runId` semantics below).
+
+Two flows ride the identical suspend/resume machinery:
+
+- **Human-in-the-loop (HITL).** A `hitl.requested` during a run (e.g. the agent
+  calling the `ask_user` tool) emits a `StateSnapshot` + `MessagesSnapshot` then
+  `RunFinished(interrupt)`; the resume emits `hitl.responded` to unblock the
+  waiter.
 - **Client-executed (frontend) tools.** Tools the client advertises via
   `RunAgentInput.tools` are surfaced to the agent (the plugin appends them to the
   synchronous `tool.catalog.query` snapshot, scoped to exactly the advertising
@@ -113,7 +138,7 @@ unblocks it. Two flows ride the identical suspend/resume machinery:
   the agent calls one, its `tool.invoke` streams the `ToolCallStart/Args/End`
   sequence and then the run ends interrupt-style: there is no in-process handler
   to produce a `tool.result`, so the **client** runs the tool and resumes with a
-  `ToolCallResult`. The plugin feeds that result back to the parked agent as the
+  tool result. The plugin feeds that result back to the parked agent as the
   `tool.result` it was waiting on, and the continuation streams on a fresh run.
 
 A server-side Nexus catalog tool is never intercepted: its own handler runs
@@ -121,12 +146,62 @@ inline and produces the `tool.result` that streams as a normal `ToolCallResult`.
 Client tools are distinguished purely by **origin** (they came from
 `RunAgentInput.tools`).
 
-The `resume[]` payload shape depends on the interrupt kind: a HITL interrupt
-accepts `{choiceId, freeText, editedPayload}`; a client-tool interrupt accepts
-`{output, error}`. A `cancelled` status resolves either kind without an answer
-(HITL abandonment / an error `tool.result` so the agent's loop still advances).
+### The interrupt anchor
+
+`RunFinished(interrupt)` carries an `Interrupt` payload in its `result` field.
+The client renders it and echoes its `interruptId` in the resume. It provides:
+
+| Field | Meaning |
+|---|---|
+| `interruptId` | The anchor the client echoes back in `resume[].interruptId`. Distinct from any internal request id. |
+| `prompt` | The rendered question/approval text (HITL) or a client-tool hint. |
+| `mode` | `free_text`, `choices`, or `both` — controls the response affordance. |
+| `choices` / `defaultChoiceId` | The options (and deadline default) for a `choices`/`both` interrupt. |
+
+The interrupt kind (HITL vs client tool) is also mirrored in the `StateSnapshot`
+under an `interrupt` (HITL) or `toolCall` (client tool) anchor, so a client that
+restores from state alone — rather than replaying `MessagesSnapshot` — still has
+everything it needs to resume.
+
+### The `resume[]` wire shape
+
+Each `resume[]` item names an `interruptId`, a `status`, and an optional
+`payload`. The payload fields depend on the interrupt kind:
+
+| `status` | Interrupt kind | `payload` fields | Effect |
+|---|---|---|---|
+| `resolved` | HITL | `choiceId`, `freeText`, `editedPayload` | Answers the prompt. A `choices`-only interrupt drops stray `freeText`. All fields optional; an empty payload accepts the default. |
+| `resolved` | client tool | `output`, `error` | Becomes the parked agent's `tool.result`. Empty resolves the call with empty output (the agent still advances). |
+| `cancelled` | either | *(none)* | Abandons the interrupt: a HITL waiter unblocks as cancelled; a client-tool call resolves with an error `tool.result` so the agent's loop still advances. |
+
+```jsonc
+// HITL resume: pick a choice.
+{ "threadId":"T", "runId":"R2",
+  "resume":[ { "interruptId":"int-…", "status":"resolved",
+               "payload": { "choiceId":"staging" } } ] }
+
+// Client-tool resume: return the tool's output.
+{ "threadId":"T", "runId":"R2",
+  "resume":[ { "interruptId":"int-…", "status":"resolved",
+               "payload": { "output":"sunny, 24C" } } ] }
+
+// Cancel either kind.
+{ "threadId":"T", "runId":"R2",
+  "resume":[ { "interruptId":"int-…", "status":"cancelled" } ] }
+```
+
 As AG-UI requires, **all** open interrupts on a thread must be addressed in one
-resume request.
+resume request: a resume that references an unknown/expired interrupt, addresses
+one twice, or leaves an open interrupt unaddressed is rejected with a clean
+terminal `RunError` stream and leaves the parked agent untouched for a corrected
+retry.
+
+The reusable pure-Go conformance client (`pkg/agui/aguiclient`) provides
+constructors for these payloads — `ResumeInput`, `ResolveChoice`, `ResolveText`,
+`ResolveToolResult`, and `Cancel` — plus `Result.Interrupt()` to extract the
+anchor from a `RunFinished(interrupt)`. The end-to-end interrupt/resume and
+client-tool round-trips are exercised in
+`tests/integration/agui_hitl_test.go`.
 
 ## `threadId` / `runId` semantics
 
