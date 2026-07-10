@@ -1,0 +1,70 @@
+# Test: nexus.io.agui client-executed (frontend) tool round-trip, end to end.
+#
+# A RunAgentInput advertises a client-executed tool (RunAgentInput.tools). The
+# AG-UI plugin appends it to the tool-catalog snapshot the agent builds, so the
+# (mocked) agent may call it. There is NO in-process handler to produce the
+# tool.result — the CLIENT runs the tool. So when the agent calls it, the AG-UI
+# plugin ends run 1 interrupt-style (StateSnapshot + MessagesSnapshot + the
+# ToolCall* sequence + RunFinished(interrupt)) and records a pending client-tool
+# interrupt. A continuation RunAgentInput carrying resume[] with a ToolCallResult
+# (same threadId, new runId) feeds the result back to the parked agent, which
+# consumes the next mock response and run 2 completes.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses (mock_responses) so
+# no API key is needed — it has no scripted inputs; the agui POST is the sole
+# driver. Remove the mock_responses block to run live (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIServe_ClientTool
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    # Two mock LLM responses drive the two-run, one-turn cycle:
+    #   1. Tool call: get_weather — the CLIENT-advertised frontend tool, so the
+    #      run ends interrupt-style awaiting the client's ToolCallResult.
+    #   2. Final content message closing the turn after the resume feeds the
+    #      client's tool result back to the parked agent.
+    mock_responses:
+      - tool_calls:
+          - name: get_weather
+            arguments: '{"city":"Paris"}'
+      - content: "It is sunny in Paris."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use tools when asked."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

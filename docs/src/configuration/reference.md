@@ -498,6 +498,39 @@ See [Sub-agent delegation](../architecture/delegate.md).
 | `cache_size` | int  | `256`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction; the cache grows unbounded. |
 | `cache`      | bool | `true`  | Set `false` to disable result caching entirely. |
 
+### `nexus.agent.agui_remote`
+
+Source: `plugins/agents/aguiremote/plugin.go`. Surfaces one or more **remote
+AG-UI agents** as delegate/subagent targets. Each configured agent registers an
+LLM-facing tool (default `delegate_agui_<name>`); when the parent agent calls
+it, the plugin builds an AG-UI `RunAgentInput` from the delegated task, runs the
+remote agent over the AG-UI wire (HTTP POST + SSE) via the reusable AG-UI
+client, maps the remote run's event stream onto the Nexus bus (text deltas →
+`io.output`; tool activity + message boundaries → `subagent.*`), and returns the
+remote run's terminal outcome as the tool result. Failures (remote `RunError`,
+timeout, transport error, auth rejection, unresolved interrupt) surface as a
+clean tool error. Per-call timeout enforces budget; results are cached by
+endpoint + task + context hash. See [Sub-agent delegation](../architecture/delegate.md).
+
+| Key               | Type | Default | Description |
+|-------------------|------|---------|-------------|
+| `agents`          | list | *(required)* | Non-empty list of remote AG-UI agents to expose. Each entry is a mapping (see below). |
+| `timeout_seconds` | int  | `120`   | Default per-call timeout (seconds) applied to every remote agent. Overridable per agent and per call. |
+| `cache_size`      | int  | `128`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction; the cache grows unbounded. |
+| `cache`           | bool | `true`  | Set `false` to disable result caching entirely. |
+
+Each `agents[]` entry:
+
+| Key                | Type   | Default                  | Description |
+|--------------------|--------|--------------------------|-------------|
+| `name`             | string | *(required)*             | Human-friendly identifier; used to derive the default tool name. |
+| `endpoint`         | string | *(required)*             | Full AG-UI POST endpoint URL (e.g. `https://host/agui`). |
+| `tool_name`        | string | `delegate_agui_<name>`   | Override the LLM-facing tool name. |
+| `description`      | string | *(auto)*                 | Override the tool description shown to the LLM. |
+| `bearer_token`     | string | *(none)*                 | Static bearer token for the `Authorization` header. Prefer `bearer_token_env`. |
+| `bearer_token_env` | string | *(none)*                 | Name of an environment variable holding the bearer token. Read at `Init`; used only when `bearer_token` is unset. |
+| `timeout_seconds`  | int    | *(plugin default)*       | Per-agent default timeout (seconds), overriding the plugin-level `timeout_seconds`. |
+
 ### `nexus.scene`
 
 Source: `plugins/scene/plugin.go`. Owns the per-session `Scene` store and
@@ -1301,6 +1334,61 @@ Source: `plugins/io/browser/plugin.go`.
 | `host`         | string | `localhost` | HTTP listen address. |
 | `port`         | int    | `8080`      | HTTP listen port. |
 | `open_browser` | bool   | `true`      | Auto-open the browser tab on startup (no-op when the OS lacks an opener). |
+
+### `nexus.io.agui`
+
+Source: `plugins/io/agui/plugin.go`. AG-UI ("Agent-User Interaction") serve
+transport. Clients `POST` a `RunAgentInput` to `/agui` and receive a
+`text/event-stream` SSE response (one stream per run), using the pkg/agui wire
+format rather than the browser/wails Envelope. Safe by default: binds loopback,
+optional bearer-token auth, and configurable CORS for browser AG-UI clients.
+
+| Key                | Type         | Default            | Description |
+|--------------------|--------------|--------------------|-------------|
+| `bind`             | string       | `127.0.0.1:8090`   | `host:port` the HTTP listener binds to. Defaults to loopback so the endpoint is not network-exposed without explicit opt-in. |
+| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. |
+| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
+| `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
+| `emit_state`       | bool         | `false`            | Opt-in AG-UI shared-state emission. When `true`, the transport mirrors the session's scene store (`nexus.scene`) as an AG-UI shared-state document and emits a `StateSnapshot` at run start plus ordered `StateDelta` events (RFC 6902 JSON Patch) as scenes mutate. Off by default because it adds scene-event subscriptions and per-mutation diffing overhead most clients do not need. Requires the `nexus.scene` plugin to be active to produce any state. |
+
+**Round-trip:** a `POST /agui` maps the request `messages` to a Nexus
+`io.input` (the trailing `user` message drives the turn; earlier messages ride
+as `PreloadMessages`; `threadId` is recorded as the session id, `runId`
+identifies the turn). The plugin subscribes to the same bus events as the
+browser transport and translates them to canonical AG-UI SSE:
+`agent.turn.start`→`StepStarted`, `llm.stream.chunk`→`TextMessage*`,
+`tool.call`/`tool.result`→`ToolCall*`, `thinking.step`→`Reasoning*`,
+`agent.turn.end`→`StepFinished`/`RunFinished`. The stream flushes incrementally
+and terminates at `RunFinished` (or `RunError` on failure/disconnect).
+
+**Non-canonical events:** Nexus bus events with no canonical AG-UI equivalent
+(`workflow.progress`, `subagent.started`/`iteration`/`complete`,
+`code.exec.stdout`) consistently ride the AG-UI `Custom` event, with `name` set
+to the bus event type and `value` the JSON-encoded payload. This is a
+documented superset — conformance clients that only understand canonical events
+can ignore `Custom` without losing the run's canonical lifecycle.
+
+**Scope:** one in-flight run per listener (single engine/session per listener,
+mirroring `nexus.io.browser`). A second `POST` while a run is active receives a
+terminal `RunStarted`+`RunError` stream rather than interleaving.
+
+**Shared state (`emit_state: true`):** the transport tracks the scene store's
+`scene.created` / `scene.patched` / `scene.deleted` bus events (each carrying the
+scene's full post-mutation content) into a shared-state document keyed by
+`scene_id`. A `StateSnapshot` of the current document is emitted immediately
+after `RunStarted`; each subsequent scene mutation during the run emits a
+`StateDelta` whose `delta` is an RFC 6902 JSON Patch from the prior document to
+the new one, so a client applying the deltas in order reconstructs the snapshot.
+The document is session-scoped and persists across runs on the listener (a later
+run's snapshot reflects scenes created earlier). Inbound state
+(`RunAgentInput.state`, same scene-keyed shape) is applied at run start — and on
+a resume/continuation run — **before** the initial `StateSnapshot`, seeding the
+scene store via a `scene_create` `tool.invoke` per scene so the agent observes it
+through `scene_get` / `scene_list`. Conflict semantics are
+client-state-seeds-then-agent-wins: the client seed lands before the agent's
+first turn, then agent-side `scene_patch` mutations are last-writer and flow back
+out as `StateDelta`. See
+[Shared state](../plugins/io-agui.md#shared-state).
 
 ### `nexus.io.realtime`
 

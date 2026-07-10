@@ -59,6 +59,15 @@ type Store interface {
 	List(sessionID string) []SceneHandle
 }
 
+// IDedCreator is an optional extension a Store may implement to create a scene
+// under a caller-chosen id (used to seed AG-UI inbound shared state, E3-S2).
+// Consumers type-assert for it and fall back to Create + a generated id when the
+// store does not support it. Kept off the core Store interface so existing
+// implementations need no change.
+type IDedCreator interface {
+	CreateWithID(sessionID, id, schema string, initial any, agentID string) (SceneHandle, error)
+}
+
 // Patcher merges a patch into existing content. The runtime is schema-
 // agnostic, so the default Patcher does shallow JSON merge for maps and
 // otherwise replaces. Schema-specific renderers can provide their own
@@ -116,10 +125,21 @@ func (s *MemoryStore) WithPatcher(p Patcher) *MemoryStore {
 }
 
 func (s *MemoryStore) Create(sessionID, schema string, initial any, agentID string) (SceneHandle, error) {
+	return s.CreateWithID(sessionID, "", schema, initial, agentID)
+}
+
+// CreateWithID is Create with a caller-chosen scene id. When id is empty a fresh
+// id is generated (the normal Create path). When id is non-empty it is used
+// verbatim, letting a client seed a scene under a known id (AG-UI inbound shared
+// state, E3-S2). It is additive to the Store interface — callers that only hold
+// a Store type-assert for the IDedCreator interface below.
+func (s *MemoryStore) CreateWithID(sessionID, id, schema string, initial any, agentID string) (SceneHandle, error) {
 	if sessionID == "" {
 		return SceneHandle{}, errors.New("scene: sessionID required")
 	}
-	id := newSceneID()
+	if id == "" {
+		id = newSceneID()
+	}
 	now := time.Now()
 	scene := &Scene{
 		Handle: SceneHandle{

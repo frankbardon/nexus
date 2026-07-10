@@ -53,9 +53,15 @@ can plug a custom `Patcher` into the in-process `scene.MemoryStore`.
 |-------|------|
 | `tool.register` | Registers each `scene_*` tool at boot. |
 | `tool.result` / `before:tool.result` | Per tool call. |
-| `scene.created` | Per `scene_create`. |
-| `scene.patched` | Per `scene_patch`. |
+| `scene.created` | Per `scene_create`. Payload includes `content` (the initial content). |
+| `scene.patched` | Per `scene_patch`. Payload includes `content` (the full post-merge content). |
 | `scene.deleted` | Per `scene_delete`. |
+
+`scene.created` and `scene.patched` carry the scene's full post-mutation
+`content` so bus consumers (e.g. the AG-UI transport's shared-state mirror) can
+track scene state without a tool call. The scene store's own patch semantics are
+shallow-merge, not RFC 6902, so a consumer needing an RFC 6902 delta diffs the
+full content itself.
 
 `agent_id` on scene events flows from `Event.Causation.AgentID` so
 sub-agent contributions stay attributable. See

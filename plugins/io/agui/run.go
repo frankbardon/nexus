@@ -1,0 +1,512 @@
+package agui
+
+import (
+	"encoding/json"
+	"sync"
+
+	"github.com/frankbardon/nexus/pkg/agui"
+	"github.com/frankbardon/nexus/pkg/events"
+)
+
+// run holds the state of a single in-flight AG-UI run. Bus-event handlers push
+// translated AG-UI events onto out; the owning HTTP handler goroutine is the
+// sole reader and the sole writer to the SSE stream, so the SSEWriter is never
+// touched concurrently. All mutation of the run's own bookkeeping fields goes
+// through mu.
+type run struct {
+	threadID string
+	runID    string
+
+	// out is the single channel every translated AG-UI event flows through.
+	// Buffered so a burst of bus events never blocks the emitting agent
+	// goroutine on a slow client for long.
+	out chan agui.Event
+	// done is closed once the terminal RunFinished/RunError has been queued so
+	// handlers stop translating further events for this run.
+	done     chan struct{}
+	closeOne sync.Once
+
+	mu sync.Mutex
+	// started guards the one-time RunStarted emission: agent.turn.start is the
+	// natural trigger, but a run with no agent (or a very fast one) still needs
+	// a RunStarted, so the handler emits it eagerly and this flag suppresses a
+	// duplicate from the first turn.start.
+	started bool
+	// stepOpen tracks whether a StepStarted is currently unmatched by a
+	// StepFinished, so agent.turn.end can close exactly the open step.
+	stepOpen bool
+	stepName string
+	// activeText is the message id of the open streamed text message, empty
+	// when no TextMessage is in flight.
+	activeText string
+	// textSeq disambiguates successive streamed messages within one run.
+	textSeq int
+	// textStreamed records whether any llm.stream.chunk delta was rendered as a
+	// TextMessage since the last one closed. It lets onOutput distinguish a
+	// genuinely-streamed final output (already rendered, skip) from one flagged
+	// "streamed" by a non-streaming provider (mock / batch) where no chunk ever
+	// arrived, so the text would otherwise be silently dropped.
+	textStreamed bool
+	// openTools tracks tool-call ids that have had a ToolCallStart but no
+	// ToolCallEnd yet, so tool.result can close them before emitting the result.
+	openTools map[string]bool
+	// reasoningOpen tracks whether a ReasoningStart is unmatched by a
+	// ReasoningEnd.
+	reasoningOpen bool
+	// messages accumulates the finalized conversation messages this run has
+	// rendered (assistant text, tool results). It backs the MessagesSnapshot
+	// emitted on interrupt so a resuming client has the conversation state.
+	// Guarded by mu; only appended to.
+	messages []agui.Message
+	// streamBuf accumulates the deltas of the currently-open streamed text
+	// message so it can be finalized into messages on stream/turn end. Empty
+	// when no streamed text is in flight.
+	streamBuf string
+
+	// clientTools holds the ToolDefs the client advertised for this run via
+	// RunAgentInput.tools. They are appended to the catalog snapshot the agent
+	// assembles so the LLM may call them; a call to one suspends the run awaiting
+	// the client's ToolCallResult. Keyed by tool name for O(1) origin checks.
+	// Read-only after newRun, so no lock is needed.
+	clientTools map[string]events.ToolDef
+}
+
+// runInput carries the fields of a decoded RunAgentInput that the plugin needs
+// to start a run, decoupling the plugin from the transport (server) package
+// boundary. When resume is non-empty the input is a continuation of an
+// interrupted run: the plugin resolves the pending interrupts rather than
+// starting a fresh turn.
+type runInput struct {
+	threadID string
+	runID    string
+	messages []agui.Message
+	resume   []agui.ResumeItem
+	// state is the client-authored AG-UI shared-state document (RunAgentInput.
+	// state): a scene_id -> content JSON object the inbound-state reconciler
+	// (E3-S2) applies to the scene store and the mirror before the run's first
+	// turn. Empty when the client sends no state.
+	state json.RawMessage
+	// tools are the client-executed (frontend) tools advertised for this run via
+	// RunAgentInput.tools. They are surfaced to the agent for the duration of the
+	// run and a call to one suspends the run awaiting the client's result.
+	tools []agui.Tool
+}
+
+// newRunStarted builds a RunStarted event for a run.
+func newRunStarted(threadID, runID string) agui.RunStartedEvent {
+	return agui.NewRunStarted(threadID, runID)
+}
+
+// newRun builds a run for the given thread/run identifiers. clientTools are the
+// frontend-executed tools advertised for the run (nil for a run with none); they
+// are surfaced to the agent and drive the client-tool suspend/resume path.
+func newRun(threadID, runID string, clientTools []agui.Tool) *run {
+	r := &run{
+		threadID:  threadID,
+		runID:     runID,
+		out:       make(chan agui.Event, 256),
+		done:      make(chan struct{}),
+		openTools: make(map[string]bool),
+	}
+	if len(clientTools) > 0 {
+		r.clientTools = make(map[string]events.ToolDef, len(clientTools))
+		for _, t := range clientTools {
+			if t.Name == "" {
+				continue
+			}
+			r.clientTools[t.Name] = clientToolDef(t)
+		}
+	}
+	return r
+}
+
+// clientToolDef maps an AG-UI client Tool onto the events.ToolDef the tool
+// catalog and agent expect. The client's JSON-Schema Parameters are decoded into
+// the map[string]any the agent hands the provider; a malformed schema degrades
+// to an empty (permissive) parameter set rather than dropping the tool.
+func clientToolDef(t agui.Tool) events.ToolDef {
+	td := events.ToolDef{
+		Name:        t.Name,
+		Description: t.Description,
+	}
+	if len(t.Parameters) > 0 {
+		var params map[string]any
+		if err := json.Unmarshal(t.Parameters, &params); err == nil {
+			td.Parameters = params
+		}
+	}
+	return td
+}
+
+// queue pushes a translated event onto the run's channel unless the run has
+// already terminated or the client has gone away. It never blocks
+// indefinitely: once done is closed the event is dropped.
+func (r *run) queue(e agui.Event) {
+	select {
+	case <-r.done:
+		return
+	default:
+	}
+	select {
+	case r.out <- e:
+	case <-r.done:
+	}
+}
+
+// finish queues the terminal RunFinished event and closes the run exactly once.
+// Subsequent bus events for this run are dropped.
+func (r *run) finish() {
+	r.closeOne.Do(func() {
+		select {
+		case r.out <- agui.NewRunFinished(r.threadID, r.runID):
+		default:
+		}
+		close(r.done)
+	})
+}
+
+// fail queues a terminal RunError event and closes the run exactly once.
+func (r *run) fail(msg string) {
+	r.closeOne.Do(func() {
+		select {
+		case r.out <- agui.NewRunError(msg):
+		default:
+		}
+		close(r.done)
+	})
+}
+
+// snapshotMessages returns a copy of the conversation messages this run has
+// rendered so far, safe to hand off without holding the run's lock.
+func (r *run) snapshotMessages() []agui.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.messages) == 0 {
+		return nil
+	}
+	out := make([]agui.Message, len(r.messages))
+	copy(out, r.messages)
+	return out
+}
+
+// interrupt terminates the run per AG-UI's terminal-run model: it emits a
+// StateSnapshot and a MessagesSnapshot (so the client can replay state on
+// resume) BEFORE a RunFinished carrying the interrupt outcome, then closes the
+// stream — exactly once. The in-process agent is NOT unblocked here; it stays
+// waiting on the pending hitl.responded and the Nexus session stays alive. A
+// continuation run (E2-S2) reopens a fresh SSE and resolves the interrupt.
+//
+// snapshot is the JSON state handoff; messages is the conversation snapshot.
+// Both are emitted unconditionally so the client always has a resume anchor,
+// even when empty.
+func (r *run) interrupt(snapshot []byte, messages []agui.Message, payload agui.Interrupt) {
+	r.closeOne.Do(func() {
+		if snapshot == nil {
+			snapshot = []byte("{}")
+		}
+		if messages == nil {
+			messages = []agui.Message{}
+		}
+		// Ordering is load-bearing: StateSnapshot and MessagesSnapshot MUST
+		// precede the RunFinished(interrupt) so a client replaying the stream
+		// has the resume anchor before the terminal event.
+		for _, e := range []agui.Event{
+			agui.NewStateSnapshot(snapshot),
+			agui.NewMessagesSnapshot(messages),
+			agui.NewRunFinishedInterrupt(r.threadID, r.runID, payload),
+		} {
+			select {
+			case r.out <- e:
+			default:
+			}
+		}
+		close(r.done)
+	})
+}
+
+// cancelTerminal terminates the run with a cancelled outcome, used when the
+// pending interrupt is retracted (hitl.cancel) before the run had a chance to
+// end normally. Closes the stream exactly once.
+func (r *run) cancelTerminal() {
+	r.closeOne.Do(func() {
+		select {
+		case r.out <- agui.NewRunFinishedCancelled(r.threadID, r.runID):
+		default:
+		}
+		close(r.done)
+	})
+}
+
+// markStarted emits RunStarted at most once for the run and returns whether it
+// performed the emission.
+func (r *run) markStarted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started {
+		return false
+	}
+	r.started = true
+	return true
+}
+
+// --- bus event translation ---
+//
+// Each on* method translates one Nexus bus payload into zero or more AG-UI
+// events and queues them. They are called from arbitrary bus goroutines; all
+// shared state is guarded by r.mu and delivery is via the channel, so the
+// SSEWriter is never touched here.
+
+// onTurnStart maps agent.turn.start to a StepStarted (RunStarted is emitted
+// eagerly by the handler). Nested turns (iterations) each open a step.
+func (r *run) onTurnStart(t events.TurnInfo) {
+	r.mu.Lock()
+	if r.stepOpen {
+		// An iteration boundary without an explicit turn.end: close the
+		// previous step before opening the next so steps stay balanced.
+		prev := r.stepName
+		r.mu.Unlock()
+		r.queue(agui.NewStepFinished(prev))
+		r.mu.Lock()
+	}
+	name := stepName(t)
+	r.stepOpen = true
+	r.stepName = name
+	r.mu.Unlock()
+	r.queue(agui.NewStepStarted(name))
+}
+
+// onTurnEnd maps agent.turn.end to StepFinished. The run itself is finished by
+// the handler when the top-level turn completes.
+func (r *run) onTurnEnd(t events.TurnInfo) {
+	r.mu.Lock()
+	// Close any open streamed text before the step ends.
+	openText := r.activeText
+	r.activeText = ""
+	buf := r.streamBuf
+	r.streamBuf = ""
+	if openText != "" && buf != "" {
+		r.messages = append(r.messages, agui.Message{ID: openText, Role: "assistant", Content: buf})
+	}
+	name := r.stepName
+	wasOpen := r.stepOpen
+	r.stepOpen = false
+	reasoning := r.reasoningOpen
+	r.reasoningOpen = false
+	r.mu.Unlock()
+
+	if openText != "" {
+		r.queue(agui.NewTextMessageEnd(openText))
+	}
+	if reasoning {
+		r.queue(agui.NewReasoningEnd())
+	}
+	if wasOpen {
+		if name == "" {
+			name = stepName(t)
+		}
+		r.queue(agui.NewStepFinished(name))
+	}
+}
+
+// onStreamChunk maps llm.stream.chunk text deltas to TextMessage* events. A
+// TextMessageStart is emitted lazily on the first non-empty delta and closed on
+// stream end / turn end.
+func (r *run) onStreamChunk(c events.StreamChunk) {
+	if c.Content == "" {
+		return
+	}
+	r.mu.Lock()
+	r.textStreamed = true
+	r.streamBuf += c.Content
+	if r.activeText == "" {
+		r.textSeq++
+		r.activeText = messageID(r.runID, r.textSeq)
+		id := r.activeText
+		r.mu.Unlock()
+		r.queue(agui.NewTextMessageStart(id, "assistant"))
+		r.queue(agui.NewTextMessageContent(id, c.Content))
+		return
+	}
+	id := r.activeText
+	r.mu.Unlock()
+	r.queue(agui.NewTextMessageContent(id, c.Content))
+}
+
+// onStreamEnd closes any open streamed text message at the end of a single LLM
+// stream (one iteration may stream multiple times across turns).
+func (r *run) onStreamEnd(_ events.StreamEnd) {
+	r.mu.Lock()
+	id := r.activeText
+	r.activeText = ""
+	buf := r.streamBuf
+	r.streamBuf = ""
+	if id != "" && buf != "" {
+		r.messages = append(r.messages, agui.Message{ID: id, Role: "assistant", Content: buf})
+	}
+	r.mu.Unlock()
+	if id != "" {
+		r.queue(agui.NewTextMessageEnd(id))
+	}
+}
+
+// onOutput maps an io.output message to a self-contained TextMessage
+// start/content/end triple, UNLESS the same content was already rendered
+// incrementally via the llm.stream.chunk path (a genuinely streamed output). A
+// "streamed"-flagged output whose stream produced no chunks (non-streaming
+// providers such as mock or batch) is rendered here so its text is never
+// silently dropped.
+func (r *run) onOutput(o events.AgentOutput) {
+	if o.Content == "" {
+		return
+	}
+	// A "streamed" output was already rendered by the llm.stream.chunk path —
+	// but only if a chunk actually arrived. Non-streaming providers (mock,
+	// batch) still flag the output "streamed" while emitting no chunks, so fall
+	// through and render a self-contained triple when nothing was streamed.
+	r.mu.Lock()
+	streamed, _ := o.Metadata["streamed"].(bool)
+	alreadyRendered := streamed && r.textStreamed
+	r.textStreamed = false
+	if alreadyRendered {
+		r.mu.Unlock()
+		return
+	}
+	role := sanitizeRole(o.Role)
+	r.textSeq++
+	id := messageID(r.runID, r.textSeq)
+	r.messages = append(r.messages, agui.Message{ID: id, Role: role, Content: o.Content})
+	r.mu.Unlock()
+	r.queue(agui.NewTextMessageStart(id, role))
+	r.queue(agui.NewTextMessageContent(id, o.Content))
+	r.queue(agui.NewTextMessageEnd(id))
+}
+
+// onToolCall maps tool.call to ToolCallStart + ToolCallArgs + ToolCallEnd. The
+// arguments are already fully resolved on the bus (not streamed), so the three
+// events are emitted together and the id is tracked so tool.result can be
+// correlated.
+func (r *run) onToolCall(tc events.ToolCall) {
+	r.mu.Lock()
+	r.openTools[tc.ID] = true
+	r.mu.Unlock()
+
+	r.queue(agui.NewToolCallStart(tc.ID, tc.Name))
+	if len(tc.Arguments) > 0 {
+		if args, err := json.Marshal(tc.Arguments); err == nil {
+			r.queue(agui.NewToolCallArgs(tc.ID, string(args)))
+		}
+	}
+	r.queue(agui.NewToolCallEnd(tc.ID))
+}
+
+// onToolResult maps tool.result to ToolCallResult, closing an open tool call if
+// tool.call did not already do so.
+func (r *run) onToolResult(tr events.ToolResult) {
+	content := tr.Output
+	if tr.Error != "" {
+		content = tr.Error
+	}
+	msgID := messageID(r.runID, 0) + "-tool-" + tr.ID
+
+	r.mu.Lock()
+	if r.openTools[tr.ID] {
+		delete(r.openTools, tr.ID)
+	}
+	r.messages = append(r.messages, agui.Message{
+		ID:         msgID,
+		Role:       "tool",
+		Content:    content,
+		ToolCallID: tr.ID,
+	})
+	r.mu.Unlock()
+
+	r.queue(agui.NewToolCallResult(msgID, tr.ID, content))
+}
+
+// onThinkingStep maps thinking.step to a Reasoning section. A ReasoningStart is
+// opened lazily on the first step and closed at turn end.
+func (r *run) onThinkingStep(s events.ThinkingStep) {
+	if s.Content == "" {
+		return
+	}
+	r.mu.Lock()
+	openStart := !r.reasoningOpen
+	r.reasoningOpen = true
+	r.mu.Unlock()
+	if openStart {
+		r.queue(agui.NewReasoningStart())
+	}
+	r.queue(agui.NewReasoningMessageContent(s.Content))
+}
+
+// onCustom rides any Nexus-specific bus event that has no canonical AG-UI
+// equivalent (workflow.progress, subagent.*, code.exec.stdout, ...) as a
+// Custom event. The Custom name is the bus event type and the value is the
+// JSON-encoded payload. This is the single, consistent superset chosen for
+// non-canonical events (see docs/src/plugins/io-agui.md).
+func (r *run) onCustom(eventType string, payload any) {
+	value, err := json.Marshal(payload)
+	if err != nil {
+		value = []byte("null")
+	}
+	r.queue(agui.NewCustom(eventType, value))
+}
+
+// stepName derives a stable, human-readable step name from a turn.
+func stepName(t events.TurnInfo) string {
+	if t.TurnID != "" {
+		return t.TurnID
+	}
+	return "turn"
+}
+
+// sanitizeRole constrains any Nexus-derived role to the closed set of roles the
+// AG-UI Message/TextMessage schema permits (developer|system|assistant|user|
+// tool). The official @ag-ui/client validates roles with a Zod literal union and
+// rejects the entire stream on any value outside that set — Nexus uses roles
+// such as "error" for failed LLM calls / guardrail output that would otherwise
+// break the client. Unknown, empty, and "error" roles all map to "assistant" so
+// the content stays visible to the user as assistant text rather than being
+// dropped or terminating the run.
+func sanitizeRole(role string) string {
+	switch role {
+	case "developer", "system", "assistant", "user", "tool":
+		return role
+	default:
+		return "assistant"
+	}
+}
+
+// messageID builds a deterministic message id for a run and sequence number.
+func messageID(runID string, seq int) string {
+	if runID == "" {
+		runID = "run"
+	}
+	if seq <= 0 {
+		return runID + "-msg"
+	}
+	return runID + "-msg-" + itoa(seq)
+}
+
+// itoa is a tiny int->string helper avoiding an fmt import in the hot path.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}

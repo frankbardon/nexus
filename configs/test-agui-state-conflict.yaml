@@ -1,0 +1,68 @@
+# Test: nexus.io.agui shared-state conflict / ordering (E3-S3), end to end.
+#
+# Proves the documented "client-state-seeds-then-agent-wins" semantics. The
+# client seeds scene "board" with {"title":"Client","owner":"alice"} on
+# RunAgentInput.state. The seed is applied BEFORE the run's io.input, so it lands
+# in both the initial StateSnapshot and the scene store. The agent then patches
+# the same scene_id with {"title":"Agent"}: last-writer wins on "title" while the
+# scene store's shallow-merge preserves the client's "owner". The mutation flows
+# back out as a StateDelta, so snapshot + delta reconstructs the merged document.
+#
+# The mock agent runs a two-response turn:
+#   1. scene_patch scene_id=board patch={"title":"Agent"}  -> agent-wins delta
+#   2. final content closing the turn.
+#
+# nexus.io.test supplies mock_responses only (no scripted inputs); the AG-UI POST
+# is the sole driver. Remove mock_responses to run live (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIState_Conflict
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.scene
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - tool_calls:
+          - name: scene_patch
+            arguments: '{"scene_id":"board","patch":{"title":"Agent"}}'
+      - content: "Board title updated."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+    emit_state: true
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Edit scene state with scene_patch."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

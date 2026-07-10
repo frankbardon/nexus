@@ -7,6 +7,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 
 	// Agent plugins.
+	"github.com/frankbardon/nexus/plugins/agents/aguiremote"
 	delegateagent "github.com/frankbardon/nexus/plugins/agents/delegate"
 	"github.com/frankbardon/nexus/plugins/agents/orchestrator"
 	"github.com/frankbardon/nexus/plugins/agents/planexec"
@@ -23,6 +24,7 @@ import (
 	hitlsynthplugin "github.com/frankbardon/nexus/plugins/control/hitl_synthesizer"
 
 	// IO plugins.
+	aguiplugin "github.com/frankbardon/nexus/plugins/io/agui"
 	brokerplugin "github.com/frankbardon/nexus/plugins/io/broker"
 	browserplugin "github.com/frankbardon/nexus/plugins/io/browser"
 	oneshotplugin "github.com/frankbardon/nexus/plugins/io/oneshot"
@@ -150,6 +152,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.agent.orchestrator", orchestrator.New)
 	r.Register("nexus.agent.postures", postures.New)
 	r.Register("nexus.agent.subagent", subagent.New)
+	r.Register("nexus.agent.agui_remote", aguiremote.New)
 	r.Register("nexus.scene", sceneplugin.New)
 
 	// Control
@@ -159,6 +162,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	// IO
 	r.Register("nexus.io.tui", tuiplugin.New)
 	r.Register("nexus.io.browser", browserplugin.New)
+	r.Register("nexus.io.agui", aguiplugin.New)
 	r.Register("nexus.io.broker", brokerplugin.New)
 	r.Register("nexus.io.realtime", realtimeplugin.New)
 	r.Register("nexus.io.voice", voiceplugin.New)

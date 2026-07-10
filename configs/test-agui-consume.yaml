@@ -1,0 +1,77 @@
+# Test: nexus.agent.agui_remote consume side, end to end (loopback serve↔consume).
+#
+# This is the CALLER engine. Its ReAct agent is driven (mock LLM) to invoke the
+# delegate_agui_remote tool that nexus.agent.agui_remote registers for a remote
+# AG-UI agent. The remote endpoint is a loopback nexus.io.agui SERVE instance
+# booted separately by the integration test (configs/test-agui-serve.yaml on
+# 127.0.0.1:18190). The delegate streams that remote run over the AG-UI wire,
+# maps its events onto this engine's bus, and returns the remote outcome as the
+# tool.result the ReAct loop consumes before closing the turn.
+#
+# nexus.io.test supplies the scripted user input AND the mock LLM responses so
+# no API key is needed:
+#   1. tool_call delegate_agui_remote — hands the subtask to the remote agent.
+#   2. final content — closes the caller's turn after the tool.result returns.
+#
+# The remote endpoint URL is overridden per-test via copyConfig so the port
+# stays in lockstep with the serve config.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIConsume
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.agui_remote
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Ask the remote agent what time it is."
+    input_delay: 100ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - tool_calls:
+          - name: delegate_agui_remote
+            arguments: '{"task":"What time is it?"}'
+      - content: "The remote agent reported the time."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test caller agent. Delegate to the remote AG-UI agent when asked."
+
+  nexus.agent.agui_remote:
+    # Disable the result cache so each run genuinely hits the loopback endpoint.
+    cache: false
+    agents:
+      - name: remote
+        # Overridden per-test with the live loopback URL.
+        endpoint: "http://127.0.0.1:18190/agui"
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 20
+    persist: false

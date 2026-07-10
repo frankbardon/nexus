@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.agui_remote.json",
+  "title": "nexus.agent.agui_remote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "properties": {
+    "cache": {
+      "type": "boolean",
+      "description": "Set false to disable result caching entirely. Defaults to true."
+    },
+    "cache_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "In-process LRU cache capacity for remote-agent results. Defaults to 128. Zero disables eviction."
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default per-call timeout (seconds) for every remote agent. Overridable per agent and per call. Defaults to 120."
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Remote AG-UI agents to expose as delegate/subagent tools.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "endpoint"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-friendly identifier for the remote agent; used to derive the default tool name."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Full AG-UI POST endpoint URL (e.g. https://host/agui)."
+          },
+          "tool_name": {
+            "type": "string",
+            "description": "Override the LLM-facing tool name. Defaults to 'delegate_agui_<name>'."
+          },
+          "description": {
+            "type": "string",
+            "description": "Override the tool description shown to the LLM."
+          },
+          "bearer_token": {
+            "type": "string",
+            "description": "Static bearer token for the Authorization header. Prefer bearer_token_env to keep secrets out of config files."
+          },
+          "bearer_token_env": {
+            "type": "string",
+            "description": "Name of an environment variable holding the bearer token. Read at Init; takes effect only when bearer_token is unset."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Per-agent default timeout (seconds), overriding the plugin-level default."
+          }
+        }
+      }
+    }
+  }
+}

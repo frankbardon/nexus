@@ -1,0 +1,71 @@
+# Test: nexus.io.agui outbound shared-state sync (E3-S1 / E3-S3), end to end.
+#
+# With emit_state: true the AG-UI transport mirrors the session's scene store as
+# an AG-UI shared-state document: a StateSnapshot rides the run right after
+# RunStarted, and every scene mutation during the run emits an ordered StateDelta
+# (RFC 6902 JSON Patch). Applying the snapshot + deltas in order reconstructs the
+# final state document (keyed by scene_id).
+#
+# The mock agent runs a three-response turn that mutates the scene store so the
+# deltas are deterministic without a real LLM or API key:
+#   1. scene_create scene_id=board  -> the first StateDelta adds /board
+#   2. scene_patch  scene_id=board  -> the second StateDelta replaces /board
+#   3. final content closing the turn
+#
+# nexus.io.test supplies mock_responses only (no scripted inputs); the AG-UI POST
+# is the sole driver. Remove mock_responses to run live (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIState_Outbound
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.scene
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - tool_calls:
+          - name: scene_create
+            arguments: '{"scene_id":"board","content":{"title":"Sprint","tasks":["design"]}}'
+      - tool_calls:
+          - name: scene_patch
+            arguments: '{"scene_id":"board","patch":{"status":"active"}}'
+      - content: "Board created and activated."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+    emit_state: true
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use scene tools to build structured output."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

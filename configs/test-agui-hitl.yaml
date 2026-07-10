@@ -1,0 +1,73 @@
+# Test: nexus.io.agui HITL interrupt/resume across a virtual run, end to end.
+#
+# One Nexus turn spans TWO AG-UI runs. In run 1 the (mocked) agent calls the
+# ask_user tool; the nexus.control.hitl plugin emits hitl.requested and parks
+# the in-process agent waiting on hitl.responded. The AG-UI plugin ends run 1's
+# SSE stream per the terminal-run model — StateSnapshot + MessagesSnapshot +
+# RunFinished(interrupt) — WITHOUT unblocking the agent. A continuation
+# RunAgentInput carrying resume[] (same threadId, new runId) resolves the
+# interrupt: the plugin emits hitl.responded, the parked agent unblocks, consumes
+# the next mock response, and run 2 completes normally.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses (mock_responses) so
+# no API key is needed — it has no scripted inputs; the agui POST is the sole
+# driver. Remove the mock_responses block to run live (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIServe_HITL
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.hitl
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    # Two mock LLM responses drive the two-run, one-turn cycle:
+    #   1. Tool call: ask_user (mode=choices) — parks the agent on hitl and ends
+    #      run 1 with an interrupt outcome.
+    #   2. Final content message closing the turn after the resume unblocks it.
+    mock_responses:
+      - tool_calls:
+          - name: ask_user
+            arguments: '{"prompt":"Which environment should I deploy to?","mode":"choices","choices":[{"id":"staging","label":"Staging"},{"id":"prod","label":"Production"}],"default_choice_id":"staging"}'
+      - content: "Deploying to staging as you selected."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use the ask_user tool to confirm before acting."
+
+  nexus.control.hitl:
+    registry:
+      enabled: false
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

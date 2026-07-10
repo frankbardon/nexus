@@ -160,17 +160,38 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 func (p *Plugin) handleCreate(tc events.ToolCall, ev engine.Event[any]) {
 	schema, _ := tc.Arguments["schema"].(string)
 	initial := tc.Arguments["content"]
-	handle, err := p.store.Create(p.sessionID, schema, initial, ev.Causation.AgentID)
+	// An optional scene_id lets a caller (the AG-UI inbound-state reconciler,
+	// E3-S2) seed a scene under a known id so a subsequent scene_get finds it.
+	// When the id already exists this is a patch, not a create, so the existing
+	// content is preserved and merged (matching scene_patch semantics).
+	id, _ := tc.Arguments["scene_id"].(string)
+	if id != "" {
+		if _, gErr := p.store.Get(p.sessionID, id); gErr == nil {
+			p.handlePatch(events.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Name,
+				TurnID:    tc.TurnID,
+				Arguments: map[string]any{"scene_id": id, "patch": initial},
+			}, ev)
+			return
+		}
+	}
+	handle, err := p.store.CreateWithID(p.sessionID, id, schema, initial, ev.Causation.AgentID)
 	if err != nil {
 		p.respondError(tc, err.Error())
 		return
 	}
+	// content carries the scene's full materialized content so bus consumers
+	// (e.g. the AG-UI transport's shared-state sync) can track scene state
+	// without going through a tool call. It is the post-create content, which
+	// for a create is the initial value.
 	_ = p.bus.Emit("scene.created", map[string]any{
 		"session_id": handle.SessionID,
 		"scene_id":   handle.ID,
 		"schema":     handle.Schema,
 		"version":    handle.Version,
 		"agent_id":   ev.Causation.AgentID,
+		"content":    p.currentContent(handle.ID),
 	})
 	p.journalEvent("created", handle, initial, ev.Causation.AgentID)
 	body, _ := json.Marshal(handle)
@@ -189,11 +210,16 @@ func (p *Plugin) handlePatch(tc events.ToolCall, ev engine.Event[any]) {
 		p.respondError(tc, err.Error())
 		return
 	}
+	// content carries the scene's full materialized content AFTER the patch is
+	// applied (the scene store's patch semantics are shallow-merge, not RFC
+	// 6902, so consumers that need an RFC 6902 delta diff the full content
+	// themselves). See scene.created for rationale.
 	_ = p.bus.Emit("scene.patched", map[string]any{
 		"session_id": handle.SessionID,
 		"scene_id":   handle.ID,
 		"version":    handle.Version,
 		"agent_id":   ev.Causation.AgentID,
+		"content":    p.currentContent(handle.ID),
 	})
 	p.journalEvent("patched", handle, patch, ev.Causation.AgentID)
 	body, _ := json.Marshal(handle)
@@ -230,6 +256,17 @@ func (p *Plugin) handleDelete(tc events.ToolCall, ev engine.Event[any]) {
 	})
 	p.journalEvent("deleted", scene.SceneHandle{ID: id, SessionID: p.sessionID}, nil, ev.Causation.AgentID)
 	p.respondOK(tc, `{"deleted":true}`)
+}
+
+// currentContent returns the scene's current materialized content, or nil if
+// the scene cannot be read. It is used to attach the post-mutation content to
+// scene.created / scene.patched bus events.
+func (p *Plugin) currentContent(id string) any {
+	sc, err := p.store.Get(p.sessionID, id)
+	if err != nil {
+		return nil
+	}
+	return sc.Content
 }
 
 func (p *Plugin) respondOK(tc events.ToolCall, body string) {
@@ -350,6 +387,10 @@ func builtinTools() []events.ToolDef {
 					},
 					"content": map[string]any{
 						"description": "Initial content. Free-form — the runtime is schema-agnostic.",
+					},
+					"scene_id": map[string]any{
+						"type":        "string",
+						"description": "Optional explicit scene id. When omitted the store assigns one. When supplied and a scene with that id already exists, the content is merged as a patch instead.",
 					},
 				},
 				"required": []string{"schema"},

@@ -1,0 +1,68 @@
+# Test: nexus.io.agui inbound shared-state seeding (E3-S2 / E3-S3), end to end.
+#
+# A client POSTs RunAgentInput.state — a scene-keyed shared-state document — to
+# seed state the agent then observes within the run. With emit_state: true the
+# transport applies the seed BEFORE the initial StateSnapshot: it updates the
+# outbound mirror (so the snapshot reflects the client's view) AND pushes each
+# scene into the scene store via a scene_create tool.invoke, so the agent reads
+# the seed through the normal scene_get / scene_list tools.
+#
+# The mock agent runs a two-response turn:
+#   1. scene_get scene_id=board  -> the ToolCallResult content carries the seed,
+#      proving the agent observed the client-authored state.
+#   2. final content closing the turn.
+#
+# nexus.io.test supplies mock_responses only (no scripted inputs); the AG-UI POST
+# is the sole driver. Remove mock_responses to run live (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIState_Inbound
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.scene
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - tool_calls:
+          - name: scene_get
+            arguments: '{"scene_id":"board"}'
+      - content: "The board is titled Seeded Board."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+    emit_state: true
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Read scene state with scene_get."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

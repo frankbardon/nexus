@@ -872,8 +872,8 @@ in the journal.
 
 | Event Type | Payload | Description |
 |------------|---------|-------------|
-| `scene.created` | map | New Scene created. Keys: `session_id`, `scene_id`, `schema`, `version`, `agent_id`. |
-| `scene.patched` | map | Scene content updated. Keys: `session_id`, `scene_id`, `version`, `agent_id`. |
+| `scene.created` | map | New Scene created. Keys: `session_id`, `scene_id`, `schema`, `version`, `agent_id`, `content` (initial content). |
+| `scene.patched` | map | Scene content updated. Keys: `session_id`, `scene_id`, `version`, `agent_id`, `content` (full post-merge content). |
 | `scene.deleted` | map | Scene removed. Keys: `session_id`, `scene_id`, `agent_id`. |
 
 ## Tool Stream Events

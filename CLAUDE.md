@@ -72,6 +72,7 @@ plugins/
   agents/orchestrator/   # Decompose → parallel workers → synthesis pipeline
   agents/postures/       # AgentPosture registry: loads YAML from scan_dirs, fsnotify hot reload, advertises posture.registry capability
   agents/delegate/       # Sub-agent invocation primitive: 'delegate' tool, posture-driven budgets+depth+cache
+  agents/aguiremote/     # Remote AG-UI agents as delegate targets: registers a delegate_agui_<name> tool per configured endpoint, runs it via pkg/agui/aguiclient, maps the SSE run onto the bus
   scene/                 # Scene store: scene_create/patch/get/list/delete tools, JSONL patch journal under <session>/plugins/nexus.scene/
   apps/helloworld/       # Built-in hello-world placeholder agent
   control/cancel/        # control.cancel capability + /resume slash command
@@ -102,6 +103,7 @@ plugins/
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
+  io/agui/               # AG-UI serve transport: POST /agui accepts RunAgentInput, streams canonical AG-UI SSE (RunStarted→text/tool/reasoning→RunFinished); external-facing interop via pkg/agui wire, loopback+bearer+CORS
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
   memory/summary_buffer/ # Inline auto-compacting history; keeps recent N verbatim, LLM-summarizes older (memory.history + memory.compaction)
