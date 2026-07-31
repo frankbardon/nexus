@@ -1,5 +1,5 @@
 // Package report aggregates per-case Results into a stable JSON shape +
-// human-readable summary. Phase 2's baseline differ depends on this shape
+// human-readable summary. The baseline differ depends on this shape
 // being stable — schema_version below is bumped explicitly.
 package report
 
@@ -17,7 +17,7 @@ import (
 // SchemaVersion of the report JSON. Bump on breaking shape changes.
 const SchemaVersion = "1"
 
-// Report is the top-level eval-run report. Stable JSON shape — Phase 2's
+// Report is the top-level eval-run report. Stable JSON shape — the
 // baseline differ keys off field names exactly.
 type Report struct {
 	SchemaVersion string       `json:"schema_version"`

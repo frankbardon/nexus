@@ -2,7 +2,7 @@
 // directly via os/exec against the host kernel. Useful as the fallback for
 // `tools/shell` until a stricter backend (gVisor / Firecracker / landlock)
 // lands. Honors `allowed_commands`, `working_dir`, `path_dirs`, and the
-// legacy env-restriction flag.
+// env-restriction flag.
 package host
 
 import (

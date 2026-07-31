@@ -171,7 +171,7 @@ func (p *Plugin) handleEmbeddings(event engine.Event[any]) {
 	req.Model = model
 
 	// Build the polymorphic input list. EmbeddingsInput is preferred; fall
-	// back to legacy Texts when Inputs is empty.
+	// back to Texts when Inputs is empty.
 	cohereInputs := make([]cohereInput, 0)
 	if len(req.Inputs) > 0 {
 		for i, in := range req.Inputs {

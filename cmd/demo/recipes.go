@@ -52,10 +52,10 @@ var recipes = map[string]recipeFn{
 	"tui":             runTUIRecipe,
 	"browser-ui":      runBrowserUIRecipe,
 	"embeddings-mock": runEmbeddingsMockRecipe,
-	"eval":            runEvalRecipe,       // Phase 8
-	"otel-trace":      runOTelTraceRecipe,  // Phase 8
-	"voice":           runVoiceRecipe,      // Phase 9
-	"fanout-vote":     runFanoutVoteRecipe, // Phase 9
+	"eval":            runEvalRecipe,
+	"otel-trace":      runOTelTraceRecipe,
+	"voice":           runVoiceRecipe,
+	"fanout-vote":     runFanoutVoteRecipe,
 }
 
 // runRecipe is the entry point called from main() when argv[1]=="recipe".

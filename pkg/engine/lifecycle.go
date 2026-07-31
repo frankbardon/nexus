@@ -387,7 +387,7 @@ func (lm *LifecycleManager) storageOpener(pluginID string) func(storage.Scope) (
 // resolveSandbox builds the per-plugin sandbox.Sandbox. Plugins with a
 // `sandbox:` config block use the named backend; plugins without one fall
 // back to a default host backend, which honors no command-allowlist and is
-// effectively the legacy "exec freely" behavior. Strict-mode boot: an
+// effectively the "exec freely" behavior. Strict-mode boot: an
 // unknown backend name returns an error so the engine never silently
 // downgrades to host.
 func (lm *LifecycleManager) resolveSandbox(pluginID string, pluginCfg map[string]any) (sandbox.Sandbox, error) {

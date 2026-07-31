@@ -12,7 +12,7 @@ import (
 // SyncLLM emits an llm.request and synchronously returns the matching
 // llm.response. It is the shared implementation behind every blocking sub-agent
 // LLM call (delegate runtime, subagent worker loop, and any future blocking
-// caller) — the pattern was previously copy-pasted across both call sites.
+// caller).
 //
 // Semantics:
 //

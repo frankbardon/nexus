@@ -346,8 +346,8 @@ func synthesizeAssertionsYAML(o observed) ([]byte, error) {
 		deterministic.Content = append(deterministic.Content, entry)
 	}
 
-	// Semantic block: empty list with a TODO. Phase 5 will turn this into a
-	// real rubric authoring surface.
+	// Semantic block: empty list with a TODO placeholder for a real rubric
+	// authoring surface.
 	semantic := &yaml.Node{
 		Kind:        yaml.SequenceNode,
 		HeadComment: "Semantic assertions (Phase 5) — LLM-judge rubrics.\nTODO: add an llm_judge rubric here once the case stabilizes.",

@@ -146,7 +146,7 @@ func TestRunAgentInputRoundTrip(t *testing.T) {
 
 func TestRunAgentInputStatePresent(t *testing.T) {
 	// A client-authored shared-state document must decode into State off the
-	// "state" wire tag (E3-S2 inbound state).
+	// "state" wire tag (inbound state).
 	raw := `{"threadId":"t","runId":"r","state":{"scene_1":{"title":"draft"}}}`
 	in, err := DecodeRunAgentInput([]byte(raw))
 	if err != nil {

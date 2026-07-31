@@ -33,7 +33,7 @@ const (
 	compilerYaegiHost compilerKind = "yaegi-host"
 	// compilerYaegiWasm routes the snippet through ctx.Sandbox to an
 	// embedded Yaegi-on-Wasm runner. Capability-gated, no `tools.*` or
-	// skill helpers in v1; bridge SDK (`nexus_sdk/*`) follows in Phase 3.
+	// skill helpers in v1; a bridge SDK (`nexus_sdk/*`) may follow later.
 	compilerYaegiWasm compilerKind = "yaegi-wasm"
 )
 

@@ -14,7 +14,7 @@ import (
 )
 
 // agui_state_test.go proves the bidirectional AG-UI shared-state feature
-// (E3-S1/S2/S3) end to end through the pure-Go conformance client, with mocked
+// end to end through the pure-Go conformance client, with mocked
 // LLM responses (no API key). The transport mirrors the session's scene store as
 // an AG-UI shared-state document keyed by scene_id: a StateSnapshot rides the run
 // right after RunStarted and every scene mutation emits an ordered StateDelta

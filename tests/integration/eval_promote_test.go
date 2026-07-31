@@ -18,7 +18,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/eval/runner"
 )
 
-// TestEvalPromote_RoundTrip is the headline acceptance test for Phase 3:
+// TestEvalPromote_RoundTrip is the headline acceptance test:
 //
 //  1. Synthesize a "session directory" from the build-error-fix seed case's
 //     journal and config — exactly the on-disk shape ~/.nexus/sessions/<id>

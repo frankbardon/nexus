@@ -16,7 +16,7 @@ import (
 // exit code 0, that all 5 seed cases land in the report, and that every
 // case passes.
 //
-// This is the headline acceptance test for Phase 2: it runs the entire
+// This is the headline acceptance test: it runs the entire
 // eval surface end-to-end through the binary, exactly as a CI pipeline
 // would. No API key required — all cases are mock-mode.
 func TestEvalCLI_RunAllCases(t *testing.T) {

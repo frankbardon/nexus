@@ -100,8 +100,8 @@ func validateRunSignature(file *ast.File) error {
 }
 
 // rejectForbiddenStatements walks the AST and fails on any `go` statement,
-// which would spawn a goroutine inside the interpreter. Phase 1 disallows
-// goroutines; revisit if/when we ship structured concurrency.
+// which would spawn a goroutine inside the interpreter. Goroutines are
+// disallowed; revisit if/when we ship structured concurrency.
 func rejectForbiddenStatements(file *ast.File) error {
 	var found error
 	ast.Inspect(file, func(n ast.Node) bool {

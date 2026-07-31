@@ -10,8 +10,8 @@ import (
 )
 
 // Assertions is the in-memory schema of assertions.yaml. All deterministic
-// kinds live under `deterministic:`. Phase 1 has no semantic kinds yet — the
-// `semantic:` block is parsed and stored as raw maps so a future phase can
+// kinds live under `deterministic:`. There are no semantic kinds yet — the
+// `semantic:` block is parsed and stored as raw maps so a later revision can
 // add LLM-judge support without a breaking migration.
 type Assertions struct {
 	Deterministic []Assertion      `yaml:"-"`

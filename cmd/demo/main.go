@@ -162,7 +162,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		// nexus.agent.react: ReAct loop (think→tool→observe).
 		// nexus.control.cancel: /resume slash command + cancel capability.
 		// IO transports. wails is the desktop/Wails default; the others
-		// are alternative transports used by recipes (Phase 7) so the
+		// are alternative transports used by recipes so the
 		// same plugin set can run as TUI, HTTP/WS server, or scripted
 		// oneshot without changing factory wiring.
 		"nexus.io.wails":   wailsio.New,
@@ -173,7 +173,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		// (embeddings-mock, eval) where the recipe drives the bus
 		// directly and never goes through a chat loop.
 		"nexus.io.test": testio.New,
-		// io.voice + io.realtime (Phase 9): voice loop with VAD/ASR/TTS
+		// io.voice + io.realtime: voice loop with VAD/ASR/TTS
 		// and the underlying low-latency WebSocket transport. The voice
 		// plugin emits audio frames over realtime; both plugins are
 		// loaded together when activated.
@@ -185,7 +185,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.agent.subagent":     subagentplugin.New,
 		"nexus.control.cancel":     cancelplugin.New,
 
-		// ─── Cross-cutting human-in-the-loop (Phase 1) ─────────────────
+		// ─── Cross-cutting human-in-the-loop ───────────────────────────
 		// hitl: owns the LLM-facing `ask_user` tool and the
 		// hitl.requested/hitl.responded protocol. Any plugin (approval
 		// gates, memory writes) can pause the loop and ask the user.
@@ -195,7 +195,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.control.hitl":             hitlplugin.New,
 		"nexus.control.hitl_synthesizer": hitlsynth.New,
 
-		// ─── Cross-cutting system var injection (Phase 1) ──────────────
+		// ─── Cross-cutting system var injection ────────────────────────
 		// dynvars: substitutes {{date}}, {{cwd}}, {{session_dir}} etc.
 		// into system prompts at request time so prompts always reflect
 		// the live environment without forcing the operator to template
@@ -212,7 +212,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.llm.gemini":        gemini.New,
 		"nexus.provider.fallback": fallbackprovider.New,
 		"nexus.provider.fanout":   fanoutprovider.New,
-		// llm/batch (Phase 7): cross-provider batch coordinator wrapping
+		// llm/batch: cross-provider batch coordinator wrapping
 		// Anthropic Messages Batches and OpenAI Batch APIs. Used by the
 		// `batch-briefs` recipe to queue dozens of brief generations
 		// overnight instead of running them serially.
@@ -232,13 +232,13 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.memory.vector":            vectormemory.New,
 		"nexus.memory.tool_result_clear": toolresultclear.New,
 		"nexus.memory.tool_def_pruner":   tooldefpruner.New,
-		// compaction (Phase 5): event-driven external compaction
+		// compaction: event-driven external compaction
 		// orchestrator. Unlike summary_buffer (which compacts inline),
 		// compaction emits memory.compacted events that other history
 		// buffers adopt — useful when the orchestrator's synth pass
 		// processes a long worker-output transcript.
 		"nexus.memory.compaction": compactionmemory.New,
-		// topic_pruner (Phase 5): drops earlier turns when the user
+		// topic_pruner: drops earlier turns when the user
 		// pivots to a new topic. Embedding-based similarity check;
 		// works with any embeddings.provider.
 		"nexus.memory.topic_pruner": topicpruner.New,
@@ -255,8 +255,8 @@ func commonFactories() map[string]func() engine.Plugin {
 		// rag.retrieved before the user-visible response is emitted.
 		// embeddings.openai is the default text embedder. cohere_multimodal
 		// is a separate embeddings.provider — it embeds images alongside
-		// text and is used by the Multimodal Reader agent (Phase 6).
-		// embeddings.mock is for CI / hermetic recipe testing (Phase 7).
+		// text and is used by the Multimodal Reader agent.
+		// embeddings.mock is for CI / hermetic recipe testing.
 		"nexus.embeddings.openai":            openaiembeddings.New,
 		"nexus.embeddings.cohere_multimodal": coheremultimodal.New,
 		"nexus.embeddings.mock":              mockembeddings.New,
@@ -271,7 +271,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.tool.knowledge_search":        knowledgesearch.New,
 
 		// ─── Tools ─────────────────────────────────────────────────────
-		// shell/code_exec/opener (Phase 4) are gated behind approval_policy
+		// shell/code_exec/opener are gated behind approval_policy
 		// + tool_timeout when active. They are loaded as factories here so
 		// any agent that lists them in `plugins.active` gets them; agents
 		// that don't (Librarian/Researcher/Drafter) never instantiate them.
@@ -327,9 +327,9 @@ func commonFactories() map[string]func() engine.Plugin {
 
 		// ─── Observers ─────────────────────────────────────────────────
 		// thinking: persists LLM thinking blocks to JSONL.
-		// otel (Phase 8): exports spans via OTLP gRPC/HTTP to a
+		// otel: exports spans via OTLP gRPC/HTTP to a
 		//   collector (Jaeger, Tempo, etc.).
-		// sampler (Phase 8): writes random/failed-turn JSON snapshots
+		// sampler: writes random/failed-turn JSON snapshots
 		//   to disk for offline inspection.
 		"nexus.observe.thinking": thinkingobs.New,
 		"nexus.observe.otel":     otelobs.New,
@@ -338,8 +338,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		// ─── Gates ─────────────────────────────────────────────────────
 		// Most gates are per-agent opt-in (in their `plugins.active`
 		// list). All registered factories are reusable across agents.
-		// stop_words / tool_timeout were added in Phase 1 as universal
-		// guard-rails.
+		// stop_words / tool_timeout are universal guard-rails.
 		"nexus.gate.endless_loop":     endlessloopgate.New,
 		"nexus.gate.content_safety":   contentsafetygate.New,
 		"nexus.gate.token_budget":     tokenbudgetgate.New,
@@ -351,7 +350,7 @@ func commonFactories() map[string]func() engine.Plugin {
 		"nexus.gate.tool_filter":      toolfiltergate.New,
 		"nexus.gate.stop_words":       stopwordsgate.New,
 		"nexus.gate.tool_timeout":     tooltimeoutgate.New,
-		// approval_policy (Phase 3): config-driven HITL gate. Match a
+		// approval_policy: config-driven HITL gate. Match a
 		// tool name → render an approval prompt → wait for the user's
 		// pick. Drafter uses this on file_write so unintended overwrites
 		// require explicit confirmation.

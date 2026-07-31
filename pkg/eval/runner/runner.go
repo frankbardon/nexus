@@ -31,7 +31,7 @@ type Result struct {
 	Pass       bool                       `json:"pass"`
 	Assertions []evalcase.AssertionResult `json:"assertions"`
 	// Counts is a per-event-type histogram for the observed (replayed)
-	// stream. Useful for the Phase 2 baseline differ.
+	// stream. Useful for the baseline differ.
 	Counts map[string]int `json:"counts,omitempty"`
 	// JournalDir is the case's golden journal dir, echoed back for the
 	// reporter's convenience.

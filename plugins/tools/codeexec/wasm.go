@@ -11,8 +11,8 @@ import (
 // runScriptWasm dispatches a run_code invocation through ctx.Sandbox to the
 // Wasm backend. v1 capability surface inside Wasm is intentionally narrow:
 // no `tools.*`, no `parallel.*`, no skill helpers — only the configured
-// stdlib whitelist. The bridge SDK (`nexus_sdk/{http,fs,exec,env,tools}`)
-// arrives in Phase 3 and reopens those affordances.
+// stdlib whitelist. A bridge SDK (`nexus_sdk/{http,fs,exec,env,tools}`)
+// may reopen those affordances later.
 func (p *Plugin) runScriptWasm(tc events.ToolCall, script string) {
 	started := time.Now()
 

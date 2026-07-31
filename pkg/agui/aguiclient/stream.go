@@ -12,8 +12,8 @@ import (
 // Stream is a live, incremental AG-UI run. Where Run buffers the whole SSE
 // stream before returning, Stream hands the caller each decoded event as it
 // arrives on the Events channel while still accumulating the full ordered
-// sequence into a terminal Result. This is the shape the Phase-4 delegate
-// integration (E4-S2) uses to pump remote AG-UI events onto the Nexus bus in
+// sequence into a terminal Result. This is the shape the delegate
+// integration uses to pump remote AG-UI events onto the Nexus bus in
 // real time and then read the final outcome (including an interrupt) once the
 // stream closes.
 //

@@ -42,7 +42,7 @@ func runEval(args []string) int {
 		printEvalHelp()
 		return 0
 	}
-	// Early sniff for --inspect-mode at the top level (Phase 5). The flag
+	// Early sniff for --inspect-mode at the top level. The flag
 	// is mutually exclusive with subcommands; combining them surfaces as
 	// INVALID_REQUEST so the harness sees a structured error.
 	if hasInspectMode(args) {

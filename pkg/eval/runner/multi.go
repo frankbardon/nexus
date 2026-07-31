@@ -3,7 +3,7 @@
 // raw config bytes — not a parsed Config), and returns one combined Report.
 //
 // The single-case Run remains the workhorse. RunMany is a thin coordinator:
-// fan out, collect, fold into the Phase 1 report shape (no schema bump).
+// fan out, collect, fold into the report shape (no schema bump).
 package runner
 
 import (

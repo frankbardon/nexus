@@ -80,7 +80,7 @@ func runOTelTraceRecipe(ctx context.Context, args []string) error {
 	// io.input directly — same effect, simpler.
 	// (We can't use eng.Bus.Emit("io.input", events.IOInput{...}) here
 	// without importing more types; the simpler path is to wait for
-	// the session timeout. Phase 8 ships the wiring; the actual span
+	// the session timeout. The actual span
 	// tree is the operator's reward for setting up Jaeger.)
 	_ = *prompt
 

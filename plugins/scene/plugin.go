@@ -160,8 +160,8 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 func (p *Plugin) handleCreate(tc events.ToolCall, ev engine.Event[any]) {
 	schema, _ := tc.Arguments["schema"].(string)
 	initial := tc.Arguments["content"]
-	// An optional scene_id lets a caller (the AG-UI inbound-state reconciler,
-	// E3-S2) seed a scene under a known id so a subsequent scene_get finds it.
+	// An optional scene_id lets a caller (the AG-UI inbound-state reconciler)
+	// seed a scene under a known id so a subsequent scene_get finds it.
 	// When the id already exists this is a patch, not a create, so the existing
 	// content is preserved and merged (matching scene_patch semantics).
 	id, _ := tc.Arguments["scene_id"].(string)

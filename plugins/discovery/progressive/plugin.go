@@ -257,7 +257,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// full depth = legacy behavior, pass through.
+	// full depth = pass-through, no progressive discovery.
 	if p.defaultDepth == "full" {
 		return
 	}

@@ -1,6 +1,6 @@
 package engine
 
-// Phase 5 — Engine.ReloadConfig tests.
+// Engine.ReloadConfig tests.
 //
 // We exercise ReloadConfig directly against an Engine struct stitched
 // together by hand rather than going through engine.New + Boot. The

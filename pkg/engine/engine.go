@@ -498,12 +498,11 @@ func (e *Engine) acquireSessionLock() error {
 // so the live agent restarts the turn from scratch. Idempotent — a
 // well-formed journal (no partial turn) is a no-op.
 //
-// Phase 3 minimum: restart the partial turn rather than mid-step resume.
-// The agent's memory has already been restored via replayHistory; the
-// only missing piece is the in-flight bus state, which is reconstructed
-// by re-firing the input. Mid-step resume (re-emit the in-flight
-// tool.invoke after replay-stash short-circuits the completed prefix) is
-// a future PR.
+// Restarts the partial turn rather than mid-step resume. The agent's
+// memory has already been restored via replayHistory; the only missing
+// piece is the in-flight bus state, which is reconstructed by re-firing
+// the input. Mid-step resume (re-emit the in-flight tool.invoke after
+// replay-stash short-circuits the completed prefix) is not implemented.
 //
 // Caveat: re-firing the input mints fresh seqs that append to the same
 // journal alongside the orphaned partial-turn events. A subsequent
@@ -519,7 +518,7 @@ func (e *Engine) crashResumeIfPartial() error {
 		PayloadConverter: replayPayloadConverter,
 	})
 	if err != nil {
-		// Missing journal is fine — older sessions predate Phase 1.
+		// Missing journal is fine — such sessions have none.
 		return nil
 	}
 	if !coord.IsPartialTurn() {
@@ -614,10 +613,9 @@ func convertVersioned[T any](eventType string, currentVer int, payload any) (T, 
 // of calling out. The current session (the one this engine booted) writes
 // its own fresh journal — the source is read-only.
 //
-// For Phase 2, replay produces functional equivalence (same final
-// assistant outputs) rather than byte-identical event re-emission. Phase 3
-// will extend this to crash-resume, where partial-turn detection picks up
-// the live mode after replay completes.
+// Replay produces functional equivalence (same final assistant outputs)
+// rather than byte-identical event re-emission. Crash-resume extends this:
+// partial-turn detection picks up the live mode after replay completes.
 func (e *Engine) ReplaySession(ctx context.Context, sourceSessionID string) error {
 	if e.Session == nil {
 		return fmt.Errorf("engine not booted")
