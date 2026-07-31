@@ -7,8 +7,8 @@ const (
 )
 
 // MCPResourceUpdated is emitted by nexus.mcp.client when a subscribed MCP
-// resource changes upstream. No consumer is wired in Phase 1; the event is
-// plumbed so future RAG ingest, memory, or cache-invalidation plugins can
+// resource changes upstream. No consumer is wired yet; the event is
+// plumbed so RAG ingest, memory, or cache-invalidation plugins can
 // react without further core changes.
 type MCPResourceUpdated struct {
 	SchemaVersion int `json:"_schema_version"`

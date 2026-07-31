@@ -61,7 +61,7 @@ type Envelope struct {
 	EventID string `json:"event_id,omitempty"`
 	// Source is the plugin ID that emitted the event, when known.
 	Source string `json:"source,omitempty"`
-	// TraceID is reserved for cross-system correlation (otel). Empty for now.
+	// TraceID is reserved for cross-system correlation (otel).
 	TraceID string `json:"trace_id,omitempty"`
 	// ParentSeq is the seq of the event whose handler emitted this one,
 	// best-effort. Zero means no detectable parent.

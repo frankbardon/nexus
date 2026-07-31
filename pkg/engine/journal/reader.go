@@ -185,7 +185,7 @@ func (r *Reader) LastSeq() (uint64, error) {
 }
 
 // LastTurnBoundary returns the seq of the most recent agent.turn.end envelope
-// and ok=true if found. Used by the Phase 2 coordinator to detect a partial
+// and ok=true if found. Used by the coordinator to detect a partial
 // turn at boot — the unfinished turn lives between this seq and LastSeq.
 func (r *Reader) LastTurnBoundary() (uint64, bool, error) {
 	var last uint64

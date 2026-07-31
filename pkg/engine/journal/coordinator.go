@@ -71,7 +71,7 @@ type Coordinator struct {
 	// Journaled io.input events to replay, in seq order.
 	inputs []Envelope
 	// Last journaled agent.turn.end seq, captured at scan time. Used by
-	// IsPartialTurn for the Phase 3 crash-resume API.
+	// IsPartialTurn for the crash-resume API.
 	lastTurnEnd       uint64
 	lastTurnEndOk     bool
 	lastSeq           uint64
@@ -179,7 +179,7 @@ func (c *Coordinator) LastTurnBoundary() (uint64, bool) {
 }
 
 // IsPartialTurn reports whether the journal ends mid-turn — an
-// agent.turn.start without a matching agent.turn.end. Phase 3 crash-resume
+// agent.turn.start without a matching agent.turn.end. Crash-resume
 // uses this to decide whether to replay-then-continue or just replay.
 func (c *Coordinator) IsPartialTurn() bool { return c.hasUnfinishedTurn }
 
@@ -201,7 +201,7 @@ func (c *Coordinator) PartialInput() (Envelope, bool) {
 }
 
 // CompletedInputs returns inputs whose enclosing turn ended — i.e. input
-// envelopes with seq <= LastTurnBoundary. The Phase 2 / 3 replay path
+// envelopes with seq <= LastTurnBoundary. The replay path
 // uses this when it wants to replay the well-formed prefix of a journal
 // without spilling into the partial-turn tail.
 func (c *Coordinator) CompletedInputs() []Envelope {

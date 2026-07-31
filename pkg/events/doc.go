@@ -14,7 +14,7 @@
 // Versions start at 1 — Nexus is a fresh project with no historical drift
 // to encode. Field-level compatibility migrations between versions live in
 // the sibling pkg/events/compat package; the empty registry today is the
-// scaffold journal-replay code calls into when a future PR ships v2.
+// scaffold journal-replay code calls into when a new version ships.
 //
 // # The v0 == v1 deserialization rule
 //

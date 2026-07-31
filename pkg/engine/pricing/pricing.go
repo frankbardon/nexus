@@ -1,11 +1,10 @@
 // Package pricing centralizes per-model token pricing for all LLM providers.
 //
-// Each provider previously embedded its own pricing table and cost calculator.
-// That worked but made the cost CLI, multi-dimensional budget gate, and
-// router (idea 09) reach into provider-internals to compare models. This
-// package is the single source of truth: defaults shipped per provider,
-// merged with optional config overrides, plus per-provider Calc dispatch
-// that keeps the distinct cache semantics each vendor bills under.
+// It is the single source of truth: defaults shipped per provider, merged
+// with optional config overrides, plus per-provider Calc dispatch that keeps
+// the distinct cache semantics each vendor bills under. The cost CLI,
+// multi-dimensional budget gate, and router compare models through it rather
+// than reaching into provider internals.
 package pricing
 
 import (

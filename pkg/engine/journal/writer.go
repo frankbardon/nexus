@@ -345,7 +345,7 @@ func (w *Writer) writeToFile(env *Envelope) error {
 }
 
 // JournalDir returns the directory passed to NewWriter. Used by Coordinator
-// (Phase 2) and by tests.
+// and by tests.
 func (w *Writer) JournalDir() string { return w.dir }
 
 // SubscribeProjection registers a handler that fires synchronously on the

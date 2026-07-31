@@ -21,7 +21,7 @@ const (
 	CompactionTriggeredVersion         = 1
 	CompactionCompleteVersion          = 1
 
-	// Idea 30 — live context curation events.
+	// Live context curation events.
 	MemoryToolResultClearedVersion  = 1
 	MemoryToolDefPrunedVersion      = 1
 	MemoryTopicShiftDetectedVersion = 1
@@ -176,7 +176,7 @@ type CompactionComplete struct {
 	PrevCount    int       // number of messages before compaction
 }
 
-// --- Idea 30: live context curation events ---
+// --- Live context curation events ---
 
 // MemoryToolResultCleared signals that a tool result body has been replaced
 // with an envelope marker by the live curator. The call/result pairing stays
@@ -245,7 +245,7 @@ type CurationSection struct {
 
 // MemoryCurated is the envelope event emitted by every curation layer.
 // It carries the stability-impact descriptor consumed by the cache-aware
-// prompt builder (Idea 05) so cache invalidation cost is scoped.
+// prompt builder so cache invalidation cost is scoped.
 type MemoryCurated struct {
 	SchemaVersion int `json:"_schema_version"`
 

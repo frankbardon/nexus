@@ -15,9 +15,9 @@
 // `compat.Apply(eventType, recordedVersion, currentVersion, payload)`
 // before re-typing the map[string]any back into a struct via
 // `journal.PayloadAs[T]`. With the registry empty (today's state), Apply
-// is a no-op and the converter returns the payload unchanged. When a
-// future PR ships v2 of an event type, the migrator goes here and
-// replay-time data flows through it without touching the engine.
+// is a no-op and the converter returns the payload unchanged. When v2 of
+// an event type ships, the migrator goes here and replay-time data flows
+// through it without touching the engine.
 //
 // # Why it lives in its own package
 //

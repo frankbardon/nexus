@@ -2,18 +2,18 @@ package events
 
 // Schema-version constants for voice.* payloads. See doc.go.
 //
-// Voice events are forward-looking placeholders for Phase 4 of the
-// multimodal/voice IO work tracked under Idea 18. The realtime IO transport
-// (nexus.io.realtime) carries them between connected clients and the bus
-// today; nexus.io.voice will consume input chunks (run VAD + ASR) and
-// produce output chunks (TTS) once that plugin lands.
+// Voice events are forward-looking placeholders for multimodal/voice IO
+// work. The realtime IO transport (nexus.io.realtime) carries them between
+// connected clients and the bus today; nexus.io.voice will consume input
+// chunks (run VAD + ASR) and produce output chunks (TTS) once that plugin
+// lands.
 const (
 	VoiceAudioInputChunkVersion  = 1
 	VoiceAudioOutputChunkVersion = 1
 )
 
 // VoiceAudioInputChunk carries a chunk of microphone-captured audio from a
-// realtime client. Phase 4 (nexus.io.voice) consumes these, runs voice-
+// realtime client. nexus.io.voice consumes these, runs voice-
 // activity detection, and hands a final segment to ASR. The audio frame is
 // base64-encoded so the chunk can ride a JSON envelope without any binary
 // framing concerns; MIME type is supplied by the producer (typically
@@ -38,7 +38,7 @@ type VoiceAudioInputChunk struct {
 	Final bool
 }
 
-// VoiceAudioOutputChunk is emitted by Phase 4 (nexus.io.voice) when a TTS
+// VoiceAudioOutputChunk is emitted by nexus.io.voice when a TTS
 // stream produces audio for a given assistant response. The realtime IO
 // plugin forwards these to connected clients for playback.
 //

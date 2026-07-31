@@ -115,8 +115,8 @@ func TestEmitVetoable_PriorityOrder(t *testing.T) {
 
 // Equal-priority handlers must run in subscription order — the first
 // Subscribe at a given priority runs first. This is the deterministic
-// tiebreak that issue #121 introduces; before the fix, sort.Slice could
-// reorder them on every Subscribe call, silently flipping which veto wins.
+// tiebreak: without it, sort.Slice could reorder them on every Subscribe
+// call, silently flipping which veto wins.
 func TestEmitVetoable_StableTiebreakBySubscriptionOrder(t *testing.T) {
 	bus := NewEventBus()
 

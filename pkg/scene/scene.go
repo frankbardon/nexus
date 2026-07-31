@@ -60,7 +60,7 @@ type Store interface {
 }
 
 // IDedCreator is an optional extension a Store may implement to create a scene
-// under a caller-chosen id (used to seed AG-UI inbound shared state, E3-S2).
+// under a caller-chosen id (used to seed AG-UI inbound shared state).
 // Consumers type-assert for it and fall back to Create + a generated id when the
 // store does not support it. Kept off the core Store interface so existing
 // implementations need no change.
@@ -131,7 +131,7 @@ func (s *MemoryStore) Create(sessionID, schema string, initial any, agentID stri
 // CreateWithID is Create with a caller-chosen scene id. When id is empty a fresh
 // id is generated (the normal Create path). When id is non-empty it is used
 // verbatim, letting a client seed a scene under a known id (AG-UI inbound shared
-// state, E3-S2). It is additive to the Store interface — callers that only hold
+// state). It is additive to the Store interface — callers that only hold
 // a Store type-assert for the IDedCreator interface below.
 func (s *MemoryStore) CreateWithID(sessionID, id, schema string, initial any, agentID string) (SceneHandle, error) {
 	if sessionID == "" {

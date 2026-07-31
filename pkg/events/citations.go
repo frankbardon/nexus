@@ -14,7 +14,7 @@ type RetrievedChunk struct {
 	Source    string
 	DocID     string
 	ChunkIdx  string
-	TrustTier string // optional, per Idea 03
+	TrustTier string // optional
 }
 
 // RetrievalContext is emitted by knowledge_search and memory.vector after

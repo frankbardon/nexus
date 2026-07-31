@@ -10,10 +10,10 @@ var anthropicDefaults = map[string]Rates{
 	"claude-opus-4-7":           {InputPerMillion: 15.0, OutputPerMillion: 75.0},
 	"claude-sonnet-4-6":         {InputPerMillion: 3.0, OutputPerMillion: 15.0},
 	"claude-haiku-4-5-20251001": {InputPerMillion: 0.80, OutputPerMillion: 4.0},
-	// Older 4.x snapshots kept for sessions that pin a specific dated build.
+	// Dated 4.x snapshot IDs.
 	"claude-sonnet-4-20250514": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
 	"claude-opus-4-20250514":   {InputPerMillion: 15.0, OutputPerMillion: 75.0},
-	// Legacy 3.x family — present so historical journals still cost-attribute.
+	// Claude 3.x model IDs.
 	"claude-3-5-sonnet-20241022": {InputPerMillion: 3.0, OutputPerMillion: 15.0},
 	"claude-3-5-haiku-20241022":  {InputPerMillion: 0.80, OutputPerMillion: 4.0},
 	"claude-3-opus-20240229":     {InputPerMillion: 15.0, OutputPerMillion: 75.0},

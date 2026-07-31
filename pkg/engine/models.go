@@ -114,7 +114,7 @@ func (r *ModelRegistry) Resolve(role string) (ModelConfig, bool) {
 		return chain[0], true
 	}
 
-	// Backward compat: treat as raw model ID if it contains a hyphen.
+	// Treat as raw model ID if it contains a hyphen.
 	if strings.Contains(role, "-") {
 		return ModelConfig{Model: role}, true
 	}
