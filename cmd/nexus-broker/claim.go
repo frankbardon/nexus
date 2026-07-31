@@ -114,7 +114,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 
 	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
 	// claim can never spawn an instance past max_concurrent. At capacity it
-	// parks the claim in a FIFO queue (E3-S2) and proceeds when a slot frees:
+	// parks the claim in a FIFO queue and proceeds when a slot frees:
 	//
 	//   - errQueueTimeout: the claim waited past queue_wait_timeout → a distinct
 	//     503 "capacity wait timed out" (told apart from the immediate

@@ -30,7 +30,7 @@ var errQueueTimeout = errors.New("capacity wait timed out")
 // slot to a lease this way makes the count impossible to drift: it is freed iff
 // a lease is removed.
 //
-// E3-S2 layers a FIFO wait queue on top of this SAME counter. When the cap is
+// A FIFO wait queue layers on top of this SAME counter. When the cap is
 // full, a queued acquire parks on a waiter; a freed slot is handed DIRECTLY to
 // the oldest waiter (the count is not decremented — ownership transfers) so no
 // fresh claim can barge ahead of the queue. Only one counter exists: the queue

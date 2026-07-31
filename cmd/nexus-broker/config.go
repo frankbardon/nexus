@@ -23,12 +23,10 @@ type Config struct {
 	// spawn OS-isolated instances. Expanded through engine.ExpandPath.
 	NexusBinaryPath string `yaml:"nexus_binary_path"`
 
-	// MaxConcurrent caps the number of live instances. Placeholder for the
-	// capacity story.
+	// MaxConcurrent caps the number of live instances.
 	MaxConcurrent int `yaml:"max_concurrent"`
 
 	// IdleTimeout is how long an idle instance survives before teardown.
-	// Placeholder for the lifecycle story.
 	IdleTimeout time.Duration `yaml:"idle_timeout"`
 
 	// QueueWaitTimeout is how long an over-capacity claim parks in the FIFO

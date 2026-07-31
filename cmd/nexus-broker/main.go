@@ -2,10 +2,6 @@
 // instances. It exposes an HTTP/WebSocket gateway: clients claim a lease, the
 // broker spawns (or recalls) a nexus instance, and bridges IO frames between
 // them.
-//
-// This binary is the foundation scaffold (E1-S1): config loading, signal
-// handling, an slog handler, and an HTTP server with a health route. The
-// gateway, claim handling, and spawn logic land in later stories.
 package main
 
 import (

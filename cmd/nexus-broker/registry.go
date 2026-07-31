@@ -20,7 +20,7 @@ type leaseState string
 
 const (
 	// leaseStatePending means the lease has been created (e.g. by POST
-	// /claim in E1-S4) but no instance has dialed back to register yet.
+	// /claim) but no instance has dialed back to register yet.
 	leaseStatePending leaseState = "pending"
 
 	// leaseStateRegistered means an instance has dialed back and bound its
@@ -158,8 +158,8 @@ type lease struct {
 	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
 	// set under Registry.mu at the moment releasing latches, so it is a
 	// non-timing signal that distinguishes an unexpected crash from a graceful
-	// release. Remove uses it to pick the client's close status, and a future
-	// /leases endpoint (E4-S1) can surface it.
+	// release. Remove uses it to pick the client's close status, and the
+	// /leases endpoint can surface it.
 	reason string
 }
 
@@ -241,7 +241,7 @@ func (r *Registry) NewLease() (string, error) {
 }
 
 // NewLeaseQueued creates a fresh, pending lease, waiting in FIFO order for a
-// capacity slot if the registry is at max_concurrent. E3-S2's POST /claim calls
+// capacity slot if the registry is at max_concurrent. POST /claim calls
 // it instead of NewLease so an over-cap claim queues rather than failing
 // outright. The slot is reserved on the SAME counter as NewLease — the queue
 // adds no second accounting path.

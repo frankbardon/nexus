@@ -15,10 +15,9 @@ import (
 // an already-gone lease is a clean, idempotent no-op rather than a server error.
 var errUnknownLease = errors.New("unknown lease")
 
-// releaseLease is the single, shared teardown path for a lease. Manual release
-// (E2-S2), idle timeout (E2-S3), crash handling (E2-S4), and slot accounting
-// (E3-S1) all funnel through here so shutdown/reap logic lives in exactly one
-// place. It:
+// releaseLease is the single, shared teardown path for a lease. Manual release,
+// idle timeout, crash handling, and slot accounting all funnel through here so
+// shutdown/reap logic lives in exactly one place. It:
 //
 //  1. Sends a shutdown frame to the instance so it shuts its engine down
 //     cleanly, flushing and persisting the session (the session directory under

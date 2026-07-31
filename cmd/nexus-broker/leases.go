@@ -56,7 +56,7 @@ type LeaseSnapshot struct {
 
 // RegistrySnapshot is an immutable, point-in-time view of the whole registry:
 // every live lease plus the capacity/queue aggregates. It is the JSON shape
-// returned by GET /leases (E4-S2 documents it).
+// returned by GET /leases.
 type RegistrySnapshot struct {
 	MaxConcurrent int             `json:"max_concurrent"`
 	SlotsInUse    int             `json:"slots_in_use"`

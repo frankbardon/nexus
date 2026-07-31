@@ -25,8 +25,8 @@ const (
 )
 
 // ClientWSPath returns the WebSocket path a client uses to reach the instance
-// claimed under the given lease id. E1-S4's POST /claim returns this to the
-// caller so it knows where to connect.
+// claimed under the given lease id. POST /claim returns this to the caller so
+// it knows where to connect.
 func ClientWSPath(leaseID string) string {
 	return clientWSPathPrefix + leaseID
 }

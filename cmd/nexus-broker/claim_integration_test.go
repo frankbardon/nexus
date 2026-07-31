@@ -20,7 +20,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 )
 
-// TestClaimSpawnProxyRoundTrip proves the full E1-S4 spine deterministically:
+// TestClaimSpawnProxyRoundTrip proves the full claim/spawn/proxy spine deterministically:
 // POST /claim spawns a stub instance, the instance dials back + registers +
 // signals ready, the claim returns {lease_id, ws_url}, and a client connecting
 // to ws_url exchanges an IO frame with the instance through the gateway. It
@@ -177,7 +177,7 @@ func TestReleaseForceKillsStubbornInstance(t *testing.T) {
 	}
 }
 
-// TestCrashDetectionFreesSlotAndClosesClient proves the E2-S4 crash path end to
+// TestCrashDetectionFreesSlotAndClosesClient proves the crash path end to
 // end: a live instance dies UNEXPECTEDLY (not via POST /release), and the broker
 // frees its slot, removes the lease, and closes that client's WS with the
 // distinguishable crash status — while a SECOND concurrent lease is untouched.
@@ -267,7 +267,7 @@ func TestCrashDetectionFreesSlotAndClosesClient(t *testing.T) {
 	}
 }
 
-// TestIdleTimeoutReleasesInstance proves the E2-S3 idle path end to end: a
+// TestIdleTimeoutReleasesInstance proves the idle path end to end: a
 // claimed instance with a connected-but-silent client (no io frames) is released
 // once it sits idle past a short idle_timeout. The instance process is gone, the
 // lease is removed, and the client's WS is closed with the graceful going-away
@@ -316,7 +316,7 @@ func TestIdleTimeoutReleasesInstance(t *testing.T) {
 	waitFor(t, func() bool { return !reg.Has(cr.LeaseID) })
 }
 
-// TestMaxConcurrentCapRejectsOverCapClaim proves the E3-S1 capacity cap end to
+// TestMaxConcurrentCapRejectsOverCapClaim proves the capacity cap end to
 // end with cap=1: a first claim goes live and holds the only slot, a second
 // claim arriving at capacity is rejected with a distinct 503 (no instance
 // spawned past the cap), and once the first lease is released a third claim
@@ -367,7 +367,7 @@ func TestMaxConcurrentCapRejectsOverCapClaim(t *testing.T) {
 	}
 }
 
-// TestQueuedClaimProceedsWhenSlotFrees proves the E3-S2 FIFO wait queue end to
+// TestQueuedClaimProceedsWhenSlotFrees proves the FIFO wait queue end to
 // end with cap=1: a first claim goes live and holds the only slot, a second
 // claim arriving at capacity PARKS in the queue (it does not 503), and once the
 // first lease is released the queued claim is granted the slot, spawns, becomes
@@ -495,7 +495,7 @@ func TestQueuedClaimTimesOut(t *testing.T) {
 	}
 }
 
-// TestLeasesListsLiveLeaseThenGoneAfterRelease proves the E4-S1 introspection
+// TestLeasesListsLiveLeaseThenGoneAfterRelease proves the introspection
 // surface end to end: after a claim, GET /leases lists the live lease with its
 // session id and an active state; after POST /release the lease no longer
 // appears and the slot is freed. Uses the stub instance, so no LLM and no API
