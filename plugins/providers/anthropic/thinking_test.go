@@ -287,7 +287,7 @@ func TestConvertMessage_PrependsThinkingBeforeToolUse(t *testing.T) {
 }
 
 // TestConvertMessage_NoThinkingNoOp confirms that messages without metadata
-// produce the legacy content shape (no leading thinking blocks).
+// produce the plain content shape (no leading thinking blocks).
 func TestConvertMessage_NoThinkingNoOp(t *testing.T) {
 	p := &Plugin{logger: silentTestLogger()}
 	msg := events.Message{

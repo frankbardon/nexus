@@ -99,9 +99,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.debug = debug
 	}
 
-	// Auth: openai (default), azure_key, or azure_aad. parseAuthConfig is
-	// backwards compatible — when auth_mode is unset, the legacy
-	// api_key / api_key_env / base_url top-level keys keep working.
+	// Auth: openai (default), azure_key, or azure_aad. When auth_mode is
+	// unset, parseAuthConfig reads the top-level api_key / api_key_env /
+	// base_url keys.
 	auth, err := parseAuthConfig(ctx.Config)
 	if err != nil {
 		return err

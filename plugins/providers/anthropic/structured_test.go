@@ -91,8 +91,8 @@ func TestParseStructuredOutputsConfig_BetaHeader(t *testing.T) {
 	}
 }
 
-// TestBuildRequestBody_StructuredOutput_ToolMode verifies the legacy
-// simulation behavior is preserved when mode == "tool" (default): a synthetic
+// TestBuildRequestBody_StructuredOutput_ToolMode verifies the tool-simulation
+// behavior when mode == "tool" (default): a synthetic
 // `_structured_output` tool is appended and tool_choice is forced to it.
 func TestBuildRequestBody_StructuredOutput_ToolMode(t *testing.T) {
 	p := &Plugin{

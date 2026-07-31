@@ -19,7 +19,7 @@ import (
 // 0..1. This is approximate — it correlates loosely with audio energy because
 // silence in compressed streams produces low-variance bytes — but it is good
 // enough for a heuristic-grade barge-in / VAD signal until a proper decode is
-// wired in. TODO(#91): decode webm/opus and mpeg before computing energy so
+// wired in. TODO: decode webm/opus and mpeg before computing energy so
 // VAD numbers match true loudness on browser MediaRecorder streams.
 func computeRMS(audio []byte, mimeType string) float64 {
 	if len(audio) == 0 {

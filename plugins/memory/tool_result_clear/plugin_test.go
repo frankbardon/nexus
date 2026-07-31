@@ -164,9 +164,9 @@ func TestSkipsInternalSubFlowRequests(t *testing.T) {
 	cleared := 0
 	bus.Subscribe("memory.tool_result_cleared", func(_ engine.Event[any]) { cleared++ })
 	// task_kind = "plan" (or any internal kind) signals an internal sub-flow
-	// — curators must leave it alone. A non-empty `_source` alone is no
-	// longer a skip signal: every agent main request now tags its own
-	// pluginID for cost attribution (Idea 09).
+	// — curators must leave it alone. A non-empty `_source` alone is not
+	// a skip signal: every agent main request tags its own pluginID for
+	// cost attribution.
 	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic", "task_kind": "plan"},
 		Messages: []events.Message{{Role: "tool", ToolCallID: "t6", Content: big}},

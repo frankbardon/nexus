@@ -45,7 +45,7 @@ const (
 )
 
 // defaultSummaryPrompt instructs the summariser with the
-// reasoning-preservation rules from Idea 30. The output ends with a
+// reasoning-preservation rules. The output ends with a
 // "## Preserved Kinds:" trailer that the plugin parses to populate the
 // MemorySummaryReplaced event and to drive optional retry-on-missing-kind.
 const defaultSummaryPrompt = `You are a context compaction assistant. Compress an older slice of conversation history into a summary that the assistant can rely on to continue working without re-reading the original.
@@ -297,8 +297,8 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	}
 	// Skip outputs from other internal sub-flows (planner, classifier,
 	// compaction, subagent). Main agent loops are recorded — every agent
-	// main request now tags its own pluginID for cost attribution
-	// (Idea 09), and a non-empty `_source` no longer means "internal".
+	// main request tags its own pluginID for cost attribution, so a
+	// non-empty `_source` does not by itself mean "internal".
 	if internalflow.SkipForHistory(resp.Metadata) {
 		return
 	}

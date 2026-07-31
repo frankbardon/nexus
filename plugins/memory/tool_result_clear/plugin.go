@@ -271,8 +271,8 @@ func (p *Plugin) handleBeforeLLMRequest(e engine.Event[any]) {
 	}
 	// Skip internal sub-flow requests (planner / classifier / summariser
 	// / compaction / subagent). Main agent loops are processed even
-	// though every agent main request now tags `_source = pluginID` for
-	// cost attribution (Idea 09).
+	// though every agent main request tags `_source = pluginID` for
+	// cost attribution.
 	if internalflow.SkipForCuration(req.Metadata) {
 		return
 	}

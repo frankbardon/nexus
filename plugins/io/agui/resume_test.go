@@ -13,7 +13,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// TestResumeCycle is the core acceptance test for E2-S2: a single interrupted
+// TestResumeCycle is the core acceptance test for the resume cycle: a single interrupted
 // Nexus turn spans two AG-UI runs. Run 1 ends with an interrupt (hitl.requested
 // during the turn); a resume-POST (run 2, same threadId, new runId) emits
 // hitl.responded to unblock the still-parked agent and streams the continuation

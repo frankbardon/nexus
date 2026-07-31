@@ -18,7 +18,7 @@ import (
 //
 // Crucially, this does NOT emit hitl.responded and does NOT unblock the
 // in-process agent: the Nexus session stays alive and the agent stays parked on
-// the pending hitl. A continuation run resolves it (E2-S2). The interruptId ↔
+// the pending hitl. A continuation run resolves it. The interruptId ↔
 // HITLRequest mapping is recorded in p.pending so the resume side can correlate.
 //
 // If no run is in flight the request is ignored here — it will be surfaced by a

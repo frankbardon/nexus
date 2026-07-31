@@ -167,7 +167,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 	case resp := <-respCh:
 		allowed := isAllow(resp, choices)
 		if !allowed && resp.EditedPayload != nil {
-			// Full edit semantics are out of scope for this PR. Surface a
+			// Full edit semantics are not implemented. Surface a
 			// warning so the behavior is observable and the operator
 			// understands their edit was ignored.
 			logger.Warn("approval: edited_payload ignored (edit flow not implemented)",

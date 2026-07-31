@@ -6,8 +6,8 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// inbound_state.go implements the inbound half of the AG-UI shared-state feature
-// (E3-S2): it applies a client-authored state document carried on a
+// inbound_state.go implements the inbound half of the AG-UI shared-state
+// feature: it applies a client-authored state document carried on a
 // RunAgentInput into the session's scene store and the plugin's shared-state
 // mirror, BEFORE the initial StateSnapshot is emitted, so the agent observes the
 // client's view and the snapshot reflects it.
@@ -15,8 +15,8 @@ import (
 // # State document shape
 //
 // The AG-UI shared-state document this transport speaks is a JSON object keyed
-// by scene_id, each value being that scene's content — the exact shape E3-S1
-// marshals outbound (StateSnapshot / StateDelta). Inbound state is therefore
+// by scene_id, each value being that scene's content — the exact shape the
+// outbound half marshals (StateSnapshot / StateDelta). Inbound state is therefore
 // symmetric: a client sends back the same document (or a subset of it) it
 // received, with edited scene contents. Any non-object state document is ignored
 // (the mirror is scene-keyed); a malformed document is logged and skipped rather
@@ -30,7 +30,7 @@ import (
 // each scene_id -> content entry is pushed into the scene store via a
 // bus-emitted scene_create tool.invoke carrying the explicit scene_id (the scene
 // plugin creates it under that id, or merges as a patch when it already exists).
-// The scene plugin then emits scene.created / scene.patched, which the E3-S1
+// The scene plugin then emits scene.created / scene.patched, which the outbound
 // mirror consumes; because p.sharedState was already updated to the same value,
 // that mirror update diffs empty and emits no duplicate delta. This keeps the
 // bus-only rule (no direct scene-plugin call) and a real, agent-visible seed.

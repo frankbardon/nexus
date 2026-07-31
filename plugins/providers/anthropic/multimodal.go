@@ -20,7 +20,7 @@ const (
 //	  pdf_beta: false  # default; Sonnet 3.5+ accepts PDFs natively
 //
 // When pdf_beta is true the request builder appends `pdfs-2024-09-25` to the
-// `anthropic-beta` header so legacy models accept document blocks.
+// `anthropic-beta` header so older models accept document blocks.
 type multimodalConfig struct {
 	PDFBeta bool
 }

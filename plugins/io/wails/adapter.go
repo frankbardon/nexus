@@ -41,7 +41,7 @@ type Adapter struct {
 // NewAdapter creates a Wails UI adapter backed by the given hub.
 //
 // bus and acceptList enable generic inbound event bridging for
-// config-driven mode. Pass nil/nil for legacy mode.
+// config-driven mode. Pass nil/nil for the hardcoded mode.
 func NewAdapter(hub *Hub, sessionID string, bus engine.EventBus, acceptList []string) *Adapter {
 	accepted := make(map[string]bool, len(acceptList))
 	for _, a := range acceptList {

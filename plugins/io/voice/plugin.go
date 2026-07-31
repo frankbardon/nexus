@@ -4,10 +4,9 @@
 // and consumes llm.response to drive TTS (OpenAI /audio/speech) chunks back
 // out (voice.audio.output.chunk).
 //
-// Local-model providers are out of scope for this PR — see #92. Configuring
-// asr.provider or tts.provider with a local-model id (e.g. local_whisper,
-// faster_whisper, kokoro) makes Init return a clear error pointing operators
-// at #92.
+// Local-model providers are not wired: configuring asr.provider or
+// tts.provider with a local-model id (e.g. local_whisper, faster_whisper,
+// kokoro) makes Init return a clear error.
 //
 // Barge-in: while a TTS turn is in flight (i.e. between llm.response and the
 // final voice.audio.output.chunk), if any input chunk's RMS exceeds the
@@ -186,7 +185,7 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 }
 
 // parseConfig resolves the plugin config map into typed structs and validates
-// the provider settings (incl. the #92 local-model rejection).
+// the provider settings (incl. the local-model rejection).
 func (p *Plugin) parseConfig(cfg map[string]any) error {
 	// ASR.
 	asr, _ := cfg["asr"].(map[string]any)
@@ -247,9 +246,9 @@ func (p *Plugin) parseConfig(cfg map[string]any) error {
 	return nil
 }
 
-// rejectLocalASR returns the #92 error when the configured provider is one of
-// the known local-model ids. Schema accepts these strings so configs migrate
-// once #92 lands; Init refuses to run with them today.
+// rejectLocalASR returns an error when the configured provider is one of the
+// known local-model ids. The schema accepts these strings so configs can
+// migrate later; Init refuses to run with them today.
 func rejectLocalASR(provider string) error {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "local_whisper", "faster_whisper", "distil_whisper":

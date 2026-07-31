@@ -3,16 +3,13 @@
 // cancellation envelopes to connected clients, and accepts text input,
 // audio chunks, cancel, and HITL responses going the other way.
 //
-// This is Phase 3 of Idea 18 (multimodal & voice IO). Phase 4 will land
-// nexus.io.voice (VAD + ASR + TTS); Phase 5 may eventually fold the
-// envelope shape into io/browser and io/wails. Until then the realtime
-// transport stands alongside those plugins as a third, lower-latency
-// option for clients that want raw stream.delta deltas without the
-// browser UI's hub state machine.
+// The realtime transport stands alongside io/browser and io/wails as a
+// third, lower-latency option for clients that want raw stream.delta
+// deltas without the browser UI's hub state machine.
 //
 // Security: there is **no auth in v1**. Origin checks and bearer-token
-// validation are tracked as follow-ups; operators running this on a
-// public network must front it with a reverse proxy that does its own
+// validation are not implemented; operators running this on a public
+// network must front it with a reverse proxy that does its own
 // authentication. See docs/src/configuration/reference.md for the
 // nexus.io.realtime entry.
 package realtime

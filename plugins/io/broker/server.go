@@ -176,7 +176,7 @@ func (c *client) session() error {
 	defer c.closeConn(websocket.StatusNormalClosure, "")
 
 	// First frame MUST be register so the broker can bind this socket to
-	// the lease (E1-S2 contract).
+	// the lease.
 	if err := c.send(brokerframe.Frame{LeaseID: c.leaseID, Signal: brokerframe.SignalRegister}); err != nil {
 		return fmt.Errorf("send register: %w", err)
 	}

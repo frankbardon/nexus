@@ -10,7 +10,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// TestClientToolCycle is the core acceptance test for E2-S3: a client-executed
+// TestClientToolCycle is the core acceptance test for client-executed tools: a client-executed
 // (frontend) tool advertised via RunAgentInput.tools is surfaced to the agent,
 // the agent calls it, the run ends interrupt-style awaiting the client's result,
 // and a resume carrying the ToolCallResult feeds the result back so the agent
@@ -299,8 +299,8 @@ func TestRealToolInvokeSequence(t *testing.T) {
 		t.Fatalf("read sse: %v", err)
 	}
 
-	// The full ToolCall* sequence must appear — previously nothing did because the
-	// plugin subscribed to tool.call while the agent emits tool.invoke.
+	// The full ToolCall* sequence must appear: the plugin subscribes to
+	// tool.invoke (the event the agent emits), not tool.call.
 	assertHasTypes(t, evs,
 		agui.EventToolCallStart, agui.EventToolCallArgs, agui.EventToolCallEnd, agui.EventToolCallResult)
 }

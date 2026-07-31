@@ -79,9 +79,9 @@ type authState struct {
 
 // parseAuthConfig builds an authState from the raw plugin config map.
 //
-// Backwards compatible: if auth_mode is missing, the legacy api_key /
-// api_key_env / base_url top-level keys are used. The new "azure" config
-// block is only consulted in azure_key / azure_aad modes.
+// If auth_mode is missing, the top-level api_key / api_key_env / base_url
+// keys are used. The "azure" config block is only consulted in azure_key /
+// azure_aad modes.
 func parseAuthConfig(cfg map[string]any) (*authState, error) {
 	mode := authModeOpenAI
 	if v, ok := cfg["auth_mode"].(string); ok && v != "" {

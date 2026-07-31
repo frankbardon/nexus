@@ -26,9 +26,9 @@ var _ engine.Plugin = (*Plugin)(nil)
 //
 // The plugin supports two modes:
 //
-//   - Legacy (no subscribe/accept config): hardcoded chat-event
-//     subscriptions with typed handlers. Backward compatible with
-//     existing configs that don't set these keys.
+//   - Hardcoded (no subscribe/accept config): hardcoded chat-event
+//     subscriptions with typed handlers, used when configs omit these
+//     keys.
 //   - Config-driven (subscribe/accept lists in YAML): generic
 //     passthrough bridging for arbitrary domain events. The developer
 //     controls exactly which events cross the bus-to-frontend boundary.
@@ -146,8 +146,8 @@ func (p *Plugin) Emissions() []string {
 // When the plugin config contains "subscribe" and/or "accept" keys,
 // the plugin operates in config-driven mode: only the listed events
 // are bridged, using a generic passthrough handler. When those keys
-// are absent, the plugin falls back to its legacy hardcoded chat-event
-// handler set for backward compatibility.
+// are absent, the plugin falls back to its hardcoded chat-event
+// handler set.
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
@@ -226,8 +226,8 @@ func (p *Plugin) handleGenericOutbound(e engine.Event[any]) {
 	}
 }
 
-// initLegacy wires the hardcoded chat-event handlers for backward
-// compatibility with configs that don't specify subscribe/accept lists.
+// initLegacy wires the hardcoded chat-event handlers used when a config
+// does not specify subscribe/accept lists.
 func (p *Plugin) initLegacy() {
 	// Inbound: webview -> engine bus.
 	//

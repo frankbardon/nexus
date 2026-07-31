@@ -253,7 +253,7 @@ func (p *Plugin) handleLLMResponseEvent(event engine.Event[any]) {
 		return
 	}
 	// Skip responses tagged for other plugins (planner, summary buffer,
-	// subagent, etc.). Since Idea 09 the agent tags its own request with
+	// subagent, etc.). The agent tags its own request with
 	// `_source = pluginID` for cost attribution and providers propagate
 	// that onto the response, so an empty-source check would skip our
 	// own reply too.
@@ -680,7 +680,7 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 
 	// Ignore tool results that arrive with no active turn. A result can reach
 	// the agent outside a turn when another plugin drives the tool bus directly
-	// — e.g. the AG-UI inbound-state reconciler (E3-S2) seeds the scene store via
+	// — e.g. the AG-UI inbound-state reconciler seeds the scene store via
 	// a scene_create tool.invoke before io.input, whose scene.* tool.result
 	// carries an empty TurnID. Without this guard that phantom result would
 	// decrement pendingToolCalls below zero and fire a spurious, turn-less

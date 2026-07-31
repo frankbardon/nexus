@@ -6,8 +6,8 @@
 // statics and templates), and exposes its prompts as slash commands of
 // the form /<command_prefix>.<server>.<prompt>.
 //
-// MCP capabilities deferred for Phase 1:
-//   - sampling (server-initiated LLM calls) — tracked in issue #98
+// MCP capabilities not yet implemented:
+//   - sampling (server-initiated LLM calls)
 //   - roots beyond the session files dir
 //   - server-initiated OAuth / dynamic client registration
 //

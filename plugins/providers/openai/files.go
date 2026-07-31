@@ -176,8 +176,8 @@ func (p *Plugin) uploadFile(ctx context.Context, data []byte, mimeType, filename
 	}
 	// Files API stays on the public OpenAI endpoint regardless of auth mode
 	// (Azure exposes a different Files surface). p.auth.apiKey is the
-	// public-OpenAI key — populated by the legacy top-level api_key /
-	// api_key_env config keys, which survive in all modes.
+	// public-OpenAI key — populated by the top-level api_key /
+	// api_key_env config keys, which apply in all modes.
 	if p.auth == nil || p.auth.apiKey == "" {
 		return "", fmt.Errorf("openai: Files API requires a public-OpenAI api_key (set api_key or OPENAI_API_KEY)")
 	}

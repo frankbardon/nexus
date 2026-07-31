@@ -2,16 +2,13 @@
 // uses to skip recording assistant messages produced by internal sub-flows
 // (planner, classifier router, summariser, compaction, subagent).
 //
-// The earlier predicate — "skip when LLMResponse.Metadata[\"_source\"] is
-// non-empty" — was correct until Idea 09 (#83) made every agent main
-// request tag itself with `_source = pluginID` for cost attribution.
-// Provider plugins propagate request metadata onto the response, so under
-// the old predicate every agent main response was silently dropped from
-// history along with its tool_use blocks. Anthropic then rejected the
-// next request with "unexpected tool_use_id found in tool_result blocks".
-//
-// The fix targets task_kind instead: each internal sub-flow has a stable
-// task_kind value, and main agent loops do not appear in this set.
+// The predicate keys on task_kind: each internal sub-flow stamps a stable
+// task_kind value, and main agent loops do not appear in that set. Keying on
+// task_kind rather than on a non-empty _source is deliberate — every agent
+// main request also tags itself with `_source = pluginID` for cost
+// attribution, and provider plugins propagate that onto the response, so an
+// empty-source test would drop main agent responses (and their tool_use
+// blocks) from history.
 package internalflow
 
 // internalTaskKinds enumerates the task_kind values produced by sub-flows

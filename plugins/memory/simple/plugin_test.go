@@ -125,9 +125,9 @@ func TestCompactedReplacesBuffer(t *testing.T) {
 // TestLLMResponseInternalKindIgnored proves that llm.response events
 // produced by internal sub-flows (planner, summariser, classifier, …) —
 // identified by their task_kind — don't land in the history buffer. Main
-// agent responses are always recorded; the older non-empty `_source` check
-// would have skipped those too once Idea 09 made every agent main request
-// tag its own pluginID.
+// agent responses are always recorded; keying on task_kind (rather than on a
+// non-empty `_source`) is what keeps them in, since every agent main request
+// also tags its own pluginID.
 func TestLLMResponseInternalKindIgnored(t *testing.T) {
 	p := New().(*Plugin)
 	p.logger = slog.Default()

@@ -48,7 +48,7 @@ func TestContract_CancelRequest_NoActiveTurn_NoOp(t *testing.T) {
 }
 
 // TestContract_DeclaredSubscriptionMatchesActualWiring exercises the
-// previously-broken slash-command interception: a "/resume" io.input is
+// slash-command interception: a "/resume" io.input is
 // dispatched through EmitVetoable on before:io.input so the cancel
 // handler's *VetoablePayload type assertion succeeds. Without a
 // previously-cancelled turn, the handler emits a system io.output

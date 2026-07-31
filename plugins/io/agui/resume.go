@@ -53,7 +53,7 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
 
-	// Inbound shared state (E3-S2): a resuming client may also carry an edited
+	// Inbound shared state: a resuming client may also carry an edited
 	// RunAgentInput.state; reconcile it before re-anchoring so the continuation
 	// snapshot reflects the client's view and the unblocked agent observes it.
 	p.applyInboundState(input.threadID, input.state)

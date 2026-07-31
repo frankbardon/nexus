@@ -109,10 +109,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.debug = debug
 	}
 
-	// Resolve auth mode: api_key (default), bedrock, or vertex. Backwards
-	// compatible with the legacy api_key / api_key_env top-level keys; the
-	// authState struct centralizes URL construction, body version markers,
-	// and per-request signing.
+	// Resolve auth mode: api_key (default), bedrock, or vertex. The
+	// top-level api_key / api_key_env keys still work; the authState struct
+	// centralizes URL construction, body version markers, and per-request
+	// signing.
 	auth, err := parseAuthConfig(ctx.Config)
 	if err != nil {
 		return err

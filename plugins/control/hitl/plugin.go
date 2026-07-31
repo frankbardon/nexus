@@ -341,9 +341,9 @@ func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
 func buildRequestFromToolCall(tc events.ToolCall) (events.HITLRequest, string) {
 	prompt, _ := tc.Arguments["prompt"].(string)
 	if prompt == "" {
-		// Backward-compatibility nicety: accept the legacy "question" key
-		// so prompts that already train the LLM on the old name keep
-		// working. The schema only documents prompt going forward.
+		// Accept the "question" key as an alias for "prompt" so prompts
+		// that use that name keep working. The schema documents only
+		// prompt.
 		prompt, _ = tc.Arguments["question"].(string)
 	}
 	if prompt == "" {

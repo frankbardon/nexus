@@ -106,8 +106,8 @@ func TestSkipsInternalSubFlowRequests(t *testing.T) {
 	pruned := 0
 	bus.Subscribe("memory.tool_def_pruned", func(_ engine.Event[any]) { pruned++ })
 	// task_kind=plan signals an internal sub-flow — pruner stays out of
-	// the way. Idea 09 made every agent main request tag its own
-	// pluginID, so a non-empty `_source` is no longer the skip signal.
+	// the way. The skip signal is task_kind, not a non-empty `_source`:
+	// every agent main request also tags its own pluginID.
 	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
 		Metadata: map[string]any{"_source": "nexus.planner.dynamic", "task_kind": "plan"},
 		Tools:    []events.ToolDef{{Name: "shell"}},

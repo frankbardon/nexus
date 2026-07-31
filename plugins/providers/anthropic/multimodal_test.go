@@ -9,7 +9,7 @@ import (
 )
 
 // TestBuildContentBlocks_EmptyParts confirms that messages without Parts fall
-// through to the legacy string-content path (caller checks for nil to decide).
+// through to the string-content path (caller checks for nil to decide).
 func TestBuildContentBlocks_EmptyParts(t *testing.T) {
 	blocks, err := buildContentBlocks(events.Message{Role: "user", Content: "hello"}, false)
 	if err != nil {

@@ -98,10 +98,10 @@ type Shell struct {
 	// apps (e.g. "~/.nexus/myapp"). The leading "~" is expanded.
 	//
 	// When DataDir is empty (the cmd/desktop default), the shell uses the
-	// legacy split layout: settings + session index at ~/.nexus/desktop/,
+	// split layout: settings + session index at ~/.nexus/desktop/,
 	// engine sessions at ~/.nexus/sessions/. When DataDir is set, both
 	// move under it (settings at <DataDir>/settings.json, sessions at
-	// <DataDir>/sessions/). Embedders that want the new unified layout
+	// <DataDir>/sessions/). Embedders that want the unified layout
 	// must also set "core.sessions.root: <DataDir>/sessions" in each
 	// agent's YAML so engines write to the same root the shell expects.
 	DataDir string
@@ -117,8 +117,8 @@ type Shell struct {
 }
 
 // resolvedDataDir returns the directory used for shell persistence
-// (settings + session index). Honors DataDir when set, falls back to
-// the legacy ~/.nexus/desktop path for backwards compatibility.
+// (settings + session index). Honors DataDir when set, otherwise uses
+// the ~/.nexus/desktop path.
 func (s *Shell) resolvedDataDir(home string) string {
 	if s.DataDir != "" {
 		return engine.ExpandPath(s.DataDir)
@@ -128,8 +128,7 @@ func (s *Shell) resolvedDataDir(home string) string {
 
 // resolvedSessionsRoot returns the engine session storage root the
 // shell uses for maintenance and deletion. When DataDir is set, this is
-// <DataDir>/sessions; otherwise it falls back to the legacy
-// ~/.nexus/sessions path.
+// <DataDir>/sessions; otherwise it uses the ~/.nexus/sessions path.
 func (s *Shell) resolvedSessionsRoot(home string) string {
 	if s.DataDir != "" {
 		return filepath.Join(engine.ExpandPath(s.DataDir), "sessions")
@@ -637,8 +636,8 @@ func openWithOS(path string) error {
 
 // Notify sends an OS notification.
 func (s *Shell) Notify(title, body string) error {
-	// Wails v2 doesn't have a built-in notification API. This is a
-	// placeholder for phase 2 when we add OS notification support.
+	// Wails v2 doesn't have a built-in notification API, so this logs the
+	// notification instead of surfacing it to the OS.
 	log.Printf("notification: %s — %s", title, body)
 	return nil
 }

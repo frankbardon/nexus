@@ -72,7 +72,7 @@ type Plugin struct {
 	bearerToken string
 	corsOrigins []string
 
-	// emitState gates the AG-UI shared-state feature (E3-S1). When true the
+	// emitState gates the AG-UI shared-state feature. When true the
 	// plugin mirrors the session's scene store as an AG-UI shared-state document,
 	// emitting a StateSnapshot at run start and ordered StateDeltas as scenes
 	// mutate. Off by default because it adds bus subscriptions and per-mutation
@@ -95,9 +95,9 @@ type Plugin struct {
 
 	// pendingMu guards pending. A virtual-run interrupt records the mapping
 	// from the AG-UI interruptId to the underlying HITL request so the resume
-	// side (E2-S2) can correlate a ResumeItem back to the still-blocked
+	// side can correlate a ResumeItem back to the still-blocked
 	// in-process hitl and emit the matching hitl.responded. Populated on
-	// hitl.requested; the resume handler (E2-S2) is the sole consumer/remover.
+	// hitl.requested; the resume handler is the sole consumer/remover.
 	pendingMu sync.Mutex
 	pending   map[string]pendingInterrupt
 
@@ -106,7 +106,7 @@ type Plugin struct {
 
 // pendingInterrupt records the correlation between an AG-UI interrupt (surfaced
 // to the client via a RunFinished(interrupt) outcome) and the in-process HITL
-// request it suspended. It is the seam E2-S2 uses on resume: given a
+// request it suspended. It is the seam the resume path uses: given a
 // ResumeItem.InterruptID it looks up the RequestID to emit hitl.responded, and
 // the SessionID/TurnID to open the continuation run against the right thread.
 type pendingInterrupt struct {
@@ -178,10 +178,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		// HITL suspends the run at the transport boundary (virtual-run model):
 		// hitl.requested ends the SSE with an interrupt outcome; hitl.cancel
 		// ends it with a cancelled outcome. Neither unblocks the in-process
-		// agent — that is the resume side's job (E2-S2).
+		// agent — that is the resume side's job.
 		{EventType: "hitl.requested", Priority: 50},
 		{EventType: "hitl.cancel", Priority: 50},
-		// Client-executed frontend tools (E2-S3) are advertised per-run via
+		// Client-executed frontend tools are advertised per-run via
 		// RunAgentInput.tools. The plugin appends them to the catalog snapshot the
 		// agent assembles, so it subscribes to the catalog query at a priority
 		// that runs after nexus.tool.catalog (priority 10) has filled the base
@@ -191,7 +191,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	for _, et := range customBridgedEvents {
 		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
 	}
-	// Shared-state (E3-S1) is opt-in: only when emit_state is enabled does the
+	// Shared-state is opt-in: only when emit_state is enabled does the
 	// plugin subscribe to the scene store's mutation events to mirror them as
 	// AG-UI StateSnapshot/StateDelta. Subscriptions() is read after Init, so this
 	// reflects the resolved config and stays in lockstep with the Subscribe calls.
@@ -204,7 +204,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 }
 
 // Emissions declares the event types the inbound handler emits onto the bus.
-// hitl.responded is emitted by the resume path (E2-S2): a continuation
+// hitl.responded is emitted by the resume path: a continuation
 // RunAgentInput carrying resume[] resolves the pending interrupt(s) that ended a
 // prior run, unblocking the still-parked in-process agent. Both the resolved and
 // the cancelled resume statuses ride hitl.responded (Cancelled:true for the
@@ -214,11 +214,11 @@ func (p *Plugin) Emissions() []string {
 		"before:io.input",
 		"io.input",
 		"hitl.responded",
-		// A client-executed tool's result rides tool.result on resume (E2-S3):
+		// A client-executed tool's result rides tool.result on resume:
 		// the ToolCallResult carried in resume[] is fed back to the still-parked
 		// agent as the tool.result it was waiting on.
 		"tool.result",
-		// Inbound shared state (E3-S2) seeds the scene store by emitting a
+		// Inbound shared state seeds the scene store by emitting a
 		// scene_create tool.invoke per client-authored scene, so the agent
 		// observes the client's state via scene_get/scene_list.
 		"tool.invoke",
@@ -256,7 +256,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.corsOrigins = parseCORSOrigins(ctx.Config["cors_origins"])
 
-	// Shared-state emission (E3-S1) is opt-in. When enabled the plugin mirrors
+	// Shared-state emission is opt-in. When enabled the plugin mirrors
 	// the scene store as an AG-UI shared-state document.
 	if v, ok := ctx.Config["emit_state"].(bool); ok {
 		p.emitState = v
@@ -300,7 +300,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
-	// Shared-state mirror (E3-S1): only wired when opt-in. These translate scene
+	// Shared-state mirror: only wired when opt-in. These translate scene
 	// store mutations into AG-UI StateSnapshot/StateDelta on the active run.
 	if p.emitState {
 		p.unsubs = append(p.unsubs,
@@ -373,7 +373,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
 
-	// Inbound shared state (E3-S2): a client-authored RunAgentInput.state is
+	// Inbound shared state: a client-authored RunAgentInput.state is
 	// reconciled into the scene store and the mirror BEFORE the initial snapshot
 	// so the agent observes the client's view and the snapshot reflects it. No-op
 	// when shared-state is disabled or no state is sent.
@@ -538,7 +538,7 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 // When the invoked tool is a client-executed (frontend) tool advertised for
 // this run via RunAgentInput.tools, there is no in-process handler to produce a
 // tool.result — the CLIENT runs it. So after emitting the ToolCall* sequence the
-// plugin suspends the run interrupt-style (E2-S1 machinery) and records a pending
+// plugin suspends the run interrupt-style and records a pending
 // client-tool entry. The client's resume carries the ToolCallResult, which the
 // resume path feeds back as the tool.result the parked agent is waiting on. A
 // server-side Nexus catalog tool is left untouched: its own handler runs inline

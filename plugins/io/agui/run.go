@@ -83,7 +83,7 @@ type runInput struct {
 	resume   []agui.ResumeItem
 	// state is the client-authored AG-UI shared-state document (RunAgentInput.
 	// state): a scene_id -> content JSON object the inbound-state reconciler
-	// (E3-S2) applies to the scene store and the mirror before the run's first
+	// applies to the scene store and the mirror before the run's first
 	// turn. Empty when the client sends no state.
 	state json.RawMessage
 	// tools are the client-executed (frontend) tools advertised for this run via
@@ -194,7 +194,7 @@ func (r *run) snapshotMessages() []agui.Message {
 // resume) BEFORE a RunFinished carrying the interrupt outcome, then closes the
 // stream — exactly once. The in-process agent is NOT unblocked here; it stays
 // waiting on the pending hitl.responded and the Nexus session stays alive. A
-// continuation run (E2-S2) reopens a fresh SSE and resolves the interrupt.
+// continuation run reopens a fresh SSE and resolves the interrupt.
 //
 // snapshot is the JSON state handoff; messages is the conversation snapshot.
 // Both are emitted unconditionally so the client always has a resume anchor,

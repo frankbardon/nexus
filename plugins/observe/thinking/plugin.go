@@ -20,11 +20,11 @@ const (
 // journal.Writer.SubscribeProjection, or post-mortem via
 // journal.ProjectFile).
 //
-// This plugin no longer writes derived JSONL files; its presence in
+// This plugin writes no derived JSONL files; its presence in
 // plugins.active acts as a UI feature flag that TUI / browser shells use
 // to enable thinking-related UI affordances. The Subscriptions() entries
-// are retained so the plugin shows up in registry / manifest tooling that
-// inventories which event types each plugin attends to.
+// let the plugin show up in registry / manifest tooling that inventories
+// which event types each plugin attends to.
 type Plugin struct {
 	logger *slog.Logger
 }

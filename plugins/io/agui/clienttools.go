@@ -54,7 +54,7 @@ func (p *Plugin) isClientTool(r *run, name string) bool {
 // suspendForClientTool ends the current run interrupt-style because the agent
 // called a client-executed tool: there is no in-process handler to produce the
 // tool.result, so the run must yield to the client, which runs the tool and
-// resumes with a ToolCallResult. It reuses the E2-S1 suspend machinery: emit a
+// resumes with a ToolCallResult. It reuses the suspend machinery: emit a
 // StateSnapshot + MessagesSnapshot then a RunFinished(interrupt) whose payload
 // names the tool call awaiting a result, and record a pending client-tool
 // interrupt so the resume path can feed the result back to the parked agent.

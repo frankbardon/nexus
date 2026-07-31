@@ -3,7 +3,7 @@
 // delegate/subagent targets. Each configured remote agent is registered as an
 // LLM-facing tool (default name "delegate_agui_<name>"); when the parent agent
 // calls it, the plugin builds an AG-UI RunAgentInput from the delegated task,
-// runs the remote agent through the reusable pkg/agui/aguiclient (E4-S1), maps the
+// runs the remote agent through the reusable pkg/agui/aguiclient, maps the
 // remote run's event stream back onto the Nexus bus (text deltas -> io.output,
 // tool activity + iterations -> subagent.* observability), and returns the remote
 // run's terminal outcome as the tool.result the parent expects.
@@ -270,8 +270,8 @@ type remoteOutcome struct {
 	err    string
 }
 
-// runRemote builds a RunAgentInput, streams the remote agent through the E4-S1
-// client, maps its event stream onto the bus, and returns the terminal outcome.
+// runRemote builds a RunAgentInput, streams the remote agent through the
+// aguiclient, maps its event stream onto the bus, and returns the terminal outcome.
 // It pushes a causation context so all mapped events carry the remote sub-run's
 // identity and depth. Cache hits short-circuit the whole remote call.
 func (p *Plugin) runRemote(ra *remoteAgent, task string, contextMap map[string]any, timeout time.Duration, parentTurnID string, parentDepth int) remoteOutcome {

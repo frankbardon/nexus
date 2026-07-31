@@ -7,7 +7,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 )
 
-// state.go implements the outbound AG-UI shared-state feature (E3-S1): it
+// state.go implements the outbound AG-UI shared-state feature: it
 // mirrors the session's scene store as an AG-UI shared-state document and emits
 // a StateSnapshot at run start plus ordered StateDeltas (RFC 6902 JSON Patch) as
 // scenes mutate during a run.
@@ -25,8 +25,8 @@ import (
 // arrive between runs still update the model (so the next snapshot is correct)
 // but emit no delta because there is no SSE stream to carry it.
 //
-// Inbound state application (RunAgentInput.state) lives in inbound_state.go
-// (E3-S2): startRun/resumeRun call applyInboundState before emitInitialSnapshot,
+// Inbound state application (RunAgentInput.state) lives in inbound_state.go:
+// startRun/resumeRun call applyInboundState before emitInitialSnapshot,
 // reconciling the client-authored state into both p.sharedState (under stateMu,
 // so the snapshot reflects the client's view) and the scene store (so the agent
 // observes it via scene_get/scene_list).
