@@ -86,10 +86,6 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	// before:llm.request priority 10 — mutates the request tool list after
-	// rate_limiter (=9) has released the goroutine but before input
-	// scanners (prompt_injection=11, stop_words=12) read the final shape.
-	// See #121 for the before:llm.request priority map.
 	return []engine.EventSubscription{
 		{EventType: "before:llm.request", Priority: 10},
 	}
@@ -112,9 +108,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 
 	// Filter is meaningful only when the request actually carries tools.
 	// Requests without tools (planner, summariser, classifier router probes)
-	// fall through as no-ops — these once short-circuited via a non-empty
-	// `_source` check, but Idea 09 made every agent main request tag itself
-	// with its own pluginID, which broke that heuristic.
+	// fall through as no-ops.
 	if len(req.Tools) == 0 {
 		return
 	}

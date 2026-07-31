@@ -159,12 +159,9 @@ func TestContentSafety_DetectsPassword(t *testing.T) {
 	}
 }
 
-// Policy lock for issue #121. content_safety subscribes before:io.output at
-// priority 8 (redact-mode mutator); a stop-words-style vetoer at priority 10
-// must see the post-redaction content, so a banned token that only existed
-// inside the redacted span never trips the veto. If the priorities ever
-// drift back together — or the bus loses its stable tiebreak — this test
-// flips.
+// TestContentSafety_RedactBeatsBanCheckOnOutputGate verifies that content_safety
+// redaction on before:io.output runs ahead of a later stop-words-style vetoer, so
+// a banned token existing only inside a redacted span never trips the veto.
 func TestContentSafety_RedactBeatsBanCheckOnOutputGate(t *testing.T) {
 	_, bus := newTestPluginAtRealPriority("redact", "email")
 

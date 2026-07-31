@@ -146,11 +146,6 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	// Priority 8 puts content_safety first in the before:io.output pipeline:
-	// redact-mode mutation must run before veto-only gates (stop_words at 10)
-	// or redaction is dead code. json_schema sits between at 9 so format
-	// retries operate on post-redaction content. See docs/configuration
-	// reference and issue #121 for the rationale.
 	subs := []engine.EventSubscription{
 		{EventType: "before:io.output", Priority: 8},
 	}

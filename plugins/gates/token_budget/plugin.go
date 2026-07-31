@@ -12,9 +12,6 @@
 // ("max_usd_per_day"). On exceed, the gate either blocks (vetoes), warns,
 // or downgrades the model (rewrites Model to the cheapest entry from a
 // configured candidate list, computed against pkg/engine/pricing).
-//
-// Backward compatibility: the legacy top-level `max_tokens` config key is
-// honored as a single session-total-tokens ceiling.
 package tokenbudget
 
 import (
@@ -200,10 +197,6 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	// before:llm.request priority 7 — cheap counter check + reservation
-	// (estimate_factor headroom). Runs right after endless_loop (=6) so a
-	// budget-exceeded veto short-circuits rate_limiter (=9), mutators, and
-	// HITL approval (=13). See #121.
 	return []engine.EventSubscription{
 		{EventType: "before:llm.request", Priority: 7},
 		{EventType: "llm.response", Priority: 0},
@@ -780,7 +773,6 @@ func (p *Plugin) persistTenantUsage(tenant, window string, resp events.LLMRespon
 func parseCeilings(cfg map[string]any) ([]ceiling, error) {
 	var out []ceiling
 
-	// Backward compat: legacy max_tokens key becomes a session ceiling.
 	if v, ok := numericInt(cfg["max_tokens"]); ok && v > 0 {
 		out = append(out, ceiling{
 			Dimension: dimSession,
