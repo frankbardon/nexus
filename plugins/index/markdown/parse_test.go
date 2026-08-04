@@ -4,16 +4,16 @@ import "testing"
 
 func TestSplitFrontmatter(t *testing.T) {
 	raw := "---\n" +
-		"title: \"BERA Score\"\n" +
+		"title: \"Score\"\n" +
 		"type: reference\n" +
 		"source: zendesk\n" +
-		"tags:\n  - external\n  - bera-metrics\n" +
+		"tags:\n  - external\n  - metrics\n" +
 		"---\n" +
-		"# BERA Score\n\nThe composite metric.\n"
+		"# Score\n\nThe composite metric.\n"
 
 	fm, body := splitFrontmatter(raw)
-	if fm.Title != "BERA Score" {
-		t.Errorf("title = %q, want %q", fm.Title, "BERA Score")
+	if fm.Title != "Score" {
+		t.Errorf("title = %q, want %q", fm.Title, "Score")
 	}
 	if fm.Type != "reference" {
 		t.Errorf("type = %q, want reference", fm.Type)
@@ -21,10 +21,10 @@ func TestSplitFrontmatter(t *testing.T) {
 	if fm.Source != "zendesk" {
 		t.Errorf("source = %q, want zendesk", fm.Source)
 	}
-	if len(fm.Tags) != 2 || fm.Tags[0] != "external" || fm.Tags[1] != "bera-metrics" {
-		t.Errorf("tags = %v, want [external bera-metrics]", fm.Tags)
+	if len(fm.Tags) != 2 || fm.Tags[0] != "external" || fm.Tags[1] != "metrics" {
+		t.Errorf("tags = %v, want [external metrics]", fm.Tags)
 	}
-	if got, want := body, "# BERA Score\n\nThe composite metric.\n"; got != want {
+	if got, want := body, "# Score\n\nThe composite metric.\n"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }

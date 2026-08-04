@@ -27,8 +27,8 @@ func newTestPlugin(t *testing.T) (engine.EventBus, func()) {
 		}
 		q.Provider = "stub"
 		q.Matches = []events.LexicalMatch{
-			{ID: "h-0", Content: "BERA Score\n\n## How It Is Calculated\n\npercentile rank", Score: 2.5,
-				Metadata: map[string]string{"source": "bera_score.md", "heading": "How It Is Calculated"}},
+			{ID: "h-0", Content: "Score\n\n## How It Is Calculated\n\npercentile rank", Score: 2.5,
+				Metadata: map[string]string{"source": "score.md", "heading": "How It Is Calculated"}},
 		}
 	}, engine.WithPriority(10))
 

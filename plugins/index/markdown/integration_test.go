@@ -25,11 +25,11 @@ func TestIndexThenQuery(t *testing.T) {
 			t.Fatalf("write fixture %s: %v", name, err)
 		}
 	}
-	write("bera_score.md", "---\ntitle: \"BERA Score\"\ntype: reference\ntags:\n  - bera-metrics\n---\n"+
-		"# BERA Score\n\nIntro.\n\n"+
-		"## How It Is Calculated\n\nThe BERA Score is a percentile rank from 0 to 100 computed across the panel.\n\n"+
+	write("score.md", "---\ntitle: \"Score\"\ntype: reference\ntags:\n  - metrics\n---\n"+
+		"# Score\n\nIntro.\n\n"+
+		"## How It Is Calculated\n\nThe Score is a percentile rank from 0 to 100 computed across the panel.\n\n"+
 		"## Why This Matters\n\nIt summarizes brand equity in one number.\n")
-	write("today_score.md", "---\ntitle: \"Today Score\"\ntype: reference\ntags:\n  - bera-metrics\n---\n"+
+	write("today_score.md", "---\ntitle: \"Today Score\"\ntype: reference\ntags:\n  - metrics\n---\n"+
 		"# Today Score\n\n## Definition\n\nToday Score combines Familiarity and Regard to show current brand health.\n")
 
 	store := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -87,8 +87,8 @@ func TestIndexThenQuery(t *testing.T) {
 		t.Fatalf("expected matches for calculation query")
 	}
 	top := q.Matches[0]
-	if top.Metadata["source"] != "bera_score.md" {
-		t.Errorf("top source = %q, want bera_score.md", top.Metadata["source"])
+	if top.Metadata["source"] != "score.md" {
+		t.Errorf("top source = %q, want score.md", top.Metadata["source"])
 	}
 	if top.Metadata["heading"] != "How It Is Calculated" {
 		t.Errorf("top heading = %q, want 'How It Is Calculated'", top.Metadata["heading"])
