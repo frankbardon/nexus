@@ -2322,6 +2322,7 @@ release_grace: 10s
 
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
+  admin_scope: "nexus.broker.admin"   # scope that unlocks the operator view of GET /leases
   validators:
     - type: static
       tokens:
@@ -2360,6 +2361,7 @@ authenticates with a spawn secret.
 
 ```yaml
 auth:
+  admin_scope: "nexus.broker.admin"   # optional; "" means nobody is an operator
   validators:          # ordered; the first validator that accepts wins
     - type: static
       tokens:
@@ -2371,6 +2373,7 @@ auth:
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
+| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
 | `auth.validators[].type`               | string          | *required* | Validator implementation. Currently `static`. |
 | `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry but only used by claim-bearing validators; accepted and ignored by `static`. |
@@ -2407,15 +2410,17 @@ group. There is no separate audit sink; these records are it.
 #### Lease ownership
 
 Every lease records the principal that claimed it (stamped from the authenticated
-`POST /claim` request). Two routes enforce that ownership:
+`POST /claim` request). Three routes consult that ownership:
 
 | Route                       | Enforcement                                                                                                                             |
 |-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
 | `POST /release/{lease_id}`  | The caller's principal `ID` must equal the lease owner's `ID`, checked **before** any teardown begins — a refused release sends no shutdown frame, kills nothing, and frees no slot. |
 | `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. |
+| `GET /leases`               | Not a refusal but a **filter**: the listing contains only leases whose owner `ID` matches the caller's, and the capacity aggregates are omitted. A caller holding `auth.admin_scope` gets the whole registry instead. See [`GET /leases`](#get-leases-http-api-not-yaml). |
 
-Comparison is principal-`ID` equality and nothing else; `tenant` and `scopes` are
-not consulted.
+Comparison is principal-`ID` equality and nothing else; `tenant` is never
+consulted, and `scopes` only via `auth.admin_scope` on the read-only listing —
+the two mutating routes ignore scopes entirely.
 
 **An unknown lease and another principal's lease answer identically** — same
 status, same body — so live lease ids cannot be enumerated by differencing
@@ -2434,9 +2439,10 @@ Each ownership refusal emits one `lease access denied` WARN record carrying
 `route`, `principal_id` and `lease_id`. Like the response, it does not record
 whether the lease existed.
 
-**With the `auth:` block absent, nothing is refused.** The lease owner and the
-caller are then both the anonymous identity, so the equality check admits every
-caller and both routes behave exactly as they did before ownership existed.
+**With the `auth:` block absent, nothing is refused and nothing is filtered.** The
+lease owner and the caller are then both the anonymous identity, so the equality
+check admits every caller and all three routes behave exactly as they did before
+ownership existed — `GET /leases` included, aggregates and all.
 
 The broker's **own** teardown paths — the `idle_timeout` sweeper and crash
 detection — bypass ownership entirely. They are the broker acting on itself with
@@ -2508,12 +2514,21 @@ teardown.
 
 ### `GET /leases` (HTTP API, not YAML)
 
-`GET /leases` is a read-only introspection surface: it reports the capacity and
-queue aggregates plus a snapshot of every live lease, sorted by `created_at`
-then `lease_id`. It performs no mutation.
+`GET /leases` is a read-only introspection surface: it reports a snapshot of live
+leases, sorted by `created_at` then `lease_id`, plus — for an operator — the
+capacity and queue aggregates. It performs no mutation.
+
+**What a caller sees depends on who it is.** There are two response shapes:
+
+| Caller                                                          | Leases                          | Aggregates |
+|-----------------------------------------------------------------|---------------------------------|------------|
+| Holds `auth.admin_scope` (an **operator**), or auth is disabled  | every live lease                | included   |
+| Any other authenticated caller                                   | only leases it owns             | **omitted**|
+
+**Operator response** — the full shape, unchanged from before scoping existed:
 
 ```jsonc
-// response (200)
+// response (200) — operator, or auth disabled
 {
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
@@ -2531,6 +2546,36 @@ then `lease_id`. It performs no mutation.
   ]
 }
 ```
+
+**Caller-scoped response** — same lease objects, same ordering, but only the
+caller's own leases and **no aggregate keys at all**:
+
+```jsonc
+// response (200) — authenticated non-operator
+{
+  "leases": [
+    {
+      "lease_id": "…",
+      "session_id": "…",
+      "pid": 41234,
+      "state": "active",
+      "last_activity": "2026-06-25T12:00:00Z",
+      "created_at": "2026-06-25T11:59:30Z"
+    }
+  ]
+}
+```
+
+The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use` and
+`queue_depth` let one tenant infer another's load, and a zero would read as a
+factual claim about an idle broker to a client that does not know it is
+unprivileged. Clients must therefore treat a missing key as "not disclosed"
+rather than as `0`.
+
+A caller that owns no live lease gets `200` with `{"leases": []}` — never a `404`
+and never an error. Filtering happens inside the registry snapshot, under the same
+lock that guards the lease table, so a lease the caller may not see is never
+copied out at all.
 
 Surface states: `spawning` (lease exists, instance not yet registered),
 `active` (registered, frames can flow), `draining` (a teardown has latched).

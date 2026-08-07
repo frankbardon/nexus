@@ -114,7 +114,8 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 
 	claims := NewClaimServer(logger, reg, cfg, &fakeRunner{started: make(chan spawnSpec, 1)})
 	releases := NewReleaseServer(logger, reg, cfg.ReleaseGrace)
-	leases := NewLeasesServer(logger, reg)
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	leases := NewLeasesServer(logger, reg, guard, cfg.AdminScope)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -123,7 +124,7 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	guarded := newAuthGuard(logger, cfg.AuthChain).Guard(mux)
+	guarded := guard.Guard(mux)
 	claims.Register(guarded)
 	releases.Register(guarded)
 	leases.Register(guarded)

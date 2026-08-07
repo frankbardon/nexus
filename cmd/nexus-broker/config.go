@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -53,6 +54,22 @@ type Config struct {
 	// treats as auth-off plus a loud startup warning — see run() in main.go.
 	Auth authBlock `yaml:"auth"`
 
+	// AdminScope is the scope a validated credential must carry to be treated as
+	// a broker operator. It widens GET /leases from "the caller's own leases" to
+	// the whole registry plus the capacity aggregates, and nothing else — the
+	// mutating lease routes remain strict principal-id ownership.
+	//
+	// It is configured as `auth.admin_scope` but is NOT part of the map handed to
+	// nexusauth: that package owns the `auth:` vocabulary and rejects every key it
+	// does not know, so LoadConfigFromBytes lifts this one out of the block before
+	// building the chain (see liftAdminScope). One key, one owner.
+	//
+	// Empty means NO caller is an operator: with auth on, GET /leases is then
+	// caller-scoped for everybody. That is the safe reading of "no admin scope was
+	// configured", and setting `admin_scope: ""` is the supported way to switch the
+	// operator view off entirely.
+	AdminScope string `yaml:"-"`
+
 	// AuthChain is the validator chain built from Auth. It is not a YAML key:
 	// LoadConfigFromBytes populates it so a malformed `auth:` block fails at
 	// load — before anything is served — and so the chain (which a future
@@ -87,12 +104,25 @@ func (a *authBlock) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// keyAdminScope is the broker-only key inside the `auth:` block that names the
+// operator scope. It lives in the auth block because it is an authorization
+// setting, but it is the broker's key, not nexusauth's — see liftAdminScope.
+const keyAdminScope = "admin_scope"
+
+// defaultAdminScope is the scope GET /leases treats as "operator" when the
+// config does not say otherwise. It is namespaced like the rest of the project's
+// dotted identifiers so it cannot collide with a scope an operator's IdP already
+// issues for something else; a deployment whose IdP uses a different vocabulary
+// overrides it with `auth.admin_scope`.
+const defaultAdminScope = "nexus.broker.admin"
+
 // DefaultConfig returns a Config populated with sane defaults. LoadConfig and
 // LoadConfigFromBytes merge YAML on top of these.
 //
 // Auth defaults to absent, and therefore to a disabled AuthChain: a broker that
 // has never been told about authentication must keep serving exactly as it did
-// before authentication existed.
+// before authentication existed. AdminScope carries a default even so, because it
+// only ever takes effect once auth IS configured.
 func DefaultConfig() Config {
 	return Config{
 		ListenAddr:       ":8080",
@@ -101,6 +131,7 @@ func DefaultConfig() Config {
 		IdleTimeout:      5 * time.Minute,
 		QueueWaitTimeout: 30 * time.Second,
 		ReleaseGrace:     defaultReleaseGrace,
+		AdminScope:       defaultAdminScope,
 		AuthChain:        nexusauth.NewChain(),
 	}
 }
@@ -123,6 +154,14 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.NexusBinaryPath = engine.ExpandPath(cfg.NexusBinaryPath)
 
+	// Take the broker's own key out of the auth block BEFORE the chain is built,
+	// so what reaches nexusauth is exactly the block it owns.
+	adminScope, err := liftAdminScope(cfg.Auth, cfg.AdminScope)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.AdminScope = adminScope
+
 	// Build the validator chain here, at load, so an operator learns about a
 	// misconfigured `auth:` block from a failed boot rather than from requests
 	// being refused (or worse, waved through) in production. nexusauth's errors
@@ -133,4 +172,33 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.AuthChain = chain
 	return cfg, nil
+}
+
+// liftAdminScope removes the broker-only `admin_scope` key from the raw auth
+// block and returns the value it should take, falling back to current (the
+// default) when the key is absent.
+//
+// It REMOVES rather than reads in place because everything left in the block is
+// handed verbatim to nexusauth, which rejects any key it does not recognize: a
+// key left behind would turn a perfectly valid config into a boot failure. The
+// map is mutated in place so cfg.Auth keeps exactly one meaning — "the block
+// nexusauth owns" — and nothing downstream has to remember to skip a key.
+//
+// `admin_scope:` present but empty (or explicitly null) is honoured as "no caller
+// is an operator", so the operator view can be switched off; only an ABSENT key
+// inherits the default.
+func liftAdminScope(block authBlock, current string) (string, error) {
+	raw, present := block[keyAdminScope]
+	if !present {
+		return current, nil
+	}
+	delete(block, keyAdminScope)
+	if raw == nil {
+		return "", nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("auth: %s: want a string, got %T", keyAdminScope, raw)
+	}
+	return strings.TrimSpace(s), nil
 }

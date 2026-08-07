@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -178,6 +179,59 @@ func TestLoadConfigMalformedAuthBlockFails(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLoadConfigAdminScope covers the broker-only `auth.admin_scope` key: it
+// defaults, it can be overridden, it can be switched OFF with an empty value, and
+// — the load-bearing part — it is lifted out of the block before nexusauth sees
+// it. nexusauth rejects unknown keys, so a config carrying admin_scope alongside
+// validators must still build a chain; if the lift regressed, every such config
+// would fail to boot.
+func TestLoadConfigAdminScope(t *testing.T) {
+	const withValidators = `
+auth:
+  admin_scope: %s
+  validators:
+    - type: static
+      tokens:
+        - token: "t"
+          principal: "p"
+`
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"absent keeps the default", "", defaultAdminScope},
+		{"absent alongside an auth block keeps the default", "auth:\n  validators: []\n", defaultAdminScope},
+		{"explicit value wins", fmt.Sprintf(withValidators, `"ops.admin"`), "ops.admin"},
+		{"surrounding whitespace is trimmed", fmt.Sprintf(withValidators, `"  ops.admin  "`), "ops.admin"},
+		{"empty string disables the operator view", fmt.Sprintf(withValidators, `""`), ""},
+		{"null disables the operator view", fmt.Sprintf(withValidators, ``), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("LoadConfigFromBytes: %v", err)
+			}
+			if cfg.AdminScope != tc.want {
+				t.Errorf("AdminScope = %q, want %q", cfg.AdminScope, tc.want)
+			}
+			// The key must not survive in the block handed to nexusauth.
+			if _, present := cfg.Auth[keyAdminScope]; present {
+				t.Errorf("%s left in the raw auth block; nexusauth would reject it", keyAdminScope)
+			}
+		})
+	}
+
+	// A non-string value is a boot failure naming the key, not a silent ignore
+	// that would leave the operator view wide open on the default scope.
+	if _, err := LoadConfigFromBytes([]byte("auth:\n  admin_scope: 42\n")); err == nil {
+		t.Fatal("LoadConfigFromBytes succeeded for a non-string admin_scope; want a boot failure")
+	} else if !strings.Contains(err.Error(), keyAdminScope) {
+		t.Errorf("error %q does not name %q", err, keyAdminScope)
 	}
 }
 

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -559,6 +560,69 @@ func TestLeasesListsLiveLeaseThenGoneAfterRelease(t *testing.T) {
 	}
 }
 
+// TestLeasesListingIsScopedPerPrincipal is the end-to-end half of E2-S3, over a
+// REAL claimed lease with a live spawned instance rather than a seeded registry
+// entry: the claimant sees its own lease without the capacity aggregates, a second
+// valid principal sees an empty list, and the operator credential sees the lease
+// plus the aggregates.
+//
+// It exercises the DEFAULT admin scope (the fixture sets no `admin_scope:`), so it
+// covers the wiring a stock broker.yaml gets — the unit tests deliberately use a
+// custom scope to prove the key is honoured.
+func TestLeasesListingIsScopedPerPrincipal(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin, withMaxConcurrent(3))
+
+	cr := b.Claim(t, b.Token, stubClaimBody)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+
+	// --- the claimant: its own lease, no aggregates -------------------------
+	var own map[string]json.RawMessage
+	ownBody := b.Leases(t, b.Token)
+	if err := json.Unmarshal(ownBody, &own); err != nil {
+		t.Fatalf("decode owner listing %q: %v", ownBody, err)
+	}
+	if len(own) != 1 {
+		t.Errorf("owner listing keys = %v, want only \"leases\"", own)
+	}
+	ownSnap := decodeLeasesBody(t, ownBody)
+	if len(ownSnap.Leases) != 1 || ownSnap.Leases[0].ID != cr.LeaseID {
+		t.Fatalf("owner listing = %+v, want exactly lease %s", ownSnap.Leases, cr.LeaseID)
+	}
+
+	// --- a second valid principal: nothing at all --------------------------
+	if got, want := string(b.Leases(t, b.OtherToken)), `{"leases":[]}`; got != want {
+		t.Errorf("cross-principal listing = %s, want %s (no lease ids, no aggregates)", got, want)
+	}
+
+	// --- the operator: everything ------------------------------------------
+	adminSnap := decodeLeasesBody(t, b.Leases(t, b.AdminToken))
+	if len(adminSnap.Leases) != 1 || adminSnap.Leases[0].ID != cr.LeaseID {
+		t.Fatalf("operator listing = %+v, want lease %s", adminSnap.Leases, cr.LeaseID)
+	}
+	if adminSnap.MaxConcurrent != 3 || adminSnap.SlotsInUse != 1 {
+		t.Errorf("operator aggregates = {max %d, in-use %d}, want {3, 1}",
+			adminSnap.MaxConcurrent, adminSnap.SlotsInUse)
+	}
+	if adminSnap.Leases[0].PID == 0 {
+		t.Error("operator listing carries no pid; the operator view must be the full one")
+	}
+}
+
+// decodeLeasesBody decodes a GET /leases body into a snapshot. Omitted
+// aggregates decode as zero, which is why the suppression assertions above work
+// on the raw bytes instead.
+func decodeLeasesBody(t *testing.T, body []byte) RegistrySnapshot {
+	t.Helper()
+	var snap RegistrySnapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode leases body %q: %v", body, err)
+	}
+	return snap
+}
+
 // stubClaimBody is the minimal valid claim body every stub-instance test posts.
 const stubClaimBody = `{"config":"engine:\n  name: stub\n"}`
 
@@ -844,21 +908,28 @@ func TestHealthzStaysOpenOnAuthEnabledBroker(t *testing.T) {
 
 // Credentials the auth-enabled integration fixture is built around.
 //
-// TWO principals are configured, not one, even though E1-S3 only needs the
+// THREE principals are configured, not one, even though E1-S3 only needs the
 // first: E2-S2's cross-principal ownership test needs a second *valid* identity
-// to be refused a lease it does not own, and minting it here means that story
-// extends this fixture instead of forking it.
+// to be refused a lease it does not own, and E2-S3's scoped `GET /leases` needs a
+// third holding the operator scope. Minting them here means those stories extend
+// this fixture instead of forking it.
 const (
 	authedPrimaryToken     = "integration-primary-token"
 	authedPrimaryPrincipal = "integration-primary"
 
 	authedOtherToken     = "integration-other-token"
 	authedOtherPrincipal = "integration-other"
+
+	authedAdminToken     = "integration-admin-token"
+	authedAdminPrincipal = "integration-admin"
 )
 
 // integrationAuthYAML is the broker `auth:` block the fixture loads. Static
 // tokens are used on purpose: they are the one validator type that needs no
 // network and no clock, which is what keeps this harness key-free and offline.
+//
+// It sets no `admin_scope`, so the operator credential carries the DEFAULT scope
+// — which makes the out-of-the-box configuration the one exercised end to end.
 const integrationAuthYAML = `
 auth:
   validators:
@@ -870,6 +941,10 @@ auth:
         - token: "` + authedOtherToken + `"
           principal: "` + authedOtherPrincipal + `"
           tenant: "acme"
+        - token: "` + authedAdminToken + `"
+          principal: "` + authedAdminPrincipal + `"
+          tenant: "acme"
+          scopes: "` + defaultAdminScope + `"
 `
 
 // authedStubBroker is the shared auth-enabled integration fixture: a
@@ -902,6 +977,11 @@ type authedStubBroker struct {
 	OtherToken     string
 	OtherPrincipal string
 
+	// AdminToken is a third VALID credential carrying the broker's operator scope,
+	// for tests about the unrestricted introspection view.
+	AdminToken     string
+	AdminPrincipal string
+
 	// spawns is the counting wrapper around the real exec runner, read via
 	// SpawnCount.
 	spawns *countingRunner
@@ -925,6 +1005,8 @@ func startAuthedStubBroker(t *testing.T, stubBin string, opts ...stubBrokerOptio
 		Principal:      authedPrimaryPrincipal,
 		OtherToken:     authedOtherToken,
 		OtherPrincipal: authedOtherPrincipal,
+		AdminToken:     authedAdminToken,
+		AdminPrincipal: authedAdminPrincipal,
 		spawns:         spawns,
 	}
 }
@@ -971,6 +1053,25 @@ func (b *authedStubBroker) Claim(t *testing.T, token, body string) claimResponse
 		t.Fatalf("decode claim response: %v", err)
 	}
 	return cr
+}
+
+// Leases performs an authenticated GET /leases and returns the RAW response
+// body, failing on any non-200.
+//
+// The raw bytes are returned rather than a decoded snapshot because the
+// caller-scoped shape is defined by which keys are ABSENT, and decoding into
+// RegistrySnapshot turns an omitted aggregate into an indistinguishable zero.
+func (b *authedStubBroker) Leases(t *testing.T, token string) []byte {
+	t.Helper()
+	resp := b.Do(t, http.MethodGet, "/leases", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /leases status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read leases body: %v", err)
+	}
+	return bytes.TrimSpace(body)
 }
 
 // SpawnCount is how many instance spawns the broker has attempted. Zero after a
@@ -1072,6 +1173,9 @@ func withAuthFromYAML(t *testing.T, yaml string) stubBrokerOption {
 	return func(w *brokerWiring) {
 		w.cfg.Auth = loaded.Auth
 		w.cfg.AuthChain = loaded.AuthChain
+		// The operator scope comes from the same load, so a fixture that sets
+		// `admin_scope:` is honoured and one that does not gets the real default.
+		w.cfg.AdminScope = loaded.AdminScope
 	}
 }
 
@@ -1127,7 +1231,12 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 		t.Fatalf("listen: %v", err)
 	}
 	wiring := brokerWiring{
-		cfg:    Config{ListenAddr: ln.Addr().String(), NexusBinaryPath: stubBin, ReleaseGrace: defaultReleaseGrace},
+		cfg: Config{
+			ListenAddr:      ln.Addr().String(),
+			NexusBinaryPath: stubBin,
+			ReleaseGrace:    defaultReleaseGrace,
+			AdminScope:      defaultAdminScope,
+		},
 		runner: execRunner{},
 	}
 	for _, opt := range opts {
@@ -1143,7 +1252,7 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	claims := NewClaimServer(logger, registry, cfg, wiring.runner)
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
-	leases := NewLeasesServer(logger, registry)
+	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 
 	// Mirror run()'s route topology exactly, because middleware ORDERING is the
 	// property the auth integration tests exist to catch: healthz and the

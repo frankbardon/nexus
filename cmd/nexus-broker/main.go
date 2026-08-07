@@ -47,6 +47,10 @@ func run() error {
 		"idle_timeout", cfg.IdleTimeout,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
+		// Logged because a mistyped admin scope fails SILENTLY — the operator view
+		// of GET /leases simply never engages — so the value in effect has to be
+		// visible somewhere at boot.
+		"admin_scope", cfg.AdminScope,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -68,7 +72,10 @@ func run() error {
 	gateway := NewGateway(logger, registry, guard)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
-	leases := NewLeasesServer(logger, registry)
+	// The leases listing is scoped to the caller unless it holds cfg.AdminScope,
+	// so it needs both the guard (to know whether auth is on at all) and the
+	// configured operator scope.
+	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
