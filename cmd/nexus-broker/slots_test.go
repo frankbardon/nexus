@@ -21,11 +21,11 @@ import (
 func TestSlots_CapRejectsThenReleaseFrees(t *testing.T) {
 	reg := NewRegistry(testLogger(), 2)
 
-	id1, err := reg.NewLease()
+	id1, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("lease 1: %v", err)
 	}
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("lease 2: %v", err)
 	}
 	if got := reg.SlotsInUse(); got != 2 {
@@ -33,7 +33,7 @@ func TestSlots_CapRejectsThenReleaseFrees(t *testing.T) {
 	}
 
 	// Third lease is over capacity.
-	if _, err := reg.NewLease(); !errors.Is(err, errNoCapacity) {
+	if _, err := reg.NewLease(anonymousOwner()); !errors.Is(err, errNoCapacity) {
 		t.Fatalf("lease 3 err = %v, want errNoCapacity", err)
 	}
 	// The rejected acquire consumed no slot.
@@ -46,7 +46,7 @@ func TestSlots_CapRejectsThenReleaseFrees(t *testing.T) {
 	if got := reg.SlotsInUse(); got != 1 {
 		t.Fatalf("slots in use after remove = %d, want 1", got)
 	}
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("lease after release: %v", err)
 	}
 	if got := reg.SlotsInUse(); got != 2 {
@@ -61,7 +61,7 @@ func TestSlots_NonPositiveCapIsUnlimited(t *testing.T) {
 		reg := NewRegistry(testLogger(), limit)
 		const n = 64
 		for i := 0; i < n; i++ {
-			if _, err := reg.NewLease(); err != nil {
+			if _, err := reg.NewLease(anonymousOwner()); err != nil {
 				t.Fatalf("cap=%d lease %d: %v", limit, i, err)
 			}
 		}
@@ -87,7 +87,7 @@ func TestSlots_ConcurrentAcquireRespectsCap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // line everyone up to maximise contention
-			if _, err := reg.NewLease(); err != nil {
+			if _, err := reg.NewLease(anonymousOwner()); err != nil {
 				if errors.Is(err, errNoCapacity) {
 					rejected.Add(1)
 				}
@@ -115,7 +115,7 @@ func TestSlots_ConcurrentAcquireRespectsCap(t *testing.T) {
 // the grace wait, so this is deterministic.
 func TestSlots_ReleasePathFreesSlot(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	id, err := reg.NewLease()
+	id, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("lease: %v", err)
 	}
@@ -151,11 +151,11 @@ func waitForQueueLen(t *testing.T, reg *Registry, want int) {
 // errNoCapacity and is never parked in the queue.
 func TestSlots_QueueDisabledRejectsImmediately(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
 	start := time.Now()
-	if _, err := reg.NewLeaseQueued(context.Background(), 0); !errors.Is(err, errNoCapacity) {
+	if _, err := reg.NewLeaseQueued(context.Background(), 0, anonymousOwner()); !errors.Is(err, errNoCapacity) {
 		t.Fatalf("err = %v, want errNoCapacity", err)
 	}
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
@@ -171,7 +171,7 @@ func TestSlots_QueueDisabledRejectsImmediately(t *testing.T) {
 // slot frees, with no drift and no leaked waiter.
 func TestSlots_QueuedClaimProceedsWhenSlotFrees(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	holder, err := reg.NewLease()
+	holder, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestSlots_QueuedClaimProceedsWhenSlotFrees(t *testing.T) {
 	idCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		id, err := reg.NewLeaseQueued(context.Background(), 5*time.Second)
+		id, err := reg.NewLeaseQueued(context.Background(), 5*time.Second, anonymousOwner())
 		idCh <- id
 		errCh <- err
 	}()
@@ -213,7 +213,7 @@ func TestSlots_QueuedClaimProceedsWhenSlotFrees(t *testing.T) {
 // not perturb the holder's slot.
 func TestSlots_QueueWaitTimeout(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
 	start := time.Now()
@@ -235,7 +235,7 @@ func TestSlots_QueueWaitTimeout(t *testing.T) {
 // never granted the holder's slot (no drift, no leak).
 func TestSlots_QueuedCancelDropsWaiter(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	holder, err := reg.NewLease()
+	holder, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestSlots_QueuedCancelDropsWaiter(t *testing.T) {
 // the oldest waiter still queued.
 func TestSlots_QueueFIFOOrder(t *testing.T) {
 	reg := NewRegistry(testLogger(), 1)
-	holder, err := reg.NewLease()
+	holder, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestSlots_QueueStormNoDrift(t *testing.T) {
 				ctx, cancel = context.WithTimeout(ctx, time.Duration(1+i%4)*time.Millisecond)
 				defer cancel()
 			}
-			id, err := reg.NewLeaseQueued(ctx, timeout)
+			id, err := reg.NewLeaseQueued(ctx, timeout, anonymousOwner())
 			if err == nil {
 				granted.Add(1)
 				// Hold the slot momentarily, then free it for the next waiter.
@@ -431,7 +431,7 @@ func TestClaim_QueueWaitTimeoutReturns503(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Occupy the only slot with a live lease.
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
 
@@ -476,7 +476,7 @@ func TestClaim_ClientCancelWhileQueued(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Occupy the only slot with a live lease.
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
 
@@ -550,7 +550,7 @@ func TestClaim_OverCapacityReturns503(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Occupy the only slot with a live lease.
-	if _, err := reg.NewLease(); err != nil {
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
 		t.Fatalf("pre-occupy slot: %v", err)
 	}
 

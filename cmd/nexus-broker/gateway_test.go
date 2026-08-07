@@ -91,7 +91,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestGateway_RegisterAndRoundTrip(t *testing.T) {
 	wsURL, registry := newTestGateway(t)
 
-	leaseID, err := registry.NewLease()
+	leaseID, err := registry.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("new lease: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestGateway_RejectsUnknownLease(t *testing.T) {
 
 func TestGateway_RejectsNonRegisterFirstFrame(t *testing.T) {
 	wsURL, registry := newTestGateway(t)
-	leaseID, err := registry.NewLease()
+	leaseID, err := registry.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("new lease: %v", err)
 	}

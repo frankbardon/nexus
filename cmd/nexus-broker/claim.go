@@ -113,9 +113,21 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The lease is stamped with whoever the auth guard authenticated. PrincipalFrom
+	// reports absent when the broker runs with no `auth:` block (or when /claim is
+	// registered outside the guard, as some tests do), and that is a supported
+	// state, not an error — the lease then records the anonymous owner so no code
+	// path downstream has to cope with an absent one.
+	owner, authenticated := PrincipalFrom(r.Context())
+	if !authenticated {
+		owner = anonymousOwner()
+	}
+
 	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
-	// claim can never spawn an instance past max_concurrent. At capacity it
-	// parks the claim in a FIFO queue (E3-S2) and proceeds when a slot frees:
+	// claim can never spawn an instance past max_concurrent. Ownership is only
+	// carried through it — it does not participate in capacity accounting. At
+	// capacity the claim parks in a FIFO queue (E3-S2) and proceeds when a slot
+	// frees:
 	//
 	//   - errQueueTimeout: the claim waited past queue_wait_timeout → a distinct
 	//     503 "capacity wait timed out" (told apart from the immediate
@@ -124,7 +136,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	//     disabled) → immediate 503 "no capacity".
 	//   - context cancelled: the client hung up while queued → no response (the
 	//     connection is gone); the waiter is already dropped from the queue.
-	leaseID, err := s.registry.NewLeaseQueued(r.Context(), s.queueWaitTimeout)
+	leaseID, err := s.registry.NewLeaseQueued(r.Context(), s.queueWaitTimeout, owner)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQueueTimeout):
@@ -215,7 +227,12 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	go s.registry.watchExit(leaseID)
 
 	wsURL := "ws://" + clientWSHost(s.cfg.ListenAddr, r.Host) + ClientWSPath(leaseID)
-	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL, "session_id", sessionID)
+	// principal_id ties the new lease id back to the identity that claimed it. The
+	// guard's allow record cannot carry it: /claim has no lease id in its path, so
+	// this is the only line that joins the two halves of the audit trail. Empty
+	// when auth is disabled.
+	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL,
+		"session_id", sessionID, "principal_id", owner.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

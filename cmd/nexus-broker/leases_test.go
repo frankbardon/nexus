@@ -132,14 +132,14 @@ func TestLeasesHTTP_ListsClaimedLeaseThenGoneAfterRelease(t *testing.T) {
 func TestLeasesHTTP_QueueDepthReflectsWaiters(t *testing.T) {
 	ts, reg := newLeasesTestServer(t, 1)
 
-	holder, err := reg.NewLease()
+	holder, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("occupy slot: %v", err)
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, qerr := reg.NewLeaseQueued(context.Background(), 5*time.Second)
+		_, qerr := reg.NewLeaseQueued(context.Background(), 5*time.Second, anonymousOwner())
 		errCh <- qerr
 	}()
 	waitForQueueLen(t, reg, 1)
@@ -172,7 +172,7 @@ func TestLeasesHTTP_SortedByCreation(t *testing.T) {
 
 	var ids []string
 	for i := 0; i < 5; i++ {
-		id, err := reg.NewLease()
+		id, err := reg.NewLease(anonymousOwner())
 		if err != nil {
 			t.Fatalf("lease %d: %v", i, err)
 		}

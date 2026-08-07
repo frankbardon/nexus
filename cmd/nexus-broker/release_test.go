@@ -29,7 +29,7 @@ func newReleaseTestServer(t *testing.T, grace time.Duration) (*httptest.Server, 
 // and the attached instance connection so the test can inspect queued frames.
 func seedLease(t *testing.T, reg *Registry, proc processHandle) (string, *wsConn) {
 	t.Helper()
-	id, err := reg.NewLease()
+	id, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}

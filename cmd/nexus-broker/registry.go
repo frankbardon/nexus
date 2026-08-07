@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // leaseState is the lifecycle phase of a lease within the gateway registry.
@@ -101,6 +103,21 @@ type lease struct {
 	createdAt time.Time
 	instance  *wsConn
 	client    *wsConn
+
+	// owner is the verified identity that claimed this lease, stamped once at
+	// creation from the authenticated Principal on the POST /claim request. It is
+	// set-once and deliberately orthogonal to state and releasing: NO lifecycle
+	// transition may clear it, because the enforcement stories compare it long
+	// after a lease has moved past pending, and a cleared owner would silently
+	// read as "anonymous" — i.e. as open access.
+	//
+	// Only owner.ID is ever compared (lease ownership is principal-id equality and
+	// nothing else); the rest of the Principal is carried for the scope check on
+	// the filtered listing and for the audit/durability record. When the broker
+	// runs with no `auth:` block there is no principal to stamp, so this is the
+	// anonymous owner (see anonymousOwner) — a well-defined zero value rather than
+	// an accident, so no code path can dereference something absent.
+	owner nexusauth.Principal
 
 	// lastActivity is the time of the most recent REAL client activity on this
 	// lease — i.e. an inbound io frame flowing client → instance (user input).
@@ -211,13 +228,54 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 	}
 }
 
-// NewLease creates a fresh, pending lease with a randomly generated id and
-// returns the id, acquiring a capacity slot WITHOUT waiting. At capacity it
-// returns errNoCapacity immediately and consumes no slot. NewLeaseQueued is the
-// claim path's entry point (it adds bounded FIFO waiting on top); NewLease is
-// the non-waiting primitive used by tests and any caller that wants the old
-// immediate-rejection semantics.
-func (r *Registry) NewLease() (string, error) {
+// anonymousOwner is the owner stamped on a lease that was claimed without an
+// authenticated principal — which is the normal, supported state when the broker
+// runs with no `auth:` block, and also covers a claim route registered outside
+// the auth guard.
+//
+// It is a named constructor rather than an inline nexusauth.Principal{} so
+// "nobody owns this lease" is a deliberate, greppable statement with one
+// definition, instead of an incidental zero value scattered across call sites.
+// The zero Principal has an empty ID, and empty-ID equals empty-ID, so with auth
+// disabled every lease is owned by the same anonymous identity — which is exactly
+// why the enforcement stories built on top of it will behave as the broker did
+// before authentication existed.
+func anonymousOwner() nexusauth.Principal { return nexusauth.Principal{} }
+
+// cloneOwner deep-copies a Principal's reference-typed fields (Scopes, Claims)
+// so the registry and its callers can never mutate state the other observes. It
+// is applied on the way IN (the claim handler keeps its own Principal, which must
+// not be able to change a lease's owner afterwards) and on the way OUT (an
+// enforcement check must not be handed a live map into registry-guarded state) —
+// the same values-only discipline Snapshot follows.
+//
+// nexusauth.Principal has an equivalent clone method, but it is unexported and
+// cmd/nexus-broker is package main, so it cannot be reached from here. Keep this
+// in sync if Principal gains another reference-typed field.
+func cloneOwner(p nexusauth.Principal) nexusauth.Principal {
+	out := p
+	if p.Scopes != nil {
+		out.Scopes = make([]string, len(p.Scopes))
+		copy(out.Scopes, p.Scopes)
+	}
+	if p.Claims != nil {
+		out.Claims = make(map[string]any, len(p.Claims))
+		for k, v := range p.Claims {
+			out.Claims[k] = v
+		}
+	}
+	return out
+}
+
+// NewLease creates a fresh, pending lease with a randomly generated id owned by
+// owner, and returns the id, acquiring a capacity slot WITHOUT waiting. At
+// capacity it returns errNoCapacity immediately and consumes no slot.
+// NewLeaseQueued is the claim path's entry point (it adds bounded FIFO waiting on
+// top); NewLease is the non-waiting primitive used by tests and any caller that
+// wants the old immediate-rejection semantics.
+//
+// Pass anonymousOwner() when there is no authenticated principal.
+func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 	id, err := newLeaseID()
 	if err != nil {
 		return "", err
@@ -233,23 +291,28 @@ func (r *Registry) NewLease() (string, error) {
 	if !r.tryAcquireSlotLocked() {
 		return "", errNoCapacity
 	}
-	if err := r.insertLeaseLocked(id); err != nil {
+	if err := r.insertLeaseLocked(id, owner); err != nil {
 		r.releaseSlotLocked()
 		return "", err
 	}
 	return id, nil
 }
 
-// NewLeaseQueued creates a fresh, pending lease, waiting in FIFO order for a
-// capacity slot if the registry is at max_concurrent. E3-S2's POST /claim calls
-// it instead of NewLease so an over-cap claim queues rather than failing
-// outright. The slot is reserved on the SAME counter as NewLease — the queue
-// adds no second accounting path.
+// NewLeaseQueued creates a fresh, pending lease owned by owner, waiting in FIFO
+// order for a capacity slot if the registry is at max_concurrent. E3-S2's POST
+// /claim calls it instead of NewLease so an over-cap claim queues rather than
+// failing outright. The slot is reserved on the SAME counter as NewLease — the
+// queue adds no second accounting path.
+//
+// owner is carried through untouched rather than consulted: the slot is still
+// acquired BEFORE the lease exists, so ownership changes nothing about capacity
+// accounting or the order of the errNoCapacity / errQueueTimeout / cancelled
+// branches. Pass anonymousOwner() when there is no authenticated principal.
 //
 // Returns errNoCapacity if the cap is full and timeout <= 0 (no waiting),
 // errQueueTimeout if the wait exceeds timeout, or the wrapped ctx error if the
 // request context is cancelled while queued. On any error no slot is held.
-func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration) (string, error) {
+func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration, owner nexusauth.Principal) (string, error) {
 	id, err := newLeaseID()
 	if err != nil {
 		return "", err
@@ -258,7 +321,7 @@ func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration) (s
 		return "", err
 	}
 	r.mu.Lock()
-	insertErr := r.insertLeaseLocked(id)
+	insertErr := r.insertLeaseLocked(id, owner)
 	r.mu.Unlock()
 	if insertErr != nil {
 		// We hold a slot we could not bind to a lease; hand it back to the
@@ -270,10 +333,13 @@ func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration) (s
 }
 
 // insertLeaseLocked inserts a fresh pending lease for an ALREADY-acquired
-// capacity slot. Caller MUST hold r.mu and MUST have reserved a slot (the lease
-// is created with hasSlot=true, never incrementing the counter itself). Returns
-// an error on the astronomically unlikely id collision.
-func (r *Registry) insertLeaseLocked(id string) error {
+// capacity slot, stamped with its owner. Caller MUST hold r.mu and MUST have
+// reserved a slot (the lease is created with hasSlot=true, never incrementing the
+// counter itself). Returns an error on the astronomically unlikely id collision.
+//
+// The owner is stamped here — the single place a lease comes into existence — so
+// there is no window in which a live lease has no owner recorded.
+func (r *Registry) insertLeaseLocked(id string, owner nexusauth.Principal) error {
 	if _, exists := r.leases[id]; exists {
 		return fmt.Errorf("lease id collision: %s", id)
 	}
@@ -282,6 +348,7 @@ func (r *Registry) insertLeaseLocked(id string) error {
 		id:              id,
 		state:           leaseStatePending,
 		createdAt:       now,
+		owner:           cloneOwner(owner),
 		lastActivity:    now,
 		ready:           make(chan struct{}),
 		sessionReported: make(chan struct{}),
@@ -390,6 +457,29 @@ func (r *Registry) SessionID(id string) string {
 		return ""
 	}
 	return l.sessionID
+}
+
+// LeaseOwner returns the identity that claimed a lease and reports whether the
+// lease is known. It is the single read path the enforcement stories use: an
+// ownership check compares the caller's principal ID against the returned
+// Principal's ID, and nothing else.
+//
+// The distinction between (anonymousOwner(), true) and (anonymousOwner(), false)
+// matters and must not be collapsed: the first is a real lease claimed with no
+// authentication, the second is a lease that does not exist. A caller that
+// ignores ok would treat an unknown lease id as an anonymously-owned one.
+//
+// It follows Snapshot's discipline — the lock is taken, values are copied out,
+// and cloneOwner ensures no internal slice or map escapes — so the returned
+// Principal is safe to read and mutate without the lock.
+func (r *Registry) LeaseOwner(id string) (nexusauth.Principal, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return anonymousOwner(), false
+	}
+	return cloneOwner(l.owner), true
 }
 
 // SetProcess records the spawned instance's process handle on a lease and

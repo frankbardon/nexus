@@ -337,6 +337,102 @@ func TestClaim_RejectsEmptyConfig(t *testing.T) {
 	}
 }
 
+// newGuardedClaimTestServer is newClaimTestServer with /claim registered THROUGH
+// the auth guard, which is the topology run() uses. It exists because the
+// ownership stamp can only be observed on the guarded path: an unguarded handler
+// never sees a Principal.
+func newGuardedClaimTestServer(t *testing.T, runner commandRunner, cfg Config) (*httptest.Server, *Registry) {
+	t.Helper()
+	reg := NewRegistry(testLogger(), 0)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	mux := http.NewServeMux()
+	cs.Register(newAuthGuard(testLogger(), cfg.AuthChain).Guard(mux))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts, reg
+}
+
+// runClaimToReady drives a claim to a 200: it posts, waits for the spawn, then
+// plays the instance's ready + session-id report. It returns the spawn spec (for
+// the minted lease id) and the response.
+func runClaimToReady(t *testing.T, ts *httptest.Server, reg *Registry, runner *fakeRunner, token string) (spawnSpec, *http.Response) {
+	t.Helper()
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- doAuthed(t, http.MethodPost, ts.URL+"/claim", token, `{"config":"engine: {}\n"}`)
+	}()
+
+	var spec spawnSpec
+	select {
+	case spec = <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.start was never called")
+	}
+	reg.MarkReady(spec.leaseID)
+	reg.MarkSessionID(spec.leaseID, "engine-sess-owned")
+
+	resp := <-respCh
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	return spec, resp
+}
+
+// TestClaim_StampsAuthenticatedOwner is the story's headline: POST /claim records
+// the identity the guard authenticated onto the lease it mints. No enforcement is
+// asserted here — the record is the deliverable.
+func TestClaim_StampsAuthenticatedOwner(t *testing.T) {
+	cfg := mustLoadConfig(t, staticAuthYAML)
+	cfg.ListenAddr = "127.0.0.1:8080"
+	cfg.NexusBinaryPath = "/bin/nexus"
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(7001)}
+	ts, reg := newGuardedClaimTestServer(t, runner, cfg)
+
+	spec, _ := runClaimToReady(t, ts, reg, runner, "good-token")
+
+	owner, ok := reg.LeaseOwner(spec.leaseID)
+	if !ok {
+		t.Fatal("claimed lease has no owner record")
+	}
+	if owner.ID != "ci-runner" {
+		t.Errorf("lease owner ID = %q, want ci-runner (the authenticated principal)", owner.ID)
+	}
+	if owner.Tenant != "acme" {
+		t.Errorf("lease owner Tenant = %q, want acme", owner.Tenant)
+	}
+}
+
+// TestClaim_AnonymousOwnerWhenAuthDisabled is the backward-compatibility half:
+// with no `auth:` block /claim is registered on the raw mux, no Principal reaches
+// the handler, and the lease records the anonymous owner. The claim itself must
+// succeed exactly as before.
+func TestClaim_AnonymousOwnerWhenAuthDisabled(t *testing.T) {
+	cfg := mustLoadConfig(t, "")
+	cfg.ListenAddr = "127.0.0.1:8080"
+	cfg.NexusBinaryPath = "/bin/nexus"
+	if cfg.AuthChain.Enabled() {
+		t.Fatal("precondition: auth should be disabled for this test")
+	}
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(7002)}
+	// Guard() on a disabled chain returns the mux unchanged, so this is the same
+	// route topology an unguarded registration produces.
+	ts, reg := newGuardedClaimTestServer(t, runner, cfg)
+
+	spec, _ := runClaimToReady(t, ts, reg, runner, "")
+
+	owner, ok := reg.LeaseOwner(spec.leaseID)
+	if !ok {
+		t.Fatal("claimed lease has no owner record")
+	}
+	if owner.ID != anonymousOwner().ID {
+		t.Errorf("lease owner ID = %q, want the anonymous owner's empty id", owner.ID)
+	}
+	if owner.Scopes != nil || owner.Claims != nil {
+		t.Errorf("lease owner = %+v, want the zero Principal", owner)
+	}
+}
+
 // jsonString quotes s as a JSON string literal for embedding in a request body.
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)

@@ -12,7 +12,7 @@ import (
 // object outlives its map entry).
 func seedLiveLease(t *testing.T, reg *Registry, proc processHandle) (string, *lease, *wsConn) {
 	t.Helper()
-	id, err := reg.NewLease()
+	id, err := reg.NewLease(anonymousOwner())
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}
