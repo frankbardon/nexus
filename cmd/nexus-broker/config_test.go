@@ -235,6 +235,99 @@ auth:
 	}
 }
 
+// TestLoadConfigAdvertiseAddrDefaultsToUnset pins the backward-compatibility
+// half of E3-S1: a broker.yaml that never heard of advertise_addr must leave both
+// derived fields empty, which is what makes clientWSHost behave exactly as it did
+// before the key existed.
+func TestLoadConfigAdvertiseAddrDefaultsToUnset(t *testing.T) {
+	for _, yaml := range []string{``, "listen_addr: \":8080\"\n", "advertise_addr: \"\"\n", "advertise_addr:\n"} {
+		cfg, err := LoadConfigFromBytes([]byte(yaml))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes(%q): %v", yaml, err)
+		}
+		if cfg.AdvertiseHost != "" || cfg.AdvertiseScheme != "" {
+			t.Errorf("for %q: AdvertiseScheme/Host = %q/%q, want both empty",
+				yaml, cfg.AdvertiseScheme, cfg.AdvertiseHost)
+		}
+	}
+}
+
+// TestLoadConfigAdvertiseAddrParsed covers every accepted form: the bare
+// host:port (which must NOT set a scheme, so ws:// stays the default) and the
+// scheme-qualified forms, including http/https normalization and the
+// port-optional case.
+func TestLoadConfigAdvertiseAddrParsed(t *testing.T) {
+	cases := []struct {
+		raw        string
+		wantScheme string
+		wantHost   string
+	}{
+		{"broker.example.com:8443", "", "broker.example.com:8443"},
+		{"  broker.example.com:8443  ", "", "broker.example.com:8443"}, // trimmed
+		{"10.0.0.7:8080", "", "10.0.0.7:8080"},
+		{"[2001:db8::1]:8080", "", "[2001:db8::1]:8080"},
+		{"ws://broker.example.com:8080", "ws", "broker.example.com:8080"},
+		{"wss://broker.example.com:443", "wss", "broker.example.com:443"},
+		{"wss://broker.example.com", "wss", "broker.example.com"}, // port optional with a scheme
+		{"http://broker.example.com:8080", "ws", "broker.example.com:8080"},
+		{"https://broker.example.com", "wss", "broker.example.com"},
+		{"wss://broker.example.com/", "wss", "broker.example.com"}, // bare trailing slash is not a path
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := LoadConfigFromBytes([]byte("advertise_addr: " + fmt.Sprintf("%q", tc.raw) + "\n"))
+			if err != nil {
+				t.Fatalf("LoadConfigFromBytes: %v", err)
+			}
+			if cfg.AdvertiseScheme != tc.wantScheme {
+				t.Errorf("AdvertiseScheme = %q, want %q", cfg.AdvertiseScheme, tc.wantScheme)
+			}
+			if cfg.AdvertiseHost != tc.wantHost {
+				t.Errorf("AdvertiseHost = %q, want %q", cfg.AdvertiseHost, tc.wantHost)
+			}
+			// The raw value is retained verbatim (modulo nothing) for logging.
+			if cfg.AdvertiseAddr != tc.raw {
+				t.Errorf("AdvertiseAddr = %q, want the raw value %q", cfg.AdvertiseAddr, tc.raw)
+			}
+		})
+	}
+}
+
+// TestLoadConfigMalformedAdvertiseAddrFails is the story's boot-failure
+// criterion: a value that could not produce a dialable URL must stop startup,
+// naming the key, rather than surfacing as clients failing to connect later.
+func TestLoadConfigMalformedAdvertiseAddrFails(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"bare host without a port", "broker.example.com"},
+		{"port only", ":8080"},
+		{"wildcard bare", "0.0.0.0:8080"},
+		{"wildcard v6 bare", "[::]:8080"},
+		{"wildcard in url form", "ws://0.0.0.0:8080"},
+		{"scheme with no host", "wss://"},
+		{"unsupported scheme", "tcp://broker.example.com:8080"},
+		{"carries a path", "wss://broker.example.com/gateway"},
+		{"carries a query", "wss://broker.example.com?x=1"},
+		{"carries userinfo", "wss://user:pw@broker.example.com"},
+		{"too many colons", "a:b:c"},
+		{"not parseable as a url", "ws://[::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfigFromBytes([]byte("advertise_addr: " + fmt.Sprintf("%q", tc.raw) + "\n"))
+			if err == nil {
+				t.Fatalf("LoadConfigFromBytes(%q) succeeded (host=%q); want a boot failure",
+					tc.raw, cfg.AdvertiseHost)
+			}
+			if !strings.Contains(err.Error(), "advertise_addr") {
+				t.Errorf("error %q does not name advertise_addr", err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigPartialOverrideKeepsDefaults(t *testing.T) {
 	cfg, err := LoadConfigFromBytes([]byte(`listen_addr: ":7777"`))
 	if err != nil {

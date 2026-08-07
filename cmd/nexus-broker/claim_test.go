@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -430,6 +431,213 @@ func TestClaim_AnonymousOwnerWhenAuthDisabled(t *testing.T) {
 	}
 	if owner.Scopes != nil || owner.Claims != nil {
 		t.Errorf("lease owner = %+v, want the zero Principal", owner)
+	}
+}
+
+// TestClientWSHost_Precedence walks the resolution order one branch at a time:
+// advertise_addr → explicit host in listen_addr → request Host → loopback. Each
+// case removes exactly one input so the branch under test is the one that fires.
+func TestClientWSHost_Precedence(t *testing.T) {
+	cases := []struct {
+		name          string
+		advertiseHost string
+		listenAddr    string
+		requestHost   string
+		want          string
+	}{
+		{
+			name:          "advertise_addr wins over an explicit listen host",
+			advertiseHost: "broker-1.example.com:8443",
+			listenAddr:    "10.0.0.7:8080",
+			requestHost:   "lb.example.com",
+			want:          "broker-1.example.com:8443",
+		},
+		{
+			name:          "advertise_addr wins over the request Host on a wildcard bind",
+			advertiseHost: "broker-1.example.com:8443",
+			listenAddr:    ":8080",
+			requestHost:   "lb.example.com",
+			want:          "broker-1.example.com:8443",
+		},
+		{
+			name:        "explicit listen host wins over the request Host",
+			listenAddr:  "10.0.0.7:8080",
+			requestHost: "lb.example.com",
+			want:        "10.0.0.7:8080",
+		},
+		{
+			name:        "request Host is used for a wildcard bind",
+			listenAddr:  ":8080",
+			requestHost: "lb.example.com",
+			want:        "lb.example.com",
+		},
+		{
+			name:        "request Host is used for an explicit 0.0.0.0 bind",
+			listenAddr:  "0.0.0.0:8080",
+			requestHost: "lb.example.com",
+			want:        "lb.example.com",
+		},
+		{
+			name:        "request Host is used for a :: bind",
+			listenAddr:  "[::]:8080",
+			requestHost: "lb.example.com",
+			want:        "lb.example.com",
+		},
+		{
+			name:       "loopback is the last resort when there is no request Host",
+			listenAddr: ":9090",
+			want:       "127.0.0.1:9090",
+		},
+		{
+			name:       "loopback with the hardcoded port for an unparseable listen addr",
+			listenAddr: "nonsense",
+			want:       "127.0.0.1:8080",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clientWSHost(tc.advertiseHost, tc.listenAddr, tc.requestHost); got != tc.want {
+				t.Errorf("clientWSHost(%q, %q, %q) = %q, want %q",
+					tc.advertiseHost, tc.listenAddr, tc.requestHost, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClientWSBaseURL_Scheme pins the scheme half: ws:// unless a
+// scheme-qualified advertise_addr says otherwise, so nothing changes for a
+// deployment that has not set the key.
+func TestClientWSBaseURL_Scheme(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "no advertise_addr keeps ws:// and the listen host",
+			cfg:  Config{ListenAddr: "10.0.0.7:8080"},
+			want: "ws://10.0.0.7:8080",
+		},
+		{
+			name: "bare host:port advertise_addr keeps ws://",
+			cfg:  Config{ListenAddr: ":8080", AdvertiseHost: "broker-1.example.com:8443"},
+			want: "ws://broker-1.example.com:8443",
+		},
+		{
+			name: "wss advertise_addr changes the scheme",
+			cfg:  Config{ListenAddr: ":8080", AdvertiseScheme: "wss", AdvertiseHost: "gw.example.com"},
+			want: "wss://gw.example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clientWSBaseURL(tc.cfg, "lb.example.com"); got != tc.want {
+				t.Errorf("clientWSBaseURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstanceDialHost_CollapsesWildcardToLoopback guards the deliberate
+// asymmetry with clientWSHost: instances are same-host by design and dial back
+// over loopback, so advertise_addr must never reach this path.
+func TestInstanceDialHost_CollapsesWildcardToLoopback(t *testing.T) {
+	cases := []struct{ listenAddr, want string }{
+		{":8080", "127.0.0.1:8080"},
+		{"0.0.0.0:9000", "127.0.0.1:9000"},
+		{"[::]:9000", "127.0.0.1:9000"},
+		{"10.0.0.7:8080", "10.0.0.7:8080"}, // explicit host is preserved
+		{"nonsense", "127.0.0.1:8080"},
+	}
+	for _, tc := range cases {
+		if got := instanceDialHost(tc.listenAddr); got != tc.want {
+			t.Errorf("instanceDialHost(%q) = %q, want %q", tc.listenAddr, got, tc.want)
+		}
+	}
+}
+
+// TestWarnIfAdvertiseAddrMissing asserts the boot warning fires on exactly the
+// configuration shape that produces a guessed ws_url, and stays quiet otherwise —
+// a warning that fires on a correct config gets tuned out.
+func TestWarnIfAdvertiseAddrMissing(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{"wildcard bind with no advertise_addr warns", Config{ListenAddr: ":8080"}, true},
+		{"0.0.0.0 bind with no advertise_addr warns", Config{ListenAddr: "0.0.0.0:8080"}, true},
+		{"[::] bind with no advertise_addr warns", Config{ListenAddr: "[::]:8080"}, true},
+		{"unparseable listen addr warns", Config{ListenAddr: "nonsense"}, true},
+		{"explicit listen host is quiet", Config{ListenAddr: "10.0.0.7:8080"}, false},
+		{"advertise_addr silences a wildcard bind", Config{ListenAddr: ":8080", AdvertiseHost: "gw.example.com:443"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			warnIfAdvertiseAddrMissing(logger, tc.cfg)
+
+			out := buf.String()
+			if tc.wantWarn {
+				if !strings.Contains(out, "level=WARN") {
+					t.Fatalf("expected a WARN record, got %q", out)
+				}
+				// The consequence, not just the symptom: a vague warning is ignored.
+				for _, want := range []string{"advertise_addr", "Host header", "proxy"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("warning %q does not mention %q", out, want)
+					}
+				}
+			} else if out != "" {
+				t.Errorf("expected no warning, got %q", out)
+			}
+		})
+	}
+}
+
+// TestClaim_AdvertiseAddrDrivesReturnedWSURL is the end-to-end proof: the ws_url
+// in a real claim response names the advertised address, not the request Host the
+// claim arrived on (which for an httptest server is 127.0.0.1:<random>).
+func TestClaim_AdvertiseAddrDrivesReturnedWSURL(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("listen_addr: \":8080\"\nadvertise_addr: \"wss://broker-1.example.com\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	cfg.NexusBinaryPath = "/bin/nexus"
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(7100)}
+	ts, reg, _ := newClaimTestServer(t, runner, cfg)
+
+	respCh := make(chan *http.Response, 1)
+	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n"}`) }()
+
+	var spec spawnSpec
+	select {
+	case spec = <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.start was never called")
+	}
+	// The instance still dials back over loopback: advertise_addr is client-facing
+	// only and must not leak into the spawn env.
+	if spec.brokerAddr != "ws://127.0.0.1:8080/instance" {
+		t.Errorf("brokerAddr = %q, want the loopback dial-back address", spec.brokerAddr)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	reg.MarkSessionID(spec.leaseID, "engine-sess-adv")
+
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var cr claimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	want := "wss://broker-1.example.com" + ClientWSPath(spec.leaseID)
+	if cr.WSURL != want {
+		t.Errorf("ws_url = %q, want %q", cr.WSURL, want)
 	}
 }
 

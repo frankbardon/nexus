@@ -52,6 +52,7 @@ The broker reads its own YAML config file (default `broker.yaml`, override with
 ```yaml
 # broker.yaml
 listen_addr: ":8080"          # HTTP/WS gateway bind address
+advertise_addr: ""            # address CLIENTS use to reach this broker; required behind a proxy/LB
 nexus_binary_path: "nexus"    # path to the nexus binary the broker exec()s
 max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a lease after this much inactivity; <=0 disables
@@ -70,6 +71,25 @@ bin/nexus-broker -config broker.yaml
 
 Every config key, its type, and its default are listed in the authoritative
 [Configuration Reference](../configuration/reference.md#session-broker-nexus-broker).
+
+### Behind a proxy: set `advertise_addr`
+
+A lease is in-memory state on **one** broker process, so the `ws_url` a claim
+returns has to name that process. With a wildcard bind and no `advertise_addr`,
+the broker can only guess — it derives the host from the claim request's `Host`
+header, which behind a reverse proxy or load balancer names the **proxy**. Set
+`advertise_addr` to the address clients actually use:
+
+```yaml
+listen_addr: ":8080"                              # bind wide
+advertise_addr: "wss://broker-1.example.com"      # tell clients where THIS broker is
+```
+
+A bare `host:port` keeps the `ws://` scheme; the scheme-qualified form is for a
+TLS-terminating proxy. Malformed values (no port, a wildcard host, a path) fail
+startup, and the wildcard-bind-without-`advertise_addr` shape logs a `WARN` at
+boot. A directly-reachable broker can leave the key empty. Full precedence table:
+[`ws_url` resolution](../configuration/reference.md#ws_url-resolution).
 
 ### Health check
 
@@ -250,7 +270,10 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   as a trusted-caller boundary only.
 - **Single broker, single host.** No clustering or HA. A broker **restart
   orphans running instances** and loses all lease tracking — orphaned `nexus`
-  processes must be cleaned up manually.
+  processes must be cleaned up manually. Running several brokers behind one load
+  balancer does **not** work as a cluster: a lease lives on exactly one process,
+  so each broker must be individually addressable via `advertise_addr` and
+  clients must reconnect to the URL the claim returned, not to the LB.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but

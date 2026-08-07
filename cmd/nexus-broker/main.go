@@ -42,6 +42,9 @@ func run() error {
 
 	logger.Info("nexus-broker starting",
 		"listen_addr", cfg.ListenAddr,
+		// Logged because it decides what clients are told to connect back to; an
+		// operator debugging a bad ws_url needs to see the value in effect.
+		"advertise_addr", cfg.AdvertiseAddr,
 		"nexus_binary_path", cfg.NexusBinaryPath,
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
@@ -52,6 +55,12 @@ func run() error {
 		// visible somewhere at boot.
 		"admin_scope", cfg.AdminScope,
 	)
+
+	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
+	// the claim request's Host header. That is fine for a directly-reachable
+	// broker and wrong behind a proxy, and nothing later in the process can tell
+	// the two apart — so the only place to say so is here, at boot.
+	warnIfAdvertiseAddrMissing(logger, cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -15,12 +17,44 @@ import (
 // YAML file at startup, mirroring the engine's file-based config style.
 //
 // All keys are live: listen_addr / nexus_binary_path (gateway + spawn),
-// max_concurrent (capacity cap), idle_timeout (idle reaping), release_grace
-// (graceful-shutdown grace), queue_wait_timeout (FIFO capacity wait), and auth
-// (client authentication).
+// advertise_addr (client-reachable address), max_concurrent (capacity cap),
+// idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
+// queue_wait_timeout (FIFO capacity wait), and auth (client authentication).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
 	ListenAddr string `yaml:"listen_addr"`
+
+	// AdvertiseAddr is the address CLIENTS use to reach THIS broker, and it is
+	// the highest-precedence input to the ws_url returned by POST /claim.
+	//
+	// It exists because listen_addr cannot answer the question. A wildcard bind
+	// (":8080") names no host, so without this key the ws_url falls back to the
+	// claim request's Host header — which behind a reverse proxy or load
+	// balancer names the PROXY. A client then reconnects through the LB and may
+	// land on a different broker, one that does not hold its lease. Auto-detection
+	// is deliberately not attempted: a heuristic would fail silently in exactly
+	// the deployment shape that matters, so this is explicit config or nothing.
+	//
+	// Accepted forms are `host:port` (implying the ws:// scheme, so existing
+	// deployments see no change) or a scheme-qualified `ws://`, `wss://`,
+	// `http://` or `https://` host, with the port optional in that form. The
+	// scheme-qualified form exists for the TLS-terminating-proxy deployment,
+	// where the broker itself speaks plain HTTP but clients must dial wss://.
+	//
+	// Empty (the default) preserves the pre-existing resolution order exactly.
+	AdvertiseAddr string `yaml:"advertise_addr"`
+
+	// AdvertiseScheme and AdvertiseHost are the parsed, validated form of
+	// AdvertiseAddr. They are not YAML keys: LoadConfigFromBytes derives them so
+	// a malformed advertise_addr fails the BOOT rather than quietly minting
+	// broken URLs at claim time, and so the parse happens once per process
+	// instead of once per claim.
+	//
+	// Both are empty when advertise_addr is unset. AdvertiseScheme is empty for
+	// the bare `host:port` form too — the ws:// default is applied at use
+	// (clientWSScheme), which keeps "unset" a single state rather than two.
+	AdvertiseScheme string `yaml:"-"`
+	AdvertiseHost   string `yaml:"-"`
 
 	// NexusBinaryPath is the path to the nexus binary the broker exec()s to
 	// spawn OS-isolated instances. Expanded through engine.ExpandPath.
@@ -154,6 +188,16 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.NexusBinaryPath = engine.ExpandPath(cfg.NexusBinaryPath)
 
+	// Parse advertise_addr here so a malformed value is a boot failure. Deferring
+	// it to claim time would surface the mistake as clients failing to connect to
+	// a URL nobody looked at, which is the failure mode this key exists to remove.
+	scheme, host, err := parseAdvertiseAddr(cfg.AdvertiseAddr)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.AdvertiseScheme = scheme
+	cfg.AdvertiseHost = host
+
 	// Take the broker's own key out of the auth block BEFORE the chain is built,
 	// so what reaches nexusauth is exactly the block it owns.
 	adminScope, err := liftAdminScope(cfg.Auth, cfg.AdminScope)
@@ -172,6 +216,83 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.AuthChain = chain
 	return cfg, nil
+}
+
+// parseAdvertiseAddr splits a raw advertise_addr into the WebSocket scheme a
+// client should use and the host:port it should dial. An empty input returns two
+// empty strings and no error: advertise_addr is optional, and unset must keep the
+// pre-existing ws_url resolution intact.
+//
+// Validation is deliberately strict, because every value that gets through here
+// is handed to clients as an absolute URL:
+//
+//   - The bare form must carry a port. `example.com` alone would silently mean
+//     port 80 via ws://, which is almost never where a broker listens.
+//   - A wildcard host is rejected in either form. `0.0.0.0` is a bind address,
+//     not a dialable one, and accepting it would reintroduce exactly the broken
+//     ws_url this key exists to prevent.
+//   - Path, query, fragment and userinfo are rejected in the URL form. The lease
+//     path is appended by the caller, so anything here would corrupt the result.
+func parseAdvertiseAddr(raw string) (scheme, host string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", nil
+	}
+
+	// "://" is the discriminator rather than ":" because an IPv6 literal
+	// ("[::1]:8080") is full of colons but is not a URL.
+	if strings.Contains(raw, "://") {
+		u, perr := url.Parse(raw)
+		if perr != nil {
+			return "", "", fmt.Errorf("advertise_addr: %q is not a valid URL: %w", raw, perr)
+		}
+		switch u.Scheme {
+		case "ws", "http":
+			// http is accepted and normalized because operators reach for the
+			// scheme they type into a browser; refusing it would be pedantry.
+			scheme = "ws"
+		case "wss", "https":
+			scheme = "wss"
+		default:
+			return "", "", fmt.Errorf("advertise_addr: %q has unsupported scheme %q, want ws, wss, http or https", raw, u.Scheme)
+		}
+		if u.User != nil {
+			return "", "", fmt.Errorf("advertise_addr: %q must not carry userinfo", raw)
+		}
+		if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", fmt.Errorf("advertise_addr: %q must name only a host[:port]; the lease path is appended by the broker", raw)
+		}
+		host = u.Host
+	} else {
+		h, port, serr := net.SplitHostPort(raw)
+		if serr != nil {
+			return "", "", fmt.Errorf("advertise_addr: %q is not a host:port (add a port, or use the ws://host / wss://host form): %w", raw, serr)
+		}
+		if port == "" {
+			return "", "", fmt.Errorf("advertise_addr: %q has no port", raw)
+		}
+		host = net.JoinHostPort(h, port)
+	}
+
+	if err := checkAdvertiseHost(raw, host); err != nil {
+		return "", "", err
+	}
+	return scheme, host, nil
+}
+
+// checkAdvertiseHost rejects a host that no client could dial. hostPort may or
+// may not carry a port (the URL form allows omitting it), so the port is stripped
+// only when it is actually there.
+func checkAdvertiseHost(raw, hostPort string) error {
+	bare := hostPort
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		bare = h
+	}
+	switch bare {
+	case "", "0.0.0.0", "::":
+		return fmt.Errorf("advertise_addr: %q names no dialable host; it must name the address clients use to reach this broker", raw)
+	}
+	return nil
 }
 
 // liftAdminScope removes the broker-only `admin_scope` key from the raw auth

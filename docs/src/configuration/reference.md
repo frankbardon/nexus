@@ -2314,6 +2314,7 @@ instances behind an HTTP/WebSocket gateway.
 ```yaml
 # broker.yaml
 listen_addr: ":8080"
+advertise_addr: ""            # required behind a proxy/LB; see below
 nexus_binary_path: "nexus"
 max_concurrent: 8
 idle_timeout: 5m
@@ -2335,6 +2336,7 @@ auth:
 | Key                  | Type     | Default  | Description                                                                 |
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
+| `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
 | `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
@@ -2490,6 +2492,34 @@ When authentication is enabled, connect to `ws_url` with the **same** credential
 the claim was made with: the client socket enforces lease ownership, so another
 principal's token — or none at all — is refused before the upgrade. See
 [Lease ownership](#lease-ownership).
+
+#### `ws_url` resolution
+
+The returned `ws_url` must name the broker that **holds the lease** — a lease is
+in-memory state on one process, so a reconnect routed elsewhere is worthless. The
+host is resolved in strict precedence order:
+
+| Precedence | Source | Notes |
+|------------|--------|-------|
+| 1 | `advertise_addr` | Explicit operator intent about how this broker is reached. Nothing overrides it. |
+| 2 | An explicit, non-wildcard host in `listen_addr` | e.g. `10.0.0.7:8080` — already unambiguous. |
+| 3 | The claim request's `Host` header | A **guess**. Correct for a directly-connected client; **wrong** behind a proxy or load balancer, where it names the intermediary. |
+| 4 | `127.0.0.1:<listen port>` | Last resort when there is no request `Host` at all. |
+
+The scheme is `ws://` unless a scheme-qualified `advertise_addr` says otherwise —
+so a deployment that terminates TLS at a proxy sets
+`advertise_addr: "wss://broker-1.example.com"` while the broker itself keeps
+speaking plain HTTP on its bind address.
+
+When `advertise_addr` is unset **and** `listen_addr` names no host, the broker
+logs one `WARN` at startup naming the consequence: `ws_url`s will be derived from
+each request's `Host` header. The broker still starts — this shape is correct for
+a directly-reachable broker.
+
+This resolution is **client-facing only**. The `/instance` dial-back address
+handed to a spawned instance is resolved separately and always collapses a
+wildcard bind to `127.0.0.1`, because instances are same-host by design;
+`advertise_addr` does not affect it.
 
 ### `POST /release/{lease_id}` (HTTP API, not YAML)
 

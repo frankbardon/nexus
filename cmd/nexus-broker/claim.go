@@ -226,7 +226,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// misclassified as a crash.
 	go s.registry.watchExit(leaseID)
 
-	wsURL := "ws://" + clientWSHost(s.cfg.ListenAddr, r.Host) + ClientWSPath(leaseID)
+	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(leaseID)
 	// principal_id ties the new lease id back to the identity that claimed it. The
 	// guard's allow record cannot carry it: /claim has no lease id in its path, so
 	// this is the only line that joins the two halves of the audit trail. Empty
@@ -284,16 +284,81 @@ func instanceDialHost(listenAddr string) string {
 	return net.JoinHostPort(host, port)
 }
 
-// clientWSHost resolves the host:port a remote client uses to reach the broker.
-// It prefers an explicit host in listen_addr; otherwise it falls back to the
-// host the claim request arrived on, then to loopback.
-func clientWSHost(listenAddr, requestHost string) string {
+// listenAddrNamesHost reports whether listenAddr carries an explicit,
+// non-wildcard host — i.e. whether it names an address a remote client could
+// dial. A wildcard or empty bind host names none.
+//
+// It is shared by clientWSHost and warnIfAdvertiseAddrMissing on purpose: the
+// warning must fire on exactly the configuration shape that makes clientWSHost
+// fall through to the request Host, and one predicate is the only way to keep
+// those two in step.
+func listenAddrNamesHost(listenAddr string) bool {
 	host, _, err := net.SplitHostPort(listenAddr)
-	if err == nil && host != "" && host != "0.0.0.0" && host != "::" {
+	return err == nil && host != "" && host != "0.0.0.0" && host != "::"
+}
+
+// clientWSHost resolves the host:port a remote client uses to reach the broker,
+// in strict precedence order:
+//
+//  1. advertiseHost — the parsed advertise_addr. Explicit operator intent about
+//     how THIS broker is reached, so nothing may override it.
+//  2. an explicit host in listen_addr — unambiguous, and already correct.
+//  3. the Host header the claim arrived on — a guess. Right for a direct client,
+//     WRONG behind a proxy or load balancer, where it names the intermediary and
+//     can send a reconnect to a broker that does not hold the lease.
+//  4. loopback — the last resort when even the request Host is absent.
+//
+// With advertiseHost empty this is byte-identical to the pre-advertise_addr
+// behavior, which is what keeps existing deployments unchanged.
+func clientWSHost(advertiseHost, listenAddr, requestHost string) string {
+	if advertiseHost != "" {
+		return advertiseHost
+	}
+	if listenAddrNamesHost(listenAddr) {
 		return listenAddr
 	}
 	if requestHost != "" {
 		return requestHost
 	}
 	return instanceDialHost(listenAddr)
+}
+
+// clientWSScheme resolves the URL scheme of a returned ws_url. It defaults to
+// plain ws:// so that every configuration that predates advertise_addr — and
+// every bare `host:port` advertise_addr — keeps producing the exact same URLs.
+// Only a scheme-qualified advertise_addr (typically wss:// for a
+// TLS-terminating proxy) changes it.
+func clientWSScheme(advertiseScheme string) string {
+	if advertiseScheme == "" {
+		return "ws"
+	}
+	return advertiseScheme
+}
+
+// clientWSBaseURL assembles the scheme://host prefix of a client WebSocket URL.
+// It is the single place the two halves are combined, so the claim response and
+// any future caller cannot disagree about precedence.
+func clientWSBaseURL(cfg Config, requestHost string) string {
+	return clientWSScheme(cfg.AdvertiseScheme) + "://" + clientWSHost(cfg.AdvertiseHost, cfg.ListenAddr, requestHost)
+}
+
+// warnIfAdvertiseAddrMissing logs one WARN at boot when the broker is configured
+// in the precise shape that makes every returned ws_url a guess: no
+// advertise_addr, and a listen_addr with no explicit host for clientWSHost to
+// fall back on.
+//
+// It is loud and specific because the failure is silent otherwise — the broker
+// works perfectly for a directly-connected client and breaks only once a proxy is
+// in front of it, at which point the returned ws_url names the proxy and a
+// reconnect can be routed to a broker that does not hold the lease.
+func warnIfAdvertiseAddrMissing(logger *slog.Logger, cfg Config) {
+	if cfg.AdvertiseHost != "" || listenAddrNamesHost(cfg.ListenAddr) {
+		return
+	}
+	logger.Warn("advertise_addr is not set and listen_addr names no host: "+
+		"the ws_url returned by POST /claim will be derived from each claim request's Host header, "+
+		"which behind a reverse proxy or load balancer names the proxy rather than this broker "+
+		"and can send a client to a broker that does not hold its lease; "+
+		"set advertise_addr to the address clients use to reach this broker",
+		"listen_addr", cfg.ListenAddr)
 }
