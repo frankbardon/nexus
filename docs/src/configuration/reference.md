@@ -2319,6 +2319,16 @@ max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
 release_grace: 10s
+
+# Optional. Omit the whole block to run the broker unauthenticated.
+auth:
+  validators:
+    - type: static
+      tokens:
+        - token: "replace-me"
+          principal: "ci-runner"
+          tenant: "acme"
+          scopes: "broker.claim broker.release"   # whitespace-separated, or a YAML list
 ```
 
 | Key                  | Type     | Default  | Description                                                                 |
@@ -2329,6 +2339,65 @@ release_grace: 10s
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
+
+### Authentication (`auth:`)
+
+The `auth:` block configures an ordered chain of credential validators
+(`pkg/nexusauth`). It guards exactly three routes — `POST /claim`,
+`POST /release/{lease_id}`, and `GET /leases`. `GET /healthz` is registered
+**outside** the guard and always answers `200` with no credential, because a
+load balancer or container probe has none to present.
+
+The `WS /instance` dial-back and `WS /lease/{id}` client socket are **not**
+covered by this block: they authenticate with a spawn secret and a single-use
+ticket respectively.
+
+```yaml
+auth:
+  validators:          # ordered; the first validator that accepts wins
+    - type: static
+      tokens:
+        - token: "..."          # bearer token, compared in constant time
+          principal: "ci-runner"  # required: the identity this token acts as
+          tenant: "acme"          # optional
+          scopes: "a b"           # optional: string (space/comma separated) or list
+```
+
+| Key                                    | Type            | Default    | Description                                                                                     |
+|----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
+| `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
+| `auth.validators[].type`               | string          | *required* | Validator implementation. Currently `static`. |
+| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry but only used by claim-bearing validators; accepted and ignored by `static`. |
+| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Accepted and ignored by `static`. |
+| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Accepted and ignored by `static`. |
+| `auth.validators[].tokens`             | list            | *required for `static`* | Token table for a `static` validator. At least one entry; duplicate `token` values are a config error rather than a last-one-wins surprise. |
+| `auth.validators[].tokens[].token`     | string          | *required* | The bearer token value, matched against `Authorization: Bearer <token>` with a constant-time compare. |
+| `auth.validators[].tokens[].principal` | string          | *required* | The principal id a request presenting this token acts as. Must be non-empty — an empty principal would behave as a wildcard in later ownership checks. |
+| `auth.validators[].tokens[].tenant`    | string          | `""`       | Optional tenant/workspace id carried on the principal. |
+| `auth.validators[].tokens[].scopes`    | string or list  | `[]`       | Optional granted scopes. A string is split on whitespace (`"a b"` → `["a","b"]`); a list is taken verbatim. Scope comparison is case-sensitive. |
+
+Because `static` tokens are written inline, a `broker.yaml` carrying them is a
+secret: restrict its file permissions accordingly.
+
+**Status mapping.** Denials are classified by the validator chain, not by string
+matching, and map onto:
+
+| Situation                                            | Status | Body                                    | `WWW-Authenticate`                                          |
+|------------------------------------------------------|--------|-----------------------------------------|-------------------------------------------------------------|
+| No `Authorization: Bearer` header                    | `401`  | `{"error":"authentication required"}`   | `Bearer realm="nexus-broker"`                               |
+| Credential presented and rejected                    | `401`  | `{"error":"credential rejected"}`       | `Bearer realm="nexus-broker", error="invalid_token"`        |
+| Credential valid but lacking the required authority   | `403`  | `{"error":"insufficient scope"}`        | `Bearer realm="nexus-broker", error="insufficient_scope"`   |
+
+The client is told the *kind* of refusal but not which validator refused. The
+full per-validator diagnosis goes to the log instead, since validator names are
+deployment topology.
+
+**Audit trail.** Every allow and every deny emits exactly one structured `slog`
+record — `auth allowed` (INFO) or `auth denied` (WARN) — carrying `route` (the
+matched mux pattern), `principal_id` (empty on a deny), `lease_id` when the route
+has one in its path, and on a deny a `reason` plus the per-validator `denial`
+group. There is no separate audit sink; these records are it.
 
 The spawned-instance side is configured by the `nexus.io.broker` plugin
 (`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the

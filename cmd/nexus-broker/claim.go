@@ -91,8 +91,9 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 	}
 }
 
-// Register wires the claim endpoint onto a mux.
-func (s *ClaimServer) Register(mux *http.ServeMux) {
+// Register wires the claim endpoint onto a mux. It takes a routeMux so main can
+// register it behind the auth guard.
+func (s *ClaimServer) Register(mux routeMux) {
 	mux.HandleFunc("POST /claim", s.handleClaim)
 }
 

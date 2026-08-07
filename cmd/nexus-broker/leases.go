@@ -117,8 +117,9 @@ func NewLeasesServer(logger *slog.Logger, registry *Registry) *LeasesServer {
 	return &LeasesServer{logger: logger, registry: registry}
 }
 
-// Register wires the leases endpoint onto a mux.
-func (s *LeasesServer) Register(mux *http.ServeMux) {
+// Register wires the leases endpoint onto a mux. It takes a routeMux so main can
+// register it behind the auth guard.
+func (s *LeasesServer) Register(mux routeMux) {
 	mux.HandleFunc("GET /leases", s.handleLeases)
 }
 

@@ -58,8 +58,10 @@ func NewGateway(logger *slog.Logger, registry *Registry) *Gateway {
 	}
 }
 
-// Register wires the gateway's WebSocket endpoints onto a mux.
-func (g *Gateway) Register(mux *http.ServeMux) {
+// Register wires the gateway's WebSocket endpoints onto a mux. It takes a
+// routeMux for symmetry with the HTTP servers, though main deliberately
+// registers these two routes unguarded — see run().
+func (g *Gateway) Register(mux routeMux) {
 	mux.HandleFunc("GET "+instanceWSPath, g.handleInstance)
 	mux.HandleFunc("GET "+clientWSPathPrefix+"{id}", g.handleClient)
 }

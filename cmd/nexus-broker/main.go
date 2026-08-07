@@ -66,16 +66,37 @@ func run() error {
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
 
+	// Authentication is opt-in. A broker.yaml with no `auth:` block keeps every
+	// route exactly as it was before authentication existed — that backward
+	// compatibility is a release requirement, not a convenience — so the disabled
+	// path does nothing but warn, once and loudly, that this broker will serve
+	// anyone who can reach it.
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	guard.logStartupState()
+
 	mux := http.NewServeMux()
+
+	// Health stays outside the guard on purpose: a load balancer or container
+	// probe has no credential to present, and liveness leaks nothing.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// The WebSocket routes are registered on the raw mux: the client WS is
+	// authenticated by a single-use ticket and the instance dial-back by a spawn
+	// secret, both of which are their own stories. Bearer-header middleware is
+	// the wrong instrument for either.
 	gateway.Register(mux)
-	claims.Register(mux)
-	releases.Register(mux)
-	leases.Register(mux)
+
+	// Client-facing control-plane routes go through the guard. Registering via
+	// `guarded` (rather than wrapping handlers individually) means any route
+	// added here later is authenticated by construction.
+	guarded := guard.Guard(mux)
+	claims.Register(guarded)
+	releases.Register(guarded)
+	leases.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

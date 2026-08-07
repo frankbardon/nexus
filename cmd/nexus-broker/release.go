@@ -113,8 +113,9 @@ func NewReleaseServer(logger *slog.Logger, registry *Registry, grace time.Durati
 	return &ReleaseServer{logger: logger, registry: registry, grace: grace}
 }
 
-// Register wires the release endpoint onto a mux.
-func (s *ReleaseServer) Register(mux *http.ServeMux) {
+// Register wires the release endpoint onto a mux. It takes a routeMux so main
+// can register it behind the auth guard.
+func (s *ReleaseServer) Register(mux routeMux) {
 	mux.HandleFunc("POST /release/{lease_id}", s.handleRelease)
 }
 
