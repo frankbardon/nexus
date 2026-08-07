@@ -2344,14 +2344,19 @@ auth:
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). It guards exactly three routes — `POST /claim`,
+(`pkg/nexusauth`). Three routes are authenticated by middleware — `POST /claim`,
 `POST /release/{lease_id}`, and `GET /leases`. `GET /healthz` is registered
 **outside** the guard and always answers `200` with no credential, because a
 load balancer or container probe has none to present.
 
-The `WS /instance` dial-back and `WS /lease/{id}` client socket are **not**
-covered by this block: they authenticate with a spawn secret and a single-use
-ticket respectively.
+`WS /lease/{lease_id}`, the per-lease client socket, is not behind that
+middleware but **does** use the same validator chain: it resolves the caller's
+`Authorization: Bearer` credential itself and then enforces lease ownership
+before the WebSocket upgrade — see [Lease ownership](#lease-ownership) below. It
+stays off the middleware because it will also accept a single-use ticket passed
+as a query parameter, which a bearer-header wrapper cannot express. The
+`WS /instance` dial-back is **not** covered by this block at all: it
+authenticates with a spawn secret.
 
 ```yaml
 auth:
@@ -2399,6 +2404,45 @@ matched mux pattern), `principal_id` (empty on a deny), `lease_id` when the rout
 has one in its path, and on a deny a `reason` plus the per-validator `denial`
 group. There is no separate audit sink; these records are it.
 
+#### Lease ownership
+
+Every lease records the principal that claimed it (stamped from the authenticated
+`POST /claim` request). Two routes enforce that ownership:
+
+| Route                       | Enforcement                                                                                                                             |
+|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /release/{lease_id}`  | The caller's principal `ID` must equal the lease owner's `ID`, checked **before** any teardown begins — a refused release sends no shutdown frame, kills nothing, and frees no slot. |
+| `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. |
+
+Comparison is principal-`ID` equality and nothing else; `tenant` and `scopes` are
+not consulted.
+
+**An unknown lease and another principal's lease answer identically** — same
+status, same body — so live lease ids cannot be enumerated by differencing
+responses:
+
+| Route                      | Unknown *or* unowned lease                                          |
+|----------------------------|---------------------------------------------------------------------|
+| `POST /release/{lease_id}` | `404` `{"error":"unknown lease"}`                                    |
+| `WS /lease/{lease_id}`     | `404` `unknown lease` (plain text; the handshake never reaches `101`) |
+
+A credential that fails validation on `WS /lease/{lease_id}` gets the usual
+`401`/`403` from the status table above. That branch never consults the registry,
+so it reveals nothing about whether the lease exists.
+
+Each ownership refusal emits one `lease access denied` WARN record carrying
+`route`, `principal_id` and `lease_id`. Like the response, it does not record
+whether the lease existed.
+
+**With the `auth:` block absent, nothing is refused.** The lease owner and the
+caller are then both the anonymous identity, so the equality check admits every
+caller and both routes behave exactly as they did before ownership existed.
+
+The broker's **own** teardown paths — the `idle_timeout` sweeper and crash
+detection — bypass ownership entirely. They are the broker acting on itself with
+no principal at all, which is why the check lives in the HTTP handlers rather
+than in the shared teardown they funnel through.
+
 The spawned-instance side is configured by the `nexus.io.broker` plugin
 (`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
 I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
@@ -2436,6 +2480,11 @@ exited before signalling ready") rather than silently starting a new session.
 }
 ```
 
+When authentication is enabled, connect to `ws_url` with the **same** credential
+the claim was made with: the client socket enforces lease ownership, so another
+principal's token — or none at all — is refused before the upgrade. See
+[Lease ownership](#lease-ownership).
+
 ### `POST /release/{lease_id}` (HTTP API, not YAML)
 
 `POST /release/{lease_id}` tears a live instance down gracefully. The broker
@@ -2446,11 +2495,12 @@ for the process to exit and **force-kills it** if that window elapses (no
 orphan). The lease is removed and its slot freed. The session directory under
 `~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
 
-| Outcome                         | Status | Body                                         |
-|---------------------------------|--------|----------------------------------------------|
-| Released (graceful or killed)   | `200`  | `{"status":"released","lease_id":"…"}`      |
-| Unknown / already-released lease | `404`  | `{"error":"unknown lease"}`                  |
-| Missing lease id in path        | `400`  | `{"error":"release requires a lease id"}`    |
+| Outcome                                  | Status | Body                                      |
+|------------------------------------------|--------|-------------------------------------------|
+| Released (graceful or killed)            | `200`  | `{"status":"released","lease_id":"…"}`    |
+| Unknown / already-released lease         | `404`  | `{"error":"unknown lease"}`               |
+| Lease owned by a **different** principal | `404`  | `{"error":"unknown lease"}` — deliberately identical to the row above; see [Lease ownership](#lease-ownership) |
+| Missing lease id in path                 | `400`  | `{"error":"release requires a lease id"}` |
 
 Release is idempotent: releasing an already-gone lease returns `404` rather than
 erroring, and concurrent releases of the same lease collapse to a single

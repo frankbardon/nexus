@@ -16,7 +16,7 @@ const (
 	instanceWSPath = "/instance"
 
 	// clientWSPathPrefix is the prefix for the per-lease client endpoint.
-	// The full path is clientWSPathPrefix + "{id}". See ClientWSPath.
+	// The full pattern is clientWSPathPrefix + "{lease_id}". See ClientWSPath.
 	clientWSPathPrefix = "/lease/"
 
 	// registerTimeout bounds how long the gateway waits for an instance's
@@ -39,13 +39,26 @@ type Gateway struct {
 	logger   *slog.Logger
 	registry *Registry
 
+	// auth resolves the credential on an inbound CLIENT WebSocket request so
+	// handleClient can check lease ownership. The gateway holds the guard rather
+	// than reading a Principal out of the request context because its routes stay
+	// on the raw mux: the client socket gains a query-parameter ticket credential
+	// that bearer-header middleware cannot express, so it must resolve its own.
+	//
+	// A nil guard means authentication is disabled, which resolves every caller to
+	// the anonymous identity — the owner every lease carries when the broker runs
+	// with no `auth:` block.
+	auth *authGuard
+
 	// rootCtx is cancelled on Shutdown so all read/write pumps exit.
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 }
 
-// NewGateway constructs a gateway over the given registry.
-func NewGateway(logger *slog.Logger, registry *Registry) *Gateway {
+// NewGateway constructs a gateway over the given registry. auth may be nil (or a
+// guard over an empty chain), which disables credential resolution and makes
+// every client caller anonymous.
+func NewGateway(logger *slog.Logger, registry *Registry, auth *authGuard) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -53,6 +66,7 @@ func NewGateway(logger *slog.Logger, registry *Registry) *Gateway {
 	return &Gateway{
 		logger:     logger,
 		registry:   registry,
+		auth:       auth,
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
 	}
@@ -60,10 +74,12 @@ func NewGateway(logger *slog.Logger, registry *Registry) *Gateway {
 
 // Register wires the gateway's WebSocket endpoints onto a mux. It takes a
 // routeMux for symmetry with the HTTP servers, though main deliberately
-// registers these two routes unguarded — see run().
+// registers these two routes unguarded — see run(). The client route names its
+// wildcard {lease_id} so the shared audit helpers find the lease id on it just as
+// they do on POST /release/{lease_id}.
 func (g *Gateway) Register(mux routeMux) {
 	mux.HandleFunc("GET "+instanceWSPath, g.handleInstance)
-	mux.HandleFunc("GET "+clientWSPathPrefix+"{id}", g.handleClient)
+	mux.HandleFunc("GET "+clientWSPathPrefix+"{lease_id}", g.handleClient)
 }
 
 // Shutdown cancels all in-flight pumps so connections close cleanly.
@@ -138,12 +154,38 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	g.logger.Info("instance disconnected", "lease_id", leaseID)
 }
 
-// handleClient accepts a client connection for a specific lease and routes
-// its frames to the lease's instance connection.
+// handleClient accepts a client connection for a specific lease and routes its
+// frames to the lease's instance connection.
+//
+// BOTH credential resolution and the ownership check happen before
+// websocket.Accept, so a refused caller gets a plain HTTP refusal and never an
+// upgraded socket that is immediately closed. An accept-then-close is observably
+// different from a clean refusal — it confirms the lease id reached a live
+// handler — which would defeat the point of returning an indistinguishable 404.
 func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
-	leaseID := r.PathValue("id")
-	if leaseID == "" || !g.registry.Has(leaseID) {
-		http.Error(w, "unknown lease", http.StatusNotFound)
+	leaseID := r.PathValue("lease_id")
+	if leaseID == "" {
+		http.Error(w, unknownLeaseError, http.StatusNotFound)
+		return
+	}
+
+	// Authenticate first, and answer a bad or missing credential with the guard's
+	// usual 401/403 envelope. That branch never touches the registry, so it leaks
+	// nothing about whether the lease exists. A nil guard is a DISABLED guard:
+	// resolvePrincipal then short-circuits to the anonymous identity with no error,
+	// so deny is unreachable and this route behaves as it always did.
+	caller, err := g.auth.resolvePrincipal(r)
+	if err != nil {
+		g.auth.deny(w, r, err)
+		return
+	}
+
+	// Then ownership. ownsLease folds "no such lease" and "someone else's lease"
+	// into one false, and this writes the byte-identical response the pre-ownership
+	// unknown-lease miss wrote, so the two remain indistinguishable.
+	if !ownsLease(g.registry, leaseID, caller) {
+		logLeaseDenied(g.logger, r, caller, leaseID)
+		http.Error(w, unknownLeaseError, http.StatusNotFound)
 		return
 	}
 

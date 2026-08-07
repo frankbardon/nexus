@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // seedLiveLease mints a lease, attaches nil-conn instance + client connections
@@ -12,7 +14,15 @@ import (
 // object outlives its map entry).
 func seedLiveLease(t *testing.T, reg *Registry, proc processHandle) (string, *lease, *wsConn) {
 	t.Helper()
-	id, err := reg.NewLease(anonymousOwner())
+	return seedLiveLeaseOwned(t, reg, proc, anonymousOwner())
+}
+
+// seedLiveLeaseOwned is seedLiveLease for a lease claimed by a specific
+// principal. The broker's own teardown paths (idle, crash) must behave
+// identically whoever owns the lease, so they are exercised against both.
+func seedLiveLeaseOwned(t *testing.T, reg *Registry, proc processHandle, owner nexusauth.Principal) (string, *lease, *wsConn) {
+	t.Helper()
+	id, err := reg.NewLease(owner)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}
@@ -67,6 +77,41 @@ func TestWatchExit_UnexpectedExitIsCrash(t *testing.T) {
 	}
 	if client.closeReason != crashCloseReason {
 		t.Errorf("client close reason = %q, want %q", client.closeReason, crashCloseReason)
+	}
+}
+
+// TestWatchExit_CrashReapsOwnedLeaseWithNoPrincipal is the ownership-regression
+// guard for the crash watcher, the second broker-internal teardown path. It runs
+// with no principal at all, so a lease owned by a named identity must be reaped
+// exactly like an anonymous one — otherwise a crashed instance's slot is never
+// freed and the leak is silent.
+func TestWatchExit_CrashReapsOwnedLeaseWithNoPrincipal(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+	proc := newFakeProcess(303)
+	id, l, client := seedLiveLeaseOwned(t, reg, proc, testOwner())
+
+	close(proc.exited)
+	reg.watchExit(id) // synchronous: returns once the crash is handled
+
+	if reg.Has(id) {
+		t.Error("crash did not free an owned lease: still present")
+	}
+	if got := reg.SlotsInUse(); got != 0 {
+		t.Errorf("slots in use after crash = %d, want 0 (the instance leaked)", got)
+	}
+	reg.mu.Lock()
+	gotReason := l.reason
+	reg.mu.Unlock()
+	if gotReason != reasonCrash {
+		t.Errorf("lease reason = %q, want %q", gotReason, reasonCrash)
+	}
+	select {
+	case <-client.closed:
+	default:
+		t.Fatal("client connection was not closed after an owned lease crashed")
+	}
+	if client.closeStatus != crashCloseStatus {
+		t.Errorf("client close status = %v, want %v", client.closeStatus, crashCloseStatus)
 	}
 }
 

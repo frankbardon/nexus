@@ -41,6 +41,67 @@ func PrincipalFrom(ctx context.Context) (nexusauth.Principal, bool) {
 	return p, ok
 }
 
+// callerPrincipal returns the identity a lease-scoped route must attribute r to.
+//
+// An absent Principal is a supported state, not an error: it means either that
+// the broker runs with no `auth:` block or that the route sits outside the guard.
+// Both collapse to the anonymous identity, which is exactly the owner stamped on
+// every lease claimed without authentication — so an id-equality check admits
+// everyone when auth is off, precisely as the broker behaved before ownership
+// existed.
+func callerPrincipal(r *http.Request) nexusauth.Principal {
+	if p, ok := PrincipalFrom(r.Context()); ok {
+		return p
+	}
+	return anonymousOwner()
+}
+
+// unknownLeaseError is the ONE refusal message every lease-scoped route returns
+// for a lease the caller may not act on, whether it never existed, was already
+// released, or belongs to another principal.
+//
+// Keeping those cases indistinguishable is a security property rather than
+// tidiness: a lease id is still the bearer secret for the instance dial-back
+// path, so a caller able to tell "no such lease" from "not yours" could
+// enumerate live lease ids by differencing responses. Both branches must write
+// the same status AND the same body — see ownsLease.
+const unknownLeaseError = "unknown lease"
+
+// ownsLease reports whether caller may act on the lease named by leaseID. It is
+// the single ownership predicate behind every caller-facing lease route
+// (POST /release/{lease_id}, WS /lease/{lease_id}).
+//
+// Ownership is principal-ID equality and nothing else — see
+// nexusauth.Principal.ID. An unknown lease returns false through the SAME branch
+// as an unowned one so no caller can tell the two apart; LeaseOwner's
+// (anonymous, false) is deliberately NOT collapsed into (anonymous, true) here,
+// because that would make every unknown lease id look anonymously owned and
+// therefore releasable by an anonymous caller.
+func ownsLease(reg *Registry, leaseID string, caller nexusauth.Principal) bool {
+	owner, known := reg.LeaseOwner(leaseID)
+	return known && owner.ID == caller.ID
+}
+
+// logLeaseDenied emits the audit record for an ownership refusal. It names the
+// requesting principal, the lease id and the route, which is what an operator
+// needs to tell a cross-principal probe apart from a client retrying its own
+// already-released lease.
+//
+// The record deliberately does NOT say whether the lease existed. The response
+// cannot distinguish the two (see unknownLeaseError) and neither does this line,
+// so nobody can later "helpfully" surface a distinction the log had already
+// drawn.
+func logLeaseDenied(logger *slog.Logger, r *http.Request, caller nexusauth.Principal, leaseID string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("lease access denied",
+		slog.String("route", routeLabel(r)),
+		slog.String("principal_id", caller.ID),
+		slog.String("lease_id", leaseID),
+		slog.String("reason", "unknown lease or not owned by this principal"))
+}
+
 // authGuard authenticates client-facing broker routes against a nexusauth
 // Chain. It holds no per-request state and is safe for concurrent use.
 //
@@ -124,6 +185,28 @@ func (g *authGuard) wrap(next func(http.ResponseWriter, *http.Request)) func(htt
 	}
 }
 
+// resolvePrincipal authenticates a request that is NOT registered through Guard,
+// returning the caller's identity or the chain's classified denial.
+//
+// It exists for the client WebSocket route, which stays on the raw mux on
+// purpose: that route grows a single-use ticket credential passed as a query
+// parameter, which bearer-header middleware cannot express, so it resolves its
+// own credential here instead of being moved behind the guard.
+//
+// A disabled guard yields the anonymous identity and no error — the same
+// "auth is off, everyone is anonymous" reading callerPrincipal takes — so the
+// route behaves exactly as it did before authentication existed.
+func (g *authGuard) resolvePrincipal(r *http.Request) (nexusauth.Principal, error) {
+	if !g.enabled() {
+		return anonymousOwner(), nil
+	}
+	p, err := g.chain.Validate(r.Context(), r)
+	if err != nil {
+		return nexusauth.Principal{}, err
+	}
+	return p, nil
+}
+
 // deny maps a nexusauth denial onto a status code and writes the broker's usual
 // JSON error envelope.
 //
@@ -181,8 +264,9 @@ func (g *authGuard) deny(w http.ResponseWriter, r *http.Request, err error) {
 //
 // The lease id is read with PathValue, which is populated by the ServeMux during
 // pattern matching — i.e. before the wrapped handler (and therefore this
-// middleware) runs — so a release of someone else's lease is auditable even
-// though this story does not yet enforce ownership.
+// middleware) runs — so an attempt on someone else's lease is auditable from the
+// allow record alone, before the handler's ownership check refuses it. Every
+// lease-scoped route names its wildcard {lease_id} so this lookup finds it.
 func (g *authGuard) recordAttrs(r *http.Request, principalID, reason string) []any {
 	attrs := []any{
 		slog.String("route", routeLabel(r)),

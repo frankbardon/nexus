@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
@@ -26,6 +28,76 @@ auth:
           principal: "ci-runner"
           tenant: "acme"
 `
+
+// twoPrincipalAuthYAML configures two DIFFERENT valid credentials. Ownership
+// enforcement needs a second identity that authenticates perfectly and is still
+// refused a lease it does not own — "invalid credential" and "valid credential,
+// wrong lease" are separate properties and a one-token fixture can only test the
+// first.
+const twoPrincipalAuthYAML = `
+auth:
+  validators:
+    - type: static
+      tokens:
+        - token: "` + ownerToken + `"
+          principal: "` + ownerPrincipal + `"
+        - token: "` + otherToken + `"
+          principal: "` + otherPrincipal + `"
+`
+
+// Credentials twoPrincipalAuthYAML binds. ownerToken resolves to the principal
+// that claims the lease under test; otherToken to a valid caller that owns
+// nothing.
+const (
+	ownerToken     = "owner-token"
+	ownerPrincipal = "owner-principal"
+
+	otherToken     = "other-token"
+	otherPrincipal = "other-principal"
+)
+
+// mustAuthChain builds the validator chain a broker `auth:` block describes,
+// going through the real config loader so a test cannot accidentally prove
+// enforcement against a chain no operator could configure.
+func mustAuthChain(t *testing.T, yaml string) *nexusauth.Chain {
+	t.Helper()
+	chain := mustLoadConfig(t, yaml).AuthChain
+	if !chain.Enabled() {
+		t.Fatalf("mustAuthChain: YAML produced a DISABLED chain; the test would prove nothing:\n%s", yaml)
+	}
+	return chain
+}
+
+// assertIdenticalRefusals fails unless two refusals are indistinguishable to the
+// caller: same status, same Content-Type, same body bytes.
+//
+// This is the assertion behind "an unknown lease and someone else's lease look
+// the same". It is a security property, not cosmetics: any observable difference
+// turns a lease-scoped route into an oracle a caller can use to enumerate live
+// lease ids, which still matter because a lease id is the bearer secret on the
+// instance dial-back path.
+func assertIdenticalRefusals(t *testing.T, wantStatus int, unknown, unowned *http.Response) {
+	t.Helper()
+	if unknown.StatusCode != wantStatus || unowned.StatusCode != wantStatus {
+		t.Fatalf("statuses = %d (unknown) / %d (unowned), want %d for both",
+			unknown.StatusCode, unowned.StatusCode, wantStatus)
+	}
+	if a, b := unknown.Header.Get("Content-Type"), unowned.Header.Get("Content-Type"); a != b {
+		t.Errorf("Content-Type differs: %q (unknown) vs %q (unowned)", a, b)
+	}
+	unknownBody, err := io.ReadAll(unknown.Body)
+	if err != nil {
+		t.Fatalf("read unknown-lease body: %v", err)
+	}
+	unownedBody, err := io.ReadAll(unowned.Body)
+	if err != nil {
+		t.Fatalf("read unowned-lease body: %v", err)
+	}
+	if !bytes.Equal(unknownBody, unownedBody) {
+		t.Errorf("bodies differ — this is a lease-id oracle:\n unknown: %q\n unowned: %q",
+			unknownBody, unownedBody)
+	}
+}
 
 // newBrokerTestServer wires the same route topology run() does — healthz
 // unguarded, claim/release/leases behind the guard — over an httptest server.
@@ -324,6 +396,101 @@ func TestAuthGuard_LogsAllowAndDeny(t *testing.T) {
 	// The per-validator diagnosis stays server-side, in the log only.
 	if !strings.Contains(buf.String(), "static") {
 		t.Error("deny record should name the validator that refused")
+	}
+}
+
+// TestOwnershipDenial_LogsPrincipalLeaseAndRoute asserts the audit record an
+// ownership refusal leaves behind. A 404 that says nothing else is
+// indistinguishable from a client retrying its own released lease, so the
+// operator-side record is the only place a cross-principal probe is visible: it
+// must name the requesting principal, the lease id, and the route.
+//
+// Both surfaces are covered because they log through the same helper but from
+// different call sites — the release handler behind the guard, and the client WS
+// handler which resolves its own credential.
+func TestOwnershipDenial_LogsPrincipalLeaseAndRoute(t *testing.T) {
+	chain := mustAuthChain(t, twoPrincipalAuthYAML)
+
+	cases := []struct {
+		name      string
+		wantRoute string
+		// do performs one refused request against a server built over logger,
+		// returning the lease id that was targeted.
+		do func(t *testing.T, logger *slog.Logger) string
+	}{
+		{
+			name:      "release",
+			wantRoute: "POST /release/{lease_id}",
+			do: func(t *testing.T, logger *slog.Logger) string {
+				reg := NewRegistry(testLogger(), 0)
+				id, err := reg.NewLease(nexusauth.Principal{ID: ownerPrincipal})
+				if err != nil {
+					t.Fatalf("NewLease: %v", err)
+				}
+				mux := http.NewServeMux()
+				NewReleaseServer(logger, reg, time.Second).
+					Register(newAuthGuard(testLogger(), chain).Guard(mux))
+				ts := httptest.NewServer(mux)
+				t.Cleanup(ts.Close)
+
+				doAuthed(t, http.MethodPost, ts.URL+"/release/"+id, otherToken, "")
+				return id
+			},
+		},
+		{
+			name:      "client websocket",
+			wantRoute: "GET /lease/{lease_id}",
+			do: func(t *testing.T, logger *slog.Logger) string {
+				reg := NewRegistry(testLogger(), 0)
+				id, err := reg.NewLease(nexusauth.Principal{ID: ownerPrincipal})
+				if err != nil {
+					t.Fatalf("NewLease: %v", err)
+				}
+				mux := http.NewServeMux()
+				gw := NewGateway(logger, reg, newAuthGuard(testLogger(), chain))
+				t.Cleanup(gw.Shutdown)
+				gw.Register(mux)
+				ts := httptest.NewServer(mux)
+				t.Cleanup(ts.Close)
+
+				doAuthed(t, http.MethodGet, ts.URL+ClientWSPath(id), otherToken, "")
+				return id
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+			leaseID := tc.do(t, logger)
+
+			var denial map[string]any
+			for _, rec := range decodeLogRecords(t, buf.Bytes()) {
+				if rec["msg"] == "lease access denied" {
+					denial = rec
+				}
+			}
+			if denial == nil {
+				t.Fatalf("no ownership-denial record emitted:\n%s", buf.String())
+			}
+			if denial["level"] != "WARN" {
+				t.Errorf("denial level = %v, want WARN", denial["level"])
+			}
+			if denial["principal_id"] != otherPrincipal {
+				t.Errorf("denial principal_id = %v, want %q", denial["principal_id"], otherPrincipal)
+			}
+			if denial["lease_id"] != leaseID {
+				t.Errorf("denial lease_id = %v, want %q", denial["lease_id"], leaseID)
+			}
+			if denial["route"] != tc.wantRoute {
+				t.Errorf("denial route = %v, want %q", denial["route"], tc.wantRoute)
+			}
+			if denial["reason"] == "" || denial["reason"] == nil {
+				t.Error("denial record carries no reason")
+			}
+		})
 	}
 }
 

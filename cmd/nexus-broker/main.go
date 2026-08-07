@@ -52,8 +52,20 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Authentication is opt-in. A broker.yaml with no `auth:` block keeps every
+	// route exactly as it was before authentication existed — that backward
+	// compatibility is a release requirement, not a convenience — so the disabled
+	// path does nothing but warn, once and loudly, that this broker will serve
+	// anyone who can reach it.
+	//
+	// The guard is built before the gateway because the gateway needs it: the
+	// client WebSocket route resolves its own credential (it is not registered
+	// through Guard) so it can refuse a caller that does not own the lease.
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	guard.logStartupState()
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
-	gateway := NewGateway(logger, registry)
+	gateway := NewGateway(logger, registry, guard)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{})
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry)
@@ -66,14 +78,6 @@ func run() error {
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
 
-	// Authentication is opt-in. A broker.yaml with no `auth:` block keeps every
-	// route exactly as it was before authentication existed — that backward
-	// compatibility is a release requirement, not a convenience — so the disabled
-	// path does nothing but warn, once and loudly, that this broker will serve
-	// anyone who can reach it.
-	guard := newAuthGuard(logger, cfg.AuthChain)
-	guard.logStartupState()
-
 	mux := http.NewServeMux()
 
 	// Health stays outside the guard on purpose: a load balancer or container
@@ -84,10 +88,11 @@ func run() error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// The WebSocket routes are registered on the raw mux: the client WS is
-	// authenticated by a single-use ticket and the instance dial-back by a spawn
-	// secret, both of which are their own stories. Bearer-header middleware is
-	// the wrong instrument for either.
+	// The WebSocket routes are registered on the raw mux: the client WS will also
+	// accept a single-use ticket and the instance dial-back a spawn secret, both of
+	// which are their own stories. Bearer-header middleware is the wrong instrument
+	// for either, so the client route resolves its own credential and enforces
+	// lease ownership inside handleClient (it holds the guard for exactly that).
 	gateway.Register(mux)
 
 	// Client-facing control-plane routes go through the guard. Registering via

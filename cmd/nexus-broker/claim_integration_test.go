@@ -596,11 +596,13 @@ func TestAuthenticatedClaimSpawnsAndProxiesEndToEnd(t *testing.T) {
 	}
 
 	// The lease is genuinely live: round-trip a frame through the spawned
-	// instance. The client WS is NOT behind the bearer guard (it is
-	// ticket-authenticated in a later story), so it dials with no credential.
+	// instance. The client WS is not behind the bearer middleware, but it resolves
+	// the credential itself and enforces lease ownership, so the claimant presents
+	// the same token it claimed with. (A single-use ticket becomes an accepted
+	// alternative in a later story; the bearer path keeps working.)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, _, err := websocket.Dial(ctx, cr.WSURL, nil)
+	client, _, err := b.DialLease(ctx, cr.WSURL, b.Token)
 	if err != nil {
 		t.Fatalf("dial ws_url %s: %v", cr.WSURL, err)
 	}
@@ -688,6 +690,124 @@ func TestUnauthenticatedClaimIsRefusedAndSpawnsNothing(t *testing.T) {
 	if got := b.SpawnCount(); got != 1 {
 		t.Errorf("spawn count after one accepted claim = %d, want 1", got)
 	}
+}
+
+// TestCrossPrincipalLeaseAccessIsRefused is the end-to-end ownership test:
+// principal A claims a real spawned instance, and principal B — holding a
+// perfectly valid credential of its own — is refused both mutating surfaces.
+//
+// The load-bearing assertion is not the status code. It is that A's instance is
+// still ALIVE and still conversing after B's attempt: a check that answered 404
+// only after releaseLease had queued the shutdown frame would pass a
+// status-code-only test while having killed A's session. So this asserts the
+// process never exited, the lease never entered teardown, and A can still
+// round-trip a frame through the instance afterwards.
+//
+// B's WebSocket attempt is made BEFORE A connects, so its refusal cannot be
+// mistaken for the one-client-per-lease rule.
+func TestCrossPrincipalLeaseAccessIsRefused(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin)
+
+	cr := b.Claim(t, b.Token, stubClaimBody)
+	if cr.LeaseID == "" || cr.WSURL == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+
+	// --- B attempts to release A's lease -----------------------------------
+	unowned := b.Do(t, http.MethodPost, "/release/"+cr.LeaseID, b.OtherToken, "")
+	if unowned.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-principal release status = %d, want 404", unowned.StatusCode)
+	}
+	// ...and it is indistinguishable from releasing a lease that never existed, so
+	// B cannot use response differencing to learn that the id is live.
+	unknown := b.Do(t, http.MethodPost, "/release/no-such-lease-id", b.OtherToken, "")
+	unownedBody, err := io.ReadAll(unowned.Body)
+	if err != nil {
+		t.Fatalf("read unowned refusal body: %v", err)
+	}
+	unknownBody, err := io.ReadAll(unknown.Body)
+	if err != nil {
+		t.Fatalf("read unknown refusal body: %v", err)
+	}
+	if unknown.StatusCode != unowned.StatusCode || string(unknownBody) != string(unownedBody) {
+		t.Errorf("refusals differ — lease-id oracle:\n unowned: %d %q\n unknown: %d %q",
+			unowned.StatusCode, unownedBody, unknown.StatusCode, unknownBody)
+	}
+
+	// A's instance survived: the lease is still registered, holds its slot, and the
+	// process has NOT exited (the shutdown frame was never sent).
+	if !b.Registry.Has(cr.LeaseID) {
+		t.Fatal("B's refused release tore down A's lease")
+	}
+	if got := b.Registry.SlotsInUse(); got != 1 {
+		t.Errorf("slots in use = %d, want 1 (a refused release must free nothing)", got)
+	}
+	select {
+	case <-b.Registry.ExitedChan(cr.LeaseID):
+		t.Fatal("B's refused release killed A's instance process")
+	default:
+	}
+
+	// --- B attempts to connect to A's lease --------------------------------
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	if conn, resp, err := b.DialLease(dctx, cr.WSURL, b.OtherToken); err == nil {
+		conn.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("B completed the client WebSocket handshake on A's lease")
+	} else if resp == nil {
+		t.Fatalf("B's dial returned no response: %v", err)
+	} else if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("B's handshake status = %d, want 404", resp.StatusCode)
+	}
+	if got := b.Registry.ClientConn(cr.LeaseID); got != nil {
+		t.Error("B's refused dial attached a client connection to A's lease")
+	}
+
+	// --- A is unaffected ---------------------------------------------------
+	// The strongest liveness proof available: A connects and the spawned instance
+	// echoes a frame back through the gateway.
+	client, _, err := b.DialLease(dctx, cr.WSURL, b.Token)
+	if err != nil {
+		t.Fatalf("the lease owner was refused its own lease after B's attempts: %v", err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+
+	out, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: cr.LeaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"hello":"still-alive"}`),
+	})
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	if err := client.Write(dctx, websocket.MessageText, out); err != nil {
+		t.Fatalf("owner write after refused cross-principal attempts: %v", err)
+	}
+	_, data, err := client.Read(dctx)
+	if err != nil {
+		t.Fatalf("owner read after refused cross-principal attempts: %v", err)
+	}
+	echo, err := brokerframe.Decode(data)
+	if err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"still-alive"}` {
+		t.Fatalf("unexpected echo frame: %+v", echo)
+	}
+
+	// And A can still release its own lease through the full shared teardown.
+	//
+	// A's socket is closed first, purely for speed: the teardown closes the client
+	// WS, and coder/websocket's close handshake waits ~5s for a peer that is not
+	// currently reading. That wait is pre-existing behaviour with nothing to do with
+	// ownership, so there is no reason to pay it here.
+	client.Close(websocket.StatusNormalClosure, "")
+	released := b.Do(t, http.MethodPost, "/release/"+cr.LeaseID, b.Token, "")
+	if released.StatusCode != http.StatusOK {
+		t.Fatalf("owner release status = %d, want 200", released.StatusCode)
+	}
+	waitFor(t, func() bool { return !b.Registry.Has(cr.LeaseID) })
 }
 
 // TestHealthzStaysOpenOnAuthEnabledBroker pins the deliberate exemption at the
@@ -857,6 +977,20 @@ func (b *authedStubBroker) Claim(t *testing.T, token, body string) claimResponse
 // refused request is the proof that the refusal preceded the spawn.
 func (b *authedStubBroker) SpawnCount() int64 { return b.spawns.count() }
 
+// DialLease opens the client WebSocket for a lease with an optional bearer token
+// ("" sends no Authorization header at all), asserting nothing so a caller can
+// inspect a refusal. On a failed handshake the conn is nil and the *http.Response
+// carries the broker's refusal.
+func (b *authedStubBroker) DialLease(ctx context.Context, wsURL, token string) (*websocket.Conn, *http.Response, error) {
+	var opts *websocket.DialOptions
+	if token != "" {
+		opts = &websocket.DialOptions{
+			HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}},
+		}
+	}
+	return websocket.Dial(ctx, wsURL, opts)
+}
+
 // getLeasesIntegration performs GET /leases against a running stub broker and
 // decodes the snapshot.
 func getLeasesIntegration(t *testing.T, base string) RegistrySnapshot {
@@ -1001,7 +1135,11 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	}
 	cfg := wiring.cfg
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
-	gateway := NewGateway(logger, registry)
+	// The guard is built before the gateway, exactly as run() does: the client WS
+	// route is not registered through Guard, so the gateway resolves that route's
+	// credential itself in order to enforce lease ownership.
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	gateway := NewGateway(logger, registry, guard)
 	claims := NewClaimServer(logger, registry, cfg, wiring.runner)
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
@@ -1019,7 +1157,7 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	gateway.Register(mux)
-	guarded := newAuthGuard(logger, cfg.AuthChain).Guard(mux)
+	guarded := guard.Guard(mux)
 	claims.Register(guarded)
 	releases.Register(guarded)
 	leases.Register(guarded)

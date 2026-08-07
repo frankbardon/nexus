@@ -166,6 +166,45 @@ func TestIdleSweeper_ReleasesIdleLease(t *testing.T) {
 	}
 }
 
+// TestIdleSweeper_ReleasesOwnedLeaseWithNoPrincipal is the ownership-regression
+// guard for the sweeper. The sweeper is the broker acting on itself: it has no
+// principal, so it must tear down a lease owned by a named identity exactly as it
+// tears down an anonymous one.
+//
+// If an ownership check ever migrates into releaseLease, the sweeper's caller-less
+// release starts failing and idle instances leak silently — a worse failure than
+// the cross-principal release this enforcement exists to stop. That is why this is
+// a test and not a comment.
+func TestIdleSweeper_ReleasesOwnedLeaseWithNoPrincipal(t *testing.T) {
+	clk := newFakeClock()
+	reg := NewRegistry(testLogger(), 0)
+	reg.now = clk.now
+
+	proc := newFakeProcess(406)
+	id, l, client := seedLiveLeaseOwned(t, reg, proc, testOwner())
+	close(proc.exited)
+
+	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, time.Second)
+	clk.advance(2 * time.Minute)
+	sweeper.sweep()
+
+	waitUntil(t, func() bool { return !reg.Has(id) })
+	if got := reg.SlotsInUse(); got != 0 {
+		t.Errorf("slots in use after idle release = %d, want 0 (the instance leaked)", got)
+	}
+	reg.mu.Lock()
+	gotReason := l.reason
+	reg.mu.Unlock()
+	if gotReason != reasonIdle {
+		t.Errorf("idle-released lease reason = %q, want %q", gotReason, reasonIdle)
+	}
+	select {
+	case <-client.closed:
+	default:
+		t.Fatal("client connection was not closed after idle release of an owned lease")
+	}
+}
+
 // TestIdleSweeper_ActivityKeepsLeaseAlive proves a client io frame within the
 // window keeps the lease alive across a sweep.
 func TestIdleSweeper_ActivityKeepsLeaseAlive(t *testing.T) {

@@ -32,6 +32,13 @@ var errUnknownLease = errors.New("unknown lease")
 // It returns errUnknownLease for an unknown lease and is safe to call
 // concurrently: only the first caller performs the teardown; a second
 // concurrent call returns nil immediately (the teardown is already underway).
+//
+// It performs NO authorization. Lease ownership is checked by handleRelease
+// before it calls through, because the idle sweeper and the crash watcher reach
+// this function as the broker acting on itself, with no principal at all. Do not
+// move an ownership check in here: those two paths would then either have to
+// forge a caller or start failing, and a failing teardown leaks instances
+// silently.
 func (r *Registry) releaseLease(id, reason string, grace time.Duration) error {
 	r.mu.Lock()
 	l, ok := r.leases[id]
@@ -119,8 +126,9 @@ func (s *ReleaseServer) Register(mux routeMux) {
 	mux.HandleFunc("POST /release/{lease_id}", s.handleRelease)
 }
 
-// handleRelease tears down the lease named in the path. Unknown leases return
-// 404; the teardown itself is bounded by the configured grace period.
+// handleRelease tears down the lease named in the path, provided the
+// authenticated caller owns it. Unknown AND unowned leases return the same 404;
+// the teardown itself is bounded by the configured grace period.
 func (s *ReleaseServer) handleRelease(w http.ResponseWriter, r *http.Request) {
 	leaseID := r.PathValue("lease_id")
 	if leaseID == "" {
@@ -128,9 +136,32 @@ func (s *ReleaseServer) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ownership is enforced HERE, in the HTTP handler, and deliberately NOT inside
+	// releaseLease. That function is the single shared teardown path for the idle
+	// sweeper and the crash watcher as well, and those two are the broker acting on
+	// itself, not callers: they have no principal to check. A check pushed down into
+	// releaseLease could only be satisfied by handing them a pretend caller, and
+	// getting that wrong would silently leak instances — a worse failure than the
+	// one being fixed. Keeping the check in the handler makes the internal paths
+	// structurally incapable of enforcing it.
+	//
+	// The check runs BEFORE releaseLease, so a refused caller never causes a
+	// shutdown frame, a grace wait, a kill, or a freed slot. A 404 that had already
+	// asked the instance to stop would pass a status-code-only test while still
+	// killing the owner's session.
+	caller := callerPrincipal(r)
+	if !ownsLease(s.registry, leaseID, caller) {
+		logLeaseDenied(s.logger, r, caller, leaseID)
+		s.fail(w, http.StatusNotFound, unknownLeaseError)
+		return
+	}
+
+	// Still mapped, and still reachable: the lease can be torn down by the idle
+	// sweeper or a crash between the ownership check and here. Both answers are the
+	// same 404, so the race is invisible to the caller.
 	err := s.registry.releaseLease(leaseID, "manual release", s.grace)
 	if errors.Is(err, errUnknownLease) {
-		s.fail(w, http.StatusNotFound, "unknown lease")
+		s.fail(w, http.StatusNotFound, unknownLeaseError)
 		return
 	}
 	if err != nil {
