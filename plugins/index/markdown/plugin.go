@@ -184,6 +184,6 @@ func pathKey(path string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func (p *Plugin) Shutdown(_ context.Context) error         { return nil }
+func (p *Plugin) Shutdown(_ context.Context) error          { return nil }
 func (p *Plugin) Subscriptions() []engine.EventSubscription { return nil }
 func (p *Plugin) Emissions() []string                       { return []string{"lexical.upsert"} }
