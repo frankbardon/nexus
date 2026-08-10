@@ -125,6 +125,142 @@ Failures during boot are logged at error but do not block the rest of the engine
 
 `http` uses the streamable HTTP transport. The SDK negotiates the session header; configure auth headers via `headers` (injected on every request through a wrapping `http.RoundTripper`). The legacy SSE transport is deliberately not exposed.
 
+`inprocess` wires an in-memory transport pair (`mcp.NewInMemoryTransports()`) to an `*mcp.Server` the embedding host built and handed to the plugin. No subprocess is launched and no socket is dialled. This is the transport for hosts that embed Nexus and already have MCP tools implemented in the same binary. See [In-process servers](#in-process-servers) below.
+
+## In-process servers
+
+`transport: inprocess` connects to a live `*mcp.Server` owned by the host process instead of launching one. The wiring has two halves that must agree: a Go call that registers the server under an opaque key, and a YAML `server:` value naming that same key.
+
+### The `server` key
+
+| | |
+|---|---|
+| **Required for** | `transport: inprocess` (the config schema rejects the boot without it) |
+| **Type** | non-empty string |
+| **Meaning** | An opaque, host-chosen key. It is never parsed, matched against a pattern, or derived from anything — it only has to be byte-identical to the key passed to `client.RegisterInProcessServer`. |
+
+If the key is absent, boot fails during schema validation naming the key. If the key is *present but unregistered*, boot succeeds — a broken MCP server never blocks the engine — and the connect fails with `no host-injected server registered under key "…"` logged at error. The symptom is a missing `mcp__<server>__*` namespace, not a crash.
+
+### Wiring order: register before `engine.Boot`
+
+> **`RegisterInProcessServer(key, srv)` must be called before `engine.Boot(ctx)`.**
+
+The plugin resolves the key while connecting, and for the default `lifecycle: engine` that connect happens *during* boot. A registration made after `Boot` returns is too late: the connect has already failed and the server's tools are absent for the rest of the engine's life. (With `lifecycle: session` the lookup happens at each `io.session.start` instead, but registering before `Boot` is correct for both and is the rule to follow.)
+
+### Worked example
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/allplugins"
+	mcpclient "github.com/frankbardon/nexus/plugins/mcp/client"
+)
+
+// echoInput is the typed argument for the host's tool; the SDK derives the
+// tool's JSON schema from this struct.
+type echoInput struct {
+	Text string `json:"text"`
+}
+
+func main() {
+	ctx := context.Background()
+
+	// 1. Build the MCP server in this process with the official SDK.
+	srv := mcp.NewServer(&mcp.Implementation{Name: "host-tools", Version: "v0"}, nil)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "echo",
+		Description: "Echo the input text back.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "echo: " + in.Text}},
+		}, nil, nil
+	})
+
+	// 2. Register it under a key BEFORE Boot. The YAML `server:` value must
+	//    be exactly this string.
+	mcpclient.RegisterInProcessServer("host-tools", srv)
+
+	// 3. Boot as usual. The plugin resolves "host-tools" during Boot and
+	//    connects over the in-memory transport.
+	eng, err := engine.New("nexus.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
+		os.Exit(1)
+	}
+	allplugins.RegisterAll(eng.Registry)
+
+	if err := eng.Boot(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "boot: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = eng.Stop(context.Background()) }()
+
+	// An embedding host owns the lifecycle and blocks however it likes —
+	// here, until a plugin ends the session. Don't call eng.Run: that is the
+	// stock CLI wrapper, it calls Boot itself and it owns signal handling.
+	<-eng.SessionEnded()
+}
+```
+
+The matching `nexus.yaml` block:
+
+```yaml
+plugins:
+  active:
+    - nexus.mcp.client
+
+  nexus.mcp.client:
+    servers:
+      - name: host
+        transport: inprocess
+        server: host-tools   # must equal the RegisterInProcessServer key
+        lifecycle: engine
+```
+
+The `echo` tool then reaches the agent as `mcp__host__echo`, exactly as if it had come from a subprocess server.
+
+### The registry is process-wide
+
+`RegisterInProcessServer` writes into a **package-level, process-wide** map. It is not scoped to an engine, an agent, or a session. Two engines booted in the same process share one key namespace, and a later registration under an existing key silently replaces the earlier one.
+
+The concrete failure in a multi-tenant host: tenant A registers its server under `host-tools`, then tenant B registers *its* server under `host-tools` too. The map now holds B's server, and tenant A's YAML — which still says `server: host-tools` — connects to **tenant B's** MCP server. Tenant A's agent then calls tools bound to tenant B's data. Nothing errors; the tools are present and answer normally.
+
+Scope the key per tenant or per agent to avoid this, and derive the YAML value from the same identifier rather than hard-coding it — for a per-tenant engine built with `engine.NewFromBytes`, render the `server:` value into the config bytes from the same variable used for the registration key:
+
+```go
+key := "tenant-" + tenantID + "/host-tools"
+mcpclient.RegisterInProcessServer(key, srv)
+// ...render `server: <key>` into the per-tenant config bytes, then
+// engine.NewFromBytes(cfg) → RegisterAll → Boot.
+```
+
+### Cleaning up: `UnregisterInProcessServer`
+
+```go
+mcpclient.UnregisterInProcessServer(key)
+```
+
+Removes the registration. Because the map is process-wide, **tests must unregister in cleanup** or one test's server stays visible to every later test in the package:
+
+```go
+mcpclient.RegisterInProcessServer(key, srv)
+t.Cleanup(func() { mcpclient.UnregisterInProcessServer(key) })
+```
+
+Hosts whose servers live for the whole process lifetime do not need to call it. Long-lived hosts that tear down a tenant should, so the key does not linger for the next tenant that reuses it.
+
+### Why the registry lives in the plugin package
+
+The natural home for a host-injection seam is `pkg/engine`, next to `eng.Registry.Register(id, factory)` — the existing precedent for handing host-constructed objects to the engine before `Boot`. This one cannot live there: the injected object is an `*mcp.Server`, and **the engine core deliberately does not import the MCP SDK**. Only this plugin does. Putting the registry on `pkg/engine` would drag `github.com/modelcontextprotocol/go-sdk` across the engine boundary and into every binary that links the engine, MCP or not. So the registry stays in `plugins/mcp/client` (`injected.go`) and hosts import the plugin package directly.
+
 ## Sampling
 
 MCP sampling (server-asks-host-to-call-an-LLM) is deferred to Phase 2. Tracked in [issue #98](https://github.com/frankbardon/nexus/issues/98).
@@ -138,3 +274,5 @@ go test -tags integration ./tests/integration/ -run TestMCPClient -v
 ```
 
 No LLM provider key is required — the tests drive the bus directly and observe the plugin's catalog, resource, and prompt projections.
+
+The `inprocess` transport is covered by unit tests in `plugins/mcp/client/inprocess_test.go` (`go test ./plugins/mcp/client/`), which build a one-tool, one-resource `*mcp.Server`, register it, and drive `tool.invoke` through the in-memory transport. They are the shortest runnable reference for the wiring described in [In-process servers](#in-process-servers).

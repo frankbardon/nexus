@@ -2064,13 +2064,37 @@ Top-level keys:
 | `env_passthrough`  | list<string> | *(none)*                  | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
 | `url`              | string   | *(required for http)*         | Base URL of the streamable HTTP MCP endpoint. |
 | `headers`          | map<string,string> | *(none)*            | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
-| `server`           | string   | *(required for inprocess)*    | Key of a live `*mcp.Server` the embedding host registered with `client.RegisterInProcessServer(key, srv)` **before** `engine.Boot()`. The connection is wired over an in-memory transport instead of a subprocess or HTTP dial. |
+| `server`           | string   | *(required for inprocess)*    | Opaque host-chosen key of a live `*mcp.Server` the embedding host registered with `client.RegisterInProcessServer(key, srv)` **before** `engine.Boot()`. Must be byte-identical to that key. The connection is wired over an in-memory transport instead of a subprocess or HTTP dial. The registry is **process-wide** — see the note below. |
 | `lifecycle`        | string   | inherited from `defaults`     | `engine` or `session`. |
 | `timeout`          | duration string | inherited from `defaults` | Overrides defaults per server. String only — see `defaults.timeout`. |
 | `tools.allow`      | list<string> | *(none)* (all allowed)    | If set, only listed raw MCP tool names are forwarded to the catalog. |
 | `tools.deny`       | list<string> | *(none)*                  | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
 | `resources.*`      | map      | inherited from `defaults`     | Same keys as `defaults.resources`. |
 | `prompts.enabled`  | bool     | inherited from `defaults`     | Disable per server when desired. |
+
+#### `transport: inprocess` — process-wide key namespace
+
+The registry behind `server` (`RegisterInProcessServer` / `UnregisterInProcessServer`
+in `plugins/mcp/client/injected.go`) is a **package-level map shared by the whole
+process**, not scoped to an engine, agent, or session. A second registration under
+an existing key silently replaces the first.
+
+In a host running several engines in one process this is a cross-tenant leak: if
+tenant A and tenant B both register under `host-tools`, the map holds whichever
+registered last, and tenant A's config — still saying `server: host-tools` —
+connects to **tenant B's** MCP server. Nothing errors; the tools answer normally
+against the wrong tenant's data. Scope keys per tenant or per agent, and derive
+the YAML `server:` value from the same identifier used for the registration key.
+
+The key is resolved when the server connects (during `Boot` for
+`lifecycle: engine`, at `io.session.start` for `lifecycle: session`), so
+registration must happen before `engine.Boot()`. A *missing* `server` key fails
+schema validation at boot; a *present but unregistered* key does not — boot
+succeeds and the connect fails with `no host-injected server registered under
+key "…"` logged at error, leaving the `mcp__<server>__*` namespace absent.
+
+Full wiring walkthrough with a runnable Go example:
+[MCP client → In-process servers](../plugins/mcp-client.md#in-process-servers).
 
 #### Events
 
