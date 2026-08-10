@@ -2015,25 +2015,40 @@ Protocol (MCP) servers into Nexus. Tools land in the catalog under
 resource templates become parameterised tools, and prompts surface as slash
 commands. See `docs/src/plugins/mcp-client.md` for the user-facing guide.
 
+**Schema-validated at boot.** The plugin ships `plugins/mcp/client/schema.json`
+and implements `ConfigSchema()`, so the engine validates this block **before
+`Init` runs**, with `additionalProperties: false` at every object level. The
+tables below are the whole surface: any key not listed is rejected by name. The
+per-transport requirements (`command` for `stdio`, `url` for `http`, `server`
+for `inprocess`) are conditional `if`/`then` branches in the schema, so a
+missing key aborts the boot naming the key instead of surfacing later as a
+connection-phase error from `parseServer`.
+
+Two constraints the schema deliberately does **not** carry: duplicate `name`
+values across `servers[]` (a cross-item check JSON Schema cannot express —
+`parseConfig` rejects them at parse time), and cross-transport key exclusivity
+(`command`, `url` and `server` are read unconditionally, so a leftover `command`
+on an `http` server is accepted and ignored, exactly as today).
+
 Top-level keys:
 
 | Key        | Type   | Default | Description |
 |------------|--------|---------|-------------|
 | `servers`  | list   | *(none)* | One entry per MCP server. See per-server keys below. |
 | `defaults` | map    | *(none)* | Inherited by every entry in `servers` unless overridden inline. |
-| `aliases`  | map    | *(none)* | Optional alias map: short slash command → `<server>.<prompt>`. Aliases use the configured `command_prefix` chain; e.g. `review: gh.review_pr` makes `/review` rewrite to `/mcp.gh.review_pr`. |
+| `aliases`  | map<string,string> | *(none)* | Optional alias map: short slash command → `<server>.<prompt>`. Values must be non-empty strings. Aliases use the configured `command_prefix` chain; e.g. `review: gh.review_pr` makes `/review` rewrite to `/mcp.gh.review_pr`. |
 
 #### `defaults`
 
 | Key                                | Type     | Default | Description |
 |------------------------------------|----------|---------|-------------|
-| `lifecycle`                        | string   | `engine` | When servers connect/disconnect. `engine` = connect on engine boot, disconnect on shutdown. `session` = connect on `io.session.start`, disconnect on `io.session.end`. |
-| `timeout`                          | duration | `30s`   | Per-RPC timeout used for `tools/call`, `resources/read`, `prompts/get`, etc. |
-| `command_prefix`                   | string   | `mcp`   | First segment of the slash command Nexus registers per prompt. With the default a server named `fake` and a prompt named `greet` becomes `/mcp.fake.greet`. |
+| `lifecycle`                        | string   | `engine` | When servers connect/disconnect. `engine` = connect on engine boot, disconnect on shutdown. `session` = connect on `io.session.start`, disconnect on `io.session.end`. Only those two values. |
+| `timeout`                          | duration string | `30s` | Per-RPC timeout used for `tools/call`, `resources/read`, `prompts/get`, etc. Must be a **quoted-or-bare duration string** (`30s`, `1m30s`). A bare number is rejected at boot: the parser reads this key only through a `string` type assertion, so `timeout: 30` would silently fall back to the default. |
+| `command_prefix`                   | string   | `mcp`   | First segment of the slash command Nexus registers per prompt. With the default a server named `fake` and a prompt named `greet` becomes `/mcp.fake.greet`. Must be non-empty. |
 | `resources.enabled`                | bool     | `true`  | Toggle the entire resource surface for the server. |
 | `resources.auto_register_static`   | bool     | `true`  | When true, every static resource becomes a no-arg catalog tool. |
 | `resources.auto_register_template` | bool     | `true`  | When true, every resource template becomes a catalog tool whose inputSchema mirrors the template's variables. |
-| `resources.auto_register_max`      | int      | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. |
+| `resources.auto_register_max`      | int ≥ 0  | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. Unlike `timeout`, this one *is* a number — the parser reads it through an int/int64/float64 coercion. Negative values are rejected at boot (the parser would silently ignore them). |
 | `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. |
 | `prompts.enabled`                  | bool     | `true`  | Toggle the prompt slash-command surface for the server. |
 
@@ -2042,17 +2057,18 @@ Top-level keys:
 | Key                | Type     | Default                       | Description |
 |--------------------|----------|-------------------------------|-------------|
 | `name`             | string   | *(required)*                  | Lowercase alpha-numeric identifier used to namespace every catalog entry and slash command (`[a-z0-9][a-z0-9_-]*`). |
-| `transport`        | string   | `stdio`                       | `stdio` (subprocess via the SDK) or `http` (streamable HTTP). |
+| `transport`        | string   | `stdio`                       | One of `stdio` (subprocess via the SDK), `http` (streamable HTTP), or `inprocess` (in-memory transport to a host-registered `*mcp.Server`). |
 | `command`          | string   | *(required for stdio)*        | Executable to launch. Resolved on `PATH`; users wanting `~` expansion can write the full path. |
-| `args`             | list     | *(none)*                      | Argument list passed to `command`. |
-| `env`              | map      | *(none)*                      | Environment variables exported to the subprocess. `${VAR}` references are expanded from the host environment. |
-| `env_passthrough`  | list     | *(none)*                      | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
+| `args`             | list<string> | *(none)*                  | Argument list passed to `command`. |
+| `env`              | map<string,string> | *(none)*            | Environment variables exported to the subprocess. `${VAR}` references are expanded from the host environment. |
+| `env_passthrough`  | list<string> | *(none)*                  | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
 | `url`              | string   | *(required for http)*         | Base URL of the streamable HTTP MCP endpoint. |
-| `headers`          | map      | *(none)*                      | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
+| `headers`          | map<string,string> | *(none)*            | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
+| `server`           | string   | *(required for inprocess)*    | Key of a live `*mcp.Server` the embedding host registered with `client.RegisterInProcessServer(key, srv)` **before** `engine.Boot()`. The connection is wired over an in-memory transport instead of a subprocess or HTTP dial. |
 | `lifecycle`        | string   | inherited from `defaults`     | `engine` or `session`. |
-| `timeout`          | duration | inherited from `defaults`     | Overrides defaults per server. |
-| `tools.allow`      | list     | *(none)* (all allowed)        | If set, only listed raw MCP tool names are forwarded to the catalog. |
-| `tools.deny`       | list     | *(none)*                      | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
+| `timeout`          | duration string | inherited from `defaults` | Overrides defaults per server. String only — see `defaults.timeout`. |
+| `tools.allow`      | list<string> | *(none)* (all allowed)    | If set, only listed raw MCP tool names are forwarded to the catalog. |
+| `tools.deny`       | list<string> | *(none)*                  | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
 | `resources.*`      | map      | inherited from `defaults`     | Same keys as `defaults.resources`. |
 | `prompts.enabled`  | bool     | inherited from `defaults`     | Disable per server when desired. |
 
