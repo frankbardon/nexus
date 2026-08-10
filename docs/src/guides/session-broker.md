@@ -20,7 +20,8 @@ crashes.
 ```
                           ┌───────────────────────────────────────┐
                           │            nexus-broker               │
-   client ──HTTP POST────▶│  /claim  /release/{id}  /leases       │
+   client ──HTTP POST────▶│  /claim /release/{id} /ticket/{id}    │
+                          │  /leases                              │
           ◀──lease+ws_url─│                                       │
           ──WebSocket────▶│  /lease/{id}  ◀──frames──▶  /instance │
                           └───────────────────────────────────────┘
@@ -52,11 +53,16 @@ The broker reads its own YAML config file (default `broker.yaml`, override with
 ```yaml
 # broker.yaml
 listen_addr: ":8080"          # HTTP/WS gateway bind address
+advertise_addr: ""            # address CLIENTS use to reach this broker; required behind a proxy/LB
 nexus_binary_path: "nexus"    # path to the nexus binary the broker exec()s
 max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a lease after this much inactivity; <=0 disables
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting
 release_grace: 10s            # graceful-shutdown grace before force-kill
+state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
+broker_id: ""                 # stamped on every lease record; generated + persisted when empty
+reattach_window: 60s          # how long a lease restored after a restart waits for its instance
+# auth:                       # optional; omit the block to run unauthenticated (see Authentication)
 ```
 
 ```bash
@@ -71,6 +77,108 @@ bin/nexus-broker -config broker.yaml
 Every config key, its type, and its default are listed in the authoritative
 [Configuration Reference](../configuration/reference.md#session-broker-nexus-broker).
 
+### Behind a proxy: set `advertise_addr`
+
+A lease is in-memory state on **one** broker process, so the `ws_url` a claim
+returns has to name that process. With a wildcard bind and no `advertise_addr`,
+the broker can only guess — it derives the host from the claim request's `Host`
+header.
+
+**That is the failure this key prevents.** Behind a reverse proxy or load
+balancer the `Host` header names the **intermediary**, so the returned `ws_url`
+points at the load balancer rather than at the broker holding the lease. The
+client then reconnects through the LB, lands on whichever broker it picks, and is
+told `404 unknown lease` — by a broker that is working perfectly and simply does
+not have that lease. Set `advertise_addr` to the address clients actually use to
+reach **this** broker:
+
+```yaml
+listen_addr: ":8080"                              # bind wide
+advertise_addr: "wss://broker-1.example.com"      # tell clients where THIS broker is
+```
+
+A bare `host:port` keeps the `ws://` scheme; the scheme-qualified form is for a
+TLS-terminating proxy. Malformed values (no port, a wildcard host, a path) fail
+startup, and the wildcard-bind-without-`advertise_addr` shape logs a `WARN` at
+boot. A directly-reachable broker can leave the key empty. Full precedence table:
+[`ws_url` resolution](../configuration/reference.md#ws_url-resolution).
+
+### Surviving a restart: set `state_dir`
+
+Lease state — which instances this broker spawned, who claimed them, and what
+session each is running — lives in memory by default, so a restart loses it and
+the spawned `nexus` processes become orphans nobody can account for. Point
+`state_dir` at a directory and the broker journals every lease transition to
+`<state_dir>/leases.jsonl`, **and reclaims its running instances when it comes
+back**:
+
+```yaml
+state_dir: "~/.nexus/broker"     # per-broker; never share one dir between brokers
+broker_id: ""                    # optional name; generated and persisted when empty
+reattach_window: 60s             # bound on how long a restored lease waits for its instance
+```
+
+A record is appended when a lease is minted, when its pid and session id first
+become known, and when it is torn down — including on **idle sweep and crash**,
+not just a manual `POST /release`. Records carry the lease id, the claiming
+principal, the session id, the pid, and this broker's `broker_id` /
+`advertise_addr`. **No secret is ever written**: not the per-spawn secret, not a
+WebSocket ticket, not a bearer token.
+
+The journal is compacted on open and every 512 appends, so it holds roughly the
+live lease set rather than the whole history. A write that fails is logged and
+never fails the claim or release that produced it, and a record torn by a `kill
+-9` is skipped with a warning instead of failing the file.
+
+Leave `state_dir` empty and the broker behaves exactly as it always has,
+logging one `WARN` at startup to say lease state is in-memory only. This is
+about **lease** bookkeeping, not sessions: an instance's session under
+`~/.nexus/sessions/<id>/` is persisted and `-recall`-able either way.
+
+#### What a restart actually does
+
+At boot — before any route is served — the broker replays the journal and, for
+each lease that was live when it stopped:
+
+- **The pid is still alive** → the lease is **restored**, with its original owner,
+  session id and creation time, and it **re-takes its capacity slot** so
+  `max_concurrent` stays honest.
+- **The pid is gone**, or the lease never got a process → the record is closed out
+  and forgotten.
+- **The record belongs to another `broker_id`** → it is left completely alone.
+  Nothing is adopted and nothing is killed.
+
+A restored lease shows as `spawning` in `GET /leases` and is **not yet usable**.
+Meanwhile the surviving instance's `nexus.io.broker` transport is already
+reconnecting with exponential backoff, so it re-dials `/instance` on its own — no
+instance-side configuration and no client action are involved. When it does, and
+it presents the right lease id **and** the right spawn secret, the lease goes
+`active` and existing clients can reconnect to the same `ws_url` and carry on.
+
+> **A restored lease always requires the spawn secret, even on a broker with no
+> `auth:` block.** A live pid is not proof of identity: the recorded pid may have
+> been recycled to an unrelated process while the broker was down, and the
+> portable liveness probe cannot tell. This one check is not configurable.
+
+The secret survives the restart without ever being written down: it is **derived**
+as `HMAC-SHA256(<state_dir>/spawn-key, lease_id)` rather than randomly minted, so
+the restarted broker recomputes exactly what the running instance is still
+holding. `spawn-key` is 32 random bytes, mode `0600`, created on first boot. It is
+a *key*, not a credential — presenting it to `/instance` authenticates nothing —
+and losing or rotating it is safe: derived secrets simply stop matching, and the
+affected leases are reaped rather than reattached.
+
+**Nothing waits forever.** A restored lease that no instance reconnects to within
+`reattach_window` (default 60s) is reaped through the ordinary release path: the
+process is signalled (`SIGTERM`, escalating to `SIGKILL`), the slot is freed, and
+the record is closed out. Setting `reattach_window` to `0` does **not** disable
+this — it falls back to the default, because an unbounded wait is the orphan the
+feature exists to remove.
+
+For the per-record detail, the exact reasons written to the journal, and the full
+trade-off discussion around the derivation key, see
+[Restart recovery](../configuration/reference.md#restart-recovery-reattach_window).
+
 ### Health check
 
 ```bash
@@ -78,10 +186,227 @@ curl -s http://localhost:8080/healthz
 # {"status":"ok"}
 ```
 
+## Authentication
+
+**An absent `auth:` block means authentication is disabled**, and every route
+behaves exactly as it did before authentication existed. That is the default for
+an upgrading deployment, and the broker says so once at boot:
+
+```
+WARN client authentication is DISABLED: broker config has no auth block, so any
+     caller that can reach this broker can claim, release and list leases
+```
+
+Opting in means adding an `auth:` block to `broker.yaml`. A **malformed** block
+is a boot failure naming the offending key — it never falls back to disabled, and
+unknown keys are rejected at every level.
+
+### What the block protects
+
+| Route | With `auth:` configured |
+|-------|-------------------------|
+| `POST /claim`, `POST /release/{lease_id}`, `POST /ticket/{lease_id}`, `GET /leases` | Middleware validates the credential **before** the handler runs. A refused claim spawns nothing. |
+| `WS /lease/{lease_id}` | The same validator chain, resolved by the handler itself so it can also accept a single-use `?ticket=` (see [the ticket flow](#connecting-the-ticket-flow)). |
+| `WS /instance` (the dial-back) | Not a client route: a spawned instance proves itself with its [per-spawn secret](#the-instance-dial-back-secret), not with an operator-configured credential. |
+| `GET /healthz` | **Never authenticated.** A load balancer or container probe has no credential to present, and liveness leaks nothing. |
+
+### The four validators
+
+The `auth.validators` list is **ordered, and the first validator that accepts
+wins** — so put the cheap ones first.
+
+| `type` | Verifies | Key settings |
+|--------|----------|--------------|
+| `static` | A table of shared bearer tokens, compared in constant time | `tokens[]`, each with `token` + `principal` |
+| `jwks` | An OIDC JWT, against the signing keys the issuer publishes | `issuer`, `jwks_url`, `audience`, `principal_claim` |
+| `introspect` | An **opaque** token, by asking the issuer (RFC 7662) | `introspection_url`, `client_id`, a client secret, `principal_claim` |
+| `proxy_headers` | An identity a fronting authenticating proxy already established | `trusted_proxy_cidrs`, `principal_header` |
+
+A worked example: a shared token for CI, and OIDC access tokens for everyone
+else. It is deliberately vendor-neutral — the broker is generic OIDC with **no
+provider-specific defaults**, so every value below comes from your own issuer.
+
+```yaml
+# broker.yaml
+listen_addr: ":8080"
+advertise_addr: "wss://broker-1.example.com"
+
+auth:
+  admin_scope: "nexus.broker.admin"    # scope that unlocks the operator view of GET /leases
+  validators:
+    # Tried first: no network round trip.
+    - type: static
+      tokens:
+        - token: "replace-me"
+          principal: "ci-runner"
+          tenant: "acme"
+          scopes: "nexus.broker.admin"   # whitespace-separated, or a YAML list
+
+    # Everyone else presents an OIDC access token.
+    - type: jwks
+      issuer: "https://id.example.com/"                        # exact `iss` value
+      jwks_url: "https://id.example.com/.well-known/jwks.json"  # explicit; no discovery
+      audience: "nexus-broker"                                  # or a list
+      algorithms: ["RS256"]
+      principal_claim: sub                                      # required
+      tenant_claim: org_id
+      scopes_claim: scope
+```
+
+Four things worth knowing before you deploy that:
+
+- **`principal_claim` is required and has no default guess.** Lease ownership is
+  principal-`ID` equality, so silently defaulting to `sub` for an issuer that
+  mints a different stable identifier would bind ownership to the wrong field. A
+  token whose mapped claim is absent, empty, or not a scalar is rejected.
+- **There is no OIDC discovery**, on purpose — `jwks_url` is configured
+  explicitly. For an issuer that documents only its discovery URL, read the value
+  out once by hand:
+  ```bash
+  curl -s https://id.example.com/.well-known/openid-configuration | jq -r .jwks_uri
+  ```
+- **Key rotation needs no restart**, and an unreachable issuer never turns into an
+  allow: a `kid` already in the cache keeps verifying, a `kid` that is not cached
+  is denied.
+- **Secrets follow one convention**: `<key>` holds the literal value, `<key>_env`
+  holds the *name* of an environment variable to read it from — so
+  `client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"` keeps the
+  `introspect` client secret out of the file. **Setting both is a boot error**,
+  not a precedence rule. A `broker.yaml` carrying `static` tokens or an inline
+  `client_secret` is itself a secret: restrict its permissions.
+
+An `introspect` validator that cannot reach its endpoint answers **`503` with a
+`Retry-After` header**, not `401`. "We could not find out" is not a statement
+about your token, and telling every client at once to re-authenticate against an
+identity provider that is already failing would make an outage worse. It is still
+a refusal: no lease is claimed and nothing is released.
+
+Every key, default and validation rule is in the authoritative
+[Authentication reference](../configuration/reference.md#authentication-auth).
+
+### `proxy_headers` needs a CIDR allowlist
+
+`type: proxy_headers` makes the broker's original deployment story — "put your own
+authenticating proxy in front of it" — first-class: the proxy authenticates the
+user and passes the identity down in a header.
+
+> **⚠️ A wrong `trusted_proxy_cidrs` turns this validator into an open door.**
+> A header is not a credential. Anyone who can open a TCP connection to
+> `listen_addr` can send `X-Forwarded-User: <anybody>` — no signature, no expiry,
+> nothing to verify. The CIDR allowlist is the *entire* security model.
+>
+> - **Never write `0.0.0.0/0` or `::/0`.** That is not "allow the ingress", it is
+>   "let every caller on the network name themselves".
+> - **List the proxy's own address, not the client's** — the allowlist is matched
+>   against the peer that opened the connection, and `X-Forwarded-For` is never
+>   read.
+> - **Do not point it at a network you share with anything else.** A `10.0.0.0/8`
+>   that also holds other workloads means any of them can impersonate any broker
+>   user. Prefer the proxy's `/32` (or `/128`).
+> - **Bind the broker where only the proxy can reach it**, so the CIDR check is a
+>   second line of defence rather than the only one.
+> - If some callers arrive directly, **chain** a token validator after this one —
+>   do not widen the CIDR to accommodate them.
+
+```yaml
+auth:
+  validators:
+    - type: proxy_headers
+      trusted_proxy_cidrs: ["10.4.0.0/16"]   # required; an empty list fails the boot
+      principal_header: X-Forwarded-User     # required; no default is right for everyone
+      tenant_header: X-Auth-Request-Org
+      scopes_header: X-Forwarded-Groups
+    - type: jwks                             # direct callers still need a real token
+      issuer: "https://id.example.com/"
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+      audience: "nexus-broker"
+      principal_claim: sub
+```
+
+### Who may touch a lease
+
+Every lease records the principal that claimed it. Authorization is that
+ownership, plus one read-only admin scope — there are no roles and no policy
+engine.
+
+- **`POST /release/{lease_id}`, `WS /lease/{lease_id}` and
+  `POST /ticket/{lease_id}`** require the caller's principal `ID` to equal the
+  owner's. It is checked *before* anything happens: a refused release sends no
+  shutdown frame and frees no slot, and a refused connect never reaches `101`.
+- **A lease that is not yours answers exactly like a lease that never existed** —
+  `404 {"error":"unknown lease"}`, byte for byte — so live lease ids cannot be
+  enumerated by differencing responses.
+- **`GET /leases` is filtered, not refused.** A non-operator sees only its own
+  leases, and the capacity aggregates are **omitted rather than zeroed** (treat a
+  missing `max_concurrent` as "not disclosed", never as `0`).
+- **`auth.admin_scope`** (default `nexus.broker.admin`) unlocks the whole-registry
+  view of `GET /leases`. It grants **visibility only — there is no admin bypass on
+  release or connect**, so a leaked operator credential cannot tear down or hijack
+  another principal's session. Set it to `""` to mean nobody is an operator.
+- The broker's **own** teardown paths — the `idle_timeout` sweeper and crash
+  detection — act with no principal at all and bypass ownership entirely.
+
+With no `auth:` block, the caller and every lease owner are the same anonymous
+identity, so nothing is refused and nothing is filtered.
+
+### Connecting: the ticket flow
+
+Browser JavaScript **cannot** set headers on a WebSocket handshake, so the bearer
+token a claim was made with can never reach `WS /lease/{lease_id}` from a browser.
+A **ticket** is the one credential the broker itself mints. End to end:
+
+1. **Claim with your credential.** `POST /claim` returns `ws_url` **and**
+   `ticket` — the `ticket` key is present only when the broker is configured with
+   an `auth:` block.
+2. **Connect with it**: `ws_url + "?ticket=" + ticket`.
+3. **It is single-use and lives 30 seconds**, and the TTL is a constant rather
+   than a config key: the value travels in a URL, so it lands in proxy access logs
+   and browser history, and the tight window plus single use are the whole
+   mitigation for that.
+4. **Reconnecting needs a fresh one.** `POST /ticket/{lease_id}`, authenticated
+   with the credential the lease was claimed with, mints a replacement. Do *not*
+   re-claim: that spawns a new instance and abandons the live session.
+5. **Non-browser clients can skip tickets entirely** and send
+   `Authorization: Bearer <token>` on the handshake instead — the same token the
+   lease was claimed with.
+
+A non-empty `?ticket=` **wins exclusively**: when both are presented the
+`Authorization` header is not consulted at all, and a ticket failure is final
+rather than falling back to the header. Send one credential, or mint a fresh
+ticket. Every way a ticket can fail — unknown, expired, already redeemed, minted
+for another lease — answers identically with `401 {"error":"credential
+rejected"}`.
+
+Tickets are in-memory only, so they do not survive a broker restart, and every
+ticket for a lease is destroyed the moment the lease goes away.
+
+### The instance dial-back secret
+
+The `auth:` block also gates the **instance** side. With it configured, an
+instance's `register` frame on `WS /instance` must carry both a known `lease_id`
+**and** the per-spawn secret the broker injected into its environment at exec;
+anything else is closed with the same `unknown lease` policy-violation close. The
+secret is never logged, never returned by `GET /leases`, and never passed in
+argv. The instance side needs no configuration — the
+[`nexus.io.broker`](../plugins/io/broker.md) plugin reads
+`NEXUS_BROKER_SPAWN_SECRET` from the environment the broker set.
+
+> **In an authenticated deployment, an out-of-date binary at `nexus_binary_path`
+> is rejected.** A `nexus` build that predates the spawn-secret protocol cannot
+> echo a secret, so its `register` frame is refused and the claim eventually fails
+> with `504 instance did not become ready in time` while the child process looks
+> alive and connects fine. The broker logs a `WARN` naming the version skew
+> explicitly, because that symptom otherwise reads as a network fault. The fix is
+> to upgrade the instance binary. With **no** `auth:` block the secret is not
+> checked at all, so an older binary keeps working — **except** on a lease
+> [restored after a restart](#what-a-restart-actually-does), which always requires
+> it.
+
 ## HTTP API
 
-All control-plane calls are plain HTTP/JSON. There is **no authentication** in
-v1 (see [caveats](#v1-caveats)).
+All control-plane calls are plain HTTP/JSON. Whether they need a credential
+depends on the [`auth:` block](#authentication): with one configured, every route
+below requires one (`GET /healthz` does not); with it absent, none of them do.
 
 ### `POST /claim` — claim an instance
 
@@ -100,15 +425,23 @@ Success (`200`):
 {
   "lease_id": "…",                          // handle for this instance
   "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
-  "session_id": "…"                          // engine session id (see new-vs-resume below)
+  "session_id": "…",                         // engine session id (see new-vs-resume below)
+  "ticket": "…"                              // single-use, 30s WebSocket credential;
+                                             // present only when `auth:` is configured
 }
 ```
 
 ```bash
 curl -s -X POST http://localhost:8080/claim \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
   -d '{"config":"engine:\n  name: example\n"}'
 ```
+
+The `Authorization` header is required when the broker is configured with an
+[`auth:` block](#authentication) and ignored when it is not. The principal it
+resolves to becomes the lease's **owner**, and only that principal can release,
+connect to, or mint a ticket for the lease.
 
 Error responses:
 
@@ -158,14 +491,51 @@ Release is **idempotent**: releasing an already-gone lease returns `404` rather
 than erroring, and concurrent releases of the same lease collapse to one
 teardown.
 
-### `GET /leases` — list live instances
+### `POST /ticket/{lease_id}` — mint a fresh WebSocket ticket
 
-A read-only introspection surface. Returns the capacity/queue aggregates plus
-every live lease, sorted by `created_at` then `lease_id`.
+Only relevant when the broker is configured with an `auth:` block. A browser
+cannot put an `Authorization` header on a WebSocket handshake, so a claim hands
+back a **single-use, 30-second** `ticket` bound to that lease and to the claiming
+principal. Because the window is deliberately tight, a reconnect needs a fresh
+one — that is what this route is for; re-claiming would spawn a *new* instance and
+abandon the live session.
 
 ```bash
-curl -s http://localhost:8080/leases
+curl -s -X POST http://localhost:8080/ticket/lease-abc123 \
+  -H 'Authorization: Bearer <the token the lease was claimed with>'
+# {"lease_id":"lease-abc123","ticket":"…"}
 ```
+
+| Outcome | Status | Body |
+|---------|--------|------|
+| Ticket issued | `200` | `{"lease_id":"…","ticket":"…"}` |
+| Unknown, already-released, **or** another principal's lease | `404` | `{"error":"unknown lease"}` (identical in all three cases, so live lease ids cannot be enumerated) |
+| Missing lease id in path | `400` | `{"error":"ticket requires a lease id"}` |
+
+Tickets are in-memory only — they do **not** survive a broker restart — and every
+ticket for a lease is destroyed the moment the lease goes away, whether by
+`POST /release`, idle reaping, or a crash. With no `auth:` block the route is
+inert: it answers `200` with the `ticket` key **omitted**, and the lease socket
+keeps accepting a connection with no ticket at all. Full detail, including why the
+TTL is not configurable, is in the
+[configuration reference](../configuration/reference.md#post-ticketlease_id-http-api-not-yaml).
+
+### `GET /leases` — list live instances
+
+A read-only introspection surface, sorted by `created_at` then `lease_id`. It
+performs no mutation.
+
+**What comes back depends on who is asking.** A caller holding
+[`auth.admin_scope`](#who-may-touch-a-lease) — and every caller when auth is
+disabled — gets the **operator** shape: every live lease plus the capacity and
+queue aggregates. Any other authenticated caller gets only its own leases, with
+the aggregates **omitted**.
+
+```bash
+curl -s http://localhost:8080/leases -H 'Authorization: Bearer <token>'
+```
+
+Operator shape:
 
 ```jsonc
 {
@@ -186,6 +556,28 @@ curl -s http://localhost:8080/leases
 }
 ```
 
+Caller-scoped shape — same lease objects, same ordering, **no aggregate keys at
+all**:
+
+```jsonc
+{
+  "leases": [
+    {
+      "lease_id": "lease-abc123",
+      "session_id": "…",
+      "pid": 41234,
+      "state": "active",
+      "last_activity": "2026-06-25T12:00:00Z",
+      "created_at": "2026-06-25T11:59:30Z"
+    }
+  ]
+}
+```
+
+The aggregates are **absent, not zeroed** — read a missing `max_concurrent`,
+`slots_in_use` or `queue_depth` as "not disclosed to you", never as `0`. A caller
+that owns no live lease gets `200` with `{"leases": []}`, never a `404`.
+
 Lease states:
 
 | State | Meaning |
@@ -196,26 +588,41 @@ Lease states:
 
 ### Connecting over WebSocket
 
-After a successful claim, open the returned `ws_url` and exchange IO frames.
-A minimal sketch:
+After a successful claim, open the returned `ws_url` and exchange IO frames. A
+minimal browser sketch, carrying the [ticket](#connecting-the-ticket-flow) the
+claim returned:
 
 ```javascript
-const { lease_id, ws_url } = await (await fetch("http://localhost:8080/claim", {
+const auth = { Authorization: "Bearer <token>" };   // omit when auth is disabled
+
+const { lease_id, ws_url, ticket } = await (await fetch("http://localhost:8080/claim", {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "application/json", ...auth },
   body: JSON.stringify({ config: "engine:\n  name: example\n" }),
 })).json();
 
-const ws = new WebSocket(ws_url);
+// `ticket` is present only when the broker is configured with an `auth:` block.
+const url = ticket ? `${ws_url}?ticket=${encodeURIComponent(ticket)}` : ws_url;
+
+const ws = new WebSocket(url);
 ws.onmessage = (e) => console.log("frame:", e.data);
 ws.onopen = () => {
   // send a user input message into the instance
   ws.send(JSON.stringify({ type: "input", content: "hello" }));
 };
 
+// reconnecting later? the ticket is single-use and 30s-lived — mint a fresh one
+// rather than re-claiming, which would spawn a NEW instance.
+// const { ticket: next } = await (await fetch(
+//   `http://localhost:8080/ticket/${lease_id}`, { method: "POST", headers: auth })).json();
+
 // later: release the instance (the session persists on disk)
-await fetch(`http://localhost:8080/release/${lease_id}`, { method: "POST" });
+await fetch(`http://localhost:8080/release/${lease_id}`, { method: "POST", headers: auth });
 ```
+
+A client that can set request headers — Go, a CLI, anything that is not a browser
+— may skip tickets and send `Authorization: Bearer <token>` on the handshake
+instead.
 
 The IO message shapes carried inside broker frames (`output`, `stream.delta`,
 `input`, `approval.response`, …) are documented on the
@@ -243,14 +650,48 @@ disable idle reaping.
 
 The session broker is a **v1**. Understand these boundaries before deploying it:
 
-- **No auth / no access control.** The broker trusts every caller. Tenant
-  isolation is **process isolation, not access control** — any client that can
-  reach the broker can claim, connect to, and release any instance. Front it
-  with your own authenticating reverse proxy; treat the broker's listen address
-  as a trusted-caller boundary only.
-- **Single broker, single host.** No clustering or HA. A broker **restart
-  orphans running instances** and loses all lease tracking — orphaned `nexus`
-  processes must be cleaned up manually.
+- **Identity is verified, but authorization is thin.** With an
+  [`auth:` block](#authentication) configured the broker validates a credential on
+  every client-facing route, stamps the resulting principal on each lease as its
+  **owner**, refuses release / connect / ticket-mint to anyone else, and scopes
+  `GET /leases` to the caller unless it holds `auth.admin_scope`. What it does
+  **not** do:
+  - **It verifies identity; it never issues it.** There is no login, no user
+    store, no token endpoint. Credentials come from a static table you write, or
+    from your own identity provider, or from a proxy you already trust. The one
+    credential the broker mints is a WebSocket [ticket](#connecting-the-ticket-flow),
+    which is a lease-scoped capability, not an identity.
+  - **Authorization is lease ownership plus one read-only admin scope.** No roles,
+    no policy engine, no per-tenant quotas. `tenant` is carried on the principal
+    and recorded, but nothing enforces it.
+  - **No mTLS, and no TLS at all.** The broker speaks plain HTTP on
+    `listen_addr`; terminate TLS at a proxy and set
+    [`advertise_addr`](#behind-a-proxy-set-advertise_addr) to the `wss://` address
+    clients use. Client certificates are not a supported credential.
+  - **No per-tenant rate limiting.** `max_concurrent` is a global cap, not a
+    per-principal one, so one caller can fill the queue for everybody.
+  - **No OS-level sandboxing of instances**, either — access control does not
+    change what a spawned process can do to the host (see the last caveat below).
+  - With **no** `auth:` block, none of the above is enforced at all: any client
+    that can reach the broker can claim, connect to, and release any instance. The
+    broker logs one `WARN` at boot saying so.
+- **Single broker, single host.** Restart-reattach works; genuine clustering does
+  not. There is **no shared lease registry**, no cross-broker `GET /leases`, and
+  no routing of a request to the broker that owns the lease.
+  With `state_dir` **unset**,
+  a broker **restart orphans running instances** and loses all lease tracking —
+  the orphaned `nexus` processes must be cleaned up manually. **With `state_dir`
+  set, a restart no longer orphans them**: the broker replays its journal, drops
+  the leases whose process is gone, restores the rest with their owners and
+  capacity slots, and the surviving instances reattach on their own reconnect
+  backoff — reaped after `reattach_window` if they do not (see
+  [Surviving a restart](#surviving-a-restart-set-state_dir)). Recovery is
+  strictly single-broker: it only ever reclaims leases stamped with **this**
+  broker's `broker_id`. Running several brokers behind one load balancer does
+  **not** work as a cluster: a lease lives on exactly one process, so each broker
+  must be individually addressable via `advertise_addr`, clients must reconnect to
+  the URL the claim returned rather than to the LB, and each broker needs its
+  **own** `state_dir` — they never read each other's.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but
@@ -263,4 +704,7 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   inside each instance.
 - [Configuration Reference](../configuration/reference.md#session-broker-nexus-broker)
   — authoritative broker + plugin config keys.
+- [Authentication (`auth:`)](../configuration/reference.md#authentication-auth) —
+  every validator key, default and validation rule, plus the per-route status
+  mapping and the audit-record shape.
 - [Sessions](../architecture/sessions.md) — on-disk session layout and `-recall`.

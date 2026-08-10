@@ -1346,10 +1346,26 @@ optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 | Key                | Type         | Default            | Description |
 |--------------------|--------------|--------------------|-------------|
 | `bind`             | string       | `127.0.0.1:8090`   | `host:port` the HTTP listener binds to. Defaults to loopback so the endpoint is not network-exposed without explicit opt-in. |
-| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. |
-| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
-| `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
+| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
+| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. Mutually exclusive with `auth`. |
+| `auth`             | map          | *(absent)*         | Optional validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker uses — so `static`, `jwks`, `introspect` and `proxy_headers` are all available here. Absent means authentication is decided by `bearer_token`/`bearer_token_env` alone. See [Authentication (`auth:`) on `nexus.io.agui`](#authentication-auth-on-nexusioagui) below. |
+| `cors_origins`     | string or list<string> | *(empty)* | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Accepts a YAML list **or** a single comma-separated string (`"https://a.example, https://b.example"`); both are trimmed and empty entries dropped. |
 | `emit_state`       | bool         | `false`            | Opt-in AG-UI shared-state emission. When `true`, the transport mirrors the session's scene store (`nexus.scene`) as an AG-UI shared-state document and emits a `StateSnapshot` at run start plus ordered `StateDelta` events (RFC 6902 JSON Patch) as scenes mutate. Off by default because it adds scene-event subscriptions and per-mutation diffing overhead most clients do not need. Requires the `nexus.scene` plugin to be active to produce any state. |
+
+**Schema-validated at boot.** The plugin ships `plugins/io/agui/schema.json` and
+implements `ConfigSchema()`, so the engine validates this block — including
+everything under `auth:` — **before `Init` runs**, with
+`additionalProperties: false` at every object level. A misspelled key aborts the
+boot naming the offender (`unknown key "bearer_tokn" (did you mean
+"bearer_token"?)`) instead of being silently ignored, which for an auth key
+would mean an unauthenticated listener and no warning. The table above is the
+whole surface: any key not listed is rejected.
+
+One rule is deliberately **not** in the schema. `auth:` versus
+`bearer_token`/`bearer_token_env` is enforced in `Init` (see below), which owns
+the operator-facing message; duplicating it in JSON Schema would give two
+enforcement points that can drift, and the schema one runs first and would
+report the worse message.
 
 **Round-trip:** a `POST /agui` maps the request `messages` to a Nexus
 `io.input` (the trailing `user` message drives the turn; earlier messages ride
@@ -1389,6 +1405,99 @@ client-state-seeds-then-agent-wins: the client seed lands before the agent's
 first turn, then agent-side `scene_patch` mutations are last-writer and flow back
 out as `StateDelta`. See
 [Shared state](../plugins/io-agui.md#shared-state).
+
+#### Authentication (`auth:`) on `nexus.io.agui`
+
+The transport authenticates through the shared identity layer (`pkg/nexusauth`)
+— the same validator chain the [session broker](#authentication-auth) uses. Two
+spellings are accepted and they are **mutually exclusive**:
+
+- `bearer_token` / `bearer_token_env` — one shared secret, unchanged and **not
+  deprecated**. It is desugared into a one-entry `static` validator, which is
+  purely an implementation detail with one visible improvement: the token
+  comparison is now constant-time.
+- `auth:` — the full validator-chain block, so an AG-UI deployment can verify
+  OIDC JWTs (`jwks`), opaque tokens (`introspect`), or an identity a fronting
+  proxy established (`proxy_headers`).
+
+Setting **both** is a **boot error** naming both keys, not a precedence rule:
+two sources for one security decision means one of them is stale, and quietly
+preferring either is how an operator comes to believe a credential was tightened
+when it was not. (Setting `bearer_token` *and* `bearer_token_env` remains legal
+and keeps its original precedence — inline first, then the environment
+variable.)
+
+Setting neither means **authentication is disabled** and every request is
+admitted, exactly as before. That is safe by default only because the listener
+binds loopback; change `bind` and you should configure auth in the same commit.
+
+```yaml
+plugins:
+  nexus.io.agui:
+    bind: "0.0.0.0:8090"
+    auth:
+      validators:            # ordered; the first validator that accepts wins
+        - type: static       # a shared token for CI or a local operator CLI
+          tokens:
+            - token: "..."
+              principal: "ci-runner"
+        - type: jwks         # OIDC JWTs verified against the issuer's published keys
+          issuer: "https://id.example.com/"
+          jwks_url: "https://id.example.com/.well-known/jwks.json"
+          audience: "nexus-agui"
+          principal_claim: sub
+```
+
+**The validator keys are identical to the broker's** — `validators[].type`,
+`principal_claim`, `tokens[]`, `issuer`/`jwks_url`/`audience`, the `introspect`
+keys, the `proxy_headers` keys, and their defaults and validation rules are all
+documented once under [Authentication (`auth:`)](#authentication-auth) and the
+per-validator sections that follow it. There is one deliberate difference:
+`auth.admin_scope` is **broker-only** and is rejected here as an unknown key.
+Unknown keys are rejected at every level in both hosts — a silently ignored auth
+key is a security bug, not a cosmetic one.
+
+On this host they are rejected **twice over**, and the earlier of the two is the
+one an operator meets: `plugins/io/agui/schema.json` describes every validator
+key per `type`, so a key that belongs to a different validator type (`jwks_url`
+on a `static` entry) or a duration written as a bare number (`cache_ttl: 600`)
+fails at boot before `pkg/nexusauth` ever parses the block. The two agree by
+construction — the schema was derived from the `nexusauth` parsers, not from
+prose — and `nexusauth` remains the authority for the rules a schema cannot
+express (URL transport, algorithm confusion, duplicate tokens, TTL caps).
+
+**Gated surface.** `POST /agui` only. `OPTIONS /agui` (CORS preflight) is
+deliberately **not** authenticated: a browser never attaches `Authorization` to a
+preflight, so gating it would make every cross-origin AG-UI client unable to
+reach the endpoint it is authorized for. CORS headers are applied **before** the
+auth check so a browser can actually read a `401` instead of seeing an opaque
+network error.
+
+**Status mapping.** Denials are classified by the chain, never by string
+matching, and map onto:
+
+| Situation                                           | Status | Body                                     | Headers |
+|-----------------------------------------------------|--------|------------------------------------------|---------|
+| No `Authorization: Bearer` header                   | `401`  | `unauthorized`                           | `WWW-Authenticate: Bearer realm="nexus-agui"` |
+| Credential presented and rejected                   | `401`  | `unauthorized`                           | `WWW-Authenticate: Bearer realm="nexus-agui", error="invalid_token"` |
+| Credential valid but lacking the required authority  | `403`  | `insufficient scope`                     | `WWW-Authenticate: Bearer realm="nexus-agui", error="insufficient_scope"` |
+| The validator could not reach a verdict              | `503`  | `authentication temporarily unavailable` | `Retry-After: 5` (deliberately **no** `WWW-Authenticate`) |
+
+The codes match the broker's because the denial kinds are the shared package's
+transport contract, and one deployment should not answer the same refusal two
+different ways. The **bodies** differ: this endpoint's success response is an SSE
+stream, not JSON, so there is no envelope for an error to be consistent with, and
+the `401` body stays the plain `unauthorized` it has always been. The RFC 6750
+challenge matters more here than on the broker — an AG-UI client is often a
+browser front-end whose only structured signal is the status plus the challenge,
+and `error="invalid_token"` is what lets it tell "sign in" from "refresh the
+token" without parsing prose.
+
+**Principal.** A resolved `Principal` is carried to the run and recorded on the
+`agui run started` log record (`principal_id`); it is empty when auth is
+disabled. Nothing keys behaviour on it yet — this transport serves a single
+engine/session per listener and admits one run at a time, so there is no second
+principal for an authorization decision to distinguish.
 
 ### `nexus.io.realtime`
 
@@ -1430,6 +1539,32 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it, unless the lease was restored after a broker restart. |
+
+The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
+alone is a poor authenticator for it: the same value appears in `ws_url`s, client
+requests and logs, so anything that observes one could otherwise impersonate an
+instance. The broker records the expected value on the lease and injects it
+through the environment (never argv, which is world-readable). Both the lease id
+and the secret must match or the dial-back is closed with the same
+policy-violation close an unknown lease gets.
+
+How the broker produces the value depends on whether it keeps state — the plugin
+echoes whatever it was handed either way. With no `state_dir` it is 128 bits of
+`crypto/rand` per spawn, held only in memory. With a `state_dir` it is derived as
+`HMAC-SHA256(<state_dir>/spawn-key, lease_id)`, so a restarted broker can
+recompute the value a surviving instance still holds; the secret itself is still
+never written to disk. See
+[Restart recovery](#restart-recovery-reattach_window).
+
+Enforcement on the broker side is **gated on the broker having an `auth:` block**
+(see the Session broker section below), with one exception. With no `auth:` block
+the secret is ignored, so a `nexus` binary at `nexus_binary_path` that predates
+the protocol keeps working; with one configured, such a binary is refused and the
+broker logs a message naming version skew as the likely cause. The exception is a
+lease **restored after a broker restart**, which always requires the secret
+regardless of `auth:` — a live pid is not proof of identity. The value is never
+logged and never appears in `GET /leases`.
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
 payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
@@ -1880,25 +2015,40 @@ Protocol (MCP) servers into Nexus. Tools land in the catalog under
 resource templates become parameterised tools, and prompts surface as slash
 commands. See `docs/src/plugins/mcp-client.md` for the user-facing guide.
 
+**Schema-validated at boot.** The plugin ships `plugins/mcp/client/schema.json`
+and implements `ConfigSchema()`, so the engine validates this block **before
+`Init` runs**, with `additionalProperties: false` at every object level. The
+tables below are the whole surface: any key not listed is rejected by name. The
+per-transport requirements (`command` for `stdio`, `url` for `http`, `server`
+for `inprocess`) are conditional `if`/`then` branches in the schema, so a
+missing key aborts the boot naming the key instead of surfacing later as a
+connection-phase error from `parseServer`.
+
+Two constraints the schema deliberately does **not** carry: duplicate `name`
+values across `servers[]` (a cross-item check JSON Schema cannot express —
+`parseConfig` rejects them at parse time), and cross-transport key exclusivity
+(`command`, `url` and `server` are read unconditionally, so a leftover `command`
+on an `http` server is accepted and ignored, exactly as today).
+
 Top-level keys:
 
 | Key        | Type   | Default | Description |
 |------------|--------|---------|-------------|
 | `servers`  | list   | *(none)* | One entry per MCP server. See per-server keys below. |
 | `defaults` | map    | *(none)* | Inherited by every entry in `servers` unless overridden inline. |
-| `aliases`  | map    | *(none)* | Optional alias map: short slash command → `<server>.<prompt>`. Aliases use the configured `command_prefix` chain; e.g. `review: gh.review_pr` makes `/review` rewrite to `/mcp.gh.review_pr`. |
+| `aliases`  | map<string,string> | *(none)* | Optional alias map: short slash command → `<server>.<prompt>`. Values must be non-empty strings. Aliases use the configured `command_prefix` chain; e.g. `review: gh.review_pr` makes `/review` rewrite to `/mcp.gh.review_pr`. |
 
 #### `defaults`
 
 | Key                                | Type     | Default | Description |
 |------------------------------------|----------|---------|-------------|
-| `lifecycle`                        | string   | `engine` | When servers connect/disconnect. `engine` = connect on engine boot, disconnect on shutdown. `session` = connect on `io.session.start`, disconnect on `io.session.end`. |
-| `timeout`                          | duration | `30s`   | Per-RPC timeout used for `tools/call`, `resources/read`, `prompts/get`, etc. |
-| `command_prefix`                   | string   | `mcp`   | First segment of the slash command Nexus registers per prompt. With the default a server named `fake` and a prompt named `greet` becomes `/mcp.fake.greet`. |
+| `lifecycle`                        | string   | `engine` | When servers connect/disconnect. `engine` = connect on engine boot, disconnect on shutdown. `session` = connect on `io.session.start`, disconnect on `io.session.end`. Only those two values. |
+| `timeout`                          | duration string | `30s` | Per-RPC timeout used for `tools/call`, `resources/read`, `prompts/get`, etc. Must be a **quoted-or-bare duration string** (`30s`, `1m30s`). A bare number is rejected at boot: the parser reads this key only through a `string` type assertion, so `timeout: 30` would silently fall back to the default. |
+| `command_prefix`                   | string   | `mcp`   | First segment of the slash command Nexus registers per prompt. With the default a server named `fake` and a prompt named `greet` becomes `/mcp.fake.greet`. Must be non-empty. |
 | `resources.enabled`                | bool     | `true`  | Toggle the entire resource surface for the server. |
 | `resources.auto_register_static`   | bool     | `true`  | When true, every static resource becomes a no-arg catalog tool. |
 | `resources.auto_register_template` | bool     | `true`  | When true, every resource template becomes a catalog tool whose inputSchema mirrors the template's variables. |
-| `resources.auto_register_max`      | int      | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. |
+| `resources.auto_register_max`      | int ≥ 0  | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. Unlike `timeout`, this one *is* a number — the parser reads it through an int/int64/float64 coercion. Negative values are rejected at boot (the parser would silently ignore them). |
 | `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. |
 | `prompts.enabled`                  | bool     | `true`  | Toggle the prompt slash-command surface for the server. |
 
@@ -1907,19 +2057,44 @@ Top-level keys:
 | Key                | Type     | Default                       | Description |
 |--------------------|----------|-------------------------------|-------------|
 | `name`             | string   | *(required)*                  | Lowercase alpha-numeric identifier used to namespace every catalog entry and slash command (`[a-z0-9][a-z0-9_-]*`). |
-| `transport`        | string   | `stdio`                       | `stdio` (subprocess via the SDK) or `http` (streamable HTTP). |
+| `transport`        | string   | `stdio`                       | One of `stdio` (subprocess via the SDK), `http` (streamable HTTP), or `inprocess` (in-memory transport to a host-registered `*mcp.Server`). |
 | `command`          | string   | *(required for stdio)*        | Executable to launch. Resolved on `PATH`; users wanting `~` expansion can write the full path. |
-| `args`             | list     | *(none)*                      | Argument list passed to `command`. |
-| `env`              | map      | *(none)*                      | Environment variables exported to the subprocess. `${VAR}` references are expanded from the host environment. |
-| `env_passthrough`  | list     | *(none)*                      | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
+| `args`             | list<string> | *(none)*                  | Argument list passed to `command`. |
+| `env`              | map<string,string> | *(none)*            | Environment variables exported to the subprocess. `${VAR}` references are expanded from the host environment. |
+| `env_passthrough`  | list<string> | *(none)*                  | Names of host environment variables forwarded verbatim (skipped silently when not set on the host). |
 | `url`              | string   | *(required for http)*         | Base URL of the streamable HTTP MCP endpoint. |
-| `headers`          | map      | *(none)*                      | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
+| `headers`          | map<string,string> | *(none)*            | HTTP headers attached to every request. `${VAR}` references expand from the host environment. |
+| `server`           | string   | *(required for inprocess)*    | Opaque host-chosen key of a live `*mcp.Server` the embedding host registered with `client.RegisterInProcessServer(key, srv)` **before** `engine.Boot()`. Must be byte-identical to that key. The connection is wired over an in-memory transport instead of a subprocess or HTTP dial. The registry is **process-wide** — see the note below. |
 | `lifecycle`        | string   | inherited from `defaults`     | `engine` or `session`. |
-| `timeout`          | duration | inherited from `defaults`     | Overrides defaults per server. |
-| `tools.allow`      | list     | *(none)* (all allowed)        | If set, only listed raw MCP tool names are forwarded to the catalog. |
-| `tools.deny`       | list     | *(none)*                      | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
+| `timeout`          | duration string | inherited from `defaults` | Overrides defaults per server. String only — see `defaults.timeout`. |
+| `tools.allow`      | list<string> | *(none)* (all allowed)    | If set, only listed raw MCP tool names are forwarded to the catalog. |
+| `tools.deny`       | list<string> | *(none)*                  | Raw MCP tool names to drop unconditionally. Deny takes precedence over allow. |
 | `resources.*`      | map      | inherited from `defaults`     | Same keys as `defaults.resources`. |
 | `prompts.enabled`  | bool     | inherited from `defaults`     | Disable per server when desired. |
+
+#### `transport: inprocess` — process-wide key namespace
+
+The registry behind `server` (`RegisterInProcessServer` / `UnregisterInProcessServer`
+in `plugins/mcp/client/injected.go`) is a **package-level map shared by the whole
+process**, not scoped to an engine, agent, or session. A second registration under
+an existing key silently replaces the first.
+
+In a host running several engines in one process this is a cross-tenant leak: if
+tenant A and tenant B both register under `host-tools`, the map holds whichever
+registered last, and tenant A's config — still saying `server: host-tools` —
+connects to **tenant B's** MCP server. Nothing errors; the tools answer normally
+against the wrong tenant's data. Scope keys per tenant or per agent, and derive
+the YAML `server:` value from the same identifier used for the registration key.
+
+The key is resolved when the server connects (during `Boot` for
+`lifecycle: engine`, at `io.session.start` for `lifecycle: session`), so
+registration must happen before `engine.Boot()`. A *missing* `server` key fails
+schema validation at boot; a *present but unregistered* key does not — boot
+succeeds and the connect fails with `no host-injected server registered under
+key "…"` logged at error, leaving the `mcp__<server>__*` namespace absent.
+
+Full wiring walkthrough with a runnable Go example:
+[MCP client → In-process servers](../plugins/mcp-client.md#in-process-servers).
 
 #### Events
 
@@ -2314,27 +2489,614 @@ instances behind an HTTP/WebSocket gateway.
 ```yaml
 # broker.yaml
 listen_addr: ":8080"
+advertise_addr: ""            # required behind a proxy/LB; see below
 nexus_binary_path: "nexus"
 max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
 release_grace: 10s
+state_dir: ""                 # empty = lease state is in-memory only; see below
+broker_id: ""                 # empty = generated once and persisted in state_dir
+reattach_window: 60s          # how long a lease restored after a restart waits for its instance
+
+# Optional. Omit the whole block to run the broker unauthenticated.
+auth:
+  admin_scope: "nexus.broker.admin"   # scope that unlocks the operator view of GET /leases
+  validators:
+    - type: static
+      tokens:
+        - token: "replace-me"
+          principal: "ci-runner"
+          tenant: "acme"
+          scopes: "broker.claim broker.release"   # whitespace-separated, or a YAML list
 ```
 
 | Key                  | Type     | Default  | Description                                                                 |
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
+| `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
 | `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
+| `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+
+### Lease durability (`state_dir`)
+
+Lease state is live-process bookkeeping: which instances this broker spawned,
+who claimed them, and what session each is running. Without `state_dir` it lives
+only in memory, so a broker restart loses all of it and the `nexus` processes it
+spawned become orphans nobody can account for. Setting `state_dir` makes it
+durable.
+
+This is **not** session continuity — that is already solved by
+`~/.nexus/sessions/<id>/` plus `-recall`, and a released instance's session
+directory is intact and resumable whether or not `state_dir` is set.
+
+```yaml
+state_dir: "~/.nexus/broker"     # per-broker; never shared between brokers
+broker_id: ""                    # optional; generated + persisted when empty
+```
+
+**Format.** `<state_dir>/leases.jsonl` is an append-only JSONL journal, one JSON
+object per line. There is no database and no migrations — the broker is a
+standalone binary, not an engine plugin, so the per-plugin SQLite storage is not
+available to it. A record is written when a lease is **minted**
+(`lease-created`), when its pid or session id first becomes knowable
+(`lease-updated`, which supersedes the earlier record for the same `lease_id`),
+and when it is **torn down** (`lease-released`). The release record is written
+from the single point all three teardown reasons converge on, so a manual
+`POST /release`, an idle sweep and a **crash** are all recorded.
+
+Each record carries `lease_id`, `owner` (the claiming principal's `id`, `tenant`
+and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim as
+configured, so a record round-trips what is in `broker.yaml` — and
+`created_at` / `released_at` / `reason`.
+
+**No secret is ever written.** Not the lease's per-spawn secret, not a client
+WebSocket ticket, not a bearer token. The owner's **raw claim set** is
+deliberately not persisted either — `id`, `tenant` and `scopes` are what
+ownership and scoped listing need, and the full claim set stays in the broker's
+`slog` audit trail. (The `spawn-key` file beside the journal is a *derivation
+key*, not a credential: presenting its contents to `WS /instance` authenticates
+nothing. See [Restart recovery](#restart-recovery-reattach_window).)
+
+**Growth is bounded** by compaction, in two passes over the same rewrite: the
+journal is compacted **when it is opened**, and again **every 512 appends**. A
+compaction rewrites the file to hold exactly the leases that are still live, one
+record each, via a temp file and an atomic rename — so a crash mid-compaction
+leaves the previous journal intact. At any moment the file holds at most
+(live leases + 512) records, however many leases have come and gone.
+
+**Failure handling.** A journal write that fails is **logged and otherwise
+ignored**: it never fails a claim or a release, because durability must not
+become a new way for the broker to refuse service. A record that was being
+written when the broker was killed leaves a torn final line; the reader **skips
+it with a warning** and keeps every complete record before it, and the
+rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
+the file is skipped the same way rather than failing the whole file.
+
+Multi-broker cooperation is **not** implemented: no broker reads another's
+journal, there is no shared store, and there is no routing. `broker_id` and
+`advertise_addr` are stamped on every record now so that a future shared backend
+needs no data migration.
+
+### Restart recovery (`reattach_window`)
+
+With `state_dir` set, a restarting broker **reclaims the instances it left
+running** instead of orphaning them. Recovery runs at boot, before any route is
+served, because a surviving instance is already retrying its dial-back and every
+attempt made before its lease is back in the registry is refused as unknown.
+
+For each live record in the journal, exactly one thing happens:
+
+| Record state | Outcome |
+|---|---|
+| `broker_id` is not this broker's | **Left alone.** Not adopted, not killed, not closed out — the broker has no standing over a lease it cannot identify as its own. `state_dir` is per-broker, so this only happens if `broker_id` changed under a directory. |
+| No `pid` | **Closed out** (`lease-released`, reason `restart recovery: no process was ever spawned`). The broker died between minting the lease and exec'ing its instance. |
+| `pid` is not alive | **Closed out** (reason `restart recovery: process is gone`). |
+| `pid` is alive | **Restored**: the lease comes back with its original `owner`, `session_id`, `pid` and `created_at`, and **re-holds its capacity slot** so `max_concurrent` stays honest and the broker cannot over-admit. |
+
+A restored lease is **inactive** — it reads as `spawning` on `GET /leases` — until
+an instance dials `/instance` and presents both the correct lease id **and** the
+correct spawn secret. Once it does, the lease is fully ordinary: idle sweeping,
+crash watching, ownership checks and `POST /release` all apply unchanged.
+
+**A restored lease always requires the spawn secret, even with no `auth:`
+block.** Liveness is not identity: the pid recorded before the restart may have
+been recycled to an unrelated process, and a signal-0 probe (the portable check
+on Linux and macOS) cannot see the difference. Admitting a dialer on a lease id
+alone would hand a stranger's process a client's session, so this check is not
+configurable.
+
+**How the secret survives when it is never written down.** The per-spawn secret
+is **derived**, not stored: `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`. The
+key file is 32 random bytes, generated on first boot, mode `0600` inside the
+`0700` `state_dir`. What is on disk is a *key*, not a credential — its contents
+authenticate nothing on their own, it is not addressed to any lease, and the
+journal beside it still contains no secret. The trade-off is explicit: anyone who
+can read `spawn-key` **and** knows a live lease id can impersonate that lease's
+instance — but that reader is already running as the broker's uid, and can
+therefore read the secret out of the child's environment or spawn instances
+directly. **Losing or rotating the key is safe, just lossy**: derived secrets stop
+matching, restored leases fail to reattach, and the reaper kills their instances
+and frees their slots. The broker logs a `WARN` if the key file is unreadable as a
+key (it regenerates one) or is readable beyond its owner.
+
+**Nothing reattaches forever.** A restored lease that no instance registers
+against within `reattach_window` is reaped through the same teardown as a manual
+release, so the shutdown → grace → force-kill sequence and the slot accounting
+stay in one place. Because a reaped lease has no dial-back socket to receive the
+protocol shutdown frame on, its process is signalled `SIGTERM` (which the engine
+handles as a clean shutdown that persists the session) and escalated to `SIGKILL`
+if it does not exit.
+
+**Boot is never failed by recovery.** An empty, absent, unreadable or corrupt
+journal is a clean cold start with a `WARN`. (A `state_dir` that cannot be *opened*
+at all is still fatal — that is a misconfiguration, not lost data.) With
+`state_dir` unset, boot is byte-for-byte what it was before recovery existed.
+
+### Authentication (`auth:`)
+
+The `auth:` block configures an ordered chain of credential validators
+(`pkg/nexusauth`). Four routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, and `POST /ticket/{lease_id}`.
+`GET /healthz` is registered **outside** the guard and always answers `200` with
+no credential, because a load balancer or container probe has none to present.
+
+`WS /lease/{lease_id}`, the per-lease client socket, is not behind that
+middleware but **does** use the same validator chain: it resolves the caller's
+credential itself and then enforces lease ownership before the WebSocket upgrade
+— see [Lease ownership](#lease-ownership) below. It stays off the middleware
+because it accepts **either** an `Authorization: Bearer` header **or** a
+single-use `?ticket=` query parameter, and a bearer-header wrapper cannot express
+the second. See [`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml) for
+the two credentials and their precedence. The `WS /instance` dial-back is **not**
+covered by this block at all: it authenticates with a spawn secret.
+
+```yaml
+auth:
+  admin_scope: "nexus.broker.admin"   # optional; "" means nobody is an operator
+  validators:          # ordered; the first validator that accepts wins
+    - type: static
+      tokens:
+        - token: "..."          # bearer token, compared in constant time
+          principal: "ci-runner"  # required: the identity this token acts as
+          tenant: "acme"          # optional
+          scopes: "a b"           # optional: string (space/comma separated) or list
+    - type: jwks            # OIDC JWTs verified against the issuer's published keys
+      issuer: "https://id.example.com/"
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+      audience: "nexus-broker"
+      algorithms: ["RS256"]
+      principal_claim: sub
+    - type: introspect      # opaque tokens verified by asking the issuer (RFC 7662)
+      introspection_url: "https://id.example.com/oauth2/introspect"
+      client_id: "nexus-broker"
+      client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"
+      principal_claim: sub
+    - type: proxy_headers   # identity established by a fronting authenticating proxy
+      trusted_proxy_cidrs: ["10.4.0.0/16"]   # required, and the entire security model
+      principal_header: X-Forwarded-User
+```
+
+| Key                                    | Type            | Default    | Description                                                                                     |
+|----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
+| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
+| `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
+| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint), or `proxy_headers` (an identity a fronting authenticating proxy already established, honoured only for peers inside a CIDR allowlist). |
+| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static` and `proxy_headers` (neither has a claim set — `proxy_headers` uses `principal_header` instead). |
+| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks` and `introspect`; accepted and ignored by `static` and `proxy_headers`. |
+| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks` and `introspect`; accepted and ignored by `static` and `proxy_headers`. |
+| `auth.validators[].tokens`             | list            | *required for `static`* | Token table for a `static` validator. At least one entry; duplicate `token` values are a config error rather than a last-one-wins surprise. |
+| `auth.validators[].tokens[].token`     | string          | *required* | The bearer token value, matched against `Authorization: Bearer <token>` with a constant-time compare. |
+| `auth.validators[].tokens[].principal` | string          | *required* | The principal id a request presenting this token acts as. Must be non-empty — an empty principal would behave as a wildcard in later ownership checks. |
+| `auth.validators[].tokens[].tenant`    | string          | `""`       | Optional tenant/workspace id carried on the principal. |
+| `auth.validators[].tokens[].scopes`    | string or list  | `[]`       | Optional granted scopes. A string is split on whitespace (`"a b"` → `["a","b"]`); a list is taken verbatim. Scope comparison is case-sensitive. |
+
+Because `static` tokens are written inline, a `broker.yaml` carrying them is a
+secret: restrict its file permissions accordingly.
+
+#### The `jwks` validator
+
+`type: jwks` verifies an RFC 7515 JWS bearer token against the signature keys an
+OIDC issuer publishes at its JWKS endpoint, validates `exp` / `nbf` / `iss` /
+`aud`, and maps the verified claims onto the `Principal`. Signature and
+standard-claim verification use `github.com/golang-jwt/jwt/v5`; the key fetch,
+cache and rotation logic is Nexus's own.
+
+It is **generic OIDC with no provider-specific defaults**. Nexus does not know
+which claim your issuer puts a stable subject in, so `principal_claim` is
+required and there is no fallback guess — a validator that silently defaulted to
+`sub` for an issuer that mints a different stable identifier would bind lease
+ownership to the wrong field.
+
+```yaml
+auth:
+  admin_scope: "nexus.broker.admin"
+  validators:
+    - type: jwks
+      # Required. Compared exactly against the token's `iss` claim.
+      issuer: "https://id.example.com/"
+
+      # Required. The issuer's key set endpoint. Must be https, except to a
+      # loopback host. There is no OIDC discovery — see below.
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+
+      # Required. A token matching any listed audience passes.
+      audience: "nexus-broker"
+      # …or several:
+      # audience: ["nexus-broker", "nexus-broker-staging"]
+
+      # Optional. Asymmetric algorithms only.
+      algorithms: ["RS256"]
+
+      # Claim mapping. principal_claim is required.
+      principal_claim: sub
+      tenant_claim: org_id
+      scopes_claim: scope
+
+      # Optional cache and transport tuning.
+      cache_ttl: 10m
+      negative_cache_ttl: 1m
+      http_timeout: 5s
+      clock_skew: 1m
+```
+
+| Key                                          | Type           | Default    | Description |
+|----------------------------------------------|----------------|------------|-------------|
+| `auth.validators[].issuer`                   | string         | *required* | The exact value the token's `iss` claim must carry. A token with no `iss`, or a different one, is rejected. Compared as an opaque string, not as a URL, so it matches whatever your issuer actually mints — trailing slash included. |
+| `auth.validators[].jwks_url`                 | string         | *required* | The issuer's JWKS endpoint. Must be an absolute `https://` URL; plain `http://` is accepted **only** for a loopback host (`127.0.0.1`, `::1`, `localhost`), for local development and sidecar-fronted deployments. The key set is the entire basis for trusting a token, so fetching it over a rewritable channel would let an on-path attacker substitute a signing key and mint any principal. Userinfo in the URL is rejected. Validated at load, so a typo fails the boot, not the first claim. |
+| `auth.validators[].audience`                 | string or list | *required* | Acceptable `aud` values; a token carrying **any** of them passes. A lone string is one audience and is **not** split on whitespace (unlike `scopes`), because an audience is a single opaque identifier and splitting would silently widen what the broker accepts. A token with **no** `aud` is rejected. |
+| `auth.validators[].algorithms`               | list           | `["RS256"]` | The JWS algorithms accepted **at verification time**. The token header's `alg` is never trusted: it is checked against this list before any key is resolved, and again by the JWT library. Allowed values are `RS256`/`RS384`/`RS512`, `PS256`/`PS384`/`PS512`, `ES256`/`ES384`/`ES512`. `none` and the HMAC family (`HS256`/`HS384`/`HS512`) are **not configurable at all** — allowing a symmetric algorithm against a published key set *is* the algorithm-confusion attack, so it is a config error rather than a footgun. |
+| `auth.validators[].cache_ttl`                | duration       | `10m`      | How long a fetched key set is considered fresh. A `kid` already in the cache is always served from memory with **no network round trip** — verification sits on `POST /claim` and on the WebSocket connect path, so a per-request fetch would put the issuer's latency in front of every session. Past the TTL the request is *still* served from cache and a refresh runs behind it. `0` means the default. |
+| `auth.validators[].negative_cache_ttl`       | duration       | `1m`       | How long a `kid` that could not be resolved is remembered as unresolvable, **and** the minimum interval between on-demand key-set fetches. Both bounds matter: the per-`kid` half stops a repeated forged token from re-fetching, and the global half stops a flood of tokens bearing *distinct* invented `kid`s from amplifying one-to-one into issuer traffic. It is also the recovery interval — a genuine key rotation that arrives during the window is picked up when it expires, with no restart. `0` means the default. |
+| `auth.validators[].http_timeout`             | duration       | `5s`       | Bounds a single JWKS request, and is the worst-case latency an unreachable issuer can add to a **cold** claim. A hanging identity provider cannot hang a claim. `0` means the default. |
+| `auth.validators[].clock_skew`               | duration       | `1m`       | Leeway applied to `exp` and `nbf`, absorbing clock drift between the issuer and the broker. Capped at `5m`: a large skew silently extends the life of every token the issuer ever minted, so a mistyped value fails the boot. Set `clock_skew: 0s` for no leeway at all. |
+
+Durations are Go duration strings (`10m`, `30s`, `1h30m`). A bare number is a
+config error — `600` reads as ten minutes to a human and six hundred nanoseconds
+to Go, and guessing either would be worse than saying so.
+
+**Key rotation and JWKS failures.** A `kid` the cache has not seen triggers one
+synchronous fetch, which is what makes rotation work without a restart: a token
+signed with a key added to the JWKS *after* the cache was populated verifies on
+its first presentation. When the endpoint is unreachable, behaviour is
+deliberately asymmetric — a key already in the cache **keeps verifying** (that is
+the point of the cache), but a `kid` that is *not* cached is **denied**. An
+endpoint the broker cannot reach cannot vouch for a key it does not hold, so the
+failure mode is a refusal and never an allow.
+
+**Claim mapping.** `principal_claim` → `Principal.ID`, `tenant_claim` →
+`Principal.Tenant`, `scopes_claim` → `Principal.Scopes`. The scopes claim accepts
+either a space-delimited string (the OAuth 2.0 `scope` convention) or a JSON
+array of strings. The full verified claim set is carried on the principal for
+audit regardless of which claims are mapped. A token whose `principal_claim` is
+**absent, empty, or not a scalar is rejected**: an empty `Principal.ID` would
+compare equal to the anonymous owner and to every other empty-id principal, which
+is a privilege-escalation path rather than a cosmetic gap.
+
+**Two further rejections worth knowing about.** A token with no `exp` is rejected
+rather than treated as valid forever. And when the issuer publishes an `alg` on a
+key (RFC 7517 §4.4), that declaration is enforced: a key published for `RS256`
+will not verify an `RS512` token even if both algorithms are in your
+`algorithms` list.
+
+**No OIDC discovery — `jwks_url` is explicit, by decision.**
+`/.well-known/openid-configuration` is deliberately not supported. Three reasons:
+a discovery document can point the JWKS URL anywhere, so supporting it adds a
+second endpoint whose compromise substitutes signing keys; an explicit URL is one
+host to allow through an egress firewall instead of two; and it removes a
+network dependency from the first claim after startup. To configure a provider
+that documents only its discovery URL, fetch that document once by hand and copy
+its `jwks_uri` value:
+
+```bash
+curl -s https://id.example.com/.well-known/openid-configuration | jq -r .jwks_uri
+```
+
+If your issuer ever changes that URL you will need to update `broker.yaml`, which
+is the trade being made: an explicit, auditable endpoint over an automatically
+followed one.
+
+#### The `introspect` validator
+
+`type: introspect` verifies an **opaque** bearer token by asking the issuer about
+it, per [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) (OAuth 2.0 Token
+Introspection). Not every identity provider issues JWTs; a token that carries no
+claims and no signature can only be validated by the authority that minted it.
+The broker POSTs the token to the configured introspection endpoint using its
+own client credentials, reads the `active` verdict plus the returned claims, and
+maps those claims onto the `Principal` using the **same** `principal_claim` /
+`tenant_claim` / `scopes_claim` options as `jwks`.
+
+```yaml
+auth:
+  validators:
+    - type: introspect
+      # Required. The issuer's RFC 7662 endpoint. Same transport rule as
+      # jwks_url: https, or http to a loopback host.
+      introspection_url: "https://id.example.com/oauth2/introspect"
+
+      # Required. How the broker identifies itself to that endpoint.
+      client_id: "nexus-broker"
+
+      # The broker's own secret. Give it inline OR by env-var reference,
+      # never both.
+      client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"
+      # client_secret: "..."
+
+      # Optional.
+      client_auth: basic          # basic (default) | post
+      token_type_hint: access_token
+
+      # Claim mapping. principal_claim is required.
+      principal_claim: sub
+      tenant_claim: org_id
+      scopes_claim: scope
+
+      # Optional cache and transport tuning.
+      cache_ttl: 1m
+      negative_cache_ttl: 30s
+      http_timeout: 5s
+```
+
+| Key                                          | Type           | Default        | Description |
+|----------------------------------------------|----------------|----------------|-------------|
+| `auth.validators[].introspection_url`        | string         | *required*     | The RFC 7662 introspection endpoint. Must be an absolute `https://` URL; plain `http://` is accepted **only** for a loopback host (`127.0.0.1`, `::1`, `localhost`), for local development and sidecar-fronted deployments — the endpoint decides who every caller is, so a rewritable channel would let an on-path attacker mint any principal. Userinfo in the URL is rejected. Validated at load, so a typo fails the boot, not the first claim. |
+| `auth.validators[].client_id`                | string         | *required*     | The client id the broker presents to the introspection endpoint. RFC 7662 §2.1 requires the endpoint to authorize its callers, so this is required rather than optional — an operator should not discover it from the endpoint's own `401`. |
+| `auth.validators[].client_secret`            | string         | `""`           | The broker's client secret, written inline. Mutually exclusive with `client_secret_env`. A `broker.yaml` carrying one is a secret file — restrict its permissions. |
+| `auth.validators[].client_secret_env`        | string         | `""`           | The **name** of an environment variable holding the client secret, so it need not be inlined in `broker.yaml`. Setting both this and `client_secret` is a config error rather than a precedence puzzle. A named variable that is unset or empty **fails the boot**: falling back to an empty secret would authenticate the broker as an anonymous client and surface much later as a confusing `401` from the endpoint. The value is trimmed (a secret injected from a file routinely arrives with a trailing newline) and is never logged — errors name the variable, never its value. |
+| `auth.validators[].client_auth`              | string         | `basic`        | How the client credentials are presented: `basic` (HTTP Basic, RFC 6749 §2.3.1 — every authorization server must support it, and it keeps the secret out of the request body) or `post` (`client_id`/`client_secret` as form parameters, for providers that only accept `client_secret_post`). With `basic` the id and secret are form-urlencoded before base64, as RFC 6749 requires, so a secret containing `:` or a non-ASCII byte is presented correctly. |
+| `auth.validators[].token_type_hint`          | string         | `access_token` | The optional RFC 7662 §2.1 `token_type_hint` parameter. Set it to `""` to send no hint at all. |
+| `auth.validators[].cache_ttl`                | duration       | `1m`           | The **maximum** lifetime of a cached verdict. A cache hit costs **no network round trip** — this validator sits on `POST /claim` and on the WebSocket connect path, so a per-request round trip would put the issuer's latency in front of every session. The effective TTL is the **lower** of this and the response's own `exp`, so a cache entry can never outlive the token it describes; a response with no `exp` falls back to this value and never to unbounded caching. Capped at `15m`: introspection exists precisely so a token can be revoked *before* it expires, and a longer cache would silently throw that away, so an over-long value fails the boot. `0` means the default. |
+| `auth.validators[].negative_cache_ttl`       | duration       | `30s`          | How long a **definitive** refusal (`active: false`, or a response whose `principal_claim` is unusable) is remembered, so a client retrying a dead token in a loop does not become introspection traffic. An **unavailable** verdict — timeout, non-2xx, unparseable body — is deliberately **never** cached, so recovery from an issuer outage is immediate with no TTL to wait out. Same `15m` cap. `0` means the default. |
+| `auth.validators[].http_timeout`             | duration       | `5s`           | Bounds a single introspection request, and is therefore the worst-case latency a hung identity provider can add to a **cold** claim — which matters more here than anywhere else, because `POST /claim` has its own ready-timeout budget to respect. `0` means the default. |
+
+**Nothing but `active: true` is an allow.** `active: false` is a denial; so is a
+non-2xx status, a body that is not a JSON object, a missing `active` member, and
+an `active` member that is not a boolean. There is no path from a strange
+response to an authenticated caller.
+
+**A response whose `principal_claim` is absent, empty, or not a scalar is
+rejected**, exactly as for `jwks`: an empty `Principal.ID` would compare equal to
+the anonymous owner and to every other empty-id principal, which is a
+privilege-escalation path rather than a cosmetic gap.
+
+**Caching.** Verdicts are cached in memory keyed by the **SHA-256 of the token**,
+never by the token itself — the cache is a long-lived map of live credentials, so
+a heap dump or a debug print of its keys must not hand over working tokens. The
+map is bounded (4096 entries); past that, expired entries are reclaimed first and
+live ones are trimmed at random, since the worst case of evicting a live entry is
+one extra round trip and never a wrong verdict. Concurrent lookups of the *same*
+token collapse onto a single request, so a client opening several leases at once
+does not multiply the round trip the cache exists to avoid.
+
+**Secret sourcing convention.** `<key>` holds a literal value; `<key>_env` holds
+the **name** of an environment variable to read it from. It is the same pair
+`nexus.io.agui` uses for `bearer_token` / `bearer_token_env`, and any future
+secret-bearing key follows it.
+
+**Status mapping.** Denials are classified by the validator chain, not by string
+matching, and map onto:
+
+| Situation                                            | Status | Body                                              | Headers                                                     |
+|------------------------------------------------------|--------|---------------------------------------------------|-------------------------------------------------------------|
+| No `Authorization: Bearer` header                    | `401`  | `{"error":"authentication required"}`             | `WWW-Authenticate: Bearer realm="nexus-broker"`             |
+| Credential presented and rejected                    | `401`  | `{"error":"credential rejected"}`                 | `WWW-Authenticate: Bearer realm="nexus-broker", error="invalid_token"` |
+| Credential valid but lacking the required authority   | `403`  | `{"error":"insufficient scope"}`                  | `WWW-Authenticate: Bearer realm="nexus-broker", error="insufficient_scope"` |
+| The validator could not reach a verdict               | `503`  | `{"error":"authentication temporarily unavailable"}` | `Retry-After: 5` (deliberately **no** `WWW-Authenticate`)  |
+
+The `503` is what an `introspect` validator returns when the introspection
+endpoint times out, refuses the broker's *own* client credentials, or answers
+with a server error. None of those is a statement about the caller's token — RFC
+7662 encodes "this token is no good" as `200` with `active: false`, never as an
+error status — so reporting them as `401` would tell every client at once to
+re-authenticate against an identity provider that is already failing. It is still
+a refusal: no lease is claimed and nothing is released. A `503` also outranks a
+plain rejection when several validators are chained: if a `static` table rejects
+a token that `introspect` merely could not check, the honest answer is "ask
+again", not "your credential is bad". The `jwks` validator does not produce this
+status — its key cache absorbs an issuer outage for any key it already holds.
+
+The client is told the *kind* of refusal but not which validator refused. The
+full per-validator diagnosis goes to the log instead, since validator names are
+deployment topology.
+
+**Audit trail.** Every allow and every deny emits exactly one structured `slog`
+record — `auth allowed` (INFO) or `auth denied` (WARN) — carrying `route` (the
+matched mux pattern), `principal_id` (empty on a deny), `lease_id` when the route
+has one in its path, and on a deny a `reason` plus the per-validator `denial`
+group. There is no separate audit sink; these records are it.
+
+#### The `proxy_headers` validator
+
+`type: proxy_headers` trusts an identity that a fronting reverse proxy has
+already established and passed down in request headers — oauth2-proxy, an
+OIDC-aware ingress, an authenticating service-mesh sidecar. It makes the broker's
+original deployment story ("put your own authenticating proxy in front of it")
+first-class instead of a workaround.
+
+> **⚠️ A wrong `trusted_proxy_cidrs` turns this validator into an open door.**
+> A header is not a credential. Anyone who can open a TCP connection to the
+> broker's `listen_addr` can send `X-Forwarded-User: <anybody>` — there is no
+> signature, no expiry, and nothing to verify. The **only** thing standing
+> between that and full impersonation is the CIDR allowlist, so:
+>
+> - **Never write `0.0.0.0/0` or `::/0`.** That is not "allow the ingress", it is
+>   "let every caller on the network name themselves". A request from the public
+>   internet carrying `X-Forwarded-User: admin@example.com` would then claim
+>   leases, release other people's leases, and — with a matching
+>   `auth.admin_scope` in its scopes header — read the whole lease registry.
+> - **Write the proxy's own address, not the client's.** The allowlist is matched
+>   against the peer that opened the connection, which is the proxy.
+> - **Do not point it at a network you share with anything else.** A `10.0.0.0/8`
+>   that also contains other tenants' workloads means any of those workloads can
+>   impersonate any broker user. Use the proxy's `/32` (or `/128`) where you can.
+> - **Bind the broker where only the proxy can reach it** — a loopback address or
+>   a private interface — so the CIDR check is a second line of defence rather
+>   than the only one.
+> - Chain this validator with `static`, `jwks`, or `introspect` (below) if some
+>   callers arrive directly rather than through the proxy; do **not** widen the
+>   CIDR to accommodate them.
+
+```yaml
+auth:
+  validators:
+    - type: proxy_headers
+      # Required, and non-empty. Headers are read ONLY when the connecting peer
+      # is inside one of these networks. IPv4 and IPv6 alike.
+      trusted_proxy_cidrs:
+        - 10.4.0.0/16
+        - fd00:1ce::/64
+
+      # Required. No default: X-Forwarded-User, X-Auth-Request-Email and
+      # X-Forwarded-Preferred-Username are all real conventions.
+      principal_header: X-Forwarded-User
+
+      # Optional.
+      tenant_header: X-Auth-Request-Org
+      scopes_header: X-Forwarded-Groups
+```
+
+| Key                                     | Type           | Default    | Description |
+|-----------------------------------------|----------------|------------|-------------|
+| `auth.validators[].trusted_proxy_cidrs`  | string or list | *required* | The networks whose peers may assert an identity through headers. A lone string is one CIDR (it is **not** split on whitespace). IPv4 and IPv6 prefixes are both accepted, and a prefix written with host bits set (`10.4.1.2/16`) is masked to the network it actually matches. **An empty or absent list is a boot failure, never an implicit allow-everything** — failing open here would silently turn the broker into an open door. A malformed entry fails the boot too, naming the index and the offending value. |
+| `auth.validators[].principal_header`     | string         | *required* | The header whose value becomes `Principal.ID`. There is no default because no default is right for everyone. Header names are matched case-insensitively. |
+| `auth.validators[].tenant_header`        | string         | `""`       | Optional header whose value becomes `Principal.Tenant`. Empty means the tenant is never populated. |
+| `auth.validators[].scopes_header`        | string         | `""`       | Optional header whose value becomes `Principal.Scopes`, split on **commas and/or whitespace** so both the OAuth 2.0 space-delimited form (`"a b"`) and the comma-delimited lists proxies such as oauth2-proxy emit (`"a,b"`) work unchanged. RFC 6749's scope grammar allows neither character inside a scope, so nothing legitimate is split apart. Scope comparison stays case-sensitive. |
+
+This validator has **no secret-bearing key**, and therefore no `_env` companion:
+what authenticates a caller here is the network the connection came from, not a
+value that has to be kept out of the config file.
+
+**Only the real peer address is consulted. `X-Forwarded-For` is never read.**
+`XFF` (and `X-Real-IP`, and anything like them) is written by whoever is talking
+to the broker and can name any address at all; using it for the trust decision
+would hand the allowlist straight to the attacker. The check uses the peer
+address the kernel reports for the accepted connection and nothing else. A
+`RemoteAddr` that is unset, malformed, or a Unix-socket path — which has no IP —
+is **denied**, with no "probably local" fallback.
+
+**Out-of-CIDR peers are reported as "no credential", not "credential rejected".**
+From an untrusted peer the headers are not a credential that failed; they are not
+a credential at all, because the validator never looks at them. That matters
+twice over: a prober is not told its forged headers were even considered, and in
+a chain the aggregate denial does not get upgraded to `401 credential rejected`
+(with no challenge) for a caller that simply forgot its bearer token. See the
+[status mapping](#the-introspect-validator) table above.
+
+**A trusted peer whose `principal_header` is absent or blank is denied**, exactly
+as for `jwks` and `introspect`: an empty `Principal.ID` would compare equal to
+the anonymous owner and to every other empty-id principal, which is a
+privilege-escalation path rather than a cosmetic gap.
+
+**A header that arrives more than once is refused.** Several proxies *append*
+their value to a header the caller already sent rather than replacing it, leaving
+`X-Forwarded-User: attacker, real-user` as two values — of which the first, the
+caller's, is the one a naive read returns. A correctly configured proxy always
+sends exactly one value, so refusing the ambiguous case costs nothing and closes
+an impersonation path.
+
+`Principal.Claims` stays empty for this validator: proxy headers carry no claim
+set, the same way a `static` token carries none.
+
+Because the trust decision is positional rather than cryptographic, this
+validator composes well with the others through the chain — proxy headers from
+the ingress network, tokens from everywhere else:
+
+```yaml
+auth:
+  validators:
+    - type: proxy_headers          # tried first: no network round trip
+      trusted_proxy_cidrs: ["10.4.0.0/16"]
+      principal_header: X-Forwarded-User
+    - type: jwks                   # direct callers still need a real token
+      issuer: "https://id.example.com/"
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+      audience: "nexus-broker"
+      principal_claim: sub
+```
+
+#### Lease ownership
+
+Every lease records the principal that claimed it (stamped from the authenticated
+`POST /claim` request). Four routes consult that ownership:
+
+| Route                       | Enforcement                                                                                                                             |
+|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /release/{lease_id}`  | The caller's principal `ID` must equal the lease owner's `ID`, checked **before** any teardown begins — a refused release sends no shutdown frame, kills nothing, and frees no slot. |
+| `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. It applies to a redeemed `?ticket=` exactly as to a bearer token: a ticket is already bound to one lease *and* one principal, and ownership is re-checked on top of that so the lease must still exist and still belong to that principal at **connect** time, not merely at mint time. |
+| `POST /ticket/{lease_id}`   | The same check, applied **before** any ticket is minted — a refused caller is issued nothing. See [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml). |
+| `GET /leases`               | Not a refusal but a **filter**: the listing contains only leases whose owner `ID` matches the caller's, and the capacity aggregates are omitted. A caller holding `auth.admin_scope` gets the whole registry instead. See [`GET /leases`](#get-leases-http-api-not-yaml). |
+
+Comparison is principal-`ID` equality and nothing else; `tenant` is never
+consulted, and `scopes` only via `auth.admin_scope` on the read-only listing —
+the two mutating routes ignore scopes entirely.
+
+**An unknown lease and another principal's lease answer identically** — same
+status, same body — so live lease ids cannot be enumerated by differencing
+responses:
+
+| Route                      | Unknown *or* unowned lease                                          |
+|----------------------------|---------------------------------------------------------------------|
+| `POST /release/{lease_id}` | `404` `{"error":"unknown lease"}`                                    |
+| `POST /ticket/{lease_id}`  | `404` `{"error":"unknown lease"}` — byte-identical to the release refusal |
+| `WS /lease/{lease_id}`     | `404` `unknown lease` (plain text; the handshake never reaches `101`) |
+
+A credential that fails validation on `WS /lease/{lease_id}` gets the usual
+`401`/`403` from the status table above — a rejected `?ticket=` included, with the
+`credential rejected` body. That branch never consults the registry, so it reveals
+nothing about whether the lease exists, and every way a ticket can fail answers
+identically; see
+[`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml).
+
+Each ownership refusal emits one `lease access denied` WARN record carrying
+`route`, `principal_id` and `lease_id`. Like the response, it does not record
+whether the lease existed.
+
+**With the `auth:` block absent, nothing is refused and nothing is filtered.** The
+lease owner and the caller are then both the anonymous identity, so the equality
+check admits every caller and all three routes behave exactly as they did before
+ownership existed — `GET /leases` included, aggregates and all.
+
+The broker's **own** teardown paths — the `idle_timeout` sweeper and crash
+detection — bypass ownership entirely. They are the broker acting on itself with
+no principal at all, which is why the check lives in the HTTP handlers rather
+than in the shared teardown they funnel through.
 
 The spawned-instance side is configured by the `nexus.io.broker` plugin
-(`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
-I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
-`NEXUS_BROKER_LEASE_ID` environment variables the broker injects at spawn
-(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID`).
+(`broker_addr`, `lease_id`, `spawn_secret`) — see
+[`nexus.io.broker`](#nexusiobroker) in the I/O section. All three keys fall back
+to the `NEXUS_BROKER_ADDR` / `NEXUS_BROKER_LEASE_ID` /
+`NEXUS_BROKER_SPAWN_SECRET` environment variables the broker injects at spawn
+(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID` /
+`brokerframe.EnvSpawnSecret`).
+
+#### Instance dial-back authentication (`WS /instance`)
+
+The `auth:` block also gates the **instance** dial-back, not just the
+control-plane routes. With it configured, the `register` frame must carry both a
+known `lease_id` **and** the per-spawn secret the broker minted for that lease
+(128 bits of `crypto/rand`, injected through the child's environment at exec).
+Anything else — an unknown lease, an absent secret, a wrong secret — is closed
+with the same `policy violation` / `unknown lease` close, so a dialer cannot
+difference the responses to enumerate live lease ids.
+
+The gate exists because of **version skew**. With no `auth:` block the secret is
+not checked at all, so a `nexus_binary_path` pointing at a build that predates
+the protocol keeps working unchanged. With one configured, such a binary is
+refused and the broker logs a `WARN` naming the version skew explicitly —
+otherwise the symptom (every claim returning `504 instance did not become ready
+in time` while the child process is alive and connecting fine) reads as a network
+fault. The fix is to upgrade the instance binary.
+
+The secret is never logged, never returned by `GET /leases`, and never passed in
+argv.
 
 ### `POST /claim` (HTTP API, not YAML)
 
@@ -2361,11 +3123,59 @@ exited before signalling ready") rather than silently starting a new session.
 {
   "lease_id": "…",                          // lease handle for this instance
   "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
-  "session_id": "…"                          // engine session id: the generated id for a
+  "session_id": "…",                         // engine session id: the generated id for a
                                              // new session (capture it to -recall later),
                                              // or the requested id echoed back on resume
+  "ticket": "…"                              // single-use, 30s credential for ws_url;
+                                             // ABSENT when auth is disabled
 }
 ```
+
+When authentication is enabled, connect to `ws_url` with **either** the returned
+`ticket` (`ws_url + "?ticket=" + ticket`) or the **same** bearer credential the
+claim was made with: the client socket enforces lease ownership, so another
+principal's token — or none at all — is refused before the upgrade. See
+[`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml) and
+[Lease ownership](#lease-ownership).
+
+`ticket` is a **single-use, 30-second** credential bound to this lease **and** the
+claiming principal, for clients that cannot present a bearer header on the
+WebSocket handshake — which is every browser, since browser JavaScript cannot set
+headers on a WebSocket upgrade. It is **omitted** (not empty) when the broker runs
+with no `auth:` block, because there is then nothing to authenticate and
+`WS /lease/{lease_id}` accepts a connection with no ticket at all. It is also
+omitted in the unlikely event minting failed; `POST /ticket/{lease_id}` mints a
+replacement. Adding the field is **additive** — a client that ignores unknown JSON
+keys is unaffected. See [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml)
+for the TTL rationale and the refresh path.
+
+#### `ws_url` resolution
+
+The returned `ws_url` must name the broker that **holds the lease** — a lease is
+in-memory state on one process, so a reconnect routed elsewhere is worthless. The
+host is resolved in strict precedence order:
+
+| Precedence | Source | Notes |
+|------------|--------|-------|
+| 1 | `advertise_addr` | Explicit operator intent about how this broker is reached. Nothing overrides it. |
+| 2 | An explicit, non-wildcard host in `listen_addr` | e.g. `10.0.0.7:8080` — already unambiguous. |
+| 3 | The claim request's `Host` header | A **guess**. Correct for a directly-connected client; **wrong** behind a proxy or load balancer, where it names the intermediary. |
+| 4 | `127.0.0.1:<listen port>` | Last resort when there is no request `Host` at all. |
+
+The scheme is `ws://` unless a scheme-qualified `advertise_addr` says otherwise —
+so a deployment that terminates TLS at a proxy sets
+`advertise_addr: "wss://broker-1.example.com"` while the broker itself keeps
+speaking plain HTTP on its bind address.
+
+When `advertise_addr` is unset **and** `listen_addr` names no host, the broker
+logs one `WARN` at startup naming the consequence: `ws_url`s will be derived from
+each request's `Host` header. The broker still starts — this shape is correct for
+a directly-reachable broker.
+
+This resolution is **client-facing only**. The `/instance` dial-back address
+handed to a spawned instance is resolved separately and always collapses a
+wildcard bind to `127.0.0.1`, because instances are same-host by design;
+`advertise_addr` does not affect it.
 
 ### `POST /release/{lease_id}` (HTTP API, not YAML)
 
@@ -2377,24 +3187,141 @@ for the process to exit and **force-kills it** if that window elapses (no
 orphan). The lease is removed and its slot freed. The session directory under
 `~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
 
-| Outcome                         | Status | Body                                         |
-|---------------------------------|--------|----------------------------------------------|
-| Released (graceful or killed)   | `200`  | `{"status":"released","lease_id":"…"}`      |
-| Unknown / already-released lease | `404`  | `{"error":"unknown lease"}`                  |
-| Missing lease id in path        | `400`  | `{"error":"release requires a lease id"}`    |
+| Outcome                                  | Status | Body                                      |
+|------------------------------------------|--------|-------------------------------------------|
+| Released (graceful or killed)            | `200`  | `{"status":"released","lease_id":"…"}`    |
+| Unknown / already-released lease         | `404`  | `{"error":"unknown lease"}`               |
+| Lease owned by a **different** principal | `404`  | `{"error":"unknown lease"}` — deliberately identical to the row above; see [Lease ownership](#lease-ownership) |
+| Missing lease id in path                 | `400`  | `{"error":"release requires a lease id"}` |
 
 Release is idempotent: releasing an already-gone lease returns `404` rather than
 erroring, and concurrent releases of the same lease collapse to a single
 teardown.
 
-### `GET /leases` (HTTP API, not YAML)
+### `POST /ticket/{lease_id}` (HTTP API, not YAML)
 
-`GET /leases` is a read-only introspection surface: it reports the capacity and
-queue aggregates plus a snapshot of every live lease, sorted by `created_at`
-then `lease_id`. It performs no mutation.
+`POST /ticket/{lease_id}` mints a **fresh** client-WebSocket ticket for a caller
+that owns the lease. It takes no request body.
+
+Tickets exist because browser JavaScript **cannot** set headers on a WebSocket
+handshake, so the bearer credential a claim was made with can never reach
+`WS /lease/{lease_id}` from a browser. A ticket is the one credential the broker
+itself mints, and it is deliberately not a general-purpose token:
+
+| Property        | Value                                                                 |
+|-----------------|-----------------------------------------------------------------------|
+| Lifetime        | **30 seconds**, fixed. **Not configurable** — see below.               |
+| Uses            | **One.** Redemption atomically consumes it; two concurrent redemptions cannot both succeed. |
+| Scope           | Bound to **one lease** *and* **one principal `ID`**. A ticket for lease A is refused for lease B. |
+| Storage         | In-memory only. Tickets do **not** survive a broker restart; mint a new one. |
+| Invalidation    | **Every** ticket for a lease is destroyed the moment the lease goes away — manual `POST /release`, `idle_timeout` reaping, **and** crash detection alike, because invalidation hooks the single point all three teardowns converge on. |
+
+**Why the TTL is not a config key.** A ticket travels as a URL query parameter, so
+it lands in reverse-proxy access logs, browser history and referrer chains no
+matter what the broker does. The tight window plus single use *are* the mitigation
+for that exposure, so making it adjustable would let a deployment silently remove
+the only thing that makes the design safe. The broker never logs a ticket **value**
+— issuance records carry `lease_id` and `principal_id` and a boolean, nothing more.
+
+**Why a refresh route exists.** 30 seconds covers a claim → connect round trip, not
+a reconnect after a dropped socket or a laptop resume. The alternative to refreshing
+would be re-claiming, which spawns a *new* instance and abandons the live session.
 
 ```jsonc
-// response (200)
+// success response (200)
+{
+  "lease_id": "…",
+  "ticket": "…"     // ABSENT when auth is disabled (see below)
+}
+```
+
+| Outcome                                  | Status | Body                                     |
+|------------------------------------------|--------|------------------------------------------|
+| Ticket issued                            | `200`  | `{"lease_id":"…","ticket":"…"}`          |
+| Unknown / already-released lease         | `404`  | `{"error":"unknown lease"}`              |
+| Lease owned by a **different** principal | `404`  | `{"error":"unknown lease"}` — byte-identical to the row above, so the route is not a lease-id oracle; see [Lease ownership](#lease-ownership) |
+| Missing lease id in path                 | `400`  | `{"error":"ticket requires a lease id"}`  |
+
+**With the `auth:` block absent, ticket issuance is inert.** The route still answers
+`200` for a lease the (anonymous) caller owns, but the `ticket` key is **omitted**
+— there is no identity to bind a capability to, and `WS /lease/{lease_id}` keeps
+accepting a connection with no ticket exactly as it did before tickets existed.
+Clients must therefore treat a missing `ticket` as "this broker issues none",
+never as an empty-string ticket.
+
+### `WS /lease/{lease_id}` (HTTP API, not YAML)
+
+The per-lease client socket. Connect to the `ws_url` returned by
+[`POST /claim`](#post-claim-http-api-not-yaml) and exchange broker frames with the
+instance. It accepts **two** credentials:
+
+| Credential | How it is presented | For |
+|------------|---------------------|-----|
+| Ticket  | `?ticket=<value>` on the handshake URL — `ws_url + "?ticket=" + ticket` | Browsers, which **cannot** set headers on a WebSocket upgrade. Issued by `POST /claim` and [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml). |
+| Bearer  | `Authorization: Bearer <token>` | Go/CLI and any other client that can set request headers. Use the same token the lease was claimed with. |
+
+**Precedence: a non-empty `?ticket=` wins, and wins exclusively.** When both are
+presented the `Authorization` header is **not consulted at all**, and a ticket
+failure is final rather than falling back to the header. Falling back would soften
+single use into "single use unless you also hold a token" — a replayed ticket
+accompanied by a valid header would connect — so a client that sends both and lets
+its ticket expire is refused despite the good header. Send one credential, or mint a
+fresh ticket.
+
+| Outcome                                                              | Handshake | Body                                    |
+|----------------------------------------------------------------------|-----------|-----------------------------------------|
+| Credential accepted and the caller owns the lease                    | `101`     | *(socket upgraded)*                     |
+| No credential at all (auth enabled)                                  | `401`     | `{"error":"authentication required"}`    |
+| Bearer token rejected by the validator chain                         | `401`     | `{"error":"credential rejected"}`        |
+| Ticket **unknown**, **expired**, **already redeemed**, or minted for a **different lease** | `401` | `{"error":"credential rejected"}` — all four are **byte-identical**, so a holder of one value learns nothing about any other |
+| Unknown, already-released, **or** another principal's lease          | `404`     | `unknown lease` (plain text; the route cannot answer JSON before an upgrade) |
+
+**A refusal always precedes the upgrade** — the handshake never reaches `101` and
+is then closed. An accept-then-close is observably different from a clean refusal
+(it confirms the lease id reached a live handler), which would defeat the point of
+answering an unowned lease identically to an unknown one.
+
+**The ticket burns on connect.** Redemption atomically consumes it, so a second
+connect with the same value is refused; mint a replacement with
+`POST /ticket/{lease_id}`. A ticket presented for the **wrong** lease is refused
+*without* being consumed — a failed authorization check is not a use, so a stale
+reconnect cannot destroy a credential the legitimate holder still needs — but the
+response is identical either way.
+
+Ticket **values are never logged**. The connect record carries `lease_id`,
+`principal_id` and which channel was used (`ticket`, `bearer` or `anonymous`),
+never the credential itself.
+
+`OriginPatterns` is `*`: the broker does **not** use the `Origin` header as access
+control. The credential is the access control.
+
+**With the `auth:` block absent, neither credential is consulted** — not the
+header, not the ticket — and the route is exactly "does this lease exist?", as it
+was before authentication existed. A client built for an authenticated broker can
+point a `?ticket=` at an open one and it still connects, rather than being refused
+by a store that never issued anything.
+
+After the upgrade, only inbound `io` frames (client → instance) reset the
+`idle_timeout` timer, and a frame whose `lease_id` does not match the socket's
+lease is dropped.
+
+### `GET /leases` (HTTP API, not YAML)
+
+`GET /leases` is a read-only introspection surface: it reports a snapshot of live
+leases, sorted by `created_at` then `lease_id`, plus — for an operator — the
+capacity and queue aggregates. It performs no mutation.
+
+**What a caller sees depends on who it is.** There are two response shapes:
+
+| Caller                                                          | Leases                          | Aggregates |
+|-----------------------------------------------------------------|---------------------------------|------------|
+| Holds `auth.admin_scope` (an **operator**), or auth is disabled  | every live lease                | included   |
+| Any other authenticated caller                                   | only leases it owns             | **omitted**|
+
+**Operator response** — the full shape, unchanged from before scoping existed:
+
+```jsonc
+// response (200) — operator, or auth disabled
 {
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
@@ -2412,6 +3339,36 @@ then `lease_id`. It performs no mutation.
   ]
 }
 ```
+
+**Caller-scoped response** — same lease objects, same ordering, but only the
+caller's own leases and **no aggregate keys at all**:
+
+```jsonc
+// response (200) — authenticated non-operator
+{
+  "leases": [
+    {
+      "lease_id": "…",
+      "session_id": "…",
+      "pid": 41234,
+      "state": "active",
+      "last_activity": "2026-06-25T12:00:00Z",
+      "created_at": "2026-06-25T11:59:30Z"
+    }
+  ]
+}
+```
+
+The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use` and
+`queue_depth` let one tenant infer another's load, and a zero would read as a
+factual claim about an idle broker to a client that does not know it is
+unprivileged. Clients must therefore treat a missing key as "not disclosed"
+rather than as `0`.
+
+A caller that owns no live lease gets `200` with `{"leases": []}` — never a `404`
+and never an error. Filtering happens inside the registry snapshot, under the same
+lock that guards the lease table, so a lease the caller may not see is never
+copied out at all.
 
 Surface states: `spawning` (lease exists, instance not yet registered),
 `active` (registered, frames can flow), `draining` (a teardown has latched).

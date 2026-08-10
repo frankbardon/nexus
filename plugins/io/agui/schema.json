@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.agui.json",
+  "title": "nexus.io.agui",
+  "description": "AG-UI serve transport. Every key here is read by Init in plugins/io/agui/plugin.go; the auth block is parsed by pkg/nexusauth, shared with cmd/nexus-broker.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "bind": {
+      "type": "string",
+      "description": "host:port the HTTP listener binds to. Default 127.0.0.1:8090 (loopback), so the endpoint is not network-exposed without explicit opt-in. Init falls back to the default on an empty string, so no minLength is imposed here."
+    },
+    "bearer_token": {
+      "type": "string",
+      "description": "Inline bearer token, desugared into a one-entry static validator. Takes precedence over bearer_token_env. Mutually exclusive with auth — that conflict is enforced in Init, which owns the operator-facing message; it is deliberately NOT duplicated here so the two enforcement points cannot drift."
+    },
+    "bearer_token_env": {
+      "type": "string",
+      "description": "Name of an environment variable holding the bearer token. Consulted only when bearer_token is empty. Mutually exclusive with auth (see bearer_token)."
+    },
+    "auth": {
+      "$ref": "#/$defs/auth"
+    },
+    "cors_origins": {
+      "$ref": "#/$defs/stringOrStringList",
+      "description": "Allowed CORS origins. A YAML list, or a single comma-separated string (parseCORSOrigins splits on commas and trims). A lone \"*\" echoes any request Origin. Empty means no CORS header at all (same-origin only)."
+    },
+    "emit_state": {
+      "type": "boolean",
+      "description": "Opt-in AG-UI shared-state emission: mirrors the session's scene store as a shared-state document (StateSnapshot at run start, ordered StateDelta per mutation). Default false."
+    }
+  },
+  "$defs": {
+    "auth": {
+      "description": "Validator-chain block, parsed by pkg/nexusauth.ChainFromMap — the same parser the session broker uses. `validators` is its only key: `admin_scope` is broker-only and is rejected here. Writing `auth:` with no value is the same as omitting it.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "validators": {
+          "description": "Validators to try, in order; the first that accepts wins. Absent, null or empty means authentication is disabled.",
+          "type": ["array", "null"],
+          "items": {"$ref": "#/$defs/validator"}
+        }
+      }
+    },
+
+    "validator": {
+      "description": "One validators[] entry. The per-type keys are described by the if/then branches below rather than by one flat property list, because additionalProperties only sees properties declared in the same schema object — a flat list would have to allow every type's keys on every type, which is exactly the silent-typo hole this schema exists to close.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["static", "jwks", "introspect", "proxy_headers"],
+          "description": "Validator implementation."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["type"], "properties": {"type": {"const": "static"}}},
+          "then": {"$ref": "#/$defs/staticValidator"}
+        },
+        {
+          "if": {"required": ["type"], "properties": {"type": {"const": "jwks"}}},
+          "then": {"$ref": "#/$defs/jwksValidator"}
+        },
+        {
+          "if": {"required": ["type"], "properties": {"type": {"const": "introspect"}}},
+          "then": {"$ref": "#/$defs/introspectValidator"}
+        },
+        {
+          "if": {"required": ["type"], "properties": {"type": {"const": "proxy_headers"}}},
+          "then": {"$ref": "#/$defs/proxyHeadersValidator"}
+        }
+      ]
+    },
+
+    "staticValidator": {
+      "description": "type: static — a table of shared bearer tokens, compared in constant time.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tokens"],
+      "properties": {
+        "type": {"const": "static"},
+        "principal_claim": {"type": "string", "description": "Accepted and ignored: a static token carries no claim set."},
+        "tenant_claim": {"type": "string", "description": "Accepted and ignored (see principal_claim)."},
+        "scopes_claim": {"type": "string", "description": "Accepted and ignored (see principal_claim)."},
+        "tokens": {
+          "type": "array",
+          "minItems": 1,
+          "description": "At least one entry. Duplicate token values are a config error, not last-one-wins.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["token", "principal"],
+            "properties": {
+              "token": {"type": "string", "minLength": 1, "description": "The bearer token value."},
+              "principal": {"type": "string", "minLength": 1, "description": "The principal id a request presenting this token acts as. Must be non-empty — an empty id behaves as a wildcard in ownership checks."},
+              "tenant": {"type": "string", "description": "Optional tenant/workspace id."},
+              "scopes": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Optional granted scopes. A string is split on whitespace; a list is taken verbatim."
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "jwksValidator": {
+      "description": "type: jwks — OIDC JWTs verified against the issuer's published key set. Generic OIDC: no provider-specific defaults, so principal_claim has no fallback guess.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "issuer", "jwks_url", "audience", "principal_claim"],
+      "properties": {
+        "type": {"const": "jwks"},
+        "principal_claim": {"type": "string", "minLength": 1, "description": "Required: the claim that becomes Principal.ID."},
+        "tenant_claim": {"type": "string", "description": "Optional: the claim that becomes Principal.Tenant."},
+        "scopes_claim": {"type": "string", "description": "Optional: the claim that becomes Principal.Scopes."},
+        "issuer": {"type": "string", "minLength": 1, "description": "The exact value the token's iss claim must carry. Compared as an opaque string, trailing slash included."},
+        "jwks_url": {"type": "string", "minLength": 1, "description": "The issuer's JWKS endpoint. Must be absolute https, except to a loopback host."},
+        "audience": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Acceptable aud values; a token carrying any of them passes. A lone string is one audience and is not split on whitespace."
+        },
+        "algorithms": {
+          "$ref": "#/$defs/jwsAlgorithms",
+          "description": "Accepted JWS algorithms. Default [\"RS256\"]. Asymmetric only — `none` and the HMAC family are not configurable at all."
+        },
+        "cache_ttl": {"$ref": "#/$defs/duration", "description": "How long a fetched key set is fresh. Default 10m."},
+        "negative_cache_ttl": {"$ref": "#/$defs/duration", "description": "How long an unresolvable kid is remembered, and the minimum interval between on-demand fetches. Default 1m."},
+        "http_timeout": {"$ref": "#/$defs/duration", "description": "Bounds a single JWKS request. Default 5s."},
+        "clock_skew": {"$ref": "#/$defs/duration", "description": "Leeway applied to exp and nbf. Default 1m, capped at 5m."}
+      }
+    },
+
+    "introspectValidator": {
+      "description": "type: introspect — opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "introspection_url", "client_id", "principal_claim"],
+      "properties": {
+        "type": {"const": "introspect"},
+        "principal_claim": {"type": "string", "minLength": 1, "description": "Required: the claim that becomes Principal.ID."},
+        "tenant_claim": {"type": "string", "description": "Optional: the claim that becomes Principal.Tenant."},
+        "scopes_claim": {"type": "string", "description": "Optional: the claim that becomes Principal.Scopes."},
+        "introspection_url": {"type": "string", "minLength": 1, "description": "The RFC 7662 endpoint. Must be absolute https, except to a loopback host."},
+        "client_id": {"type": "string", "minLength": 1, "description": "Required: the client id presented to the introspection endpoint."},
+        "client_secret": {"type": "string", "description": "The client secret written inline. Mutually exclusive with client_secret_env."},
+        "client_secret_env": {"type": "string", "description": "The NAME of an environment variable holding the client secret. Mutually exclusive with client_secret; a named variable that is unset or empty fails the boot."},
+        "client_auth": {"type": "string", "enum": ["basic", "post"], "description": "How the client credentials are presented. Default basic."},
+        "token_type_hint": {"type": "string", "description": "The optional RFC 7662 §2.1 token_type_hint parameter. Default access_token; set to \"\" to send no hint."},
+        "cache_ttl": {"$ref": "#/$defs/duration", "description": "Maximum lifetime of a cached verdict. Default 1m, capped at 15m."},
+        "negative_cache_ttl": {"$ref": "#/$defs/duration", "description": "How long a definitive refusal is remembered. Default 30s, capped at 15m."},
+        "http_timeout": {"$ref": "#/$defs/duration", "description": "Bounds a single introspection request. Default 5s."}
+      }
+    },
+
+    "proxyHeadersValidator": {
+      "description": "type: proxy_headers — an identity a fronting authenticating proxy already established, honoured only for peers inside the CIDR allowlist.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trusted_proxy_cidrs", "principal_header"],
+      "properties": {
+        "type": {"const": "proxy_headers"},
+        "principal_claim": {"type": "string", "description": "Accepted and ignored: there is no claim set here, only headers."},
+        "tenant_claim": {"type": "string", "description": "Accepted and ignored (see principal_claim)."},
+        "scopes_claim": {"type": "string", "description": "Accepted and ignored (see principal_claim)."},
+        "trusted_proxy_cidrs": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Required and non-empty: the networks whose peers may assert an identity through headers. This allowlist IS the security model — never 0.0.0.0/0 or ::/0."
+        },
+        "principal_header": {"type": "string", "minLength": 1, "description": "Required: the header whose value becomes Principal.ID. No default is right for everyone."},
+        "tenant_header": {"type": "string", "description": "Optional header whose value becomes Principal.Tenant."},
+        "scopes_header": {"type": "string", "description": "Optional header whose value becomes Principal.Scopes, split on commas and/or whitespace."}
+      }
+    },
+
+    "stringOrStringList": {
+      "description": "A single string or a list of strings — both spellings the nexusauth/agui parsers accept.",
+      "anyOf": [
+        {"type": "string"},
+        {"type": "array", "items": {"type": "string"}}
+      ]
+    },
+
+    "duration": {
+      "description": "A Go duration string such as \"10m\", \"30s\" or \"1h30m\". A bare number is rejected on purpose: 600 reads as ten minutes to an operator and six hundred nanoseconds to Go.",
+      "type": "string",
+      "minLength": 1
+    },
+
+    "jwsAlgorithm": {
+      "type": "string",
+      "enum": ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"]
+    },
+
+    "jwsAlgorithms": {
+      "anyOf": [
+        {"$ref": "#/$defs/jwsAlgorithm"},
+        {"type": "array", "items": {"$ref": "#/$defs/jwsAlgorithm"}}
+      ]
+    }
+  }
+}

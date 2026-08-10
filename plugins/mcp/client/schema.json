@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.mcp.client.json",
+  "title": "nexus.mcp.client",
+  "description": "MCP client bridge. Every key here is read by parseConfig/parseServer/parseToolFilter/applyResourceConfig in plugins/mcp/client/config.go — the schema is derived from those readers, so an unknown key is a key the plugin would have silently ignored. Duplicate names across servers[] are rejected by parseConfig after the loop; JSON Schema cannot express that cross-item constraint, so it stays a runtime check.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "aliases": {
+      "description": "Short slash command -> \"<server>.<prompt>\". With the default command_prefix, `review: gh.review_pr` makes /review rewrite to /mcp.gh.review_pr. Values must be strings: parseConfig drops any entry whose value is not a non-empty string.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "servers": {
+      "description": "One entry per MCP server. Absent or empty means the plugin connects nothing.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/server"
+      }
+    }
+  },
+  "$defs": {
+    "defaults": {
+      "description": "Inherited by every servers[] entry unless overridden inline. Note there is no `tools` key here — tool filters are per-server only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle",
+          "description": "Default connect/disconnect timing for every server. Default \"engine\"."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Default per-RPC timeout for tools/call, resources/read, prompts/get. Default 30s."
+        },
+        "command_prefix": {
+          "type": "string",
+          "description": "First segment of the slash command registered per MCP prompt. Default \"mcp\", so server `fake` prompt `greet` becomes /mcp.fake.greet.",
+          "minLength": 1
+        },
+        "resources": {
+          "$ref": "#/$defs/resources"
+        },
+        "prompts": {
+          "$ref": "#/$defs/prompts"
+        }
+      }
+    },
+
+    "server": {
+      "description": "One MCP server connection. The key set is flat and identical for every transport — parseServer reads command, url and server unconditionally — but which of them is REQUIRED depends on transport. That per-transport requirement is expressed by the allOf/if/then branches below so a missing key fails at boot naming the key, instead of surfacing from parseServer during the connect phase.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "description": "Required. Namespaces every catalog entry (mcp__<name>__<tool>) and slash command. Same pattern parseServer enforces. Must be unique across servers[] — that check is a runtime one."
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["stdio", "http", "inprocess"],
+          "description": "How the connection is made. \"stdio\" launches `command` as a subprocess, \"http\" dials `url` over the streamable HTTP transport, \"inprocess\" wires an in-memory transport to the *mcp.Server the host registered under `server` via RegisterInProcessServer before engine.Boot(). Defaults to \"stdio\" when absent."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle",
+          "description": "Overrides defaults.lifecycle for this server."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Overrides defaults.timeout for this server."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for transport: stdio. Executable to launch, resolved on PATH. No ~ expansion — write an absolute path."
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Argument list passed to `command`. Strings only: parseServer skips non-string elements."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "Environment exported to the stdio subprocess. ${VAR} references expand from the host environment at parse time (unset expands to empty), so the expansion is invisible to this schema and values are typed as plain strings."
+        },
+        "env_passthrough": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Names of host environment variables forwarded verbatim to the subprocess. Silently skipped when unset on the host."
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for transport: http. Base URL of the streamable HTTP MCP endpoint."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "HTTP headers attached to every request. ${VAR} references expand from the host environment (see `env`)."
+        },
+        "server": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for transport: inprocess. The opaque key a host passed to client.RegisterInProcessServer(key, *mcp.Server) BEFORE engine.Boot(). The registry is process-wide, so a multi-engine host must scope keys per agent/tenant."
+        },
+        "tools": {
+          "$ref": "#/$defs/tools"
+        },
+        "resources": {
+          "$ref": "#/$defs/resources"
+        },
+        "prompts": {
+          "$ref": "#/$defs/prompts"
+        }
+      },
+      "allOf": [
+        {
+          "description": "stdio requires command. The `if` deliberately does NOT require `transport`: an absent transport defaults to stdio in parseServer, and an absent property matches vacuously, so both spellings land here.",
+          "if": {
+            "properties": {"transport": {"const": "stdio"}}
+          },
+          "then": {"required": ["command"]}
+        },
+        {
+          "description": "http requires url. `required: [transport]` in the `if` stops an absent transport from matching vacuously — without it, a stdio server would be asked for a url.",
+          "if": {
+            "required": ["transport"],
+            "properties": {"transport": {"const": "http"}}
+          },
+          "then": {"required": ["url"]}
+        },
+        {
+          "description": "inprocess requires server (see the http branch for why `required: [transport]` is there).",
+          "if": {
+            "required": ["transport"],
+            "properties": {"transport": {"const": "inprocess"}}
+          },
+          "then": {"required": ["server"]}
+        }
+      ]
+    },
+
+    "tools": {
+      "description": "Per-server allowlist/blocklist, matched against the RAW MCP tool name, not the mcp__<server>__<tool> catalog name. Deny wins over allow; an empty allow list means everything is allowed.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "When non-empty, only these raw tool names reach the catalog."
+        },
+        "deny": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Raw tool names dropped unconditionally."
+        }
+      }
+    },
+
+    "resources": {
+      "description": "How MCP resources are surfaced. Identical key set under `defaults` and under a servers[] entry — applyResourceConfig parses both, layering the server block over the inherited defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Toggle the whole resource surface. Default true."
+        },
+        "auto_register_static": {
+          "type": "boolean",
+          "description": "Register every static resource as a no-arg catalog tool. Default true."
+        },
+        "auto_register_template": {
+          "type": "boolean",
+          "description": "Register every resource template as a catalog tool whose inputSchema mirrors the template variables. Default true."
+        },
+        "auto_register_max": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Static auto-registration is skipped when the server returns more static resources than this, leaving only the generic list_resources/read_resource tools. Default 50. An integer here (unlike `timeout`, which is string-only): applyResourceConfig reads it through intLike, which accepts int, int64 and float64. A negative value is silently ignored by that reader, so it is rejected here instead."
+        },
+        "subscribe_updates": {
+          "type": "boolean",
+          "description": "Subscribe to resources/updated for each auto-registered static resource; notifications produce mcp.resource.updated events. Default true."
+        }
+      }
+    },
+
+    "prompts": {
+      "description": "The prompt slash-command surface. `enabled` is its only key, under both `defaults` and a servers[] entry.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Toggle prompt slash commands for the server. Default true."
+        }
+      }
+    },
+
+    "lifecycle": {
+      "description": "When servers connect and disconnect. \"engine\" = on engine boot/shutdown. \"session\" = on io.session.start / io.session.end.",
+      "type": "string",
+      "enum": ["engine", "session"]
+    },
+
+    "duration": {
+      "description": "A Go duration string such as \"30s\", \"10m\" or \"1h30m\". A bare number is rejected on purpose: parseServer reads timeout only through a `string` type assertion, so a YAML number is silently ignored and the default is used instead — exactly the kind of quiet miss this schema exists to stop.",
+      "type": "string"
+    }
+  }
+}

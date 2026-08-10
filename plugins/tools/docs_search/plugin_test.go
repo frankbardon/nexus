@@ -90,8 +90,8 @@ func TestSearchDocsToolResult(t *testing.T) {
 	if out.Count != 1 || len(out.Results) != 1 {
 		t.Fatalf("want 1 result, got %d", out.Count)
 	}
-	if out.Results[0].Source != "bera_score.md" || out.Results[0].Heading != "How It Is Calculated" {
-		t.Errorf("result = %+v, want bera_score.md / How It Is Calculated", out.Results[0])
+	if out.Results[0].Source != "score.md" || out.Results[0].Heading != "How It Is Calculated" {
+		t.Errorf("result = %+v, want score.md / How It Is Calculated", out.Results[0])
 	}
 }
 

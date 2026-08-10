@@ -30,6 +30,19 @@ const (
 	// EnvLeaseID holds the lease ID the broker assigned to the spawned
 	// instance. The plugin echoes it in its register frame.
 	EnvLeaseID = "NEXUS_BROKER_LEASE_ID"
+
+	// EnvSpawnSecret holds a per-spawn secret the broker generates and hands
+	// to the child process. The plugin echoes it in its register frame
+	// (Frame.Secret) and the broker requires it to match the value it minted
+	// for that lease.
+	//
+	// It exists because the lease id ALONE is a poor authenticator for the
+	// dial-back socket: it travels in ws_urls, client requests and logs, so
+	// anything that observes one could otherwise impersonate an instance. This
+	// secret never leaves the broker↔child channel — it is passed through the
+	// environment (not argv, which is world-readable on most systems) and is
+	// never logged or reported on any HTTP surface.
+	EnvSpawnSecret = "NEXUS_BROKER_SPAWN_SECRET"
 )
 
 // Signal identifies the lifecycle phase or payload kind a Frame carries.
@@ -81,6 +94,23 @@ type Frame struct {
 
 	// Signal is the lifecycle phase or payload kind.
 	Signal Signal `json:"signal"`
+
+	// Secret is the per-spawn secret the broker handed the instance through
+	// EnvSpawnSecret, echoed on SignalRegister frames so the broker can prove
+	// the dialing process is one IT spawned rather than anything that learned
+	// the lease id.
+	//
+	// It is OPTIONAL on the wire (`omitempty`) and that is deliberate, not
+	// laxity: an instance binary predating this field encodes no `secret` key
+	// at all, and its frame must still DECODE cleanly so the broker can answer
+	// with a specific version-skew diagnosis instead of a JSON error. Whether an
+	// absent secret is ACCEPTED is the broker's policy decision (it is gated on
+	// the broker having an `auth:` block), not this package's.
+	//
+	// It is meaningless on every other signal and must never be echoed back to
+	// a client: the broker forwards SignalIO frames verbatim, so nothing may
+	// ever populate this on one.
+	Secret string `json:"secret,omitempty"`
 
 	// SessionID is the engine session ID. Set on SignalSessionIDReport
 	// frames; empty otherwise.

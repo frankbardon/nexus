@@ -42,21 +42,114 @@ func run() error {
 
 	logger.Info("nexus-broker starting",
 		"listen_addr", cfg.ListenAddr,
+		// Logged because it decides what clients are told to connect back to; an
+		// operator debugging a bad ws_url needs to see the value in effect.
+		"advertise_addr", cfg.AdvertiseAddr,
 		"nexus_binary_path", cfg.NexusBinaryPath,
+		// Logged because an empty state_dir means lease state is lost on restart,
+		// and that is a decision an operator should be able to confirm from the
+		// boot line rather than infer from a missing directory.
+		"state_dir", cfg.StateDir,
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
+		// Logged because it decides how long a restored lease holds a capacity slot
+		// waiting for an instance that may never come back.
+		"reattach_window", cfg.ReattachWindow,
+		// Logged because a mistyped admin scope fails SILENTLY — the operator view
+		// of GET /leases simply never engages — so the value in effect has to be
+		// visible somewhere at boot.
+		"admin_scope", cfg.AdminScope,
 	)
+
+	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
+	// the claim request's Host header. That is fine for a directly-reachable
+	// broker and wrong behind a proxy, and nothing later in the process can tell
+	// the two apart — so the only place to say so is here, at boot.
+	warnIfAdvertiseAddrMissing(logger, cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Authentication is opt-in. A broker.yaml with no `auth:` block keeps every
+	// route exactly as it was before authentication existed — that backward
+	// compatibility is a release requirement, not a convenience — so the disabled
+	// path does nothing but warn, once and loudly, that this broker will serve
+	// anyone who can reach it.
+	//
+	// The guard is built before the gateway because the gateway needs it: the
+	// client WebSocket route resolves its own credential (it is not registered
+	// through Guard) so it can refuse a caller that does not own the lease.
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	guard.logStartupState()
+
+	// Single-use WebSocket tickets exist ONLY because a browser cannot put a bearer
+	// header on a WebSocket handshake. With authentication disabled there is
+	// nothing to authenticate, so the store is built INERT: it issues nothing, the
+	// claim response omits `ticket`, and WS /lease/{lease_id} keeps accepting a
+	// connection with no ticket exactly as it did before tickets existed.
+	tickets := newTicketStore(logger, guard.enabled())
+
+	// Lease durability. An unset state_dir returns a nil store and persistence
+	// stays off; a state_dir that is set but unusable fails the boot, because an
+	// operator who asked for durability and silently did not get it would only
+	// find out from a restart that lost the state they configured it to keep.
+	leaseStore, brokerID, err := openLeaseStore(logger, cfg)
+	if err != nil {
+		logger.Error("failed to open lease state", "state_dir", cfg.StateDir, "error", err)
+		return err
+	}
+	if leaseStore != nil {
+		defer func() { _ = leaseStore.Close() }()
+		logger.Info("lease durability enabled", "state_dir", cfg.StateDir, "broker_id", brokerID)
+	} else {
+		logger.Warn("state_dir is not set: lease state is in-memory only and a restart " +
+			"will lose track of every instance this broker spawned")
+	}
+
+	// The spawn-secret derivation key. It shares state_dir's fate: present and
+	// stable when durability is on, absent (and secrets random per spawn, as they
+	// always were) when it is off. Loaded AFTER openLeaseStore because that is
+	// what creates the directory.
+	spawnSecretKey, err := loadSpawnKey(logger, cfg.StateDir)
+	if err != nil {
+		logger.Error("failed to load the broker spawn key", "state_dir", cfg.StateDir, "error", err)
+		return err
+	}
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
-	gateway := NewGateway(logger, registry)
-	claims := NewClaimServer(logger, registry, cfg, execRunner{})
+	// The registry invalidates a lease's tickets when the lease goes away, through
+	// the single teardown convergence point (Remove) so manual release, the idle
+	// sweeper and crash detection all invalidate.
+	registry.useTicketStore(tickets)
+	// Records carry the RAW advertise_addr, verbatim as configured, so a record
+	// round-trips what is in broker.yaml rather than a derived host.
+	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+
+	// Restart recovery. It runs BEFORE anything is served, because a surviving
+	// instance is already dialing /instance on its reconnect backoff and every
+	// attempt made before its lease is back in the registry is refused as unknown.
+	// A restored lease re-holds its capacity slot immediately, so the cap is
+	// honest from the first claim this process accepts.
+	restoredLeases := recoverLeases(logger, registry, leaseStore, brokerID, spawnSecretKey)
+
+	// The gateway holds the ticket store as well as the guard: the client WebSocket
+	// accepts a single-use `?ticket=` as an alternative to a bearer header, and it
+	// is the only route that redeems one.
+	gateway := NewGateway(logger, registry, guard, tickets)
+	claims := NewClaimServer(logger, registry, cfg, execRunner{}, tickets)
+	// Spawn secrets are derived from the broker's key when there is one, so a
+	// restart can recompute what a surviving instance is holding.
+	claims.useSpawnKey(spawnSecretKey)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
-	leases := NewLeasesServer(logger, registry)
+	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
+	// ticket and re-claiming (which would spawn a new instance) is not an answer.
+	ticketsServer := NewTicketServer(logger, registry, tickets)
+	// The leases listing is scoped to the caller unless it holds cfg.AdminScope,
+	// so it needs both the guard (to know whether auth is on at all) and the
+	// configured operator scope.
+	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
@@ -66,16 +159,37 @@ func run() error {
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
 
+	// Bound the restored leases: anything no instance reattaches to within
+	// reattach_window is torn down through the shared release path. It shares the
+	// sweeper's context so a shutdown cancels the wait instead of reaping leases on
+	// the way out. A no-op when nothing was restored.
+	go reapUnreattached(sweepCtx, logger, registry, restoredLeases, cfg.ReattachWindow, cfg.ReleaseGrace)
+
 	mux := http.NewServeMux()
+
+	// Health stays outside the guard on purpose: a load balancer or container
+	// probe has no credential to present, and liveness leaks nothing.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// The WebSocket routes are registered on the raw mux: the client WS will also
+	// accept a single-use ticket and the instance dial-back a spawn secret, both of
+	// which are their own stories. Bearer-header middleware is the wrong instrument
+	// for either, so the client route resolves its own credential and enforces
+	// lease ownership inside handleClient (it holds the guard for exactly that).
 	gateway.Register(mux)
-	claims.Register(mux)
-	releases.Register(mux)
-	leases.Register(mux)
+
+	// Client-facing control-plane routes go through the guard. Registering via
+	// `guarded` (rather than wrapping handlers individually) means any route
+	// added here later is authenticated by construction.
+	guarded := guard.Guard(mux)
+	claims.Register(guarded)
+	releases.Register(guarded)
+	leases.Register(guarded)
+	ticketsServer.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
