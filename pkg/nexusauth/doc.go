@@ -10,11 +10,12 @@
 //
 //   - Principal — the verified identity. ID is the only field authorization
 //     compares; Tenant, Scopes and Claims are carried for policy and audit.
-//   - Validator — the single extension point. Three implementations ship here:
+//   - Validator — the single extension point. Four implementations ship here:
 //     static (a token → Principal table), jwks (an OIDC JWS verified against the
-//     issuer's published key set) and introspect (an opaque token verified by
-//     asking the issuer, per RFC 7662). Others might trust a fronting proxy's
-//     headers.
+//     issuer's published key set), introspect (an opaque token verified by
+//     asking the issuer, per RFC 7662) and proxy_headers (an identity a fronting
+//     reverse proxy already established, honoured only for peers inside a
+//     configured CIDR allowlist).
 //   - Chain — an ordered set of named validators. The first success wins. When
 //     every validator denies, the aggregate *DeniedError names each validator
 //     and its reason so an operator can diagnose the rejection from a single

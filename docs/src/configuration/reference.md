@@ -2383,16 +2383,19 @@ auth:
       client_id: "nexus-broker"
       client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"
       principal_claim: sub
+    - type: proxy_headers   # identity established by a fronting authenticating proxy
+      trusted_proxy_cidrs: ["10.4.0.0/16"]   # required, and the entire security model
+      principal_header: X-Forwarded-User
 ```
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
 | `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
-| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), or `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint). |
-| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static`. |
-| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks` and `introspect`; accepted and ignored by `static`. |
-| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks` and `introspect`; accepted and ignored by `static`. |
+| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint), or `proxy_headers` (an identity a fronting authenticating proxy already established, honoured only for peers inside a CIDR allowlist). |
+| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static` and `proxy_headers` (neither has a claim set — `proxy_headers` uses `principal_header` instead). |
+| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks` and `introspect`; accepted and ignored by `static` and `proxy_headers`. |
+| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks` and `introspect`; accepted and ignored by `static` and `proxy_headers`. |
 | `auth.validators[].tokens`             | list            | *required for `static`* | Token table for a `static` validator. At least one entry; duplicate `token` values are a config error rather than a last-one-wins surprise. |
 | `auth.validators[].tokens[].token`     | string          | *required* | The bearer token value, matched against `Authorization: Bearer <token>` with a constant-time compare. |
 | `auth.validators[].tokens[].principal` | string          | *required* | The principal id a request presenting this token acts as. Must be non-empty — an empty principal would behave as a wildcard in later ownership checks. |
@@ -2613,6 +2616,115 @@ record — `auth allowed` (INFO) or `auth denied` (WARN) — carrying `route` (t
 matched mux pattern), `principal_id` (empty on a deny), `lease_id` when the route
 has one in its path, and on a deny a `reason` plus the per-validator `denial`
 group. There is no separate audit sink; these records are it.
+
+#### The `proxy_headers` validator
+
+`type: proxy_headers` trusts an identity that a fronting reverse proxy has
+already established and passed down in request headers — oauth2-proxy, an
+OIDC-aware ingress, an authenticating service-mesh sidecar. It makes the broker's
+original deployment story ("put your own authenticating proxy in front of it")
+first-class instead of a workaround.
+
+> **⚠️ A wrong `trusted_proxy_cidrs` turns this validator into an open door.**
+> A header is not a credential. Anyone who can open a TCP connection to the
+> broker's `listen_addr` can send `X-Forwarded-User: <anybody>` — there is no
+> signature, no expiry, and nothing to verify. The **only** thing standing
+> between that and full impersonation is the CIDR allowlist, so:
+>
+> - **Never write `0.0.0.0/0` or `::/0`.** That is not "allow the ingress", it is
+>   "let every caller on the network name themselves". A request from the public
+>   internet carrying `X-Forwarded-User: admin@example.com` would then claim
+>   leases, release other people's leases, and — with a matching
+>   `auth.admin_scope` in its scopes header — read the whole lease registry.
+> - **Write the proxy's own address, not the client's.** The allowlist is matched
+>   against the peer that opened the connection, which is the proxy.
+> - **Do not point it at a network you share with anything else.** A `10.0.0.0/8`
+>   that also contains other tenants' workloads means any of those workloads can
+>   impersonate any broker user. Use the proxy's `/32` (or `/128`) where you can.
+> - **Bind the broker where only the proxy can reach it** — a loopback address or
+>   a private interface — so the CIDR check is a second line of defence rather
+>   than the only one.
+> - Chain this validator with `static`, `jwks`, or `introspect` (below) if some
+>   callers arrive directly rather than through the proxy; do **not** widen the
+>   CIDR to accommodate them.
+
+```yaml
+auth:
+  validators:
+    - type: proxy_headers
+      # Required, and non-empty. Headers are read ONLY when the connecting peer
+      # is inside one of these networks. IPv4 and IPv6 alike.
+      trusted_proxy_cidrs:
+        - 10.4.0.0/16
+        - fd00:1ce::/64
+
+      # Required. No default: X-Forwarded-User, X-Auth-Request-Email and
+      # X-Forwarded-Preferred-Username are all real conventions.
+      principal_header: X-Forwarded-User
+
+      # Optional.
+      tenant_header: X-Auth-Request-Org
+      scopes_header: X-Forwarded-Groups
+```
+
+| Key                                     | Type           | Default    | Description |
+|-----------------------------------------|----------------|------------|-------------|
+| `auth.validators[].trusted_proxy_cidrs`  | string or list | *required* | The networks whose peers may assert an identity through headers. A lone string is one CIDR (it is **not** split on whitespace). IPv4 and IPv6 prefixes are both accepted, and a prefix written with host bits set (`10.4.1.2/16`) is masked to the network it actually matches. **An empty or absent list is a boot failure, never an implicit allow-everything** — failing open here would silently turn the broker into an open door. A malformed entry fails the boot too, naming the index and the offending value. |
+| `auth.validators[].principal_header`     | string         | *required* | The header whose value becomes `Principal.ID`. There is no default because no default is right for everyone. Header names are matched case-insensitively. |
+| `auth.validators[].tenant_header`        | string         | `""`       | Optional header whose value becomes `Principal.Tenant`. Empty means the tenant is never populated. |
+| `auth.validators[].scopes_header`        | string         | `""`       | Optional header whose value becomes `Principal.Scopes`, split on **commas and/or whitespace** so both the OAuth 2.0 space-delimited form (`"a b"`) and the comma-delimited lists proxies such as oauth2-proxy emit (`"a,b"`) work unchanged. RFC 6749's scope grammar allows neither character inside a scope, so nothing legitimate is split apart. Scope comparison stays case-sensitive. |
+
+This validator has **no secret-bearing key**, and therefore no `_env` companion:
+what authenticates a caller here is the network the connection came from, not a
+value that has to be kept out of the config file.
+
+**Only the real peer address is consulted. `X-Forwarded-For` is never read.**
+`XFF` (and `X-Real-IP`, and anything like them) is written by whoever is talking
+to the broker and can name any address at all; using it for the trust decision
+would hand the allowlist straight to the attacker. The check uses the peer
+address the kernel reports for the accepted connection and nothing else. A
+`RemoteAddr` that is unset, malformed, or a Unix-socket path — which has no IP —
+is **denied**, with no "probably local" fallback.
+
+**Out-of-CIDR peers are reported as "no credential", not "credential rejected".**
+From an untrusted peer the headers are not a credential that failed; they are not
+a credential at all, because the validator never looks at them. That matters
+twice over: a prober is not told its forged headers were even considered, and in
+a chain the aggregate denial does not get upgraded to `401 credential rejected`
+(with no challenge) for a caller that simply forgot its bearer token. See the
+[status mapping](#the-introspect-validator) table above.
+
+**A trusted peer whose `principal_header` is absent or blank is denied**, exactly
+as for `jwks` and `introspect`: an empty `Principal.ID` would compare equal to
+the anonymous owner and to every other empty-id principal, which is a
+privilege-escalation path rather than a cosmetic gap.
+
+**A header that arrives more than once is refused.** Several proxies *append*
+their value to a header the caller already sent rather than replacing it, leaving
+`X-Forwarded-User: attacker, real-user` as two values — of which the first, the
+caller's, is the one a naive read returns. A correctly configured proxy always
+sends exactly one value, so refusing the ambiguous case costs nothing and closes
+an impersonation path.
+
+`Principal.Claims` stays empty for this validator: proxy headers carry no claim
+set, the same way a `static` token carries none.
+
+Because the trust decision is positional rather than cryptographic, this
+validator composes well with the others through the chain — proxy headers from
+the ingress network, tokens from everywhere else:
+
+```yaml
+auth:
+  validators:
+    - type: proxy_headers          # tried first: no network round trip
+      trusted_proxy_cidrs: ["10.4.0.0/16"]
+      principal_header: X-Forwarded-User
+    - type: jwks                   # direct callers still need a real token
+      issuer: "https://id.example.com/"
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+      audience: "nexus-broker"
+      principal_claim: sub
+```
 
 #### Lease ownership
 

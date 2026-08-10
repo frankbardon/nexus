@@ -77,7 +77,7 @@ const (
 // knownValidatorTypes lists the types BuildChain can construct, for the
 // unknown-type error message. Extend it alongside the switch in buildValidator.
 func knownValidatorTypes() []string {
-	return []string{ValidatorTypeStatic, ValidatorTypeJWKS, ValidatorTypeIntrospect}
+	return []string{ValidatorTypeStatic, ValidatorTypeJWKS, ValidatorTypeIntrospect, ValidatorTypeProxyHeaders}
 }
 
 // ParseConfig parses an `auth:` block. A nil or empty map is valid and yields a
@@ -206,6 +206,8 @@ func buildValidator(vc ValidatorConfig) (Validator, error) {
 		return buildJWKSValidator(vc)
 	case ValidatorTypeIntrospect:
 		return buildIntrospectValidator(vc)
+	case ValidatorTypeProxyHeaders:
+		return buildProxyHeadersValidator(vc)
 	default:
 		return nil, fmt.Errorf("unknown validator type %q (known types: %s)",
 			vc.Type, strings.Join(knownValidatorTypes(), ", "))
@@ -330,6 +332,40 @@ func buildIntrospectValidator(vc ValidatorConfig) (Validator, error) {
 		return nil, err
 	}
 	return newIntrospectValidator(opts)
+}
+
+// buildProxyHeadersValidator constructs a ProxyHeadersValidator from a config
+// entry.
+//
+// It has no secret-bearing key at all, and therefore no `_env` companion: the
+// thing that authenticates a caller here is the network the connection came
+// from, not a value the operator has to keep out of the config file.
+//
+// A claim mapping on a proxy_headers entry is accepted and ignored, the same way
+// a static entry treats it: there is no claim set to map, only headers, and the
+// mapping keys are parsed uniformly across every entry type.
+func buildProxyHeadersValidator(vc ValidatorConfig) (Validator, error) {
+	if err := rejectUnknownKeys(vc.Options,
+		keyTrustedProxyCIDRs, keyPrincipalHeader, keyTenantHeader, keyScopesHeader,
+	); err != nil {
+		return nil, err
+	}
+
+	var opts proxyHeadersOptions
+	var err error
+	if opts.TrustedProxyCIDRs, err = optStringList(vc.Options, keyTrustedProxyCIDRs); err != nil {
+		return nil, err
+	}
+	if opts.PrincipalHeader, _, err = optString(vc.Options, keyPrincipalHeader); err != nil {
+		return nil, err
+	}
+	if opts.TenantHeader, _, err = optString(vc.Options, keyTenantHeader); err != nil {
+		return nil, err
+	}
+	if opts.ScopesHeader, _, err = optString(vc.Options, keyScopesHeader); err != nil {
+		return nil, err
+	}
+	return newProxyHeadersValidator(opts)
 }
 
 // resolveSecret reads a value that may be written inline (`key`) or sourced from
