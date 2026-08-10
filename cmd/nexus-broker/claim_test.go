@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -110,6 +111,113 @@ func TestBuildCommand_ArgsAndEnv(t *testing.T) {
 	}
 	if !envHas(cmd.Env, brokerframe.EnvLeaseID+"=lease-abc") {
 		t.Errorf("env missing %s; got %v", brokerframe.EnvLeaseID, cmd.Env)
+	}
+}
+
+// TestBuildCommand_InjectsSpawnSecret pins how the second factor reaches the
+// child: through the ENVIRONMENT, and never through argv.
+//
+// The argv assertion is the load-bearing half. argv is world-readable via `ps`
+// and /proc on the machines this runs on, so a secret that leaked into the
+// command line would be readable by every local user — which would defeat the
+// point of having a second factor at all.
+func TestBuildCommand_InjectsSpawnSecret(t *testing.T) {
+	const secret = "7f3b91c2ad4e5806b1c2d3e4f5061728"
+	cmd := buildCommand(spawnSpec{
+		binaryPath:  "/opt/nexus/bin/nexus",
+		configPath:  "/tmp/claim-123.yaml",
+		leaseID:     "lease-abc",
+		brokerAddr:  "ws://127.0.0.1:8080/instance",
+		spawnSecret: secret,
+	})
+
+	if !envHas(cmd.Env, brokerframe.EnvSpawnSecret+"="+secret) {
+		t.Errorf("env missing %s=<secret>; got %v", brokerframe.EnvSpawnSecret, cmd.Env)
+	}
+	for _, arg := range cmd.Args {
+		if strings.Contains(arg, secret) {
+			t.Fatalf("the spawn secret appears in argv (%q): argv is world-readable", arg)
+		}
+	}
+}
+
+// TestNewSpawnSecret_UnguessableAndUnique checks the two properties the value's
+// entire security rests on: it is 128 bits of crypto/rand hex (the same width as
+// a lease id), and consecutive calls differ.
+//
+// Uniqueness cannot prove randomness, but a counter, a constant or a per-process
+// value would all fail it — and those are the realistic ways this gets broken
+// later.
+func TestNewSpawnSecret_UnguessableAndUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 64; i++ {
+		s, err := newSpawnSecret()
+		if err != nil {
+			t.Fatalf("newSpawnSecret: %v", err)
+		}
+		if len(s) != 32 {
+			t.Fatalf("secret %q has length %d, want 32 hex chars (128 bits)", s, len(s))
+		}
+		if _, err := hex.DecodeString(s); err != nil {
+			t.Fatalf("secret %q is not hex: %v", s, err)
+		}
+		if seen[s] {
+			t.Fatalf("newSpawnSecret repeated a value after %d calls: %q", i, s)
+		}
+		seen[s] = true
+	}
+}
+
+// TestClaim_RecordsSpawnSecretOnLease is the join between the two halves of the
+// mechanism: the value handed to the runner must be the value the registry will
+// accept from a dial-back.
+//
+// It is asserted through AttachInstance rather than through a getter because
+// there deliberately is no getter — the expected secret is write-mostly so it
+// cannot be projected onto GET /leases or into a log by accident. The wrong-value
+// case runs FIRST, so the accept afterwards proves the check is real and not
+// simply admitting everything.
+func TestClaim_RecordsSpawnSecretOnLease(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(8801)}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
+	ts, reg, cs := newClaimTestServer(t, runner, cfg)
+	cs.sessionReportGrace = 50 * time.Millisecond
+
+	respCh := make(chan *http.Response, 1)
+	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine:\n  name: test\n"}`) }()
+
+	var spec spawnSpec
+	select {
+	case spec = <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.start was never called")
+	}
+
+	if spec.spawnSecret == "" {
+		t.Fatal("the claim spawned an instance with no spawn secret")
+	}
+	if spec.spawnSecret == spec.leaseID {
+		t.Fatal("the spawn secret is the lease id; it must be an independent value")
+	}
+
+	// A value that is not the minted one is refused...
+	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), "not-the-minted-secret", true); err == nil {
+		t.Fatal("the registry accepted a secret the claim never minted")
+	}
+	// ...and the one handed to the runner is accepted, so the registry's stored
+	// expectation and the child's environment agree.
+	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), spec.spawnSecret, true); err != nil {
+		t.Fatalf("the registry refused the secret it handed the runner: %v", err)
+	}
+
+	// Let the parked claim finish rather than leaving it to time out, so the
+	// server teardown does not block on the ready deadline.
+	reg.MarkReady(spec.leaseID)
+	select {
+	case resp := <-respCh:
+		resp.Body.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("claim never completed after the instance was marked ready")
 	}
 }
 

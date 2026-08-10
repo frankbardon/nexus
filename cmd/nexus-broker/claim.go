@@ -187,12 +187,35 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// handler returns — on success and on every failure path alike.
 	defer func() { _ = os.Remove(configPath) }()
 
+	// Mint the dial-back second factor and record it on the lease BEFORE any
+	// process exists. Ordering is the whole point: an instance can dial back the
+	// microsecond it is exec()d, so a secret stored after the spawn would leave a
+	// window in which a legitimate instance is refused for presenting a value the
+	// registry does not yet expect.
+	//
+	// It is minted here rather than inside the runner so it holds for EVERY
+	// commandRunner — a fake runner in a test injects no environment, and must
+	// not thereby be able to skip the check the production path enforces.
+	//
+	// A generation failure fails the claim. crypto/rand not producing 16 bytes
+	// means the machine is in a state where nothing security-relevant should
+	// proceed, and spawning an instance whose dial-back cannot be authenticated
+	// is precisely the outcome this story exists to prevent.
+	spawnSecret, err := newSpawnSecret()
+	if err != nil {
+		s.registry.Remove(leaseID)
+		s.fail(w, http.StatusInternalServerError, "minting spawn secret", err)
+		return
+	}
+	s.registry.SetSpawnSecret(leaseID, spawnSecret)
+
 	brokerAddr := "ws://" + instanceDialHost(s.cfg.ListenAddr) + instanceWSPath
 	handle, err := s.runner.start(r.Context(), spawnSpec{
 		binaryPath:      s.cfg.NexusBinaryPath,
 		configPath:      configPath,
 		leaseID:         leaseID,
 		brokerAddr:      brokerAddr,
+		spawnSecret:     spawnSecret,
 		recallSessionID: req.SessionID,
 	})
 	if err != nil {

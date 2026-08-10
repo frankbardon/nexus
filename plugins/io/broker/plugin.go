@@ -43,6 +43,12 @@ type Plugin struct {
 	leaseID    string
 	sessionID  string
 
+	// spawnSecret is the per-spawn second factor the broker handed this process
+	// at exec. It is echoed in the register frame and is NEVER logged: unlike
+	// brokerAddr and leaseID (both of which appear in the init record below and
+	// on the broker's own surfaces), this value's only job is to be unguessable.
+	spawnSecret string
+
 	unsubs []func()
 }
 
@@ -103,11 +109,24 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if p.leaseID == "" {
 		p.leaseID = os.Getenv(brokerframe.EnvLeaseID)
 	}
+	// Same config-then-env shape as the two above, so all three spawn inputs are
+	// resolved one way. Absent is a supported state: an unauthenticated broker
+	// does not check the secret, so a missing value must produce an empty
+	// register field rather than a boot failure.
+	p.spawnSecret = configString(ctx.Config, "spawn_secret")
+	if p.spawnSecret == "" {
+		p.spawnSecret = os.Getenv(brokerframe.EnvSpawnSecret)
+	}
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
 	}
 
-	p.client = newClient(p.logger, p.brokerAddr, p.leaseID, p.sessionID, p.handleInbound, p.handleShutdown)
+	p.client = newClient(p.logger, clientConfig{
+		addr:        p.brokerAddr,
+		leaseID:     p.leaseID,
+		spawnSecret: p.spawnSecret,
+		sessionID:   p.sessionID,
+	}, p.handleInbound, p.handleShutdown)
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
@@ -119,8 +138,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("cancel.complete", p.handleCancelComplete, engine.WithSource(pluginID)),
 	)
 
+	// spawn_secret_present records WHETHER a secret was resolved, never its
+	// value. The boolean is worth a field: if the broker refuses this instance's
+	// registration, the first question is whether the secret ever reached the
+	// process, and that is answerable from this line alone.
 	p.logger.Info("broker IO plugin initialized",
-		"broker_addr", p.brokerAddr, "lease_id", p.leaseID, "session_id", p.sessionID)
+		"broker_addr", p.brokerAddr, "lease_id", p.leaseID, "session_id", p.sessionID,
+		"spawn_secret_present", p.spawnSecret != "")
 	return nil
 }
 

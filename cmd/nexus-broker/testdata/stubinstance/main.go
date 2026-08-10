@@ -43,6 +43,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The spawn secret is echoed in the register frame, exactly as the real
+	// nexus.io.broker plugin does. It is read WITHOUT a presence check on
+	// purpose: the broker injects it unconditionally but only enforces it when
+	// authenticated, and the stub must reproduce the unauthenticated case too.
+	spawnSecret := os.Getenv(brokerframe.EnvSpawnSecret)
+
 	sessionID := *recall
 	if sessionID == "" {
 		sessionID = newSessionID
@@ -70,7 +76,11 @@ func main() {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	if err := write(ctx, conn, brokerframe.Frame{LeaseID: leaseID, Signal: brokerframe.SignalRegister}); err != nil {
+	if err := write(ctx, conn, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  spawnSecret,
+	}); err != nil {
 		os.Exit(1)
 	}
 	if err := write(ctx, conn, brokerframe.Frame{LeaseID: leaseID, Signal: brokerframe.SignalReady}); err != nil {

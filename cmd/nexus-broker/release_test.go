@@ -62,7 +62,7 @@ func seedLeaseOwned(t *testing.T, reg *Registry, proc processHandle, owner nexus
 		t.Fatalf("NewLease: %v", err)
 	}
 	wc := newWSConn(nil)
-	if err := reg.AttachInstance(id, wc); err != nil {
+	if err := reg.AttachInstance(id, wc, "", false); err != nil {
 		t.Fatalf("AttachInstance: %v", err)
 	}
 	reg.SetProcess(id, proc)

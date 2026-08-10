@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -118,6 +120,22 @@ type lease struct {
 	// anonymous owner (see anonymousOwner) — a well-defined zero value rather than
 	// an accident, so no code path can dereference something absent.
 	owner nexusauth.Principal
+
+	// spawnSecret is the per-spawn second factor this lease's instance must echo
+	// in its register frame. It is minted by the claim path (newSpawnSecret) and
+	// handed to the child through the environment, so only a process THIS broker
+	// started can present it — which is what the lease id alone cannot prove,
+	// since a lease id travels in ws_urls, client requests and logs.
+	//
+	// It is deliberately write-mostly: SetSpawnSecret stores it and
+	// AttachInstance compares it, and nothing else reads it. There is no getter,
+	// it is absent from LeaseSnapshot (so GET /leases cannot disclose it), it is
+	// never logged, and a future lease-persistence story must NOT write it to
+	// disk — a secret that outlives the process it was minted for authenticates
+	// nothing, because the process it belongs to is gone.
+	//
+	// Guarded by Registry.mu.
+	spawnSecret string
 
 	// lastActivity is the time of the most recent REAL client activity on this
 	// lease — i.e. an inbound io frame flowing client → instance (user input).
@@ -569,15 +587,64 @@ func (r *Registry) PID(id string) int {
 	return l.pid
 }
 
+// SetSpawnSecret records the secret this lease's instance must echo in its
+// register frame. The claim path calls it BEFORE the runner is invoked, so the
+// expected value exists from the moment a process could possibly dial back — a
+// secret recorded after the spawn would leave a window in which a fast instance
+// registers against an empty expectation.
+//
+// It is a no-op for an unknown lease. It does NOT log the value.
+func (r *Registry) SetSpawnSecret(id, secret string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, ok := r.leases[id]; ok {
+		l.spawnSecret = secret
+	}
+}
+
+// Sentinel reasons an instance's register frame is refused. They exist so the
+// gateway can tell the two apart in its LOG — a missing secret is the signature
+// of an instance binary that predates the protocol, a wrong one is the signature
+// of something impersonating an instance — while answering both, and an unknown
+// lease, with the byte-identical close (see handleInstance).
+var (
+	// errSpawnSecretAbsent means the register frame carried no secret at all
+	// while the broker requires one.
+	errSpawnSecretAbsent = errors.New("register frame carried no spawn secret")
+
+	// errSpawnSecretMismatch means the register frame carried a secret that is
+	// not the one this broker minted for the lease.
+	errSpawnSecretMismatch = errors.New("register frame spawn secret does not match")
+)
+
 // AttachInstance binds an instance's dial-back connection to a known lease.
-// It fails if the lease is unknown or already has an instance connection,
-// which is how the gateway rejects an unrecognized register frame.
-func (r *Registry) AttachInstance(id string, conn *wsConn) error {
+// It fails if the lease is unknown, already has an instance connection, or —
+// when enforce is set — presented a spawn secret that is not the one minted for
+// the lease. Those are how the gateway rejects an unrecognized register frame.
+//
+// enforce is the config gate: the caller passes true only when the broker has an
+// `auth:` block. With it false the presented secret is ignored entirely, so an
+// instance binary that predates the spawn-secret protocol keeps registering
+// exactly as it did before — the backward-compatibility guarantee, expressed as
+// "do not run the check" rather than "run a check that always passes".
+//
+// The comparison is constant-time. The presented value never reaches a log or a
+// response, so a timing signal would be the only channel available to someone
+// guessing it, and closing it costs one function call.
+func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret string, enforce bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
 		return fmt.Errorf("unknown lease: %s", id)
+	}
+	if enforce {
+		if presentedSecret == "" {
+			return errSpawnSecretAbsent
+		}
+		if subtle.ConstantTimeCompare([]byte(presentedSecret), []byte(l.spawnSecret)) != 1 {
+			return errSpawnSecretMismatch
+		}
 	}
 	if l.instance != nil {
 		return fmt.Errorf("lease %s already has an instance connection", id)

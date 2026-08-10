@@ -143,7 +143,7 @@ func TestLeaseOwner_SurvivesLifecycleTransitions(t *testing.T) {
 	assertOwner("pending", leaseStatePending)
 
 	instance := newWSConn(nil)
-	if err := reg.AttachInstance(id, instance); err != nil {
+	if err := reg.AttachInstance(id, instance, "", false); err != nil {
 		t.Fatalf("AttachInstance: %v", err)
 	}
 	assertOwner("registered", leaseStateRegistered)

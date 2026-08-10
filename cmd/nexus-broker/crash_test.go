@@ -28,7 +28,7 @@ func seedLiveLeaseOwned(t *testing.T, reg *Registry, proc processHandle, owner n
 	}
 	inst := newWSConn(nil)
 	client := newWSConn(nil)
-	if err := reg.AttachInstance(id, inst); err != nil {
+	if err := reg.AttachInstance(id, inst, "", false); err != nil {
 		t.Fatalf("AttachInstance: %v", err)
 	}
 	if err := reg.AttachClient(id, client); err != nil {

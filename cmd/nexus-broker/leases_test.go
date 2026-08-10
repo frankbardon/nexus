@@ -126,6 +126,39 @@ func TestSurfaceState_MapsInternalLifecycle(t *testing.T) {
 	}
 }
 
+// TestLeasesHTTP_NeverDisclosesSpawnSecret pins the non-disclosure rule on the
+// projection most likely to break it: LeaseSnapshot is a field-by-field copy of
+// a lease, so an added field is one careless line away from being listed.
+//
+// The assertion is on the RAW bytes of both the operator and the caller-scoped
+// listings, not on LeaseSnapshot's fields, so a secret that reached the response
+// under any key name — or inside another value — would fail it.
+func TestLeasesHTTP_NeverDisclosesSpawnSecret(t *testing.T) {
+	const secret = "5c9e1f70b2a34d68af0c1e2d3b4a5968"
+
+	ts, reg := newLeasesTestServer(t, 4)
+	id, _ := seedLease(t, reg, newFakeProcess(4243))
+	reg.SetSpawnSecret(id, secret)
+
+	body := getLeasesBody(t, ts.URL, "")
+	if !bytes.Contains(body, []byte(id)) {
+		t.Fatalf("the lease is not in the listing at all, so the assertion below is vacuous: %s", body)
+	}
+	if bytes.Contains(body, []byte(secret)) {
+		t.Errorf("GET /leases disclosed the lease's spawn secret: %s", body)
+	}
+
+	// The same, one layer down: a caller that encodes the snapshot itself (an
+	// internal caller, a future surface) must not find it either.
+	snapJSON, err := json.Marshal(reg.Snapshot())
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if bytes.Contains(snapJSON, []byte(secret)) {
+		t.Errorf("RegistrySnapshot carries the spawn secret: %s", snapJSON)
+	}
+}
+
 // TestLeasesHTTP_ListsClaimedLeaseThenGoneAfterRelease proves the core surface:
 // a seeded (claimed) lease appears with its id, pid, session id, and an active
 // state plus the capacity aggregates; after release it disappears and the

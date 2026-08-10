@@ -21,6 +21,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // TestClaimSpawnProxyRoundTrip proves the full E1-S4 spine deterministically:
@@ -1159,6 +1160,118 @@ func TestClaimOmitsTicketWhenAuthDisabled(t *testing.T) {
 	}
 	if _, present := trFields["ticket"]; present {
 		t.Errorf("ticket refresh issued a ticket with auth disabled: %s", trBody)
+	}
+}
+
+// TestInstanceDialBackRequiresSpawnSecret is E5-S1 end to end on an
+// authenticated broker: a REAL spawned instance registers and converses, and a
+// hand-rolled dial-back holding a VALID lease id but the wrong secret is refused.
+//
+// The two halves have to be one test. The positive half alone would pass against
+// a broker that checks nothing; the negative half alone would pass against a
+// broker that refuses every dial-back, which is indistinguishable from a broken
+// gateway. Together they say the check is both present and correct.
+//
+// The negative half uses a lease minted directly on the broker's registry rather
+// than a claimed one, because a claimed lease already holds its instance
+// connection — a second dial-back would then be refused by the one-instance rule
+// and the assertion would prove nothing about the secret. The correct-secret dial
+// at the end closes that gap from the other side.
+func TestInstanceDialBackRequiresSpawnSecret(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin)
+
+	// --- a real spawn registers and is genuinely usable ---------------------
+	// The stub echoes the injected NEXUS_BROKER_SPAWN_SECRET in its register
+	// frame exactly as nexus.io.broker does. If the broker minted a secret it did
+	// not inject, or enforced one it did not mint, this claim would never become
+	// ready.
+	cr := b.Claim(t, b.Token, stubClaimBody)
+	if cr.LeaseID == "" || cr.WSURL == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, _, err := b.DialLease(ctx, cr.WSURL, b.Token)
+	if err != nil {
+		t.Fatalf("dial ws_url %s: %v", cr.WSURL, err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+	roundTripIOFrame(t, ctx, client, cr.LeaseID, `{"hello":"spawn-secret"}`)
+
+	// --- a hand-rolled dial-back with a valid lease id but a wrong secret ----
+	const minted = "9d4e7a10c3b28f56ae0192b3c4d5e6f7"
+	leaseID, err := b.Registry.NewLease(nexusauth.Principal{ID: b.Principal})
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	b.Registry.SetSpawnSecret(leaseID, minted)
+	instanceURL := "ws://" + b.Base + instanceWSPath
+
+	impostor := dialInstance(t, ctx, instanceURL)
+	defer impostor.Close(websocket.StatusNormalClosure, "")
+	writeInstanceFrame(t, ctx, impostor, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  "00000000000000000000000000000000",
+	})
+	rctx, rcancel := context.WithTimeout(ctx, 3*time.Second)
+	_, _, rerr := impostor.Read(rctx)
+	rcancel()
+	if rerr == nil {
+		t.Fatal("the broker kept an impostor dial-back open: a valid lease id alone was enough")
+	}
+	if got := websocket.CloseStatus(rerr); got != websocket.StatusPolicyViolation {
+		t.Errorf("impostor close status = %v, want %v (the same close an unknown lease gets)",
+			got, websocket.StatusPolicyViolation)
+	}
+	if b.Registry.InstanceConn(leaseID) != nil {
+		t.Fatal("the impostor was attached to the lease")
+	}
+
+	// Non-vacuity: the SAME lease over the SAME endpoint accepts the minted
+	// secret, so the refusal above is the secret check rather than a gateway that
+	// refuses everything hand-rolled.
+	legit := dialInstance(t, ctx, instanceURL)
+	defer legit.Close(websocket.StatusNormalClosure, "")
+	writeInstanceFrame(t, ctx, legit, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  minted,
+	})
+	waitFor(t, func() bool { return b.Registry.InstanceConn(leaseID) != nil })
+
+	// And the real claimed lease is untouched by any of it.
+	if !b.Registry.Has(cr.LeaseID) {
+		t.Error("the impostor's refusal disturbed the live claimed lease")
+	}
+}
+
+// dialInstance opens a raw WebSocket to the broker's instance dial-back
+// endpoint, standing in for a spawned process.
+func dialInstance(t *testing.T, ctx context.Context, url string) *websocket.Conn {
+	t.Helper()
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(dctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", url, err)
+	}
+	return conn
+}
+
+// writeInstanceFrame encodes and writes one frame to a hand-rolled instance
+// connection.
+func writeInstanceFrame(t *testing.T, ctx context.Context, conn *websocket.Conn, f brokerframe.Frame) {
+	t.Helper()
+	data, err := brokerframe.Encode(f)
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := conn.Write(wctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write frame: %v", err)
 	}
 }
 

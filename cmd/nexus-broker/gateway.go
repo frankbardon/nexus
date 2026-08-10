@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -183,8 +184,18 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 
 	leaseID := frame.LeaseID
 	wc := newWSConn(conn)
-	if err := g.registry.AttachInstance(leaseID, wc); err != nil {
-		g.logger.Warn("rejecting instance registration", "lease_id", leaseID, "error", err)
+	// The register frame must carry BOTH the lease id and the per-spawn secret
+	// the broker handed this child through its environment. Enforcement is gated
+	// on authentication being configured at all: with no `auth:` block the
+	// secret is ignored, so an older nexus binary at nexus_binary_path keeps
+	// working in an unauthenticated deployment exactly as it did.
+	//
+	// Every refusal — unknown lease, absent secret, wrong secret — gets the SAME
+	// policy-violation close and the same reason text. The distinctions live in
+	// the log below and nowhere else: a dialer that could tell "no such lease"
+	// from "wrong secret" could enumerate live lease ids by differencing the two.
+	if err := g.registry.AttachInstance(leaseID, wc, frame.Secret, g.auth.enabled()); err != nil {
+		g.logInstanceRegistrationRefused(leaseID, err)
 		_ = conn.Close(websocket.StatusPolicyViolation, "unknown lease")
 		return
 	}
@@ -212,6 +223,39 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	g.registry.DetachInstance(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")
 	g.logger.Info("instance disconnected", "lease_id", leaseID)
+}
+
+// logInstanceRegistrationRefused emits the audit record for a rejected
+// dial-back. The wire response is identical for every cause; this is the ONLY
+// place they are told apart.
+//
+// The absent-secret case gets its own message, and says out loud that the
+// instance binary may predate the protocol, because that is the failure an
+// operator will otherwise misdiagnose. The symptom of a version-skewed
+// nexus_binary_path is indistinguishable from a network fault at the claim
+// layer: every claim times out with "instance did not become ready in time"
+// while the child process is alive, connecting fine, and being silently hung up
+// on. Naming the cause here is what turns a day of packet captures into a
+// binary upgrade.
+//
+// No record carries the presented secret. Refusing to log a credential is not
+// optional just because this one was rejected — a near-miss value is exactly
+// what makes a log worth stealing.
+func (g *Gateway) logInstanceRegistrationRefused(leaseID string, err error) {
+	switch {
+	case errors.Is(err, errSpawnSecretAbsent):
+		g.logger.Warn("rejecting instance registration: its register frame carried NO spawn secret, "+
+			"but this broker has an auth block and therefore requires one. "+
+			"The most likely cause is that the instance binary at nexus_binary_path predates the "+
+			"spawn-secret protocol: upgrade it, or remove the auth block to run this broker unauthenticated",
+			"lease_id", leaseID, "error", err)
+	case errors.Is(err, errSpawnSecretMismatch):
+		g.logger.Warn("rejecting instance registration: its register frame carried the WRONG spawn secret. "+
+			"This broker did not spawn the process that dialed back",
+			"lease_id", leaseID, "error", err)
+	default:
+		g.logger.Warn("rejecting instance registration", "lease_id", leaseID, "error", err)
+	}
 }
 
 // handleClient accepts a client connection for a specific lease and routes its

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -391,6 +392,236 @@ func TestGatewayClient_AuthDisabledAllowsAnonymousConnect(t *testing.T) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	waitFor(t, func() bool { return reg.ClientConn(leaseID) != nil })
+}
+
+// ---------------------------------------------------------------------------
+// Spawn secret on the instance dial-back
+// ---------------------------------------------------------------------------
+
+// syncBuffer is a mutex-guarded log sink. slog handlers are safe for concurrent
+// use but the io.Writer beneath them must be too, and a test that reads its own
+// log output while gateway goroutines are still writing to it needs that.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// seedSecretLease mints a lease with a known spawn secret, the way the claim
+// path does before invoking the runner. It returns the lease id.
+func seedSecretLease(t *testing.T, reg *Registry, secret string) string {
+	t.Helper()
+	id, err := reg.NewLease(anonymousOwner())
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	reg.SetSpawnSecret(id, secret)
+	return id
+}
+
+// registerInstance dials the instance endpoint, sends a register frame carrying
+// secret, and reports whether the gateway ACCEPTED it — observed as the socket
+// staying open and an instance connection appearing on the lease, not as the
+// absence of an immediate error (the dial itself always succeeds; the refusal is
+// a close on the established socket).
+func registerInstance(t *testing.T, wsURL string, reg *Registry, leaseID, secret string) bool {
+	t.Helper()
+	conn := dial(t, wsURL+instanceWSPath)
+	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
+	writeFrame(t, conn, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  secret,
+	})
+
+	// Poll for the attach rather than reading: an ACCEPTED registration sends
+	// nothing back, so a read would block until the deadline in the success case.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if reg.InstanceConn(leaseID) != nil {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+// assertRegisterRefused fails unless the gateway both declined to attach the
+// instance AND closed the socket with the policy-violation close it uses for an
+// unknown lease — the two halves of "refused indistinguishably".
+func assertRegisterRefused(t *testing.T, wsURL string, reg *Registry, leaseID, secret string) {
+	t.Helper()
+	conn := dial(t, wsURL+instanceWSPath)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	writeFrame(t, conn, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  secret,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatal("the gateway kept the connection open; the registration was not refused")
+	}
+	if got := websocket.CloseStatus(err); got != websocket.StatusPolicyViolation {
+		t.Errorf("close status = %v, want %v (the same close an unknown lease gets)",
+			got, websocket.StatusPolicyViolation)
+	}
+	if reg.InstanceConn(leaseID) != nil {
+		t.Error("a refused instance was attached to the lease")
+	}
+}
+
+// TestGatewayInstance_SpawnSecretEnforcedWhenAuthEnabled is the core of E5-S1:
+// with an `auth:` block configured, the register frame's secret must be the one
+// the broker minted for that lease.
+//
+// Each subtest gets its OWN lease because a successful attach is single-shot
+// (a lease refuses a second instance connection), which would otherwise make a
+// later refusal ambiguous. The wrong-secret and absent-secret cases are followed
+// by a correct-secret registration ON THE SAME lease and gateway: without that,
+// a gateway that refused every dial-back would pass both of them.
+func TestGatewayInstance_SpawnSecretEnforcedWhenAuthEnabled(t *testing.T) {
+	const secret = "b8d3f0a15c274e6981aa4f0c2e7d5b93"
+
+	t.Run("matching secret registers", func(t *testing.T) {
+		env := newTestGatewayEnv(t, mustAuthChain(t, twoPrincipalAuthYAML), nil)
+		leaseID := seedSecretLease(t, env.reg, secret)
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("an instance presenting the minted secret was refused")
+		}
+	})
+
+	t.Run("wrong secret refused", func(t *testing.T) {
+		env := newTestGatewayEnv(t, mustAuthChain(t, twoPrincipalAuthYAML), nil)
+		leaseID := seedSecretLease(t, env.reg, secret)
+
+		// A well-formed value of the same shape — this is what someone who
+		// learned the lease id (from a ws_url, a log, a client request) but not
+		// the secret would present.
+		assertRegisterRefused(t, env.wsURL, env.reg, leaseID, "00000000000000000000000000000000")
+
+		// Non-vacuity: the SAME lease on the SAME gateway accepts the real
+		// secret, so the refusal above is the secret check and not a broken
+		// endpoint.
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("the correct secret was also refused; the rejection above proves nothing")
+		}
+	})
+
+	t.Run("absent secret refused", func(t *testing.T) {
+		env := newTestGatewayEnv(t, mustAuthChain(t, twoPrincipalAuthYAML), nil)
+		leaseID := seedSecretLease(t, env.reg, secret)
+
+		// This is the version-skew shape: a register frame with no secret at all,
+		// exactly what a nexus binary predating the protocol sends.
+		assertRegisterRefused(t, env.wsURL, env.reg, leaseID, "")
+
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("the correct secret was also refused; the rejection above proves nothing")
+		}
+	})
+}
+
+// TestGatewayInstance_SpawnSecretIgnoredWhenAuthDisabled is the
+// backward-compatibility guarantee, and the reason enforcement is gated at all:
+// an operator running a broker with no `auth:` block can keep pointing
+// nexus_binary_path at an older nexus that sends no secret, and nothing changes.
+//
+// The wrong-secret case is included deliberately. With the gate off the field is
+// not consulted AT ALL, so a stale or garbage value must also be admitted — a
+// gate implemented as "compare, but tolerate empty" would pass the first subtest
+// and fail this one.
+func TestGatewayInstance_SpawnSecretIgnoredWhenAuthDisabled(t *testing.T) {
+	for _, tc := range []struct{ name, secret string }{
+		{"no secret at all (pre-protocol instance)", ""},
+		{"a secret this broker never minted", "deadbeefdeadbeefdeadbeefdeadbeef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestGatewayEnv(t, nil, nil)
+			if env.tickets.issuing() {
+				t.Fatal("precondition: auth must be OFF for this fixture")
+			}
+			leaseID := seedSecretLease(t, env.reg, "the-brokers-real-secret")
+			if !registerInstance(t, env.wsURL, env.reg, leaseID, tc.secret) {
+				t.Fatal("an instance was refused by a broker with no auth block")
+			}
+		})
+	}
+}
+
+// TestGatewayInstance_SpawnSecretIsNeverLogged pins the non-disclosure rule on
+// the one component that handles both the expected and the presented value.
+//
+// Both an admitted and a refused registration are exercised at DEBUG level, and
+// the assertion is on the raw log bytes rather than on any particular field, so a
+// value smuggled into a message string or an error would fail it just the same.
+func TestGatewayInstance_SpawnSecretIsNeverLogged(t *testing.T) {
+	const (
+		minted    = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+		presented = "ffeeddccbbaa99887766554433221100"
+	)
+	// A synchronized sink, not a bare bytes.Buffer: an admitted registration
+	// leaves a read pump running, so the gateway is still logging (read pump
+	// ended, instance disconnected) on its own goroutine while this test reads
+	// the output back.
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	env := newTestGatewayEnv(t, mustAuthChain(t, twoPrincipalAuthYAML), logger)
+
+	// A refusal for a WRONG secret: the presented value must not be logged.
+	mismatchLease := seedSecretLease(t, env.reg, minted)
+	assertRegisterRefused(t, env.wsURL, env.reg, mismatchLease, presented)
+
+	// A refusal for an ABSENT secret: the version-skew shape, whose record must
+	// name the cause.
+	skewLease := seedSecretLease(t, env.reg, minted)
+	assertRegisterRefused(t, env.wsURL, env.reg, skewLease, "")
+
+	// And an admitted registration, so the expected value passes through the
+	// success path too.
+	admittedLease := seedSecretLease(t, env.reg, minted)
+	if !registerInstance(t, env.wsURL, env.reg, admittedLease, minted) {
+		t.Fatal("the correct secret was refused; the log assertions would cover the wrong path")
+	}
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("no log output captured; the assertions below would be vacuous")
+	}
+	for name, value := range map[string]string{"minted": minted, "presented": presented} {
+		if strings.Contains(out, value) {
+			t.Errorf("the %s spawn secret VALUE appears in the log output:\n%s", name, out)
+		}
+	}
+	// Non-vacuity: the events WERE recorded and name their leases, so the
+	// absences above are the values being withheld rather than nothing having
+	// been logged.
+	if !strings.Contains(out, "instance registered") || !strings.Contains(out, admittedLease) {
+		t.Errorf("no registration record naming the admitted lease:\n%s", out)
+	}
+	if !strings.Contains(out, "rejecting instance registration") || !strings.Contains(out, mismatchLease) {
+		t.Errorf("no refusal record naming the refused lease:\n%s", out)
+	}
+	// And the absent-secret refusal says out loud that the binary may predate the
+	// protocol, because an operator who cannot see that will chase a network
+	// fault instead.
+	if !strings.Contains(out, "predates the spawn-secret protocol") {
+		t.Errorf("the absent-secret refusal does not name the version-skew cause:\n%s", out)
+	}
 }
 
 // ---------------------------------------------------------------------------

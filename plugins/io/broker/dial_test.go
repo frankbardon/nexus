@@ -83,7 +83,11 @@ func newTestPlugin(t *testing.T, addr, leaseID, sessionID string) (*Plugin, engi
 	p.brokerAddr = addr
 	p.leaseID = leaseID
 	p.sessionID = sessionID
-	p.client = newClient(logger, addr, leaseID, sessionID, p.handleInbound, p.handleShutdown)
+	p.client = newClient(logger, clientConfig{
+		addr:      addr,
+		leaseID:   leaseID,
+		sessionID: sessionID,
+	}, p.handleInbound, p.handleShutdown)
 
 	p.unsubs = append(p.unsubs,
 		bus.Subscribe("io.output", p.handleOutput),
@@ -142,6 +146,75 @@ func TestDialRegisterHandshake(t *testing.T) {
 	}
 	if frames[2].Signal != brokerframe.SignalSessionIDReport || frames[2].SessionID != "sess-123" {
 		t.Fatalf("third frame want session-id-report/sess-123, got %+v", frames[2])
+	}
+}
+
+// TestRegisterFrameCarriesSpawnSecret proves the instance half of E5-S1: the
+// spawn secret rides on the REGISTER frame and on that frame only.
+//
+// The "only" half is load-bearing. The broker forwards SignalIO frames verbatim
+// to the connected client, so a secret leaking onto any later frame would be
+// handed straight to whoever is on the other end of the session socket.
+func TestRegisterFrameCarriesSpawnSecret(t *testing.T) {
+	const secret = "3a7c91e0d5b6482f10ac2b3d4e5f6071"
+
+	stub := newStubBroker(t)
+	p, _ := newTestPlugin(t, stub.wsURL(), "lease-sec", "sess-sec")
+	p.spawnSecret = secret
+	p.client.cfg.spawnSecret = secret
+
+	p.client.Start()
+	waitConn(t, stub)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var frames []brokerframe.Frame
+	for time.Now().Before(deadline) {
+		frames = stub.snapshot()
+		if len(frames) >= 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(frames) < 3 {
+		t.Fatalf("expected >=3 handshake frames, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].Signal != brokerframe.SignalRegister {
+		t.Fatalf("first frame want register, got %+v", frames[0])
+	}
+	if frames[0].Secret != secret {
+		t.Errorf("register frame Secret = %q, want the configured spawn secret", frames[0].Secret)
+	}
+	for _, f := range frames[1:] {
+		if f.Secret != "" {
+			t.Errorf("a %s frame carries the spawn secret; only register may: %+v", f.Signal, f)
+		}
+	}
+}
+
+// TestRegisterFrameOmitsAbsentSpawnSecret is the unauthenticated-broker path:
+// with no secret resolved the register frame must still be sent, carrying no
+// secret at all rather than failing or stalling the handshake.
+func TestRegisterFrameOmitsAbsentSpawnSecret(t *testing.T) {
+	stub := newStubBroker(t)
+	p, _ := newTestPlugin(t, stub.wsURL(), "lease-nosec", "")
+
+	p.client.Start()
+	waitConn(t, stub)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var frames []brokerframe.Frame
+	for time.Now().Before(deadline) {
+		frames = stub.snapshot()
+		if len(frames) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(frames) < 2 {
+		t.Fatalf("expected >=2 handshake frames, got %d: %+v", len(frames), frames)
+	}
+	if frames[0].Signal != brokerframe.SignalRegister || frames[0].Secret != "" {
+		t.Errorf("first frame want register with no secret, got %+v", frames[0])
 	}
 }
 

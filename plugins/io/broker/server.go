@@ -64,9 +64,7 @@ type ioMessage struct {
 // is cancelled.
 type client struct {
 	logger     *slog.Logger
-	addr       string
-	leaseID    string
-	sessionID  string
+	cfg        clientConfig
 	onIO       func(ioMessage)
 	onShutdown func()
 
@@ -88,18 +86,38 @@ type client struct {
 	done      chan struct{}
 }
 
+// clientConfig is the set of spawn-time coordinates a dial-back client needs.
+//
+// It is a struct rather than four positional string parameters because they are
+// all strings and one of them is a credential: a transposed pair would compile
+// cleanly and send the spawn secret where the lease id belongs, putting a secret
+// on a surface that is logged and echoed to clients.
+type clientConfig struct {
+	// addr is the ws:// URL of the broker's instance dial-back endpoint.
+	addr string
+
+	// leaseID identifies the lease and is echoed in every frame.
+	leaseID string
+
+	// spawnSecret is the per-spawn second factor echoed in the register frame.
+	// Empty is valid — an unauthenticated broker does not check it — and the
+	// frame then simply omits the field.
+	spawnSecret string
+
+	// sessionID is the engine session id reported after ready, when non-empty.
+	sessionID string
+}
+
 // newClient constructs a dial-back client. It does not dial until Start.
 // onShutdown is invoked (once) when the broker sends a SignalShutdown frame so
 // the plugin can trigger a graceful engine shutdown; it may be nil.
-func newClient(logger *slog.Logger, addr, leaseID, sessionID string, onIO func(ioMessage), onShutdown func()) *client {
+func newClient(logger *slog.Logger, cfg clientConfig, onIO func(ioMessage), onShutdown func()) *client {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &client{
 		logger:     logger,
-		addr:       addr,
-		leaseID:    leaseID,
-		sessionID:  sessionID,
+		cfg:        cfg,
 		onIO:       onIO,
 		onShutdown: onShutdown,
 		minBackoff: 250 * time.Millisecond,
@@ -118,9 +136,14 @@ func (c *client) Start() {
 // Stop cancels the reconnect loop and closes the active connection, then
 // waits for the loop goroutine to exit (bounded by the supplied context).
 func (c *client) Stop(ctx context.Context) {
-	if c.runCancel != nil {
-		c.runCancel()
+	if c.runCancel == nil {
+		// Start was never called — the plugin stayed dormant because no
+		// broker_addr was configured. There is no loop goroutine, so `done` will
+		// never close and the wait below would burn the caller's entire timeout
+		// (5s) on every shutdown of a dormant instance.
+		return
 	}
+	c.runCancel()
 	c.closeConn(websocket.StatusNormalClosure, "shutting down")
 	select {
 	case <-c.done:
@@ -164,10 +187,10 @@ func (c *client) runLoop() {
 // then reads frames until the connection closes or the context is cancelled.
 func (c *client) session() error {
 	dialCtx, cancel := context.WithTimeout(c.runCtx, 10*time.Second)
-	conn, _, err := websocket.Dial(dialCtx, c.addr, nil)
+	conn, _, err := websocket.Dial(dialCtx, c.cfg.addr, nil)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("dial broker %s: %w", c.addr, err)
+		return fmt.Errorf("dial broker %s: %w", c.cfg.addr, err)
 	}
 
 	c.mu.Lock()
@@ -176,26 +199,34 @@ func (c *client) session() error {
 	defer c.closeConn(websocket.StatusNormalClosure, "")
 
 	// First frame MUST be register so the broker can bind this socket to
-	// the lease (E1-S2 contract).
-	if err := c.send(brokerframe.Frame{LeaseID: c.leaseID, Signal: brokerframe.SignalRegister}); err != nil {
+	// the lease (E1-S2 contract). It carries the spawn secret alongside the
+	// lease id: the lease id says WHICH lease, the secret proves this process is
+	// the one the broker spawned for it. The secret is sent on this frame only —
+	// it is meaningless on the others and every later frame is forwarded to a
+	// client verbatim.
+	if err := c.send(brokerframe.Frame{
+		LeaseID: c.cfg.leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  c.cfg.spawnSecret,
+	}); err != nil {
 		return fmt.Errorf("send register: %w", err)
 	}
 	// Announce readiness to accept IO.
-	if err := c.send(brokerframe.Frame{LeaseID: c.leaseID, Signal: brokerframe.SignalReady}); err != nil {
+	if err := c.send(brokerframe.Frame{LeaseID: c.cfg.leaseID, Signal: brokerframe.SignalReady}); err != nil {
 		return fmt.Errorf("send ready: %w", err)
 	}
 	// Report the engine session id so the broker can persist it for -recall.
-	if c.sessionID != "" {
+	if c.cfg.sessionID != "" {
 		if err := c.send(brokerframe.Frame{
-			LeaseID:   c.leaseID,
+			LeaseID:   c.cfg.leaseID,
 			Signal:    brokerframe.SignalSessionIDReport,
-			SessionID: c.sessionID,
+			SessionID: c.cfg.sessionID,
 		}); err != nil {
 			return fmt.Errorf("send session-id-report: %w", err)
 		}
 	}
 
-	c.logger.Info("registered with broker", "addr", c.addr, "lease_id", c.leaseID)
+	c.logger.Info("registered with broker", "addr", c.cfg.addr, "lease_id", c.cfg.leaseID)
 	return c.readPump(conn)
 }
 
@@ -252,7 +283,7 @@ func (c *client) SendIO(msg ioMessage) {
 		return
 	}
 	frame := brokerframe.Frame{
-		LeaseID: c.leaseID,
+		LeaseID: c.cfg.leaseID,
 		Signal:  brokerframe.SignalIO,
 		Payload: payload,
 	}

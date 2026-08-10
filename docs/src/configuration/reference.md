@@ -1430,6 +1430,22 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it. |
+
+The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
+alone is a poor authenticator for it: the same value appears in `ws_url`s, client
+requests and logs, so anything that observes one could otherwise impersonate an
+instance. The broker mints 128 bits of `crypto/rand` per spawn, records the
+expected value on the lease, and injects it through the environment (never argv,
+which is world-readable). Both the lease id and the secret must match or the
+dial-back is closed with the same policy-violation close an unknown lease gets.
+
+Enforcement on the broker side is **gated on the broker having an `auth:` block**
+(see the Session broker section below). With no `auth:` block the secret is
+ignored entirely, so a `nexus` binary at `nexus_binary_path` that predates the
+protocol keeps working; with one configured, such a binary is refused and the
+broker logs a message naming version skew as the likely cause. The value is never
+logged and never appears in `GET /leases`.
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
 payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
@@ -2342,7 +2358,7 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
 
 ### Authentication (`auth:`)
 
@@ -2774,10 +2790,33 @@ no principal at all, which is why the check lives in the HTTP handlers rather
 than in the shared teardown they funnel through.
 
 The spawned-instance side is configured by the `nexus.io.broker` plugin
-(`broker_addr`, `lease_id`) — see [`nexus.io.broker`](#nexusiobroker) in the
-I/O section. Both keys fall back to the `NEXUS_BROKER_ADDR` /
-`NEXUS_BROKER_LEASE_ID` environment variables the broker injects at spawn
-(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID`).
+(`broker_addr`, `lease_id`, `spawn_secret`) — see
+[`nexus.io.broker`](#nexusiobroker) in the I/O section. All three keys fall back
+to the `NEXUS_BROKER_ADDR` / `NEXUS_BROKER_LEASE_ID` /
+`NEXUS_BROKER_SPAWN_SECRET` environment variables the broker injects at spawn
+(defined as `brokerframe.EnvBrokerAddr` / `brokerframe.EnvLeaseID` /
+`brokerframe.EnvSpawnSecret`).
+
+#### Instance dial-back authentication (`WS /instance`)
+
+The `auth:` block also gates the **instance** dial-back, not just the
+control-plane routes. With it configured, the `register` frame must carry both a
+known `lease_id` **and** the per-spawn secret the broker minted for that lease
+(128 bits of `crypto/rand`, injected through the child's environment at exec).
+Anything else — an unknown lease, an absent secret, a wrong secret — is closed
+with the same `policy violation` / `unknown lease` close, so a dialer cannot
+difference the responses to enumerate live lease ids.
+
+The gate exists because of **version skew**. With no `auth:` block the secret is
+not checked at all, so a `nexus_binary_path` pointing at a build that predates
+the protocol keeps working unchanged. With one configured, such a binary is
+refused and the broker logs a `WARN` naming the version skew explicitly —
+otherwise the symptom (every claim returning `504 instance did not become ready
+in time` while the child process is alive and connecting fine) reads as a network
+fault. The fix is to upgrade the instance binary.
+
+The secret is never logged, never returned by `GET /leases`, and never passed in
+argv.
 
 ### `POST /claim` (HTTP API, not YAML)
 
