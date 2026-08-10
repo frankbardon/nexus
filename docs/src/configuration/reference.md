@@ -2336,6 +2336,8 @@ max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
 release_grace: 10s
+state_dir: ""                 # empty = lease state is in-memory only; see below
+broker_id: ""                 # empty = generated once and persisted in state_dir
 
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
@@ -2358,7 +2360,72 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) below. |
+| `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
+
+### Lease durability (`state_dir`)
+
+Lease state is live-process bookkeeping: which instances this broker spawned,
+who claimed them, and what session each is running. Without `state_dir` it lives
+only in memory, so a broker restart loses all of it and the `nexus` processes it
+spawned become orphans nobody can account for. Setting `state_dir` makes it
+durable.
+
+This is **not** session continuity — that is already solved by
+`~/.nexus/sessions/<id>/` plus `-recall`, and a released instance's session
+directory is intact and resumable whether or not `state_dir` is set.
+
+```yaml
+state_dir: "~/.nexus/broker"     # per-broker; never shared between brokers
+broker_id: ""                    # optional; generated + persisted when empty
+```
+
+**Format.** `<state_dir>/leases.jsonl` is an append-only JSONL journal, one JSON
+object per line. There is no database and no migrations — the broker is a
+standalone binary, not an engine plugin, so the per-plugin SQLite storage is not
+available to it. A record is written when a lease is **minted**
+(`lease-created`), when its pid or session id first becomes knowable
+(`lease-updated`, which supersedes the earlier record for the same `lease_id`),
+and when it is **torn down** (`lease-released`). The release record is written
+from the single point all three teardown reasons converge on, so a manual
+`POST /release`, an idle sweep and a **crash** are all recorded.
+
+Each record carries `lease_id`, `owner` (the claiming principal's `id`, `tenant`
+and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim as
+configured, so a record round-trips what is in `broker.yaml` — and
+`created_at` / `released_at` / `reason`.
+
+**No secret is ever written.** Not the lease's per-spawn secret (it
+authenticates a process that dies with the broker, so persisting it would put a
+live-looking credential on disk in exchange for nothing), not a client WebSocket
+ticket, not a bearer token. The owner's **raw claim set** is deliberately not
+persisted either — `id`, `tenant` and `scopes` are what ownership and scoped
+listing need, and the full claim set stays in the broker's `slog` audit trail.
+
+**Growth is bounded** by compaction, in two passes over the same rewrite: the
+journal is compacted **when it is opened**, and again **every 512 appends**. A
+compaction rewrites the file to hold exactly the leases that are still live, one
+record each, via a temp file and an atomic rename — so a crash mid-compaction
+leaves the previous journal intact. At any moment the file holds at most
+(live leases + 512) records, however many leases have come and gone.
+
+**Failure handling.** A journal write that fails is **logged and otherwise
+ignored**: it never fails a claim or a release, because durability must not
+become a new way for the broker to refuse service. A record that was being
+written when the broker was killed leaves a torn final line; the reader **skips
+it with a warning** and keeps every complete record before it, and the
+rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
+the file is skipped the same way rather than failing the whole file.
+
+> Restart **recovery** — replaying the journal, checking whether each recorded
+> pid is still alive, and re-adopting the survivors — builds on this write path
+> and is tracked separately. Writing the journal is what makes it possible.
+
+Multi-broker cooperation is **not** implemented: no broker reads another's
+journal, there is no shared store, and there is no routing. `broker_id` and
+`advertise_addr` are stamped on every record now so that a future shared backend
+needs no data migration.
 
 ### Authentication (`auth:`)
 

@@ -40,10 +40,17 @@ func (p Principal) HasScope(s string) bool {
 	return false
 }
 
-// clone deep-copies the reference-typed fields so a validator can return a
+// Clone deep-copies the reference-typed fields so a validator can return a
 // Principal derived from its own long-lived configuration without handing the
 // caller a slice or map it could mutate under a concurrent request.
-func (p Principal) clone() Principal {
+//
+// It is EXPORTED because the same discipline is needed outside this package:
+// cmd/nexus-broker stamps a Principal onto a lease and hands copies back out of
+// its registry, and being `package main` it cannot reach an unexported method.
+// It previously carried a hand-maintained duplicate with a "keep in sync"
+// comment — one deep-copy definition per type is the only version of that which
+// cannot drift.
+func (p Principal) Clone() Principal {
 	out := p
 	if p.Scopes != nil {
 		out.Scopes = make([]string, len(p.Scopes))

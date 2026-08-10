@@ -60,6 +60,33 @@ type Config struct {
 	// spawn OS-isolated instances. Expanded through engine.ExpandPath.
 	NexusBinaryPath string `yaml:"nexus_binary_path"`
 
+	// StateDir is the per-broker directory holding this broker's lease journal
+	// (`leases.jsonl`) and, when broker_id is unset, its generated identity
+	// (`broker-id`). Expanded through engine.ExpandPath.
+	//
+	// EMPTY (the default) DISABLES PERSISTENCE ENTIRELY: nothing is written, no
+	// directory is created, and the broker behaves exactly as it did before lease
+	// durability existed. That is the default because durability writes an
+	// operator did not ask for — into a path Nexus picked — is a worse surprise
+	// than a restart that loses in-memory bookkeeping, which is the behaviour
+	// every existing deployment already has.
+	//
+	// It must NOT be shared between brokers. Two brokers pointed at one directory
+	// would append to the same journal and compact each other's live leases away.
+	// Each broker gets its own.
+	StateDir string `yaml:"state_dir"`
+
+	// BrokerID is this broker's identity, stamped on every persisted lease record
+	// alongside advertise_addr so a future shared store can tell whose lease is
+	// whose. It must be STABLE ACROSS RESTARTS of the same broker.
+	//
+	// Empty (the default) means the broker generates one on first boot and
+	// persists it at <state_dir>/broker-id, reusing it thereafter — stable and
+	// unique with no operator effort. Set it explicitly to give a broker a name
+	// that means something in a cluster ("broker-eu-1"). Irrelevant while
+	// state_dir is unset, since nothing is then recorded.
+	BrokerID string `yaml:"broker_id"`
+
 	// MaxConcurrent caps the number of live instances. Placeholder for the
 	// capacity story.
 	MaxConcurrent int `yaml:"max_concurrent"`
@@ -187,6 +214,9 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("parsing broker config: %w", err)
 	}
 	cfg.NexusBinaryPath = engine.ExpandPath(cfg.NexusBinaryPath)
+	// Trimmed before expansion so a whitespace-only value reads as "unset"
+	// (persistence disabled) rather than as a directory literally named " ".
+	cfg.StateDir = engine.ExpandPath(strings.TrimSpace(cfg.StateDir))
 
 	// Parse advertise_addr here so a malformed value is a boot failure. Deferring
 	// it to claim time would surface the mistake as clients failing to connect to

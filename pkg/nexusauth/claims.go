@@ -88,7 +88,7 @@ func (m ClaimMapping) Principal(claims map[string]any) (Principal, error) {
 			p.Scopes = scopes
 		}
 	}
-	return p.clone(), nil
+	return p.Clone(), nil
 }
 
 // ParseScopes normalizes a scope set into individual scopes. It accepts the two

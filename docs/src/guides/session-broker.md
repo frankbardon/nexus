@@ -59,6 +59,8 @@ max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a lease after this much inactivity; <=0 disables
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting
 release_grace: 10s            # graceful-shutdown grace before force-kill
+state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
+broker_id: ""                 # stamped on every lease record; generated + persisted when empty
 ```
 
 ```bash
@@ -91,6 +93,36 @@ TLS-terminating proxy. Malformed values (no port, a wildcard host, a path) fail
 startup, and the wildcard-bind-without-`advertise_addr` shape logs a `WARN` at
 boot. A directly-reachable broker can leave the key empty. Full precedence table:
 [`ws_url` resolution](../configuration/reference.md#ws_url-resolution).
+
+### Surviving a restart: set `state_dir`
+
+Lease state — which instances this broker spawned, who claimed them, and what
+session each is running — lives in memory by default, so a restart loses it and
+the spawned `nexus` processes become orphans nobody can account for. Point
+`state_dir` at a directory and the broker journals every lease transition to
+`<state_dir>/leases.jsonl`:
+
+```yaml
+state_dir: "~/.nexus/broker"     # per-broker; never share one dir between brokers
+broker_id: ""                    # optional name; generated and persisted when empty
+```
+
+A record is appended when a lease is minted, when its pid and session id first
+become known, and when it is torn down — including on **idle sweep and crash**,
+not just a manual `POST /release`. Records carry the lease id, the claiming
+principal, the session id, the pid, and this broker's `broker_id` /
+`advertise_addr`. **No secret is ever written**: not the per-spawn secret, not a
+WebSocket ticket, not a bearer token.
+
+The journal is compacted on open and every 512 appends, so it holds roughly the
+live lease set rather than the whole history. A write that fails is logged and
+never fails the claim or release that produced it, and a record torn by a `kill
+-9` is skipped with a warning instead of failing the file.
+
+Leave `state_dir` empty and the broker behaves exactly as it always has,
+logging one `WARN` at startup to say lease state is in-memory only. This is
+about **lease** bookkeeping, not sessions: an instance's session under
+`~/.nexus/sessions/<id>/` is persisted and `-recall`-able either way.
 
 ### Health check
 
@@ -300,12 +332,16 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   reach the broker can claim, connect to, and release any instance. Front it
   with your own authenticating reverse proxy; treat the broker's listen address
   as a trusted-caller boundary only.
-- **Single broker, single host.** No clustering or HA. A broker **restart
-  orphans running instances** and loses all lease tracking — orphaned `nexus`
-  processes must be cleaned up manually. Running several brokers behind one load
-  balancer does **not** work as a cluster: a lease lives on exactly one process,
-  so each broker must be individually addressable via `advertise_addr` and
-  clients must reconnect to the URL the claim returned, not to the LB.
+- **Single broker, single host.** No clustering or HA. With `state_dir` unset a
+  broker **restart orphans running instances** and loses all lease tracking —
+  orphaned `nexus` processes must be cleaned up manually; setting `state_dir`
+  journals lease state to disk so a restart can at least account for them (see
+  [Surviving a restart](#surviving-a-restart-set-state_dir)). Running several
+  brokers behind one load balancer does **not** work as a cluster: a lease lives
+  on exactly one process, so each broker must be individually addressable via
+  `advertise_addr`, clients must reconnect to the URL the claim returned rather
+  than to the LB, and each broker needs its **own** `state_dir` — they never read
+  each other's.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but

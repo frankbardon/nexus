@@ -234,6 +234,22 @@ type Registry struct {
 	// is only ever assigned at wiring time, before anything is served.
 	tickets *ticketStore
 
+	// store persists lease lifecycle records so a broker restart can account for
+	// the instances it left running. It is nil until wired via useLeaseStore, and
+	// nil is a fully supported state: with no `state_dir` configured the registry
+	// simply records nothing and behaves exactly as it did before durability
+	// existed. Like tickets it is NOT guarded by mu — the implementation owns its
+	// own lock, and this field is only assigned at wiring time, before anything is
+	// served.
+	store LeaseStore
+
+	// brokerID and advertiseAddr are stamped on every record so a future shared
+	// store can tell whose lease is whose without a data migration. advertiseAddr
+	// is the RAW config value, verbatim as the operator wrote it, not the parsed
+	// scheme/host pair — a record should round-trip what is in broker.yaml.
+	brokerID      string
+	advertiseAddr string
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
@@ -264,6 +280,91 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 // concurrently with Remove.
 func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
 
+// useLeaseStore binds the durability store every lease transition is journaled
+// to, along with the broker identity stamped on each record.
+//
+// Like useTicketStore it is a setter rather than a NewRegistry parameter: the
+// store is optional (an unset `state_dir` disables persistence entirely), and
+// threading an optional dependency through the constructor would churn every
+// existing registry test for something none of them exercise. Call it once at
+// wiring time, before the broker serves — it is not safe to call concurrently
+// with a lease transition.
+//
+// Pass a nil store to leave persistence off. Beware the typed-nil trap: pass a
+// literal nil, never a nil *fileLeaseStore, or the nil check in recordLease
+// silently stops firing.
+func (r *Registry) useLeaseStore(s LeaseStore, brokerID, advertiseAddr string) {
+	r.store = s
+	r.brokerID = brokerID
+	r.advertiseAddr = advertiseAddr
+}
+
+// leaseRecordLocked projects a lease onto its journal record. Caller MUST hold
+// r.mu.
+//
+// It reads the lease's fields and NOT its spawnSecret — the one field on a lease
+// that must never reach disk (see lease.spawnSecret). The projection is
+// allowlist-shaped rather than a struct copy for exactly that reason: a field
+// added to lease later cannot leak into the journal by default.
+func (r *Registry) leaseRecordLocked(l *lease, kind leaseRecordKind) LeaseRecord {
+	rec := LeaseRecord{
+		Kind:          kind,
+		LeaseID:       l.id,
+		Owner:         ownerRecord(l.owner),
+		SessionID:     l.sessionID,
+		PID:           l.pid,
+		BrokerID:      r.brokerID,
+		AdvertiseAddr: r.advertiseAddr,
+		CreatedAt:     l.createdAt,
+	}
+	if kind == leaseRecordReleased {
+		at := r.now()
+		rec.ReleasedAt = &at
+		rec.Reason = l.reason
+	}
+	return rec
+}
+
+// recordLease journals a transition for a known lease. It takes r.mu itself, so
+// callers MUST NOT hold it — the file write happens outside the lock, because
+// blocking every other lease transition on a disk write would make durability a
+// throughput problem.
+//
+// A missing store, or a lease that has already gone, is a silent no-op.
+func (r *Registry) recordLease(id string, kind leaseRecordKind) {
+	if r.store == nil {
+		return
+	}
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	var rec LeaseRecord
+	if ok {
+		rec = r.leaseRecordLocked(l, kind)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	r.appendRecord(rec)
+}
+
+// appendRecord writes one record, LOGGING any failure rather than surfacing it.
+//
+// This is the whole of the "write failures do not fail the claim or the release"
+// rule, expressed as a function with no error return so no caller can
+// accidentally propagate one. Losing a record degrades what a restart can
+// recover; refusing the claim or the release that produced it would take the
+// broker off the air for a disk problem it can otherwise ride out.
+func (r *Registry) appendRecord(rec LeaseRecord) {
+	if r.store == nil {
+		return
+	}
+	if err := r.store.Append(rec); err != nil {
+		r.logger.Error("persisting lease record failed; restart recovery for this lease is degraded",
+			"lease_id", rec.LeaseID, "kind", string(rec.Kind), "error", err)
+	}
+}
+
 // anonymousOwner is the owner stamped on a lease that was claimed without an
 // authenticated principal — which is the normal, supported state when the broker
 // runs with no `auth:` block, and also covers a claim route registered outside
@@ -277,31 +378,6 @@ func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
 // why the enforcement stories built on top of it will behave as the broker did
 // before authentication existed.
 func anonymousOwner() nexusauth.Principal { return nexusauth.Principal{} }
-
-// cloneOwner deep-copies a Principal's reference-typed fields (Scopes, Claims)
-// so the registry and its callers can never mutate state the other observes. It
-// is applied on the way IN (the claim handler keeps its own Principal, which must
-// not be able to change a lease's owner afterwards) and on the way OUT (an
-// enforcement check must not be handed a live map into registry-guarded state) —
-// the same values-only discipline Snapshot follows.
-//
-// nexusauth.Principal has an equivalent clone method, but it is unexported and
-// cmd/nexus-broker is package main, so it cannot be reached from here. Keep this
-// in sync if Principal gains another reference-typed field.
-func cloneOwner(p nexusauth.Principal) nexusauth.Principal {
-	out := p
-	if p.Scopes != nil {
-		out.Scopes = make([]string, len(p.Scopes))
-		copy(out.Scopes, p.Scopes)
-	}
-	if p.Claims != nil {
-		out.Claims = make(map[string]any, len(p.Claims))
-		for k, v := range p.Claims {
-			out.Claims[k] = v
-		}
-	}
-	return out
-}
 
 // NewLease creates a fresh, pending lease with a randomly generated id owned by
 // owner, and returns the id, acquiring a capacity slot WITHOUT waiting. At
@@ -317,7 +393,6 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 		return "", err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	// Acquire a capacity slot BEFORE the lease exists, so a claim can never
 	// spawn an instance past max_concurrent. The slot is bound to the lease
 	// (hasSlot) and freed exactly once when the lease is Removed, so every
@@ -325,12 +400,19 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 	// lease — no separate slot bookkeeping to leak. At capacity this returns
 	// errNoCapacity and no slot is consumed; the claim handler maps it to 503.
 	if !r.tryAcquireSlotLocked() {
+		r.mu.Unlock()
 		return "", errNoCapacity
 	}
 	if err := r.insertLeaseLocked(id, owner); err != nil {
 		r.releaseSlotLocked()
+		r.mu.Unlock()
 		return "", err
 	}
+	r.mu.Unlock()
+	// Journal the mint OUTSIDE the lock, and before the id is returned: the
+	// caller cannot spawn anything for a lease it has not been told about, so
+	// there is no window in which a running instance is absent from the journal.
+	r.recordLease(id, leaseRecordCreated)
 	return id, nil
 }
 
@@ -365,6 +447,9 @@ func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration, ow
 		r.releaseSlot()
 		return "", insertErr
 	}
+	// Journaled here for the same reason as in NewLease: before the id escapes,
+	// so nothing can be spawned for a lease the journal has never heard of.
+	r.recordLease(id, leaseRecordCreated)
 	return id, nil
 }
 
@@ -384,7 +469,7 @@ func (r *Registry) insertLeaseLocked(id string, owner nexusauth.Principal) error
 		id:              id,
 		state:           leaseStatePending,
 		createdAt:       now,
-		owner:           cloneOwner(owner),
+		owner:           owner.Clone(),
 		lastActivity:    now,
 		ready:           make(chan struct{}),
 		sessionReported: make(chan struct{}),
@@ -467,6 +552,9 @@ func (r *Registry) MarkSessionID(id, sessionID string) {
 		return
 	}
 	l.sessionOnce.Do(func() { close(l.sessionReported) })
+	// The session id is only knowable once the instance reports it, so the mint
+	// record could not carry it. Supersede that record with one that does.
+	r.recordLease(id, leaseRecordUpdated)
 }
 
 // SessionReportedChan returns the lease's session-report channel, closed once
@@ -506,7 +594,7 @@ func (r *Registry) SessionID(id string) string {
 // ignores ok would treat an unknown lease id as an anonymously-owned one.
 //
 // It follows Snapshot's discipline — the lock is taken, values are copied out,
-// and cloneOwner ensures no internal slice or map escapes — so the returned
+// and Principal.Clone ensures no internal slice or map escapes — so the returned
 // Principal is safe to read and mutate without the lock.
 func (r *Registry) LeaseOwner(id string) (nexusauth.Principal, bool) {
 	r.mu.Lock()
@@ -515,7 +603,7 @@ func (r *Registry) LeaseOwner(id string) (nexusauth.Principal, bool) {
 	if !ok {
 		return anonymousOwner(), false
 	}
-	return cloneOwner(l.owner), true
+	return l.owner.Clone(), true
 }
 
 // SetProcess records the spawned instance's process handle on a lease and
@@ -539,6 +627,10 @@ func (r *Registry) SetProcess(id string, p processHandle) {
 	if p == nil {
 		return
 	}
+	// The pid is only knowable once the process exists, so the mint record could
+	// not carry it. Supersede that record with one that does — without a pid on
+	// disk, restart recovery has no way to ask whether an instance is still alive.
+	r.recordLease(id, leaseRecordUpdated)
 	go func() {
 		err := p.wait()
 		r.mu.Lock()
@@ -746,16 +838,21 @@ func (r *Registry) Has(id string) bool {
 // every client-WebSocket ticket issued for the lease, and drops the lease from
 // the map. Safe to call on an unknown or already-removed lease.
 //
-// Ticket invalidation lives HERE rather than in releaseLease because Remove is
-// the one point every teardown converges on. releaseLease ends here, and crash
-// detection (watchExit) calls Remove DIRECTLY, bypassing releaseLease entirely —
-// so a hook on releaseLease would leave a crashed lease's tickets redeemable for
-// the rest of their TTL, which is exactly the gap the invalidation exists to
-// close.
+// Ticket invalidation AND the lease-released journal record both live HERE
+// rather than in releaseLease, because Remove is the one point every teardown
+// converges on. releaseLease ends here, and crash detection (watchExit) calls
+// Remove DIRECTLY, bypassing releaseLease entirely — so a hook on releaseLease
+// would leave a crashed lease's tickets redeemable for the rest of their TTL and
+// its instance recorded on disk as still running, which are exactly the gaps
+// both hooks exist to close. One call site, all three teardown reasons.
 func (r *Registry) Remove(id string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
+	var released LeaseRecord
 	if ok {
+		// Projected while the lease still exists and under the same lock that
+		// deletes it, so the record cannot observe a half-torn-down lease.
+		released = r.leaseRecordLocked(l, leaseRecordReleased)
 		l.state = leaseStateClosed
 		// Free the lease's capacity slot exactly once. Map deletion below
 		// guarantees a second Remove finds nothing, so the slot is never
@@ -779,6 +876,7 @@ func (r *Registry) Remove(id string) {
 	if !ok {
 		return
 	}
+
 	if l.instance != nil {
 		l.instance.shutdown(websocket.StatusGoingAway, "lease closed")
 	}
@@ -790,6 +888,15 @@ func (r *Registry) Remove(id string) {
 		status, reason := clientCloseForReason(l.reason)
 		l.client.shutdown(status, reason)
 	}
+
+	// Journal the teardown LAST, outside the lock and after the peers have been
+	// closed: bookkeeping must never sit between a teardown and the client
+	// learning about it, however slow the disk is.
+	//
+	// Gated on `ok` — unlike ticket invalidation, which is idempotent — because a
+	// second, concurrent Remove finds no lease and must not append a duplicate
+	// release for one already recorded as gone.
+	r.appendRecord(released)
 }
 
 // newLeaseID returns a 128-bit random hex lease id.

@@ -64,6 +64,58 @@ func TestLoadConfigExpandsBinaryPath(t *testing.T) {
 	}
 }
 
+// TestLoadConfigExpandsStateDir pins the path rule for the durability key: every
+// config-supplied filesystem path goes through engine.ExpandPath, so an operator
+// can write `~/.nexus/broker` wherever a path is accepted.
+func TestLoadConfigExpandsStateDir(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`state_dir: "~/.nexus/broker-state"`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if strings.HasPrefix(cfg.StateDir, "~") {
+		t.Errorf("expected ~ to be expanded, got %q", cfg.StateDir)
+	}
+	if !strings.HasSuffix(cfg.StateDir, "/.nexus/broker-state") {
+		t.Errorf("StateDir = %q, want the configured suffix preserved", cfg.StateDir)
+	}
+}
+
+// TestLoadConfigStateDirDefaultsToDisabled pins the compatibility guarantee: a
+// broker.yaml that never mentions state_dir persists nothing, so an existing
+// deployment behaves exactly as it did before durability existed. A whitespace
+// -only value reads as unset too, rather than as a directory named " ".
+func TestLoadConfigStateDirDefaultsToDisabled(t *testing.T) {
+	for _, yaml := range []string{
+		``,
+		"listen_addr: \":7777\"\n",
+		"state_dir: \"\"\n",
+		"state_dir: \"   \"\n",
+	} {
+		cfg, err := LoadConfigFromBytes([]byte(yaml))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes(%q): %v", yaml, err)
+		}
+		if cfg.StateDir != "" {
+			t.Errorf("StateDir = %q for %q, want empty (persistence disabled)", cfg.StateDir, yaml)
+		}
+	}
+}
+
+// TestLoadConfigBrokerID: an explicit broker_id is carried verbatim; absent it
+// stays empty and the store generates and persists one.
+func TestLoadConfigBrokerID(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("broker_id: \"broker-eu-1\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.BrokerID != "broker-eu-1" {
+		t.Errorf("BrokerID = %q, want broker-eu-1", cfg.BrokerID)
+	}
+	if def := DefaultConfig(); def.BrokerID != "" {
+		t.Errorf("DefaultConfig().BrokerID = %q, want empty", def.BrokerID)
+	}
+}
+
 // TestLoadConfigAuthAbsentDisablesAuth pins the backward-compatibility
 // guarantee: a broker.yaml with no auth block loads clean and yields a chain
 // that is disabled (not permissive, not nil).

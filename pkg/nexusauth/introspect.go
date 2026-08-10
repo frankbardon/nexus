@@ -499,7 +499,7 @@ func (c *introspectionCache) resolve(ctx context.Context, token string, fetch fe
 		if v.err != nil {
 			return Principal{}, v.err
 		}
-		return v.principal.clone(), nil
+		return v.principal.Clone(), nil
 	}
 
 	call, leader := c.join(key)
@@ -512,7 +512,7 @@ func (c *introspectionCache) resolve(ctx context.Context, token string, fetch fe
 			if call.err != nil {
 				return Principal{}, call.err
 			}
-			return call.principal.clone(), nil
+			return call.principal.Clone(), nil
 		case <-ctx.Done():
 			return Principal{}, NewError(KindUnavailable,
 				"gave up waiting for an in-flight token introspection", ctx.Err())
@@ -529,7 +529,7 @@ func (c *introspectionCache) resolve(ctx context.Context, token string, fetch fe
 	if err != nil {
 		return Principal{}, err
 	}
-	return principal.clone(), nil
+	return principal.Clone(), nil
 }
 
 // lookup returns a live verdict for key, if there is one.
@@ -567,7 +567,7 @@ func (c *introspectionCache) publish(key tokenKey, call *introspectionCall, p Pr
 	now := c.now()
 	if ttl := c.cacheableFor(err, expiry, now); ttl > 0 {
 		c.evictLocked()
-		c.entries[key] = cachedVerdict{principal: p.clone(), err: err, expiresAt: now.Add(ttl)}
+		c.entries[key] = cachedVerdict{principal: p.Clone(), err: err, expiresAt: now.Add(ttl)}
 	}
 	delete(c.inflight, key)
 	c.mu.Unlock()

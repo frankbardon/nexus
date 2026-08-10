@@ -46,6 +46,10 @@ func run() error {
 		// operator debugging a bad ws_url needs to see the value in effect.
 		"advertise_addr", cfg.AdvertiseAddr,
 		"nexus_binary_path", cfg.NexusBinaryPath,
+		// Logged because an empty state_dir means lease state is lost on restart,
+		// and that is a decision an operator should be able to confirm from the
+		// boot line rather than infer from a missing directory.
+		"state_dir", cfg.StateDir,
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
@@ -84,11 +88,31 @@ func run() error {
 	// connection with no ticket exactly as it did before tickets existed.
 	tickets := newTicketStore(logger, guard.enabled())
 
+	// Lease durability. An unset state_dir returns a nil store and persistence
+	// stays off; a state_dir that is set but unusable fails the boot, because an
+	// operator who asked for durability and silently did not get it would only
+	// find out from a restart that lost the state they configured it to keep.
+	leaseStore, brokerID, err := openLeaseStore(logger, cfg)
+	if err != nil {
+		logger.Error("failed to open lease state", "state_dir", cfg.StateDir, "error", err)
+		return err
+	}
+	if leaseStore != nil {
+		defer func() { _ = leaseStore.Close() }()
+		logger.Info("lease durability enabled", "state_dir", cfg.StateDir, "broker_id", brokerID)
+	} else {
+		logger.Warn("state_dir is not set: lease state is in-memory only and a restart " +
+			"will lose track of every instance this broker spawned")
+	}
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
 	// The registry invalidates a lease's tickets when the lease goes away, through
 	// the single teardown convergence point (Remove) so manual release, the idle
 	// sweeper and crash detection all invalidate.
 	registry.useTicketStore(tickets)
+	// Records carry the RAW advertise_addr, verbatim as configured, so a record
+	// round-trips what is in broker.yaml rather than a derived host.
+	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
 	// The gateway holds the ticket store as well as the guard: the client WebSocket
 	// accepts a single-use `?ticket=` as an alternative to a bearer header, and it
 	// is the only route that redeems one.

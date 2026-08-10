@@ -27,7 +27,7 @@ func TestPrincipalCloneIsDeep(t *testing.T) {
 		Scopes: []string{"admin"},
 		Claims: map[string]any{"sub": "u"},
 	}
-	dst := src.clone()
+	dst := src.Clone()
 	dst.Scopes[0] = "hacked"
 	dst.Claims["sub"] = "hacked"
 	if src.Scopes[0] != "admin" {
@@ -39,7 +39,7 @@ func TestPrincipalCloneIsDeep(t *testing.T) {
 
 	// A nil slice/map must stay nil rather than become an empty allocation, so
 	// "carries no scopes" stays distinguishable from "carries none granted".
-	bare := Principal{ID: "u"}.clone()
+	bare := Principal{ID: "u"}.Clone()
 	if bare.Scopes != nil || bare.Claims != nil {
 		t.Fatalf("clone materialized empty containers: %+v", bare)
 	}

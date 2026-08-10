@@ -52,7 +52,7 @@ func NewStaticValidator(tokens []StaticToken) (*StaticValidator, error) {
 				i, tokens[prev].Principal.ID, prev)
 		}
 		seen[t.Token] = i
-		out = append(out, StaticToken{Token: t.Token, Principal: t.Principal.clone()})
+		out = append(out, StaticToken{Token: t.Token, Principal: t.Principal.Clone()})
 	}
 	return &StaticValidator{tokens: out}, nil
 }
@@ -79,5 +79,5 @@ func (v *StaticValidator) Validate(_ context.Context, r *http.Request) (Principa
 	if match < 0 {
 		return Principal{}, NewError(KindInvalidCredential, "bearer token does not match any configured static token", nil)
 	}
-	return v.tokens[match].Principal.clone(), nil
+	return v.tokens[match].Principal.Clone(), nil
 }
