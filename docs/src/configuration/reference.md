@@ -1346,8 +1346,9 @@ optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 | Key                | Type         | Default            | Description |
 |--------------------|--------------|--------------------|-------------|
 | `bind`             | string       | `127.0.0.1:8090`   | `host:port` the HTTP listener binds to. Defaults to loopback so the endpoint is not network-exposed without explicit opt-in. |
-| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. |
-| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. |
+| `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
+| `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. Mutually exclusive with `auth`. |
+| `auth`             | map          | *(absent)*         | Optional validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker uses — so `static`, `jwks`, `introspect` and `proxy_headers` are all available here. Absent means authentication is decided by `bearer_token`/`bearer_token_env` alone. See [Authentication (`auth:`) on `nexus.io.agui`](#authentication-auth-on-nexusioagui) below. |
 | `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
 | `emit_state`       | bool         | `false`            | Opt-in AG-UI shared-state emission. When `true`, the transport mirrors the session's scene store (`nexus.scene`) as an AG-UI shared-state document and emits a `StateSnapshot` at run start plus ordered `StateDelta` events (RFC 6902 JSON Patch) as scenes mutate. Off by default because it adds scene-event subscriptions and per-mutation diffing overhead most clients do not need. Requires the `nexus.scene` plugin to be active to produce any state. |
 
@@ -1389,6 +1390,90 @@ client-state-seeds-then-agent-wins: the client seed lands before the agent's
 first turn, then agent-side `scene_patch` mutations are last-writer and flow back
 out as `StateDelta`. See
 [Shared state](../plugins/io-agui.md#shared-state).
+
+#### Authentication (`auth:`) on `nexus.io.agui`
+
+The transport authenticates through the shared identity layer (`pkg/nexusauth`)
+— the same validator chain the [session broker](#authentication-auth) uses. Two
+spellings are accepted and they are **mutually exclusive**:
+
+- `bearer_token` / `bearer_token_env` — one shared secret, unchanged and **not
+  deprecated**. It is desugared into a one-entry `static` validator, which is
+  purely an implementation detail with one visible improvement: the token
+  comparison is now constant-time.
+- `auth:` — the full validator-chain block, so an AG-UI deployment can verify
+  OIDC JWTs (`jwks`), opaque tokens (`introspect`), or an identity a fronting
+  proxy established (`proxy_headers`).
+
+Setting **both** is a **boot error** naming both keys, not a precedence rule:
+two sources for one security decision means one of them is stale, and quietly
+preferring either is how an operator comes to believe a credential was tightened
+when it was not. (Setting `bearer_token` *and* `bearer_token_env` remains legal
+and keeps its original precedence — inline first, then the environment
+variable.)
+
+Setting neither means **authentication is disabled** and every request is
+admitted, exactly as before. That is safe by default only because the listener
+binds loopback; change `bind` and you should configure auth in the same commit.
+
+```yaml
+plugins:
+  nexus.io.agui:
+    bind: "0.0.0.0:8090"
+    auth:
+      validators:            # ordered; the first validator that accepts wins
+        - type: static       # a shared token for CI or a local operator CLI
+          tokens:
+            - token: "..."
+              principal: "ci-runner"
+        - type: jwks         # OIDC JWTs verified against the issuer's published keys
+          issuer: "https://id.example.com/"
+          jwks_url: "https://id.example.com/.well-known/jwks.json"
+          audience: "nexus-agui"
+          principal_claim: sub
+```
+
+**The validator keys are identical to the broker's** — `validators[].type`,
+`principal_claim`, `tokens[]`, `issuer`/`jwks_url`/`audience`, the `introspect`
+keys, the `proxy_headers` keys, and their defaults and validation rules are all
+documented once under [Authentication (`auth:`)](#authentication-auth) and the
+per-validator sections that follow it. There is one deliberate difference:
+`auth.admin_scope` is **broker-only** and is rejected here as an unknown key.
+Unknown keys are rejected at every level in both hosts — a silently ignored auth
+key is a security bug, not a cosmetic one.
+
+**Gated surface.** `POST /agui` only. `OPTIONS /agui` (CORS preflight) is
+deliberately **not** authenticated: a browser never attaches `Authorization` to a
+preflight, so gating it would make every cross-origin AG-UI client unable to
+reach the endpoint it is authorized for. CORS headers are applied **before** the
+auth check so a browser can actually read a `401` instead of seeing an opaque
+network error.
+
+**Status mapping.** Denials are classified by the chain, never by string
+matching, and map onto:
+
+| Situation                                           | Status | Body                                     | Headers |
+|-----------------------------------------------------|--------|------------------------------------------|---------|
+| No `Authorization: Bearer` header                   | `401`  | `unauthorized`                           | `WWW-Authenticate: Bearer realm="nexus-agui"` |
+| Credential presented and rejected                   | `401`  | `unauthorized`                           | `WWW-Authenticate: Bearer realm="nexus-agui", error="invalid_token"` |
+| Credential valid but lacking the required authority  | `403`  | `insufficient scope`                     | `WWW-Authenticate: Bearer realm="nexus-agui", error="insufficient_scope"` |
+| The validator could not reach a verdict              | `503`  | `authentication temporarily unavailable` | `Retry-After: 5` (deliberately **no** `WWW-Authenticate`) |
+
+The codes match the broker's because the denial kinds are the shared package's
+transport contract, and one deployment should not answer the same refusal two
+different ways. The **bodies** differ: this endpoint's success response is an SSE
+stream, not JSON, so there is no envelope for an error to be consistent with, and
+the `401` body stays the plain `unauthorized` it has always been. The RFC 6750
+challenge matters more here than on the broker — an AG-UI client is often a
+browser front-end whose only structured signal is the status plus the challenge,
+and `error="invalid_token"` is what lets it tell "sign in" from "refresh the
+token" without parsing prose.
+
+**Principal.** A resolved `Principal` is carried to the run and recorded on the
+`agui run started` log record (`principal_id`); it is empty when auth is
+disabled. Nothing keys behaviour on it yet — this transport serves a single
+engine/session per listener and admits one run at a time, so there is no second
+principal for an authorization decision to distinguish.
 
 ### `nexus.io.realtime`
 

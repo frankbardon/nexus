@@ -233,6 +233,9 @@ endpoint is never network-exposed without an explicit operator opt-in.
   `bearer_token` takes precedence; otherwise `bearer_token_env` names an
   environment variable to read it from. When set, every request must carry
   `Authorization: Bearer <token>`.
+- **Identity providers** — an optional [`auth:` block](#authentication-auth)
+  configures the full `pkg/nexusauth` validator chain (`static`, `jwks`,
+  `introspect`, `proxy_headers`) instead of a single shared token.
 - **CORS** is off by default (same-origin only). `cors_origins` accepts a YAML
   list (or comma-separated string); a single `*` echoes any request `Origin`,
   while an explicit list echoes only matching origins. `OPTIONS /agui` answers
@@ -247,10 +250,78 @@ are summarized here for convenience:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `bind` | string | `127.0.0.1:8090` | `host:port` the HTTP listener binds to. Loopback by default. |
-| `bearer_token` | string | *(empty)* | Inline bearer token. Takes precedence over `bearer_token_env`. |
-| `bearer_token_env` | string | *(empty)* | Env var name to read the bearer token from (used only when `bearer_token` is empty). |
+| `bearer_token` | string | *(empty)* | Inline bearer token. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
+| `bearer_token_env` | string | *(empty)* | Env var name to read the bearer token from (used only when `bearer_token` is empty). Mutually exclusive with `auth`. |
+| `auth` | map | *(absent)* | Validator-chain block, parsed by the same `pkg/nexusauth` parser the session broker uses. See [Authentication](#authentication-auth) below. |
 | `cors_origins` | list&lt;string&gt; | *(empty)* | Allowed CORS origins. `*` echoes any Origin; a list echoes only matches; empty means same-origin only. Also accepts a comma-separated string. |
 | `emit_state` | bool | `false` | Opt-in AG-UI shared-state emission: mirror the scene store as a shared-state document and emit `STATE_SNAPSHOT`/`STATE_DELTA` on the run stream. See [Shared state](#shared-state) below. |
+
+### Authentication (`auth:`)
+
+The transport authenticates through the shared identity layer, `pkg/nexusauth` —
+the same validator chain `cmd/nexus-broker` uses. Pointing both hosts at one
+parser is what makes OIDC available here without any AG-UI-specific
+identity code.
+
+Two spellings are accepted, and they are **mutually exclusive**:
+
+- **`bearer_token` / `bearer_token_env`** — one shared secret. Unchanged, **not
+  deprecated**, and still the right amount of configuration for a loopback
+  listener fronting one developer's UI. It is desugared into a one-entry
+  `static` validator; the only visible difference is that the token comparison is
+  now constant-time.
+- **`auth:`** — the full validator chain: `static` (a token table), `jwks` (OIDC
+  JWTs verified against the issuer's published keys), `introspect` (opaque tokens
+  verified via RFC 7662), and `proxy_headers` (an identity a fronting
+  authenticating proxy already established). Validators are tried in the order
+  listed and the first one that accepts wins, so cheap validators belong first.
+
+Setting **both** fails the boot with an error naming both keys. That is a
+deliberate choice over a precedence rule: two sources for one security decision
+means one of them is stale. (`bearer_token` together with `bearer_token_env`
+remains legal, with its original precedence — inline first, then the environment
+variable.)
+
+Setting **neither** disables authentication and admits every request, exactly as
+before. That is only safe because the listener binds loopback; if you change
+`bind`, configure auth in the same change.
+
+```yaml
+plugins:
+  nexus.io.agui:
+    bind: "0.0.0.0:8090"
+    auth:
+      validators:
+        - type: jwks
+          issuer: "https://id.example.com/"
+          jwks_url: "https://id.example.com/.well-known/jwks.json"
+          audience: "nexus-agui"
+          principal_claim: sub
+          scopes_claim: scope
+```
+
+Every validator key, default and validation rule is documented once in the
+[Configuration Reference](../configuration/reference.md#authentication-auth).
+The one difference from the broker is that `admin_scope` is broker-only and is
+rejected here as an unknown key; unknown keys are rejected at every level in both
+hosts.
+
+**What is gated:** `POST /agui`, and nothing else. `OPTIONS /agui` stays
+unauthenticated — a browser never attaches `Authorization` to a CORS preflight.
+CORS headers are written **before** the auth check, so a browser can read a `401`
+rather than seeing an opaque network error.
+
+**Refusals:** `401` with a `WWW-Authenticate: Bearer realm="nexus-agui"`
+challenge (plus `error="invalid_token"` when a credential was presented and
+rejected), `403` with `error="insufficient_scope"`, and `503` with a
+`Retry-After` when a validator could not reach a verdict — an identity-provider
+outage must not read to a client as "re-authenticate". See the
+[status mapping table](../configuration/reference.md#authentication-auth-on-nexusioagui).
+
+**Principal:** the resolved identity is recorded on the `agui run started` log
+record as `principal_id` (empty when auth is disabled). Nothing keys behaviour on
+it yet — one listener serves a single session and one run at a time, so there is
+no second principal to distinguish.
 
 ### Shared state
 
@@ -331,6 +402,9 @@ plugins:
     cors_origins:
       - "https://app.example.com"
 ```
+
+For an OIDC deployment, replace `bearer_token_env` with an
+[`auth:` block](#authentication-auth) — the two are mutually exclusive.
 
 ## See also
 

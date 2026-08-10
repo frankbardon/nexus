@@ -9,11 +9,22 @@ import (
 	"net/http"
 
 	"github.com/frankbardon/nexus/pkg/agui"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // agentPath is the POST route that accepts a RunAgentInput and responds with an
 // AG-UI SSE stream.
 const agentPath = "/agui"
+
+// legacyBearerPrincipal is the identity a request authenticated by the legacy
+// `bearer_token` / `bearer_token_env` config acts as.
+//
+// The legacy keys carry no notion of who the holder is — they are one shared
+// secret — but nexusauth requires a non-empty Principal.ID for a validation to
+// count as a success (an empty id would compare equal to every other empty id).
+// Naming the credential source rather than inventing an identity keeps the audit
+// record honest: "this caller presented the configured shared token".
+const legacyBearerPrincipal = "bearer_token"
 
 // bridge is the seam between the HTTP server and the plugin's bus wiring. The
 // server hands a decoded RunAgentInput to startRun (which registers the active
@@ -30,21 +41,46 @@ type bridge interface {
 
 // serverConfig carries the resolved settings for the embedded HTTP server.
 type serverConfig struct {
-	addr        string
+	addr string
+
+	// bearerToken is the legacy single-shared-secret form. Init no longer sets it
+	// (it resolves a chain instead), but NewServer still desugars it so a
+	// directly-constructed Server — tests, and any embedder building a Server
+	// without going through the plugin — keeps behaving exactly as before.
 	bearerToken string
+
+	// chain is the resolved validator chain. When enabled it wins over
+	// bearerToken; the plugin's Init makes the two mutually exclusive at config
+	// level, so in production exactly one of them is ever set.
+	chain *nexusauth.Chain
+
 	corsOrigins []string
 	logger      *slog.Logger
 	bridge      bridge
 }
 
 // Server is the embedded AG-UI HTTP server. It owns an *http.Server bound to a
-// loopback address by default, enforces optional bearer auth, and answers CORS
-// preflight for browser AG-UI clients.
+// loopback address by default, authenticates requests through a nexusauth
+// validator chain, and answers CORS preflight for browser AG-UI clients.
 type Server struct {
 	cfg     serverConfig
 	server  *http.Server
 	corsSet map[string]struct{}
 	corsAny bool
+
+	// chain is the validator chain requests are authenticated against. A nil or
+	// empty chain means auth is not configured and every request is permitted,
+	// which is what an AG-UI listener with no token and no `auth:` block has
+	// always done.
+	chain *nexusauth.Chain
+
+	// authBroken latches a chain that could not be built. It exists so the one
+	// construction path that cannot return an error (NewServer desugaring
+	// bearerToken) fails CLOSED rather than silently open. Unreachable in
+	// practice — the only failures NewStaticValidator has are an empty token and
+	// an empty principal, and both are excluded here — but "unreachable" is not a
+	// reason to discard an error on an authentication path.
+	authBroken bool
 }
 
 // NewServer builds a Server from cfg. The socket is not bound until Start.
@@ -56,7 +92,44 @@ func NewServer(cfg serverConfig) *Server {
 		}
 		s.corsSet[o] = struct{}{}
 	}
+
+	switch {
+	case cfg.chain.Enabled():
+		s.chain = cfg.chain
+	case cfg.bearerToken != "":
+		chain, err := staticChainFromToken(cfg.bearerToken)
+		if err != nil {
+			s.authBroken = true
+			if cfg.logger != nil {
+				cfg.logger.Error("agui bearer token could not be compiled into a validator; refusing every request", "error", err)
+			}
+			break
+		}
+		s.chain = chain
+	}
 	return s
+}
+
+// staticChainFromToken desugars the legacy `bearer_token` / `bearer_token_env`
+// configuration into a one-entry static validator chain.
+//
+// This is the whole of the backward-compatibility story: the two keys keep their
+// exact meaning and precedence, and are simply expressed in terms of the shared
+// identity layer instead of a bespoke string comparison. Routing them through
+// StaticValidator also upgrades the comparison to constant-time, which the
+// hand-rolled `==` was not.
+func staticChainFromToken(token string) (*nexusauth.Chain, error) {
+	v, err := nexusauth.NewStaticValidator([]nexusauth.StaticToken{{
+		Token:     token,
+		Principal: nexusauth.Principal{ID: legacyBearerPrincipal},
+	}})
+	if err != nil {
+		return nil, fmt.Errorf("desugaring bearer_token into a static validator: %w", err)
+	}
+	return nexusauth.NewChain(nexusauth.NamedValidator{
+		Name:      nexusauth.ValidatorTypeStatic,
+		Validator: v,
+	}), nil
 }
 
 // Start binds the listener and serves in a background goroutine.
@@ -94,6 +167,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // handlePreflight answers CORS preflight requests for browser AG-UI clients.
+//
+// It is NOT authenticated, and must not become so: a browser never attaches
+// Authorization to a preflight, so gating it would make every cross-origin
+// AG-UI client unable to reach the endpoint it is authorized for. POST /agui
+// remains the one authenticated surface, exactly as before.
 func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	s.applyCORS(w, r)
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -112,8 +190,13 @@ func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 	s.applyCORS(w, r)
 
-	if !s.authorized(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	// CORS headers are applied BEFORE the auth check on purpose: a browser can
+	// only read a 401 that carries them, so denying without CORS would surface to
+	// a browser AG-UI client as an opaque network error instead of "your token
+	// was refused".
+	principal, err := s.authorize(r)
+	if err != nil {
+		s.denyAuth(w, r, err)
 		return
 	}
 
@@ -176,10 +259,20 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.cfg.bridge.endRun(run)
 
+	// principal_id is empty when auth is disabled. It is recorded here and
+	// NOWHERE ELSE, because AG-UI has no per-identity behaviour to key on yet:
+	// this transport serves a single engine/session per listener and admits one
+	// run at a time, so there is no second principal for an authorization
+	// decision to distinguish. The identity is deliberately carried this far and
+	// logged rather than dropped at the guard — the run record is what an
+	// operator correlates a turn back to a caller with, and it is the seam a
+	// future per-principal policy (thread ownership, per-tenant sessions) would
+	// extend rather than re-derive.
 	s.cfg.logger.Debug("agui run started",
 		"thread_id", input.ThreadID,
 		"run_id", input.RunID,
 		"messages", len(input.Messages),
+		"principal_id", principal.ID,
 	)
 
 	// Client disconnect: fail the run so the drain loop stops promptly and the
@@ -233,18 +326,88 @@ func isTerminal(e agui.Event) bool {
 	}
 }
 
-// authorized reports whether the request satisfies bearer auth. When no token
-// is configured, all requests are permitted.
-func (s *Server) authorized(r *http.Request) bool {
-	if s.cfg.bearerToken == "" {
-		return true
+// authorize resolves the caller's identity for r, or returns the chain's
+// classified denial.
+//
+// With no chain configured it returns the zero Principal and no error: an AG-UI
+// listener with neither a bearer token nor an `auth:` block has always admitted
+// every caller, and the disabled path must keep doing exactly that. Note that
+// this is NOT chain.Validate's own behaviour — a disabled chain returns
+// ErrAuthDisabled, because "not configured" is a deployment state the host has
+// to take a position on, and this host's position is "loopback-bound and open".
+func (s *Server) authorize(r *http.Request) (nexusauth.Principal, error) {
+	if s.authBroken {
+		return nexusauth.Principal{}, nexusauth.NewError(nexusauth.KindUnavailable,
+			"authentication is misconfigured", nil)
 	}
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if len(h) <= len(prefix) || h[:len(prefix)] != prefix {
-		return false
+	if !s.chain.Enabled() {
+		return nexusauth.Principal{}, nil
 	}
-	return h[len(prefix):] == s.cfg.bearerToken
+	return s.chain.Validate(r.Context(), r)
+}
+
+// denyAuth maps a nexusauth denial onto a status code and writes the refusal.
+//
+// The classification comes from nexusauth.KindOf, never from matching the error
+// string, so a reworded reason cannot silently reclassify a denial.
+//
+// The mapping matches the broker's — the kinds ARE the package's transport
+// contract, and one Nexus deployment should not answer the same refusal two
+// different ways — but the response body deliberately does not. The broker
+// speaks JSON on every route; this endpoint's success body is an SSE stream, so
+// there is no JSON envelope for an error to be consistent with, and the 401 body
+// stays the plain "unauthorized" it has always been.
+//
+// The RFC 6750 challenge is kept, and matters MORE here than on the broker: an
+// AG-UI client is frequently a browser front-end whose only structured signal is
+// the status plus the challenge, and `error="invalid_token"` is what lets it
+// tell "sign in" from "your session expired, refresh the token" without parsing
+// prose. Retry-After is kept for the same reason it exists on the broker — a 503
+// from an unreachable identity provider must not read as "re-authenticate", or
+// every connected client aims a re-auth storm at a provider that is already down.
+func (s *Server) denyAuth(w http.ResponseWriter, r *http.Request, err error) {
+	kind := nexusauth.KindOf(err)
+
+	status := http.StatusUnauthorized
+	// Unchanged from the hand-rolled check, so a client string-matching the 401
+	// body sees what it always saw.
+	message := "unauthorized"
+	switch kind {
+	case nexusauth.KindInsufficientScope:
+		status = http.StatusForbidden
+		message = "insufficient scope"
+	case nexusauth.KindUnavailable:
+		status = http.StatusServiceUnavailable
+		message = "authentication temporarily unavailable"
+	default:
+		// KindNoCredential, KindInvalidCredential, and anything the package could
+		// not classify. Failing closed on an unclassified denial is the only safe
+		// reading.
+	}
+
+	s.cfg.logger.Warn("agui auth denied",
+		"path", r.URL.Path,
+		"status", status,
+		"denial", err,
+	)
+
+	switch status {
+	case http.StatusUnauthorized:
+		if kind == nexusauth.KindNoCredential {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="nexus-agui"`)
+		} else {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="nexus-agui", error="invalid_token"`)
+		}
+	case http.StatusForbidden:
+		w.Header().Set("WWW-Authenticate", `Bearer realm="nexus-agui", error="insufficient_scope"`)
+	case http.StatusServiceUnavailable:
+		// Deliberately no WWW-Authenticate: a 503 is not a challenge, and emitting
+		// one would invite exactly the re-authentication this status exists to
+		// avoid.
+		w.Header().Set("Retry-After", "5")
+	}
+
+	http.Error(w, message, status)
 }
 
 // applyCORS sets Access-Control-Allow-Origin when the request's Origin is

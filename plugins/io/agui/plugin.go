@@ -36,9 +36,19 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 const pluginID = "nexus.io.agui"
+
+// Config keys this plugin reads for authentication. bearer_token /
+// bearer_token_env are the original single-shared-secret form; auth is the
+// full validator-chain block shared with cmd/nexus-broker.
+const (
+	cfgKeyBearerToken    = "bearer_token"
+	cfgKeyBearerTokenEnv = "bearer_token_env"
+	cfgKeyAuth           = "auth"
+)
 
 // defaultBindAddr binds loopback by default so the endpoint is not exposed on
 // the network without explicit operator opt-in.
@@ -68,8 +78,12 @@ type Plugin struct {
 
 	sessionID string
 
-	bindAddr    string
-	bearerToken string
+	bindAddr string
+
+	// authChain is the resolved credential validator chain. It is never nil after
+	// Init; a chain with no validators means auth is disabled.
+	authChain *nexusauth.Chain
+
 	corsOrigins []string
 
 	// emitState gates the AG-UI shared-state feature (E3-S1). When true the
@@ -242,17 +256,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bindAddr = strings.TrimSpace(v)
 	}
 
-	// Bearer token: an inline `bearer_token` takes precedence; otherwise
-	// `bearer_token_env` names an environment variable to read it from. Auth
-	// is enforced only when a non-empty token is resolved.
-	if v, ok := ctx.Config["bearer_token"].(string); ok {
-		p.bearerToken = strings.TrimSpace(v)
+	chain, err := resolveAuthChain(ctx.Config)
+	if err != nil {
+		return err
 	}
-	if p.bearerToken == "" {
-		if envVar, ok := ctx.Config["bearer_token_env"].(string); ok && strings.TrimSpace(envVar) != "" {
-			p.bearerToken = strings.TrimSpace(os.Getenv(strings.TrimSpace(envVar)))
-		}
-	}
+	p.authChain = chain
 
 	p.corsOrigins = parseCORSOrigins(ctx.Config["cors_origins"])
 
@@ -265,7 +273,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.server = NewServer(serverConfig{
 		addr:        p.bindAddr,
-		bearerToken: p.bearerToken,
+		chain:       p.authChain,
 		corsOrigins: p.corsOrigins,
 		logger:      p.logger,
 		bridge:      p,
@@ -310,13 +318,83 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
+	// The validator names make the auth posture readable in one line: which
+	// validators are live and in what order they are tried.
 	p.logger.Info("agui serve plugin initialized",
 		"bind", p.bindAddr,
-		"auth", p.bearerToken != "",
+		"auth", p.authChain.Enabled(),
+		"auth_validators", p.authChain.Names(),
 		"cors_origins", len(p.corsOrigins),
 		"emit_state", p.emitState,
 	)
 	return nil
+}
+
+// resolveAuthChain turns the plugin's authentication config into a validator
+// chain. A chain with no validators means auth is disabled, which is what a
+// listener with neither a bearer token nor an `auth:` block has always been.
+//
+// Two spellings are accepted and they are MUTUALLY EXCLUSIVE:
+//
+//   - `bearer_token` / `bearer_token_env` — the original single-shared-secret
+//     form, desugared into a one-entry `static` validator. Its behaviour and its
+//     precedence (inline first, then the env var) are unchanged, and it is not
+//     deprecated: it is the right amount of configuration for a loopback
+//     listener fronting one developer's UI.
+//   - `auth:` — the full validator-chain block, parsed by the same
+//     nexusauth.ChainFromMap the session broker uses, which is what makes JWKS,
+//     RFC 7662 introspection and proxy-header identity available here.
+//
+// Setting both is a boot error rather than a precedence rule, following the same
+// reasoning nexusauth applies to `client_secret` / `client_secret_env`: two
+// sources for one security decision means one of them is stale, and quietly
+// preferring either is how an operator comes to believe a credential was
+// tightened when it was not. The error names both keys so the fix is obvious.
+func resolveAuthChain(cfg map[string]any) (*nexusauth.Chain, error) {
+	var inline, envVar string
+	if v, ok := cfg[cfgKeyBearerToken].(string); ok {
+		inline = strings.TrimSpace(v)
+	}
+	if v, ok := cfg[cfgKeyBearerTokenEnv].(string); ok {
+		envVar = strings.TrimSpace(v)
+	}
+
+	rawAuth, hasAuth := cfg[cfgKeyAuth]
+	if rawAuth == nil {
+		hasAuth = false
+	}
+
+	if hasAuth {
+		// Presence of the legacy keys is what conflicts, not the value they
+		// resolve to: `bearer_token_env` naming an unset variable is still an
+		// operator saying "authenticate with a shared token", and must not slip
+		// through the check just because the variable happened to be empty.
+		if inline != "" || envVar != "" {
+			return nil, fmt.Errorf("%s: %s and %s/%s are mutually exclusive: express the shared token as an %s validator with type: %s, or drop the %s block",
+				pluginID, cfgKeyAuth, cfgKeyBearerToken, cfgKeyBearerTokenEnv,
+				cfgKeyAuth, nexusauth.ValidatorTypeStatic, cfgKeyAuth)
+		}
+		m, ok := rawAuth.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s: %s: want a mapping, got %T", pluginID, cfgKeyAuth, rawAuth)
+		}
+		chain, err := nexusauth.ChainFromMap(m)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s: %w", pluginID, cfgKeyAuth, err)
+		}
+		return chain, nil
+	}
+
+	// Legacy path. Precedence is preserved exactly: an inline token wins, and the
+	// env var is consulted only when there is no inline token.
+	token := inline
+	if token == "" && envVar != "" {
+		token = strings.TrimSpace(os.Getenv(envVar))
+	}
+	if token == "" {
+		return nexusauth.NewChain(), nil
+	}
+	return staticChainFromToken(token)
 }
 
 // Ready starts the HTTP listener.
