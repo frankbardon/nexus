@@ -2354,12 +2354,13 @@ no credential, because a load balancer or container probe has none to present.
 
 `WS /lease/{lease_id}`, the per-lease client socket, is not behind that
 middleware but **does** use the same validator chain: it resolves the caller's
-`Authorization: Bearer` credential itself and then enforces lease ownership
-before the WebSocket upgrade — see [Lease ownership](#lease-ownership) below. It
-stays off the middleware because it will also accept a single-use ticket passed
-as a query parameter, which a bearer-header wrapper cannot express. The
-`WS /instance` dial-back is **not** covered by this block at all: it
-authenticates with a spawn secret.
+credential itself and then enforces lease ownership before the WebSocket upgrade
+— see [Lease ownership](#lease-ownership) below. It stays off the middleware
+because it accepts **either** an `Authorization: Bearer` header **or** a
+single-use `?ticket=` query parameter, and a bearer-header wrapper cannot express
+the second. See [`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml) for
+the two credentials and their precedence. The `WS /instance` dial-back is **not**
+covered by this block at all: it authenticates with a spawn secret.
 
 ```yaml
 auth:
@@ -2417,7 +2418,7 @@ Every lease records the principal that claimed it (stamped from the authenticate
 | Route                       | Enforcement                                                                                                                             |
 |-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
 | `POST /release/{lease_id}`  | The caller's principal `ID` must equal the lease owner's `ID`, checked **before** any teardown begins — a refused release sends no shutdown frame, kills nothing, and frees no slot. |
-| `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. |
+| `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. It applies to a redeemed `?ticket=` exactly as to a bearer token: a ticket is already bound to one lease *and* one principal, and ownership is re-checked on top of that so the lease must still exist and still belong to that principal at **connect** time, not merely at mint time. |
 | `POST /ticket/{lease_id}`   | The same check, applied **before** any ticket is minted — a refused caller is issued nothing. See [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml). |
 | `GET /leases`               | Not a refusal but a **filter**: the listing contains only leases whose owner `ID` matches the caller's, and the capacity aggregates are omitted. A caller holding `auth.admin_scope` gets the whole registry instead. See [`GET /leases`](#get-leases-http-api-not-yaml). |
 
@@ -2436,8 +2437,11 @@ responses:
 | `WS /lease/{lease_id}`     | `404` `unknown lease` (plain text; the handshake never reaches `101`) |
 
 A credential that fails validation on `WS /lease/{lease_id}` gets the usual
-`401`/`403` from the status table above. That branch never consults the registry,
-so it reveals nothing about whether the lease exists.
+`401`/`403` from the status table above — a rejected `?ticket=` included, with the
+`credential rejected` body. That branch never consults the registry, so it reveals
+nothing about whether the lease exists, and every way a ticket can fail answers
+identically; see
+[`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml).
 
 Each ownership refusal emits one `lease access denied` WARN record carrying
 `route`, `principal_id` and `lease_id`. Like the response, it does not record
@@ -2492,9 +2496,11 @@ exited before signalling ready") rather than silently starting a new session.
 }
 ```
 
-When authentication is enabled, connect to `ws_url` with the **same** credential
-the claim was made with: the client socket enforces lease ownership, so another
+When authentication is enabled, connect to `ws_url` with **either** the returned
+`ticket` (`ws_url + "?ticket=" + ticket`) or the **same** bearer credential the
+claim was made with: the client socket enforces lease ownership, so another
 principal's token — or none at all — is refused before the upgrade. See
+[`WS /lease/{lease_id}`](#ws-leaselease_id-http-api-not-yaml) and
 [Lease ownership](#lease-ownership).
 
 `ticket` is a **single-use, 30-second** credential bound to this lease **and** the
@@ -2607,6 +2613,62 @@ would be re-claiming, which spawns a *new* instance and abandons the live sessio
 accepting a connection with no ticket exactly as it did before tickets existed.
 Clients must therefore treat a missing `ticket` as "this broker issues none",
 never as an empty-string ticket.
+
+### `WS /lease/{lease_id}` (HTTP API, not YAML)
+
+The per-lease client socket. Connect to the `ws_url` returned by
+[`POST /claim`](#post-claim-http-api-not-yaml) and exchange broker frames with the
+instance. It accepts **two** credentials:
+
+| Credential | How it is presented | For |
+|------------|---------------------|-----|
+| Ticket  | `?ticket=<value>` on the handshake URL — `ws_url + "?ticket=" + ticket` | Browsers, which **cannot** set headers on a WebSocket upgrade. Issued by `POST /claim` and [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml). |
+| Bearer  | `Authorization: Bearer <token>` | Go/CLI and any other client that can set request headers. Use the same token the lease was claimed with. |
+
+**Precedence: a non-empty `?ticket=` wins, and wins exclusively.** When both are
+presented the `Authorization` header is **not consulted at all**, and a ticket
+failure is final rather than falling back to the header. Falling back would soften
+single use into "single use unless you also hold a token" — a replayed ticket
+accompanied by a valid header would connect — so a client that sends both and lets
+its ticket expire is refused despite the good header. Send one credential, or mint a
+fresh ticket.
+
+| Outcome                                                              | Handshake | Body                                    |
+|----------------------------------------------------------------------|-----------|-----------------------------------------|
+| Credential accepted and the caller owns the lease                    | `101`     | *(socket upgraded)*                     |
+| No credential at all (auth enabled)                                  | `401`     | `{"error":"authentication required"}`    |
+| Bearer token rejected by the validator chain                         | `401`     | `{"error":"credential rejected"}`        |
+| Ticket **unknown**, **expired**, **already redeemed**, or minted for a **different lease** | `401` | `{"error":"credential rejected"}` — all four are **byte-identical**, so a holder of one value learns nothing about any other |
+| Unknown, already-released, **or** another principal's lease          | `404`     | `unknown lease` (plain text; the route cannot answer JSON before an upgrade) |
+
+**A refusal always precedes the upgrade** — the handshake never reaches `101` and
+is then closed. An accept-then-close is observably different from a clean refusal
+(it confirms the lease id reached a live handler), which would defeat the point of
+answering an unowned lease identically to an unknown one.
+
+**The ticket burns on connect.** Redemption atomically consumes it, so a second
+connect with the same value is refused; mint a replacement with
+`POST /ticket/{lease_id}`. A ticket presented for the **wrong** lease is refused
+*without* being consumed — a failed authorization check is not a use, so a stale
+reconnect cannot destroy a credential the legitimate holder still needs — but the
+response is identical either way.
+
+Ticket **values are never logged**. The connect record carries `lease_id`,
+`principal_id` and which channel was used (`ticket`, `bearer` or `anonymous`),
+never the credential itself.
+
+`OriginPatterns` is `*`: the broker does **not** use the `Origin` header as access
+control. The credential is the access control.
+
+**With the `auth:` block absent, neither credential is consulted** — not the
+header, not the ticket — and the route is exactly "does this lease exist?", as it
+was before authentication existed. A client built for an authenticated broker can
+point a `?ticket=` at an open one and it still connects, rather than being refused
+by a store that never issued anything.
+
+After the upgrade, only inbound `io` frames (client → instance) reset the
+`idle_timeout` timer, and a frame whose `lease_id` does not match the socket's
+lease is dropped.
 
 ### `GET /leases` (HTTP API, not YAML)
 

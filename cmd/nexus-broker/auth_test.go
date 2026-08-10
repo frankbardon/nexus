@@ -456,7 +456,9 @@ func TestOwnershipDenial_LogsPrincipalLeaseAndRoute(t *testing.T) {
 					t.Fatalf("NewLease: %v", err)
 				}
 				mux := http.NewServeMux()
-				gw := NewGateway(logger, reg, newAuthGuard(testLogger(), chain))
+				// No ticket store: this case presents a bearer credential, and a
+				// gateway that can redeem nothing is the right shape for it.
+				gw := NewGateway(logger, reg, newAuthGuard(testLogger(), chain), nil)
 				t.Cleanup(gw.Shutdown)
 				gw.Register(mux)
 				ts := httptest.NewServer(mux)

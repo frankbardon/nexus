@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -972,6 +973,132 @@ func TestClaimTicketIssuedRefreshedAndInvalidatedOnRelease(t *testing.T) {
 	}
 }
 
+// TestBrowserTicketJourney is the whole point of the epic, end to end over a REAL
+// claimed lease with a live spawned instance: a browser-shaped client, holding
+// nothing but the URL and ticket a claim handed it, opens its own session socket,
+// converses through it, cannot replay the ticket, and recovers with a refresh.
+//
+// It is deliberately the full journey rather than four separate cases, because the
+// sequence is the property: claim → connect with `?ticket=` → round-trip an IO
+// frame → reconnect with the SAME ticket refused → POST /ticket/{lease_id} →
+// reconnect succeeds. The client presents NO Authorization header anywhere in it,
+// which is exactly what a browser can do and the reason tickets exist.
+//
+// The round trips are the load-bearing assertions. A handshake that returned 101
+// proves only that the gateway accepted a socket; echoing a frame off the spawned
+// instance proves the connection was attached to the right lease and is genuinely
+// usable — which a ticket path that resolved a principal but bound the socket to
+// nothing would fail.
+func TestBrowserTicketJourney(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin)
+
+	cr := b.Claim(t, b.Token, stubClaimBody)
+	if cr.LeaseID == "" || cr.WSURL == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	if cr.Ticket == "" {
+		t.Fatal("authenticated claim returned no ticket; a browser client could never open the lease socket")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// --- connect with the claim's ticket, no header at all -------------------
+	client, resp, err := b.DialLeaseTicket(ctx, cr.WSURL, cr.Ticket)
+	if err != nil {
+		t.Fatalf("dial %s with ?ticket=: %v", cr.WSURL, err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("handshake status = %d, want 101", resp.StatusCode)
+	}
+	roundTripIOFrame(t, ctx, client, cr.LeaseID, `{"hello":"ticket"}`)
+
+	// Close and wait for the lease to have no client, so the replay below is
+	// refused on credential grounds and not by the one-client-per-lease rule.
+	//
+	// The client initiates this close, so the ~5s close-handshake wait a
+	// server-initiated close pays against a non-reading peer does not apply — the
+	// gateway's read pump is reading and answers immediately.
+	client.Close(websocket.StatusNormalClosure, "")
+	waitFor(t, func() bool { return b.Registry.ClientConn(cr.LeaseID) == nil })
+
+	// --- the ticket is spent: a replay is refused before the upgrade ---------
+	replay, replayResp, replayErr := b.DialLeaseTicket(ctx, cr.WSURL, cr.Ticket)
+	if replayErr == nil {
+		replay.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("a spent ticket opened the lease socket a second time")
+	}
+	if replayResp == nil {
+		t.Fatalf("replayed dial returned no response: %v", replayErr)
+	}
+	if replayResp.StatusCode == http.StatusSwitchingProtocols {
+		t.Fatal("replay handshake status = 101: the socket was upgraded and then closed, not refused")
+	}
+	if replayResp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("replay handshake status = %d, want 401", replayResp.StatusCode)
+	}
+	if got := b.Registry.ClientConn(cr.LeaseID); got != nil {
+		t.Error("the replayed dial attached a client to the lease")
+	}
+	// A's instance is untouched by the refusal: still leased, still holding its slot.
+	if !b.Registry.Has(cr.LeaseID) {
+		t.Fatal("the refused replay tore the lease down")
+	}
+
+	// --- refresh, and reconnect ---------------------------------------------
+	// This is the leg that matters most: the 30s TTL means every real reconnect
+	// (dropped socket, laptop resume) goes through this route, and re-claiming is
+	// not an alternative because it would spawn a new instance and abandon the
+	// live session.
+	refreshed := b.Ticket(t, b.Token, cr.LeaseID)
+	if refreshed.Ticket == "" {
+		t.Fatal("refresh issued no ticket for the lease owner")
+	}
+	if refreshed.Ticket == cr.Ticket {
+		t.Fatal("refresh re-served the spent ticket")
+	}
+
+	reconnected, _, err := b.DialLeaseTicket(ctx, cr.WSURL, refreshed.Ticket)
+	if err != nil {
+		t.Fatalf("dial with a refreshed ticket: %v", err)
+	}
+	defer reconnected.Close(websocket.StatusNormalClosure, "")
+	// The SAME live instance is still on the other end — the session survived the
+	// disconnect, which is the whole reason the refresh route exists.
+	roundTripIOFrame(t, ctx, reconnected, cr.LeaseID, `{"hello":"reconnected"}`)
+}
+
+// roundTripIOFrame writes one IO frame into a client socket and asserts the stub
+// instance echoes it back unchanged. It is the strongest liveness proof available
+// over a broker connection: the frame has to reach the spawned process and come
+// back through the gateway's routing.
+func roundTripIOFrame(t *testing.T, ctx context.Context, conn *websocket.Conn, leaseID, payload string) {
+	t.Helper()
+	out, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(payload),
+	})
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	echo, err := brokerframe.Decode(data)
+	if err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != payload {
+		t.Fatalf("unexpected echo frame: %+v (want payload %s)", echo, payload)
+	}
+}
+
 // TestClaimOmitsTicketWhenAuthDisabled is the backward-compatibility half: with no
 // `auth:` block a claim carries NO ticket field at all, and the client WebSocket
 // still opens with no ticket and no credential — so an existing deployment sees
@@ -1278,6 +1405,16 @@ func (b *authedStubBroker) DialLease(ctx context.Context, wsURL, token string) (
 	return websocket.Dial(ctx, wsURL, opts)
 }
 
+// DialLeaseTicket opens the client WebSocket for a lease presenting a single-use
+// ticket as a query parameter and NO Authorization header — the browser-shaped
+// request, since browser JavaScript cannot set headers on a WebSocket handshake.
+//
+// It asserts nothing, so a caller can inspect a refusal; on a failed handshake the
+// conn is nil and the *http.Response carries the broker's refusal.
+func (b *authedStubBroker) DialLeaseTicket(ctx context.Context, wsURL, ticket string) (*websocket.Conn, *http.Response, error) {
+	return websocket.Dial(ctx, wsURL+"?"+ticketQueryParam+"="+url.QueryEscape(ticket), nil)
+}
+
 // getLeasesIntegration performs GET /leases against a running stub broker and
 // decodes the snapshot.
 func getLeasesIntegration(t *testing.T, base string) RegistrySnapshot {
@@ -1439,7 +1576,7 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	// lease down.
 	tickets := newTicketStore(logger, guard.enabled())
 	registry.useTicketStore(tickets)
-	gateway := NewGateway(logger, registry, guard)
+	gateway := NewGateway(logger, registry, guard, tickets)
 	claims := NewClaimServer(logger, registry, cfg, wiring.runner, tickets)
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)

@@ -89,7 +89,10 @@ func run() error {
 	// the single teardown convergence point (Remove) so manual release, the idle
 	// sweeper and crash detection all invalidate.
 	registry.useTicketStore(tickets)
-	gateway := NewGateway(logger, registry, guard)
+	// The gateway holds the ticket store as well as the guard: the client WebSocket
+	// accepts a single-use `?ticket=` as an alternative to a bearer header, and it
+	// is the only route that redeems one.
+	gateway := NewGateway(logger, registry, guard, tickets)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{}, tickets)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
