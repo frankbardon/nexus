@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Config is the parsed form of an `auth:` block. It is decoder-agnostic on
@@ -47,10 +48,22 @@ const (
 	keyScopesClaim    = "scopes_claim"
 )
 
+// Keys a `jwks` validator entry accepts, consumed by buildJWKSValidator.
+const (
+	keyIssuer           = "issuer"
+	keyJWKSURL          = "jwks_url"
+	keyAudience         = "audience"
+	keyAlgorithms       = "algorithms"
+	keyCacheTTL         = "cache_ttl"
+	keyNegativeCacheTTL = "negative_cache_ttl"
+	keyHTTPTimeout      = "http_timeout"
+	keyClockSkew        = "clock_skew"
+)
+
 // knownValidatorTypes lists the types BuildChain can construct, for the
 // unknown-type error message. Extend it alongside the switch in buildValidator.
 func knownValidatorTypes() []string {
-	return []string{ValidatorTypeStatic}
+	return []string{ValidatorTypeStatic, ValidatorTypeJWKS}
 }
 
 // ParseConfig parses an `auth:` block. A nil or empty map is valid and yields a
@@ -175,6 +188,8 @@ func buildValidator(vc ValidatorConfig) (Validator, error) {
 	switch vc.Type {
 	case ValidatorTypeStatic:
 		return buildStaticValidator(vc)
+	case ValidatorTypeJWKS:
+		return buildJWKSValidator(vc)
 	default:
 		return nil, fmt.Errorf("unknown validator type %q (known types: %s)",
 			vc.Type, strings.Join(knownValidatorTypes(), ", "))
@@ -212,6 +227,117 @@ func buildStaticValidator(vc ValidatorConfig) (Validator, error) {
 		tokens = append(tokens, t)
 	}
 	return NewStaticValidator(tokens)
+}
+
+// buildJWKSValidator constructs a JWKSValidator from a config entry.
+//
+// Nothing here reaches the network: the issuer's key set is fetched lazily on
+// first use. A broker that cannot start because its identity provider is briefly
+// unreachable would be a worse failure mode than one that starts and denies until
+// the endpoint answers.
+func buildJWKSValidator(vc ValidatorConfig) (Validator, error) {
+	if err := rejectUnknownKeys(vc.Options,
+		keyIssuer, keyJWKSURL, keyAudience, keyAlgorithms,
+		keyCacheTTL, keyNegativeCacheTTL, keyHTTPTimeout, keyClockSkew,
+	); err != nil {
+		return nil, err
+	}
+
+	opts := jwksOptions{Mapping: vc.ClaimMapping}
+	var err error
+	if opts.Issuer, _, err = optString(vc.Options, keyIssuer); err != nil {
+		return nil, err
+	}
+	if opts.JWKSURL, _, err = optString(vc.Options, keyJWKSURL); err != nil {
+		return nil, err
+	}
+	if opts.Audiences, err = optStringList(vc.Options, keyAudience); err != nil {
+		return nil, err
+	}
+	if opts.Algorithms, err = optStringList(vc.Options, keyAlgorithms); err != nil {
+		return nil, err
+	}
+	if opts.CacheTTL, _, err = optDuration(vc.Options, keyCacheTTL); err != nil {
+		return nil, err
+	}
+	if opts.NegativeCacheTTL, _, err = optDuration(vc.Options, keyNegativeCacheTTL); err != nil {
+		return nil, err
+	}
+	if opts.HTTPTimeout, _, err = optDuration(vc.Options, keyHTTPTimeout); err != nil {
+		return nil, err
+	}
+	if opts.ClockSkew, opts.ClockSkewSet, err = optDuration(vc.Options, keyClockSkew); err != nil {
+		return nil, err
+	}
+	return newJWKSValidator(opts)
+}
+
+// optStringList reads a key that accepts either a single string or a list of
+// strings, and returns it as a slice.
+//
+// A lone string is taken verbatim as one entry and is deliberately NOT split on
+// whitespace, unlike ParseScopes. These lists hold audiences and algorithm names,
+// which are single opaque identifiers: splitting `audience: "my service"` into
+// two audiences would silently widen what the validator accepts, whereas leaving
+// it whole produces a clean "no token matched" that an operator can diagnose.
+func optStringList(m map[string]any, key string) ([]string, error) {
+	v, present := m[key]
+	if !present || v == nil {
+		return nil, nil
+	}
+	switch value := v.(type) {
+	case string:
+		s := strings.TrimSpace(value)
+		if s == "" {
+			return nil, nil
+		}
+		return []string{s}, nil
+	case []string:
+		out := make([]string, 0, len(value))
+		for _, s := range value {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out, nil
+	case []any:
+		out := make([]string, 0, len(value))
+		for i, elem := range value {
+			s, ok := elem.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d]: want a string, got %T", key, i, elem)
+			}
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s: want a string or a list of strings, got %T", key, v)
+	}
+}
+
+// optDuration reads an optional duration key written as a Go duration string
+// ("10m", "30s", "1h30m"). The bool reports whether the key was present, so a
+// caller can tell an explicit zero from an absent key.
+//
+// A bare number is rejected rather than guessed at: "cache_ttl: 600" reads as ten
+// minutes to one operator and six hundred nanoseconds to Go, and silently picking
+// either would be worse than an error naming the key.
+func optDuration(m map[string]any, key string) (time.Duration, bool, error) {
+	v, present := m[key]
+	if !present || v == nil {
+		return 0, false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return 0, true, fmt.Errorf("%s: want a duration string such as \"10m\", got %T", key, v)
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, true, fmt.Errorf("%s: %w", key, err)
+	}
+	return d, true, nil
 }
 
 // parseStaticToken parses one `tokens:` entry.

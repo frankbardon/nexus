@@ -2372,16 +2372,22 @@ auth:
           principal: "ci-runner"  # required: the identity this token acts as
           tenant: "acme"          # optional
           scopes: "a b"           # optional: string (space/comma separated) or list
+    - type: jwks            # OIDC JWTs verified against the issuer's published keys
+      issuer: "https://id.example.com/"
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+      audience: "nexus-broker"
+      algorithms: ["RS256"]
+      principal_claim: sub
 ```
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
 | `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
-| `auth.validators[].type`               | string          | *required* | Validator implementation. Currently `static`. |
-| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry but only used by claim-bearing validators; accepted and ignored by `static`. |
-| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Accepted and ignored by `static`. |
-| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Accepted and ignored by `static`. |
+| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens) or `jwks` (OIDC JWTs verified against an issuer's published key set). |
+| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks`**, accepted and ignored by `static`. |
+| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks`; accepted and ignored by `static`. |
+| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks`; accepted and ignored by `static`. |
 | `auth.validators[].tokens`             | list            | *required for `static`* | Token table for a `static` validator. At least one entry; duplicate `token` values are a config error rather than a last-one-wins surprise. |
 | `auth.validators[].tokens[].token`     | string          | *required* | The bearer token value, matched against `Authorization: Bearer <token>` with a constant-time compare. |
 | `auth.validators[].tokens[].principal` | string          | *required* | The principal id a request presenting this token acts as. Must be non-empty — an empty principal would behave as a wildcard in later ownership checks. |
@@ -2390,6 +2396,108 @@ auth:
 
 Because `static` tokens are written inline, a `broker.yaml` carrying them is a
 secret: restrict its file permissions accordingly.
+
+#### The `jwks` validator
+
+`type: jwks` verifies an RFC 7515 JWS bearer token against the signature keys an
+OIDC issuer publishes at its JWKS endpoint, validates `exp` / `nbf` / `iss` /
+`aud`, and maps the verified claims onto the `Principal`. Signature and
+standard-claim verification use `github.com/golang-jwt/jwt/v5`; the key fetch,
+cache and rotation logic is Nexus's own.
+
+It is **generic OIDC with no provider-specific defaults**. Nexus does not know
+which claim your issuer puts a stable subject in, so `principal_claim` is
+required and there is no fallback guess — a validator that silently defaulted to
+`sub` for an issuer that mints a different stable identifier would bind lease
+ownership to the wrong field.
+
+```yaml
+auth:
+  admin_scope: "nexus.broker.admin"
+  validators:
+    - type: jwks
+      # Required. Compared exactly against the token's `iss` claim.
+      issuer: "https://id.example.com/"
+
+      # Required. The issuer's key set endpoint. Must be https, except to a
+      # loopback host. There is no OIDC discovery — see below.
+      jwks_url: "https://id.example.com/.well-known/jwks.json"
+
+      # Required. A token matching any listed audience passes.
+      audience: "nexus-broker"
+      # …or several:
+      # audience: ["nexus-broker", "nexus-broker-staging"]
+
+      # Optional. Asymmetric algorithms only.
+      algorithms: ["RS256"]
+
+      # Claim mapping. principal_claim is required.
+      principal_claim: sub
+      tenant_claim: org_id
+      scopes_claim: scope
+
+      # Optional cache and transport tuning.
+      cache_ttl: 10m
+      negative_cache_ttl: 1m
+      http_timeout: 5s
+      clock_skew: 1m
+```
+
+| Key                                          | Type           | Default    | Description |
+|----------------------------------------------|----------------|------------|-------------|
+| `auth.validators[].issuer`                   | string         | *required* | The exact value the token's `iss` claim must carry. A token with no `iss`, or a different one, is rejected. Compared as an opaque string, not as a URL, so it matches whatever your issuer actually mints — trailing slash included. |
+| `auth.validators[].jwks_url`                 | string         | *required* | The issuer's JWKS endpoint. Must be an absolute `https://` URL; plain `http://` is accepted **only** for a loopback host (`127.0.0.1`, `::1`, `localhost`), for local development and sidecar-fronted deployments. The key set is the entire basis for trusting a token, so fetching it over a rewritable channel would let an on-path attacker substitute a signing key and mint any principal. Userinfo in the URL is rejected. Validated at load, so a typo fails the boot, not the first claim. |
+| `auth.validators[].audience`                 | string or list | *required* | Acceptable `aud` values; a token carrying **any** of them passes. A lone string is one audience and is **not** split on whitespace (unlike `scopes`), because an audience is a single opaque identifier and splitting would silently widen what the broker accepts. A token with **no** `aud` is rejected. |
+| `auth.validators[].algorithms`               | list           | `["RS256"]` | The JWS algorithms accepted **at verification time**. The token header's `alg` is never trusted: it is checked against this list before any key is resolved, and again by the JWT library. Allowed values are `RS256`/`RS384`/`RS512`, `PS256`/`PS384`/`PS512`, `ES256`/`ES384`/`ES512`. `none` and the HMAC family (`HS256`/`HS384`/`HS512`) are **not configurable at all** — allowing a symmetric algorithm against a published key set *is* the algorithm-confusion attack, so it is a config error rather than a footgun. |
+| `auth.validators[].cache_ttl`                | duration       | `10m`      | How long a fetched key set is considered fresh. A `kid` already in the cache is always served from memory with **no network round trip** — verification sits on `POST /claim` and on the WebSocket connect path, so a per-request fetch would put the issuer's latency in front of every session. Past the TTL the request is *still* served from cache and a refresh runs behind it. `0` means the default. |
+| `auth.validators[].negative_cache_ttl`       | duration       | `1m`       | How long a `kid` that could not be resolved is remembered as unresolvable, **and** the minimum interval between on-demand key-set fetches. Both bounds matter: the per-`kid` half stops a repeated forged token from re-fetching, and the global half stops a flood of tokens bearing *distinct* invented `kid`s from amplifying one-to-one into issuer traffic. It is also the recovery interval — a genuine key rotation that arrives during the window is picked up when it expires, with no restart. `0` means the default. |
+| `auth.validators[].http_timeout`             | duration       | `5s`       | Bounds a single JWKS request, and is the worst-case latency an unreachable issuer can add to a **cold** claim. A hanging identity provider cannot hang a claim. `0` means the default. |
+| `auth.validators[].clock_skew`               | duration       | `1m`       | Leeway applied to `exp` and `nbf`, absorbing clock drift between the issuer and the broker. Capped at `5m`: a large skew silently extends the life of every token the issuer ever minted, so a mistyped value fails the boot. Set `clock_skew: 0s` for no leeway at all. |
+
+Durations are Go duration strings (`10m`, `30s`, `1h30m`). A bare number is a
+config error — `600` reads as ten minutes to a human and six hundred nanoseconds
+to Go, and guessing either would be worse than saying so.
+
+**Key rotation and JWKS failures.** A `kid` the cache has not seen triggers one
+synchronous fetch, which is what makes rotation work without a restart: a token
+signed with a key added to the JWKS *after* the cache was populated verifies on
+its first presentation. When the endpoint is unreachable, behaviour is
+deliberately asymmetric — a key already in the cache **keeps verifying** (that is
+the point of the cache), but a `kid` that is *not* cached is **denied**. An
+endpoint the broker cannot reach cannot vouch for a key it does not hold, so the
+failure mode is a refusal and never an allow.
+
+**Claim mapping.** `principal_claim` → `Principal.ID`, `tenant_claim` →
+`Principal.Tenant`, `scopes_claim` → `Principal.Scopes`. The scopes claim accepts
+either a space-delimited string (the OAuth 2.0 `scope` convention) or a JSON
+array of strings. The full verified claim set is carried on the principal for
+audit regardless of which claims are mapped. A token whose `principal_claim` is
+**absent, empty, or not a scalar is rejected**: an empty `Principal.ID` would
+compare equal to the anonymous owner and to every other empty-id principal, which
+is a privilege-escalation path rather than a cosmetic gap.
+
+**Two further rejections worth knowing about.** A token with no `exp` is rejected
+rather than treated as valid forever. And when the issuer publishes an `alg` on a
+key (RFC 7517 §4.4), that declaration is enforced: a key published for `RS256`
+will not verify an `RS512` token even if both algorithms are in your
+`algorithms` list.
+
+**No OIDC discovery — `jwks_url` is explicit, by decision.**
+`/.well-known/openid-configuration` is deliberately not supported. Three reasons:
+a discovery document can point the JWKS URL anywhere, so supporting it adds a
+second endpoint whose compromise substitutes signing keys; an explicit URL is one
+host to allow through an egress firewall instead of two; and it removes a
+network dependency from the first claim after startup. To configure a provider
+that documents only its discovery URL, fetch that document once by hand and copy
+its `jwks_uri` value:
+
+```bash
+curl -s https://id.example.com/.well-known/openid-configuration | jq -r .jwks_uri
+```
+
+If your issuer ever changes that URL you will need to update `broker.yaml`, which
+is the trade being made: an explicit, auditable endpoint over an automatically
+followed one.
 
 **Status mapping.** Denials are classified by the validator chain, not by string
 matching, and map onto:

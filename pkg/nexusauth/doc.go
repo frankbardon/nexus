@@ -10,9 +10,10 @@
 //
 //   - Principal — the verified identity. ID is the only field authorization
 //     compares; Tenant, Scopes and Claims are carried for policy and audit.
-//   - Validator — the single extension point. One implementation ships here
-//     (static, a token → Principal table); others verify a JWS against a JWKS,
-//     call an introspection endpoint, or trust a fronting proxy's headers.
+//   - Validator — the single extension point. Two implementations ship here:
+//     static (a token → Principal table) and jwks (an OIDC JWS verified against
+//     the issuer's published key set). Others might call an introspection
+//     endpoint or trust a fronting proxy's headers.
 //   - Chain — an ordered set of named validators. The first success wins. When
 //     every validator denies, the aggregate *DeniedError names each validator
 //     and its reason so an operator can diagnose the rejection from a single
@@ -31,6 +32,12 @@
 // (decoded by gopkg.in/yaml.v3) and a plugin's ctx.Config block. See
 // ParseConfig and BuildChain.
 //
-// This package is stdlib-only by design; it is the shared trust boundary for two
-// very different hosts and must not drag dependencies into either.
+// The package is stdlib-only apart from github.com/golang-jwt/jwt/v5, which the
+// jwks validator uses for signature and standard-claim verification. That is a
+// deliberate, single exception: hand-rolling JWS verification is exactly the
+// kind of code that fails silently and open. Everything around it — the JWKS
+// fetch, the JWK-to-public-key reconstruction, the key cache and its rotation
+// behaviour — is written here against stdlib crypto rather than pulling in a
+// JOSE library. This is the shared trust boundary for two very different hosts
+// and must not drag dependencies into either.
 package nexusauth
