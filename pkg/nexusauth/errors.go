@@ -12,6 +12,7 @@ import (
 //	KindNoCredential      → 401 (nothing presented; challenge the caller)
 //	KindInvalidCredential → 401 (presented and rejected; include the reason)
 //	KindInsufficientScope → 403 (identity is good, authority is not)
+//	KindUnavailable       → 503 (we could not find out; retry, do not re-auth)
 type Kind string
 
 const (
@@ -25,6 +26,27 @@ const (
 	// KindInsufficientScope means the credential verified but does not grant
 	// the authority the operation requires.
 	KindInsufficientScope Kind = "insufficient_scope"
+
+	// KindUnavailable means the validator could not reach a verdict because the
+	// authority it depends on did not answer — an introspection endpoint that
+	// timed out, refused the broker's own client credentials, or returned a
+	// server error.
+	//
+	// It is still a denial: no Principal is produced and the request is refused.
+	// What it changes is the *story told to the client*. A validator that must
+	// ask a remote authority on every cold credential (see IntrospectValidator)
+	// has no cache to fall back on, so an identity-provider outage would
+	// otherwise become a wall of 401s. A 401 reads to a client as "your token is
+	// bad, go re-authenticate", and every client doing that at once aims a
+	// re-auth storm at the identity provider that is already struggling. A 503
+	// with a Retry-After says the honest thing — "ask again shortly" — and lets
+	// the outage recover.
+	//
+	// It is deliberately NOT used for a verdict the authority actually gave. An
+	// RFC 7662 endpoint reports "this token is no good" as 200 with
+	// active:false, never as an error status, so a non-2xx from it is never a
+	// statement about the caller's credential.
+	KindUnavailable Kind = "unavailable"
 )
 
 // Sentinel errors for errors.Is. Both *Error and *DeniedError report themselves
@@ -39,6 +61,9 @@ var (
 
 	// ErrInsufficientScope matches any denial of kind KindInsufficientScope.
 	ErrInsufficientScope = errors.New("nexusauth: insufficient scope")
+
+	// ErrUnavailable matches any denial of kind KindUnavailable.
+	ErrUnavailable = errors.New("nexusauth: authentication authority unavailable")
 
 	// ErrAuthDisabled is returned by a Chain with no validators. It is
 	// deliberately not one of the three kinds: an unconfigured chain is a
@@ -57,6 +82,8 @@ func (k Kind) sentinel() error {
 		return ErrInvalidCredential
 	case KindInsufficientScope:
 		return ErrInsufficientScope
+	case KindUnavailable:
+		return ErrUnavailable
 	default:
 		return nil
 	}
@@ -155,12 +182,22 @@ type DeniedError struct {
 }
 
 // Kind collapses the attempts into the kind the caller should act on, in
-// severity order: an insufficient-scope refusal means some validator did verify
-// the credential (403 is the honest answer), otherwise a rejection outranks a
-// missing credential. An empty DeniedError fails closed as
-// KindInvalidCredential rather than reporting no kind at all.
+// severity order.
+//
+// The order encodes how much each verdict actually knows. An insufficient-scope
+// refusal is highest because some validator *did* verify the credential, so 403
+// is the honest answer. KindUnavailable comes next, above a flat rejection:
+// consider a chain of [static, introspect] presented with a real identity-provider
+// token — the static table rejects it (it is not in the table) while introspect
+// could not reach its endpoint. Collapsing that to "credential rejected" would
+// tell the client to re-authenticate against the provider that is already down,
+// which is exactly the re-auth storm KindUnavailable exists to prevent. A
+// rejection in turn outranks a missing credential.
+//
+// An empty DeniedError fails closed as KindInvalidCredential rather than
+// reporting no kind at all.
 func (d *DeniedError) Kind() Kind {
-	for _, k := range []Kind{KindInsufficientScope, KindInvalidCredential, KindNoCredential} {
+	for _, k := range []Kind{KindInsufficientScope, KindUnavailable, KindInvalidCredential, KindNoCredential} {
 		for _, a := range d.Attempts {
 			if a.Kind == k {
 				return k
@@ -257,6 +294,8 @@ func KindOf(err error) Kind {
 		return KindInvalidCredential
 	case errors.Is(err, ErrInsufficientScope):
 		return KindInsufficientScope
+	case errors.Is(err, ErrUnavailable):
+		return KindUnavailable
 	}
 	return ""
 }

@@ -247,6 +247,17 @@ func (g *authGuard) deny(w http.ResponseWriter, r *http.Request, err error) {
 	case nexusauth.KindInsufficientScope:
 		status = http.StatusForbidden
 		reason = "insufficient scope"
+	case nexusauth.KindUnavailable:
+		// The credential was neither accepted nor rejected: a validator that has
+		// to ask a remote authority (an RFC 7662 introspection endpoint) could
+		// not get an answer. Reporting that as 401 would tell every client at
+		// once to go and re-authenticate against the provider that is already
+		// failing, so the honest answer is "try again shortly" — and Retry-After
+		// gives a well-behaved client a number to back off by instead of
+		// hot-looping. Still a refusal: no lease is claimed, nothing is
+		// released.
+		status = http.StatusServiceUnavailable
+		reason = "authentication temporarily unavailable"
 	default:
 		// KindInvalidCredential, and anything the package could not classify
 		// (a bare transport error from a network-backed validator, say). Failing
@@ -268,6 +279,11 @@ func (g *authGuard) deny(w http.ResponseWriter, r *http.Request, err error) {
 		}
 	case http.StatusForbidden:
 		w.Header().Set("WWW-Authenticate", `Bearer realm="nexus-broker", error="insufficient_scope"`)
+	case http.StatusServiceUnavailable:
+		// Deliberately no WWW-Authenticate: a 503 is not a challenge, and
+		// emitting one would invite exactly the re-authentication this status
+		// exists to avoid.
+		w.Header().Set("Retry-After", "5")
 	}
 
 	w.Header().Set("Content-Type", "application/json")

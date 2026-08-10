@@ -10,18 +10,20 @@
 //
 //   - Principal — the verified identity. ID is the only field authorization
 //     compares; Tenant, Scopes and Claims are carried for policy and audit.
-//   - Validator — the single extension point. Two implementations ship here:
-//     static (a token → Principal table) and jwks (an OIDC JWS verified against
-//     the issuer's published key set). Others might call an introspection
-//     endpoint or trust a fronting proxy's headers.
+//   - Validator — the single extension point. Three implementations ship here:
+//     static (a token → Principal table), jwks (an OIDC JWS verified against the
+//     issuer's published key set) and introspect (an opaque token verified by
+//     asking the issuer, per RFC 7662). Others might trust a fronting proxy's
+//     headers.
 //   - Chain — an ordered set of named validators. The first success wins. When
 //     every validator denies, the aggregate *DeniedError names each validator
 //     and its reason so an operator can diagnose the rejection from a single
 //     slog record.
-//   - Kind and Error — three denial kinds a caller maps onto transport status
+//   - Kind and Error — four denial kinds a caller maps onto transport status
 //     codes: KindNoCredential and KindInvalidCredential are 401,
-//     KindInsufficientScope is 403. Use KindOf, or errors.Is against the
-//     package sentinels; never match on error strings.
+//     KindInsufficientScope is 403, and KindUnavailable is 503 (we could not
+//     find out — retry, do not re-authenticate). Use KindOf, or errors.Is
+//     against the package sentinels; never match on error strings.
 //
 // A chain built from an empty validator list is *disabled*, not permissive:
 // Validate always returns ErrAuthDisabled and never a Principal. Callers decide
@@ -33,7 +35,8 @@
 // ParseConfig and BuildChain.
 //
 // The package is stdlib-only apart from github.com/golang-jwt/jwt/v5, which the
-// jwks validator uses for signature and standard-claim verification. That is a
+// jwks validator uses for signature and standard-claim verification (the
+// introspect validator is plain net/http and encoding/json). That is a
 // deliberate, single exception: hand-rolling JWS verification is exactly the
 // kind of code that fails silently and open. Everything around it — the JWKS
 // fetch, the JWK-to-public-key reconstruction, the key cache and its rotation

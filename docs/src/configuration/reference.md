@@ -2378,16 +2378,21 @@ auth:
       audience: "nexus-broker"
       algorithms: ["RS256"]
       principal_claim: sub
+    - type: introspect      # opaque tokens verified by asking the issuer (RFC 7662)
+      introspection_url: "https://id.example.com/oauth2/introspect"
+      client_id: "nexus-broker"
+      client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"
+      principal_claim: sub
 ```
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
 | `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
-| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens) or `jwks` (OIDC JWTs verified against an issuer's published key set). |
-| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks`**, accepted and ignored by `static`. |
-| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks`; accepted and ignored by `static`. |
-| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks`; accepted and ignored by `static`. |
+| `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), or `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint). |
+| `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static`. |
+| `auth.validators[].tenant_claim`       | string          | `""`       | Which claim becomes `Principal.Tenant`. Optional for `jwks` and `introspect`; accepted and ignored by `static`. |
+| `auth.validators[].scopes_claim`       | string          | `""`       | Which claim becomes `Principal.Scopes`. Optional for `jwks` and `introspect`; accepted and ignored by `static`. |
 | `auth.validators[].tokens`             | list            | *required for `static`* | Token table for a `static` validator. At least one entry; duplicate `token` values are a config error rather than a last-one-wins surprise. |
 | `auth.validators[].tokens[].token`     | string          | *required* | The bearer token value, matched against `Authorization: Bearer <token>` with a constant-time compare. |
 | `auth.validators[].tokens[].principal` | string          | *required* | The principal id a request presenting this token acts as. Must be non-empty — an empty principal would behave as a wildcard in later ownership checks. |
@@ -2499,14 +2504,105 @@ If your issuer ever changes that URL you will need to update `broker.yaml`, whic
 is the trade being made: an explicit, auditable endpoint over an automatically
 followed one.
 
+#### The `introspect` validator
+
+`type: introspect` verifies an **opaque** bearer token by asking the issuer about
+it, per [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) (OAuth 2.0 Token
+Introspection). Not every identity provider issues JWTs; a token that carries no
+claims and no signature can only be validated by the authority that minted it.
+The broker POSTs the token to the configured introspection endpoint using its
+own client credentials, reads the `active` verdict plus the returned claims, and
+maps those claims onto the `Principal` using the **same** `principal_claim` /
+`tenant_claim` / `scopes_claim` options as `jwks`.
+
+```yaml
+auth:
+  validators:
+    - type: introspect
+      # Required. The issuer's RFC 7662 endpoint. Same transport rule as
+      # jwks_url: https, or http to a loopback host.
+      introspection_url: "https://id.example.com/oauth2/introspect"
+
+      # Required. How the broker identifies itself to that endpoint.
+      client_id: "nexus-broker"
+
+      # The broker's own secret. Give it inline OR by env-var reference,
+      # never both.
+      client_secret_env: "NEXUS_BROKER_INTROSPECTION_SECRET"
+      # client_secret: "..."
+
+      # Optional.
+      client_auth: basic          # basic (default) | post
+      token_type_hint: access_token
+
+      # Claim mapping. principal_claim is required.
+      principal_claim: sub
+      tenant_claim: org_id
+      scopes_claim: scope
+
+      # Optional cache and transport tuning.
+      cache_ttl: 1m
+      negative_cache_ttl: 30s
+      http_timeout: 5s
+```
+
+| Key                                          | Type           | Default        | Description |
+|----------------------------------------------|----------------|----------------|-------------|
+| `auth.validators[].introspection_url`        | string         | *required*     | The RFC 7662 introspection endpoint. Must be an absolute `https://` URL; plain `http://` is accepted **only** for a loopback host (`127.0.0.1`, `::1`, `localhost`), for local development and sidecar-fronted deployments — the endpoint decides who every caller is, so a rewritable channel would let an on-path attacker mint any principal. Userinfo in the URL is rejected. Validated at load, so a typo fails the boot, not the first claim. |
+| `auth.validators[].client_id`                | string         | *required*     | The client id the broker presents to the introspection endpoint. RFC 7662 §2.1 requires the endpoint to authorize its callers, so this is required rather than optional — an operator should not discover it from the endpoint's own `401`. |
+| `auth.validators[].client_secret`            | string         | `""`           | The broker's client secret, written inline. Mutually exclusive with `client_secret_env`. A `broker.yaml` carrying one is a secret file — restrict its permissions. |
+| `auth.validators[].client_secret_env`        | string         | `""`           | The **name** of an environment variable holding the client secret, so it need not be inlined in `broker.yaml`. Setting both this and `client_secret` is a config error rather than a precedence puzzle. A named variable that is unset or empty **fails the boot**: falling back to an empty secret would authenticate the broker as an anonymous client and surface much later as a confusing `401` from the endpoint. The value is trimmed (a secret injected from a file routinely arrives with a trailing newline) and is never logged — errors name the variable, never its value. |
+| `auth.validators[].client_auth`              | string         | `basic`        | How the client credentials are presented: `basic` (HTTP Basic, RFC 6749 §2.3.1 — every authorization server must support it, and it keeps the secret out of the request body) or `post` (`client_id`/`client_secret` as form parameters, for providers that only accept `client_secret_post`). With `basic` the id and secret are form-urlencoded before base64, as RFC 6749 requires, so a secret containing `:` or a non-ASCII byte is presented correctly. |
+| `auth.validators[].token_type_hint`          | string         | `access_token` | The optional RFC 7662 §2.1 `token_type_hint` parameter. Set it to `""` to send no hint at all. |
+| `auth.validators[].cache_ttl`                | duration       | `1m`           | The **maximum** lifetime of a cached verdict. A cache hit costs **no network round trip** — this validator sits on `POST /claim` and on the WebSocket connect path, so a per-request round trip would put the issuer's latency in front of every session. The effective TTL is the **lower** of this and the response's own `exp`, so a cache entry can never outlive the token it describes; a response with no `exp` falls back to this value and never to unbounded caching. Capped at `15m`: introspection exists precisely so a token can be revoked *before* it expires, and a longer cache would silently throw that away, so an over-long value fails the boot. `0` means the default. |
+| `auth.validators[].negative_cache_ttl`       | duration       | `30s`          | How long a **definitive** refusal (`active: false`, or a response whose `principal_claim` is unusable) is remembered, so a client retrying a dead token in a loop does not become introspection traffic. An **unavailable** verdict — timeout, non-2xx, unparseable body — is deliberately **never** cached, so recovery from an issuer outage is immediate with no TTL to wait out. Same `15m` cap. `0` means the default. |
+| `auth.validators[].http_timeout`             | duration       | `5s`           | Bounds a single introspection request, and is therefore the worst-case latency a hung identity provider can add to a **cold** claim — which matters more here than anywhere else, because `POST /claim` has its own ready-timeout budget to respect. `0` means the default. |
+
+**Nothing but `active: true` is an allow.** `active: false` is a denial; so is a
+non-2xx status, a body that is not a JSON object, a missing `active` member, and
+an `active` member that is not a boolean. There is no path from a strange
+response to an authenticated caller.
+
+**A response whose `principal_claim` is absent, empty, or not a scalar is
+rejected**, exactly as for `jwks`: an empty `Principal.ID` would compare equal to
+the anonymous owner and to every other empty-id principal, which is a
+privilege-escalation path rather than a cosmetic gap.
+
+**Caching.** Verdicts are cached in memory keyed by the **SHA-256 of the token**,
+never by the token itself — the cache is a long-lived map of live credentials, so
+a heap dump or a debug print of its keys must not hand over working tokens. The
+map is bounded (4096 entries); past that, expired entries are reclaimed first and
+live ones are trimmed at random, since the worst case of evicting a live entry is
+one extra round trip and never a wrong verdict. Concurrent lookups of the *same*
+token collapse onto a single request, so a client opening several leases at once
+does not multiply the round trip the cache exists to avoid.
+
+**Secret sourcing convention.** `<key>` holds a literal value; `<key>_env` holds
+the **name** of an environment variable to read it from. It is the same pair
+`nexus.io.agui` uses for `bearer_token` / `bearer_token_env`, and any future
+secret-bearing key follows it.
+
 **Status mapping.** Denials are classified by the validator chain, not by string
 matching, and map onto:
 
-| Situation                                            | Status | Body                                    | `WWW-Authenticate`                                          |
-|------------------------------------------------------|--------|-----------------------------------------|-------------------------------------------------------------|
-| No `Authorization: Bearer` header                    | `401`  | `{"error":"authentication required"}`   | `Bearer realm="nexus-broker"`                               |
-| Credential presented and rejected                    | `401`  | `{"error":"credential rejected"}`       | `Bearer realm="nexus-broker", error="invalid_token"`        |
-| Credential valid but lacking the required authority   | `403`  | `{"error":"insufficient scope"}`        | `Bearer realm="nexus-broker", error="insufficient_scope"`   |
+| Situation                                            | Status | Body                                              | Headers                                                     |
+|------------------------------------------------------|--------|---------------------------------------------------|-------------------------------------------------------------|
+| No `Authorization: Bearer` header                    | `401`  | `{"error":"authentication required"}`             | `WWW-Authenticate: Bearer realm="nexus-broker"`             |
+| Credential presented and rejected                    | `401`  | `{"error":"credential rejected"}`                 | `WWW-Authenticate: Bearer realm="nexus-broker", error="invalid_token"` |
+| Credential valid but lacking the required authority   | `403`  | `{"error":"insufficient scope"}`                  | `WWW-Authenticate: Bearer realm="nexus-broker", error="insufficient_scope"` |
+| The validator could not reach a verdict               | `503`  | `{"error":"authentication temporarily unavailable"}` | `Retry-After: 5` (deliberately **no** `WWW-Authenticate`)  |
+
+The `503` is what an `introspect` validator returns when the introspection
+endpoint times out, refuses the broker's *own* client credentials, or answers
+with a server error. None of those is a statement about the caller's token — RFC
+7662 encodes "this token is no good" as `200` with `active: false`, never as an
+error status — so reporting them as `401` would tell every client at once to
+re-authenticate against an identity provider that is already failing. It is still
+a refusal: no lease is claimed and nothing is released. A `503` also outranks a
+plain rejection when several validators are chained: if a `static` table rejects
+a token that `introspect` merely could not check, the honest answer is "ask
+again", not "your credential is bad". The `jwks` validator does not produce this
+status — its key cache absorbs an issuer outage for any key it already holds.
 
 The client is told the *kind* of refusal but not which validator refused. The
 full per-validator diagnosis goes to the log instead, since validator names are

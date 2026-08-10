@@ -16,6 +16,8 @@ func statusFor(err error) int {
 		return http.StatusForbidden
 	case KindNoCredential, KindInvalidCredential:
 		return http.StatusUnauthorized
+	case KindUnavailable:
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -43,6 +45,11 @@ func TestErrorKindMapping(t *testing.T) {
 			"insufficient scope",
 			NewError(KindInsufficientScope, "requires scope leases.admin", nil),
 			KindInsufficientScope, ErrInsufficientScope, http.StatusForbidden,
+		},
+		{
+			"unavailable",
+			NewError(KindUnavailable, "the introspection endpoint could not be reached", nil),
+			KindUnavailable, ErrUnavailable, http.StatusServiceUnavailable,
 		},
 	}
 	for _, tc := range cases {
@@ -76,6 +83,14 @@ func TestErrorKindsAreDistinct(t *testing.T) {
 	if errors.Is(scope, ErrNoCredential) || errors.Is(scope, ErrInvalidCredential) {
 		t.Fatalf("insufficient-scope error matched a foreign sentinel")
 	}
+	// Unavailable is the one that must never be mistaken for a rejection: a
+	// caller that read it as ErrInvalidCredential would answer 401 and invite the
+	// re-auth storm the kind exists to prevent.
+	unavailable := NewError(KindUnavailable, "endpoint unreachable", nil)
+	if errors.Is(unavailable, ErrInvalidCredential) || errors.Is(unavailable, ErrNoCredential) ||
+		errors.Is(unavailable, ErrInsufficientScope) {
+		t.Fatalf("unavailable error matched a foreign sentinel")
+	}
 }
 
 func TestErrorUnwrapsCause(t *testing.T) {
@@ -99,6 +114,9 @@ func TestDeniedErrorKindPrecedence(t *testing.T) {
 		{"rejection outranks missing", []Kind{KindNoCredential, KindInvalidCredential}, KindInvalidCredential},
 		{"scope outranks rejection", []Kind{KindInvalidCredential, KindInsufficientScope}, KindInsufficientScope},
 		{"scope outranks missing", []Kind{KindNoCredential, KindInsufficientScope}, KindInsufficientScope},
+		{"unavailable outranks rejection", []Kind{KindInvalidCredential, KindUnavailable}, KindUnavailable},
+		{"unavailable outranks missing", []Kind{KindNoCredential, KindUnavailable}, KindUnavailable},
+		{"scope outranks unavailable", []Kind{KindUnavailable, KindInsufficientScope}, KindInsufficientScope},
 		{"empty fails closed", nil, KindInvalidCredential},
 	}
 	for _, tc := range cases {

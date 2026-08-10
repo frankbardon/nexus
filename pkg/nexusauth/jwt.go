@@ -406,18 +406,28 @@ func jwsHeaderAlgorithm(token string) (string, error) {
 // server and a sidecar-fronted deployment workable without an
 // allow-insecure-anything switch that would inevitably be set in production.
 func validateJWKSURL(raw string) error {
+	return validateAuthorityURL(raw, keyJWKSURL)
+}
+
+// validateAuthorityURL is the shared endpoint check for every config key that
+// names a remote authority the package will trust — the JWKS endpoint and the
+// introspection endpoint alike. The transport requirement is identical for both
+// (a rewritable channel lets an on-path attacker decide who the caller is), so
+// there is one implementation and the key name is a parameter, which keeps each
+// caller's error messages naming its own key.
+func validateAuthorityURL(raw, key string) error {
 	if raw == "" {
-		return fmt.Errorf("%s is required", keyJWKSURL)
+		return fmt.Errorf("%s is required", key)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("%s: %w", keyJWKSURL, err)
+		return fmt.Errorf("%s: %w", key, err)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("%s: want an absolute URL, got %q", keyJWKSURL, raw)
+		return fmt.Errorf("%s: want an absolute URL, got %q", key, raw)
 	}
 	if u.User != nil {
-		return fmt.Errorf("%s: userinfo is not supported", keyJWKSURL)
+		return fmt.Errorf("%s: userinfo is not supported", key)
 	}
 	switch u.Scheme {
 	case "https":
@@ -426,9 +436,9 @@ func validateJWKSURL(raw string) error {
 		if isLoopbackHost(u.Hostname()) {
 			return nil
 		}
-		return fmt.Errorf("%s: http is only allowed for a loopback host, got %q", keyJWKSURL, u.Hostname())
+		return fmt.Errorf("%s: http is only allowed for a loopback host, got %q", key, u.Hostname())
 	default:
-		return fmt.Errorf("%s: scheme must be https (or http to a loopback host), got %q", keyJWKSURL, u.Scheme)
+		return fmt.Errorf("%s: scheme must be https (or http to a loopback host), got %q", key, u.Scheme)
 	}
 }
 

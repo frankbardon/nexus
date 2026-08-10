@@ -349,6 +349,37 @@ func TestAuthGuard_InsufficientScopeIs403(t *testing.T) {
 	assertErrorBody(t, resp, "insufficient scope")
 }
 
+// TestAuthGuard_UnavailableIs503 covers the denial kind a network-backed
+// validator (`introspect`) produces when it cannot reach a verdict at all.
+//
+// It must NOT fall through to the 401 default: telling every client "your
+// credential is bad" during an identity-provider outage aims a re-authentication
+// storm at the provider that is already failing. It is still a refusal — the
+// route's handler never runs — and it carries a Retry-After but deliberately no
+// WWW-Authenticate, since a 503 is not a challenge.
+func TestAuthGuard_UnavailableIs503(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AuthChain = nexusauth.NewChain(nexusauth.NamedValidator{
+		Name: "stub",
+		Validator: stubValidator{
+			err: nexusauth.NewError(nexusauth.KindUnavailable, "the introspection endpoint could not be reached", nil),
+		},
+	})
+	ts, _ := newBrokerTestServer(t, cfg, nil)
+
+	resp := doAuthed(t, http.MethodGet, ts.URL+"/leases", "any-token", "")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got == "" {
+		t.Error("a 503 must carry Retry-After so a client backs off instead of hot-looping")
+	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != "" {
+		t.Errorf("WWW-Authenticate = %q, want none on a 503", got)
+	}
+	assertErrorBody(t, resp, "authentication temporarily unavailable")
+}
+
 // TestAuthGuard_LogsAllowAndDeny asserts the audit trail: one structured record
 // per decision, carrying the route, the principal id (empty on a deny), the
 // lease id where the route has one, and a reason on a deny.

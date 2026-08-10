@@ -248,7 +248,7 @@ func TestBuildChainRejectsBadValidators(t *testing.T) {
 			// unrecognized type, so it needs a name no validator will ever claim.
 			"unknown type",
 			map[string]any{"type": "introspect-over-carrier-pigeon"},
-			`unknown validator type "introspect-over-carrier-pigeon" (known types: static, jwks)`,
+			`unknown validator type "introspect-over-carrier-pigeon" (known types: static, jwks, introspect)`,
 		},
 		{
 			"static without tokens",

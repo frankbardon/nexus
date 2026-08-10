@@ -2,6 +2,7 @@ package nexusauth
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -60,10 +61,23 @@ const (
 	keyClockSkew        = "clock_skew"
 )
 
+// Keys an `introspect` validator entry accepts, consumed by
+// buildIntrospectValidator. It shares keyCacheTTL, keyNegativeCacheTTL and
+// keyHTTPTimeout with `jwks` — the same names mean the same things, so an
+// operator does not have to learn two vocabularies for one concept.
+const (
+	keyIntrospectionURL = "introspection_url"
+	keyClientID         = "client_id"
+	keyClientSecret     = "client_secret"
+	keyClientSecretEnv  = "client_secret_env"
+	keyClientAuth       = "client_auth"
+	keyTokenTypeHint    = "token_type_hint"
+)
+
 // knownValidatorTypes lists the types BuildChain can construct, for the
 // unknown-type error message. Extend it alongside the switch in buildValidator.
 func knownValidatorTypes() []string {
-	return []string{ValidatorTypeStatic, ValidatorTypeJWKS}
+	return []string{ValidatorTypeStatic, ValidatorTypeJWKS, ValidatorTypeIntrospect}
 }
 
 // ParseConfig parses an `auth:` block. A nil or empty map is valid and yields a
@@ -190,6 +204,8 @@ func buildValidator(vc ValidatorConfig) (Validator, error) {
 		return buildStaticValidator(vc)
 	case ValidatorTypeJWKS:
 		return buildJWKSValidator(vc)
+	case ValidatorTypeIntrospect:
+		return buildIntrospectValidator(vc)
 	default:
 		return nil, fmt.Errorf("unknown validator type %q (known types: %s)",
 			vc.Type, strings.Join(knownValidatorTypes(), ", "))
@@ -270,6 +286,95 @@ func buildJWKSValidator(vc ValidatorConfig) (Validator, error) {
 		return nil, err
 	}
 	return newJWKSValidator(opts)
+}
+
+// buildIntrospectValidator constructs an IntrospectValidator from a config
+// entry.
+//
+// Like the jwks builder, nothing here reaches the network: the first
+// introspection happens on the first request, so a briefly unreachable identity
+// provider cannot stop the broker booting.
+func buildIntrospectValidator(vc ValidatorConfig) (Validator, error) {
+	if err := rejectUnknownKeys(vc.Options,
+		keyIntrospectionURL, keyClientID, keyClientSecret, keyClientSecretEnv,
+		keyClientAuth, keyTokenTypeHint,
+		keyCacheTTL, keyNegativeCacheTTL, keyHTTPTimeout,
+	); err != nil {
+		return nil, err
+	}
+
+	opts := introspectOptions{Mapping: vc.ClaimMapping}
+	var err error
+	if opts.IntrospectionURL, _, err = optString(vc.Options, keyIntrospectionURL); err != nil {
+		return nil, err
+	}
+	if opts.ClientID, _, err = optString(vc.Options, keyClientID); err != nil {
+		return nil, err
+	}
+	if opts.ClientSecret, err = resolveSecret(vc.Options, keyClientSecret, keyClientSecretEnv); err != nil {
+		return nil, err
+	}
+	if opts.ClientAuth, _, err = optString(vc.Options, keyClientAuth); err != nil {
+		return nil, err
+	}
+	if opts.TokenTypeHint, opts.TokenTypeHintSet, err = optString(vc.Options, keyTokenTypeHint); err != nil {
+		return nil, err
+	}
+	if opts.CacheTTL, _, err = optDuration(vc.Options, keyCacheTTL); err != nil {
+		return nil, err
+	}
+	if opts.NegativeCacheTTL, _, err = optDuration(vc.Options, keyNegativeCacheTTL); err != nil {
+		return nil, err
+	}
+	if opts.HTTPTimeout, _, err = optDuration(vc.Options, keyHTTPTimeout); err != nil {
+		return nil, err
+	}
+	return newIntrospectValidator(opts)
+}
+
+// resolveSecret reads a value that may be written inline (`key`) or sourced from
+// the environment by name (`key_env`).
+//
+// THE SECRET-SOURCING CONVENTION for this package, and the one any future
+// secret-bearing key should follow: `<key>` holds the literal value, `<key>_env`
+// holds the NAME of an environment variable to read it from. It matches the
+// `bearer_token` / `bearer_token_env` pair nexus.io.agui already ships, so
+// operators meet one spelling rather than two.
+//
+// Three rules, each chosen so a mistake is loud rather than silent:
+//
+//   - Setting both is an error, not a precedence puzzle. Two sources for one
+//     secret means one of them is stale, and quietly preferring either is how a
+//     rotated credential appears not to have rotated.
+//   - A named variable that is unset or empty is an error at load time. The
+//     alternative — falling back to an empty secret — authenticates the broker
+//     to the identity provider as an anonymous client and surfaces much later as
+//     a confusing 401 from the endpoint.
+//   - Errors name the variable, never its value, so a boot failure can be pasted
+//     into an issue without leaking a credential.
+func resolveSecret(m map[string]any, key, envKey string) (string, error) {
+	inline, _, err := optString(m, key)
+	if err != nil {
+		return "", err
+	}
+	envName, _, err := optString(m, envKey)
+	if err != nil {
+		return "", err
+	}
+	if inline != "" && envName != "" {
+		return "", fmt.Errorf("%s and %s are mutually exclusive: set one or the other", key, envKey)
+	}
+	if envName == "" {
+		return inline, nil
+	}
+	// Trimmed because a secret injected from a file or a here-doc routinely
+	// arrives with a trailing newline, and a credential that differs from the
+	// configured one by an invisible byte is a miserable thing to debug.
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return "", fmt.Errorf("%s names environment variable %q, which is unset or empty", envKey, envName)
+	}
+	return value, nil
 }
 
 // optStringList reads a key that accepts either a single string or a list of
