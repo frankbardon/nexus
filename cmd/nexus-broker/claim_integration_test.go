@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1558,6 +1559,224 @@ func postClaimRaw(t *testing.T, base, body string) *http.Response {
 	return resp
 }
 
+// TestBrokerRestartReattachesLiveInstance is E5's payoff, end to end: claim an
+// instance, kill the broker WITHOUT releasing it, bring a new broker back on the
+// same address over the same state_dir, and watch the surviving instance
+// reattach — after which the client WebSocket works again.
+//
+// It is deliberately built out of the real pieces: the real journal, the real
+// spawn-key derivation, the real recovery pass, and a stub instance running the
+// same reconnect-with-backoff loop the nexus.io.broker plugin runs. Nothing about
+// the reattach is simulated except the engine at the far end.
+func TestBrokerRestartReattachesLiveInstance(t *testing.T) {
+	// The stub must survive its broker and keep dialing, exactly as the real
+	// plugin does. Without this it exits on the first read error and there would be
+	// nothing left to reclaim.
+	t.Setenv("STUB_RECONNECT", "1")
+	stubBin := buildStubInstance(t)
+
+	stateDir := t.TempDir()
+	addr := freeAddr(t)
+
+	// --- broker #1: claim an instance -------------------------------------
+	first := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr))
+	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	pid := first.registry.PID(cr.LeaseID)
+	if pid == 0 {
+		t.Fatal("claimed lease has no pid recorded")
+	}
+	killInstanceOnCleanup(t, pid)
+
+	// --- the broker dies, the instance does not ---------------------------
+	// stop() closes the server and cancels the pumps; it releases nothing, so the
+	// stub process is still running and its lease is still recorded as live.
+	first.stop()
+	if !processAlive(pid) {
+		t.Fatal("stopping the broker killed its instance; there is nothing to reclaim")
+	}
+
+	// --- broker #2: same address, same state_dir --------------------------
+	second := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr),
+		// Long enough that a slow reconnect is not mistaken for a failure to
+		// reattach; the test asserts on reattach, not on the reaper.
+		withReattachWindow(30*time.Second))
+
+	if len(second.restored) != 1 || second.restored[0] != cr.LeaseID {
+		t.Fatalf("restored = %v, want [%s]", second.restored, cr.LeaseID)
+	}
+	// The slot came back with it, so the restarted broker cannot over-admit.
+	if got := second.registry.SlotsInUse(); got != 1 {
+		t.Errorf("slots_in_use after recovery = %d, want 1", got)
+	}
+	// And so did the pid, which is what the reaper would act on.
+	if got := second.registry.PID(cr.LeaseID); got != pid {
+		t.Errorf("restored pid = %d, want %d", got, pid)
+	}
+
+	// The instance is still dialing on its backoff; give it time to land. Until it
+	// presents the derived spawn secret the lease reads as `spawning`.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if second.registry.InstanceConn(cr.LeaseID) != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if second.registry.InstanceConn(cr.LeaseID) == nil {
+		t.Fatal("the surviving instance never reattached to the restarted broker")
+	}
+
+	// --- the lease is usable again ----------------------------------------
+	snap := second.registry.Snapshot()
+	if len(snap.Leases) != 1 || snap.Leases[0].State != surfaceStateActive {
+		t.Fatalf("restored lease snapshot = %+v, want one lease in state %q",
+			snap.Leases, surfaceStateActive)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wsURL := "ws://" + second.base + ClientWSPath(cr.LeaseID)
+	client, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial the restored lease at %s: %v", wsURL, err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+
+	out, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: cr.LeaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"after":"restart"}`),
+	})
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	_, data, err := client.Read(ctx)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	echo, err := brokerframe.Decode(data)
+	if err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"after":"restart"}` {
+		t.Fatalf("unexpected echo through the restored lease: %+v", echo)
+	}
+
+	// And the lease can still be released normally, which proves it is an ordinary
+	// lease now and not a special case.
+	resp, err := http.Post("http://"+second.base+"/release/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /release: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("release of a restored lease = %d, want 200", resp.StatusCode)
+	}
+	if second.registry.Has(cr.LeaseID) {
+		t.Error("a restored lease survived its release")
+	}
+}
+
+// TestBrokerRestartReapsUnreattachedLease is the other half of the contract: an
+// instance that does NOT come back does not hold a capacity slot forever. Its
+// stub is spawned without STUB_RECONNECT, so it exits when the first broker dies
+// — but the journal still records a lease, and a pid that the OS may hand to
+// something else. The restarted broker must close it out either way.
+func TestBrokerRestartReapsUnreattachedLease(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	stateDir := t.TempDir()
+	addr := freeAddr(t)
+
+	first := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr))
+	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
+	if cr.LeaseID == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	pid := first.registry.PID(cr.LeaseID)
+	first.stop()
+
+	// The non-reconnecting stub exits when its broker goes away. Wait for that so
+	// the restart sees a settled state rather than a racing one.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && processAlive(pid) {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	second := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr),
+		withReattachWindow(200*time.Millisecond),
+		withReleaseGrace(200*time.Millisecond))
+
+	// Either the pid was already gone at boot (dropped outright by recovery) or it
+	// lingered long enough to be restored and then reaped by the window. Both are
+	// correct; what matters is that no lease and no slot survives.
+	waitForNoLease := time.Now().Add(20 * time.Second)
+	for time.Now().Before(waitForNoLease) {
+		if !second.registry.Has(cr.LeaseID) && second.registry.SlotsInUse() == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("an unreattached lease survived the reattach window: has=%v slots=%d",
+		second.registry.Has(cr.LeaseID), second.registry.SlotsInUse())
+}
+
+// TestRestoredLeaseRefusesAWrongSecretEndToEnd proves the identity gate over the
+// real wire: a dialer that knows a restored lease id but not its spawn secret is
+// refused at /instance, even though this broker has no `auth:` block at all.
+func TestRestoredLeaseRefusesAWrongSecretEndToEnd(t *testing.T) {
+	t.Setenv("STUB_RECONNECT", "1")
+	stubBin := buildStubInstance(t)
+	stateDir := t.TempDir()
+	addr := freeAddr(t)
+
+	first := startStubBrokerHandle(t, stubBin, withStateDir(stateDir), withListenAddr(addr))
+	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
+	killInstanceOnCleanup(t, first.registry.PID(cr.LeaseID))
+	first.stop()
+
+	second := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr), withReattachWindow(30*time.Second))
+	if len(second.restored) != 1 {
+		t.Fatalf("restored = %v, want the claimed lease", second.restored)
+	}
+
+	// Race the genuine instance's reconnect: dial /instance directly with the right
+	// lease id and a wrong secret, and require a refusal. The lease id alone is not
+	// enough even though the broker is unauthenticated.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+second.base+instanceWSPath, nil)
+	if err != nil {
+		t.Fatalf("dial /instance: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	frame, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: cr.LeaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  "definitely-not-the-derived-secret",
+	})
+	if err != nil {
+		t.Fatalf("encode register: %v", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, frame); err != nil {
+		t.Fatalf("write register: %v", err)
+	}
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("a register frame with the wrong secret was accepted for a restored lease")
+	}
+}
+
 // brokerWiring is the complete description of a stub broker under test: its
 // Config plus the commandRunner that spawns instances. Options mutate it before
 // startStubBrokerWithRegistry builds anything, so a test can vary both the
@@ -1615,6 +1834,27 @@ func withAuthFromYAML(t *testing.T, yaml string) stubBrokerOption {
 	}
 }
 
+// withStateDir points a stub broker at a lease journal directory, enabling
+// durability and — on a second broker started over the same directory — restart
+// recovery.
+func withStateDir(dir string) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.StateDir = dir }
+}
+
+// withListenAddr pins the address a stub broker binds to, instead of letting the
+// kernel pick one. It exists for the restart test: a restarted broker must come
+// back on the SAME address, because that is what the surviving instance's
+// reconnect loop is dialing.
+func withListenAddr(addr string) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.ListenAddr = addr }
+}
+
+// withReattachWindow bounds how long a restored lease waits for its instance
+// before being reaped.
+func withReattachWindow(d time.Duration) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.ReattachWindow = d }
+}
+
 // withCommandRunner replaces the spawn seam. It exists so a test can count (or
 // refuse) instance spawns while still exec()ing the real stub binary underneath
 // — see countingRunner.
@@ -1657,20 +1897,38 @@ func startStubBroker(t *testing.T, stubBin string) string {
 // startStubBrokerWithRegistry is startStubBroker plus the shared registry, so a
 // test can assert lease presence directly. It also wires the release endpoint.
 func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBrokerOption) (string, *Registry) {
+	h := startStubBrokerHandle(t, stubBin, opts...)
+	return h.base, h.registry
+}
+
+// brokerHandle is a running stub broker a test can stop mid-test. It exists for
+// the restart story: every other test lets t.Cleanup tear the broker down at the
+// end, but a restart test has to stop one broker and start another over the same
+// state_dir and the same address while its instance is still running.
+type brokerHandle struct {
+	base     string
+	registry *Registry
+
+	// restored is what recovery brought back at this broker's boot — nil for a
+	// cold start.
+	restored []string
+
+	// stop shuts the broker down WITHOUT releasing its leases, the way a crash or
+	// a SIGKILL would. It is idempotent and also runs from t.Cleanup.
+	stop func()
+}
+
+// startStubBrokerHandle wires and serves one stub broker, mirroring run()'s
+// topology, and returns a handle that can stop it independently of t.Cleanup.
+func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOption) *brokerHandle {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Bind a real listener first so we know the broker's address before wiring
-	// the claim handler (it needs it to build the instance dial-back URL).
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
 	wiring := brokerWiring{
 		cfg: Config{
-			ListenAddr:      ln.Addr().String(),
 			NexusBinaryPath: stubBin,
 			ReleaseGrace:    defaultReleaseGrace,
+			ReattachWindow:  defaultReattachWindow,
 			AdminScope:      defaultAdminScope,
 		},
 		runner: execRunner{},
@@ -1678,8 +1936,42 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	for _, opt := range opts {
 		opt(&wiring)
 	}
+
+	// Bind a real listener before wiring the claim handler (it needs the address
+	// to build the instance dial-back URL). An option may have pinned the address;
+	// otherwise the kernel picks one.
+	bindAddr := wiring.cfg.ListenAddr
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", bindAddr, err)
+	}
+	wiring.cfg.ListenAddr = ln.Addr().String()
+
 	cfg := wiring.cfg
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
+
+	// Lease durability + restart recovery, wired exactly as run() does. With no
+	// state_dir the store is nil and every one of these is inert.
+	var leaseStore LeaseStore
+	var restored []string
+	var spawnSecretKey spawnKey
+	if cfg.StateDir != "" {
+		var brokerID string
+		leaseStore, brokerID, err = openLeaseStore(logger, cfg)
+		if err != nil {
+			t.Fatalf("open lease store: %v", err)
+		}
+		spawnSecretKey, err = loadSpawnKey(logger, cfg.StateDir)
+		if err != nil {
+			t.Fatalf("load spawn key: %v", err)
+		}
+		registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+		restored = recoverLeases(logger, registry, leaseStore, brokerID, spawnSecretKey)
+	}
+
 	// The guard is built before the gateway, exactly as run() does: the client WS
 	// route is not registered through Guard, so the gateway resolves that route's
 	// credential itself in order to enforce lease ownership.
@@ -1691,6 +1983,10 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	registry.useTicketStore(tickets)
 	gateway := NewGateway(logger, registry, guard, tickets)
 	claims := NewClaimServer(logger, registry, cfg, wiring.runner, tickets)
+	// Spawn secrets are derived from the broker's key when a state_dir is
+	// configured, so a restarted broker can recompute what a surviving instance
+	// still holds. Nil key = random per spawn, the pre-existing behaviour.
+	claims.useSpawnKey(spawnSecretKey)
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
@@ -1720,13 +2016,65 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
 	go sweeper.Run(sweepCtx)
+	// And the reattach reaper, which bounds how long the leases recovery just
+	// restored may wait for their instances.
+	go reapUnreattached(sweepCtx, logger, registry, restored, cfg.ReattachWindow, cfg.ReleaseGrace)
 
+	// stop tears the SERVER down and leaves every lease (and every spawned
+	// instance) exactly where it is — a crash, not a drain. That is the whole
+	// point for the restart test: releasing on the way out would kill the very
+	// instance the next broker is supposed to reclaim.
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			stopSweep()
+			_ = srv.Close()
+			gateway.Shutdown()
+			if leaseStore != nil {
+				_ = leaseStore.Close()
+			}
+		})
+	}
+	t.Cleanup(stop)
+
+	return &brokerHandle{
+		base:     ln.Addr().String(),
+		registry: registry,
+		restored: restored,
+		stop:     stop,
+	}
+}
+
+// killInstanceOnCleanup makes sure a spawned stub does not outlive the test.
+//
+// It matters only for the restart tests: those deliberately stop a broker WITHOUT
+// releasing its leases, so nothing in the normal teardown path kills the child —
+// and a reconnecting stub inherits the test binary's stderr, which keeps `go
+// test` waiting on its own output pipe long after the test has passed.
+func killInstanceOnCleanup(t *testing.T, pid int) {
+	t.Helper()
 	t.Cleanup(func() {
-		stopSweep()
-		_ = srv.Close()
-		gateway.Shutdown()
+		if pid > 0 && processAlive(pid) {
+			_ = (&adoptedProcess{id: pid}).kill()
+		}
 	})
-	return ln.Addr().String(), registry
+}
+
+// freeAddr reserves and immediately releases a loopback port, returning the
+// address. It is how the restart test pins an address BOTH brokers can bind: the
+// second broker must come back where the surviving instance is dialing, so the
+// address cannot be whatever the kernel happens to hand out the second time.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release reserved port: %v", err)
+	}
+	return addr
 }
 
 // postClaimJSON posts a claim body to the broker and returns the decoded

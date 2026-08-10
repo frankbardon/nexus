@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -29,6 +30,7 @@ max_concurrent: 32
 idle_timeout: 2m
 queue_wait_timeout: 10s
 release_grace: 20s
+reattach_window: 90s
 `
 	cfg, err := LoadConfigFromBytes([]byte(yaml))
 	if err != nil {
@@ -51,6 +53,43 @@ release_grace: 20s
 	}
 	if cfg.ReleaseGrace != 20*time.Second {
 		t.Errorf("ReleaseGrace = %v", cfg.ReleaseGrace)
+	}
+	if cfg.ReattachWindow != 90*time.Second {
+		t.Errorf("ReattachWindow = %v", cfg.ReattachWindow)
+	}
+}
+
+// TestLoadConfigReattachWindowDefault pins the restart-recovery bound: absent, it
+// takes the default, and a non-positive value falls back to the same default at
+// use rather than disabling the reaper — "wait forever" would reintroduce the
+// orphaned lease this key exists to remove.
+func TestLoadConfigReattachWindowDefault(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(``))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReattachWindow != defaultReattachWindow {
+		t.Errorf("ReattachWindow = %v, want %v", cfg.ReattachWindow, defaultReattachWindow)
+	}
+
+	zero, err := LoadConfigFromBytes([]byte("reattach_window: 0s\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if zero.ReattachWindow != 0 {
+		t.Errorf("ReattachWindow = %v, want the configured 0 carried through", zero.ReattachWindow)
+	}
+	// The fallback lives at the use site, so the reaper still bounds the wait.
+	reg := NewRegistry(discardLogger(), 8)
+	id, err := reg.NewLease(anonymousOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	// Nothing was restored, so the reaper is a no-op regardless — this asserts the
+	// zero value does not make it hang or panic.
+	reapUnreattached(context.Background(), discardLogger(), reg, nil, zero.ReattachWindow, 0)
+	if !reg.Has(id) {
+		t.Error("an ordinary lease was reaped by the reattach reaper")
 	}
 }
 

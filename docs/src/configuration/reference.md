@@ -1430,21 +1430,31 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it, unless the lease was restored after a broker restart. |
 
 The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
 alone is a poor authenticator for it: the same value appears in `ws_url`s, client
 requests and logs, so anything that observes one could otherwise impersonate an
-instance. The broker mints 128 bits of `crypto/rand` per spawn, records the
-expected value on the lease, and injects it through the environment (never argv,
-which is world-readable). Both the lease id and the secret must match or the
-dial-back is closed with the same policy-violation close an unknown lease gets.
+instance. The broker records the expected value on the lease and injects it
+through the environment (never argv, which is world-readable). Both the lease id
+and the secret must match or the dial-back is closed with the same
+policy-violation close an unknown lease gets.
+
+How the broker produces the value depends on whether it keeps state — the plugin
+echoes whatever it was handed either way. With no `state_dir` it is 128 bits of
+`crypto/rand` per spawn, held only in memory. With a `state_dir` it is derived as
+`HMAC-SHA256(<state_dir>/spawn-key, lease_id)`, so a restarted broker can
+recompute the value a surviving instance still holds; the secret itself is still
+never written to disk. See
+[Restart recovery](#restart-recovery-reattach_window).
 
 Enforcement on the broker side is **gated on the broker having an `auth:` block**
-(see the Session broker section below). With no `auth:` block the secret is
-ignored entirely, so a `nexus` binary at `nexus_binary_path` that predates the
-protocol keeps working; with one configured, such a binary is refused and the
-broker logs a message naming version skew as the likely cause. The value is never
+(see the Session broker section below), with one exception. With no `auth:` block
+the secret is ignored, so a `nexus` binary at `nexus_binary_path` that predates
+the protocol keeps working; with one configured, such a binary is refused and the
+broker logs a message naming version skew as the likely cause. The exception is a
+lease **restored after a broker restart**, which always requires the secret
+regardless of `auth:` — a live pid is not proof of identity. The value is never
 logged and never appears in `GET /leases`.
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
@@ -2338,6 +2348,7 @@ queue_wait_timeout: 30s
 release_grace: 10s
 state_dir: ""                 # empty = lease state is in-memory only; see below
 broker_id: ""                 # empty = generated once and persisted in state_dir
+reattach_window: 60s          # how long a lease restored after a restart waits for its instance
 
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
@@ -2360,9 +2371,10 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
-| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
+| `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
 
 ### Lease durability (`state_dir`)
 
@@ -2396,12 +2408,13 @@ and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim a
 configured, so a record round-trips what is in `broker.yaml` — and
 `created_at` / `released_at` / `reason`.
 
-**No secret is ever written.** Not the lease's per-spawn secret (it
-authenticates a process that dies with the broker, so persisting it would put a
-live-looking credential on disk in exchange for nothing), not a client WebSocket
-ticket, not a bearer token. The owner's **raw claim set** is deliberately not
-persisted either — `id`, `tenant` and `scopes` are what ownership and scoped
-listing need, and the full claim set stays in the broker's `slog` audit trail.
+**No secret is ever written.** Not the lease's per-spawn secret, not a client
+WebSocket ticket, not a bearer token. The owner's **raw claim set** is
+deliberately not persisted either — `id`, `tenant` and `scopes` are what
+ownership and scoped listing need, and the full claim set stays in the broker's
+`slog` audit trail. (The `spawn-key` file beside the journal is a *derivation
+key*, not a credential: presenting its contents to `WS /instance` authenticates
+nothing. See [Restart recovery](#restart-recovery-reattach_window).)
 
 **Growth is bounded** by compaction, in two passes over the same rewrite: the
 journal is compacted **when it is opened**, and again **every 512 appends**. A
@@ -2418,14 +2431,65 @@ it with a warning** and keeps every complete record before it, and the
 rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
 the file is skipped the same way rather than failing the whole file.
 
-> Restart **recovery** — replaying the journal, checking whether each recorded
-> pid is still alive, and re-adopting the survivors — builds on this write path
-> and is tracked separately. Writing the journal is what makes it possible.
-
 Multi-broker cooperation is **not** implemented: no broker reads another's
 journal, there is no shared store, and there is no routing. `broker_id` and
 `advertise_addr` are stamped on every record now so that a future shared backend
 needs no data migration.
+
+### Restart recovery (`reattach_window`)
+
+With `state_dir` set, a restarting broker **reclaims the instances it left
+running** instead of orphaning them. Recovery runs at boot, before any route is
+served, because a surviving instance is already retrying its dial-back and every
+attempt made before its lease is back in the registry is refused as unknown.
+
+For each live record in the journal, exactly one thing happens:
+
+| Record state | Outcome |
+|---|---|
+| `broker_id` is not this broker's | **Left alone.** Not adopted, not killed, not closed out — the broker has no standing over a lease it cannot identify as its own. `state_dir` is per-broker, so this only happens if `broker_id` changed under a directory. |
+| No `pid` | **Closed out** (`lease-released`, reason `restart recovery: no process was ever spawned`). The broker died between minting the lease and exec'ing its instance. |
+| `pid` is not alive | **Closed out** (reason `restart recovery: process is gone`). |
+| `pid` is alive | **Restored**: the lease comes back with its original `owner`, `session_id`, `pid` and `created_at`, and **re-holds its capacity slot** so `max_concurrent` stays honest and the broker cannot over-admit. |
+
+A restored lease is **inactive** — it reads as `spawning` on `GET /leases` — until
+an instance dials `/instance` and presents both the correct lease id **and** the
+correct spawn secret. Once it does, the lease is fully ordinary: idle sweeping,
+crash watching, ownership checks and `POST /release` all apply unchanged.
+
+**A restored lease always requires the spawn secret, even with no `auth:`
+block.** Liveness is not identity: the pid recorded before the restart may have
+been recycled to an unrelated process, and a signal-0 probe (the portable check
+on Linux and macOS) cannot see the difference. Admitting a dialer on a lease id
+alone would hand a stranger's process a client's session, so this check is not
+configurable.
+
+**How the secret survives when it is never written down.** The per-spawn secret
+is **derived**, not stored: `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`. The
+key file is 32 random bytes, generated on first boot, mode `0600` inside the
+`0700` `state_dir`. What is on disk is a *key*, not a credential — its contents
+authenticate nothing on their own, it is not addressed to any lease, and the
+journal beside it still contains no secret. The trade-off is explicit: anyone who
+can read `spawn-key` **and** knows a live lease id can impersonate that lease's
+instance — but that reader is already running as the broker's uid, and can
+therefore read the secret out of the child's environment or spawn instances
+directly. **Losing or rotating the key is safe, just lossy**: derived secrets stop
+matching, restored leases fail to reattach, and the reaper kills their instances
+and frees their slots. The broker logs a `WARN` if the key file is unreadable as a
+key (it regenerates one) or is readable beyond its owner.
+
+**Nothing reattaches forever.** A restored lease that no instance registers
+against within `reattach_window` is reaped through the same teardown as a manual
+release, so the shutdown → grace → force-kill sequence and the slot accounting
+stay in one place. Because a reaped lease has no dial-back socket to receive the
+protocol shutdown frame on, its process is signalled `SIGTERM` (which the engine
+handles as a clean shutdown that persists the session) and escalated to `SIGKILL`
+if it does not exit.
+
+**Boot is never failed by recovery.** An empty, absent, unreadable or corrupt
+journal is a clean cold start with a `WARN`. (A `state_dir` that cannot be *opened*
+at all is still fatal — that is a misconfiguration, not lost data.) With
+`state_dir` unset, boot is byte-for-byte what it was before recovery existed.
 
 ### Authentication (`auth:`)
 

@@ -91,7 +91,23 @@ type ClaimServer struct {
 	// broker config's queue_wait_timeout. A non-positive value disables waiting:
 	// an at-capacity claim is rejected immediately with "no capacity".
 	queueWaitTimeout time.Duration
+
+	// spawnKey derives each lease's spawn secret from a broker-held key instead of
+	// minting a random one, so a restarted broker can recompute the value a
+	// surviving instance is still holding without that value ever reaching disk
+	// (see spawnKey). It is nil when no state_dir is configured, and secretFor
+	// then falls back to a per-spawn random secret — the pre-existing behaviour.
+	spawnKey spawnKey
 }
+
+// useSpawnKey binds the derivation key spawn secrets are computed from.
+//
+// It is a setter rather than a NewClaimServer parameter for the same reason
+// Registry.useLeaseStore is: the key is optional (it exists only when state_dir
+// is set) and threading an optional dependency through the constructor would
+// churn every existing claim test for something none of them exercise. Call it
+// once at wiring time, before the broker serves.
+func (s *ClaimServer) useSpawnKey(k spawnKey) { s.spawnKey = k }
 
 // NewClaimServer constructs a claim handler. A nil runner defaults to the
 // production execRunner; tests inject a fake to avoid booting a real engine. A
@@ -197,11 +213,18 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// commandRunner — a fake runner in a test injects no environment, and must
 	// not thereby be able to skip the check the production path enforces.
 	//
+	// With a state_dir configured the value is DERIVED from the broker's key
+	// rather than drawn from crypto/rand, so a restarted broker can recompute it
+	// for a surviving instance; with no state_dir it is random exactly as before.
+	// Either way it is minted here, held only in memory, and never journaled — see
+	// spawnKey for why a derivation key on disk is not the same thing as a
+	// persisted credential.
+	//
 	// A generation failure fails the claim. crypto/rand not producing 16 bytes
 	// means the machine is in a state where nothing security-relevant should
 	// proceed, and spawning an instance whose dial-back cannot be authenticated
 	// is precisely the outcome this story exists to prevent.
-	spawnSecret, err := newSpawnSecret()
+	spawnSecret, err := s.spawnKey.secretFor(leaseID)
 	if err != nil {
 		s.registry.Remove(leaseID)
 		s.fail(w, http.StatusInternalServerError, "minting spawn secret", err)

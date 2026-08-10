@@ -53,7 +53,11 @@ On `Ready` (after the engine is fully up), the plugin:
 5. **Bridges IO** in both directions for the rest of the session.
 
 If the connection drops, the plugin reconnects with exponential backoff
-(250 ms → 5 s) until shutdown.
+(250 ms → 5 s) until shutdown. That loop is also what makes **broker restart
+recovery** work: a broker configured with a `state_dir` restores this instance's
+lease at boot and accepts the re-registration, so a surviving instance rejoins
+with no plugin configuration and no client involvement. See
+[Surviving a restart](../../guides/session-broker.md#surviving-a-restart-set-state_dir).
 
 ### Outbound (engine bus → broker → client)
 
@@ -111,14 +115,21 @@ configure or bypass.
 The `register` frame carries a **second factor** beside the lease id. The lease
 id alone is a poor authenticator for the dial-back socket: the same value appears
 in `ws_url`s, client requests and logs, so anything that observes one could
-otherwise impersonate an instance. The broker mints 128 bits of `crypto/rand` per
-spawn, records the expected value on the lease, and injects it through the
-child's **environment** — never argv, which is world-readable via `ps` and
-`/proc`. Both values must match or the gateway closes the socket with the same
-`policy violation` close an unknown lease gets.
+otherwise impersonate an instance. The broker records the expected value on the
+lease and injects it through the child's **environment** — never argv, which is
+world-readable via `ps` and `/proc`. Both values must match or the gateway closes
+the socket with the same `policy violation` close an unknown lease gets.
+
+How the broker produces the value depends on whether it keeps state, and the
+plugin cannot tell the difference — it echoes whatever it was given:
+
+- **No `state_dir`** — 128 bits of `crypto/rand` per spawn, held only in memory.
+- **`state_dir` set** — derived as `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`,
+  so a restarted broker can recompute the value this instance is still holding and
+  let it reattach. The secret itself is still never written to disk.
 
 Enforcement is decided entirely by the broker, and is **gated on the broker
-having an `auth:` block**:
+having an `auth:` block** — with one exception:
 
 - **No `auth:` block** — the secret is not checked. A `nexus` binary predating
   the protocol dials back and registers exactly as it always did.
@@ -127,6 +138,12 @@ having an `auth:` block**:
   because the symptom otherwise looks like a network fault (claims time out with
   `instance did not become ready in time` while the child is alive and connecting
   fine). The fix is to upgrade the instance binary.
+- **Reattaching to a lease restored after a broker restart** — the secret is
+  **always** required, whatever the `auth:` setting. The broker only knows that
+  the recorded pid is alive, and a pid can be recycled to an unrelated process
+  while the broker is down; the secret is the only thing that distinguishes the
+  genuine instance. An instance binary too old to send one cannot reattach and its
+  lease is reaped after `reattach_window`.
 
 The plugin never logs the secret. Its init record carries a
 `spawn_secret_present` boolean instead, which is what you want when diagnosing a
@@ -150,7 +167,7 @@ nexus.io.broker:
 Omit `broker_addr` and `lease_id` (or leave their env vars unset) and the plugin
 stays dormant, so a config that activates the plugin outside a broker still boots
 without error. `spawn_secret` does not affect dormancy — a broker with no `auth:`
-block ignores it.
+block ignores it, except when the lease was restored after a broker restart.
 
 ## See also
 

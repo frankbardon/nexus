@@ -61,6 +61,7 @@ queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO que
 release_grace: 10s            # graceful-shutdown grace before force-kill
 state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
 broker_id: ""                 # stamped on every lease record; generated + persisted when empty
+reattach_window: 60s          # how long a lease restored after a restart waits for its instance
 ```
 
 ```bash
@@ -100,11 +101,13 @@ Lease state — which instances this broker spawned, who claimed them, and what
 session each is running — lives in memory by default, so a restart loses it and
 the spawned `nexus` processes become orphans nobody can account for. Point
 `state_dir` at a directory and the broker journals every lease transition to
-`<state_dir>/leases.jsonl`:
+`<state_dir>/leases.jsonl`, **and reclaims its running instances when it comes
+back**:
 
 ```yaml
 state_dir: "~/.nexus/broker"     # per-broker; never share one dir between brokers
 broker_id: ""                    # optional name; generated and persisted when empty
+reattach_window: 60s             # bound on how long a restored lease waits for its instance
 ```
 
 A record is appended when a lease is minted, when its pid and session id first
@@ -123,6 +126,50 @@ Leave `state_dir` empty and the broker behaves exactly as it always has,
 logging one `WARN` at startup to say lease state is in-memory only. This is
 about **lease** bookkeeping, not sessions: an instance's session under
 `~/.nexus/sessions/<id>/` is persisted and `-recall`-able either way.
+
+#### What a restart actually does
+
+At boot — before any route is served — the broker replays the journal and, for
+each lease that was live when it stopped:
+
+- **The pid is still alive** → the lease is **restored**, with its original owner,
+  session id and creation time, and it **re-takes its capacity slot** so
+  `max_concurrent` stays honest.
+- **The pid is gone**, or the lease never got a process → the record is closed out
+  and forgotten.
+- **The record belongs to another `broker_id`** → it is left completely alone.
+  Nothing is adopted and nothing is killed.
+
+A restored lease shows as `spawning` in `GET /leases` and is **not yet usable**.
+Meanwhile the surviving instance's `nexus.io.broker` transport is already
+reconnecting with exponential backoff, so it re-dials `/instance` on its own — no
+instance-side configuration and no client action are involved. When it does, and
+it presents the right lease id **and** the right spawn secret, the lease goes
+`active` and existing clients can reconnect to the same `ws_url` and carry on.
+
+> **A restored lease always requires the spawn secret, even on a broker with no
+> `auth:` block.** A live pid is not proof of identity: the recorded pid may have
+> been recycled to an unrelated process while the broker was down, and the
+> portable liveness probe cannot tell. This one check is not configurable.
+
+The secret survives the restart without ever being written down: it is **derived**
+as `HMAC-SHA256(<state_dir>/spawn-key, lease_id)` rather than randomly minted, so
+the restarted broker recomputes exactly what the running instance is still
+holding. `spawn-key` is 32 random bytes, mode `0600`, created on first boot. It is
+a *key*, not a credential — presenting it to `/instance` authenticates nothing —
+and losing or rotating it is safe: derived secrets simply stop matching, and the
+affected leases are reaped rather than reattached.
+
+**Nothing waits forever.** A restored lease that no instance reconnects to within
+`reattach_window` (default 60s) is reaped through the ordinary release path: the
+process is signalled (`SIGTERM`, escalating to `SIGKILL`), the slot is freed, and
+the record is closed out. Setting `reattach_window` to `0` does **not** disable
+this — it falls back to the default, because an unbounded wait is the orphan the
+feature exists to remove.
+
+For the per-record detail, the exact reasons written to the journal, and the full
+trade-off discussion around the derivation key, see
+[Restart recovery](../configuration/reference.md#restart-recovery-reattach_window).
 
 ### Health check
 
@@ -332,16 +379,20 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   reach the broker can claim, connect to, and release any instance. Front it
   with your own authenticating reverse proxy; treat the broker's listen address
   as a trusted-caller boundary only.
-- **Single broker, single host.** No clustering or HA. With `state_dir` unset a
-  broker **restart orphans running instances** and loses all lease tracking —
-  orphaned `nexus` processes must be cleaned up manually; setting `state_dir`
-  journals lease state to disk so a restart can at least account for them (see
-  [Surviving a restart](#surviving-a-restart-set-state_dir)). Running several
-  brokers behind one load balancer does **not** work as a cluster: a lease lives
-  on exactly one process, so each broker must be individually addressable via
-  `advertise_addr`, clients must reconnect to the URL the claim returned rather
-  than to the LB, and each broker needs its **own** `state_dir` — they never read
-  each other's.
+- **Single broker, single host.** No clustering or HA. With `state_dir` **unset**,
+  a broker **restart orphans running instances** and loses all lease tracking —
+  the orphaned `nexus` processes must be cleaned up manually. **With `state_dir`
+  set, a restart no longer orphans them**: the broker replays its journal, drops
+  the leases whose process is gone, restores the rest with their owners and
+  capacity slots, and the surviving instances reattach on their own reconnect
+  backoff — reaped after `reattach_window` if they do not (see
+  [Surviving a restart](#surviving-a-restart-set-state_dir)). Recovery is
+  strictly single-broker: it only ever reclaims leases stamped with **this**
+  broker's `broker_id`. Running several brokers behind one load balancer does
+  **not** work as a cluster: a lease lives on exactly one process, so each broker
+  must be individually addressable via `advertise_addr`, clients must reconnect to
+  the URL the claim returned rather than to the LB, and each broker needs its
+  **own** `state_dir` — they never read each other's.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but

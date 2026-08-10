@@ -106,6 +106,22 @@ type Config struct {
 	// kill is the orphan-prevention backstop.
 	ReleaseGrace time.Duration `yaml:"release_grace"`
 
+	// ReattachWindow bounds how long a lease restored from the journal at boot may
+	// sit with no instance reattached before the broker reaps it: kills the
+	// process, frees the slot, and closes the record out.
+	//
+	// It exists because restart recovery adopts leases on the strength of a live
+	// pid, and a pid can be alive without anything ever coming back for it — the
+	// instance may have been killed and its pid reused, or it may be wedged. The
+	// window is the point at which the broker stops holding a capacity slot open
+	// for an instance that is not going to reconnect.
+	//
+	// A non-positive value falls back to defaultReattachWindow. It is deliberately
+	// NOT disableable: "wait forever" is the orphaned-lease behaviour this key
+	// exists to bound. Irrelevant while state_dir is unset, since nothing is then
+	// restored.
+	ReattachWindow time.Duration `yaml:"reattach_window"`
+
 	// Auth is the raw `auth:` block, handed to pkg/nexusauth verbatim. It is
 	// kept as a map rather than a typed struct because nexusauth owns the
 	// validator vocabulary and parses it identically for the broker and for
@@ -192,6 +208,7 @@ func DefaultConfig() Config {
 		IdleTimeout:      5 * time.Minute,
 		QueueWaitTimeout: 30 * time.Second,
 		ReleaseGrace:     defaultReleaseGrace,
+		ReattachWindow:   defaultReattachWindow,
 		AdminScope:       defaultAdminScope,
 		AuthChain:        nexusauth.NewChain(),
 	}

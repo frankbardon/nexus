@@ -84,11 +84,17 @@ type LeaseOwnerRecord struct {
 
 // LeaseRecord is one line of the lease journal.
 //
-// NO SECRET MAY EVER BE ADDED TO THIS STRUCT. Not the lease's spawn secret (it
-// authenticates a process that dies with the broker, so persisting it puts a
-// live-looking credential on disk in exchange for nothing), not a client
-// WebSocket ticket, not a bearer token. Everything here is bookkeeping an
-// operator could read out of `GET /leases` anyway.
+// NO SECRET MAY EVER BE ADDED TO THIS STRUCT. Not the lease's spawn secret, not
+// a client WebSocket ticket, not a bearer token. Everything here is bookkeeping
+// an operator could read out of `GET /leases` anyway.
+//
+// The spawn secret is the interesting case, because restart recovery genuinely
+// needs it: a restored lease must recognise the instance that reattaches to it.
+// The answer is DERIVATION, not persistence — the secret is recomputed from a
+// broker-held key plus the lease id (see spawnKey), so a restarted broker knows
+// the value without a bearer credential ever touching this file. Writing the
+// secret here instead would put a live credential in a journal whose whole point
+// is to be readable, alongside the lease id it unlocks.
 type LeaseRecord struct {
 	// Kind is the lifecycle transition this record describes.
 	Kind leaseRecordKind `json:"kind"`

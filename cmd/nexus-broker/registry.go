@@ -127,12 +127,17 @@ type lease struct {
 	// started can present it — which is what the lease id alone cannot prove,
 	// since a lease id travels in ws_urls, client requests and logs.
 	//
-	// It is deliberately write-mostly: SetSpawnSecret stores it and
-	// AttachInstance compares it, and nothing else reads it. There is no getter,
-	// it is absent from LeaseSnapshot (so GET /leases cannot disclose it), it is
-	// never logged, and a future lease-persistence story must NOT write it to
-	// disk — a secret that outlives the process it was minted for authenticates
-	// nothing, because the process it belongs to is gone.
+	// It is deliberately write-mostly: SetSpawnSecret (or RestoreLease) stores it
+	// and AttachInstance compares it, and nothing else reads it. There is no
+	// getter, it is absent from LeaseSnapshot (so GET /leases cannot disclose it),
+	// it is never logged, and it is NEVER WRITTEN TO THE LEASE JOURNAL.
+	//
+	// It does, however, have to survive a broker restart, because a restored lease
+	// must be able to recognise the instance that reattaches to it. That is solved
+	// by DERIVATION rather than persistence: with a state_dir configured the value
+	// is HMAC(broker key, lease id) instead of a random draw, so a restarted broker
+	// recomputes it (see spawnKey and RestoreLease) and nothing bearer-shaped ever
+	// reaches disk.
 	//
 	// Guarded by Registry.mu.
 	spawnSecret string
@@ -188,6 +193,25 @@ type lease struct {
 	// Remove → releaseSlotLocked), so the slot count can never drift: a slot
 	// is held iff a lease exists. Guarded by Registry.mu.
 	hasSlot bool
+
+	// restored marks a lease reconstructed from the journal at boot rather than
+	// minted by a claim (see RestoreLease). It carries ONE behavioural
+	// consequence, and it is a hardening one: AttachInstance enforces the spawn
+	// secret for a restored lease even when the broker has no `auth:` block.
+	//
+	// That asymmetry is deliberate. For a freshly claimed lease the broker knows
+	// it started the process, so the unauthenticated deployment can keep skipping
+	// the check exactly as it always did. For a restored one it knows only that
+	// SOME process holds the recorded pid — and a pid can be reused by an
+	// unrelated process between the broker dying and coming back. Liveness is
+	// therefore not identity, and the secret is the only thing that is. A restored
+	// lease that admitted a dialer on its lease id alone would hand a stranger's
+	// process a client's session.
+	//
+	// It is NOT cleared on reattach: the instance plugin reconnects on every
+	// dropped socket, so a restored lease can register more than once, and each
+	// registration must clear the same bar. Guarded by Registry.mu.
+	restored bool
 
 	// reason records why the lease is being (or was) torn down: "" while live,
 	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
@@ -479,6 +503,104 @@ func (r *Registry) insertLeaseLocked(id string, owner nexusauth.Principal) error
 	return nil
 }
 
+// restoreSpec is one lease being brought back from the journal at boot. Every
+// field comes from a persisted LeaseRecord except spawnSecret, which is DERIVED
+// (see spawnKey) because no secret is ever written to disk.
+type restoreSpec struct {
+	id        string
+	owner     nexusauth.Principal
+	sessionID string
+	pid       int
+	createdAt time.Time
+
+	// spawnSecret is the value a reattaching instance must present. An empty one
+	// would make the lease unattachable rather than open: AttachInstance compares
+	// in constant time against it and a register frame carrying no secret is
+	// refused outright, so there is no "" == "" hole.
+	spawnSecret string
+}
+
+// RestoreLease reinserts a lease reconstructed from the journal, re-holding its
+// capacity slot. It is the boot-time counterpart to NewLease and is called ONLY
+// by recoverLeases, before the broker serves anything.
+//
+// It does NOT journal a record: the lease's `lease-created` (or superseding
+// `lease-updated`) record is already on disk — restoring is the act of believing
+// it, not of restating it.
+//
+// The slot is taken UNCONDITIONALLY rather than through tryAcquireSlotLocked. A
+// restored lease is a process that is already running: refusing its slot because
+// the operator lowered max_concurrent between restarts would not stop the
+// instance, it would only hide it from the count and let the broker admit fresh
+// claims on top of it — the exact over-admission the cap exists to prevent. Going
+// briefly over the cap is honest; the count drains as leases are released, and
+// the queue holds new claims back until it does.
+func (r *Registry) RestoreLease(spec restoreSpec) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.leases[spec.id]; exists {
+		return fmt.Errorf("lease id collision on restore: %s", spec.id)
+	}
+	r.slotsInUse++
+	if r.maxConcurrent > 0 && r.slotsInUse > r.maxConcurrent {
+		r.logger.Warn("restored leases exceed max_concurrent; the broker is over its cap "+
+			"until enough leases are released, and will admit no new claims until then",
+			"slots_in_use", r.slotsInUse, "max_concurrent", r.maxConcurrent)
+	}
+	l := &lease{
+		id:        spec.id,
+		state:     leaseStatePending,
+		createdAt: spec.createdAt,
+		owner:     spec.owner.Clone(),
+		// Last activity is stamped NOW, not from the record: the journal carries no
+		// activity time, and dating a restored lease from its creation would have
+		// the idle sweeper reap a long-lived healthy session the moment it came
+		// back. The reattach reaper, not the idle sweeper, is what bounds a lease
+		// nobody reconnects to.
+		lastActivity:    r.now(),
+		ready:           make(chan struct{}),
+		sessionReported: make(chan struct{}),
+		exited:          make(chan struct{}),
+		hasSlot:         true,
+		restored:        true,
+		spawnSecret:     spec.spawnSecret,
+		sessionID:       spec.sessionID,
+		pid:             spec.pid,
+	}
+	r.leases[spec.id] = l
+	if spec.sessionID != "" {
+		// The session id is already known, so nothing should ever wait on this
+		// channel. Closing a channel is non-blocking, so doing it under the lock
+		// costs nothing.
+		l.sessionOnce.Do(func() { close(l.sessionReported) })
+	}
+	return nil
+}
+
+// unattachedRestored filters ids down to the restored leases that no instance has
+// registered against and that are not already being torn down. The reattach
+// reaper calls it once its window elapses.
+//
+// "Never registered" is read off the lifecycle state rather than a second flag:
+// a restored lease starts pending, AttachInstance moves it to registered/active,
+// and DetachInstance drops it back only as far as registered. Pending after the
+// window therefore means nothing ever presented a valid secret for it.
+func (r *Registry) unattachedRestored(ids []string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, id := range ids {
+		l, ok := r.leases[id]
+		if !ok || !l.restored || l.releasing {
+			continue
+		}
+		if l.state == leaseStatePending {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // markActivity stamps a lease's last-activity time with the registry clock. The
 // gateway calls it ONLY for real client input — inbound io frames flowing
 // client → instance — so the idle sweeper resets on genuine user activity and
@@ -720,6 +842,13 @@ var (
 // exactly as it did before — the backward-compatibility guarantee, expressed as
 // "do not run the check" rather than "run a check that always passes".
 //
+// A RESTORED lease overrides that gate and always requires the secret, whatever
+// the config says (see lease.restored). For a claimed lease the broker knows it
+// spawned the process; for a restored one it knows only that the recorded pid is
+// alive, and pid reuse means an unrelated process can be sitting on it. There is
+// no configuration in which admitting a dialer on a restored lease id alone is
+// the right answer, so this is not made optional.
+//
 // The comparison is constant-time. The presented value never reaches a log or a
 // response, so a timing signal would be the only channel available to someone
 // guessing it, and closing it costs one function call.
@@ -730,7 +859,7 @@ func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret strin
 	if !ok {
 		return fmt.Errorf("unknown lease: %s", id)
 	}
-	if enforce {
+	if enforce || l.restored {
 		if presentedSecret == "" {
 			return errSpawnSecretAbsent
 		}

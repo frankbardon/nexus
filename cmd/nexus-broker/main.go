@@ -54,6 +54,9 @@ func run() error {
 		"idle_timeout", cfg.IdleTimeout,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
+		// Logged because it decides how long a restored lease holds a capacity slot
+		// waiting for an instance that may never come back.
+		"reattach_window", cfg.ReattachWindow,
 		// Logged because a mistyped admin scope fails SILENTLY — the operator view
 		// of GET /leases simply never engages — so the value in effect has to be
 		// visible somewhere at boot.
@@ -105,6 +108,16 @@ func run() error {
 			"will lose track of every instance this broker spawned")
 	}
 
+	// The spawn-secret derivation key. It shares state_dir's fate: present and
+	// stable when durability is on, absent (and secrets random per spawn, as they
+	// always were) when it is off. Loaded AFTER openLeaseStore because that is
+	// what creates the directory.
+	spawnSecretKey, err := loadSpawnKey(logger, cfg.StateDir)
+	if err != nil {
+		logger.Error("failed to load the broker spawn key", "state_dir", cfg.StateDir, "error", err)
+		return err
+	}
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
 	// The registry invalidates a lease's tickets when the lease goes away, through
 	// the single teardown convergence point (Remove) so manual release, the idle
@@ -113,11 +126,22 @@ func run() error {
 	// Records carry the RAW advertise_addr, verbatim as configured, so a record
 	// round-trips what is in broker.yaml rather than a derived host.
 	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+
+	// Restart recovery. It runs BEFORE anything is served, because a surviving
+	// instance is already dialing /instance on its reconnect backoff and every
+	// attempt made before its lease is back in the registry is refused as unknown.
+	// A restored lease re-holds its capacity slot immediately, so the cap is
+	// honest from the first claim this process accepts.
+	restoredLeases := recoverLeases(logger, registry, leaseStore, brokerID, spawnSecretKey)
+
 	// The gateway holds the ticket store as well as the guard: the client WebSocket
 	// accepts a single-use `?ticket=` as an alternative to a bearer header, and it
 	// is the only route that redeems one.
 	gateway := NewGateway(logger, registry, guard, tickets)
 	claims := NewClaimServer(logger, registry, cfg, execRunner{}, tickets)
+	// Spawn secrets are derived from the broker's key when there is one, so a
+	// restart can recompute what a surviving instance is holding.
+	claims.useSpawnKey(spawnSecretKey)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
 	// ticket and re-claiming (which would spawn a new instance) is not an answer.
@@ -134,6 +158,12 @@ func run() error {
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
+
+	// Bound the restored leases: anything no instance reattaches to within
+	// reattach_window is torn down through the shared release path. It shares the
+	// sweeper's context so a shutdown cancels the wait instead of reaping leases on
+	// the way out. A no-op when nothing was restored.
+	go reapUnreattached(sweepCtx, logger, registry, restoredLeases, cfg.ReattachWindow, cfg.ReleaseGrace)
 
 	mux := http.NewServeMux()
 
