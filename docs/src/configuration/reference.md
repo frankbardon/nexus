@@ -1349,8 +1349,23 @@ optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 | `bearer_token`     | string       | *(empty)*          | Inline bearer token. When set (and non-empty), `Authorization: Bearer <token>` is required on every request. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
 | `bearer_token_env` | string       | *(empty)*          | Name of an environment variable to read the bearer token from. Used only when `bearer_token` is empty. Mutually exclusive with `auth`. |
 | `auth`             | map          | *(absent)*         | Optional validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker uses — so `static`, `jwks`, `introspect` and `proxy_headers` are all available here. Absent means authentication is decided by `bearer_token`/`bearer_token_env` alone. See [Authentication (`auth:`) on `nexus.io.agui`](#authentication-auth-on-nexusioagui) below. |
-| `cors_origins`     | list<string> | *(empty)*          | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Also accepts a comma-separated string. |
+| `cors_origins`     | string or list<string> | *(empty)* | Allowed CORS origins for browser clients. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header (same-origin only), the safe default for a loopback listener. Accepts a YAML list **or** a single comma-separated string (`"https://a.example, https://b.example"`); both are trimmed and empty entries dropped. |
 | `emit_state`       | bool         | `false`            | Opt-in AG-UI shared-state emission. When `true`, the transport mirrors the session's scene store (`nexus.scene`) as an AG-UI shared-state document and emits a `StateSnapshot` at run start plus ordered `StateDelta` events (RFC 6902 JSON Patch) as scenes mutate. Off by default because it adds scene-event subscriptions and per-mutation diffing overhead most clients do not need. Requires the `nexus.scene` plugin to be active to produce any state. |
+
+**Schema-validated at boot.** The plugin ships `plugins/io/agui/schema.json` and
+implements `ConfigSchema()`, so the engine validates this block — including
+everything under `auth:` — **before `Init` runs**, with
+`additionalProperties: false` at every object level. A misspelled key aborts the
+boot naming the offender (`unknown key "bearer_tokn" (did you mean
+"bearer_token"?)`) instead of being silently ignored, which for an auth key
+would mean an unauthenticated listener and no warning. The table above is the
+whole surface: any key not listed is rejected.
+
+One rule is deliberately **not** in the schema. `auth:` versus
+`bearer_token`/`bearer_token_env` is enforced in `Init` (see below), which owns
+the operator-facing message; duplicating it in JSON Schema would give two
+enforcement points that can drift, and the schema one runs first and would
+report the worse message.
 
 **Round-trip:** a `POST /agui` maps the request `messages` to a Nexus
 `io.input` (the trailing `user` message drives the turn; earlier messages ride
@@ -1441,6 +1456,15 @@ per-validator sections that follow it. There is one deliberate difference:
 `auth.admin_scope` is **broker-only** and is rejected here as an unknown key.
 Unknown keys are rejected at every level in both hosts — a silently ignored auth
 key is a security bug, not a cosmetic one.
+
+On this host they are rejected **twice over**, and the earlier of the two is the
+one an operator meets: `plugins/io/agui/schema.json` describes every validator
+key per `type`, so a key that belongs to a different validator type (`jwks_url`
+on a `static` entry) or a duration written as a bare number (`cache_ttl: 600`)
+fails at boot before `pkg/nexusauth` ever parses the block. The two agree by
+construction — the schema was derived from the `nexusauth` parsers, not from
+prose — and `nexusauth` remains the authority for the rules a schema cannot
+express (URL transport, algorithm confusion, duplicate tokens, TTL caps).
 
 **Gated surface.** `POST /agui` only. `OPTIONS /agui` (CORS preflight) is
 deliberately **not** authenticated: a browser never attaches `Authorization` to a

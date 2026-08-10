@@ -253,8 +253,14 @@ are summarized here for convenience:
 | `bearer_token` | string | *(empty)* | Inline bearer token. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
 | `bearer_token_env` | string | *(empty)* | Env var name to read the bearer token from (used only when `bearer_token` is empty). Mutually exclusive with `auth`. |
 | `auth` | map | *(absent)* | Validator-chain block, parsed by the same `pkg/nexusauth` parser the session broker uses. See [Authentication](#authentication-auth) below. |
-| `cors_origins` | list&lt;string&gt; | *(empty)* | Allowed CORS origins. `*` echoes any Origin; a list echoes only matches; empty means same-origin only. Also accepts a comma-separated string. |
+| `cors_origins` | string or list&lt;string&gt; | *(empty)* | Allowed CORS origins. `*` echoes any Origin; a list echoes only matches; empty means same-origin only. Accepts a YAML list or a single comma-separated string. |
 | `emit_state` | bool | `false` | Opt-in AG-UI shared-state emission: mirror the scene store as a shared-state document and emit `STATE_SNAPSHOT`/`STATE_DELTA` on the run stream. See [Shared state](#shared-state) below. |
+
+The block is validated against `plugins/io/agui/schema.json` **before `Init`
+runs**, with `additionalProperties: false` at every level including inside
+`auth:` and inside each `validators[]` entry. An unknown key aborts the boot and
+names the offender — a misspelled auth key that was silently ignored would mean
+an unauthenticated listener with no warning.
 
 ### Authentication (`auth:`)
 
