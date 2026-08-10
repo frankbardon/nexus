@@ -51,6 +51,23 @@ type claimResponse struct {
 	// for a resume it echoes the requested id. It may be empty if the
 	// instance did not report one within the grace window.
 	SessionID string `json:"session_id,omitempty"`
+
+	// Ticket is a single-use, lease-and-principal-scoped credential the client
+	// presents on the WebSocket handshake, valid for ticketTTL. It exists because
+	// browser JavaScript cannot put an Authorization header on a WebSocket
+	// handshake, so the claim's bearer credential can never reach WS
+	// /lease/{lease_id} from a browser.
+	//
+	// It is OMITTED — the same omitempty convention as SessionID — when the broker
+	// runs with no `auth:` block, because there is then nothing to authenticate
+	// and the WebSocket accepts a connection with no ticket at all. Omitted rather
+	// than empty so a client can tell "this broker issues no tickets" from "a
+	// ticket was issued and it is the empty string", which would be a bug. It is
+	// also omitted if minting failed; POST /ticket/{lease_id} mints a replacement.
+	//
+	// Adding this field is additive: a client that ignores unknown JSON keys is
+	// unaffected.
+	Ticket string `json:"ticket,omitempty"`
 }
 
 // ClaimServer handles POST /claim: it mints a lease, spawns a nexus instance
@@ -64,6 +81,11 @@ type ClaimServer struct {
 	readyTimeout       time.Duration
 	sessionReportGrace time.Duration
 
+	// tickets mints the single-use client WebSocket ticket returned with a
+	// successful claim. A nil store (or one built inert because auth is disabled)
+	// simply issues nothing, and the response omits the `ticket` field.
+	tickets *ticketStore
+
 	// queueWaitTimeout bounds how long an over-capacity claim parks in the FIFO
 	// capacity queue before returning a timeout error. It is sourced from the
 	// broker config's queue_wait_timeout. A non-positive value disables waiting:
@@ -72,8 +94,10 @@ type ClaimServer struct {
 }
 
 // NewClaimServer constructs a claim handler. A nil runner defaults to the
-// production execRunner; tests inject a fake to avoid booting a real engine.
-func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner commandRunner) *ClaimServer {
+// production execRunner; tests inject a fake to avoid booting a real engine. A
+// nil tickets store means no `ticket` is returned with a claim, which is also
+// what an auth-disabled broker produces.
+func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner commandRunner, tickets *ticketStore) *ClaimServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -87,6 +111,7 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 		runner:             runner,
 		readyTimeout:       defaultReadyTimeout,
 		sessionReportGrace: defaultSessionReportGrace,
+		tickets:            tickets,
 		queueWaitTimeout:   cfg.QueueWaitTimeout,
 	}
 }
@@ -226,17 +251,42 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// misclassified as a crash.
 	go s.registry.watchExit(leaseID)
 
+	// Mint the client's WebSocket ticket LAST, immediately before responding, so
+	// its short TTL starts when the caller receives it rather than when the
+	// instance began booting — a boot may take up to readyTimeout (30s), which
+	// would otherwise hand back an already-expired ticket.
+	//
+	// A mint failure does NOT fail the claim. The instance is live and the lease is
+	// usable (a non-browser client authenticates the socket with its bearer
+	// credential, and any client can mint a replacement via POST
+	// /ticket/{lease_id}), so tearing down a working session over a recoverable
+	// gap would be the worse outcome. The response then omits `ticket`.
+	ticket, mintErr := s.tickets.mint(leaseID, owner.ID)
+	if mintErr != nil {
+		s.logger.Error("minting claim ticket failed; claim returns no ticket",
+			"lease_id", leaseID, "principal_id", owner.ID, "error", mintErr)
+	}
+
 	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(leaseID)
 	// principal_id ties the new lease id back to the identity that claimed it. The
 	// guard's allow record cannot carry it: /claim has no lease id in its path, so
 	// this is the only line that joins the two halves of the audit trail. Empty
 	// when auth is disabled.
+	//
+	// `ticket_issued` records WHETHER a ticket went out, never its value: a ticket
+	// is a bearer credential and the broker's logs must not add to the exposure it
+	// already has from travelling in a URL.
 	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL,
-		"session_id", sessionID, "principal_id", owner.ID)
+		"session_id", sessionID, "principal_id", owner.ID, "ticket_issued", ticket != "")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(claimResponse{LeaseID: leaseID, WSURL: wsURL, SessionID: sessionID})
+	_ = json.NewEncoder(w).Encode(claimResponse{
+		LeaseID:   leaseID,
+		WSURL:     wsURL,
+		SessionID: sessionID,
+		Ticket:    ticket,
+	})
 }
 
 // fail writes a JSON error response and logs the cause.

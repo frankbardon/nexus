@@ -20,7 +20,8 @@ crashes.
 ```
                           ┌───────────────────────────────────────┐
                           │            nexus-broker               │
-   client ──HTTP POST────▶│  /claim  /release/{id}  /leases       │
+   client ──HTTP POST────▶│  /claim /release/{id} /ticket/{id}    │
+                          │  /leases                              │
           ◀──lease+ws_url─│                                       │
           ──WebSocket────▶│  /lease/{id}  ◀──frames──▶  /instance │
                           └───────────────────────────────────────┘
@@ -120,7 +121,9 @@ Success (`200`):
 {
   "lease_id": "…",                          // handle for this instance
   "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
-  "session_id": "…"                          // engine session id (see new-vs-resume below)
+  "session_id": "…",                         // engine session id (see new-vs-resume below)
+  "ticket": "…"                              // single-use, 30s WebSocket credential;
+                                             // present only when `auth:` is configured
 }
 ```
 
@@ -177,6 +180,35 @@ curl -s -X POST http://localhost:8080/release/lease-abc123
 Release is **idempotent**: releasing an already-gone lease returns `404` rather
 than erroring, and concurrent releases of the same lease collapse to one
 teardown.
+
+### `POST /ticket/{lease_id}` — mint a fresh WebSocket ticket
+
+Only relevant when the broker is configured with an `auth:` block. A browser
+cannot put an `Authorization` header on a WebSocket handshake, so a claim hands
+back a **single-use, 30-second** `ticket` bound to that lease and to the claiming
+principal. Because the window is deliberately tight, a reconnect needs a fresh
+one — that is what this route is for; re-claiming would spawn a *new* instance and
+abandon the live session.
+
+```bash
+curl -s -X POST http://localhost:8080/ticket/lease-abc123 \
+  -H 'Authorization: Bearer <the token the lease was claimed with>'
+# {"lease_id":"lease-abc123","ticket":"…"}
+```
+
+| Outcome | Status | Body |
+|---------|--------|------|
+| Ticket issued | `200` | `{"lease_id":"…","ticket":"…"}` |
+| Unknown, already-released, **or** another principal's lease | `404` | `{"error":"unknown lease"}` (identical in all three cases, so live lease ids cannot be enumerated) |
+| Missing lease id in path | `400` | `{"error":"ticket requires a lease id"}` |
+
+Tickets are in-memory only — they do **not** survive a broker restart — and every
+ticket for a lease is destroyed the moment the lease goes away, whether by
+`POST /release`, idle reaping, or a crash. With no `auth:` block the route is
+inert: it answers `200` with the `ticket` key **omitted**, and the lease socket
+keeps accepting a connection with no ticket at all. Full detail, including why the
+TTL is not configurable, is in the
+[configuration reference](../configuration/reference.md#post-ticketlease_id-http-api-not-yaml).
 
 ### `GET /leases` — list live instances
 

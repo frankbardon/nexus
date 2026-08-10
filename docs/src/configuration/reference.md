@@ -2347,10 +2347,10 @@ auth:
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Three routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, and `GET /leases`. `GET /healthz` is registered
-**outside** the guard and always answers `200` with no credential, because a
-load balancer or container probe has none to present.
+(`pkg/nexusauth`). Four routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, and `POST /ticket/{lease_id}`.
+`GET /healthz` is registered **outside** the guard and always answers `200` with
+no credential, because a load balancer or container probe has none to present.
 
 `WS /lease/{lease_id}`, the per-lease client socket, is not behind that
 middleware but **does** use the same validator chain: it resolves the caller's
@@ -2412,12 +2412,13 @@ group. There is no separate audit sink; these records are it.
 #### Lease ownership
 
 Every lease records the principal that claimed it (stamped from the authenticated
-`POST /claim` request). Three routes consult that ownership:
+`POST /claim` request). Four routes consult that ownership:
 
 | Route                       | Enforcement                                                                                                                             |
 |-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
 | `POST /release/{lease_id}`  | The caller's principal `ID` must equal the lease owner's `ID`, checked **before** any teardown begins — a refused release sends no shutdown frame, kills nothing, and frees no slot. |
 | `WS /lease/{lease_id}`      | The same check, applied after the credential is validated and **before** the WebSocket upgrade, so a refused caller never gets an open socket that is then closed. |
+| `POST /ticket/{lease_id}`   | The same check, applied **before** any ticket is minted — a refused caller is issued nothing. See [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml). |
 | `GET /leases`               | Not a refusal but a **filter**: the listing contains only leases whose owner `ID` matches the caller's, and the capacity aggregates are omitted. A caller holding `auth.admin_scope` gets the whole registry instead. See [`GET /leases`](#get-leases-http-api-not-yaml). |
 
 Comparison is principal-`ID` equality and nothing else; `tenant` is never
@@ -2431,6 +2432,7 @@ responses:
 | Route                      | Unknown *or* unowned lease                                          |
 |----------------------------|---------------------------------------------------------------------|
 | `POST /release/{lease_id}` | `404` `{"error":"unknown lease"}`                                    |
+| `POST /ticket/{lease_id}`  | `404` `{"error":"unknown lease"}` — byte-identical to the release refusal |
 | `WS /lease/{lease_id}`     | `404` `unknown lease` (plain text; the handshake never reaches `101`) |
 
 A credential that fails validation on `WS /lease/{lease_id}` gets the usual
@@ -2482,9 +2484,11 @@ exited before signalling ready") rather than silently starting a new session.
 {
   "lease_id": "…",                          // lease handle for this instance
   "ws_url": "ws://host:port/lease/<lease>",  // client WebSocket endpoint
-  "session_id": "…"                          // engine session id: the generated id for a
+  "session_id": "…",                         // engine session id: the generated id for a
                                              // new session (capture it to -recall later),
                                              // or the requested id echoed back on resume
+  "ticket": "…"                              // single-use, 30s credential for ws_url;
+                                             // ABSENT when auth is disabled
 }
 ```
 
@@ -2492,6 +2496,17 @@ When authentication is enabled, connect to `ws_url` with the **same** credential
 the claim was made with: the client socket enforces lease ownership, so another
 principal's token — or none at all — is refused before the upgrade. See
 [Lease ownership](#lease-ownership).
+
+`ticket` is a **single-use, 30-second** credential bound to this lease **and** the
+claiming principal, for clients that cannot present a bearer header on the
+WebSocket handshake — which is every browser, since browser JavaScript cannot set
+headers on a WebSocket upgrade. It is **omitted** (not empty) when the broker runs
+with no `auth:` block, because there is then nothing to authenticate and
+`WS /lease/{lease_id}` accepts a connection with no ticket at all. It is also
+omitted in the unlikely event minting failed; `POST /ticket/{lease_id}` mints a
+replacement. Adding the field is **additive** — a client that ignores unknown JSON
+keys is unaffected. See [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml)
+for the TTL rationale and the refresh path.
 
 #### `ws_url` resolution
 
@@ -2541,6 +2556,57 @@ orphan). The lease is removed and its slot freed. The session directory under
 Release is idempotent: releasing an already-gone lease returns `404` rather than
 erroring, and concurrent releases of the same lease collapse to a single
 teardown.
+
+### `POST /ticket/{lease_id}` (HTTP API, not YAML)
+
+`POST /ticket/{lease_id}` mints a **fresh** client-WebSocket ticket for a caller
+that owns the lease. It takes no request body.
+
+Tickets exist because browser JavaScript **cannot** set headers on a WebSocket
+handshake, so the bearer credential a claim was made with can never reach
+`WS /lease/{lease_id}` from a browser. A ticket is the one credential the broker
+itself mints, and it is deliberately not a general-purpose token:
+
+| Property        | Value                                                                 |
+|-----------------|-----------------------------------------------------------------------|
+| Lifetime        | **30 seconds**, fixed. **Not configurable** — see below.               |
+| Uses            | **One.** Redemption atomically consumes it; two concurrent redemptions cannot both succeed. |
+| Scope           | Bound to **one lease** *and* **one principal `ID`**. A ticket for lease A is refused for lease B. |
+| Storage         | In-memory only. Tickets do **not** survive a broker restart; mint a new one. |
+| Invalidation    | **Every** ticket for a lease is destroyed the moment the lease goes away — manual `POST /release`, `idle_timeout` reaping, **and** crash detection alike, because invalidation hooks the single point all three teardowns converge on. |
+
+**Why the TTL is not a config key.** A ticket travels as a URL query parameter, so
+it lands in reverse-proxy access logs, browser history and referrer chains no
+matter what the broker does. The tight window plus single use *are* the mitigation
+for that exposure, so making it adjustable would let a deployment silently remove
+the only thing that makes the design safe. The broker never logs a ticket **value**
+— issuance records carry `lease_id` and `principal_id` and a boolean, nothing more.
+
+**Why a refresh route exists.** 30 seconds covers a claim → connect round trip, not
+a reconnect after a dropped socket or a laptop resume. The alternative to refreshing
+would be re-claiming, which spawns a *new* instance and abandons the live session.
+
+```jsonc
+// success response (200)
+{
+  "lease_id": "…",
+  "ticket": "…"     // ABSENT when auth is disabled (see below)
+}
+```
+
+| Outcome                                  | Status | Body                                     |
+|------------------------------------------|--------|------------------------------------------|
+| Ticket issued                            | `200`  | `{"lease_id":"…","ticket":"…"}`          |
+| Unknown / already-released lease         | `404`  | `{"error":"unknown lease"}`              |
+| Lease owned by a **different** principal | `404`  | `{"error":"unknown lease"}` — byte-identical to the row above, so the route is not a lease-id oracle; see [Lease ownership](#lease-ownership) |
+| Missing lease id in path                 | `400`  | `{"error":"ticket requires a lease id"}`  |
+
+**With the `auth:` block absent, ticket issuance is inert.** The route still answers
+`200` for a lease the (anonymous) caller owns, but the `ticket` key is **omitted**
+— there is no identity to bind a capability to, and `WS /lease/{lease_id}` keeps
+accepting a connection with no ticket exactly as it did before tickets existed.
+Clients must therefore treat a missing `ticket` as "this broker issues none",
+never as an empty-string ticket.
 
 ### `GET /leases` (HTTP API, not YAML)
 

@@ -73,7 +73,9 @@ func testLogger() *slog.Logger {
 func newClaimTestServer(t *testing.T, runner commandRunner, cfg Config) (*httptest.Server, *Registry, *ClaimServer) {
 	t.Helper()
 	reg := NewRegistry(testLogger(), 0)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	// No ticket store: this helper serves the pre-auth topology, where a claim
+	// returns no ticket at all.
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -342,15 +344,31 @@ func TestClaim_RejectsEmptyConfig(t *testing.T) {
 // the auth guard, which is the topology run() uses. It exists because the
 // ownership stamp can only be observed on the guarded path: an unguarded handler
 // never sees a Principal.
+// It also wires the ticket store exactly as run() does — inert when the config
+// enables no auth — so the `ticket` field in the claim response is observable on
+// both sides of that switch.
 func newGuardedClaimTestServer(t *testing.T, runner commandRunner, cfg Config) (*httptest.Server, *Registry) {
 	t.Helper()
-	reg := NewRegistry(testLogger(), 0)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	ts, reg, _ := newGuardedClaimTestServerWithTickets(t, runner, cfg)
+	return ts, reg
+}
+
+// newGuardedClaimTestServerWithTickets is newGuardedClaimTestServer plus the
+// ticket store, for tests that assert on issuance directly rather than through
+// the response body.
+func newGuardedClaimTestServerWithTickets(t *testing.T, runner commandRunner, cfg Config) (*httptest.Server, *Registry, *ticketStore) {
+	t.Helper()
+	logger := testLogger()
+	reg := NewRegistry(logger, 0)
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	tickets := newTicketStore(logger, guard.enabled())
+	reg.useTicketStore(tickets)
+	cs := NewClaimServer(logger, reg, cfg, runner, tickets)
 	mux := http.NewServeMux()
-	cs.Register(newAuthGuard(testLogger(), cfg.AuthChain).Guard(mux))
+	cs.Register(guard.Guard(mux))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts, reg
+	return ts, reg, tickets
 }
 
 // runClaimToReady drives a claim to a 200: it posts, waits for the spawn, then
@@ -431,6 +449,80 @@ func TestClaim_AnonymousOwnerWhenAuthDisabled(t *testing.T) {
 	}
 	if owner.Scopes != nil || owner.Claims != nil {
 		t.Errorf("lease owner = %+v, want the zero Principal", owner)
+	}
+}
+
+// TestClaim_ReturnsRedeemableTicket proves the claim response's `ticket` is a real
+// capability and not just a populated field: it redeems for the lease that was
+// claimed and resolves to the principal that claimed it.
+//
+// The redemption is the assertion. A handler that returned any random string would
+// satisfy a presence check while handing the client a credential the WebSocket will
+// refuse, and the failure would only surface in E3-S3.
+func TestClaim_ReturnsRedeemableTicket(t *testing.T) {
+	cfg := mustLoadConfig(t, staticAuthYAML)
+	cfg.ListenAddr = "127.0.0.1:8080"
+	cfg.NexusBinaryPath = "/bin/nexus"
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(7003)}
+	ts, reg, tickets := newGuardedClaimTestServerWithTickets(t, runner, cfg)
+
+	spec, resp := runClaimToReady(t, ts, reg, runner, "good-token")
+
+	var cr claimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if cr.Ticket == "" {
+		t.Fatal("authenticated claim returned no ticket")
+	}
+
+	// Bound to THIS lease: another lease id is refused.
+	if _, ok := tickets.redeem(cr.Ticket, "some-other-lease"); ok {
+		t.Error("the claim's ticket was accepted for a different lease")
+	}
+	// ...and redeems once, for the claimant.
+	got, ok := tickets.redeem(cr.Ticket, spec.leaseID)
+	if !ok {
+		t.Fatal("the claim's ticket is not redeemable for its own lease")
+	}
+	if got != "ci-runner" {
+		t.Errorf("ticket principal = %q, want ci-runner (the authenticated claimant)", got)
+	}
+	if _, ok := tickets.redeem(cr.Ticket, spec.leaseID); ok {
+		t.Error("the claim's ticket was redeemable twice")
+	}
+}
+
+// TestClaim_OmitsTicketWhenAuthDisabled is the backward-compatibility half: with no
+// `auth:` block the claim body carries no `ticket` KEY at all, so an existing
+// client sees byte-for-byte the response it saw before tickets existed.
+func TestClaim_OmitsTicketWhenAuthDisabled(t *testing.T) {
+	cfg := mustLoadConfig(t, "")
+	cfg.ListenAddr = "127.0.0.1:8080"
+	cfg.NexusBinaryPath = "/bin/nexus"
+	if cfg.AuthChain.Enabled() {
+		t.Fatal("precondition: auth should be disabled for this test")
+	}
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(7004)}
+	ts, reg, tickets := newGuardedClaimTestServerWithTickets(t, runner, cfg)
+
+	_, resp := runClaimToReady(t, ts, reg, runner, "")
+
+	// Read the RAW body: decoding into claimResponse turns an omitted `ticket` into
+	// an indistinguishable empty string, and absence is the property under test.
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read claim body: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode claim body %q: %v", raw, err)
+	}
+	if _, present := fields["ticket"]; present {
+		t.Errorf("claim body carries a ticket with auth disabled: %s", raw)
+	}
+	if got := tickets.outstanding(); got != 0 {
+		t.Errorf("outstanding tickets = %d, want 0 with auth disabled", got)
 	}
 }
 

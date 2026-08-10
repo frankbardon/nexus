@@ -367,7 +367,7 @@ func TestClaim_QueuedClaimProceedsAfterRelease(t *testing.T) {
 	runner := newQueueRunner()
 	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 5 * time.Second}
 	reg := NewRegistry(testLogger(), 1)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	cs.sessionReportGrace = 20 * time.Millisecond
 	mux := http.NewServeMux()
 	cs.Register(mux)
@@ -424,7 +424,7 @@ func TestClaim_QueueWaitTimeoutReturns503(t *testing.T) {
 	runner := newQueueRunner()
 	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 80 * time.Millisecond}
 	reg := NewRegistry(testLogger(), 1)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -469,7 +469,7 @@ func TestClaim_ClientCancelWhileQueued(t *testing.T) {
 	runner := newQueueRunner()
 	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 10 * time.Second}
 	reg := NewRegistry(testLogger(), 1)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -543,7 +543,7 @@ func TestClaim_OverCapacityReturns503(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(1)}
 	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
 	reg := NewRegistry(testLogger(), 1)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)
@@ -577,7 +577,7 @@ func TestClaim_FailedSpawnReturnsSlot(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), err: errors.New("exec failed")}
 	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
 	reg := NewRegistry(testLogger(), 2)
-	cs := NewClaimServer(testLogger(), reg, cfg, runner)
+	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)

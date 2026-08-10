@@ -77,10 +77,24 @@ func run() error {
 	guard := newAuthGuard(logger, cfg.AuthChain)
 	guard.logStartupState()
 
+	// Single-use WebSocket tickets exist ONLY because a browser cannot put a bearer
+	// header on a WebSocket handshake. With authentication disabled there is
+	// nothing to authenticate, so the store is built INERT: it issues nothing, the
+	// claim response omits `ticket`, and WS /lease/{lease_id} keeps accepting a
+	// connection with no ticket exactly as it did before tickets existed.
+	tickets := newTicketStore(logger, guard.enabled())
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
+	// The registry invalidates a lease's tickets when the lease goes away, through
+	// the single teardown convergence point (Remove) so manual release, the idle
+	// sweeper and crash detection all invalidate.
+	registry.useTicketStore(tickets)
 	gateway := NewGateway(logger, registry, guard)
-	claims := NewClaimServer(logger, registry, cfg, execRunner{})
+	claims := NewClaimServer(logger, registry, cfg, execRunner{}, tickets)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
+	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
+	// ticket and re-claiming (which would spawn a new instance) is not an answer.
+	ticketsServer := NewTicketServer(logger, registry, tickets)
 	// The leases listing is scoped to the caller unless it holds cfg.AdminScope,
 	// so it needs both the guard (to know whether auth is on at all) and the
 	// configured operator scope.
@@ -118,6 +132,7 @@ func run() error {
 	claims.Register(guarded)
 	releases.Register(guarded)
 	leases.Register(guarded)
+	ticketsServer.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

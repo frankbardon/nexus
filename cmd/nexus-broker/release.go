@@ -152,7 +152,7 @@ func (s *ReleaseServer) handleRelease(w http.ResponseWriter, r *http.Request) {
 	caller := callerPrincipal(r)
 	if !ownsLease(s.registry, leaseID, caller) {
 		logLeaseDenied(s.logger, r, caller, leaseID)
-		s.fail(w, http.StatusNotFound, unknownLeaseError)
+		writeUnknownLease(w)
 		return
 	}
 
@@ -161,7 +161,7 @@ func (s *ReleaseServer) handleRelease(w http.ResponseWriter, r *http.Request) {
 	// same 404, so the race is invisible to the caller.
 	err := s.registry.releaseLease(leaseID, "manual release", s.grace)
 	if errors.Is(err, errUnknownLease) {
-		s.fail(w, http.StatusNotFound, unknownLeaseError)
+		writeUnknownLease(w)
 		return
 	}
 	if err != nil {

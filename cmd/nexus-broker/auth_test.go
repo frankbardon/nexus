@@ -112,10 +112,16 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 	logger := testLogger()
 	reg := NewRegistry(logger, 0)
 
-	claims := NewClaimServer(logger, reg, cfg, &fakeRunner{started: make(chan spawnSpec, 1)})
-	releases := NewReleaseServer(logger, reg, cfg.ReleaseGrace)
 	guard := newAuthGuard(logger, cfg.AuthChain)
+	// Mirror run()'s ticket wiring: the store's inert/live state comes from the
+	// guard, and the registry invalidates a lease's tickets on teardown.
+	tickets := newTicketStore(logger, guard.enabled())
+	reg.useTicketStore(tickets)
+
+	claims := NewClaimServer(logger, reg, cfg, &fakeRunner{started: make(chan spawnSpec, 1)}, tickets)
+	releases := NewReleaseServer(logger, reg, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, reg, guard, cfg.AdminScope)
+	ticketsServer := NewTicketServer(logger, reg, tickets)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -128,6 +134,7 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 	claims.Register(guarded)
 	releases.Register(guarded)
 	leases.Register(guarded)
+	ticketsServer.Register(guarded)
 	if extra != nil {
 		extra(guarded)
 	}
@@ -193,6 +200,7 @@ func guardedRoutes() []guardedRoute {
 		{"claim", http.MethodPost, "/claim", `{}`, http.StatusBadRequest},
 		{"release", http.MethodPost, "/release/no-such-lease", "", http.StatusNotFound},
 		{"leases", http.MethodGet, "/leases", "", http.StatusOK},
+		{"ticket", http.MethodPost, "/ticket/no-such-lease", "", http.StatusNotFound},
 	}
 }
 

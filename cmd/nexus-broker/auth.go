@@ -67,6 +67,23 @@ func callerPrincipal(r *http.Request) nexusauth.Principal {
 // the same status AND the same body — see ownsLease.
 const unknownLeaseError = "unknown lease"
 
+// writeUnknownLease writes THE refusal for a lease the caller may not act on.
+//
+// Every JSON lease-scoped route calls this rather than assembling its own
+// response, so the "unknown and unowned are indistinguishable" property holds by
+// construction instead of by two handlers happening to spell the same status,
+// Content-Type and body. A route that wrote its own would drift the day someone
+// reworded one of them, and the drift would be a lease-id oracle rather than a
+// cosmetic difference.
+//
+// The WebSocket route is the deliberate exception: it cannot answer JSON before
+// an upgrade, so it writes the same message as plain text.
+func writeUnknownLease(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": unknownLeaseError})
+}
+
 // ownsLease reports whether caller may act on the lease named by leaseID. It is
 // the single ownership predicate behind every caller-facing lease route
 // (POST /release/{lease_id}, WS /lease/{lease_id}).

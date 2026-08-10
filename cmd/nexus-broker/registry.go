@@ -208,6 +208,14 @@ type Registry struct {
 	// barged past. Guarded by mu.
 	waiters *list.List
 
+	// tickets is the client-WebSocket ticket store whose lease-scoped
+	// capabilities must die with the lease (see Remove). It is nil until wired
+	// via useTicketStore, and every ticketStore method is nil-receiver safe, so
+	// a registry built without one (unit tests, and the tests that predate
+	// tickets) needs no branch. It is NOT guarded by mu: it owns its own lock and
+	// is only ever assigned at wiring time, before anything is served.
+	tickets *ticketStore
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
@@ -227,6 +235,16 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 		leases:        make(map[string]*lease),
 	}
 }
+
+// useTicketStore binds the ticket store whose entries Remove must invalidate.
+//
+// It is a setter rather than a NewRegistry parameter because the store's own
+// enabled/inert state is decided by the auth guard, which is built alongside the
+// registry in run() — and because threading it through the constructor would
+// churn every existing registry test for a dependency none of them exercise.
+// Call it once at wiring time, before the broker serves: it is not safe to call
+// concurrently with Remove.
+func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
 
 // anonymousOwner is the owner stamped on a lease that was claimed without an
 // authenticated principal — which is the normal, supported state when the broker
@@ -657,9 +675,16 @@ func (r *Registry) Has(id string) bool {
 	return ok
 }
 
-// Remove tears a lease down: it closes both connections (if any) and drops
-// the lease from the map. Safe to call on an unknown or already-removed
-// lease.
+// Remove tears a lease down: it closes both connections (if any), invalidates
+// every client-WebSocket ticket issued for the lease, and drops the lease from
+// the map. Safe to call on an unknown or already-removed lease.
+//
+// Ticket invalidation lives HERE rather than in releaseLease because Remove is
+// the one point every teardown converges on. releaseLease ends here, and crash
+// detection (watchExit) calls Remove DIRECTLY, bypassing releaseLease entirely —
+// so a hook on releaseLease would leave a crashed lease's tickets redeemable for
+// the rest of their TTL, which is exactly the gap the invalidation exists to
+// close.
 func (r *Registry) Remove(id string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
@@ -675,6 +700,15 @@ func (r *Registry) Remove(id string) {
 		delete(r.leases, id)
 	}
 	r.mu.Unlock()
+
+	// Every ticket issued for this lease dies with it. Called UNCONDITIONALLY,
+	// outside the registry lock: it is idempotent, the ticket store owns its own
+	// mutex (so nesting the two locks buys nothing but a deadlock risk), and
+	// gating it on `ok` would reintroduce a window where a concurrent second
+	// Remove — the one that finds nothing — is also the one that skips
+	// invalidation.
+	r.tickets.invalidateLease(id)
+
 	if !ok {
 		return
 	}

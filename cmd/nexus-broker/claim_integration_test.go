@@ -874,6 +874,167 @@ func TestCrossPrincipalLeaseAccessIsRefused(t *testing.T) {
 	waitFor(t, func() bool { return !b.Registry.Has(cr.LeaseID) })
 }
 
+// TestClaimTicketIssuedRefreshedAndInvalidatedOnRelease is the end-to-end half of
+// E3-S2, over a REAL claimed lease with a live spawned instance: an authenticated
+// claim hands back a redeemable ticket, its owner can mint a replacement, another
+// valid principal cannot, and releasing the lease kills every ticket it holds.
+//
+// The load-bearing assertions are the redemptions, not the presence of a string in
+// the JSON. A route that returned a random value the store had never recorded
+// would satisfy every response-shape check and hand out a credential the
+// WebSocket will refuse; and invalidation is only observable by redeeming, since
+// the WebSocket does not accept `?ticket=` until E3-S3.
+func TestClaimTicketIssuedRefreshedAndInvalidatedOnRelease(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin)
+
+	cr := b.Claim(t, b.Token, stubClaimBody)
+	if cr.LeaseID == "" || cr.WSURL == "" {
+		t.Fatalf("incomplete claim response: %+v", cr)
+	}
+	if cr.Ticket == "" {
+		t.Fatal("authenticated claim returned no ticket; a browser client could never open the lease socket")
+	}
+
+	// --- the claim's ticket is real, and bound to THIS lease ----------------
+	// Presented for another lease it is refused — and, because a failed binding
+	// check is not a use, it survives for the invalidation assertion below.
+	if _, ok := b.Tickets.redeem(cr.Ticket, "some-other-lease"); ok {
+		t.Error("the claim's ticket was accepted for a different lease")
+	}
+
+	// A throwaway ticket proves the binding resolves to the CLAIMANT rather than to
+	// the anonymous identity. It is minted (and consumed) separately so the claim's
+	// own ticket stays unredeemed for the release assertion — redeeming that one
+	// here would make the invalidation check vacuous.
+	probe := b.Ticket(t, b.Token, cr.LeaseID)
+	gotPrincipal, ok := b.Tickets.redeem(probe.Ticket, cr.LeaseID)
+	if !ok {
+		t.Fatal("a freshly minted ticket was not redeemable for its own lease")
+	}
+	if gotPrincipal != b.Principal {
+		t.Errorf("ticket principal = %q, want %q (the claimant)", gotPrincipal, b.Principal)
+	}
+	if _, ok := b.Tickets.redeem(probe.Ticket, cr.LeaseID); ok {
+		t.Error("a ticket was redeemable twice over HTTP-issued state; single use is not enforced")
+	}
+
+	// --- refresh: the owner gets a fresh, DIFFERENT ticket ------------------
+	refreshed := b.Ticket(t, b.Token, cr.LeaseID)
+	if refreshed.LeaseID != cr.LeaseID {
+		t.Errorf("refresh lease_id = %q, want %q", refreshed.LeaseID, cr.LeaseID)
+	}
+	if refreshed.Ticket == "" {
+		t.Fatal("refresh returned no ticket for the lease owner")
+	}
+	if refreshed.Ticket == cr.Ticket {
+		t.Error("refresh returned the SAME ticket; a refresh must mint a new one, not re-serve a used one")
+	}
+
+	// --- a second valid principal is refused, indistinguishably from unknown -
+	unowned := b.Do(t, http.MethodPost, "/ticket/"+cr.LeaseID, b.OtherToken, "")
+	if unowned.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-principal refresh status = %d, want 404", unowned.StatusCode)
+	}
+	unknown := b.Do(t, http.MethodPost, "/ticket/no-such-lease-id", b.OtherToken, "")
+	unownedBody, err := io.ReadAll(unowned.Body)
+	if err != nil {
+		t.Fatalf("read unowned refusal body: %v", err)
+	}
+	unknownBody, err := io.ReadAll(unknown.Body)
+	if err != nil {
+		t.Fatalf("read unknown refusal body: %v", err)
+	}
+	if unknown.StatusCode != unowned.StatusCode || string(unknownBody) != string(unownedBody) {
+		t.Errorf("refusals differ — lease-id oracle:\n unowned: %d %q\n unknown: %d %q",
+			unowned.StatusCode, unownedBody, unknown.StatusCode, unknownBody)
+	}
+	// The refused caller got nothing: the store holds exactly the two tickets A
+	// was issued.
+	if got := b.Tickets.outstanding(); got != 2 {
+		t.Errorf("outstanding tickets = %d, want 2 (a refused refresh must mint nothing)", got)
+	}
+
+	// --- release invalidates every ticket for the lease ---------------------
+	released := b.Do(t, http.MethodPost, "/release/"+cr.LeaseID, b.Token, "")
+	if released.StatusCode != http.StatusOK {
+		t.Fatalf("owner release status = %d, want 200", released.StatusCode)
+	}
+	waitFor(t, func() bool { return !b.Registry.Has(cr.LeaseID) })
+
+	for name, value := range map[string]string{"claim": cr.Ticket, "refreshed": refreshed.Ticket} {
+		if _, ok := b.Tickets.redeem(value, cr.LeaseID); ok {
+			t.Errorf("the %s ticket is still redeemable after the lease was released", name)
+		}
+	}
+	if got := b.Tickets.outstanding(); got != 0 {
+		t.Errorf("outstanding tickets after release = %d, want 0", got)
+	}
+}
+
+// TestClaimOmitsTicketWhenAuthDisabled is the backward-compatibility half: with no
+// `auth:` block a claim carries NO ticket field at all, and the client WebSocket
+// still opens with no ticket and no credential — so an existing deployment sees
+// nothing change.
+func TestClaimOmitsTicketWhenAuthDisabled(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, _ := startStubBrokerWithRegistry(t, stubBin)
+
+	// Read the RAW body: decoding into claimResponse turns an omitted `ticket` into
+	// an indistinguishable empty string, and "absent" is the property under test.
+	resp := postClaimRaw(t, base, stubClaimBody)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("claim status = %d, want 200", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read claim body: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode claim body %q: %v", raw, err)
+	}
+	if _, present := fields["ticket"]; present {
+		t.Errorf("claim body carries a ticket with auth disabled: %s", raw)
+	}
+
+	var cr claimResponse
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+
+	// And the lease socket still opens with no ticket and no Authorization header.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, _, err := websocket.Dial(ctx, cr.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws_url %s with no credential and no ticket: %v", cr.WSURL, err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+
+	// Ticket refresh is inert rather than an error: 200, no ticket.
+	tr, err := http.Post("http://"+base+"/ticket/"+cr.LeaseID, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /ticket: %v", err)
+	}
+	defer tr.Body.Close()
+	if tr.StatusCode != http.StatusOK {
+		t.Fatalf("ticket refresh status = %d, want 200 with auth disabled", tr.StatusCode)
+	}
+	trBody, err := io.ReadAll(tr.Body)
+	if err != nil {
+		t.Fatalf("read ticket body: %v", err)
+	}
+	var trFields map[string]json.RawMessage
+	if err := json.Unmarshal(trBody, &trFields); err != nil {
+		t.Fatalf("decode ticket body %q: %v", trBody, err)
+	}
+	if _, present := trFields["ticket"]; present {
+		t.Errorf("ticket refresh issued a ticket with auth disabled: %s", trBody)
+	}
+}
+
 // TestHealthzStaysOpenOnAuthEnabledBroker pins the deliberate exemption at the
 // integration layer: healthz is registered on the raw mux, so a probe with no
 // credential gets 200 from a broker whose control plane is refusing anonymous
@@ -967,6 +1128,12 @@ type authedStubBroker struct {
 	// from HTTP responses.
 	Registry *Registry
 
+	// Tickets is the broker's live ticket store, so a test can redeem or count
+	// tickets directly. Redemption has no HTTP surface until the WebSocket accepts
+	// `?ticket=` (E3-S3), so this is the only way to prove an issued ticket is
+	// genuinely redeemable — and, after a teardown, genuinely is not.
+	Tickets *ticketStore
+
 	// Token is the primary caller's bearer token and Principal the identity it
 	// resolves to.
 	Token     string
@@ -999,8 +1166,12 @@ func startAuthedStubBroker(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	}, opts...)
 	base, reg := startStubBrokerWithRegistry(t, stubBin, all...)
 	return &authedStubBroker{
-		Base:           base,
-		Registry:       reg,
+		Base:     base,
+		Registry: reg,
+		// The store the broker actually wired, read back off the registry rather
+		// than constructed a second time here — a fixture-local copy would let the
+		// tests pass while the served broker used a different store.
+		Tickets:        reg.tickets,
 		Token:          authedPrimaryToken,
 		Principal:      authedPrimaryPrincipal,
 		OtherToken:     authedOtherToken,
@@ -1072,6 +1243,21 @@ func (b *authedStubBroker) Leases(t *testing.T, token string) []byte {
 		t.Fatalf("read leases body: %v", err)
 	}
 	return bytes.TrimSpace(body)
+}
+
+// Ticket performs an authenticated POST /ticket/{lease_id} and decodes the
+// success response, failing on any non-200. Use Do directly to inspect a refusal.
+func (b *authedStubBroker) Ticket(t *testing.T, token, leaseID string) ticketResponse {
+	t.Helper()
+	resp := b.Do(t, http.MethodPost, "/ticket/"+leaseID, token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ticket/%s status = %d, want 200", leaseID, resp.StatusCode)
+	}
+	var tr ticketResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		t.Fatalf("decode ticket response: %v", err)
+	}
+	return tr
 }
 
 // SpawnCount is how many instance spawns the broker has attempted. Zero after a
@@ -1248,11 +1434,17 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	// route is not registered through Guard, so the gateway resolves that route's
 	// credential itself in order to enforce lease ownership.
 	guard := newAuthGuard(logger, cfg.AuthChain)
+	// Ticket wiring mirrors run() too: the store's inert/live state is decided by
+	// the guard, and the registry invalidates a lease's tickets when it tears the
+	// lease down.
+	tickets := newTicketStore(logger, guard.enabled())
+	registry.useTicketStore(tickets)
 	gateway := NewGateway(logger, registry, guard)
-	claims := NewClaimServer(logger, registry, cfg, wiring.runner)
+	claims := NewClaimServer(logger, registry, cfg, wiring.runner, tickets)
 	claims.readyTimeout = 15 * time.Second
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
+	ticketsServer := NewTicketServer(logger, registry, tickets)
 
 	// Mirror run()'s route topology exactly, because middleware ORDERING is the
 	// property the auth integration tests exist to catch: healthz and the
@@ -1270,6 +1462,7 @@ func startStubBrokerWithRegistry(t *testing.T, stubBin string, opts ...stubBroke
 	claims.Register(guarded)
 	releases.Register(guarded)
 	leases.Register(guarded)
+	ticketsServer.Register(guarded)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 
