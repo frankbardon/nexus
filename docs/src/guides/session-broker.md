@@ -77,6 +77,13 @@ go build -o bin/nexus-broker ./cmd/nexus-broker
 bin/nexus-broker -config broker.yaml
 ```
 
+Every `binaries` entry is resolved and verified at **startup**: bare names are
+looked up on the broker's `PATH`, the result is stat'd, and a missing file, a
+directory, or a file with no execute bit **refuses the boot** naming the entry.
+That includes the reserved `nexus` entry, so a zero-config broker with no `nexus`
+on its `PATH` now fails to start rather than failing at the first claim. See
+[Binary resolution](../configuration/reference.md#binary-resolution).
+
 Every config key, its type, and its default are listed in the authoritative
 [Configuration Reference](../configuration/reference.md#session-broker-nexus-broker).
 

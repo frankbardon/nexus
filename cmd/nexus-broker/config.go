@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -222,6 +226,21 @@ type BinaryEntry struct {
 	// override them would let a config entry point an instance at another broker
 	// or hand it the wrong lease, so the broker's values always win.
 	Env map[string]string `yaml:"env"`
+
+	// ResolvedPath is the ABSOLUTE, verified executable this entry spawns: Path
+	// after tilde expansion, after a PATH lookup if Path was a bare name, and
+	// after a stat that confirmed a regular file with an execute bit.
+	//
+	// It is not a YAML key. LoadConfig derives it, following the
+	// AdvertiseScheme/AdvertiseHost precedent, for two reasons. First, a typo or a
+	// missing build then fails the BOOT — naming the entry — instead of surfacing
+	// as one user's failed claim hours later. Second, spawn does no filesystem
+	// work per claim: the answer is computed once per process, so a PATH lookup
+	// cannot resolve to one binary at boot and a different one mid-flight.
+	//
+	// Empty after LoadConfigFromBytes alone, which parses but deliberately does
+	// not touch the filesystem — see LoadConfig.
+	ResolvedPath string `yaml:"-"`
 }
 
 // reservedBinaryName is the registry entry that must exist after every load. It
@@ -271,16 +290,7 @@ type binaryAliasProbe struct {
 func foldBinaryRegistry(declared map[string]BinaryEntry, alias *string) (map[string]BinaryEntry, []string, error) {
 	out := make(map[string]BinaryEntry, len(declared)+1)
 
-	// Iterated in sorted order so a config with several bad entries fails on the
-	// same one every boot. Map order would otherwise make the error message flap
-	// between runs, which is miserable to debug from a crash-looping container.
-	names := make([]string, 0, len(declared))
-	for name := range declared {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, raw := range names {
+	for _, raw := range sortedBinaryNames(declared) {
 		entry := declared[raw]
 		// Trimmed so `"nexus ":` cannot smuggle in a second entry that looks
 		// identical to the reserved one in every log line and UI.
@@ -320,6 +330,129 @@ func foldBinaryRegistry(declared map[string]BinaryEntry, alias *string) (map[str
 	}
 
 	return out, warnings, nil
+}
+
+// sortedBinaryNames returns a registry map's keys in a stable order.
+//
+// Every walk of the registry goes through this, because Go randomizes map
+// iteration: without it, a config with two bad entries would fail on a
+// different one each boot (miserable to debug from a crash-looping container)
+// and the boot log would list the entries in a different order every restart.
+// Generic over the value type so it serves both the raw declared map and the
+// resolved one.
+func sortedBinaryNames[T any](m map[string]T) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// resolveBinaryRegistry resolves and verifies every entry's spawn target,
+// recording the answer on each entry's ResolvedPath. It mutates the map in
+// place; on the first failure it returns and the caller refuses the boot.
+//
+// The accepted tradeoff: a broker restarted midway through a variant rollout,
+// while one of its binaries is momentarily absent, will not come up. That is
+// deliberate — the alternative is a broker that boots fine and then rejects
+// every claim for that variant, which the operator only discovers from a user.
+// The error message is what makes it tolerable, so each one names the entry,
+// the path that was resolved, and the specific reason.
+func resolveBinaryRegistry(binaries map[string]BinaryEntry) error {
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		resolved, err := resolveBinaryPath(name, entry.Path)
+		if err != nil {
+			return err
+		}
+		entry.ResolvedPath = resolved
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// resolveBinaryPath turns one entry's configured path into an absolute path
+// that is known to be an executable file, or explains why it is not.
+//
+// The order is expand → PATH lookup → absolute → stat, and each step exists:
+//
+//   - ExpandPath so `~/builds/nexus-vision` works here exactly as it does in
+//     every other Nexus path key. (foldBinaryRegistry already expanded, and the
+//     helper is idempotent; repeating it keeps this function correct on its own.)
+//   - exec.LookPath for a BARE name, so `nexus` means "whatever the broker's own
+//     PATH resolves" — the zero-config default, and allowed for every entry, not
+//     just the reserved one, because an operator who installs variants into
+//     /usr/local/bin should not have to spell out directories.
+//   - filepath.Abs so what is stored can be exec()d regardless of what the
+//     process working directory later becomes, and so the boot log names a path
+//     an operator can paste into a shell.
+func resolveBinaryPath(name, path string) (string, error) {
+	candidate := engine.ExpandPath(strings.TrimSpace(path))
+
+	if isBareBinaryName(candidate) {
+		found, err := exec.LookPath(candidate)
+		if err != nil {
+			return "", fmt.Errorf("binaries: %s: %q has no path separator, so it was looked up on the broker's PATH, and not found there: %w",
+				name, candidate, err)
+		}
+		candidate = found
+	}
+
+	resolved, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("binaries: %s: cannot resolve %q to an absolute path: %w", name, candidate, err)
+	}
+
+	// Stat rather than exec: the broker must not run an operator's binary just to
+	// find out whether it is runnable. Stat follows symlinks, so a symlinked
+	// variant is judged on its target, which is what exec() would do too.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("binaries: %s: no such file %s%s", name, resolved, configuredAs(resolved, path))
+		}
+		return "", fmt.Errorf("binaries: %s: cannot stat %s%s: %w", name, resolved, configuredAs(resolved, path), err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("binaries: %s: %s is a directory, not an executable%s", name, resolved, configuredAs(resolved, path))
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("binaries: %s: %s is not a regular file (mode %s), so it cannot be exec()d%s",
+			name, resolved, info.Mode(), configuredAs(resolved, path))
+	}
+	// Any of the three execute bits counts. This is deliberately NOT an attempt to
+	// emulate the kernel's euid/egid permission check: the common failure is a
+	// build artifact that was never chmod +x'd, and catching that is worth far
+	// more than the false negative where a file is executable only by some other
+	// user (which still fails, at exec time, with a clear EACCES).
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("binaries: %s: %s is not executable (mode %s); chmod +x it or point the entry at a different build%s",
+			name, resolved, info.Mode().Perm(), configuredAs(resolved, path))
+	}
+	return resolved, nil
+}
+
+// isBareBinaryName reports whether path names something to look up on PATH
+// rather than a location on disk. `nexus` is bare; `./nexus`, `bin/nexus` and
+// `/usr/local/bin/nexus` are not.
+//
+// Both '/' and the host separator are checked because Go accepts '/' as a
+// separator on every platform it targets, so a config written on one OS still
+// reads as a path on another.
+func isBareBinaryName(path string) bool {
+	return !strings.ContainsRune(path, '/') && !strings.ContainsRune(path, filepath.Separator)
+}
+
+// configuredAs renders the trailing " (configured as ...)" clause that ties a
+// resolved path back to what the operator actually wrote — but only when the two
+// differ, so an entry that already names an absolute path does not get an error
+// message that says the same thing twice.
+func configuredAs(resolved, path string) string {
+	if resolved == path {
+		return ""
+	}
+	return fmt.Sprintf(" (configured as %q)", path)
 }
 
 // authBlock is the raw `auth:` mapping. It exists only to give a non-mapping
@@ -380,17 +513,43 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfig reads a YAML broker config file from disk.
+// LoadConfig reads a YAML broker config file from disk, parses it, and resolves
+// it against the machine the broker is about to run on.
+//
+// It is the BOOT path, and the only caller that performs the second half. The
+// split from LoadConfigFromBytes is deliberate: parsing is a pure function of
+// the bytes and must stay that way, because the whole broker test suite loads
+// config from string literals and would otherwise need a real nexus build on
+// disk to assert anything about an unrelated key. Resolving the spawn registry,
+// by contrast, is inherently environmental — the same bytes legitimately resolve
+// differently on two machines — and it belongs with the step that was already
+// touching the filesystem.
+//
+// The consequence for operators is intentional: a broker whose registry names a
+// binary that is missing, is a directory, or has no execute bit does not start.
+// That includes a zero-config broker whose PATH has no `nexus` on it, which
+// previously got as far as accepting claims and only failed when one was made.
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("reading broker config file: %w", err)
 	}
-	return LoadConfigFromBytes(data)
+	cfg, err := LoadConfigFromBytes(data)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	return cfg, nil
 }
 
 // LoadConfigFromBytes parses a YAML broker config from bytes, merged on top of
 // DefaultConfig. Every filesystem path is funneled through engine.ExpandPath.
+//
+// It validates the DOCUMENT — shapes, required fields, mutually exclusive keys —
+// and touches no filesystem. Binary registry entries come back with ResolvedPath
+// empty; LoadConfig fills those in.
 func LoadConfigFromBytes(data []byte) (Config, error) {
 	cfg := DefaultConfig()
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

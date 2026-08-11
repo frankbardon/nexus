@@ -2528,7 +2528,7 @@ auth:
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
-| `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**. |
+| `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
 | `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
@@ -2561,7 +2561,7 @@ binaries:
 
 | Entry field   | Type              | Default    | Description                                                                 |
 |---------------|-------------------|------------|-----------------------------------------------------------------------------|
-| `path`        | string            | *(required)* | The executable the broker exec()s for this entry. Funneled through `ExpandPath` (supports `~`). **Required** — an empty or missing `path` fails startup naming the entry. It is deliberately not defaulted to the entry name, which would turn a typo into a silent `PATH` lookup for a binary the operator never meant to run. |
+| `path`        | string            | *(required)* | The executable the broker exec()s for this entry. Funneled through `ExpandPath` (supports `~`). A value with **no path separator** (`nexus`, `nexus-vision`) is looked up on the broker process's `PATH`; anything else is used as a location on disk, relative to the broker's working directory if it is not absolute. **Required** — an empty or missing `path` fails startup naming the entry. It is deliberately not defaulted to the entry name, which would turn a typo into a silent `PATH` lookup for a binary the operator never meant to run. Resolved and verified at boot — see [Binary resolution](#binary-resolution). |
 | `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
 | `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
 | `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
@@ -2582,6 +2582,42 @@ boot, from the same file, in exactly four cases:
 | set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
 | absent  | set     | Taken as written; nothing to fold. |
 | set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
+
+### Binary resolution
+
+Every registry entry — including the reserved `nexus` one, and including the
+value folded in from a deprecated `nexus_binary_path` — is resolved and verified
+**once, at startup**, before the gateway listens. The steps, in order:
+
+1. **Expand.** `~` and `~/…` are expanded through `ExpandPath`, as everywhere
+   else in Nexus.
+2. **Look up bare names on `PATH`.** A `path` containing no path separator is
+   resolved against the broker process's own `PATH`. This is what makes the
+   zero-config `path: "nexus"` work, and it is allowed for **every** entry, not
+   just the reserved one.
+3. **Make absolute.** The result is turned into an absolute path, so spawning is
+   unaffected by the broker's working directory.
+4. **Stat and check.** The path must exist, be a regular file (symlinks are
+   followed), and carry at least one execute bit.
+
+Any failure at any step **refuses the boot**, with an error naming the entry, the
+path that was resolved, and the specific reason (`no such file`, `is a
+directory`, `is not executable (mode …)`, `not found on PATH`). The resolved
+absolute path is then held for the process lifetime, so a claim performs no
+filesystem work and a `PATH` lookup cannot answer differently mid-flight.
+
+At startup the broker logs one line per entry carrying both the configured
+`path` and the `resolved_path`, so a surprising `PATH` answer — a stale build in
+`~/go/bin` shadowing `/usr/local/bin` — is visible in the boot log rather than
+inferred later from an instance behaving oddly.
+
+> **Behaviour change.** A broker whose registry names a missing, non-executable,
+> or directory path now **fails to start**. That includes a **zero-config broker
+> with no `nexus` on its `PATH`**, which previously started fine and only failed
+> at the first `POST /claim`. The tradeoff is deliberate and one-sided: a broker
+> restarted midway through a variant rollout, while a binary is momentarily
+> absent, will not come up — but an operator learns about a typo or a missing
+> build at deploy time instead of from a user's failed claim.
 
 ### Lease durability (`state_dir`)
 

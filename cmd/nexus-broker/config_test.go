@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -322,6 +324,249 @@ binaries:
 	}
 	if !strings.Contains(err.Error(), "vision") {
 		t.Errorf("error %q does not name the colliding entry", err)
+	}
+}
+
+// writeBinaryFixture writes a fake spawn target into dir and returns its path.
+//
+// Fixtures are always built under t.TempDir() and PATH is always overridden with
+// t.Setenv, so nothing in this file can pass or fail because of what happens to
+// be installed on the machine running the tests.
+func writeBinaryFixture(t *testing.T, dir, name string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), mode); err != nil {
+		t.Fatalf("writing binary fixture: %v", err)
+	}
+	// WriteFile's mode is masked by the process umask, so set it explicitly —
+	// otherwise the "executable" fixture can land at 0644 on a strict umask and
+	// the test asserts the opposite of what it means to.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod binary fixture: %v", err)
+	}
+	return path
+}
+
+// resolveOne is the single-entry shorthand the resolution tests are written
+// against: it exercises the same map-walking entry point the boot path uses.
+func resolveOne(name, path string) (string, error) {
+	binaries := map[string]BinaryEntry{name: {Path: path}}
+	if err := resolveBinaryRegistry(binaries); err != nil {
+		return "", err
+	}
+	return binaries[name].ResolvedPath, nil
+}
+
+// TestResolveBinaryRegistryRejectsMissingFile is the headline criterion: a typo
+// or a build that was never produced stops the boot, and the error names the
+// entry so an operator knows which line of broker.yaml to fix.
+func TestResolveBinaryRegistryRejectsMissingFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nexus-vision")
+	resolved, err := resolveOne("vision", missing)
+	if err == nil {
+		t.Fatalf("resolveBinaryRegistry succeeded (resolved=%q); want a load failure", resolved)
+	}
+	for _, want := range []string{"vision", missing} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestResolveBinaryRegistryRejectsDirectory: pointing an entry at a directory is
+// the classic "I gave it the install dir, not the binary" mistake, and exec()
+// would fail with a confusing EACCES at claim time.
+func TestResolveBinaryRegistryRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	resolved, err := resolveOne("vision", dir)
+	if err == nil {
+		t.Fatalf("resolveBinaryRegistry succeeded (resolved=%q); want a load failure", resolved)
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("error %q does not say the path is a directory", err)
+	}
+	if !strings.Contains(err.Error(), "vision") {
+		t.Errorf("error %q does not name the offending entry", err)
+	}
+}
+
+// TestResolveBinaryRegistryRejectsNonExecutableFile covers the build artifact
+// that exists but was never chmod +x'd — the one failure mode that looks
+// completely fine in an `ls` of the deploy directory.
+func TestResolveBinaryRegistryRejectsNonExecutableFile(t *testing.T) {
+	path := writeBinaryFixture(t, t.TempDir(), "nexus-vision", 0o644)
+	resolved, err := resolveOne("vision", path)
+	if err == nil {
+		t.Fatalf("resolveBinaryRegistry succeeded (resolved=%q); want a load failure", resolved)
+	}
+	if !strings.Contains(err.Error(), "not executable") {
+		t.Errorf("error %q does not say the file is not executable", err)
+	}
+	for _, want := range []string{"vision", path} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestResolveBinaryRegistryResolvesBareNameThroughPath pins the PATH contract,
+// for a NON-reserved entry: bare names are allowed for every variant, not just
+// `nexus`, so an operator installing builds into /usr/local/bin need not spell
+// out directories.
+func TestResolveBinaryRegistryResolvesBareNameThroughPath(t *testing.T) {
+	dir := t.TempDir()
+	want := writeBinaryFixture(t, dir, "nexus-vision", 0o755)
+	t.Setenv("PATH", dir)
+
+	got, err := resolveOne("vision", "nexus-vision")
+	if err != nil {
+		t.Fatalf("resolveBinaryRegistry: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolvedPath = %q, want the PATH fixture %q", got, want)
+	}
+}
+
+// TestResolveBinaryRegistryBareNameNotOnPathFails is the other half: a name that
+// PATH cannot answer is a boot failure naming the entry and the name, not a
+// deferred surprise at claim time.
+func TestResolveBinaryRegistryBareNameNotOnPathFails(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	resolved, err := resolveOne("vision", "nexus-vision")
+	if err == nil {
+		t.Fatalf("resolveBinaryRegistry succeeded (resolved=%q); want a load failure", resolved)
+	}
+	for _, want := range []string{"vision", "nexus-vision", "PATH"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestResolveBinaryRegistryExpandsTilde: `~` works in a registry entry exactly
+// as it does in every other Nexus path key, and the EXPANDED path is what gets
+// stat'd — a `~` reaching the filesystem would be a directory literally named
+// "~", which is never what the operator meant.
+func TestResolveBinaryRegistryExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "builds"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	want := writeBinaryFixture(t, filepath.Join(home, "builds"), "nexus-vision", 0o755)
+
+	got, err := resolveOne("vision", "~/builds/nexus-vision")
+	if err != nil {
+		t.Fatalf("resolveBinaryRegistry: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolvedPath = %q, want %q", got, want)
+	}
+}
+
+// TestResolveBinaryRegistryYieldsAbsolutePaths pins the claim-time guarantee: a
+// valid registry leaves every entry holding an absolute path, so spawning does no
+// filesystem work and cannot be affected by the process working directory.
+func TestResolveBinaryRegistryYieldsAbsolutePaths(t *testing.T) {
+	dir := t.TempDir()
+	base := writeBinaryFixture(t, dir, "nexus", 0o755)
+	vision := writeBinaryFixture(t, dir, "nexus-vision", 0o755)
+	t.Setenv("PATH", dir)
+
+	binaries := map[string]BinaryEntry{
+		reservedBinaryName: {Path: reservedBinaryName}, // bare, via PATH
+		"vision":           {Path: vision},             // already absolute
+	}
+	if err := resolveBinaryRegistry(binaries); err != nil {
+		t.Fatalf("resolveBinaryRegistry: %v", err)
+	}
+	for name, entry := range binaries {
+		if !filepath.IsAbs(entry.ResolvedPath) {
+			t.Errorf("%s ResolvedPath = %q, want an absolute path", name, entry.ResolvedPath)
+		}
+	}
+	if got := binaries[reservedBinaryName].ResolvedPath; got != base {
+		t.Errorf("%s ResolvedPath = %q, want %q", reservedBinaryName, got, base)
+	}
+	if got := binaries["vision"].ResolvedPath; got != vision {
+		t.Errorf("vision ResolvedPath = %q, want %q", got, vision)
+	}
+}
+
+// TestLoadConfigResolvesBinaryRegistry runs the whole boot path — a real file on
+// disk through LoadConfig — because that, not the byte-level parser, is what
+// run() calls. The reserved entry is resolved too, even though the config never
+// mentions it.
+func TestLoadConfigResolvesBinaryRegistry(t *testing.T) {
+	dir := t.TempDir()
+	base := writeBinaryFixture(t, dir, "nexus", 0o755)
+	vision := writeBinaryFixture(t, dir, "nexus-vision", 0o755)
+	t.Setenv("PATH", dir)
+
+	configPath := filepath.Join(dir, "broker.yaml")
+	yaml := "binaries:\n  vision:\n    path: " + fmt.Sprintf("%q", vision) + "\n"
+	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("writing broker.yaml: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Binaries[reservedBinaryName].ResolvedPath; got != base {
+		t.Errorf("%s ResolvedPath = %q, want the PATH-resolved %q", reservedBinaryName, got, base)
+	}
+	if got := cfg.Binaries["vision"].ResolvedPath; got != vision {
+		t.Errorf("vision ResolvedPath = %q, want %q", got, vision)
+	}
+	// The configured path is retained verbatim alongside the resolved one, so the
+	// boot log can show both and an operator can see a surprising PATH answer.
+	if got := cfg.Binaries[reservedBinaryName].Path; got != defaultNexusBinaryPath {
+		t.Errorf("%s Path = %q, want the configured %q retained", reservedBinaryName, got, defaultNexusBinaryPath)
+	}
+}
+
+// TestLoadConfigZeroConfigResolvesReservedEntryThroughPath is the deliberate
+// behaviour change this story introduces: a zero-config broker resolves `nexus`
+// through PATH at BOOT. If PATH cannot answer, startup fails — where previously
+// it deferred the failure to the first claim.
+func TestLoadConfigZeroConfigResolvesReservedEntryThroughPath(t *testing.T) {
+	dir := t.TempDir()
+	base := writeBinaryFixture(t, dir, "nexus", 0o755)
+	configPath := filepath.Join(dir, "broker.yaml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("writing broker.yaml: %v", err)
+	}
+
+	t.Setenv("PATH", dir)
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Binaries[reservedBinaryName].ResolvedPath; got != base {
+		t.Errorf("%s ResolvedPath = %q, want %q", reservedBinaryName, got, base)
+	}
+
+	t.Setenv("PATH", t.TempDir()) // same config, a PATH with no nexus on it
+	if _, err := LoadConfig(configPath); err == nil {
+		t.Fatal("LoadConfig succeeded with no nexus on PATH; want a boot failure")
+	} else if !strings.Contains(err.Error(), reservedBinaryName) {
+		t.Errorf("error %q does not name the %q entry", err, reservedBinaryName)
+	}
+}
+
+// TestLoadConfigFromBytesLeavesRegistryUnresolved pins the deliberate split: the
+// byte-level parser validates the DOCUMENT and touches no filesystem, which is
+// what lets the rest of this suite load config from string literals naming paths
+// that do not exist.
+func TestLoadConfigFromBytesLeavesRegistryUnresolved(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("binaries:\n  vision:\n    path: \"/nope/nexus-vision\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if got := cfg.Binaries["vision"].ResolvedPath; got != "" {
+		t.Errorf("vision ResolvedPath = %q, want empty until LoadConfig resolves it", got)
 	}
 }
 

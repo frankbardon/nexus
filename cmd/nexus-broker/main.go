@@ -77,6 +77,21 @@ func run() error {
 		"admin_scope", cfg.AdminScope,
 	)
 
+	// One line per registry entry, carrying the RESOLVED path and not just the
+	// configured one. A bare `path` goes through the broker process's own PATH, so
+	// `nexus` can silently be a different build than the operator has in mind —
+	// a stale copy in ~/go/bin ahead of /usr/local/bin, say. That surprise has to
+	// be visible in the boot log, where it can be compared against a deploy, rather
+	// than inferred later from an instance behaving oddly.
+	for _, name := range sortedBinaryNames(cfg.Binaries) {
+		entry := cfg.Binaries[name]
+		logger.Info("binary registry entry",
+			"name", name,
+			"path", entry.Path,
+			"resolved_path", entry.ResolvedPath,
+		)
+	}
+
 	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
 	// the claim request's Host header. That is fine for a directly-reachable
 	// broker and wrong behind a proxy, and nothing later in the process can tell
