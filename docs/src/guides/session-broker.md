@@ -54,7 +54,10 @@ The broker reads its own YAML config file (default `broker.yaml`, override with
 # broker.yaml
 listen_addr: ":8080"          # HTTP/WS gateway bind address
 advertise_addr: ""            # address CLIENTS use to reach this broker; required behind a proxy/LB
-nexus_binary_path: "nexus"    # path to the nexus binary the broker exec()s
+binaries:                     # named nexus variants this broker may spawn
+  nexus:                      # reserved name; always present, declare it to override the path
+    path: "nexus"
+# nexus_binary_path: "nexus"  # DEPRECATED alias for binaries.nexus.path; still honoured
 max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a lease after this much inactivity; <=0 disables
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting

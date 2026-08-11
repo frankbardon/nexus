@@ -17,6 +17,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
 	want := DefaultConfig()
+	// The one field a load produces that DefaultConfig does not: the binary
+	// registry is SYNTHESIZED at load, not defaulted, because the folding rules
+	// have to be able to tell an operator-declared `binaries.nexus` from a value
+	// we put there ourselves. Zero config still resolves to exactly the historical
+	// spawn target.
+	want.Binaries = map[string]BinaryEntry{reservedBinaryName: {Path: defaultNexusBinaryPath}}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("defaults mismatch:\n got %+v\nwant %+v", cfg, want)
 	}
@@ -100,6 +106,222 @@ func TestLoadConfigExpandsBinaryPath(t *testing.T) {
 	}
 	if cfg.NexusBinaryPath == "~/bin/nexus" {
 		t.Errorf("expected ~ to be expanded, got %q", cfg.NexusBinaryPath)
+	}
+}
+
+// TestLoadConfigBinariesSynthesizesReservedEntry pins the zero-config guarantee:
+// a broker.yaml that has never heard of `binaries:` still resolves a registry,
+// and the reserved entry in it points at exactly the path the broker has spawned
+// since before the registry existed.
+func TestLoadConfigBinariesSynthesizesReservedEntry(t *testing.T) {
+	for _, yaml := range []string{``, "listen_addr: \":7777\"\n", "binaries: {}\n", "binaries:\n"} {
+		cfg, err := LoadConfigFromBytes([]byte(yaml))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes(%q): %v", yaml, err)
+		}
+		entry, ok := cfg.Binaries[reservedBinaryName]
+		if !ok {
+			t.Fatalf("for %q: registry = %+v, want a %q entry", yaml, cfg.Binaries, reservedBinaryName)
+		}
+		if entry.Path != defaultNexusBinaryPath {
+			t.Errorf("for %q: %s path = %q, want %q", yaml, reservedBinaryName, entry.Path, defaultNexusBinaryPath)
+		}
+		if len(cfg.Warnings) != 0 {
+			t.Errorf("for %q: warnings = %v, want none (nothing deprecated was used)", yaml, cfg.Warnings)
+		}
+	}
+}
+
+// TestLoadConfigBinariesReservedEntrySurvivesOtherEntries is the other half of
+// the reservation: an operator's `binaries:` block adds variants, it does not
+// replace the base binary. A broker that could lose its `nexus` entry would
+// start refusing claims that name no binary at all.
+func TestLoadConfigBinariesReservedEntrySurvivesOtherEntries(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+binaries:
+  vision:
+    path: "/opt/nexus/bin/nexus-vision"
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if len(cfg.Binaries) != 2 {
+		t.Fatalf("registry = %+v, want the declared entry plus the reserved one", cfg.Binaries)
+	}
+	if got := cfg.Binaries[reservedBinaryName].Path; got != defaultNexusBinaryPath {
+		t.Errorf("%s path = %q, want %q", reservedBinaryName, got, defaultNexusBinaryPath)
+	}
+	if got := cfg.Binaries["vision"].Path; got != "/opt/nexus/bin/nexus-vision" {
+		t.Errorf("vision path = %q", got)
+	}
+}
+
+// TestLoadConfigBinaryEntryFields covers the descriptive and per-variant spawn
+// fields round-tripping off the YAML.
+func TestLoadConfigBinaryEntryFields(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+binaries:
+  vision:
+    path: "/opt/nexus/bin/nexus-vision"
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	entry := cfg.Binaries["vision"]
+	if entry.Label != "Nexus (vision)" {
+		t.Errorf("Label = %q", entry.Label)
+	}
+	if entry.Description != "Multimodal build with the image tools compiled in" {
+		t.Errorf("Description = %q", entry.Description)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"-profile", "vision"}) {
+		t.Errorf("Args = %v", entry.Args)
+	}
+	if !reflect.DeepEqual(entry.Env, map[string]string{"NEXUS_VISION": "1"}) {
+		t.Errorf("Env = %v", entry.Env)
+	}
+}
+
+// TestLoadConfigBinaryEntryExpandsPath pins the project-wide path rule for the
+// new key: every config-supplied filesystem path goes through engine.ExpandPath,
+// so `~` works in a registry entry exactly as it does in nexus_binary_path.
+func TestLoadConfigBinaryEntryExpandsPath(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("binaries:\n  vision:\n    path: \"~/bin/nexus-vision\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	got := cfg.Binaries["vision"].Path
+	if strings.HasPrefix(got, "~") {
+		t.Errorf("expected ~ to be expanded, got %q", got)
+	}
+	if !strings.HasSuffix(got, "/bin/nexus-vision") {
+		t.Errorf("vision path = %q, want the configured suffix preserved", got)
+	}
+}
+
+// TestLoadConfigBinaryAliasFoldsIntoRegistry is the backward-compatibility
+// criterion: an existing deployment that only knows nexus_binary_path boots
+// unchanged, its value becomes the reserved entry, and the operator is told
+// which key replaces it.
+func TestLoadConfigBinaryAliasFoldsIntoRegistry(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("nexus_binary_path: \"/opt/nexus/bin/nexus\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if got := cfg.Binaries[reservedBinaryName].Path; got != "/opt/nexus/bin/nexus" {
+		t.Errorf("%s path = %q, want the alias value folded in", reservedBinaryName, got)
+	}
+	if len(cfg.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one deprecation warning", cfg.Warnings)
+	}
+	// The warning has to name BOTH the dead key and its replacement; "deprecated"
+	// with no migration target is not actionable.
+	for _, want := range []string{keyNexusBinaryPath, "binaries." + reservedBinaryName + ".path"} {
+		if !strings.Contains(cfg.Warnings[0], want) {
+			t.Errorf("warning %q does not name %q", cfg.Warnings[0], want)
+		}
+	}
+
+	// The alias path is expanded on the way into the registry, like any other.
+	tilde, err := LoadConfigFromBytes([]byte("nexus_binary_path: \"~/bin/nexus\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if got := tilde.Binaries[reservedBinaryName].Path; strings.HasPrefix(got, "~") {
+		t.Errorf("expected ~ to be expanded in the folded entry, got %q", got)
+	}
+}
+
+// TestLoadConfigBinaryAliasAndEntryConflictFails: two keys naming one spawn
+// target is a config bug, and the broker refuses the boot rather than picking a
+// winner — whichever way the tie broke, half the operators hitting it would
+// silently spawn the binary they did not mean.
+func TestLoadConfigBinaryAliasAndEntryConflictFails(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+nexus_binary_path: "/opt/nexus/bin/nexus"
+binaries:
+  nexus:
+    path: "/usr/local/bin/nexus"
+`))
+	if err == nil {
+		t.Fatalf("LoadConfigFromBytes succeeded (registry=%+v); want a boot failure", cfg.Binaries)
+	}
+	for _, want := range []string{keyNexusBinaryPath, "binaries." + reservedBinaryName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestLoadConfigBinaryEntryWithoutPathFails: an entry that names nothing
+// spawnable must fail the boot, naming the entry, rather than the first claim
+// that selects it.
+func TestLoadConfigBinaryEntryWithoutPathFails(t *testing.T) {
+	for _, yaml := range []string{
+		"binaries:\n  vision: {}\n",
+		"binaries:\n  vision:\n    path: \"\"\n",
+		"binaries:\n  vision:\n    path: \"   \"\n",
+		"binaries:\n  vision:\n    label: \"Nexus (vision)\"\n",
+	} {
+		cfg, err := LoadConfigFromBytes([]byte(yaml))
+		if err == nil {
+			t.Fatalf("LoadConfigFromBytes(%q) succeeded (registry=%+v); want a boot failure", yaml, cfg.Binaries)
+		}
+		if !strings.Contains(err.Error(), "vision") {
+			t.Errorf("error %q does not name the offending entry", err)
+		}
+	}
+}
+
+// TestLoadConfigBinaryEmptyNameFails: the map key is the name a claim selects
+// by, so a nameless entry is unreachable and is refused rather than carried.
+func TestLoadConfigBinaryEmptyNameFails(t *testing.T) {
+	for _, yaml := range []string{
+		"binaries:\n  \"\":\n    path: \"/opt/nexus/bin/nexus-x\"\n",
+		"binaries:\n  \"   \":\n    path: \"/opt/nexus/bin/nexus-x\"\n",
+	} {
+		cfg, err := LoadConfigFromBytes([]byte(yaml))
+		if err == nil {
+			t.Fatalf("LoadConfigFromBytes(%q) succeeded (registry=%+v); want a boot failure", yaml, cfg.Binaries)
+		}
+		if !strings.Contains(err.Error(), "binaries") {
+			t.Errorf("error %q does not name binaries", err)
+		}
+	}
+}
+
+// TestLoadConfigBinaryEmptyAliasFails: `nexus_binary_path: ""` written
+// explicitly is not the same as omitting it. Defaulting it back to "nexus"
+// would silently undo whatever the operator was in the middle of doing.
+func TestLoadConfigBinaryEmptyAliasFails(t *testing.T) {
+	if _, err := LoadConfigFromBytes([]byte("nexus_binary_path: \"\"\n")); err == nil {
+		t.Fatal("LoadConfigFromBytes succeeded for an empty nexus_binary_path; want a boot failure")
+	} else if !strings.Contains(err.Error(), keyNexusBinaryPath) {
+		t.Errorf("error %q does not name %q", err, keyNexusBinaryPath)
+	}
+}
+
+// TestLoadConfigBinaryTrimmedNameCollisionFails: names are compared trimmed, so
+// `"nexus ":` cannot smuggle in a second entry indistinguishable from the
+// reserved one in every log line and operator surface.
+func TestLoadConfigBinaryTrimmedNameCollisionFails(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+binaries:
+  vision:
+    path: "/opt/a"
+  "vision ":
+    path: "/opt/b"
+`))
+	if err == nil {
+		t.Fatalf("LoadConfigFromBytes succeeded (registry=%+v); want a boot failure", cfg.Binaries)
+	}
+	if !strings.Contains(err.Error(), "vision") {
+		t.Errorf("error %q does not name the colliding entry", err)
 	}
 }
 

@@ -40,12 +40,26 @@ func run() error {
 		return err
 	}
 
+	// Non-fatal config complaints (deprecated keys, folded aliases) are collected
+	// during the load rather than logged there, because config is parsed before
+	// anything else exists and the parser has no logger. Drained here so they
+	// land in the same boot output as everything else, before the startup line
+	// that reports the values they affected.
+	for _, warning := range cfg.Warnings {
+		logger.Warn(warning)
+	}
+
 	logger.Info("nexus-broker starting",
 		"listen_addr", cfg.ListenAddr,
 		// Logged because it decides what clients are told to connect back to; an
 		// operator debugging a bad ws_url needs to see the value in effect.
 		"advertise_addr", cfg.AdvertiseAddr,
 		"nexus_binary_path", cfg.NexusBinaryPath,
+		// Logged because the registry decides what a claim can spawn at all, and
+		// the count is the cheapest way for an operator to confirm the `binaries:`
+		// block they wrote was actually picked up (it is never below 1 — the
+		// reserved `nexus` entry always exists).
+		"binaries", len(cfg.Binaries),
 		// Logged because an empty state_dir means lease state is lost on restart,
 		// and that is a decision an operator should be able to confirm from the
 		// boot line rather than infer from a missing directory.

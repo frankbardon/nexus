@@ -2490,7 +2490,20 @@ instances behind an HTTP/WebSocket gateway.
 # broker.yaml
 listen_addr: ":8080"
 advertise_addr: ""            # required behind a proxy/LB; see below
-nexus_binary_path: "nexus"
+
+# The named registry of nexus variants this broker may spawn. The `nexus` entry
+# always exists — declare it to override its path, omit it to take the default.
+binaries:
+  nexus:
+    path: "nexus"
+  vision:
+    path: "/opt/nexus/bin/nexus-vision"
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+
 max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
@@ -2515,7 +2528,8 @@ auth:
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
-| `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
+| `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**. |
+| `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
@@ -2524,6 +2538,50 @@ auth:
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+
+### Binary registry (`binaries`)
+
+One broker can front several `nexus` builds — a base binary, a vision-enabled
+build, a pinned older release — instead of the single spawn target
+`nexus_binary_path` allowed. Each entry is keyed by the **name a claim selects
+it by**; the key is the name, so an entry cannot disagree with itself.
+
+```yaml
+binaries:
+  nexus:                                    # reserved; declare it only to override the path
+    path: "/usr/local/bin/nexus"
+  vision:
+    path: "~/builds/nexus-vision"           # ExpandPath applies here too
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+```
+
+| Entry field   | Type              | Default    | Description                                                                 |
+|---------------|-------------------|------------|-----------------------------------------------------------------------------|
+| `path`        | string            | *(required)* | The executable the broker exec()s for this entry. Funneled through `ExpandPath` (supports `~`). **Required** — an empty or missing `path` fails startup naming the entry. It is deliberately not defaulted to the entry name, which would turn a typo into a silent `PATH` lookup for a binary the operator never meant to run. |
+| `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
+| `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
+| `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
+| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker or hand it the wrong lease. |
+
+**The `nexus` name is reserved.** After a successful load the registry always
+contains it, so the base binary is spawnable from every broker no matter what
+the config says. There is deliberately **no `default: true` field**: a claim
+that names no binary always means `nexus`, so an operator cannot silently
+change what an existing client ends up spawning.
+
+**Folding the deprecated `nexus_binary_path`.** The two keys are resolved at
+boot, from the same file, in exactly four cases:
+
+| `nexus_binary_path` | `binaries.nexus` | Result |
+|---|---|---|
+| absent  | absent  | `nexus` synthesized with path `nexus` — the historical zero-config default, unchanged. |
+| set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
+| absent  | set     | Taken as written; nothing to fold. |
+| set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
 
 ### Lease durability (`state_dir`)
 
