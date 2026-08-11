@@ -162,6 +162,12 @@ over the broker process's environment, but the three `NEXUS_BROKER_*` dial-back
 variables are applied **last and always win** — an entry cannot point an instance
 at a different broker, hand it another lease id, or supply its own spawn secret.
 
+**Which entry ran a session is remembered**, so a resume re-uses it instead of
+falling back to `nexus`, and a resume that names a *different* variant is refused
+with a `409`. That check is best-effort, with limits worth knowing before you
+depend on it — see
+[A resume re-uses the binary that created the session](#a-resume-re-uses-the-binary-that-created-the-session).
+
 Full resolution rules and the boot-failure messages are in
 [Binary resolution](../configuration/reference.md#binary-resolution).
 
@@ -599,6 +605,8 @@ Error responses:
 |-----------|--------|------|
 | Missing/empty `config` | `400` | `{"error":"claim requires a non-empty config"}` |
 | Unknown `binary` name | `400` | `{"error":"unknown binary \"…\"; this broker spawns: …"}` |
+| Resume whose `binary` differs from the one recorded for the session | `409` | `{"error":"session \"…\" was created by binary \"…\" but this claim requests \"…\"; …"}` |
+| Resume whose recorded binary is no longer in `binaries:` | `409` | `{"error":"session \"…\" was created by binary \"…\", which this broker no longer offers; …"}` |
 | Over capacity, queue wait elapsed | `503` | `{"error":"capacity wait timed out"}` |
 | At capacity, queueing disabled (`queue_wait_timeout <= 0`) | `503` | `{"error":"no capacity"}` |
 | Instance exited before ready (e.g. resume of a missing/invalid session) | `502` | `{"error":"instance exited before signalling ready"}` |
@@ -624,7 +632,10 @@ curl -s -X POST http://localhost:8080/claim \
 **Omitting `binary` means `nexus`**, the entry every broker is guaranteed to
 have, so a client written before the registry existed keeps getting exactly what
 it got before. The field is trimmed of surrounding whitespace, the same way entry
-names are trimmed at load, so the two always agree.
+names are trimmed at load, so the two always agree. **On a resume this changes**:
+omitting `binary` alongside a `session_id` means the entry that created the
+session, not `nexus` — see
+[A resume re-uses the binary that created the session](#a-resume-re-uses-the-binary-that-created-the-session).
 
 An unknown name returns `400` naming the rejected value and listing the entries
 this broker actually has — never a silent fallback to `nexus`. The check runs
@@ -649,6 +660,89 @@ or supply its own spawn secret.
 Resuming a session id that does not exist on disk makes the engine fail to boot;
 the instance never signals ready and the claim returns **`502`** rather than
 silently starting a new session.
+
+#### A resume re-uses the binary that created the session
+
+A session directory is engine state written by **one particular build**, and
+replaying it under a different variant does not fail loudly: the engine boots,
+the transcript loads, and the session simply behaves as though capabilities it
+once had have vanished. The claim is the last point at which that mistake is
+still attributable, so the broker records which
+[`binaries:` entry](#serving-several-nexus-variants-the-binary-registry) ran each
+session — the entry **name**, never a path — and reconciles a resume against it.
+
+Recording happens only when [`state_dir`](#surviving-a-restart-set-state_dir) is
+configured, in two places:
+
+- the **lease journal** stamps the entry name on the lease record, so
+  `leases.jsonl` says which variant a live lease is running;
+- the **session → binary index**, `session-binaries.jsonl`, keeps the pairing
+  after the lease is gone. This is the one a resume actually consults, because a
+  resume always arrives *after* the original lease was released and the journal is
+  compacted down to live leases. The broker checks live leases first and falls
+  back to the index.
+
+On a claim that carries a `session_id`:
+
+| You send | Recorded binding | What happens |
+|---|---|---|
+| no `binary` | `vision` | Spawns **`vision`** — the recorded entry is inherited with its `path`, its `args` **and** its `env`. Not the reserved `nexus`. |
+| `"binary": "vision"` | `vision` | Proceeds normally. |
+| `"binary": "nexus"` | `vision` | **`409`**, naming **both** the recorded entry and the one you asked for. |
+| anything | *none recorded* | **Falls through** — spawns what you asked for, or `nexus` if you asked for nothing. **No error.** |
+| no `binary` | `nocturne`, no longer in `binaries:` | **`409`** naming the missing entry, so it can be restored. Deliberately *not* a silent fallback to `nexus`. |
+
+A `binary` that is empty or only whitespace counts as **omitted**. An *unknown*
+name is still a `400`, not a `409`, even on a bound session — a typo is reported
+as a typo, and only the `400` lists the entries this broker actually has. Every
+rejection happens **before anything is allocated**: no lease, no capacity slot, no
+place in the queue, no temp config file, and no process.
+
+The exact error strings and the reasoning behind `409` over `400`/`500` are in
+[Resume inherits the recorded binary](../configuration/reference.md#resume-inherits-the-recorded-binary).
+
+#### The 409 is best-effort, not an invariant
+
+**Do not build a client that relies on the mismatch check catching every
+mistake.** An unrecorded session is *no opinion, proceed* — never a mismatch — so
+a resume runs completely unchecked whenever the binding is missing. Concretely,
+nothing is checked when:
+
+- **the broker has no `state_dir`.** Nothing is recorded durably, so once the
+  original lease is gone so is the pairing — which is every resume, since a resume
+  by definition follows a release.
+- **the binding was evicted.** The index holds at most **4096** pairings and drops
+  the **oldest first**, so a session resumed after a lot of other traffic can find
+  its binding gone.
+- **the session predates the feature**, or was created against a *different*
+  broker — no broker reads another's index.
+
+In all three the claim proceeds silently under whatever binary it asked for. The
+check is a safety net over the common mistake, not a guarantee about what a
+session directory is replayed under.
+
+**The recommended client pattern is therefore: capture `session_id` *and* the
+`binary` you claimed with, and send both back on resume.** That way the correct
+variant is selected by your own request rather than by a broker-side record that
+may not exist:
+
+```bash
+# 1. claim, remembering BOTH values
+claim=$(curl -s -X POST http://localhost:8080/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"config":"engine:\n  name: example\n","binary":"vision"}')
+session_id=$(printf '%s' "$claim" | jq -r .session_id)
+binary=vision                      # persist this next to the session id
+
+# 2. resume, restating the binary you recorded
+curl -s -X POST http://localhost:8080/claim \
+  -H 'Content-Type: application/json' \
+  -d "{\"config\":\"engine:\n  name: example\n\",\"session_id\":\"$session_id\",\"binary\":\"$binary\"}"
+```
+
+Restating a matching `binary` costs nothing when the broker also has the binding
+(the claim simply proceeds), and it is the only thing that keeps the resume
+correct when the broker does not.
 
 ### `POST /release/{lease_id}` — release an instance
 
@@ -879,6 +973,12 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   must be individually addressable via `advertise_addr`, clients must reconnect to
   the URL the claim returned rather than to the LB, and each broker needs its
   **own** `state_dir` — they never read each other's.
+- **The session → binary check is advisory.** A resume is reconciled against the
+  variant recorded for that session, but the recording is best-effort: a broker
+  with no `state_dir` keeps nothing, the index is capped at 4096 bindings, and
+  sessions created before the feature (or by another broker) have none. An
+  unrecorded session resumes unchecked, so
+  [do not treat the `409` as a guarantee](#a-resume-re-uses-the-binary-that-created-the-session).
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but
