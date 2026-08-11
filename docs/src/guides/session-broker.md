@@ -256,11 +256,21 @@ from, the pid, and this broker's `broker_id` / `advertise_addr`. **No secret is
 ever written**: not the per-spawn secret, not a WebSocket ticket, not a bearer
 token.
 
-The session id and the binary name together are the durable **session → binary**
-mapping, so a restarted broker still knows which build a surviving session
-belongs to. It is best-effort: a released lease is dropped from the journal, and
-a record written by a broker that predates the field carries no binary at all —
-both read as *not recorded* rather than as a wrong answer.
+The durable **session → binary** mapping lives in its own file beside the
+journal, `<state_dir>/session-binaries.jsonl`, and not in the journal itself. The
+journal is compacted down to live leases, and a resume always arrives *after* the
+original lease was released, so a binding kept only there would be gone exactly
+when it is wanted. A line is written at claim time for a resume and on the
+session-id report for a new session; the file is capped at 4096 bindings, oldest
+dropped first, and rewritten on open and every 256 appends.
+
+It is best-effort by design: an unknown session means *no opinion, proceed*, never
+a mismatch. A session that predates the file, one whose binding was pruned, and a
+broker with no `state_dir` all resume exactly as they did before it existed. A
+corrupt or torn index is skipped line by line and **never prevents the broker from
+booting** — an index that cannot be opened at all only logs a `WARN` and turns the
+mapping off. See
+[Session → binary index](../configuration/reference.md#session--binary-index-session-binariesjsonl).
 
 The journal is compacted on open and every 512 appends, so it holds roughly the
 live lease set rather than the whole history. A write that fails is logged and

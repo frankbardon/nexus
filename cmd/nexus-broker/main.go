@@ -140,6 +140,28 @@ func run() error {
 			"will lose track of every instance this broker spawned")
 	}
 
+	// The durable session → binary index. It is separate from the lease journal on
+	// purpose: the journal is compacted down to live leases, and a resume always
+	// arrives after the original lease was released, so a binding kept only there
+	// would be gone exactly when it is wanted.
+	//
+	// It shares state_dir's fate — unset means no index and no file — but NOT the
+	// journal's boot-failure policy. The index backs an advisory check whose answer
+	// for an unknown session is "no opinion, proceed", so a broker that cannot open
+	// it degrades to the behaviour it had before the index existed. Refusing to boot
+	// over that would trade a weaker resume check for a total outage. Loud WARN,
+	// nil index, carry on.
+	sessionBinaries, err := openSessionBinaryIndex(logger, cfg)
+	if err != nil {
+		logger.Warn("failed to open the session binary index; resume will not know which binary "+
+			"served a session whose lease has already been released",
+			"state_dir", cfg.StateDir, "error", err)
+		sessionBinaries = nil
+	}
+	if sessionBinaries != nil {
+		defer func() { _ = sessionBinaries.Close() }()
+	}
+
 	// The spawn-secret derivation key. It shares state_dir's fate: present and
 	// stable when durability is on, absent (and secrets random per spawn, as they
 	// always were) when it is off. Loaded AFTER openLeaseStore because that is
@@ -158,6 +180,10 @@ func run() error {
 	// Records carry the RAW advertise_addr, verbatim as configured, so a record
 	// round-trips what is in broker.yaml rather than a derived host.
 	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+	// Wired BEFORE recovery, so a lease restored from the journal can still have its
+	// pairing consulted, and before anything is served, since the setter is not safe
+	// to call alongside a live lease transition.
+	registry.useSessionBinaryIndex(sessionBinaries)
 
 	// Restart recovery. It runs BEFORE anything is served, because a surviving
 	// instance is already dialing /instance on its reconnect backoff and every

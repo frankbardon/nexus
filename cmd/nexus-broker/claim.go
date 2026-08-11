@@ -226,6 +226,19 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// mean the mapping depended on how far a claim got before something failed.
 	s.registry.SetBinary(leaseID, binaryName)
 
+	// A RESUME already names its session, so the pairing is complete here — before
+	// anything is spawned and before the instance reports anything. Record it now
+	// rather than waiting for the session-id report: a resume that never gets that
+	// far (the instance dies booting) would otherwise leave the binding for a
+	// session that DOES exist on disk unrecorded, and the next attempt would be
+	// just as blind. For a new session req.SessionID is empty, RecordSessionBinary
+	// no-ops, and MarkSessionID does the recording when the id arrives.
+	//
+	// The requested id is used rather than a reported one because it is what the
+	// caller holds and what -recall was handed; a mismatching report is already
+	// treated as advisory further down this handler.
+	s.registry.RecordSessionBinary(req.SessionID, binaryName)
+
 	configPath, err := writeTempConfig(req.Config)
 	if err != nil {
 		s.registry.Remove(leaseID)

@@ -2535,7 +2535,7 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, the session → binary index does not exist, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
@@ -2658,12 +2658,12 @@ verbatim as configured, so a record round-trips what is in `broker.yaml` — and
 
 `binary` is the [`binaries`](#binary-registry-binaries) entry **name** the instance was spawned
 from — the name, not the path, so the record still identifies the variant after
-the entry is repointed at a new build. Paired with `session_id` it is the durable
-**session → binary** mapping. It is omitted when empty, which is what a journal
-written by a broker predating the field looks like; such a record still loads,
-and an absent `binary` means *not recorded*, never "the binary named empty
-string". The mapping is **best-effort**: a released lease is dropped from the
-journal, so a session whose instance has already stopped has no recorded binary.
+the entry is repointed at a new build. It is omitted when empty, which is what a
+journal written by a broker predating the field looks like; such a record still
+loads, and an absent `binary` means *not recorded*, never "the binary named empty
+string". The lease journal's copy is only good while the lease is live — a
+released lease is dropped by compaction — so the durable mapping lives in a
+separate file, described next.
 
 **No secret is ever written.** Not the lease's per-spawn secret, not a client
 WebSocket ticket, not a bearer token. The owner's **raw claim set** is
@@ -2692,6 +2692,48 @@ Multi-broker cooperation is **not** implemented: no broker reads another's
 journal, there is no shared store, and there is no routing. `broker_id` and
 `advertise_addr` are stamped on every record now so that a future shared backend
 needs no data migration.
+
+### Session → binary index (`session-binaries.jsonl`)
+
+`<state_dir>/session-binaries.jsonl` records which
+[`binaries`](#binary-registry-binaries) entry served each engine session, so a
+resume can be checked against the build that created the session. It is a
+**separate file from the lease journal on purpose**: the journal is compacted down
+to the leases that are still live, and a resume always arrives *after* the
+original lease was released, so a binding kept only there would be gone precisely
+when it is wanted.
+
+**Format.** Append-only JSONL, one object per line, with three fields —
+`session_id`, `binary` (the entry **name**, never the path) and `at` (when the
+pairing was last recorded, used only for pruning). A later line for the same
+`session_id` supersedes an earlier one. **No secret is ever written**, for the
+same reasons as the lease journal.
+
+**When a line is written.** At **claim time** for a resume, where the session id
+arrives in the request body, and on the **session-id report** for a new session,
+where the id is not knowable any earlier. Re-recording an unchanged pairing does
+not append — a session resumed many times costs one line, not one per resume. An
+empty `binary` is never written: empty means *not recorded*.
+
+**Growth is bounded** by an entry cap of **4096 bindings**, applied when the file
+is rewritten — on open, and again every 256 appends — via a temp file and an
+atomic rename. A cap is required here and compaction alone would not be enough:
+nothing ever retires a binding (outliving its lease is the whole point), so
+without one the file would grow by a line per distinct session forever. When the
+cap is exceeded the **oldest** bindings are dropped.
+
+**It is best-effort, and that is deliberate.** An unknown session is an ordinary
+answer meaning *no opinion, proceed* — never a mismatch. A session predating this
+file, a session whose binding was pruned, and a broker running without a
+`state_dir` all resume exactly as they did before the index existed.
+
+**Failure handling.** Malformed, torn or partially-written lines are **skipped
+with a warning** and every good line before them is kept; the rewrite-on-open
+truncates the damage away. A corrupt index **never prevents the broker from
+booting**. Unlike the lease journal, an index that cannot be opened at all is
+**not** a boot failure either — it logs a `WARN` and the broker runs with the
+index off, because refusing to serve would trade an advisory check for an outage.
+A write that fails is logged and otherwise ignored: it never fails a claim.
 
 ### Restart recovery (`reattach_window`)
 

@@ -285,6 +285,18 @@ type Registry struct {
 	// served.
 	store LeaseStore
 
+	// sessionBinaries is the DURABLE session → binary index (see
+	// sessionbinary.go). It is separate from store on purpose: the lease journal
+	// drops a lease the moment it is released, and a resume happens after that, so
+	// the pairing needs a home outside lease-lifecycle compaction.
+	//
+	// It is nil until wired via useSessionBinaryIndex, and nil is fully supported —
+	// with no `state_dir` there is no index and BinaryForSession answers from live
+	// leases alone, exactly as it did before this existed. Every method on the type
+	// is nil-receiver safe, so no call site branches. Like tickets and store it is
+	// NOT guarded by mu: it owns its own lock and is only assigned at wiring time.
+	sessionBinaries *sessionBinaryIndex
+
 	// brokerID and advertiseAddr are stamped on every record so a future shared
 	// store can tell whose lease is whose without a data migration. advertiseAddr
 	// is the RAW config value, verbatim as the operator wrote it, not the parsed
@@ -339,6 +351,37 @@ func (r *Registry) useLeaseStore(s LeaseStore, brokerID, advertiseAddr string) {
 	r.store = s
 	r.brokerID = brokerID
 	r.advertiseAddr = advertiseAddr
+}
+
+// useSessionBinaryIndex binds the durable session → binary index the registry
+// records pairings into and reads back in BinaryForSession.
+//
+// A setter for the same reasons as useLeaseStore: the index is optional (an unset
+// `state_dir` disables it), and threading an optional dependency through
+// NewRegistry would churn every existing registry test for something none of them
+// exercise. Call it once at wiring time, before the broker serves.
+//
+// Pass a nil *sessionBinaryIndex to leave the index off. There is no typed-nil
+// trap here — the field is the concrete pointer type, not an interface, so a nil
+// value is nil to every check and every method.
+func (r *Registry) useSessionBinaryIndex(idx *sessionBinaryIndex) { r.sessionBinaries = idx }
+
+// RecordSessionBinary durably pairs an engine session id with the `binaries:`
+// entry name serving it.
+//
+// It exists because the pairing becomes knowable at two different moments and the
+// index must be written at whichever one comes first:
+//
+//   - a RESUME names the session id in the claim body, so the pair is complete
+//     before anything is spawned — the claim path records it there;
+//   - a NEW session has no id until the instance reports one over its dial-back
+//     connection, so MarkSessionID records it at that point.
+//
+// Both funnel here rather than reaching into r.sessionBinaries directly, so the
+// index has exactly one owner and one place to change if it ever moves. Empty
+// arguments, and a broker with no index, are no-ops.
+func (r *Registry) RecordSessionBinary(sessionID, binary string) {
+	r.sessionBinaries.record(sessionID, binary)
 }
 
 // leaseRecordLocked projects a lease onto its journal record. Caller MUST hold
@@ -694,8 +737,10 @@ func (r *Registry) ReadyChan(id string) <-chan struct{} {
 func (r *Registry) MarkSessionID(id, sessionID string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
+	var binary string
 	if ok {
 		l.sessionID = sessionID
+		binary = l.binary
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -705,6 +750,13 @@ func (r *Registry) MarkSessionID(id, sessionID string) {
 	// The session id is only knowable once the instance reports it, so the mint
 	// record could not carry it. Supersede that record with one that does.
 	r.recordLease(id, leaseRecordUpdated)
+	// This is the moment a NEW session's id and its binary first exist together,
+	// so it is where the pairing becomes durable. It is recorded into the standalone
+	// index and not only into the lease journal, because the journal drops this
+	// lease when it is released and a resume only ever looks afterwards. The name is
+	// read above under the same lock that set the session id, so the pair written
+	// here is one that was true simultaneously rather than two separate reads.
+	r.RecordSessionBinary(sessionID, binary)
 }
 
 // SessionReportedChan returns the lease's session-report channel, closed once
@@ -763,42 +815,59 @@ func (r *Registry) SetBinary(id, name string) {
 // persisted session is not handed to a different build than the one that created
 // it.
 //
-// IT IS BEST-EFFORT BY CONSTRUCTION, and ok=false is an ordinary answer rather
-// than an error. The mapping lives on live leases — restored from the journal at
-// boot, so it survives a restart — and a released lease is dropped from the
-// journal fold the moment it is torn down. A session whose instance has already
-// stopped is therefore unknown here, which is the common case for a resume. A
-// caller MUST read (", false) as "no opinion, proceed" and never as a mismatch;
-// adding retention to make this a guarantee is explicitly out of scope.
+// It answers from TWO sources, live leases first and the durable index second:
+//
+//  1. A live lease running that session. This is the freshest possible answer —
+//     it is what the process on this machine is running right now — so it wins
+//     even if the index disagrees, which it can only do if a binding was recorded
+//     and the entry later repointed.
+//  2. The durable session → binary index (sessionbinary.go). This is the case the
+//     read exists for: a resume happens after the original lease was released, at
+//     which point the lease is gone from memory AND from the compacted lease
+//     journal, so a live-leases-only scan would report every real resume unknown.
+//
+// IT REMAINS BEST-EFFORT BY CONSTRUCTION, and ok=false is an ordinary answer
+// rather than an error. The index is capped and prunes its oldest bindings, and a
+// broker with no `state_dir` has no index at all — so a session can legitimately
+// be unknown here. A caller MUST read ("", false) as "no opinion, proceed" and
+// never as a mismatch; in particular a session created before the binding was
+// recorded at all must resume exactly as it did before this existed. Adding
+// retention to make a found binding a guarantee is explicitly out of scope.
 //
 // Two guards make an absent mapping report as absent rather than as an empty
 // one:
 //
-//   - An empty session id is always unknown. Without that check it would match
-//     the first pending lease it met — every lease carries an empty session id
-//     until its instance reports one — and answer with an unrelated lease's
-//     binary.
+//   - An empty session id is always unknown. Without that check the lease scan
+//     would match the first pending lease it met — every lease carries an empty
+//     session id until its instance reports one — and answer with an unrelated
+//     lease's binary.
 //   - A lease with no recorded binary is skipped. That is what a lease restored
 //     from a journal written before this field existed looks like, and such a
 //     resume must fall through to "unknown" rather than be told it asked for the
-//     wrong build.
+//     wrong build. (The index cannot hold an empty binary at all; record() drops
+//     one and the reader skips one.)
 //
 // A session id names at most one live lease in practice (an instance holds its
 // session directory for as long as it runs), so the scan's first match is the
 // only match; it is a linear walk because the registry is bounded by
-// max_concurrent and a second index would be state to keep in step for nothing.
+// max_concurrent and a second in-memory index would be state to keep in step for
+// nothing.
 func (r *Registry) BinaryForSession(sessionID string) (string, bool) {
 	if sessionID == "" {
 		return "", false
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, l := range r.leases {
 		if l.sessionID == sessionID && l.binary != "" {
+			r.mu.Unlock()
 			return l.binary, true
 		}
 	}
-	return "", false
+	r.mu.Unlock()
+	// Consulted OUTSIDE r.mu: the index has its own lock, and holding the registry
+	// lock across a second one is how lock-order problems are invented. Nothing
+	// above is carried past the unlock, so there is nothing to be made stale by it.
+	return r.sessionBinaries.lookup(sessionID)
 }
 
 // LeaseOwner returns the identity that claimed a lease and reports whether the
