@@ -2572,6 +2572,10 @@ binaries:
 its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
 name is rejected with **HTTP 400** before the claim allocates anything.
 
+**Discovering the entries.** Clients read the live registry from
+[`GET /binaries`](#get-binaries-http-api-not-yaml), which returns `name`, `label`
+and `description` per entry — never `path`, `args` or `env`.
+
 **The `nexus` name is reserved.** After a successful load the registry always
 contains it, so the base binary is spawnable from every broker no matter what
 the config says. There is deliberately **no `default: true` field**: a claim
@@ -2795,8 +2799,9 @@ at all is still fatal — that is a misconfiguration, not lost data.) With
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Four routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, `GET /leases`, and `POST /ticket/{lease_id}`.
+(`pkg/nexusauth`). Five routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`, and
+`GET /binaries`.
 `GET /healthz` is registered **outside** the guard and always answers `200` with
 no credential, because a load balancer or container probe has none to present.
 
@@ -3586,6 +3591,56 @@ copied out at all.
 
 Surface states: `spawning` (lease exists, instance not yet registered),
 `active` (registered, frames can flow), `draining` (a teardown has latched).
+
+### `GET /binaries` (HTTP API, not YAML)
+
+`GET /binaries` lists the entries of the [binary registry](#binary-registry-binaries)
+this broker can spawn, so a client can render a picker from live broker truth
+instead of hardcoding names that may not exist on the broker it is talking to.
+It performs no mutation and reads nothing from the request.
+
+```jsonc
+// response (200) — sorted by name
+[
+  { "name": "archive", "label": "Nexus 0.9" },
+  { "name": "nexus" },
+  {
+    "name": "vision",
+    "label": "Nexus (vision)",
+    "description": "Multimodal build with the image tools compiled in"
+  }
+]
+```
+
+| Field         | Type   | Description |
+|---------------|--------|-------------|
+| `name`        | string | The registry key — the exact string to put in a claim's `binary` field. Always present. |
+| `label`       | string | The entry's `label`. **Omitted** when the operator set none. |
+| `description` | string | The entry's `description`. **Omitted** when the operator set none. |
+
+**`path`, `args` and `env` are never serialized**, nor is the derived absolute
+path the broker resolved at boot. They are broker-host detail — build locations,
+deployment flags, per-variant environment — that a claiming client has no use for
+and every reason not to learn. Only the three fields above cross the wire.
+
+`label` and `description` are **absent, not empty**, when unset, so a client can
+tell "the operator wrote nothing" from "the operator wrote an empty string". A
+consumer with no label falls back to `name`, which is always present.
+
+Ordering is by `name`, ascending — stable across requests and across restarts, so
+a picker does not reshuffle. The reserved `nexus` entry is always included: it is
+spawnable from every broker no matter what the config says.
+
+The listing is **unfiltered** — every caller sees every entry. There is no
+per-principal visibility rule: an entry name is not a secret (an unknown one is
+already rejected by `POST /claim` with a **400** naming the alternatives), and a
+filter would need a per-entry authorization model no config key describes.
+
+Authentication follows `POST /claim` exactly: the route is registered behind the
+same middleware, so with an `auth:` block a missing or invalid credential is
+refused (**401**) and a valid one gets the list; with no `auth:` block the route
+serves an unauthenticated caller, which is a supported deployment rather than a
+degraded one.
 
 Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
 deployment caveats live in the

@@ -122,6 +122,7 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 	releases := NewReleaseServer(logger, reg, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, reg, guard, cfg.AdminScope)
 	ticketsServer := NewTicketServer(logger, reg, tickets)
+	binaries := NewBinariesServer(logger, cfg.Binaries)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -135,6 +136,7 @@ func newBrokerTestServer(t *testing.T, cfg Config, extra func(routeMux)) (*httpt
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	binaries.Register(guarded)
 	if extra != nil {
 		extra(guarded)
 	}
@@ -201,6 +203,7 @@ func guardedRoutes() []guardedRoute {
 		{"release", http.MethodPost, "/release/no-such-lease", "", http.StatusNotFound},
 		{"leases", http.MethodGet, "/leases", "", http.StatusOK},
 		{"ticket", http.MethodPost, "/ticket/no-such-lease", "", http.StatusNotFound},
+		{"binaries", http.MethodGet, "/binaries", "", http.StatusOK},
 	}
 }
 

@@ -208,6 +208,10 @@ func run() error {
 	// so it needs both the guard (to know whether auth is on at all) and the
 	// configured operator scope.
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
+	// The binary listing is projected from the config ONCE, here, because the
+	// registry is immutable after load — there is no reload path — so the handler
+	// holds a finished response rather than the Config it came from.
+	binaries := NewBinariesServer(logger, cfg.Binaries)
 
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
@@ -248,6 +252,10 @@ func run() error {
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	// Behind the SAME guard as /claim: enumerating what this broker can spawn is
+	// a control-plane read, and a caller that cannot claim has no business
+	// learning which variants an operator deploys.
+	binaries.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
