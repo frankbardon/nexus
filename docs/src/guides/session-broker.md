@@ -251,9 +251,16 @@ reattach_window: 60s             # bound on how long a restored lease waits for 
 A record is appended when a lease is minted, when its pid and session id first
 become known, and when it is torn down — including on **idle sweep and crash**,
 not just a manual `POST /release`. Records carry the lease id, the claiming
-principal, the session id, the pid, and this broker's `broker_id` /
-`advertise_addr`. **No secret is ever written**: not the per-spawn secret, not a
-WebSocket ticket, not a bearer token.
+principal, the session id, the `binaries` entry name the instance was spawned
+from, the pid, and this broker's `broker_id` / `advertise_addr`. **No secret is
+ever written**: not the per-spawn secret, not a WebSocket ticket, not a bearer
+token.
+
+The session id and the binary name together are the durable **session → binary**
+mapping, so a restarted broker still knows which build a surviving session
+belongs to. It is best-effort: a released lease is dropped from the journal, and
+a record written by a broker that predates the field carries no binary at all —
+both read as *not recorded* rather than as a wrong answer.
 
 The journal is compacted on open and every 512 appends, so it holds roughly the
 live lease set rather than the whole history. A write that fails is logged and

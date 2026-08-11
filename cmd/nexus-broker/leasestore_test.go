@@ -403,6 +403,171 @@ func TestLeaseStore_PersistenceDisabled(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_BinaryTravelsWithSessionID is the durability half of the
+// session → binary mapping.
+//
+// The two halves become knowable at different times — the binary at claim, the
+// session id only when the instance reports one — so the pairing has to be
+// written by whichever record carries the LATER of the two, not merely stamped
+// on the mint. It then has to survive the rewrite a restarting broker performs
+// when it opens the journal, which is what the reopen at the end covers.
+func TestLeaseStore_BinaryTravelsWithSessionID(t *testing.T) {
+	dir := t.TempDir()
+	reg, store, journal := newPersistentRegistry(t, dir, "b1", "")
+
+	id, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	// Claim-time order: the binary is stamped while there is still no session id.
+	reg.SetBinary(id, "vision")
+	reg.SetProcess(id, newFakeProcess(4242))
+	reg.MarkSessionID(id, "sess-vision")
+
+	live, err := store.Live()
+	if err != nil {
+		t.Fatalf("Live: %v", err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("Live() = %d records, want 1", len(live))
+	}
+	if live[0].SessionID != "sess-vision" || live[0].Binary != "vision" {
+		t.Fatalf("folded record = (session %q, binary %q), want (sess-vision, vision)",
+			live[0].SessionID, live[0].Binary)
+	}
+
+	// On disk, not merely in the fold: a mapping that only existed in memory
+	// would be exactly the thing a restart loses.
+	raw, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatalf("reading journal: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"binary":"vision"`)) {
+		t.Fatalf("journal does not carry the binary name:\n%s", raw)
+	}
+
+	// Reopen, which folds and then compacts the file — the exact path a restart
+	// takes before recoverLeases reads it.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("reopening the journal: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	restored, err := reopened.Live()
+	if err != nil {
+		t.Fatalf("Live after reopen: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("Live() = %d records after reopen, want 1", len(restored))
+	}
+	if restored[0].Binary != "vision" {
+		t.Errorf("binary = %q after reopen and compaction, want vision", restored[0].Binary)
+	}
+}
+
+// TestLeaseStore_RecordWithoutBinaryLoads is the backward-compatibility
+// criterion, and it is deliberately written as the BYTES AN OLDER BROKER WOULD
+// HAVE PRODUCED rather than as a struct with a zero field: a struct assertion
+// would only prove Go's zero value, not that a line with no `binary` key still
+// parses, folds and compacts.
+//
+// It also pins omitempty from the other direction — the rewritten file must not
+// gain a key the operator's older broker never wrote, or every record would grow
+// a field that means nothing.
+func TestLeaseStore_RecordWithoutBinaryLoads(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, leaseJournalName)
+	legacy := `{"kind":"lease-updated","lease_id":"lease-old","owner":{"id":"ci-runner"},` +
+		`"session_id":"sess-old","pid":4242,"broker_id":"b1","created_at":"2026-01-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(journal, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seeding a pre-binary journal: %v", err)
+	}
+
+	store, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("openFileLeaseStore over a pre-binary journal: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	live, err := store.Live()
+	if err != nil {
+		t.Fatalf("Live: %v", err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("Live() = %d records, want the seeded one to have loaded", len(live))
+	}
+	if live[0].Binary != "" {
+		t.Errorf("binary = %q for a record that carries no binary key, want empty", live[0].Binary)
+	}
+	// The rest of the record still read, so the load was a real one and not a
+	// silently skipped line that happened to leave the count right.
+	if live[0].SessionID != "sess-old" || live[0].PID != 4242 {
+		t.Errorf("record = (session %q, pid %d), want (sess-old, 4242)", live[0].SessionID, live[0].PID)
+	}
+
+	recs, skipped := readJournalOrFail(t, journal)
+	if skipped != 0 {
+		t.Errorf("skipped = %d records, want 0: a pre-binary line is well-formed", skipped)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("compacted journal holds %d records, want 1", len(recs))
+	}
+	raw, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatalf("reading journal: %v", err)
+	}
+	if bytes.Contains(raw, []byte(`"binary"`)) {
+		t.Errorf("compaction added a binary key to a record that had none:\n%s", raw)
+	}
+}
+
+// TestLeaseStore_BinaryRecordedWithoutStateDir is the persistence-off half of
+// the mapping: with no state_dir the in-memory pairing is still complete, no
+// code path assumes a store exists, and nothing is written anywhere.
+func TestLeaseStore_BinaryRecordedWithoutStateDir(t *testing.T) {
+	store, brokerID, err := openLeaseStore(testLogger(), DefaultConfig())
+	if err != nil {
+		t.Fatalf("openLeaseStore with no state_dir: %v", err)
+	}
+	if store != nil {
+		t.Fatalf("openLeaseStore returned %v, want a nil LeaseStore", store)
+	}
+
+	// A temp dir stands in as the place a stray write would land, exactly as
+	// TestLeaseStore_PersistenceDisabled does.
+	dir := t.TempDir()
+	reg := NewRegistry(testLogger(), 0)
+	reg.useLeaseStore(store, brokerID, "")
+
+	id, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.SetBinary(id, "vision")
+	reg.SetProcess(id, newFakeProcess(13))
+	reg.MarkSessionID(id, "sess-nostate")
+
+	got, ok := reg.BinaryForSession("sess-nostate")
+	if !ok {
+		t.Fatal("BinaryForSession reported the session unknown with persistence off")
+	}
+	if got != "vision" {
+		t.Errorf("BinaryForSession = %q, want vision", got)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading temp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("persistence-disabled broker wrote %d entries", len(entries))
+	}
+}
+
 // TestLeaseStore_NoSecretsInRecords asserts on the RAW FILE BYTES, not on the
 // record struct: the point is that no secret reaches the disk by ANY route, and
 // a struct assertion would only re-state the fields the projection already

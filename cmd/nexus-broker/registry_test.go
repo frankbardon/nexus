@@ -213,6 +213,82 @@ func TestLeaseOwner_NoInternalStateEscapes(t *testing.T) {
 	}
 }
 
+// TestBinaryForSession_UnknownSessionReportsUnknown pins the three shapes that
+// must all read as "the broker has no opinion" rather than as "the binary named
+// empty string".
+//
+// The distinction is the whole safety of the lookup: a resume check turns a
+// KNOWN mismatch into a rejected claim and an absent mapping into a fallthrough,
+// so a shape that wrongly reported ok=true would reject resumes the broker has no
+// business rejecting.
+func TestBinaryForSession_UnknownSessionReportsUnknown(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+
+	// A session no live lease is running — the ordinary case, because a released
+	// lease is dropped from the registry and from the journal fold alike.
+	if got, ok := reg.BinaryForSession("sess-never-seen"); ok {
+		t.Errorf("BinaryForSession on an unrecorded session = (%q, true), want unknown", got)
+	}
+
+	// The empty session id, with a stamped lease that has not reported one yet.
+	// EVERY lease looks like this between its mint and its session report, so a
+	// scan without the empty-id guard would answer with an unrelated lease's
+	// binary.
+	pending, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.SetBinary(pending, "vision")
+	if got, ok := reg.BinaryForSession(""); ok {
+		t.Errorf("BinaryForSession(\"\") = (%q, true), want unknown", got)
+	}
+
+	// A lease whose session id IS known but whose binary was never recorded —
+	// what a lease restored from a journal written before the field existed looks
+	// like. It must fall through to unknown, not report an empty binary that a
+	// caller would then compare against and reject.
+	legacy, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.MarkSessionID(legacy, "sess-legacy")
+	if got, ok := reg.BinaryForSession("sess-legacy"); ok {
+		t.Errorf("BinaryForSession on a lease with no recorded binary = (%q, true), want unknown", got)
+	}
+}
+
+// TestBinaryForSession_SurvivesRestore covers the restart half of the mapping: a
+// lease rebuilt from a journal record answers the lookup exactly as the lease
+// that wrote the record did.
+//
+// RestoreLease is exercised directly rather than through recoverLeases so the
+// assertion does not hang on a live pid — recovery's liveness and reattach rules
+// are pinned by their own tests, and what matters here is only that the recorded
+// name is carried through rather than re-derived from the current config.
+func TestBinaryForSession_SurvivesRestore(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+
+	if err := reg.RestoreLease(restoreSpec{
+		id:          "lease-restored",
+		owner:       testOwner(),
+		sessionID:   "sess-restored",
+		binary:      "vision",
+		pid:         4242,
+		createdAt:   time.Now(),
+		spawnSecret: "0123456789abcdef0123456789abcdef",
+	}); err != nil {
+		t.Fatalf("RestoreLease: %v", err)
+	}
+
+	got, ok := reg.BinaryForSession("sess-restored")
+	if !ok {
+		t.Fatal("BinaryForSession reported a restored lease's session unknown")
+	}
+	if got != "vision" {
+		t.Errorf("BinaryForSession = %q, want vision (the name the record carried)", got)
+	}
+}
+
 // TestLeaseOwner_NilReferenceFieldsAreSafe covers the shape a static token
 // produces (an ID and nothing else): cloning must leave nil fields nil rather
 // than materialising empty ones, so a persisted or logged owner does not gain

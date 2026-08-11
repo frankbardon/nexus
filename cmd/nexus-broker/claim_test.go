@@ -567,6 +567,52 @@ func TestClaim_OmittedBinaryResolvesToReservedNexus(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestClaim_StampsBinaryOnLeaseForSessionLookup is the join the resume check is
+// built on: the entry a claim resolved is stamped on its lease, so once the
+// instance reports a session id the broker can answer "which build is this
+// session running".
+//
+// It asserts through BinaryForSession rather than by reaching into the lease
+// struct, because the lookup is the field's only consumer and one that could not
+// be read back would be bookkeeping with no user.
+//
+// The ORDER matters and is what the test really pins: the binary is known at
+// claim time, the session id only arrives later, and the mapping must exist once
+// the second of the two lands. This server is also wired with NO lease store —
+// the pre-durability topology, and the same shape as an unset state_dir — so the
+// mapping is shown to hold in memory whether or not anything is journaled.
+func TestClaim_StampsBinaryOnLeaseForSessionLookup(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9311)}
+	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
+	cs.sessionReportGrace = 2 * time.Second
+
+	respCh := make(chan *http.Response, 1)
+	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","binary":"vision"}`) }()
+
+	spec := awaitSpawn(t, runner)
+	// Nothing is recorded against a session id yet — there is no session id.
+	if got, ok := reg.BinaryForSession(""); ok {
+		t.Errorf("BinaryForSession(\"\") = (%q, true) mid-claim, want unknown", got)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	reg.MarkSessionID(spec.leaseID, "engine-sess-vision")
+
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	got, ok := reg.BinaryForSession("engine-sess-vision")
+	if !ok {
+		t.Fatal("BinaryForSession reported the session this claim just created unknown")
+	}
+	if got != "vision" {
+		t.Errorf("BinaryForSession = %q, want vision (the entry the claim named)", got)
+	}
+}
+
 // TestClaim_UnknownBinaryAllocatesNothing is the ordering criterion, and it is
 // the reason resolution sits where it does in handleClaim.
 //

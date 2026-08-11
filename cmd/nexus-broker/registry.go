@@ -166,6 +166,24 @@ type lease struct {
 	sessionReported chan struct{}
 	sessionOnce     sync.Once
 
+	// binary is the `binaries:` registry entry this lease's instance was spawned
+	// from — the NAME, not the path. The name is what identifies a variant: two
+	// entries may legitimately point at the same executable, and an operator may
+	// repoint an entry at a new build without that changing which variant a
+	// session belongs to.
+	//
+	// It sits beside sessionID because the two together ARE the durable session →
+	// binary mapping a resume is checked against (see BinaryForSession). Nothing
+	// on the spawn path reads it — spawn already has the entry — it exists to be
+	// recorded, journaled, and read back.
+	//
+	// Stamped once by the claim path (SetBinary) from the entry it resolved, and
+	// carried through verbatim for a lease restored from the journal. Empty means
+	// NOT RECORDED — a lease minted by a caller that never stamped one, or one
+	// restored from a journal written before this field existed — never "the
+	// binary named empty string". Guarded by Registry.mu.
+	binary string
+
 	// process is the broker's handle on the spawned instance process. It is
 	// stored so later stories (release, crash, capacity) can manage the
 	// process lifecycle; pid is cached for logging and inspection.
@@ -336,6 +354,7 @@ func (r *Registry) leaseRecordLocked(l *lease, kind leaseRecordKind) LeaseRecord
 		LeaseID:       l.id,
 		Owner:         ownerRecord(l.owner),
 		SessionID:     l.sessionID,
+		Binary:        l.binary,
 		PID:           l.pid,
 		BrokerID:      r.brokerID,
 		AdvertiseAddr: r.advertiseAddr,
@@ -513,6 +532,14 @@ type restoreSpec struct {
 	pid       int
 	createdAt time.Time
 
+	// binary is the registry entry name recorded for this lease. It is carried
+	// through restore rather than re-resolved from the current config because the
+	// record states what was ACTUALLY spawned; re-deriving it would let a config
+	// edit made while the broker was down rewrite history. An empty value — a
+	// record written by a broker that predates the field — stays empty, which
+	// BinaryForSession reads as "not recorded".
+	binary string
+
 	// spawnSecret is the value a reattaching instance must present. An empty one
 	// would make the lease unattachable rather than open: AttachInstance compares
 	// in constant time against it and a register frame carrying no secret is
@@ -565,6 +592,7 @@ func (r *Registry) RestoreLease(spec restoreSpec) error {
 		restored:        true,
 		spawnSecret:     spec.spawnSecret,
 		sessionID:       spec.sessionID,
+		binary:          spec.binary,
 		pid:             spec.pid,
 	}
 	r.leases[spec.id] = l
@@ -703,6 +731,74 @@ func (r *Registry) SessionID(id string) string {
 		return ""
 	}
 	return l.sessionID
+}
+
+// SetBinary stamps the `binaries:` registry entry name a lease's instance is
+// spawned from. The claim path calls it immediately after the lease is minted
+// and before the runner is invoked, so from that moment on every record the
+// lease produces carries which variant it is running — including the
+// `lease-updated` the session-id report writes, which is the record that first
+// pairs a session id with a binary.
+//
+// It deliberately journals NOTHING of its own. The name is known at claim time
+// but the session id is not, so a record written here could only say "this lease
+// has a binary and no session yet", which is the mint record plus one field and
+// one extra disk write per claim. The first record to carry the name is
+// SetProcess's instead; the only window in which the journal holds a lease with
+// no binary recorded is between the mint and the spawn, and a record with no pid
+// is one restart recovery closes out without ever consulting its binary.
+//
+// It is a no-op for an unknown lease.
+func (r *Registry) SetBinary(id, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, ok := r.leases[id]; ok {
+		l.binary = name
+	}
+}
+
+// BinaryForSession answers "which `binaries:` entry is running this engine
+// session", and reports whether the broker knows. It is the read side of the
+// session → binary mapping: a resume claim consults it before spawning, so a
+// persisted session is not handed to a different build than the one that created
+// it.
+//
+// IT IS BEST-EFFORT BY CONSTRUCTION, and ok=false is an ordinary answer rather
+// than an error. The mapping lives on live leases — restored from the journal at
+// boot, so it survives a restart — and a released lease is dropped from the
+// journal fold the moment it is torn down. A session whose instance has already
+// stopped is therefore unknown here, which is the common case for a resume. A
+// caller MUST read (", false) as "no opinion, proceed" and never as a mismatch;
+// adding retention to make this a guarantee is explicitly out of scope.
+//
+// Two guards make an absent mapping report as absent rather than as an empty
+// one:
+//
+//   - An empty session id is always unknown. Without that check it would match
+//     the first pending lease it met — every lease carries an empty session id
+//     until its instance reports one — and answer with an unrelated lease's
+//     binary.
+//   - A lease with no recorded binary is skipped. That is what a lease restored
+//     from a journal written before this field existed looks like, and such a
+//     resume must fall through to "unknown" rather than be told it asked for the
+//     wrong build.
+//
+// A session id names at most one live lease in practice (an instance holds its
+// session directory for as long as it runs), so the scan's first match is the
+// only match; it is a linear walk because the registry is bounded by
+// max_concurrent and a second index would be state to keep in step for nothing.
+func (r *Registry) BinaryForSession(sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.leases {
+		if l.sessionID == sessionID && l.binary != "" {
+			return l.binary, true
+		}
+	}
+	return "", false
 }
 
 // LeaseOwner returns the identity that claimed a lease and reports whether the

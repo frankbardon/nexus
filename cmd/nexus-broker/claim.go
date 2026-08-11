@@ -218,6 +218,14 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stamp the resolved entry name on the lease at once, while nothing else can
+	// yet have happened to it. Every record the lease writes from here on carries
+	// which variant it is running — in particular the one the session-id report
+	// produces, which is where the session id and the binary first exist together
+	// and therefore where the pairing becomes durable. Doing it any later would
+	// mean the mapping depended on how far a claim got before something failed.
+	s.registry.SetBinary(leaseID, binaryName)
+
 	configPath, err := writeTempConfig(req.Config)
 	if err != nil {
 		s.registry.Remove(leaseID)

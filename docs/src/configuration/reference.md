@@ -2652,9 +2652,18 @@ from the single point all three teardown reasons converge on, so a manual
 `POST /release`, an idle sweep and a **crash** are all recorded.
 
 Each record carries `lease_id`, `owner` (the claiming principal's `id`, `tenant`
-and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim as
-configured, so a record round-trips what is in `broker.yaml` — and
+and `scopes`), `session_id`, `binary`, `pid`, `broker_id`, `advertise_addr` —
+verbatim as configured, so a record round-trips what is in `broker.yaml` — and
 `created_at` / `released_at` / `reason`.
+
+`binary` is the [`binaries`](#binary-registry-binaries) entry **name** the instance was spawned
+from — the name, not the path, so the record still identifies the variant after
+the entry is repointed at a new build. Paired with `session_id` it is the durable
+**session → binary** mapping. It is omitted when empty, which is what a journal
+written by a broker predating the field looks like; such a record still loads,
+and an absent `binary` means *not recorded*, never "the binary named empty
+string". The mapping is **best-effort**: a released lease is dropped from the
+journal, so a session whose instance has already stopped has no recorded binary.
 
 **No secret is ever written.** Not the lease's per-spawn secret, not a client
 WebSocket ticket, not a bearer token. The owner's **raw claim set** is
