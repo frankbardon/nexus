@@ -1559,9 +1559,10 @@ never written to disk. See
 
 Enforcement on the broker side is **gated on the broker having an `auth:` block**
 (see the Session broker section below), with one exception. With no `auth:` block
-the secret is ignored, so a `nexus` binary at `nexus_binary_path` that predates
-the protocol keeps working; with one configured, such a binary is refused and the
-broker logs a message naming version skew as the likely cause. The exception is a
+the secret is ignored, so a `nexus` build that predates the protocol keeps
+working wherever the broker's [binary registry](#binary-registry-binaries) points
+at one; with one configured, such a build is refused and the broker logs a
+message naming version skew as the likely cause. The exception is a
 lease **restored after a broker restart**, which always requires the secret
 regardless of `auth:` — a live pid is not proof of identity. The value is never
 logged and never appears in `GET /leases`.
@@ -3186,12 +3187,14 @@ with the same `policy violation` / `unknown lease` close, so a dialer cannot
 difference the responses to enumerate live lease ids.
 
 The gate exists because of **version skew**. With no `auth:` block the secret is
-not checked at all, so a `nexus_binary_path` pointing at a build that predates
-the protocol keeps working unchanged. With one configured, such a binary is
-refused and the broker logs a `WARN` naming the version skew explicitly —
-otherwise the symptom (every claim returning `504 instance did not become ready
-in time` while the child process is alive and connecting fine) reads as a network
-fault. The fix is to upgrade the instance binary.
+not checked at all, so a [registry entry](#binary-registry-binaries) pointing at
+a build that predates the protocol keeps working unchanged. With one configured,
+such a build is refused and the broker logs a `WARN` naming the version skew
+explicitly — otherwise the symptom (every claim returning `504 instance did not
+become ready in time` while the child process is alive and connecting fine) reads
+as a network fault. The check is per **spawn**, so one stale variant fails while
+every other entry keeps working; the fix is to upgrade the binary that entry
+points at.
 
 The secret is never logged, never returned by `GET /leases`, and never passed in
 argv.

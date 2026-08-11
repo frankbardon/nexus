@@ -56,7 +56,7 @@ The broker reads its own YAML config file (default `broker.yaml`, override with
 # broker.yaml
 listen_addr: ":8080"          # HTTP/WS gateway bind address
 advertise_addr: ""            # address CLIENTS use to reach this broker; required behind a proxy/LB
-binaries:                     # named nexus variants this broker may spawn
+binaries:                     # named nexus variants this broker may spawn (see below)
   nexus:                      # reserved name; always present, declare it to override the path
     path: "nexus"
 # nexus_binary_path: "nexus"  # DEPRECATED alias for binaries.nexus.path; still honoured
@@ -79,15 +79,133 @@ go build -o bin/nexus-broker ./cmd/nexus-broker
 bin/nexus-broker -config broker.yaml
 ```
 
-Every `binaries` entry is resolved and verified at **startup**: bare names are
-looked up on the broker's `PATH`, the result is stat'd, and a missing file, a
-directory, or a file with no execute bit **refuses the boot** naming the entry.
-That includes the reserved `nexus` entry, so a zero-config broker with no `nexus`
-on its `PATH` now fails to start rather than failing at the first claim. See
-[Binary resolution](../configuration/reference.md#binary-resolution).
-
 Every config key, its type, and its default are listed in the authoritative
 [Configuration Reference](../configuration/reference.md#session-broker-nexus-broker).
+
+### Serving several `nexus` variants: the binary registry
+
+`binaries:` is a **registry of named `nexus` variants** this broker may spawn,
+keyed by the name a claim selects it by. A base build, a vision-enabled build, a
+pinned older release and a wrapper script that pre-sets an environment can all
+live behind one ingress.
+
+Every entry is a **variant of `nexus`, not an arbitrary program**, because the
+broker spawns them all identically and expects the same behaviour back:
+
+- it exec()s the entry's `path` with `-config <temp file>`, plus
+  `-recall <session_id>` when the claim is a [resume](#new-vs-resume);
+- it injects `NEXUS_BROKER_ADDR`, `NEXUS_BROKER_LEASE_ID` and
+  `NEXUS_BROKER_SPAWN_SECRET` into the child's environment;
+- it waits for the process's [`nexus.io.broker`](../plugins/io/broker.md) plugin
+  to dial **back** to `/instance`, register that lease, and signal ready.
+
+A binary that does not honour that contract never signals ready, so the claim
+fails with `504 instance did not become ready in time` rather than misbehaving
+quietly. The registry chooses *which* build runs; it does not change the
+protocol any of them speak.
+
+```yaml
+# broker.yaml
+binaries:
+  nexus:                                 # reserved name; declare it only to pin the path
+    path: "/usr/local/bin/nexus"
+
+  vision:
+    path: "~/builds/nexus-vision"        # `~` is expanded
+    label: "Nexus (vision)"              # presentational only
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]         # appended AFTER the broker's -config / -recall
+    env:
+      NEXUS_VISION: "1"                  # layered UNDER the broker's NEXUS_BROKER_* vars
+
+  pinned:
+    path: "nexus-0.9"                    # no path separator → looked up on the broker's PATH
+    description: "Pinned 0.9 build for regression triage"
+```
+
+`label` and `description` are documentation for operator and client surfaces —
+nothing routes on them, and consumers fall back to the entry name when `label`
+is empty. `path` is the only required field. The per-field table is in the
+[Binary registry reference](../configuration/reference.md#binary-registry-binaries).
+
+`args` are **that variant's own flags**, so only set them for a build that
+defines them: stock `nexus` accepts `-config`, `-recall` and `-replay` and
+nothing else, and an unknown flag makes the process exit before it can dial back
+— which the claim sees as `502 instance exited before signalling ready`.
+
+**`nexus` is reserved and always resolves.** After a successful load the registry
+always contains a `nexus` entry, whatever the config says — declare it to pin its
+path, omit it and it is synthesized as `path: "nexus"` (a `PATH` lookup). Omit
+the whole `binaries:` block and that synthesized entry is the entire registry,
+which is exactly the pre-registry behaviour. There is deliberately **no
+`default:` field**: a claim that names no binary always means `nexus`, so an
+operator cannot silently change what an existing client spawns.
+
+**Every entry is verified at boot**, before the gateway listens: the path is
+expanded (`~`), looked up on the broker process's `PATH` when it contains no path
+separator, made absolute, then stat'd and checked for an execute bit. An entry
+that is missing, is a directory, or carries no execute bit **refuses the boot**,
+naming the entry, the path that was resolved, and the reason. The broker logs the
+resolved absolute path of every entry at startup, so a stale build shadowing the
+one you meant is visible in the boot log rather than inferred later.
+
+> **This includes the reserved `nexus` entry.** A zero-config broker whose `PATH`
+> has no `nexus` now fails to start, where it previously started fine and failed
+> at the first claim. The exec-bit check is a mode check, not a "can *this* user
+> run it" check, so a binary executable only by another user still passes boot and
+> fails at exec.
+
+**A variant can extend a spawn, never redirect it.** `args` are appended *after*
+the broker's own `-config` / `-recall` arguments, so an entry can add flags but
+cannot displace the contract the instance protocol depends on. `env` is merged
+over the broker process's environment, but the three `NEXUS_BROKER_*` dial-back
+variables are applied **last and always win** — an entry cannot point an instance
+at a different broker, hand it another lease id, or supply its own spawn secret.
+
+Full resolution rules and the boot-failure messages are in
+[Binary resolution](../configuration/reference.md#binary-resolution).
+
+#### Migrating from `nexus_binary_path`
+
+**Nothing to do.** `nexus_binary_path` still works and existing deployments boot
+unchanged — it is **deprecated**, not removed:
+
+| Your `broker.yaml` | What happens |
+|---|---|
+| Neither key | `nexus` is synthesized with path `nexus`; unchanged zero-config behaviour. |
+| `nexus_binary_path` only | Its value becomes `binaries.nexus.path`, and the broker logs one `WARN` naming the replacement key. |
+| `binaries.nexus` only | Taken as written. This is the form to move to. |
+| **Both** | **Boot failure** naming both keys. |
+
+Setting both is refused rather than resolved by precedence: whichever rule the
+broker picked, half of the operators who hit it would silently spawn the binary
+they did not mean, and the mistake would only ever surface as instances behaving
+oddly. Setting `nexus_binary_path: ""` is likewise a boot error, not a silent
+fallback — remove the key to take the default.
+
+Migrating is a mechanical rewrite:
+
+```yaml
+# before
+nexus_binary_path: "/usr/local/bin/nexus"
+
+# after
+binaries:
+  nexus:
+    path: "/usr/local/bin/nexus"
+```
+
+#### What the registry deliberately does not do
+
+- **No per-binary authentication or scoping.** [`auth:`](#authentication) gates
+  routes, not entries. Any caller allowed to claim may name any registered entry.
+- **No per-binary capacity.** `max_concurrent` is one global cap across every
+  variant; there is no per-entry limit or reservation.
+- **No broker-side default configs.** A claim still supplies the whole engine
+  config as YAML text. An entry contributes `args` and `env`, never config
+  content.
+- **No hot reload.** The registry is read, folded and resolved once at startup.
+  Adding, changing or removing an entry means **restarting the broker**.
 
 ### Behind a proxy: set `advertise_addr`
 
@@ -403,13 +521,15 @@ argv. The instance side needs no configuration — the
 [`nexus.io.broker`](../plugins/io/broker.md) plugin reads
 `NEXUS_BROKER_SPAWN_SECRET` from the environment the broker set.
 
-> **In an authenticated deployment, an out-of-date binary at `nexus_binary_path`
-> is rejected.** A `nexus` build that predates the spawn-secret protocol cannot
+> **In an authenticated deployment, an out-of-date registry entry is rejected.**
+> A `nexus` build that predates the spawn-secret protocol cannot
 > echo a secret, so its `register` frame is refused and the claim eventually fails
 > with `504 instance did not become ready in time` while the child process looks
 > alive and connects fine. The broker logs a `WARN` naming the version skew
 > explicitly, because that symptom otherwise reads as a network fault. The fix is
-> to upgrade the instance binary. With **no** `auth:` block the secret is not
+> to upgrade the binary that registry entry points at — the check is per **spawn**,
+> so one stale variant fails while the rest of the registry keeps working. With
+> **no** `auth:` block the secret is not
 > checked at all, so an older binary keeps working — **except** on a lease
 > [restored after a restart](#what-a-restart-actually-does), which always requires
 > it.
@@ -469,22 +589,35 @@ Error responses:
 
 ### Choosing a binary
 
-`binary` names an entry of the broker's [`binaries:` registry](#running-the-broker).
-Omit it and the claim gets the reserved `nexus` entry, so a client written before
-the registry existed is unaffected. The entry's `args` are appended after the
-broker's own `-config` / `-recall` arguments, and its `env` is layered under the
-broker-owned `NEXUS_BROKER_*` variables — an entry can extend a spawn but never
-redirect it at another broker or supply its own spawn secret.
-
-An unknown name returns `400` naming the rejected value and listing the entries
-this broker actually has. The check runs before the claim allocates anything, so
-a typo consumes no lease and no capacity slot.
+`binary` names an entry of the broker's
+[binary registry](#serving-several-nexus-variants-the-binary-registry):
 
 ```bash
+# spawn the "vision" variant
 curl -s -X POST http://localhost:8080/claim \
   -H 'Content-Type: application/json' \
   -d '{"config":"engine:\n  name: example\n","binary":"vision"}'
+
+# omit `binary` and the claim spawns the reserved `nexus` entry
+curl -s -X POST http://localhost:8080/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"config":"engine:\n  name: example\n"}'
 ```
+
+**Omitting `binary` means `nexus`**, the entry every broker is guaranteed to
+have, so a client written before the registry existed keeps getting exactly what
+it got before. The field is trimmed of surrounding whitespace, the same way entry
+names are trimmed at load, so the two always agree.
+
+An unknown name returns `400` naming the rejected value and listing the entries
+this broker actually has — never a silent fallback to `nexus`. The check runs
+before the claim allocates anything, so a typo consumes no lease, no capacity
+slot, no temp config file, and spawns no process.
+
+The entry's `args` are appended after the broker's own `-config` / `-recall`
+arguments, and its `env` is layered under the broker-owned `NEXUS_BROKER_*`
+variables — an entry can extend a spawn but never redirect it at another broker
+or supply its own spawn secret.
 
 ### New vs. resume
 
@@ -701,8 +834,12 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
     `listen_addr`; terminate TLS at a proxy and set
     [`advertise_addr`](#behind-a-proxy-set-advertise_addr) to the `wss://` address
     clients use. Client certificates are not a supported credential.
-  - **No per-tenant rate limiting.** `max_concurrent` is a global cap, not a
-    per-principal one, so one caller can fill the queue for everybody.
+  - **No per-tenant rate limiting.** `max_concurrent` is a global cap — not a
+    per-principal one and not a per-binary one — so one caller, or one variant,
+    can fill the queue for everybody. Nor is the
+    [binary registry](#serving-several-nexus-variants-the-binary-registry) part
+    of the access-control surface: any caller allowed to claim may name any
+    registered entry.
   - **No OS-level sandboxing of instances**, either — access control does not
     change what a spawned process can do to the host (see the last caveat below).
   - With **no** `auth:` block, none of the above is enforced at all: any client
