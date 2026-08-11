@@ -53,6 +53,11 @@ type claimRequest struct {
 	// base binary for a caller that asked for a vision build would produce a
 	// session that merely behaves oddly, which is far harder to diagnose than a
 	// rejected claim.
+	//
+	// ON A RESUME the recorded binary takes part: omitted then means the entry
+	// that CREATED the session (not the reserved one), and a name that disagrees
+	// with the record is a 409. Both are best-effort — an unrecorded session
+	// resolves exactly as a fresh claim does. See resolveSpawnBinary.
 	Binary string `json:"binary,omitempty"`
 }
 
@@ -169,14 +174,22 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the requested variant BEFORE anything is allocated. Everything
-	// below this point acquires something that has to be given back — a capacity
-	// slot, a lease id, a temp config file, a child process — and a caller's
-	// typo must not be able to consume any of it. Doing it here also means the
-	// rejection is instant rather than arriving after a queue wait.
-	binaryName, entry, err := resolveClaimBinary(s.cfg.Binaries, req.Binary)
+	// Resolve the variant this claim spawns BEFORE anything is allocated.
+	// Everything below this point acquires something that has to be given back —
+	// a capacity slot, a lease id, a temp config file, a child process — and
+	// neither a caller's typo nor a refused resume must be able to consume any of
+	// it. Doing it here also means the rejection is instant rather than arriving
+	// after a queue wait.
+	//
+	// For a resume the answer is not the requested name alone: the binary
+	// recorded for the session takes part, so a persisted session directory is
+	// not handed to a build that never created it. BinaryForSession is
+	// best-effort and reports unknown for a fresh claim, so this one call covers
+	// both shapes without a branch here — see resolveSpawnBinary.
+	recorded, recordedKnown := s.registry.BinaryForSession(req.SessionID)
+	binaryName, entry, status, err := resolveSpawnBinary(s.cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
 	if err != nil {
-		s.fail(w, http.StatusBadRequest, err.Error(), nil)
+		s.fail(w, status, err.Error(), nil)
 		return
 	}
 
@@ -419,6 +432,89 @@ func resolveClaimBinary(binaries map[string]BinaryEntry, requested string) (stri
 			name, strings.Join(sortedBinaryNames(binaries), ", "))
 	}
 	return name, entry, nil
+}
+
+// resolveSpawnBinary picks the registry entry a claim actually spawns,
+// reconciling the name the caller asked for with the one recorded for the
+// session it is resuming. It returns the resolved name and entry, or an error
+// together with the HTTP status the caller should report it as (0 on success),
+// so handleClaim never has to re-classify a failure it did not diagnose.
+//
+// WHY A MISMATCH IS REFUSED RATHER THAN HONOURED. A session directory is engine
+// state written by one particular build: its history, its tool results, its
+// per-plugin data dirs and storage all assume the plugin set that produced them.
+// Replaying it under a different variant does not fail loudly — the engine boots,
+// the transcript loads, and the session simply behaves as if capabilities it once
+// had have vanished, or gains ones its history was never written against. That
+// failure surfaces to a user as "my session got worse", days after the claim that
+// caused it, with nothing in any log tying the two together. Refusing at the
+// claim is the only point where the mistake is still attributable, so the
+// requested and the recorded name are BOTH named in the error: the caller can
+// then either resume correctly or start a fresh session deliberately.
+//
+// recorded/recordedKnown come straight from Registry.BinaryForSession, and
+// recordedKnown == false MEANS "NO OPINION, PROCEED" — it is never a mismatch.
+// It is the answer for a fresh claim (no session id at all), an unknown session,
+// a session created before bindings were recorded, a broker with no state_dir,
+// and a binding the index evicted under its entry cap. Every one of those is a
+// legitimate resume, so the unknown branch must fall through to exactly the
+// pre-binding behaviour: spawn what was asked for, or the reserved entry when
+// nothing was. Treating any of them as a conflict would reject real work to
+// enforce a check the broker was explicitly built not to guarantee.
+func resolveSpawnBinary(binaries map[string]BinaryEntry, sessionID, requested, recorded string, recordedKnown bool) (string, BinaryEntry, int, error) {
+	// The REQUESTED name is validated first, so a misspelling is still the 400
+	// that E1-S3 defined even on a resume. Reporting a typo as a mismatch would
+	// tell the caller its session is bound to some other build when the real
+	// problem is a name this broker has never had — and only the 400 lists the
+	// names that do exist.
+	name, entry, err := resolveClaimBinary(binaries, requested)
+	if err != nil {
+		return "", BinaryEntry{}, http.StatusBadRequest, err
+	}
+	if !recordedKnown {
+		return name, entry, 0, nil
+	}
+
+	// An omitted binary on a resume INHERITS the recorded one instead of falling
+	// back to the reserved `nexus` entry. This is the case the whole story exists
+	// for: a client that captured a session id from a claim it made against a
+	// variant, and reconnects to it later without restating which variant that
+	// was, gets its own session back rather than a base build replaying it.
+	if strings.TrimSpace(requested) == "" {
+		recordedEntry, ok := binaries[recorded]
+		if !ok {
+			// The recorded entry was removed from `binaries:` (or renamed) since
+			// the session was created. 409 rather than 400 or 500, deliberately:
+			// the request is well-formed and the caller did nothing wrong — it
+			// named a real session and asked for nothing this broker could
+			// dispute — so blaming the client with a 400 would point at a value
+			// it never sent and cannot correct. Nor did anything fail, so a 500
+			// would report a healthy broker as broken. What conflicts is the
+			// session's recorded state against this broker's current
+			// configuration, which is precisely 409's meaning, and it keeps ONE
+			// status for "this resume cannot proceed as recorded".
+			//
+			// A silent fallback to `nexus` is the outcome this branch exists to
+			// prevent — it is the same foreign-build replay a mismatch is refused
+			// for, arrived at by an operator's config change instead of a
+			// caller's parameter, and it would be even harder to trace. The
+			// message names the missing entry so the fix (restore it, or start a
+			// new session) is obvious from the response alone.
+			return "", BinaryEntry{}, http.StatusConflict, fmt.Errorf(
+				"session %q was created by binary %q, which this broker no longer offers; "+
+					"restore that entry, or start a new session. This broker spawns: %s",
+				sessionID, recorded, strings.Join(sortedBinaryNames(binaries), ", "))
+		}
+		return recorded, recordedEntry, 0, nil
+	}
+
+	if name != recorded {
+		return "", BinaryEntry{}, http.StatusConflict, fmt.Errorf(
+			"session %q was created by binary %q but this claim requests %q; "+
+				"resume it with %q, or omit `binary` to inherit it, or start a new session",
+			sessionID, recorded, name, recorded)
+	}
+	return name, entry, 0, nil
 }
 
 // fail writes a JSON error response and logs the cause.

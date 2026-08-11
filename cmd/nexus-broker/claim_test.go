@@ -673,6 +673,287 @@ func claimTempConfigCount(t *testing.T) int {
 	return len(matches)
 }
 
+// seedSessionBinding puts a claim test's registry in the state a REAL resume
+// meets: the lease that created the session is long gone, and the only thing
+// that remembers which variant it ran is the durable index.
+//
+// It seeds through RecordSessionBinary rather than by minting a lease on purpose
+// — a live lease would let the live-lease half of BinaryForSession answer, and
+// the resume path that matters is precisely the one where it cannot.
+func seedSessionBinding(t *testing.T, reg *Registry, sessionID, binary string) {
+	t.Helper()
+	idx, err := openSessionBinaryIndex(testLogger(), Config{StateDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("openSessionBinaryIndex: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	reg.useSessionBinaryIndex(idx)
+	reg.RecordSessionBinary(sessionID, binary)
+}
+
+// TestClaim_ResumeWithOmittedBinaryInheritsRecordedEntry is the headline: a
+// client that captured a session id from a variant claim and reconnects without
+// restating the variant gets its own session back, not a base build replaying it.
+//
+// The reserved entry's resolved path is asserted to be absent rather than merely
+// asserting the vision one is present, because the regression this guards
+// against is exactly the fallthrough to `nexus` that an omitted `binary` means
+// on every non-resume claim.
+func TestClaim_ResumeWithOmittedBinaryInheritsRecordedEntry(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9401)}
+	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
+	cs.sessionReportGrace = 50 * time.Millisecond
+	seedSessionBinding(t, reg, "sess-vision-1", "vision")
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-vision-1"}`)
+	}()
+
+	spec := awaitSpawn(t, runner)
+	if spec.binaryName != "vision" {
+		t.Errorf("binaryName = %q, want vision (the recorded entry) for a resume with no binary", spec.binaryName)
+	}
+	if spec.binaryPath != "/opt/builds/nexus-vision" {
+		t.Errorf("binaryPath = %q, want the recorded entry's resolved path", spec.binaryPath)
+	}
+	// The recorded entry's whole contribution is inherited, not just its path:
+	// a variant whose args were dropped would boot the wrong profile.
+	if !reflect.DeepEqual(spec.binaryArgs, []string{"-profile", "vision"}) {
+		t.Errorf("binaryArgs = %v, want the recorded entry's args", spec.binaryArgs)
+	}
+	if spec.recallSessionID != "sess-vision-1" {
+		t.Errorf("recallSessionID = %q, want the requested session", spec.recallSessionID)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestClaim_ResumeWithMatchingBinaryProceeds pins the common case, which must
+// stay entirely uneventful: a client that DOES restate the variant it recorded
+// is not made to pay for the check.
+func TestClaim_ResumeWithMatchingBinaryProceeds(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9402)}
+	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
+	cs.sessionReportGrace = 50 * time.Millisecond
+	seedSessionBinding(t, reg, "sess-vision-2", "vision")
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-vision-2","binary":"vision"}`)
+	}()
+
+	spec := awaitSpawn(t, runner)
+	if spec.binaryName != "vision" {
+		t.Errorf("binaryName = %q, want vision", spec.binaryName)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestClaim_ResumeWithDifferentBinaryConflicts is the refusal, and it uses the
+// reserved `nexus` as the requested name on purpose: `{"binary":"nexus"}` is the
+// one value that proves the check reads what the CALLER SENT rather than what an
+// omitted field resolves to. If the two were conflated this claim would be
+// indistinguishable from the inherit case above and would silently succeed.
+//
+// It also re-asserts the allocation criterion at the 409, for the same reason
+// TestClaim_UnknownBinaryAllocatesNothing does it at the 400: the four resources
+// are freed by four different code paths, so a rejection that ran past the
+// resolution block could leak any one of them alone.
+func TestClaim_ResumeWithDifferentBinaryConflicts(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9403)}
+	ts, reg, _ := newClaimTestServer(t, runner, variantRegistryConfig())
+	seedSessionBinding(t, reg, "sess-vision-3", "vision")
+
+	tempsBefore := claimTempConfigCount(t)
+
+	resp := postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-vision-3","binary":"nexus"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	// BOTH names, or the message cannot be acted on: the recorded one is the
+	// value a correct retry has to send, and the requested one is what the caller
+	// has to recognise as its own mistake.
+	for _, want := range []string{`"vision"`, `"nexus"`} {
+		if !strings.Contains(body["error"], want) {
+			t.Errorf("error %q does not name %s", body["error"], want)
+		}
+	}
+
+	if snap := reg.Snapshot(); len(snap.Leases) != 0 {
+		t.Errorf("registry holds %d leases after a refused resume, want 0", len(snap.Leases))
+	}
+	if used := reg.SlotsInUse(); used != 0 {
+		t.Errorf("SlotsInUse = %d after a refused resume, want 0", used)
+	}
+	select {
+	case spec := <-runner.started:
+		t.Fatalf("a refused resume spawned %q", spec.binaryPath)
+	default:
+	}
+	if after := claimTempConfigCount(t); after != tempsBefore {
+		t.Errorf("temp claim configs went from %d to %d; a refused resume wrote one", tempsBefore, after)
+	}
+}
+
+// TestClaim_ResumeWithUnknownBindingSpawnsRequestedBinary is the fallthrough, and
+// it is the branch most likely to be broken by an over-eager implementation of
+// the check above.
+//
+// This server has NO session binary index at all — the shape a broker with no
+// state_dir has, and the same answer a pruned binding or a session predating the
+// index gives. Every one of those is a legitimate resume, so an unknown binding
+// must resolve exactly as a fresh claim does and never as a mismatch.
+func TestClaim_ResumeWithUnknownBindingSpawnsRequestedBinary(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9404)}
+	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
+	cs.sessionReportGrace = 50 * time.Millisecond
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-unrecorded","binary":"vision"}`)
+	}()
+
+	spec := awaitSpawn(t, runner)
+	if spec.binaryName != "vision" {
+		t.Errorf("binaryName = %q, want vision (the requested entry) for an unrecorded session", spec.binaryName)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; an unknown binding must never be reported as a conflict", resp.StatusCode)
+	}
+}
+
+// TestClaim_ResumeWithUnknownBindingAndNoBinaryFallsBackToNexus is the other
+// half of the fallthrough: with nothing recorded AND nothing requested there is
+// no opinion to inherit, so the reserved entry applies exactly as it does to a
+// fresh claim. This is what every pre-registry client's resume looks like.
+func TestClaim_ResumeWithUnknownBindingAndNoBinaryFallsBackToNexus(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9405)}
+	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
+	cs.sessionReportGrace = 50 * time.Millisecond
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-unrecorded-2"}`)
+	}()
+
+	spec := awaitSpawn(t, runner)
+	if spec.binaryName != reservedBinaryName {
+		t.Errorf("binaryName = %q, want %q for an unrecorded session with no binary", spec.binaryName, reservedBinaryName)
+	}
+	if spec.binaryPath != "/usr/local/bin/nexus" {
+		t.Errorf("binaryPath = %q, want the reserved entry's resolved path", spec.binaryPath)
+	}
+
+	reg.MarkReady(spec.leaseID)
+	resp := <-respCh
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestClaim_ResumeWhoseRecordedBinaryIsGoneConflicts covers the operator-caused
+// half: the binding is intact but the entry it names has been removed from
+// `binaries:` since the session was created.
+//
+// The refusal matters more here than it looks. There is no requested name to
+// compare against, so the tempting behaviour is to shrug and spawn the reserved
+// entry — which is the same foreign-build replay a mismatch is refused for,
+// reached through an operator's config change instead of a caller's parameter.
+// It must name the missing entry, or the operator cannot tell which one to
+// restore.
+func TestClaim_ResumeWhoseRecordedBinaryIsGoneConflicts(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9406)}
+	ts, reg, _ := newClaimTestServer(t, runner, variantRegistryConfig())
+	seedSessionBinding(t, reg, "sess-nocturne", "nocturne") // never in variantRegistryConfig
+
+	resp := postClaim(t, ts.URL, `{"config":"engine: {}\n","session_id":"sess-nocturne"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if !strings.Contains(body["error"], `"nocturne"`) {
+		t.Errorf("error %q does not name the recorded entry that is gone", body["error"])
+	}
+
+	if snap := reg.Snapshot(); len(snap.Leases) != 0 {
+		t.Errorf("registry holds %d leases after a refused resume, want 0", len(snap.Leases))
+	}
+	select {
+	case spec := <-runner.started:
+		t.Fatalf("a refused resume spawned %q", spec.binaryPath)
+	default:
+	}
+}
+
+// TestResolveSpawnBinary_TypoBeatsMismatch pins the precedence between the two
+// rejections, which is the one ordering a reader cannot infer from the criteria.
+//
+// A name this broker has never had is a 400 listing the names it does have, even
+// on a session bound to something else. Reporting it as a 409 would tell the
+// caller its session is bound elsewhere — true, but not the problem — and would
+// withhold the list that is the only way to discover the correct spelling.
+func TestResolveSpawnBinary_TypoBeatsMismatch(t *testing.T) {
+	binaries := variantRegistryConfig().Binaries
+
+	_, _, status, err := resolveSpawnBinary(binaries, "sess-x", "vison", "vision", true)
+	if err == nil {
+		t.Fatal("resolveSpawnBinary accepted a name that is in no registry entry")
+	}
+	if status != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an unknown name even on a bound session", status)
+	}
+	if !strings.Contains(err.Error(), "this broker spawns:") {
+		t.Errorf("error %q does not list the registry's entries", err)
+	}
+}
+
+// TestResolveSpawnBinary_WhitespaceOnlyBinaryIsOmitted keeps the resume path in
+// step with resolveClaimBinary, which reads whitespace as "omitted" rather than
+// as a name made of spaces. If the two diverged, `{"binary":"  "}` would be
+// compared against the record as a literal and 409 every bound session.
+func TestResolveSpawnBinary_WhitespaceOnlyBinaryIsOmitted(t *testing.T) {
+	binaries := variantRegistryConfig().Binaries
+
+	name, entry, status, err := resolveSpawnBinary(binaries, "sess-x", "  \t", "vision", true)
+	if err != nil {
+		t.Fatalf("resolveSpawnBinary: %v (status %d)", err, status)
+	}
+	if name != "vision" {
+		t.Errorf("name = %q, want the recorded vision entry inherited", name)
+	}
+	if entry.ResolvedPath != "/opt/builds/nexus-vision" {
+		t.Errorf("entry = %+v, want the vision entry", entry)
+	}
+}
+
 // TestResolveClaimBinary_TrimsRequestedName mirrors foldBinaryRegistry, which
 // trims entry names as it loads them. The two have to agree: a registry that
 // stores `vision` while a claim looks up `vision ` verbatim would make an entry

@@ -2725,7 +2725,9 @@ cap is exceeded the **oldest** bindings are dropped.
 **It is best-effort, and that is deliberate.** An unknown session is an ordinary
 answer meaning *no opinion, proceed* — never a mismatch. A session predating this
 file, a session whose binding was pruned, and a broker running without a
-`state_dir` all resume exactly as they did before the index existed.
+`state_dir` all resume exactly as they did before the index existed. What a
+*found* binding is enforced as on a claim is described under
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).
 
 **Failure handling.** Malformed, torn or partially-written lines are **skipped
 with a warning** and every good line before them is kept; the rewrite-on-open
@@ -3271,7 +3273,9 @@ so the field is additive and a client written before the registry existed keeps
 getting exactly what it got before. Leading/trailing whitespace is trimmed, the
 same way entry names are trimmed at load, so the two always agree. There is no
 operator-settable default: an operator must not be able to silently change what
-an existing client ends up spawning.
+an existing client ends up spawning. (On a **resume**, omitted instead means the
+entry that created the session — see
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).)
 
 An **unknown** name is **HTTP 400**, with a message echoing the rejected name and
 listing the registry's actual entries — not a silent fallback to `nexus`, which
@@ -3289,6 +3293,44 @@ the engine reloads that session and replays its history; when omitted it starts
 a fresh session. An unknown/invalid `session_id` makes the engine fail to boot,
 so the instance never signals ready and the claim returns `502` ("instance
 exited before signalling ready") rather than silently starting a new session.
+
+#### Resume inherits the recorded binary
+
+On a resume, `binary` is reconciled against the entry recorded for that session
+in the [session → binary index](#session--binary-index-session-binariesjsonl).
+A session directory is engine state written by one particular build, and
+replaying it under a different variant does **not** fail loudly — the engine
+boots, the transcript loads, and the session simply behaves as though
+capabilities it once had have vanished. The claim is the only point at which that
+mistake is still attributable, so:
+
+| `session_id` | `binary` | Recorded binding | Outcome |
+|---|---|---|---|
+| set | omitted | `vision` | **Spawns `vision`** — the recorded entry is inherited, *not* the reserved `nexus`. |
+| set | `vision` | `vision` | Proceeds normally. |
+| set | `nexus` | `vision` | **`409`** — `{"error":"session \"…\" was created by binary \"vision\" but this claim requests \"nexus\"; …"}`. The message names **both** the recorded and the requested entry. |
+| set | anything | *(none)* | **Falls through**: spawns the requested entry, or `nexus` when none was requested. **No error.** |
+| set | omitted | `nocturne`, no longer in `binaries:` | **`409`** — the message names the missing entry so it can be restored. Deliberately *not* a silent fallback to `nexus`, which is the same foreign-build replay the mismatch row prevents. |
+| omitted | anything | — | Not a resume; resolves as described above. |
+
+An **unknown** requested name is still `400` (not `409`) even on a bound session:
+a misspelling is a client bug, and only the `400` lists the entries that exist.
+
+The check runs **before anything is allocated**, on the same path as the unknown-name
+`400`, so a refused resume consumes no lease, no capacity slot, no temp config
+file, and spawns no process.
+
+`409` rather than `400` or `500` for both conflict rows: the request is
+well-formed and the caller named a real session, so a `400` would blame it for a
+value it never sent; and nothing failed, so a `500` would report a healthy broker
+as broken. What conflicts is the session's recorded state against this broker's
+current configuration.
+
+The binding is **best-effort by construction** and this check inherits that: an
+unknown binding is *no opinion, proceed*. A broker with no `state_dir`, a session
+created before bindings were recorded, and a binding evicted by the index's
+4096-entry cap all resume exactly as they did before the check existed — none of
+them is ever reported as a mismatch.
 
 ```jsonc
 // success response (200)
