@@ -54,7 +54,10 @@ func run() error {
 		// Logged because it decides what clients are told to connect back to; an
 		// operator debugging a bad ws_url needs to see the value in effect.
 		"advertise_addr", cfg.AdvertiseAddr,
-		"nexus_binary_path", cfg.NexusBinaryPath,
+		// nexus_binary_path is deliberately NOT logged here any more. It is a
+		// deprecated INPUT that is folded into the registry at load and read
+		// nowhere afterwards, so printing it would name a value that no longer
+		// decides anything — the per-entry lines below are the truth.
 		// Logged because the registry decides what a claim can spawn at all, and
 		// the count is the cheapest way for an operator to confirm the `binaries:`
 		// block they wrote was actually picked up (it is never below 1 — the

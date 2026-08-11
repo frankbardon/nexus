@@ -1926,10 +1926,10 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 
 	wiring := brokerWiring{
 		cfg: Config{
-			NexusBinaryPath: stubBin,
-			ReleaseGrace:    defaultReleaseGrace,
-			ReattachWindow:  defaultReattachWindow,
-			AdminScope:      defaultAdminScope,
+			Binaries:       map[string]BinaryEntry{reservedBinaryName: {Path: stubBin, ResolvedPath: stubBin}},
+			ReleaseGrace:   defaultReleaseGrace,
+			ReattachWindow: defaultReattachWindow,
+			AdminScope:     defaultAdminScope,
 		},
 		runner: execRunner{},
 	}

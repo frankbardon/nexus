@@ -33,10 +33,12 @@ crashes.
                           └───────────────────────────────────────┘
 ```
 
-1. A caller `POST /claim`s with a full nexus config.
-2. The broker acquires a capacity slot, mints a lease, writes the config to a
-   temp file, and **cold-spawns** a `nexus` subprocess (`nexus_binary_path`),
-   injecting the broker address and lease id as environment variables.
+1. A caller `POST /claim`s with a full nexus config, optionally naming which
+   `binaries:` entry to run.
+2. The broker resolves that name against its registry, acquires a capacity slot,
+   mints a lease, writes the config to a temp file, and **cold-spawns** that
+   entry's `nexus` binary, injecting the broker address and lease id as
+   environment variables.
 3. The instance's [`nexus.io.broker`](../plugins/io/broker.md) plugin dials
    **back** to the broker's `/instance` endpoint, registers its lease, and
    signals ready. The broker is the only listening socket.
@@ -425,7 +427,8 @@ Body:
 ```jsonc
 {
   "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
-  "session_id": "prior-session-id"          // optional: resume a persisted session
+  "session_id": "prior-session-id",         // optional: resume a persisted session
+  "binary": "vision"                        // optional: which `binaries:` entry to spawn
 }
 ```
 
@@ -458,10 +461,30 @@ Error responses:
 | Condition | Status | Body |
 |-----------|--------|------|
 | Missing/empty `config` | `400` | `{"error":"claim requires a non-empty config"}` |
+| Unknown `binary` name | `400` | `{"error":"unknown binary \"…\"; this broker spawns: …"}` |
 | Over capacity, queue wait elapsed | `503` | `{"error":"capacity wait timed out"}` |
 | At capacity, queueing disabled (`queue_wait_timeout <= 0`) | `503` | `{"error":"no capacity"}` |
 | Instance exited before ready (e.g. resume of a missing/invalid session) | `502` | `{"error":"instance exited before signalling ready"}` |
 | Instance did not become ready within the boot window | `504` | `{"error":"instance did not become ready in time"}` |
+
+### Choosing a binary
+
+`binary` names an entry of the broker's [`binaries:` registry](#running-the-broker).
+Omit it and the claim gets the reserved `nexus` entry, so a client written before
+the registry existed is unaffected. The entry's `args` are appended after the
+broker's own `-config` / `-recall` arguments, and its `env` is layered under the
+broker-owned `NEXUS_BROKER_*` variables — an entry can extend a spawn but never
+redirect it at another broker or supply its own spawn secret.
+
+An unknown name returns `400` naming the rejected value and listing the entries
+this broker actually has. The check runs before the claim allocates anything, so
+a typo consumes no lease and no capacity slot.
+
+```bash
+curl -s -X POST http://localhost:8080/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"config":"engine:\n  name: example\n","binary":"vision"}'
+```
 
 ### New vs. resume
 

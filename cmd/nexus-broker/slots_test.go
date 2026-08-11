@@ -365,7 +365,7 @@ func TestSlots_QueueStormNoDrift(t *testing.T) {
 // lease is released — exercising the FIFO wait end to end through HTTP.
 func TestClaim_QueuedClaimProceedsAfterRelease(t *testing.T) {
 	runner := newQueueRunner()
-	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 5 * time.Second}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus"), QueueWaitTimeout: 5 * time.Second}
 	reg := NewRegistry(testLogger(), 1)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	cs.sessionReportGrace = 20 * time.Millisecond
@@ -422,7 +422,7 @@ func TestClaim_QueuedClaimProceedsAfterRelease(t *testing.T) {
 // nothing, and leaves the slot count and queue clean.
 func TestClaim_QueueWaitTimeoutReturns503(t *testing.T) {
 	runner := newQueueRunner()
-	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 80 * time.Millisecond}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus"), QueueWaitTimeout: 80 * time.Millisecond}
 	reg := NewRegistry(testLogger(), 1)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
@@ -467,7 +467,7 @@ func TestClaim_QueueWaitTimeoutReturns503(t *testing.T) {
 // spawn.
 func TestClaim_ClientCancelWhileQueued(t *testing.T) {
 	runner := newQueueRunner()
-	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus", QueueWaitTimeout: 10 * time.Second}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus"), QueueWaitTimeout: 10 * time.Second}
 	reg := NewRegistry(testLogger(), 1)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
@@ -541,7 +541,7 @@ func (q *queueRunner) start(_ context.Context, spec spawnSpec) (processHandle, e
 // registry to a distinct 503 "no capacity" and spawns nothing.
 func TestClaim_OverCapacityReturns503(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(1)}
-	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
 	reg := NewRegistry(testLogger(), 1)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()
@@ -575,7 +575,7 @@ func TestClaim_OverCapacityReturns503(t *testing.T) {
 // claim never leaks capacity.
 func TestClaim_FailedSpawnReturnsSlot(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), err: errors.New("exec failed")}
-	cfg := Config{ListenAddr: "127.0.0.1:8080", NexusBinaryPath: "/bin/nexus"}
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
 	reg := NewRegistry(testLogger(), 2)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
 	mux := http.NewServeMux()

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,20 @@ type claimRequest struct {
 	// session and replays its history. When empty the broker starts a fresh
 	// session and returns the engine-generated id in the response.
 	SessionID string `json:"session_id,omitempty"`
+
+	// Binary names which entry of the broker's `binaries:` registry to spawn.
+	//
+	// OMITTED MEANS THE RESERVED `nexus` ENTRY, which every load guarantees
+	// exists — so adding this field is additive and every client written before
+	// the registry existed keeps getting exactly what it got before. There is no
+	// operator-settable default for the same reason: an operator must not be
+	// able to silently change what an existing client ends up spawning.
+	//
+	// An unknown name is a 400, not a fallback to `nexus`. Quietly spawning the
+	// base binary for a caller that asked for a vision build would produce a
+	// session that merely behaves oddly, which is far harder to diagnose than a
+	// rejected claim.
+	Binary string `json:"binary,omitempty"`
 }
 
 // claimResponse is the JSON body returned once the instance is ready.
@@ -154,6 +169,17 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the requested variant BEFORE anything is allocated. Everything
+	// below this point acquires something that has to be given back — a capacity
+	// slot, a lease id, a temp config file, a child process — and a caller's
+	// typo must not be able to consume any of it. Doing it here also means the
+	// rejection is instant rather than arriving after a queue wait.
+	binaryName, entry, err := resolveClaimBinary(s.cfg.Binaries, req.Binary)
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
 	// The lease is stamped with whoever the auth guard authenticated. PrincipalFrom
 	// reports absent when the broker runs with no `auth:` block (or when /claim is
 	// registered outside the guard, as some tests do), and that is a supported
@@ -233,8 +259,15 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	s.registry.SetSpawnSecret(leaseID, spawnSecret)
 
 	brokerAddr := "ws://" + instanceDialHost(s.cfg.ListenAddr) + instanceWSPath
+	// The entry's RESOLVED path is what is exec()d — LoadConfig verified it at
+	// boot, so no claim performs a stat or a PATH lookup, and a PATH that
+	// changes under a running broker cannot make one claim spawn a different
+	// build than the next.
 	handle, err := s.runner.start(r.Context(), spawnSpec{
-		binaryPath:      s.cfg.NexusBinaryPath,
+		binaryName:      binaryName,
+		binaryPath:      entry.ResolvedPath,
+		binaryArgs:      entry.Args,
+		binaryEnv:       entry.Env,
 		configPath:      configPath,
 		leaseID:         leaseID,
 		brokerAddr:      brokerAddr,
@@ -322,8 +355,14 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// `ticket_issued` records WHETHER a ticket went out, never its value: a ticket
 	// is a bearer credential and the broker's logs must not add to the exposure it
 	// already has from travelling in a URL.
+	//
+	// `binary` records WHICH registry entry was spawned. With several variants
+	// behind one broker, "which build is this lease running" stops being
+	// inferable from the broker's config alone, and this line is the only place
+	// the answer is joined to a lease id.
 	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL,
-		"session_id", sessionID, "principal_id", owner.ID, "ticket_issued", ticket != "")
+		"session_id", sessionID, "principal_id", owner.ID, "ticket_issued", ticket != "",
+		"binary", binaryName)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -333,6 +372,32 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 		SessionID: sessionID,
 		Ticket:    ticket,
 	})
+}
+
+// resolveClaimBinary picks the registry entry a claim selects, returning the
+// resolved name alongside the entry so the caller never has to re-derive
+// "which name did the empty string mean".
+//
+// The name is trimmed before lookup for the same reason foldBinaryRegistry
+// trims entry names: the two have to agree, or a config an operator wrote with a
+// stray space would be unselectable by the obvious name.
+//
+// The error names both the rejected value and the registry's actual contents.
+// Listing them is not a leak — /claim is behind the same auth guard as every
+// other control-plane route, and a caller that may spawn a variant may
+// certainly know it exists — and without the list the only way to discover a
+// typo is to ask the operator for their broker.yaml.
+func resolveClaimBinary(binaries map[string]BinaryEntry, requested string) (string, BinaryEntry, error) {
+	name := strings.TrimSpace(requested)
+	if name == "" {
+		name = reservedBinaryName
+	}
+	entry, ok := binaries[name]
+	if !ok {
+		return "", BinaryEntry{}, fmt.Errorf("unknown binary %q; this broker spawns: %s",
+			name, strings.Join(sortedBinaryNames(binaries), ", "))
+	}
+	return name, entry, nil
 }
 
 // fail writes a JSON error response and logs the cause.

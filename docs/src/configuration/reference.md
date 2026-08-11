@@ -2567,6 +2567,10 @@ binaries:
 | `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
 | `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker or hand it the wrong lease. |
 
+**Selecting an entry.** A claim picks one with the optional `binary` field of
+its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
+name is rejected with **HTTP 400** before the claim allocates anything.
+
 **The `nexus` name is reserved.** After a successful load the registry always
 contains it, so the base binary is spawnable from every broker no matter what
 the config says. There is deliberately **no `default: true` field**: a claim
@@ -3202,9 +3206,29 @@ request is a small JSON envelope; `session_id` is optional.
 // request body
 {
   "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
-  "session_id": "prior-session-id"          // optional: resume a persisted session
+  "session_id": "prior-session-id",         // optional: resume a persisted session
+  "binary": "vision"                        // optional: which `binaries:` entry to spawn
 }
 ```
+
+`binary` names an entry of the broker's [binary registry](#binary-registry-binaries).
+**Omitted means the reserved `nexus` entry**, which every load guarantees exists —
+so the field is additive and a client written before the registry existed keeps
+getting exactly what it got before. Leading/trailing whitespace is trimmed, the
+same way entry names are trimmed at load, so the two always agree. There is no
+operator-settable default: an operator must not be able to silently change what
+an existing client ends up spawning.
+
+An **unknown** name is **HTTP 400**, with a message echoing the rejected name and
+listing the registry's actual entries — not a silent fallback to `nexus`, which
+would produce a session that merely behaves oddly. The name is resolved **before
+anything is allocated**, so a rejected claim consumes no lease, no capacity slot
+(it never even joins the FIFO wait queue), no temp config file, and spawns no
+process.
+
+The selected entry's `args` are appended after the broker's own `-config` /
+`-recall` arguments, and its `env` is layered under the broker-owned
+`NEXUS_BROKER_*` variables — see [Binary registry](#binary-registry-binaries).
 
 When `session_id` is set the broker spawns the instance with `-recall <id>` so
 the engine reloads that session and replays its history; when omitted it starts
