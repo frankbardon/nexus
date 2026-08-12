@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,8 +21,10 @@ import (
 // Config holds the nexus-broker service configuration. It is loaded from a
 // YAML file at startup, mirroring the engine's file-based config style.
 //
-// All keys are live: listen_addr / nexus_binary_path (gateway + spawn),
-// advertise_addr (client-reachable address), max_concurrent (capacity cap),
+// All keys are live: listen_addr (gateway bind), binaries (the named registry
+// of nexus variants this broker may spawn, superseding the deprecated
+// nexus_binary_path), advertise_addr (client-reachable address),
+// max_concurrent (capacity cap),
 // idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
 // queue_wait_timeout (FIFO capacity wait), and auth (client authentication).
 type Config struct {
@@ -56,9 +63,41 @@ type Config struct {
 	AdvertiseScheme string `yaml:"-"`
 	AdvertiseHost   string `yaml:"-"`
 
-	// NexusBinaryPath is the path to the nexus binary the broker exec()s to
-	// spawn OS-isolated instances. Expanded through engine.ExpandPath.
+	// NexusBinaryPath is the DEPRECATED single spawn target: the path to the
+	// nexus binary the broker exec()s to spawn OS-isolated instances. Expanded
+	// through engine.ExpandPath.
+	//
+	// It has been superseded by Binaries. The field survives so that existing
+	// broker.yaml files keep parsing and so that readers not yet migrated keep
+	// compiling; LoadConfigFromBytes folds its value into the `nexus` registry
+	// entry, which is what spawn actually resolves against. Nothing new should
+	// read it.
 	NexusBinaryPath string `yaml:"nexus_binary_path"`
+
+	// Binaries is the registry of named nexus variants this broker may spawn,
+	// keyed by the name a claim selects. It replaces the single
+	// nexus_binary_path target: one broker can front a base nexus, a
+	// vision-enabled build, a pinned older release, and so on.
+	//
+	// After a successful load this map is ALWAYS non-empty and ALWAYS contains
+	// the reserved `nexus` entry — see foldBinaryRegistry. That guarantee is
+	// what makes "the base Nexus binary is spawnable from every broker" true
+	// regardless of what an operator wrote, and it is why there is deliberately
+	// no `default: true` field on an entry: a claim that omits `binary` always
+	// means `nexus`, and an operator must not be able to silently change what an
+	// existing client ends up spawning.
+	Binaries map[string]BinaryEntry `yaml:"binaries"`
+
+	// Warnings are non-fatal configuration complaints collected during the load
+	// — deprecated keys, folded aliases — for the caller to log.
+	//
+	// They are returned rather than logged in place because LoadConfigFromBytes
+	// has no logger: config is parsed before anything else exists, and threading
+	// a logger into it purely to say "this key is deprecated" would put a
+	// dependency on the parser that nothing else needs. run() drains this at
+	// boot so the complaint lands in the same output as every other startup
+	// line, and tests can assert on it without capturing a log sink.
+	Warnings []string `yaml:"-"`
 
 	// StateDir is the per-broker directory holding this broker's lease journal
 	// (`leases.jsonl`) and, when broker_id is unset, its generated identity
@@ -156,6 +195,266 @@ type Config struct {
 	AuthChain *nexusauth.Chain `yaml:"-"`
 }
 
+// BinaryEntry is one named nexus variant in the broker's spawn registry. The
+// map key — not a field — is the name a claim selects it by, so an entry cannot
+// disagree with its own name.
+type BinaryEntry struct {
+	// Path is the executable the broker exec()s for this entry. It is required:
+	// an entry with no path names nothing spawnable, and defaulting it to the
+	// entry name would turn a typo into a silent PATH lookup for a binary the
+	// operator never meant to run. Expanded through engine.ExpandPath, so `~`
+	// works here exactly as it does in every other Nexus path key.
+	Path string `yaml:"path"`
+
+	// Label is a short human-readable name for operator and client surfaces
+	// ("Nexus (vision)"). Purely presentational — nothing routes on it. Empty is
+	// fine; a consumer falls back to the entry name.
+	Label string `yaml:"label"`
+
+	// Description is a one-line explanation of what this variant is for, for the
+	// same surfaces as Label. Purely presentational.
+	Description string `yaml:"description"`
+
+	// Args are extra argv entries for this variant, appended AFTER the broker's
+	// own spawn arguments so they can add to the command line but never displace
+	// the `-config`/`-recall` contract the instance protocol depends on.
+	Args []string `yaml:"args"`
+
+	// Env are extra environment variables for this variant, layered UNDER the
+	// broker-owned NEXUS_BROKER_* variables (see pkg/brokerframe). Those name the
+	// dial-back address, the lease and the spawn secret; letting an entry
+	// override them would let a config entry point an instance at another broker
+	// or hand it the wrong lease, so the broker's values always win.
+	Env map[string]string `yaml:"env"`
+
+	// ResolvedPath is the ABSOLUTE, verified executable this entry spawns: Path
+	// after tilde expansion, after a PATH lookup if Path was a bare name, and
+	// after a stat that confirmed a regular file with an execute bit.
+	//
+	// It is not a YAML key. LoadConfig derives it, following the
+	// AdvertiseScheme/AdvertiseHost precedent, for two reasons. First, a typo or a
+	// missing build then fails the BOOT — naming the entry — instead of surfacing
+	// as one user's failed claim hours later. Second, spawn does no filesystem
+	// work per claim: the answer is computed once per process, so a PATH lookup
+	// cannot resolve to one binary at boot and a different one mid-flight.
+	//
+	// Empty after LoadConfigFromBytes alone, which parses but deliberately does
+	// not touch the filesystem — see LoadConfig.
+	ResolvedPath string `yaml:"-"`
+}
+
+// reservedBinaryName is the registry entry that must exist after every load. It
+// is what a claim gets when it names no binary, which is why it is synthesized
+// rather than merely defaulted: an operator's `binaries:` map may add entries,
+// but it may not take this one away.
+const reservedBinaryName = "nexus"
+
+// defaultNexusBinaryPath is the path the reserved entry takes when neither
+// `binaries.nexus` nor the deprecated alias says otherwise. A bare name, so it
+// resolves through PATH — exactly the zero-config behaviour the broker has had
+// since it existed.
+const defaultNexusBinaryPath = "nexus"
+
+// keyNexusBinaryPath is the deprecated alias key, named in the errors and
+// warnings the folding rules produce so an operator can grep for it.
+const keyNexusBinaryPath = "nexus_binary_path"
+
+// binaryAliasProbe answers the one question the merged Config cannot: did the
+// OPERATOR write nexus_binary_path, or is Config.NexusBinaryPath just carrying
+// the value DefaultConfig put there? The merged struct cannot tell the two
+// apart, and the difference decides whether the deprecation warning fires and
+// whether the alias/entry conflict is a conflict at all. A pointer decoded from
+// the same bytes distinguishes absent from set, including set-to-empty.
+type binaryAliasProbe struct {
+	NexusBinaryPath *string `yaml:"nexus_binary_path"`
+}
+
+// foldBinaryRegistry validates the declared `binaries:` map and folds the
+// deprecated nexus_binary_path alias into it, returning the resolved registry
+// plus any non-fatal warnings.
+//
+// alias is nil when the key is absent from the YAML. The four cases:
+//
+//   - alias set, `binaries.nexus` absent → the alias is synthesized into the
+//     reserved entry and a deprecation warning names the replacement key. This
+//     is what makes every pre-registry deployment boot unchanged.
+//   - alias set AND `binaries.nexus` set → ERROR. Picking a winner would be
+//     worse than refusing: whichever way the tie broke, half of the operators
+//     hitting it would silently spawn the binary they did not mean, and the
+//     mistake would only surface as instances behaving oddly. Two keys naming
+//     one thing is a config bug, and the cheapest place to fix it is a boot
+//     failure that names both.
+//   - neither set → the reserved entry is synthesized with the historical
+//     default path, so zero-config is byte-for-byte what it always was.
+//   - `binaries.nexus` set alone → taken as written; nothing to fold.
+func foldBinaryRegistry(declared map[string]BinaryEntry, alias *string) (map[string]BinaryEntry, []string, error) {
+	out := make(map[string]BinaryEntry, len(declared)+1)
+
+	for _, raw := range sortedBinaryNames(declared) {
+		entry := declared[raw]
+		// Trimmed so `"nexus ":` cannot smuggle in a second entry that looks
+		// identical to the reserved one in every log line and UI.
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, nil, fmt.Errorf("binaries: an entry has an empty name; every entry must be keyed by the name a claim selects it with")
+		}
+		if _, dup := out[name]; dup {
+			return nil, nil, fmt.Errorf("binaries: %q is declared more than once (names are compared with surrounding whitespace trimmed)", name)
+		}
+		path := strings.TrimSpace(entry.Path)
+		if path == "" {
+			return nil, nil, fmt.Errorf("binaries: %s: path is required and must name the executable to spawn", name)
+		}
+		entry.Path = engine.ExpandPath(path)
+		out[name] = entry
+	}
+
+	_, reservedDeclared := out[reservedBinaryName]
+	var warnings []string
+	switch {
+	case alias != nil && reservedDeclared:
+		return nil, nil, fmt.Errorf("%s and binaries.%s both name the base nexus binary; remove %s and keep the registry entry",
+			keyNexusBinaryPath, reservedBinaryName, keyNexusBinaryPath)
+	case alias != nil:
+		path := strings.TrimSpace(*alias)
+		if path == "" {
+			return nil, nil, fmt.Errorf("%s is set but empty; remove the key to take the default, or declare binaries.%s.path",
+				keyNexusBinaryPath, reservedBinaryName)
+		}
+		out[reservedBinaryName] = BinaryEntry{Path: engine.ExpandPath(path)}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s is deprecated: declare it as binaries.%s.path instead. Its value was folded into the %q registry entry for this boot.",
+			keyNexusBinaryPath, reservedBinaryName, reservedBinaryName))
+	case !reservedDeclared:
+		out[reservedBinaryName] = BinaryEntry{Path: defaultNexusBinaryPath}
+	}
+
+	return out, warnings, nil
+}
+
+// sortedBinaryNames returns a registry map's keys in a stable order.
+//
+// Every walk of the registry goes through this, because Go randomizes map
+// iteration: without it, a config with two bad entries would fail on a
+// different one each boot (miserable to debug from a crash-looping container)
+// and the boot log would list the entries in a different order every restart.
+// Generic over the value type so it serves both the raw declared map and the
+// resolved one.
+func sortedBinaryNames[T any](m map[string]T) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// resolveBinaryRegistry resolves and verifies every entry's spawn target,
+// recording the answer on each entry's ResolvedPath. It mutates the map in
+// place; on the first failure it returns and the caller refuses the boot.
+//
+// The accepted tradeoff: a broker restarted midway through a variant rollout,
+// while one of its binaries is momentarily absent, will not come up. That is
+// deliberate — the alternative is a broker that boots fine and then rejects
+// every claim for that variant, which the operator only discovers from a user.
+// The error message is what makes it tolerable, so each one names the entry,
+// the path that was resolved, and the specific reason.
+func resolveBinaryRegistry(binaries map[string]BinaryEntry) error {
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		resolved, err := resolveBinaryPath(name, entry.Path)
+		if err != nil {
+			return err
+		}
+		entry.ResolvedPath = resolved
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// resolveBinaryPath turns one entry's configured path into an absolute path
+// that is known to be an executable file, or explains why it is not.
+//
+// The order is expand → PATH lookup → absolute → stat, and each step exists:
+//
+//   - ExpandPath so `~/builds/nexus-vision` works here exactly as it does in
+//     every other Nexus path key. (foldBinaryRegistry already expanded, and the
+//     helper is idempotent; repeating it keeps this function correct on its own.)
+//   - exec.LookPath for a BARE name, so `nexus` means "whatever the broker's own
+//     PATH resolves" — the zero-config default, and allowed for every entry, not
+//     just the reserved one, because an operator who installs variants into
+//     /usr/local/bin should not have to spell out directories.
+//   - filepath.Abs so what is stored can be exec()d regardless of what the
+//     process working directory later becomes, and so the boot log names a path
+//     an operator can paste into a shell.
+func resolveBinaryPath(name, path string) (string, error) {
+	candidate := engine.ExpandPath(strings.TrimSpace(path))
+
+	if isBareBinaryName(candidate) {
+		found, err := exec.LookPath(candidate)
+		if err != nil {
+			return "", fmt.Errorf("binaries: %s: %q has no path separator, so it was looked up on the broker's PATH, and not found there: %w",
+				name, candidate, err)
+		}
+		candidate = found
+	}
+
+	resolved, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("binaries: %s: cannot resolve %q to an absolute path: %w", name, candidate, err)
+	}
+
+	// Stat rather than exec: the broker must not run an operator's binary just to
+	// find out whether it is runnable. Stat follows symlinks, so a symlinked
+	// variant is judged on its target, which is what exec() would do too.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("binaries: %s: no such file %s%s", name, resolved, configuredAs(resolved, path))
+		}
+		return "", fmt.Errorf("binaries: %s: cannot stat %s%s: %w", name, resolved, configuredAs(resolved, path), err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("binaries: %s: %s is a directory, not an executable%s", name, resolved, configuredAs(resolved, path))
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("binaries: %s: %s is not a regular file (mode %s), so it cannot be exec()d%s",
+			name, resolved, info.Mode(), configuredAs(resolved, path))
+	}
+	// Any of the three execute bits counts. This is deliberately NOT an attempt to
+	// emulate the kernel's euid/egid permission check: the common failure is a
+	// build artifact that was never chmod +x'd, and catching that is worth far
+	// more than the false negative where a file is executable only by some other
+	// user (which still fails, at exec time, with a clear EACCES).
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("binaries: %s: %s is not executable (mode %s); chmod +x it or point the entry at a different build%s",
+			name, resolved, info.Mode().Perm(), configuredAs(resolved, path))
+	}
+	return resolved, nil
+}
+
+// isBareBinaryName reports whether path names something to look up on PATH
+// rather than a location on disk. `nexus` is bare; `./nexus`, `bin/nexus` and
+// `/usr/local/bin/nexus` are not.
+//
+// Both '/' and the host separator are checked because Go accepts '/' as a
+// separator on every platform it targets, so a config written on one OS still
+// reads as a path on another.
+func isBareBinaryName(path string) bool {
+	return !strings.ContainsRune(path, '/') && !strings.ContainsRune(path, filepath.Separator)
+}
+
+// configuredAs renders the trailing " (configured as ...)" clause that ties a
+// resolved path back to what the operator actually wrote — but only when the two
+// differ, so an entry that already names an absolute path does not get an error
+// message that says the same thing twice.
+func configuredAs(resolved, path string) string {
+	if resolved == path {
+		return ""
+	}
+	return fmt.Sprintf(" (configured as %q)", path)
+}
+
 // authBlock is the raw `auth:` mapping. It exists only to give a non-mapping
 // `auth:` value an error that names the offending key: a silent fallback to
 // "auth disabled" on a malformed block would be a security bug, so every
@@ -203,7 +502,7 @@ const defaultAdminScope = "nexus.broker.admin"
 func DefaultConfig() Config {
 	return Config{
 		ListenAddr:       ":8080",
-		NexusBinaryPath:  "nexus",
+		NexusBinaryPath:  defaultNexusBinaryPath,
 		MaxConcurrent:    8,
 		IdleTimeout:      5 * time.Minute,
 		QueueWaitTimeout: 30 * time.Second,
@@ -214,23 +513,66 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfig reads a YAML broker config file from disk.
+// LoadConfig reads a YAML broker config file from disk, parses it, and resolves
+// it against the machine the broker is about to run on.
+//
+// It is the BOOT path, and the only caller that performs the second half. The
+// split from LoadConfigFromBytes is deliberate: parsing is a pure function of
+// the bytes and must stay that way, because the whole broker test suite loads
+// config from string literals and would otherwise need a real nexus build on
+// disk to assert anything about an unrelated key. Resolving the spawn registry,
+// by contrast, is inherently environmental — the same bytes legitimately resolve
+// differently on two machines — and it belongs with the step that was already
+// touching the filesystem.
+//
+// The consequence for operators is intentional: a broker whose registry names a
+// binary that is missing, is a directory, or has no execute bit does not start.
+// That includes a zero-config broker whose PATH has no `nexus` on it, which
+// previously got as far as accepting claims and only failed when one was made.
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("reading broker config file: %w", err)
 	}
-	return LoadConfigFromBytes(data)
+	cfg, err := LoadConfigFromBytes(data)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	return cfg, nil
 }
 
 // LoadConfigFromBytes parses a YAML broker config from bytes, merged on top of
 // DefaultConfig. Every filesystem path is funneled through engine.ExpandPath.
+//
+// It validates the DOCUMENT — shapes, required fields, mutually exclusive keys —
+// and touches no filesystem. Binary registry entries come back with ResolvedPath
+// empty; LoadConfig fills those in.
 func LoadConfigFromBytes(data []byte) (Config, error) {
 	cfg := DefaultConfig()
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing broker config: %w", err)
 	}
 	cfg.NexusBinaryPath = engine.ExpandPath(cfg.NexusBinaryPath)
+
+	// Resolve the spawn registry at load, from the same bytes, so a config that
+	// names two spawn targets for the base binary — or an entry with no path —
+	// fails the BOOT rather than the first claim that happens to select it. The
+	// probe is decoded separately because only the raw document can say whether
+	// the deprecated alias was written by the operator or defaulted by us.
+	var probe binaryAliasProbe
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return Config{}, fmt.Errorf("parsing broker config: %w", err)
+	}
+	binaries, warnings, err := foldBinaryRegistry(cfg.Binaries, probe.NexusBinaryPath)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.Binaries = binaries
+	cfg.Warnings = append(cfg.Warnings, warnings...)
+
 	// Trimmed before expansion so a whitespace-only value reads as "unset"
 	// (persistence disabled) rather than as a directory literally named " ".
 	cfg.StateDir = engine.ExpandPath(strings.TrimSpace(cfg.StateDir))

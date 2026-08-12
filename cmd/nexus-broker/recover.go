@@ -224,6 +224,7 @@ func recoverLeases(logger *slog.Logger, reg *Registry, store LeaseStore, brokerI
 			id:          rec.LeaseID,
 			owner:       principalFromRecord(rec.Owner),
 			sessionID:   rec.SessionID,
+			binary:      rec.Binary,
 			pid:         rec.PID,
 			createdAt:   rec.CreatedAt,
 			spawnSecret: secret,
@@ -242,9 +243,13 @@ func recoverLeases(logger *slog.Logger, reg *Registry, store LeaseStore, brokerI
 		go reg.watchExit(rec.LeaseID)
 
 		restored = append(restored, rec.LeaseID)
+		// `binary` is logged because a restored lease is the one case where the
+		// broker did not choose the variant this boot: it is believing a record. An
+		// empty value is a record from a broker that predates the field.
 		logger.Info("restored lease from the journal; awaiting instance reattach",
 			"lease_id", rec.LeaseID, "pid", rec.PID,
-			"session_id", rec.SessionID, "principal_id", rec.Owner.ID)
+			"session_id", rec.SessionID, "binary", rec.Binary,
+			"principal_id", rec.Owner.ID)
 	}
 	logger.Info("lease journal replayed",
 		"records", len(recs), "restored", len(restored), "dropped", len(recs)-len(restored))

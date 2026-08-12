@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
@@ -22,10 +23,33 @@ import (
 // config file the instance must read, and the lease/dial-back coordinates it
 // needs to find its way back to this broker.
 type spawnSpec struct {
+	// binaryName is the registry entry the claim selected — the NAME, not the
+	// path. It is carried alongside binaryPath rather than derived from it
+	// because two entries may legitimately point at the same executable, so the
+	// path cannot answer "which variant was this". Nothing on the spawn path
+	// itself needs it; it exists so the lease can record what was claimed.
+	binaryName string
+
+	// binaryPath is the entry's RESOLVED absolute executable — BinaryEntry's
+	// ResolvedPath, computed once at boot by LoadConfig. Spawn does no
+	// filesystem work and no PATH lookup of its own.
 	binaryPath string
+
 	configPath string
 	leaseID    string
 	brokerAddr string // ws:// URL of the broker's instance dial-back endpoint
+
+	// binaryArgs are the selected entry's static extra argv entries. They are
+	// appended AFTER the broker's own arguments (see buildCommand), so a variant
+	// can add flags but can never displace the -config/-recall contract the
+	// instance protocol depends on.
+	binaryArgs []string
+
+	// binaryEnv are the selected entry's static extra environment variables.
+	// They are layered UNDER the broker-owned NEXUS_BROKER_* variables, which
+	// buildCommand appends last — an entry that could set the spawn secret would
+	// defeat the dial-back second factor entirely.
+	binaryEnv map[string]string
 
 	// spawnSecret is the per-lease second factor the instance must echo in its
 	// register frame (see newSpawnSecret). The claim path mints it, records the
@@ -80,12 +104,22 @@ func (execRunner) start(_ context.Context, spec spawnSpec) (processHandle, error
 // process. The instance is told to read the temp config via -config (matching
 // cmd/nexus/main.go) and is handed its dial-back target through the shared
 // brokerframe env constants — the single source of truth for these names.
+//
+// Both layering rules below are ORDER-DEPENDENT, and both point the same way:
+// whatever a registry entry contributes goes on before what the broker owns, so
+// a `binaries:` entry can extend a spawn but never redirect it.
 func buildCommand(spec spawnSpec) *exec.Cmd {
 	args := []string{"-config", spec.configPath}
 	if spec.recallSessionID != "" {
 		args = append(args, "-recall", spec.recallSessionID)
 	}
+	// Entry args come LAST in argv. Go's flag package stops at the first
+	// non-flag argument, so prepending an entry's args could swallow -config
+	// and leave the instance booting whatever default config it finds — the
+	// broker's own arguments have to be the ones the parser sees first.
+	args = append(args, spec.binaryArgs...)
 	cmd := exec.Command(spec.binaryPath, args...)
+
 	// The spawn secret travels in the ENVIRONMENT rather than in argv on
 	// purpose: argv is world-readable through /proc (and `ps`) on the machines
 	// this runs on, whereas a process's environment is readable only by its own
@@ -93,15 +127,47 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	// without an `auth:` block and therefore does not enforce it — so that
 	// turning authentication on is a pure broker-config change and never
 	// requires a different spawn path.
-	cmd.Env = append(os.Environ(),
+	env := os.Environ()
+	// Entry env sits between the broker process's own environment and the
+	// broker-owned variables: a variant may override something inherited from
+	// the broker's shell, which is the point of the key. Keys are applied in
+	// sorted order so a spawn's environment is byte-identical across restarts
+	// and a boot is reproducible; Go randomizes map iteration otherwise.
+	for _, key := range sortedEnvKeys(spec.binaryEnv) {
+		env = append(env, key+"="+spec.binaryEnv[key])
+	}
+	// The three brokerframe variables are appended LAST, and that is a security
+	// boundary rather than a style choice: os/exec resolves a duplicated key to
+	// its final occurrence, so this is what makes an entry unable to point an
+	// instance at a different broker, hand it another lease's id, or — the one
+	// that matters — supply its own NEXUS_BROKER_SPAWN_SECRET and thereby
+	// authenticate a dial-back the broker never minted.
+	env = append(env,
 		brokerframe.EnvBrokerAddr+"="+spec.brokerAddr,
 		brokerframe.EnvLeaseID+"="+spec.leaseID,
 		brokerframe.EnvSpawnSecret+"="+spec.spawnSecret,
 	)
+	cmd.Env = env
+
 	// Surface the child's logs through the broker's stderr for observability.
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd
+}
+
+// sortedEnvKeys returns an entry's env map keys in a stable order.
+//
+// It is deliberately not shared with sortedBinaryNames: that helper exists to
+// make registry VALIDATION deterministic (which of two bad entries is reported),
+// while this one exists to make a spawned process's environment reproducible.
+// Same three lines, unrelated reasons to change.
+func sortedEnvKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // newSpawnSecret returns a 128-bit random hex secret for one instance spawn —

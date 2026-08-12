@@ -8,6 +8,7 @@ Modular AI agent harness. Pure event-driven Go. Core manages event lifecycle + p
 make build        # Build binary to bin/nexus
 make run          # Build and run with default config (configs/default.yaml)
 make test         # Run all tests
+make test-broker-integration  # Broker integration suite (tagged; no API key needed)
 make fmt          # Format code (gofmt)
 make vet          # Run go vet
 make lint         # Run staticcheck (includes vet)
@@ -15,7 +16,9 @@ make lint         # Run staticcheck (includes vet)
 
 Run specific profile: `bin/nexus -config configs/coding.yaml`
 
-Run integration tests: `go test -tags integration ./tests/integration/ -v`
+Run engine integration tests: `go test -tags integration ./tests/integration/ -v` (live mode needs `ANTHROPIC_API_KEY`)
+
+`make test` is untagged, so it skips both integration suites. CI runs `make test` plus `make test-broker-integration` as its own step; the engine suite under `tests/integration/` stays out of CI because live mode requires an API key.
 
 Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 

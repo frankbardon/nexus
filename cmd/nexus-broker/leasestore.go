@@ -111,6 +111,20 @@ type LeaseRecord struct {
 	// reported one. Empty until then.
 	SessionID string `json:"session_id,omitempty"`
 
+	// Binary is the `binaries:` registry entry the instance was spawned from —
+	// the NAME, not the path, so the record still identifies the variant after an
+	// operator repoints that entry at a new build. Paired with SessionID it is the
+	// durable session → binary mapping a resume is checked against, which is why
+	// it is written on every record the way SessionID is rather than only on the
+	// mint.
+	//
+	// EMPTY IS A FIRST-CLASS VALUE and omitempty is load-bearing: a journal
+	// written by a broker that predates this field carries no `binary` key at all,
+	// deserializes cleanly to "", and must keep loading, folding and compacting
+	// exactly as it did. "" therefore means "not recorded" — never "the binary
+	// named empty string" — and readers must treat it as unknown.
+	Binary string `json:"binary,omitempty"`
+
 	// PID is the spawned instance's OS process id, once it has been spawned.
 	// Zero until then.
 	PID int `json:"pid,omitempty"`

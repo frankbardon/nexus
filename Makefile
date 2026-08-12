@@ -1,4 +1,4 @@
-.PHONY: build build-broker run clean test fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
+.PHONY: build build-broker run clean test test-broker-integration fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
 
 BINARY_NAME=nexus
 BROKER_BINARY_NAME=nexus-broker
@@ -36,6 +36,23 @@ clean:
 
 test:
 	$(GO) test ./...
+
+# Broker integration suite. cmd/nexus-broker/claim_integration_test.go is
+# //go:build integration, so `make test` (plain `go test ./...`, no tags) never
+# runs it — the tag is deliberate, it keeps ~18s of stub-instance `go build`
+# out of the default loop.
+#
+# Scoped to ./cmd/nexus-broker/ on purpose. `-tags integration ./...` would also
+# sweep in tests/integration/, which carries the same tag but makes real LLM
+# calls in live mode and needs ANTHROPIC_API_KEY. This suite is loopback-only:
+# it spawns stub instance binaries it compiles itself, so it needs no key and no
+# secrets. Run the engine suite separately:
+#   go test -tags integration ./tests/integration/ -v
+#
+# -count=1 because the stub binaries are produced by a `go build` subprocess at
+# test time; a cached PASS would not be a real gate.
+test-broker-integration:
+	$(GO) test -tags integration -count=1 ./cmd/nexus-broker/
 
 fmt:
 	$(GO) fmt ./...

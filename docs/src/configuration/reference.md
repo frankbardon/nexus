@@ -1559,9 +1559,10 @@ never written to disk. See
 
 Enforcement on the broker side is **gated on the broker having an `auth:` block**
 (see the Session broker section below), with one exception. With no `auth:` block
-the secret is ignored, so a `nexus` binary at `nexus_binary_path` that predates
-the protocol keeps working; with one configured, such a binary is refused and the
-broker logs a message naming version skew as the likely cause. The exception is a
+the secret is ignored, so a `nexus` build that predates the protocol keeps
+working wherever the broker's [binary registry](#binary-registry-binaries) points
+at one; with one configured, such a build is refused and the broker logs a
+message naming version skew as the likely cause. The exception is a
 lease **restored after a broker restart**, which always requires the secret
 regardless of `auth:` — a live pid is not proof of identity. The value is never
 logged and never appears in `GET /leases`.
@@ -2490,7 +2491,20 @@ instances behind an HTTP/WebSocket gateway.
 # broker.yaml
 listen_addr: ":8080"
 advertise_addr: ""            # required behind a proxy/LB; see below
-nexus_binary_path: "nexus"
+
+# The named registry of nexus variants this broker may spawn. The `nexus` entry
+# always exists — declare it to override its path, omit it to take the default.
+binaries:
+  nexus:
+    path: "nexus"
+  vision:
+    path: "/opt/nexus/bin/nexus-vision"
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+
 max_concurrent: 8
 idle_timeout: 5m
 queue_wait_timeout: 30s
@@ -2515,15 +2529,104 @@ auth:
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
-| `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
+| `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
+| `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, the session → binary index does not exist, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+
+### Binary registry (`binaries`)
+
+One broker can front several `nexus` builds — a base binary, a vision-enabled
+build, a pinned older release — instead of the single spawn target
+`nexus_binary_path` allowed. Each entry is keyed by the **name a claim selects
+it by**; the key is the name, so an entry cannot disagree with itself.
+
+```yaml
+binaries:
+  nexus:                                    # reserved; declare it only to override the path
+    path: "/usr/local/bin/nexus"
+  vision:
+    path: "~/builds/nexus-vision"           # ExpandPath applies here too
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+```
+
+| Entry field   | Type              | Default    | Description                                                                 |
+|---------------|-------------------|------------|-----------------------------------------------------------------------------|
+| `path`        | string            | *(required)* | The executable the broker exec()s for this entry. Funneled through `ExpandPath` (supports `~`). A value with **no path separator** (`nexus`, `nexus-vision`) is looked up on the broker process's `PATH`; anything else is used as a location on disk, relative to the broker's working directory if it is not absolute. **Required** — an empty or missing `path` fails startup naming the entry. It is deliberately not defaulted to the entry name, which would turn a typo into a silent `PATH` lookup for a binary the operator never meant to run. Resolved and verified at boot — see [Binary resolution](#binary-resolution). |
+| `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
+| `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
+| `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
+| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker or hand it the wrong lease. |
+
+**Selecting an entry.** A claim picks one with the optional `binary` field of
+its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
+name is rejected with **HTTP 400** before the claim allocates anything.
+
+**Discovering the entries.** Clients read the live registry from
+[`GET /binaries`](#get-binaries-http-api-not-yaml), which returns `name`, `label`
+and `description` per entry — never `path`, `args` or `env`.
+
+**The `nexus` name is reserved.** After a successful load the registry always
+contains it, so the base binary is spawnable from every broker no matter what
+the config says. There is deliberately **no `default: true` field**: a claim
+that names no binary always means `nexus`, so an operator cannot silently
+change what an existing client ends up spawning.
+
+**Folding the deprecated `nexus_binary_path`.** The two keys are resolved at
+boot, from the same file, in exactly four cases:
+
+| `nexus_binary_path` | `binaries.nexus` | Result |
+|---|---|---|
+| absent  | absent  | `nexus` synthesized with path `nexus` — the historical zero-config default, unchanged. |
+| set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
+| absent  | set     | Taken as written; nothing to fold. |
+| set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
+
+### Binary resolution
+
+Every registry entry — including the reserved `nexus` one, and including the
+value folded in from a deprecated `nexus_binary_path` — is resolved and verified
+**once, at startup**, before the gateway listens. The steps, in order:
+
+1. **Expand.** `~` and `~/…` are expanded through `ExpandPath`, as everywhere
+   else in Nexus.
+2. **Look up bare names on `PATH`.** A `path` containing no path separator is
+   resolved against the broker process's own `PATH`. This is what makes the
+   zero-config `path: "nexus"` work, and it is allowed for **every** entry, not
+   just the reserved one.
+3. **Make absolute.** The result is turned into an absolute path, so spawning is
+   unaffected by the broker's working directory.
+4. **Stat and check.** The path must exist, be a regular file (symlinks are
+   followed), and carry at least one execute bit.
+
+Any failure at any step **refuses the boot**, with an error naming the entry, the
+path that was resolved, and the specific reason (`no such file`, `is a
+directory`, `is not executable (mode …)`, `not found on PATH`). The resolved
+absolute path is then held for the process lifetime, so a claim performs no
+filesystem work and a `PATH` lookup cannot answer differently mid-flight.
+
+At startup the broker logs one line per entry carrying both the configured
+`path` and the `resolved_path`, so a surprising `PATH` answer — a stale build in
+`~/go/bin` shadowing `/usr/local/bin` — is visible in the boot log rather than
+inferred later from an instance behaving oddly.
+
+> **Behaviour change.** A broker whose registry names a missing, non-executable,
+> or directory path now **fails to start**. That includes a **zero-config broker
+> with no `nexus` on its `PATH`**, which previously started fine and only failed
+> at the first `POST /claim`. The tradeoff is deliberate and one-sided: a broker
+> restarted midway through a variant rollout, while a binary is momentarily
+> absent, will not come up — but an operator learns about a typo or a missing
+> build at deploy time instead of from a user's failed claim.
 
 ### Lease durability (`state_dir`)
 
@@ -2553,9 +2656,18 @@ from the single point all three teardown reasons converge on, so a manual
 `POST /release`, an idle sweep and a **crash** are all recorded.
 
 Each record carries `lease_id`, `owner` (the claiming principal's `id`, `tenant`
-and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim as
-configured, so a record round-trips what is in `broker.yaml` — and
+and `scopes`), `session_id`, `binary`, `pid`, `broker_id`, `advertise_addr` —
+verbatim as configured, so a record round-trips what is in `broker.yaml` — and
 `created_at` / `released_at` / `reason`.
+
+`binary` is the [`binaries`](#binary-registry-binaries) entry **name** the instance was spawned
+from — the name, not the path, so the record still identifies the variant after
+the entry is repointed at a new build. It is omitted when empty, which is what a
+journal written by a broker predating the field looks like; such a record still
+loads, and an absent `binary` means *not recorded*, never "the binary named empty
+string". The lease journal's copy is only good while the lease is live — a
+released lease is dropped by compaction — so the durable mapping lives in a
+separate file, described next.
 
 **No secret is ever written.** Not the lease's per-spawn secret, not a client
 WebSocket ticket, not a bearer token. The owner's **raw claim set** is
@@ -2584,6 +2696,50 @@ Multi-broker cooperation is **not** implemented: no broker reads another's
 journal, there is no shared store, and there is no routing. `broker_id` and
 `advertise_addr` are stamped on every record now so that a future shared backend
 needs no data migration.
+
+### Session → binary index (`session-binaries.jsonl`)
+
+`<state_dir>/session-binaries.jsonl` records which
+[`binaries`](#binary-registry-binaries) entry served each engine session, so a
+resume can be checked against the build that created the session. It is a
+**separate file from the lease journal on purpose**: the journal is compacted down
+to the leases that are still live, and a resume always arrives *after* the
+original lease was released, so a binding kept only there would be gone precisely
+when it is wanted.
+
+**Format.** Append-only JSONL, one object per line, with three fields —
+`session_id`, `binary` (the entry **name**, never the path) and `at` (when the
+pairing was last recorded, used only for pruning). A later line for the same
+`session_id` supersedes an earlier one. **No secret is ever written**, for the
+same reasons as the lease journal.
+
+**When a line is written.** At **claim time** for a resume, where the session id
+arrives in the request body, and on the **session-id report** for a new session,
+where the id is not knowable any earlier. Re-recording an unchanged pairing does
+not append — a session resumed many times costs one line, not one per resume. An
+empty `binary` is never written: empty means *not recorded*.
+
+**Growth is bounded** by an entry cap of **4096 bindings**, applied when the file
+is rewritten — on open, and again every 256 appends — via a temp file and an
+atomic rename. A cap is required here and compaction alone would not be enough:
+nothing ever retires a binding (outliving its lease is the whole point), so
+without one the file would grow by a line per distinct session forever. When the
+cap is exceeded the **oldest** bindings are dropped.
+
+**It is best-effort, and that is deliberate.** An unknown session is an ordinary
+answer meaning *no opinion, proceed* — never a mismatch. A session predating this
+file, a session whose binding was pruned, and a broker running without a
+`state_dir` all resume exactly as they did before the index existed. What a
+*found* binding is enforced as on a claim is described under
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).
+
+**Failure handling.** Malformed, torn or partially-written lines are **skipped
+with a warning** and every good line before them is kept; the rewrite-on-open
+truncates the damage away. A corrupt index **never prevents the broker from
+booting**. Unlike the lease journal, an index that cannot be opened at all is
+**not** a boot failure either — it logs a `WARN` and the broker runs with the
+index off, because refusing to serve would trade an advisory check for an outage.
+A write that fails is logged and otherwise ignored: it never fails a claim.
 
 ### Restart recovery (`reattach_window`)
 
@@ -2643,8 +2799,9 @@ at all is still fatal — that is a misconfiguration, not lost data.) With
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Four routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, `GET /leases`, and `POST /ticket/{lease_id}`.
+(`pkg/nexusauth`). Five routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`, and
+`GET /binaries`.
 `GET /healthz` is registered **outside** the guard and always answers `200` with
 no credential, because a load balancer or container probe has none to present.
 
@@ -3088,12 +3245,14 @@ with the same `policy violation` / `unknown lease` close, so a dialer cannot
 difference the responses to enumerate live lease ids.
 
 The gate exists because of **version skew**. With no `auth:` block the secret is
-not checked at all, so a `nexus_binary_path` pointing at a build that predates
-the protocol keeps working unchanged. With one configured, such a binary is
-refused and the broker logs a `WARN` naming the version skew explicitly —
-otherwise the symptom (every claim returning `504 instance did not become ready
-in time` while the child process is alive and connecting fine) reads as a network
-fault. The fix is to upgrade the instance binary.
+not checked at all, so a [registry entry](#binary-registry-binaries) pointing at
+a build that predates the protocol keeps working unchanged. With one configured,
+such a build is refused and the broker logs a `WARN` naming the version skew
+explicitly — otherwise the symptom (every claim returning `504 instance did not
+become ready in time` while the child process is alive and connecting fine) reads
+as a network fault. The check is per **spawn**, so one stale variant fails while
+every other entry keeps working; the fix is to upgrade the binary that entry
+points at.
 
 The secret is never logged, never returned by `GET /leases`, and never passed in
 argv.
@@ -3108,15 +3267,75 @@ request is a small JSON envelope; `session_id` is optional.
 // request body
 {
   "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
-  "session_id": "prior-session-id"          // optional: resume a persisted session
+  "session_id": "prior-session-id",         // optional: resume a persisted session
+  "binary": "vision"                        // optional: which `binaries:` entry to spawn
 }
 ```
+
+`binary` names an entry of the broker's [binary registry](#binary-registry-binaries).
+**Omitted means the reserved `nexus` entry**, which every load guarantees exists —
+so the field is additive and a client written before the registry existed keeps
+getting exactly what it got before. Leading/trailing whitespace is trimmed, the
+same way entry names are trimmed at load, so the two always agree. There is no
+operator-settable default: an operator must not be able to silently change what
+an existing client ends up spawning. (On a **resume**, omitted instead means the
+entry that created the session — see
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).)
+
+An **unknown** name is **HTTP 400**, with a message echoing the rejected name and
+listing the registry's actual entries — not a silent fallback to `nexus`, which
+would produce a session that merely behaves oddly. The name is resolved **before
+anything is allocated**, so a rejected claim consumes no lease, no capacity slot
+(it never even joins the FIFO wait queue), no temp config file, and spawns no
+process.
+
+The selected entry's `args` are appended after the broker's own `-config` /
+`-recall` arguments, and its `env` is layered under the broker-owned
+`NEXUS_BROKER_*` variables — see [Binary registry](#binary-registry-binaries).
 
 When `session_id` is set the broker spawns the instance with `-recall <id>` so
 the engine reloads that session and replays its history; when omitted it starts
 a fresh session. An unknown/invalid `session_id` makes the engine fail to boot,
 so the instance never signals ready and the claim returns `502` ("instance
 exited before signalling ready") rather than silently starting a new session.
+
+#### Resume inherits the recorded binary
+
+On a resume, `binary` is reconciled against the entry recorded for that session
+in the [session → binary index](#session--binary-index-session-binariesjsonl).
+A session directory is engine state written by one particular build, and
+replaying it under a different variant does **not** fail loudly — the engine
+boots, the transcript loads, and the session simply behaves as though
+capabilities it once had have vanished. The claim is the only point at which that
+mistake is still attributable, so:
+
+| `session_id` | `binary` | Recorded binding | Outcome |
+|---|---|---|---|
+| set | omitted | `vision` | **Spawns `vision`** — the recorded entry is inherited, *not* the reserved `nexus`. |
+| set | `vision` | `vision` | Proceeds normally. |
+| set | `nexus` | `vision` | **`409`** — `{"error":"session \"…\" was created by binary \"vision\" but this claim requests \"nexus\"; …"}`. The message names **both** the recorded and the requested entry. |
+| set | anything | *(none)* | **Falls through**: spawns the requested entry, or `nexus` when none was requested. **No error.** |
+| set | omitted | `nocturne`, no longer in `binaries:` | **`409`** — the message names the missing entry so it can be restored. Deliberately *not* a silent fallback to `nexus`, which is the same foreign-build replay the mismatch row prevents. |
+| omitted | anything | — | Not a resume; resolves as described above. |
+
+An **unknown** requested name is still `400` (not `409`) even on a bound session:
+a misspelling is a client bug, and only the `400` lists the entries that exist.
+
+The check runs **before anything is allocated**, on the same path as the unknown-name
+`400`, so a refused resume consumes no lease, no capacity slot, no temp config
+file, and spawns no process.
+
+`409` rather than `400` or `500` for both conflict rows: the request is
+well-formed and the caller named a real session, so a `400` would blame it for a
+value it never sent; and nothing failed, so a `500` would report a healthy broker
+as broken. What conflicts is the session's recorded state against this broker's
+current configuration.
+
+The binding is **best-effort by construction** and this check inherits that: an
+unknown binding is *no opinion, proceed*. A broker with no `state_dir`, a session
+created before bindings were recorded, and a binding evicted by the index's
+4096-entry cap all resume exactly as they did before the check existed — none of
+them is ever reported as a mismatch.
 
 ```jsonc
 // success response (200)
@@ -3372,6 +3591,67 @@ copied out at all.
 
 Surface states: `spawning` (lease exists, instance not yet registered),
 `active` (registered, frames can flow), `draining` (a teardown has latched).
+
+### `GET /binaries` (HTTP API, not YAML)
+
+`GET /binaries` lists the entries of the [binary registry](#binary-registry-binaries)
+this broker can spawn, so a client can render a picker from live broker truth
+instead of hardcoding names that may not exist on the broker it is talking to.
+It performs no mutation and reads nothing from the request.
+
+```jsonc
+// response (200) — entries sorted by name
+{
+  "binaries": [
+    { "name": "archive", "label": "Nexus 0.9" },
+    { "name": "nexus" },
+    {
+      "name": "vision",
+      "label": "Nexus (vision)",
+      "description": "Multimodal build with the image tools compiled in"
+    }
+  ]
+}
+```
+
+| Field                     | Type             | Description |
+|---------------------------|------------------|-------------|
+| `binaries`                | list of object   | The listing. Always present and never `null` — an empty registry would encode as `[]` — so a client can iterate it unconditionally. |
+| `binaries[].name`         | string           | The registry key — the exact string to put in a claim's `binary` field. Always present. |
+| `binaries[].label`        | string           | The entry's `label`. **Omitted** when the operator set none. |
+| `binaries[].description`  | string           | The entry's `description`. **Omitted** when the operator set none. |
+
+**The response is an object, not a bare array.** The envelope exists so a
+broker-wide fact — a default-binary hint, a schema version — can be added later as
+a sibling key, which a client that ignores unknown keys will not notice. A
+top-level array has nowhere to put one, so adding it would mean changing the
+top-level JSON type and breaking every client at once.
+
+**`path`, `args` and `env` are never serialized**, nor is the derived absolute
+path the broker resolved at boot. They are broker-host detail — build locations,
+deployment flags, per-variant environment — that a claiming client has no use for
+and every reason not to learn. Only the three fields above cross the wire.
+
+`label` and `description` are **absent, not empty**, when unset, so a client can
+tell "the operator wrote nothing" from "the operator wrote an empty string". A
+consumer with no label falls back to `name`, which is always present.
+
+Ordering is by `name`, ascending — stable across requests and identical for every
+caller, so a picker does not reshuffle. The *contents* are not stable across a
+restart: the registry is read once at startup, so an operator's edit changes the
+listing the next time the broker boots. The reserved `nexus` entry is always
+included: it is spawnable from every broker no matter what the config says.
+
+The listing is **unfiltered** — every caller sees every entry. There is no
+per-principal visibility rule: an entry name is not a secret (an unknown one is
+already rejected by `POST /claim` with a **400** naming the alternatives), and a
+filter would need a per-entry authorization model no config key describes.
+
+Authentication follows `POST /claim` exactly: the route is registered behind the
+same middleware, so with an `auth:` block a missing or invalid credential is
+refused (**401**) and a valid one gets the list; with no `auth:` block the route
+serves an unauthenticated caller, which is a supported deployment rather than a
+degraded one.
 
 Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
 deployment caveats live in the

@@ -29,6 +29,18 @@ jobs:
       - name: Test
         run: make test
 
+      # Separate step so a broker-integration failure is attributable at a
+      # glance instead of being buried in the unit-test output above. Reuses the
+      # Go toolchain from the "Set up Go" step; no extra setup needed.
+      #
+      # Scoped to ./cmd/nexus-broker/ deliberately: tests/integration/ carries
+      # the same //go:build integration tag but makes real LLM calls in live
+      # mode and would fail here without ANTHROPIC_API_KEY. The broker suite is
+      # loopback-only — it compiles and spawns its own stub instance binaries —
+      # so it needs no API key and no repo secrets.
+      - name: Broker integration tests
+        run: make test-broker-integration
+
   lint:
     runs-on: ubuntu-latest
     steps:

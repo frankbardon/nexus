@@ -40,12 +40,29 @@ func run() error {
 		return err
 	}
 
+	// Non-fatal config complaints (deprecated keys, folded aliases) are collected
+	// during the load rather than logged there, because config is parsed before
+	// anything else exists and the parser has no logger. Drained here so they
+	// land in the same boot output as everything else, before the startup line
+	// that reports the values they affected.
+	for _, warning := range cfg.Warnings {
+		logger.Warn(warning)
+	}
+
 	logger.Info("nexus-broker starting",
 		"listen_addr", cfg.ListenAddr,
 		// Logged because it decides what clients are told to connect back to; an
 		// operator debugging a bad ws_url needs to see the value in effect.
 		"advertise_addr", cfg.AdvertiseAddr,
-		"nexus_binary_path", cfg.NexusBinaryPath,
+		// nexus_binary_path is deliberately NOT logged here any more. It is a
+		// deprecated INPUT that is folded into the registry at load and read
+		// nowhere afterwards, so printing it would name a value that no longer
+		// decides anything — the per-entry lines below are the truth.
+		// Logged because the registry decides what a claim can spawn at all, and
+		// the count is the cheapest way for an operator to confirm the `binaries:`
+		// block they wrote was actually picked up (it is never below 1 — the
+		// reserved `nexus` entry always exists).
+		"binaries", len(cfg.Binaries),
 		// Logged because an empty state_dir means lease state is lost on restart,
 		// and that is a decision an operator should be able to confirm from the
 		// boot line rather than infer from a missing directory.
@@ -62,6 +79,21 @@ func run() error {
 		// visible somewhere at boot.
 		"admin_scope", cfg.AdminScope,
 	)
+
+	// One line per registry entry, carrying the RESOLVED path and not just the
+	// configured one. A bare `path` goes through the broker process's own PATH, so
+	// `nexus` can silently be a different build than the operator has in mind —
+	// a stale copy in ~/go/bin ahead of /usr/local/bin, say. That surprise has to
+	// be visible in the boot log, where it can be compared against a deploy, rather
+	// than inferred later from an instance behaving oddly.
+	for _, name := range sortedBinaryNames(cfg.Binaries) {
+		entry := cfg.Binaries[name]
+		logger.Info("binary registry entry",
+			"name", name,
+			"path", entry.Path,
+			"resolved_path", entry.ResolvedPath,
+		)
+	}
 
 	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
 	// the claim request's Host header. That is fine for a directly-reachable
@@ -108,6 +140,28 @@ func run() error {
 			"will lose track of every instance this broker spawned")
 	}
 
+	// The durable session → binary index. It is separate from the lease journal on
+	// purpose: the journal is compacted down to live leases, and a resume always
+	// arrives after the original lease was released, so a binding kept only there
+	// would be gone exactly when it is wanted.
+	//
+	// It shares state_dir's fate — unset means no index and no file — but NOT the
+	// journal's boot-failure policy. The index backs an advisory check whose answer
+	// for an unknown session is "no opinion, proceed", so a broker that cannot open
+	// it degrades to the behaviour it had before the index existed. Refusing to boot
+	// over that would trade a weaker resume check for a total outage. Loud WARN,
+	// nil index, carry on.
+	sessionBinaries, err := openSessionBinaryIndex(logger, cfg)
+	if err != nil {
+		logger.Warn("failed to open the session binary index; resume will not know which binary "+
+			"served a session whose lease has already been released",
+			"state_dir", cfg.StateDir, "error", err)
+		sessionBinaries = nil
+	}
+	if sessionBinaries != nil {
+		defer func() { _ = sessionBinaries.Close() }()
+	}
+
 	// The spawn-secret derivation key. It shares state_dir's fate: present and
 	// stable when durability is on, absent (and secrets random per spawn, as they
 	// always were) when it is off. Loaded AFTER openLeaseStore because that is
@@ -126,6 +180,10 @@ func run() error {
 	// Records carry the RAW advertise_addr, verbatim as configured, so a record
 	// round-trips what is in broker.yaml rather than a derived host.
 	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+	// Wired BEFORE recovery, so a lease restored from the journal can still have its
+	// pairing consulted, and before anything is served, since the setter is not safe
+	// to call alongside a live lease transition.
+	registry.useSessionBinaryIndex(sessionBinaries)
 
 	// Restart recovery. It runs BEFORE anything is served, because a surviving
 	// instance is already dialing /instance on its reconnect backoff and every
@@ -150,6 +208,10 @@ func run() error {
 	// so it needs both the guard (to know whether auth is on at all) and the
 	// configured operator scope.
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
+	// The binary listing is projected from the config ONCE, here, because the
+	// registry is immutable after load — there is no reload path — so the handler
+	// holds a finished response rather than the Config it came from.
+	binaries := NewBinariesServer(logger, cfg.Binaries)
 
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
@@ -190,6 +252,10 @@ func run() error {
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	// Behind the SAME guard as /claim: enumerating what this broker can spawn is
+	// a control-plane read, and a caller that cannot claim has no business
+	// learning which variants an operator deploys.
+	binaries.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

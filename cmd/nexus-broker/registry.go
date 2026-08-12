@@ -166,6 +166,24 @@ type lease struct {
 	sessionReported chan struct{}
 	sessionOnce     sync.Once
 
+	// binary is the `binaries:` registry entry this lease's instance was spawned
+	// from — the NAME, not the path. The name is what identifies a variant: two
+	// entries may legitimately point at the same executable, and an operator may
+	// repoint an entry at a new build without that changing which variant a
+	// session belongs to.
+	//
+	// It sits beside sessionID because the two together ARE the durable session →
+	// binary mapping a resume is checked against (see BinaryForSession). Nothing
+	// on the spawn path reads it — spawn already has the entry — it exists to be
+	// recorded, journaled, and read back.
+	//
+	// Stamped once by the claim path (SetBinary) from the entry it resolved, and
+	// carried through verbatim for a lease restored from the journal. Empty means
+	// NOT RECORDED — a lease minted by a caller that never stamped one, or one
+	// restored from a journal written before this field existed — never "the
+	// binary named empty string". Guarded by Registry.mu.
+	binary string
+
 	// process is the broker's handle on the spawned instance process. It is
 	// stored so later stories (release, crash, capacity) can manage the
 	// process lifecycle; pid is cached for logging and inspection.
@@ -267,6 +285,18 @@ type Registry struct {
 	// served.
 	store LeaseStore
 
+	// sessionBinaries is the DURABLE session → binary index (see
+	// sessionbinary.go). It is separate from store on purpose: the lease journal
+	// drops a lease the moment it is released, and a resume happens after that, so
+	// the pairing needs a home outside lease-lifecycle compaction.
+	//
+	// It is nil until wired via useSessionBinaryIndex, and nil is fully supported —
+	// with no `state_dir` there is no index and BinaryForSession answers from live
+	// leases alone, exactly as it did before this existed. Every method on the type
+	// is nil-receiver safe, so no call site branches. Like tickets and store it is
+	// NOT guarded by mu: it owns its own lock and is only assigned at wiring time.
+	sessionBinaries *sessionBinaryIndex
+
 	// brokerID and advertiseAddr are stamped on every record so a future shared
 	// store can tell whose lease is whose without a data migration. advertiseAddr
 	// is the RAW config value, verbatim as the operator wrote it, not the parsed
@@ -323,6 +353,37 @@ func (r *Registry) useLeaseStore(s LeaseStore, brokerID, advertiseAddr string) {
 	r.advertiseAddr = advertiseAddr
 }
 
+// useSessionBinaryIndex binds the durable session → binary index the registry
+// records pairings into and reads back in BinaryForSession.
+//
+// A setter for the same reasons as useLeaseStore: the index is optional (an unset
+// `state_dir` disables it), and threading an optional dependency through
+// NewRegistry would churn every existing registry test for something none of them
+// exercise. Call it once at wiring time, before the broker serves.
+//
+// Pass a nil *sessionBinaryIndex to leave the index off. There is no typed-nil
+// trap here — the field is the concrete pointer type, not an interface, so a nil
+// value is nil to every check and every method.
+func (r *Registry) useSessionBinaryIndex(idx *sessionBinaryIndex) { r.sessionBinaries = idx }
+
+// RecordSessionBinary durably pairs an engine session id with the `binaries:`
+// entry name serving it.
+//
+// It exists because the pairing becomes knowable at two different moments and the
+// index must be written at whichever one comes first:
+//
+//   - a RESUME names the session id in the claim body, so the pair is complete
+//     before anything is spawned — the claim path records it there;
+//   - a NEW session has no id until the instance reports one over its dial-back
+//     connection, so MarkSessionID records it at that point.
+//
+// Both funnel here rather than reaching into r.sessionBinaries directly, so the
+// index has exactly one owner and one place to change if it ever moves. Empty
+// arguments, and a broker with no index, are no-ops.
+func (r *Registry) RecordSessionBinary(sessionID, binary string) {
+	r.sessionBinaries.record(sessionID, binary)
+}
+
 // leaseRecordLocked projects a lease onto its journal record. Caller MUST hold
 // r.mu.
 //
@@ -336,6 +397,7 @@ func (r *Registry) leaseRecordLocked(l *lease, kind leaseRecordKind) LeaseRecord
 		LeaseID:       l.id,
 		Owner:         ownerRecord(l.owner),
 		SessionID:     l.sessionID,
+		Binary:        l.binary,
 		PID:           l.pid,
 		BrokerID:      r.brokerID,
 		AdvertiseAddr: r.advertiseAddr,
@@ -513,6 +575,14 @@ type restoreSpec struct {
 	pid       int
 	createdAt time.Time
 
+	// binary is the registry entry name recorded for this lease. It is carried
+	// through restore rather than re-resolved from the current config because the
+	// record states what was ACTUALLY spawned; re-deriving it would let a config
+	// edit made while the broker was down rewrite history. An empty value — a
+	// record written by a broker that predates the field — stays empty, which
+	// BinaryForSession reads as "not recorded".
+	binary string
+
 	// spawnSecret is the value a reattaching instance must present. An empty one
 	// would make the lease unattachable rather than open: AttachInstance compares
 	// in constant time against it and a register frame carrying no secret is
@@ -565,6 +635,7 @@ func (r *Registry) RestoreLease(spec restoreSpec) error {
 		restored:        true,
 		spawnSecret:     spec.spawnSecret,
 		sessionID:       spec.sessionID,
+		binary:          spec.binary,
 		pid:             spec.pid,
 	}
 	r.leases[spec.id] = l
@@ -666,8 +737,10 @@ func (r *Registry) ReadyChan(id string) <-chan struct{} {
 func (r *Registry) MarkSessionID(id, sessionID string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
+	var binary string
 	if ok {
 		l.sessionID = sessionID
+		binary = l.binary
 	}
 	r.mu.Unlock()
 	if !ok {
@@ -677,6 +750,13 @@ func (r *Registry) MarkSessionID(id, sessionID string) {
 	// The session id is only knowable once the instance reports it, so the mint
 	// record could not carry it. Supersede that record with one that does.
 	r.recordLease(id, leaseRecordUpdated)
+	// This is the moment a NEW session's id and its binary first exist together,
+	// so it is where the pairing becomes durable. It is recorded into the standalone
+	// index and not only into the lease journal, because the journal drops this
+	// lease when it is released and a resume only ever looks afterwards. The name is
+	// read above under the same lock that set the session id, so the pair written
+	// here is one that was true simultaneously rather than two separate reads.
+	r.RecordSessionBinary(sessionID, binary)
 }
 
 // SessionReportedChan returns the lease's session-report channel, closed once
@@ -703,6 +783,91 @@ func (r *Registry) SessionID(id string) string {
 		return ""
 	}
 	return l.sessionID
+}
+
+// SetBinary stamps the `binaries:` registry entry name a lease's instance is
+// spawned from. The claim path calls it immediately after the lease is minted
+// and before the runner is invoked, so from that moment on every record the
+// lease produces carries which variant it is running — including the
+// `lease-updated` the session-id report writes, which is the record that first
+// pairs a session id with a binary.
+//
+// It deliberately journals NOTHING of its own. The name is known at claim time
+// but the session id is not, so a record written here could only say "this lease
+// has a binary and no session yet", which is the mint record plus one field and
+// one extra disk write per claim. The first record to carry the name is
+// SetProcess's instead; the only window in which the journal holds a lease with
+// no binary recorded is between the mint and the spawn, and a record with no pid
+// is one restart recovery closes out without ever consulting its binary.
+//
+// It is a no-op for an unknown lease.
+func (r *Registry) SetBinary(id, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, ok := r.leases[id]; ok {
+		l.binary = name
+	}
+}
+
+// BinaryForSession answers "which `binaries:` entry is running this engine
+// session", and reports whether the broker knows. It is the read side of the
+// session → binary mapping: a resume claim consults it before spawning, so a
+// persisted session is not handed to a different build than the one that created
+// it.
+//
+// It answers from TWO sources, live leases first and the durable index second:
+//
+//  1. A live lease running that session. This is the freshest possible answer —
+//     it is what the process on this machine is running right now — so it wins
+//     even if the index disagrees, which it can only do if a binding was recorded
+//     and the entry later repointed.
+//  2. The durable session → binary index (sessionbinary.go). This is the case the
+//     read exists for: a resume happens after the original lease was released, at
+//     which point the lease is gone from memory AND from the compacted lease
+//     journal, so a live-leases-only scan would report every real resume unknown.
+//
+// IT REMAINS BEST-EFFORT BY CONSTRUCTION, and ok=false is an ordinary answer
+// rather than an error. The index is capped and prunes its oldest bindings, and a
+// broker with no `state_dir` has no index at all — so a session can legitimately
+// be unknown here. A caller MUST read ("", false) as "no opinion, proceed" and
+// never as a mismatch; in particular a session created before the binding was
+// recorded at all must resume exactly as it did before this existed. Adding
+// retention to make a found binding a guarantee is explicitly out of scope.
+//
+// Two guards make an absent mapping report as absent rather than as an empty
+// one:
+//
+//   - An empty session id is always unknown. Without that check the lease scan
+//     would match the first pending lease it met — every lease carries an empty
+//     session id until its instance reports one — and answer with an unrelated
+//     lease's binary.
+//   - A lease with no recorded binary is skipped. That is what a lease restored
+//     from a journal written before this field existed looks like, and such a
+//     resume must fall through to "unknown" rather than be told it asked for the
+//     wrong build. (The index cannot hold an empty binary at all; record() drops
+//     one and the reader skips one.)
+//
+// A session id names at most one live lease in practice (an instance holds its
+// session directory for as long as it runs), so the scan's first match is the
+// only match; it is a linear walk because the registry is bounded by
+// max_concurrent and a second in-memory index would be state to keep in step for
+// nothing.
+func (r *Registry) BinaryForSession(sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	for _, l := range r.leases {
+		if l.sessionID == sessionID && l.binary != "" {
+			r.mu.Unlock()
+			return l.binary, true
+		}
+	}
+	r.mu.Unlock()
+	// Consulted OUTSIDE r.mu: the index has its own lock, and holding the registry
+	// lock across a second one is how lock-order problems are invented. Nothing
+	// above is carried past the unlock, so there is nothing to be made stale by it.
+	return r.sessionBinaries.lookup(sessionID)
 }
 
 // LeaseOwner returns the identity that claimed a lease and reports whether the
