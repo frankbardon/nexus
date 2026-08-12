@@ -37,6 +37,25 @@ type BinaryInfo struct {
 	Description string `json:"description,omitempty"`
 }
 
+// binariesBody is the ENVELOPE GET /binaries returns: the listing under a single
+// `binaries` key rather than as a bare top-level array.
+//
+// The envelope buys additive evolution. A top-level array has nowhere to put a
+// broker-wide fact — a default-binary hint, a schema version, a "this registry
+// was truncated" marker — so adding one later would mean changing the top-level
+// JSON type, which breaks every client at once. With the envelope a new sibling
+// key is invisible to a client that ignores unknown keys, the same additive
+// contract the rest of the broker's JSON follows (see claimResponse.Ticket).
+//
+// Decided while there were no external clients, which is the only moment the
+// choice is free: the cost of the wrapper is one key, and the cost of switching
+// later is a coordinated client migration.
+type binariesBody struct {
+	// Binaries is the listing. Always present and never null — an empty registry
+	// encodes as `[]` — so a client can iterate it unconditionally.
+	Binaries []BinaryInfo `json:"binaries"`
+}
+
 // BinariesServer handles GET /binaries: a read-only listing of the binaries this
 // broker can spawn, so a client can render a picker from live broker truth
 // instead of hardcoding names that may not exist on the broker it is talking to.
@@ -49,14 +68,17 @@ type BinaryInfo struct {
 type BinariesServer struct {
 	logger *slog.Logger
 
-	// entries is the response, projected and sorted ONCE at construction.
+	// body is the whole response envelope, projected and sorted ONCE at
+	// construction.
 	//
 	// The registry is immutable after LoadConfig — there is no reload path — so
 	// there is nothing to recompute per request, and precomputing has a second
 	// benefit worth more than the saved allocations: the served value simply does
 	// not contain a path, an arg or an env var, so no future edit to the handler
-	// can accidentally encode one.
-	entries []BinaryInfo
+	// can accidentally encode one. The envelope (not just its slice) is held, so
+	// a broker-wide field added to binariesBody later is likewise computed here,
+	// once, rather than assembled per request.
+	body binariesBody
 }
 
 // NewBinariesServer projects a loaded binary registry into the client-facing
@@ -71,9 +93,9 @@ func NewBinariesServer(logger *slog.Logger, binaries map[string]BinaryEntry) *Bi
 	// listing whose order changed per request would reshuffle every client's
 	// picker and make any assertion on the response order flaky.
 	names := sortedBinaryNames(binaries)
-	// Non-nil even when empty so the body is `[]` rather than `null`. A load
-	// always yields at least the reserved entry, so this is defensive against a
-	// hand-built Config in a test rather than a reachable production state.
+	// Non-nil even when empty so `binaries` encodes as `[]` rather than `null`. A
+	// load always yields at least the reserved entry, so this is defensive against
+	// a hand-built Config in a test rather than a reachable production state.
 	entries := make([]BinaryInfo, 0, len(names))
 	for _, name := range names {
 		entry := binaries[name]
@@ -83,7 +105,7 @@ func NewBinariesServer(logger *slog.Logger, binaries map[string]BinaryEntry) *Bi
 			Description: entry.Description,
 		})
 	}
-	return &BinariesServer{logger: logger, entries: entries}
+	return &BinariesServer{logger: logger, body: binariesBody{Binaries: entries}}
 }
 
 // Register wires the binaries endpoint onto a mux. It takes a routeMux so main
@@ -93,7 +115,7 @@ func (s *BinariesServer) Register(mux routeMux) {
 	mux.HandleFunc("GET /binaries", s.handleBinaries)
 }
 
-// handleBinaries writes the precomputed listing as a JSON array.
+// handleBinaries writes the precomputed listing envelope as JSON.
 //
 // It reads no request state at all — not even the Principal. That is not an
 // oversight: the listing is unfiltered, and an auth-disabled broker (where
@@ -104,7 +126,7 @@ func (s *BinariesServer) Register(mux routeMux) {
 func (s *BinariesServer) handleBinaries(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(s.entries); err != nil {
+	if err := json.NewEncoder(w).Encode(s.body); err != nil {
 		// The status and part of the body are already on the wire, so there is no
 		// error response left to send. Log it and move on — the client sees a
 		// truncated body and its own decode failure.

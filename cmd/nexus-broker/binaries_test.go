@@ -74,8 +74,8 @@ func newBinariesTestServer(t *testing.T, authYAML string) *httptest.Server {
 
 // getBinariesBody performs GET /binaries with an optional bearer token and
 // returns the RAW response body, failing on any non-200 status. The raw bytes
-// are what the leak assertion needs — a decode into []BinaryInfo would discard
-// exactly the keys under test.
+// are what the leak and envelope assertions need — a decode into binariesBody
+// would discard exactly the keys those tests are about.
 func getBinariesBody(t *testing.T, base, token string) []byte {
 	t.Helper()
 	resp := doAuthed(t, http.MethodGet, base+"/binaries", token, "")
@@ -92,14 +92,17 @@ func getBinariesBody(t *testing.T, base, token string) []byte {
 	return body
 }
 
-// decodeBinaries decodes a GET /binaries body into the listing.
+// decodeBinaries decodes a GET /binaries body and returns the listing inside the
+// envelope. It decodes into binariesBody rather than a bare slice, so a
+// regression that dropped the envelope and went back to a top-level array fails
+// here instead of silently decoding.
 func decodeBinaries(t *testing.T, body []byte) []BinaryInfo {
 	t.Helper()
-	var list []BinaryInfo
-	if err := json.Unmarshal(body, &list); err != nil {
+	var env binariesBody
+	if err := json.Unmarshal(body, &env); err != nil {
 		t.Fatalf("decode binaries %q: %v", body, err)
 	}
-	return list
+	return env.Binaries
 }
 
 // TestBinaries_AuthDisabledServesUnauthenticated pins the supported
@@ -148,6 +151,37 @@ func TestBinaries_AuthEnabledServesValidCredential(t *testing.T) {
 	}
 }
 
+// TestBinaries_ResponseIsAnEnvelopeNotABareArray pins the top-level wire shape:
+// an OBJECT carrying the listing under `binaries`, not a bare array.
+//
+// The distinction is the whole reason the envelope exists — it is what lets a
+// broker-wide field (a default-binary hint, a schema version) be added later
+// without changing the top-level JSON type under every client at once — so it is
+// asserted on the raw bytes rather than left implicit in a decode that would
+// accept either shape for a slice-typed target.
+func TestBinaries_ResponseIsAnEnvelopeNotABareArray(t *testing.T) {
+	ts := newBinariesTestServer(t, "")
+
+	body := getBinariesBody(t, ts.URL, "")
+	if trimmed := strings.TrimSpace(string(body)); !strings.HasPrefix(trimmed, "{") {
+		t.Fatalf("response is not a JSON object: %s", body)
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode envelope %q: %v", body, err)
+	}
+	if _, ok := envelope["binaries"]; !ok {
+		t.Fatalf("envelope has no `binaries` key: %s", body)
+	}
+	// Exactly one key today. Not a ban on ever adding a second — that is the
+	// point of the envelope — but a new key must be a deliberate edit here and in
+	// reference.md, not something that appeared unnoticed.
+	if len(envelope) != 1 {
+		t.Errorf("envelope keys = %v, want `binaries` alone (add new keys deliberately, and document them)", envelope)
+	}
+}
+
 // TestBinaries_ResponseShapeAndOrdering pins the whole contract a client codes
 // against: one object per registry entry — the reserved `nexus` one included —
 // sorted by name, carrying the presentational strings and nothing else.
@@ -177,14 +211,16 @@ func TestBinaries_ResponseShapeAndOrdering(t *testing.T) {
 func TestBinaries_OmitsUnsetLabelAndDescription(t *testing.T) {
 	ts := newBinariesTestServer(t, "")
 
-	var raw []map[string]any
+	var raw struct {
+		Binaries []map[string]any `json:"binaries"`
+	}
 	body := getBinariesBody(t, ts.URL, "")
 	if err := json.Unmarshal(body, &raw); err != nil {
 		t.Fatalf("decode binaries %q: %v", body, err)
 	}
 
 	var reserved map[string]any
-	for _, entry := range raw {
+	for _, entry := range raw.Binaries {
 		if entry["name"] == reservedBinaryName {
 			reserved = entry
 		}
@@ -245,14 +281,15 @@ func TestBinaries_ListingIsUnfiltered(t *testing.T) {
 
 // TestNewBinariesServer_EmptyRegistryEncodesAsArray guards the JSON zero value.
 // A real load always yields at least the reserved entry, so this is about the
-// projection never handing `null` to a client that does `for (const b of list)`.
+// projection never handing `null` to a client that iterates `body.binaries`
+// unconditionally.
 func TestNewBinariesServer_EmptyRegistryEncodesAsArray(t *testing.T) {
 	s := NewBinariesServer(testLogger(), nil)
-	body, err := json.Marshal(s.entries)
+	body, err := json.Marshal(s.body)
 	if err != nil {
-		t.Fatalf("marshal entries: %v", err)
+		t.Fatalf("marshal body: %v", err)
 	}
-	if string(body) != "[]" {
-		t.Errorf("empty registry encodes as %s, want []", body)
+	if string(body) != `{"binaries":[]}` {
+		t.Errorf(`empty registry encodes as %s, want {"binaries":[]}`, body)
 	}
 }

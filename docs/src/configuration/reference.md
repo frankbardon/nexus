@@ -3600,23 +3600,32 @@ instead of hardcoding names that may not exist on the broker it is talking to.
 It performs no mutation and reads nothing from the request.
 
 ```jsonc
-// response (200) — sorted by name
-[
-  { "name": "archive", "label": "Nexus 0.9" },
-  { "name": "nexus" },
-  {
-    "name": "vision",
-    "label": "Nexus (vision)",
-    "description": "Multimodal build with the image tools compiled in"
-  }
-]
+// response (200) — entries sorted by name
+{
+  "binaries": [
+    { "name": "archive", "label": "Nexus 0.9" },
+    { "name": "nexus" },
+    {
+      "name": "vision",
+      "label": "Nexus (vision)",
+      "description": "Multimodal build with the image tools compiled in"
+    }
+  ]
+}
 ```
 
-| Field         | Type   | Description |
-|---------------|--------|-------------|
-| `name`        | string | The registry key — the exact string to put in a claim's `binary` field. Always present. |
-| `label`       | string | The entry's `label`. **Omitted** when the operator set none. |
-| `description` | string | The entry's `description`. **Omitted** when the operator set none. |
+| Field                     | Type             | Description |
+|---------------------------|------------------|-------------|
+| `binaries`                | list of object   | The listing. Always present and never `null` — an empty registry would encode as `[]` — so a client can iterate it unconditionally. |
+| `binaries[].name`         | string           | The registry key — the exact string to put in a claim's `binary` field. Always present. |
+| `binaries[].label`        | string           | The entry's `label`. **Omitted** when the operator set none. |
+| `binaries[].description`  | string           | The entry's `description`. **Omitted** when the operator set none. |
+
+**The response is an object, not a bare array.** The envelope exists so a
+broker-wide fact — a default-binary hint, a schema version — can be added later as
+a sibling key, which a client that ignores unknown keys will not notice. A
+top-level array has nowhere to put one, so adding it would mean changing the
+top-level JSON type and breaking every client at once.
 
 **`path`, `args` and `env` are never serialized**, nor is the derived absolute
 path the broker resolved at boot. They are broker-host detail — build locations,
