@@ -123,6 +123,13 @@ binaries:
     description: "Pinned 0.9 build for regression triage"
 ```
 
+**Clients do not have to be told these names out of band.** The broker publishes
+its registry on [`GET /binaries`](#get-binaries--list-the-spawnable-binaries), so
+a client builds its picker from live broker truth instead of hardcoding entries
+that may not exist on the broker it is talking to. Only `name`, `label` and
+`description` are published — `path`, `args` and `env` never leave the broker
+host.
+
 `label` and `description` are documentation for operator and client surfaces —
 nothing routes on them, and consumers fall back to the entry name when `label`
 is empty. `path` is the only required field. The per-field table is in the
@@ -204,7 +211,9 @@ binaries:
 #### What the registry deliberately does not do
 
 - **No per-binary authentication or scoping.** [`auth:`](#authentication) gates
-  routes, not entries. Any caller allowed to claim may name any registered entry.
+  routes, not entries. Any caller allowed to claim may name any registered entry,
+  and [`GET /binaries`](#get-binaries--list-the-spawnable-binaries) shows every
+  entry to every caller.
 - **No per-binary capacity.** `max_concurrent` is one global cap across every
   variant; there is no per-entry limit or reservation.
 - **No broker-side default configs.** A claim still supplies the whole engine
@@ -358,7 +367,7 @@ unknown keys are rejected at every level.
 
 | Route | With `auth:` configured |
 |-------|-------------------------|
-| `POST /claim`, `POST /release/{lease_id}`, `POST /ticket/{lease_id}`, `GET /leases` | Middleware validates the credential **before** the handler runs. A refused claim spawns nothing. |
+| `POST /claim`, `POST /release/{lease_id}`, `POST /ticket/{lease_id}`, `GET /leases`, `GET /binaries` | Middleware validates the credential **before** the handler runs. A refused claim spawns nothing. |
 | `WS /lease/{lease_id}` | The same validator chain, resolved by the handler itself so it can also accept a single-use `?ticket=` (see [the ticket flow](#connecting-the-ticket-flow)). |
 | `WS /instance` (the dial-back) | Not a client route: a spawned instance proves itself with its [per-spawn secret](#the-instance-dial-back-secret), not with an operator-configured credential. |
 | `GET /healthz` | **Never authenticated.** A load balancer or container probe has no credential to present, and liveness leaks nothing. |
@@ -640,7 +649,9 @@ session, not `nexus` — see
 An unknown name returns `400` naming the rejected value and listing the entries
 this broker actually has — never a silent fallback to `nexus`. The check runs
 before the claim allocates anything, so a typo consumes no lease, no capacity
-slot, no temp config file, and spawns no process.
+slot, no temp config file, and spawns no process. To pick a name that is
+certainly valid on *this* broker, read
+[`GET /binaries`](#get-binaries--list-the-spawnable-binaries) first.
 
 The entry's `args` are appended after the broker's own `-config` / `-recall`
 arguments, and its `env` is layered under the broker-owned `NEXUS_BROKER_*`
@@ -862,6 +873,121 @@ Lease states:
 | `spawning` | The lease exists but its instance has not yet dialed back and registered — the claim is still booting an engine. |
 | `active` | The instance has registered; frames can flow. |
 | `draining` | A teardown (manual release, idle, or crash) has latched; the lease is on its way out. |
+
+### `GET /binaries` — list the spawnable binaries
+
+A read-only listing of this broker's
+[binary registry](#serving-several-nexus-variants-the-binary-registry), so a
+client can build a picker — or check a name it has configured — from live broker
+truth rather than from entries hardcoded against a broker that may not have them.
+It performs no mutation and reads nothing from the request.
+
+```bash
+curl -s http://localhost:8080/binaries -H 'Authorization: Bearer <token>'
+```
+
+```jsonc
+// 200 — entries sorted by name, ascending
+{
+  "binaries": [
+    { "name": "archive", "label": "Nexus 0.9" },
+    { "name": "nexus" },
+    {
+      "name": "vision",
+      "label": "Nexus (vision)",
+      "description": "Multimodal build with the image tools compiled in"
+    }
+  ]
+}
+```
+
+- **`name`** is the registry key, and the exact string to send back as a claim's
+  `binary`. Always present.
+- **`label`** and **`description`** are the operator's presentational strings.
+  They are **omitted, not empty**, when none was set — so a client can tell "the
+  operator wrote nothing" from "the operator wrote an empty string" — and a
+  consumer with no label falls back to `name`.
+- **`binaries`** is always present and never `null`; the empty case is
+  `{"binaries": []}`, so a client can iterate it unconditionally. In practice it
+  always holds at least the reserved `nexus` entry, which every broker can spawn.
+- Ordering is by `name`, ascending. It does not change between requests and does
+  not differ between callers, so a picker built from it never reshuffles.
+
+**The response is an object, not a bare array.** Decode it into a struct with a
+`binaries` field rather than into a list: the envelope leaves room for a
+broker-wide fact later — a default-binary hint, a schema version — to arrive as a
+sibling key that a client ignoring unknown keys never notices. Per-field types are
+in the
+[`GET /binaries` reference](../configuration/reference.md#get-binaries-http-api-not-yaml),
+which is authoritative.
+
+**`path`, `args` and `env` are deliberately not returned**, nor is the absolute
+path the broker resolved for the entry at boot. They are broker-host detail —
+build locations, deployment flags, per-variant environment — that a claiming
+client has no use for and every reason not to learn. A client picks a *name*; what
+that name runs stays the broker's business.
+
+**Authentication is exactly `POST /claim`'s**, because it is exactly the same
+middleware. With an [`auth:` block](#authentication) configured, a missing
+credential is refused `401 authentication required` and an invalid one `401
+credential rejected`; a valid one gets the list. **With no `auth:` block the route
+serves an unauthenticated caller**, just as `/claim` does — a supported
+deployment, not a degraded one. A caller that may not claim has no business
+enumerating what it cannot spawn.
+
+**The listing is not filtered per principal.** Every authenticated caller sees
+**every** entry and may claim any of them. There is no per-entry visibility rule
+and no per-entry authorization anywhere in the broker.
+
+That is a **known gap, deferred by decision rather than overlooked**: an entry
+name is not a secret (naming a wrong one is already a `400` from `POST /claim`
+that lists the alternatives), and a filter would need a per-entry authorization
+model that no config key describes today — building one here would put the policy
+in the listing handler instead of next to the model that should own it. Until such
+a model exists, the way to make a variant reachable by only some callers is a
+**separate broker** with its own `binaries:` block and its own `auth:` chain. See
+also [What the registry deliberately does not do](#what-the-registry-deliberately-does-not-do)
+and the [v1 caveats](#v1-caveats).
+
+#### Discover, then claim
+
+The intended client flow is two calls: read the registry, pick a `name` out of it,
+then send that name back as `binary` alongside the config to run.
+
+```bash
+broker=http://localhost:8080
+auth='Authorization: Bearer <token>'    # drop the -H below when the broker has no `auth:` block
+
+# 1. discover what this broker offers (label falls back to name)
+curl -s "$broker/binaries" -H "$auth" \
+  | jq -r '.binaries[] | "\(.name)\t\(.label // .name)"'
+# archive   Nexus 0.9
+# nexus     nexus
+# vision    Nexus (vision)
+
+# 2. pick a name from that listing
+binary=vision
+
+# 3. claim it, passing the engine config to run
+claim=$(curl -s -X POST "$broker/claim" \
+  -H 'Content-Type: application/json' -H "$auth" \
+  -d "{\"config\":\"engine:\n  name: example\n\",\"binary\":\"$binary\"}")
+
+lease_id=$(printf '%s' "$claim" | jq -r .lease_id)
+ws_url=$(printf '%s' "$claim" | jq -r .ws_url)
+session_id=$(printf '%s' "$claim" | jq -r .session_id)
+```
+
+Then open `ws_url` as in [Connecting over WebSocket](#connecting-over-websocket).
+Persist `session_id` **and** `$binary` together if you mean to resume later: a
+resume should restate the binary it was claimed with, because the broker's own
+record of that pairing is best-effort — see
+[The 409 is best-effort, not an invariant](#the-409-is-best-effort-not-an-invariant).
+
+Prefer discovering per run over caching the names. The registry is read **once at
+broker startup** and can only change across a restart, so a client holding names
+from an earlier session may be holding entries this broker no longer offers —
+which surfaces as a `400` on the claim, after the user has already chosen.
 
 ### Connecting over WebSocket
 

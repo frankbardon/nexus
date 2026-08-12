@@ -3636,9 +3636,11 @@ and every reason not to learn. Only the three fields above cross the wire.
 tell "the operator wrote nothing" from "the operator wrote an empty string". A
 consumer with no label falls back to `name`, which is always present.
 
-Ordering is by `name`, ascending — stable across requests and across restarts, so
-a picker does not reshuffle. The reserved `nexus` entry is always included: it is
-spawnable from every broker no matter what the config says.
+Ordering is by `name`, ascending — stable across requests and identical for every
+caller, so a picker does not reshuffle. The *contents* are not stable across a
+restart: the registry is read once at startup, so an operator's edit changes the
+listing the next time the broker boots. The reserved `nexus` entry is always
+included: it is spawnable from every broker no matter what the config says.
 
 The listing is **unfiltered** — every caller sees every entry. There is no
 per-principal visibility rule: an entry name is not a secret (an unknown one is
