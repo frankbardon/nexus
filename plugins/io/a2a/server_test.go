@@ -229,13 +229,21 @@ func TestAbsentVersionHeaderPolicy(t *testing.T) {
 
 // ---- Operation wiring ----
 
-// TestOperationsReturnNotImplemented pins this story's end state: every
-// operation is routed and answered with a well-formed A2A error.
+// TestOperationsReturnNotImplemented pins the current maturity line: the
+// operations that are NOT wired are routed and answered with a well-formed
+// UnsupportedOperationError, never a bare 404 or a silent success.
+//
+// The loop skips whatever implementedOperations claims, so wiring an operation
+// moves it out of this test automatically instead of leaving a stale expectation
+// that has to be remembered.
 func TestOperationsReturnNotImplemented(t *testing.T) {
 	s := newTestServer(t, testConfig(t, nil))
 
 	t.Run("jsonrpc", func(t *testing.T) {
 		for _, method := range a2a.Methods() {
+			if operationImplemented(method) {
+				continue
+			}
 			t.Run(method, func(t *testing.T) {
 				rec := do(t, s, http.MethodPost, "/a2a", withVersion("1.0"),
 					jsonrpcBody(t, method, paramsFor(method)))
@@ -266,8 +274,6 @@ func TestOperationsReturnNotImplemented(t *testing.T) {
 			{http.MethodGet, "/a2a/v1/tasks"},
 			{http.MethodPost, "/a2a/v1/tasks/task-1:cancel"},
 			{http.MethodPost, "/a2a/v1/tasks/task-1:subscribe"},
-			{http.MethodPost, "/a2a/v1/message:send"},
-			{http.MethodPost, "/a2a/v1/message:stream"},
 		}
 		for _, c := range cases {
 			t.Run(c.method+" "+c.path, func(t *testing.T) {
@@ -378,5 +384,33 @@ func TestMalformedJSONRPCIsClassified(t *testing.T) {
 				t.Errorf("error = %+v, want code %d", resp.Error, c.wantCode)
 			}
 		})
+	}
+}
+
+// TestMessageOperationsAreWired is the counterpart to the test above: the two
+// operations this plugin implements must NOT answer with the not-implemented
+// refusal, and the card must agree.
+func TestMessageOperationsAreWired(t *testing.T) {
+	for _, method := range []string{a2a.MethodSendMessage, a2a.MethodSendStreamingMessage} {
+		if !operationImplemented(method) {
+			t.Errorf("%s is not marked implemented; the turn mapping and the card derive from this map", method)
+		}
+	}
+}
+
+// TestTransportWithoutABridgeFailsClosed pins the defensive path: a Server built
+// without a bus bridge (a transport-only test, or an embedder wiring it by hand)
+// answers with an internal error rather than panicking on a nil bridge.
+func TestTransportWithoutABridgeFailsClosed(t *testing.T) {
+	s := newTestServer(t, testConfig(t, nil))
+	rec := do(t, s, http.MethodPost, "/a2a", withVersion("1.0"),
+		jsonrpcBody(t, a2a.MethodSendMessage, paramsFor(a2a.MethodSendMessage)))
+
+	var resp a2a.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("not a JSON-RPC envelope: %v (%s)", err, rec.Body)
+	}
+	if resp.Error == nil || resp.Error.Code != a2a.CodeInternal {
+		t.Fatalf("error = %+v, want an internal error", resp.Error)
 	}
 }

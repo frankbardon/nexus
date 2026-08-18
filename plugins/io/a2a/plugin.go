@@ -15,30 +15,47 @@
 // browser/wails transport parity rule (see .claude/docs/io-transport.md): an
 // external interop transport is not a Nexus UI.
 //
+// # Round-trip
+//
+// Inbound: a SendMessage or SendStreamingMessage becomes a Nexus io.input. The
+// message's text parts are the turn's prompt and its contextId selects the
+// session (see bindContextLocked). Each call creates exactly one Task, which is
+// one Nexus agent turn: created SUBMITTED, moved to WORKING when the agent turn
+// starts, and ended COMPLETED at agent.turn.end — or FAILED when the turn dies
+// with an error nobody will retry.
+//
+// Outbound: the plugin subscribes to the bus events that describe a turn and
+// translates them into A2A stream frames. SendStreamingMessage writes them as
+// text/event-stream records; the blocking SendMessage folds the same frames into
+// the Task it returns, so both bindings answer from one translation rather than
+// two that can drift. The turn's final assistant text rides out as an Artifact
+// carrying a text Part.
+//
 // # What this plugin does NOT do yet
 //
-// Nothing here touches the event bus. Subscriptions and Emissions are
-// deliberately empty and the contract harness asserts that they stay honest.
-// Every A2A operation is decoded, version-checked and authenticated, and then
-// answered with an UnsupportedOperationError naming the operation — see
-// implementedOperations, which is the single switch that both gates dispatch and
-// determines what the Agent Card claims. Driving an actual agent turn lands in a
-// later story; when it does, adding an entry to that map flips both the
-// behaviour and the advertised capability together, so the two cannot disagree.
+// GetTask, ListTasks, CancelTask and SubscribeToTask are decoded, version-checked
+// and authenticated, and then answered with an UnsupportedOperationError naming
+// the operation — see implementedOperations, which is the single switch that
+// both gates dispatch and determines what the Agent Card claims. Adding an entry
+// there flips the behaviour and the advertised capability together, so the two
+// cannot disagree.
 //
 // # Concurrency
 //
-// The plugin owns one *http.Server. Handlers run on net/http goroutines and read
-// only immutable state built during Init (the resolved config, the rendered
-// card, the validator chain), so there is no shared mutable state to guard. When
-// bus mapping arrives it must follow nexus.io.agui's model: bus handlers never
-// touch an SSE writer, and a mutex guards the active-run pointer.
+// The model is nexus.io.agui's, copied deliberately rather than reinvented. Bus
+// handlers run on arbitrary engine goroutines and NEVER touch the response
+// writer: each handler translates its payload and pushes frames onto the active
+// run's buffered channel. The HTTP handler goroutine is the sole reader of that
+// channel and the sole writer to the stream. A mutex guards the active-run
+// pointer and the bound context. Everything else the handlers read (the resolved
+// config, the rendered card, the validator chain) is immutable after Init.
 package a2a
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
@@ -65,9 +82,13 @@ const legacyBearerPrincipal = "bearer_token"
 // here plus the handler, and it is not possible to ship a card claiming
 // streaming while SendStreamingMessage refuses every caller.
 //
-// Empty in this story by design: the listener is discoverable and authenticated,
-// and no operation drives a turn yet.
-var implementedOperations = map[string]bool{}
+// SendMessage and SendStreamingMessage are wired: both drive a real Nexus turn.
+// The task-store operations (GetTask, ListTasks, SubscribeToTask) and CancelTask
+// are not, so they stay out of the map and the card keeps reporting what is true.
+var implementedOperations = map[string]bool{
+	a2a.MethodSendMessage:          true,
+	a2a.MethodSendStreamingMessage: true,
+}
 
 // operationImplemented reports whether an A2A operation is wired to real
 // behaviour.
@@ -75,10 +96,28 @@ func operationImplemented(operation string) bool { return implementedOperations[
 
 // Plugin is the A2A serve plugin.
 type Plugin struct {
+	bus    engine.EventBus
 	logger *slog.Logger
 	cfg    *config
 	card   *servedCard
 	server *Server
+
+	// sessionID is the Nexus session this listener serves. One process owns one
+	// session, which is what makes the contextId binding below single-valued.
+	sessionID string
+
+	// mu guards active and contextID: both are read by net/http goroutines and
+	// written by them, while bus handlers read active from arbitrary engine
+	// goroutines.
+	mu sync.Mutex
+	// active is the single in-flight task. At most one runs at a time: the
+	// listener fronts one agent loop, and two turns would interleave on the bus.
+	active *run
+	// contextID is the A2A context this process is bound to, claimed by the
+	// first turn. See bindContextLocked.
+	contextID string
+
+	unsubs []func()
 }
 
 // New creates a new A2A serve plugin.
@@ -93,23 +132,44 @@ func (p *Plugin) Dependencies() []string            { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
-// Subscriptions declares the bus events this plugin consumes.
+// Subscriptions declares every bus event the outbound translator consumes. It
+// must stay in lockstep with the Subscribe calls in Init; the contract harness
+// enforces that, and each entry below earns its place by driving a frame:
 //
-// It is empty, and honestly so: this story stands up the transport, not the
-// bus mapping. Declaring the events a future story will need would make the
-// contract harness pass against an intention rather than against behaviour,
-// which is the one thing the harness exists to prevent.
-func (p *Plugin) Subscriptions() []engine.EventSubscription { return nil }
+//   - agent.turn.start  -> the WORKING status update
+//   - llm.response      -> the terminal assistant text (tool-call-free responses)
+//   - io.output         -> the same text after the output gates had their say
+//   - agent.turn.end    -> the artifact plus the COMPLETED status
+//   - core.error        -> a FAILED status when nothing will retry
+func (p *Plugin) Subscriptions() []engine.EventSubscription {
+	return []engine.EventSubscription{
+		{EventType: "agent.turn.start", Priority: 50},
+		{EventType: "agent.turn.end", Priority: 50},
+		{EventType: "llm.response", Priority: 50},
+		{EventType: "io.output", Priority: 50},
+		{EventType: "core.error", Priority: 50},
+	}
+}
 
-// Emissions declares the bus events this plugin publishes. Empty for the same
-// reason as Subscriptions: no inbound request reaches the bus yet.
-func (p *Plugin) Emissions() []string { return nil }
+// Emissions declares the bus events the inbound mapping publishes: one turn's
+// worth of user input, gated first so the same guardrails that see a TUI keypress
+// see an A2A message.
+func (p *Plugin) Emissions() []string {
+	return []string{
+		"before:io.input",
+		"io.input",
+	}
+}
 
 // Init resolves configuration, renders the Agent Card and constructs the
 // server. Nothing binds a socket here; the listener starts in Ready so every
 // plugin has finished Init first.
 func (p *Plugin) Init(ctx engine.PluginContext) error {
+	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	if ctx.Session != nil {
+		p.sessionID = ctx.Session.ID
+	}
 
 	cfg, err := parseConfig(ctx.Config)
 	if err != nil {
@@ -130,7 +190,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		cfg:    cfg,
 		card:   card,
 		logger: p.logger,
+		bridge: p,
 	})
+
+	// Outbound translation (engine -> A2A frames). Handlers translate and
+	// enqueue onto the active run; they never write a response.
+	p.unsubs = append(p.unsubs,
+		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
+		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.response", p.handleLLMResponse, engine.WithSource(pluginID)),
+		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
+		p.bus.Subscribe("core.error", p.handleError, engine.WithSource(pluginID)),
+	)
 
 	// One line an operator can read the whole posture off: where it binds, what
 	// it will accept, which validators are live and in what order, and both
@@ -160,8 +231,18 @@ func (p *Plugin) Ready() error {
 	return nil
 }
 
-// Shutdown gracefully stops the HTTP server.
+// Shutdown unsubscribes, fails any in-flight task so its HTTP handler returns
+// promptly, and gracefully stops the HTTP server.
 func (p *Plugin) Shutdown(_ context.Context) error {
+	for _, unsub := range p.unsubs {
+		unsub()
+	}
+	p.unsubs = nil
+
+	if r := p.currentRun(); r != nil {
+		r.fail("the agent is shutting down")
+	}
+
 	if p.server == nil {
 		return nil
 	}

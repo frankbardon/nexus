@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -89,11 +90,19 @@ func TestPluginIdentity(t *testing.T) {
 	if p.ID() != "nexus.io.a2a" {
 		t.Errorf("ID() = %q, want nexus.io.a2a", p.ID())
 	}
-	if len(p.Subscriptions()) != 0 {
-		t.Errorf("Subscriptions() = %v; this story maps nothing onto the bus", p.Subscriptions())
+	// The declared contract is the one the turn mapping actually uses; the
+	// contract harness checks it against runtime behaviour, this checks it is
+	// spelled the way the rest of the engine spells it.
+	wantSubs := []string{"agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error"}
+	var haveSubs []string
+	for _, sub := range p.Subscriptions() {
+		haveSubs = append(haveSubs, sub.EventType)
 	}
-	if len(p.Emissions()) != 0 {
-		t.Errorf("Emissions() = %v; this story maps nothing onto the bus", p.Emissions())
+	if !slices.Equal(haveSubs, wantSubs) {
+		t.Errorf("Subscriptions() = %v, want %v", haveSubs, wantSubs)
+	}
+	if want := []string{"before:io.input", "io.input"}; !slices.Equal(p.Emissions(), want) {
+		t.Errorf("Emissions() = %v, want %v", p.Emissions(), want)
 	}
 	if p.Dependencies() != nil || p.Requires() != nil {
 		t.Error("plugin declares dependencies or requirements it does not have")
@@ -191,6 +200,7 @@ func TestReadyAndShutdownBindAndRelease(t *testing.T) {
 	p := New().(*Plugin)
 	if err := p.Init(engine.PluginContext{
 		Config: testConfig(t, map[string]any{"bind": addr}),
+		Bus:    engine.NewEventBus(),
 		Logger: discardLogger(),
 	}); err != nil {
 		t.Fatalf("Init: %v", err)

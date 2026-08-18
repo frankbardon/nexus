@@ -5,49 +5,66 @@ import (
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness/contract"
 )
 
-// TestContract_NoBusSurface asserts the plugin's declared event contract is
-// honest for this story: it neither subscribes to nor emits anything.
+// TestContract_TurnMapping asserts the declared event contract is the one the
+// plugin actually exercises: an A2A message emits io.input (gated first), and
+// nothing else reaches the bus.
 //
-// This is the assertion that matters right now. The transport is stood up but no
-// request reaches the bus, so declaring the events a later story will need would
-// make the harness pass against an intention. When the bus mapping lands, this
-// test flips into the usual Inject/AssertEmitted shape.
-func TestContract_NoBusSurface(t *testing.T) {
+// The turn is driven through a real listener and a real bus, so the declaration
+// is checked against behaviour rather than against intent — which is the whole
+// reason this harness exists.
+func TestContract_TurnMapping(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithPluginConfig(testConfig(t, nil)))
 
-	if subs := h.Plugin().Subscriptions(); len(subs) != 0 {
-		t.Errorf("Subscriptions() = %v; the plugin wires no bus handlers in Init", subs)
-	}
-	if emits := h.Plugin().Emissions(); len(emits) != 0 {
-		t.Errorf("Emissions() = %v; the plugin publishes nothing", emits)
-	}
+	h.AssertSubscribesTo("agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error")
 
-	// Drive the transport end to end through a real listener and confirm the bus
-	// stays quiet: the declaration and the runtime agree because there is no
-	// runtime bus behaviour, not because nothing was exercised.
 	p, ok := h.Plugin().(*Plugin)
 	if !ok {
 		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
 	}
-	rec := do(t, p.server, http.MethodGet, a2a.AgentCardPath)
+
+	// A scripted agent answers the turn so the task reaches a terminal state and
+	// the request returns.
+	h.Bus().Subscribe("io.input", func(e engine.Event[any]) {
+		in, ok := e.Payload.(events.UserInput)
+		if !ok {
+			return
+		}
+		scriptedTurn("contract answer")(h.Bus(), in)
+	}, engine.WithSource("test.agent"))
+
+	rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
+		jsonrpcBody(t, a2a.MethodSendMessage, sendMessageParams("drive a turn", "ctx-contract")))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("agent card status = %d: %s", rec.Code, rec.Body)
+		t.Fatalf("SendMessage status = %d: %s", rec.Code, rec.Body)
 	}
-	rec = do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
+
+	h.AssertEmitted("io.input")
+	h.AssertNoUndeclaredEmissions()
+}
+
+// TestContract_UnwiredOperationsStayOffTheBus pins the other half of the
+// contract: an operation that is not implemented must not reach the bus at all,
+// so the not-implemented refusal cannot quietly acquire a side effect.
+func TestContract_UnwiredOperationsStayOffTheBus(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithPluginConfig(testConfig(t, nil)))
+
+	p, ok := h.Plugin().(*Plugin)
+	if !ok {
+		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
+	}
+	rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
 		jsonrpcBody(t, a2a.MethodGetTask, map[string]any{"id": "task-1"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("jsonrpc status = %d: %s", rec.Code, rec.Body)
 	}
 
+	h.AssertNotEmitted("io.input")
 	h.AssertNoUndeclaredEmissions()
-	for _, ev := range h.PluginEmissions() {
-		if ev.Source == pluginID {
-			t.Errorf("plugin emitted %q while declaring no emissions", ev.Type)
-		}
-	}
 }
 
 // TestContract_BootsThroughTheHarness asserts Init and Ready succeed under the
@@ -67,5 +84,9 @@ func TestContract_BootsThroughTheHarness(t *testing.T) {
 	}
 	if len(card.SecuritySchemes) == 0 {
 		t.Error("a guarded listener published no securitySchemes for a client to discover")
+	}
+	// The card advertises streaming now that SendStreamingMessage is wired.
+	if !card.Capabilities.Streaming {
+		t.Error("capabilities.streaming is false while SendStreamingMessage is implemented")
 	}
 }

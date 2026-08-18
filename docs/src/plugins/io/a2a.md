@@ -22,21 +22,17 @@ interop transport is not a Nexus UI, so nothing here is back-ported into
 
 ## Current maturity
 
-> Every operation is routed, version-negotiated and authenticated — and then
-> answered with `UnsupportedOperationError`. **No A2A operation drives an agent
-> turn yet.** The plugin declares no bus subscriptions and emits no bus events;
-> its contract test asserts exactly that, so the declaration cannot quietly
-> drift ahead of the behaviour.
+> `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**. The
+> task-store operations — `GetTask`, `ListTasks`, `CancelTask`,
+> `SubscribeToTask` — are routed, version-negotiated and authenticated, then
+> answered with `UnsupportedOperationError`: tasks are not retained between
+> calls yet.
 
-The Agent Card reports this honestly rather than advertising an intention:
+The Agent Card reports this rather than advertising an intention:
 `capabilities.streaming`, `pushNotifications` and `extendedAgentCard` are all
-derived from the set of operations the plugin actually implements, which is
-currently empty. Wiring an operation flips its capability in the same edit, so
-the card and the behaviour cannot disagree.
-
-The **discovery and authentication surfaces are complete**: an A2A client can
-fetch the card, learn which credentials to present, present them, and receive a
-well-formed protocol error rather than a wrong answer.
+derived from the set of operations the plugin actually implements. Wiring an
+operation flips its capability in the same edit, so the card and the behaviour
+cannot disagree.
 
 ## Details
 
@@ -45,9 +41,58 @@ well-formed protocol error rather than a wrong answer.
 | **ID** | `nexus.io.a2a` |
 | **Dependencies** | None |
 | **Requires** | None |
-| **Subscriptions** | *(none yet)* |
-| **Emissions** | *(none yet)* |
+| **Subscriptions** | `agent.turn.start`, `agent.turn.end`, `llm.response`, `io.output`, `core.error` |
+| **Emissions** | `before:io.input`, `io.input` |
 | **Listens?** | Yes — loopback by default (`127.0.0.1:8091`) |
+
+## How a message becomes a turn
+
+```
+SendMessage / SendStreamingMessage
+  └─ message.parts (text)  ──▶  before:io.input ──▶ io.input
+                                                       │
+        Task SUBMITTED  ◀── the request was accepted    │
+        Task WORKING    ◀── agent.turn.start            ▼
+        Artifact (text) ◀── io.output / llm.response  the agent runs
+        Task COMPLETED  ◀── agent.turn.end
+        Task FAILED     ◀── core.error (fatal or retries exhausted)
+```
+
+One call is one Task is one turn. `SendMessage` **blocks** until that task is
+terminal and returns the finished Task — A2A's default (§3.2.2) —
+while `SendStreamingMessage` writes the same frames as SSE and closes the stream
+the moment a frame reports a terminal state. Both bindings render from one
+translation, so they cannot report different outcomes for the same turn.
+
+The turn's final assistant text is published as an Artifact carrying a text
+Part. It is taken from `io.output` rather than straight from the model, so
+whatever the output gates actually let through is what the client receives.
+Richer artifacts — tool results, files, structured output — are a later story.
+
+Refusals worth knowing about, each carrying the error type the specification
+reserves for it: a non-text Part (`ContentTypeNotSupportedError`), a message
+naming a `taskId` (`TaskNotFoundError` — nothing is retained to continue),
+`configuration.returnImmediately` (`UnsupportedOperationError` — a task returned
+early cannot be polled while `GetTask` is unwired), and a second task while one
+is in flight (`UnsupportedOperationError` — the listener fronts one agent loop,
+and two turns would interleave on the same bus).
+
+## `contextId` is the Nexus session
+
+An A2A context is a conversation, and so is a Nexus session. They map onto each
+other — but a Nexus process owns exactly **one** session, fixed at boot, with one
+`memory.history` buffer and no bus primitive that starts a second session or
+resets history. So:
+
+- The first call **claims** the session. A client that names no `contextId` is
+  assigned the session id and gets it back on the Task.
+- Later calls naming the **same** context continue the conversation, history
+  intact.
+- A **different** `contextId` is refused, naming the bound one. Accepting it
+  would hand the caller a conversation already carrying another context's
+  history while calling it new, which is worse than an error. One instance per
+  context is the answer, and the [session
+  broker](../../guides/session-broker.md) exists to automate that.
 
 ## Configuration
 
@@ -156,17 +201,23 @@ bin/nexus -config configs/test-a2a-serve.yaml
 # Discovery needs no credentials.
 curl -s localhost:18191/.well-known/agent-card.json | jq
 
-# Operations do.
-curl -s localhost:18191/a2a \
+# Operations do. This one runs a turn and streams it.
+curl -sN localhost:18191/a2a \
   -H 'Authorization: Bearer test-a2a-token' \
   -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/a2a+json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"t-1"}}' | jq
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":
+       {"message":{"messageId":"m1","role":"ROLE_USER",
+        "parts":[{"text":"hello"}],"contextId":"demo"}}}'
 ```
 
-The second call returns an `UnsupportedOperationError` (`-32004`) today; that is
-the documented end state of the current stage, not a misconfiguration. Drop the
-`Authorization` header to see the `401` and its RFC 6750 challenge.
+Each SSE record carries one `StreamResponse`: the opening Task in
+`TASK_STATE_SUBMITTED`, a `TASK_STATE_WORKING` status update, an artifact
+holding the reply, and the `TASK_STATE_COMPLETED` update that closes the stream.
+Send the same `contextId` again to continue the conversation. Swap the method
+for `GetTask` to see the `UnsupportedOperationError` (`-32004`) the unwired
+operations still return, or drop the `Authorization` header for the `401` and
+its RFC 6750 challenge.
 
 ## See also
 

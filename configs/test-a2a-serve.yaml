@@ -4,15 +4,28 @@
 # document plus the JSON-RPC and HTTP+JSON/REST bindings, guarded by a shared
 # bearer token.
 #
-# NOTE for this stage of the effort: no A2A operation drives a turn yet. Every
-# operation is decoded, version-checked and authenticated, then answered with
-# UnsupportedOperationError, and the Agent Card honestly advertises
-# capabilities.streaming as false to match. The card endpoint is the surface
-# that is fully live.
+# SendMessage and SendStreamingMessage drive a real Nexus turn: the message's
+# text becomes an io.input, the ReAct agent runs, and the turn is reported as one
+# A2A Task moving SUBMITTED -> WORKING -> COMPLETED with the final assistant text
+# as an artifact. The task-store operations (GetTask, ListTasks, CancelTask,
+# SubscribeToTask) are still answered with UnsupportedOperationError.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses (mock_responses) so
+# no API key is needed — it has no scripted inputs; the A2A request is the sole
+# driver of the turn. Remove the mock_responses block to run live against a real
+# provider (needs ANTHROPIC_API_KEY).
 #
 # Run:
 #   bin/nexus -config configs/test-a2a-serve.yaml
 #   curl -s localhost:18191/.well-known/agent-card.json | jq
+#   curl -sN localhost:18191/a2a \
+#     -H 'Authorization: Bearer test-a2a-token' \
+#     -H 'A2A-Version: 1.0' -H 'Content-Type: application/a2a+json' \
+#     -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":
+#          {"message":{"messageId":"m1","role":"ROLE_USER",
+#           "parts":[{"text":"hello"}],"contextId":"demo"}}}'
+#
+#   go test -tags integration ./tests/integration/ -run TestA2AServe
 
 core:
   log_level: warn
@@ -41,8 +54,11 @@ plugins:
     inputs: []
     approval_mode: approve
     timeout: 20s
+    # Two mock LLM responses so a second turn on the same context is visibly a
+    # different answer, which is what makes the continuation assertion real.
     mock_responses:
       - content: "Hello from a mocked Nexus agent."
+      - content: "Still here on the second turn."
 
   nexus.io.a2a:
     # Fixed high port unlikely to collide; integration tests run sequentially.

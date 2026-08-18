@@ -48,11 +48,24 @@ const (
 // authRealm is the RFC 7235 realm this listener challenges with.
 const authRealm = "nexus-a2a"
 
+// turnBridge is the seam between the HTTP server and the plugin's bus wiring.
+// The server hands a decoded SendMessage to startTurn (which binds the context,
+// registers the active run and emits io.input) and calls endTurn once the
+// response has been rendered. It is satisfied by *Plugin.
+type turnBridge interface {
+	startTurn(in turnInput) (*run, *a2a.Error)
+	endTurn(r *run)
+}
+
 // serverConfig carries the resolved settings for the embedded HTTP server.
 type serverConfig struct {
 	cfg    *config
 	card   *servedCard
 	logger *slog.Logger
+	// bridge drives the bus. A Server built without one answers every
+	// turn-driving operation with an internal error rather than panicking, which
+	// is what a directly-constructed Server in a transport-only test gets.
+	bridge turnBridge
 }
 
 // Server is the embedded A2A HTTP server. It owns an *http.Server bound to a
@@ -268,9 +281,23 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unreachable while implementedOperations is empty. It is written as an
-	// internal error rather than a panic so that adding an entry to the map
-	// without adding a handler fails one request instead of the process.
+	bind := binding{jsonrpc: true, id: call.ID()}
+	switch call.Method {
+	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
+		req, ok := call.Params.(*a2a.SendMessageRequest)
+		if !ok {
+			s.writeError(w, bind, a2a.Errorf(a2a.ErrorTypeInternal,
+				"decoded %s params have type %T", call.Method, call.Params))
+			return
+		}
+		s.handleSendMessage(w, r, bind, req, call.Streaming())
+		return
+	}
+
+	// Unreachable while implementedOperations and this switch agree. It is
+	// written as an internal error rather than a panic so that adding an entry
+	// to the map without adding a handler fails one request instead of the
+	// process.
 	s.writeJSONRPCError(w, call.ID(),
 		a2a.Errorf(a2a.ErrorTypeInternal, "operation %q is marked implemented but has no handler", call.Method))
 }
@@ -340,6 +367,22 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 
 	if !operationImplemented(route.Operation) {
 		s.writeRESTError(w, notImplemented(route.Operation))
+		return
+	}
+
+	switch route.Operation {
+	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.writeRESTError(w, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", err))
+			return
+		}
+		req, protoErr := a2a.DecodeSendMessageRequest(body)
+		if protoErr != nil {
+			s.writeRESTError(w, protoErr)
+			return
+		}
+		s.handleSendMessage(w, r, binding{}, req, route.Streaming)
 		return
 	}
 

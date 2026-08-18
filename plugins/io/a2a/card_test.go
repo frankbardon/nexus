@@ -68,8 +68,9 @@ func TestAgentCardIsServedAtTheWellKnownPath(t *testing.T) {
 	}
 }
 
-// TestAgentCardCapabilitiesAreDerivedNotConfigured pins the honesty rule: while
-// no operation is implemented the card must not claim streaming.
+// TestAgentCardCapabilitiesAreDerivedNotConfigured pins the honesty rule: every
+// capability boolean is computed from implementedOperations, so the card cannot
+// claim a capability nothing implements — nor understate one that is wired.
 func TestAgentCardCapabilitiesAreDerivedNotConfigured(t *testing.T) {
 	s := newTestServer(t, testConfig(t, nil))
 	rec := do(t, s, http.MethodGet, a2a.AgentCardPath)
@@ -81,6 +82,9 @@ func TestAgentCardCapabilitiesAreDerivedNotConfigured(t *testing.T) {
 	caps, _ := doc["capabilities"].(map[string]any)
 	if caps == nil {
 		t.Fatal("card has no capabilities object")
+	}
+	if caps["streaming"] != true {
+		t.Error("capabilities.streaming = false while SendStreamingMessage drives real turns")
 	}
 	for key, want := range map[string]bool{
 		"streaming":         operationImplemented(a2a.MethodSendStreamingMessage) || operationImplemented(a2a.MethodSubscribeToTask),

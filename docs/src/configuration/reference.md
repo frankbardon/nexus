@@ -1509,11 +1509,12 @@ and the HTTP+JSON/REST binding. The wire format is `pkg/a2a` (A2A specification
 assembly and the routing. Safe by default: binds loopback, optional auth through
 the shared `pkg/nexusauth` chain, and CORS off unless configured.
 
-> **Maturity.** Every operation is routed, version-negotiated and
-> authenticated, then answered with `UnsupportedOperationError` — no A2A
-> operation drives an agent turn yet. The Agent Card reports this honestly:
-> `capabilities.streaming` is `false` until the streaming operations are wired.
-> The discovery and authentication surfaces are complete.
+> **Maturity.** `SendMessage` and `SendStreamingMessage` drive a real Nexus
+> turn. The task-store operations — `GetTask`, `ListTasks`, `CancelTask`,
+> `SubscribeToTask` — are routed, version-negotiated and authenticated, then
+> answered with `UnsupportedOperationError`; tasks are not retained between
+> calls yet. The Agent Card reports this honestly: `capabilities.streaming` is
+> `true`, `pushNotifications` and `extendedAgentCard` are `false`.
 
 | Key                     | Type         | Default              | Description |
 |-------------------------|--------------|----------------------|-------------|
@@ -1536,6 +1537,53 @@ everything under `auth:` and `card:` — **before `Init` runs**, with
 `additionalProperties: false` at every object level. The schema also enforces
 that one of `card`/`card_file` is present. The table above is the whole
 top-level surface; any key not listed is rejected.
+
+#### Running a turn
+
+A `SendMessage` or `SendStreamingMessage` becomes one Nexus turn, reported as
+one A2A Task. There is no configuration for any of this; it is the fixed
+behaviour of the transport.
+
+| A2A | Nexus |
+|---|---|
+| The message's text parts | `before:io.input` (vetoable, so the same gates that see a TUI keypress see this) then `io.input` |
+| Task created `SUBMITTED` | the request is accepted |
+| Task `WORKING` | `agent.turn.start` |
+| Artifact with a text Part | the turn's final assistant text, taken from `io.output` (or the terminal `llm.response` when no output was published) |
+| Task `COMPLETED` | `agent.turn.end` |
+| Task `FAILED` | a `core.error` that is fatal or has exhausted its retries, or a vetoed input |
+
+`SendMessage` **blocks** until the task is terminal and returns the finished
+Task, which is A2A's default (§3.2.2). `configuration.returnImmediately` is
+refused: a task returned early cannot be polled while `GetTask` is unwired, so
+the honest answer is an error rather than an unresolvable task id.
+`SendStreamingMessage` writes the same frames as SSE — an opening Task snapshot,
+status updates, the artifact, and the terminal status that closes the stream.
+
+Other refusals, each with the error type the specification reserves for it: a
+non-text Part or an `acceptedOutputModes` list with no text type
+(`ContentTypeNotSupportedError`), a message naming a `taskId`
+(`TaskNotFoundError` — tasks are not retained), an inline
+`taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a second
+task while one is in flight (`UnsupportedOperationError`; the listener fronts
+one agent loop).
+
+#### `contextId` and the Nexus session
+
+An A2A context is a conversation and so is a Nexus session, so `contextId` maps
+onto the session — but a Nexus process owns exactly **one** session, fixed at
+boot, and there is no bus primitive that starts a second one or resets history.
+The binding follows from that:
+
+- The first call **claims** the session. A client that names no `contextId` is
+  assigned the session id and gets it back on the Task, so it can keep using it.
+- Later calls naming the **same** context continue the conversation, with
+  history intact — `memory.history` persists across turns within a session.
+- A **different** `contextId` is refused with `UnsupportedOperationError` naming
+  the bound context. Accepting it would hand the caller a conversation already
+  carrying another context's history while calling it new. Run one instance per
+  context; the [session broker](../guides/session-broker.md) automates exactly
+  that.
 
 #### Agent Card content
 
