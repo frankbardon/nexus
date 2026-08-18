@@ -1507,7 +1507,10 @@ the `/.well-known/agent-card.json` discovery document, the JSON-RPC 2.0 binding,
 and the HTTP+JSON/REST binding. The wire format is `pkg/a2a` (A2A specification
 1.0.x); this plugin contributes the listener, the credential guard, the card
 assembly and the routing. Safe by default: binds loopback, optional auth through
-the shared `pkg/nexusauth` chain, and CORS off unless configured.
+the shared `pkg/nexusauth` chain, and CORS off unless configured. The
+[A2A Interoperability guide](../guides/a2a.md) covers the protocol mapping and a
+worked end-to-end example; [`nexus.io.a2a`](../plugins/io/a2a.md) is the plugin
+page.
 
 > **Maturity.** `SendMessage` and `SendStreamingMessage` drive a real Nexus
 > turn. The task-store operations — `GetTask`, `ListTasks`, `CancelTask`,

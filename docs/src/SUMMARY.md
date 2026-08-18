@@ -128,4 +128,5 @@
 - [Integration Testing](./guides/integration-testing.md)
 - [Plugin Contract Tests](./guides/plugin-contracts.md)
 - [Session Broker](./guides/session-broker.md)
+- [A2A Interoperability](./guides/a2a.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)

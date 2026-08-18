@@ -197,6 +197,10 @@ full mapping.
 bin/nexus -config configs/test-a2a-serve.yaml
 ```
 
+> That config's `nexus.io.test` block carries `timeout: 20s`, which ends the
+> session — and the process — twenty seconds after boot. Raise it for a longer
+> window to poke at the endpoint by hand.
+
 ```bash
 # Discovery needs no credentials.
 curl -s localhost:18191/.well-known/agent-card.json | jq
@@ -221,6 +225,8 @@ its RFC 6750 challenge.
 
 ## See also
 
+- [A2A Interoperability guide](../../guides/a2a.md) — the protocol mapping, a
+  worked end-to-end example, and what is deliberately unsupported
 - [Configuration Reference — `nexus.io.a2a`](../../configuration/reference.md#nexusioa2a)
 - [AG-UI transport](../io-agui.md) — the structural sibling
 - [Authentication (`auth:`)](../../configuration/reference.md#authentication-auth)
