@@ -335,10 +335,13 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- **`GetTask` / `ListTasks` / `SubscribeToTask`** need a task store. Tasks are
-  not retained between calls at all right now, which is also why a message
-  naming a `taskId` is refused with `TaskNotFoundError` rather than silently
-  starting a fresh turn under an id the client believes it is resuming.
+- **`GetTask` / `ListTasks` / `SubscribeToTask`** are not wired to the wire yet.
+  Tasks *are* now retained durably — a principal-scoped SQLite store under the
+  session directory records every task, its transitions and its artifacts — but
+  no operation reads from it over the protocol, and nothing resumes a stored
+  task, which is why a message naming a `taskId` is still refused with
+  `TaskNotFoundError` rather than silently starting a fresh turn under an id the
+  client believes it is resuming.
 - **HITL as `TASK_STATE_INPUT_REQUIRED`.** The intended shape is that a Nexus
   `hitl.requested` parks the task in `INPUT_REQUIRED` with the question in
   `status.message`, and the client resumes by sending a new message carrying the

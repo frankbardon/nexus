@@ -1513,11 +1513,15 @@ worked end-to-end example; [`nexus.io.a2a`](../plugins/io/a2a.md) is the plugin
 page.
 
 > **Maturity.** `SendMessage` and `SendStreamingMessage` drive a real Nexus
-> turn. The task-store operations — `GetTask`, `ListTasks`, `CancelTask`,
-> `SubscribeToTask` — are routed, version-negotiated and authenticated, then
-> answered with `UnsupportedOperationError`; tasks are not retained between
-> calls yet. The Agent Card reports this honestly: `capabilities.streaming` is
-> `true`, `pushNotifications` and `extendedAgentCard` are `false`.
+> turn, and every task they create is **persisted durably** — see
+> [Task retention](#task-retention) below. The read and control operations —
+> `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` — are routed,
+> version-negotiated and authenticated, then answered with
+> `UnsupportedOperationError`; the store is in place but nothing is wired to
+> read from it over the wire yet. Sending a message that names a `taskId`
+> (continuing a task) is likewise refused. The Agent Card reports all of this
+> honestly: `capabilities.streaming` is `true`, `pushNotifications` and
+> `extendedAgentCard` are `false`.
 
 | Key                     | Type         | Default              | Description |
 |-------------------------|--------------|----------------------|-------------|
@@ -1533,6 +1537,7 @@ page.
 | `auth`                  | map          | *(absent)*           | Validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker and `nexus.io.agui` use, so `static`, `jwks`, `introspect` and `proxy_headers` are all available. The card's `securitySchemes` are derived from it — see [Agent Card security](#agent-card-security-schemes) below. Every rule documented under [Authentication (`auth:`)](#authentication-auth) applies verbatim; `auth.admin_scope` is broker-only and is rejected here. |
 | `card`                  | map          | *(absent)*           | The hand-authored Agent Card. Exactly one of `card` or `card_file` is **required**. See [Agent Card content](#agent-card-content) below. |
 | `card_file`             | string (path)| *(absent)*           | Path to a JSON file holding a complete A2A Agent Card document (camelCase wire shape). Expanded through `engine.ExpandPath`, so `~` and `~/...` work. Mutually exclusive with `card`. |
+| `tasks`                 | map          | *(absent)*           | Retention policy for the durable task store. Both knobs have non-zero defaults; see [Task retention](#task-retention) below. |
 
 **Schema-validated at boot.** The plugin ships `plugins/io/a2a/schema.json` and
 implements `ConfigSchema()`, so the engine validates this block — including
@@ -1566,10 +1571,56 @@ status updates, the artifact, and the terminal status that closes the stream.
 Other refusals, each with the error type the specification reserves for it: a
 non-text Part or an `acceptedOutputModes` list with no text type
 (`ContentTypeNotSupportedError`), a message naming a `taskId`
-(`TaskNotFoundError` — tasks are not retained), an inline
+(`TaskNotFoundError` — tasks are stored, but continuing one is not supported
+yet, so every message starts a new task), an inline
 `taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a second
 task while one is in flight (`UnsupportedOperationError`; the listener fronts
 one agent loop).
+
+#### Task retention
+
+Every task this listener creates is written to a SQLite database at
+`<session>/plugins/nexus.io.a2a/store.db`, opened through the engine's
+[per-plugin storage](../architecture/storage.md) capability at **session**
+scope. There is no bespoke file format and no separate cleanup job: archiving
+the session disposes of its tasks with it. A listener that cannot open the store
+**does not start** — a task that existed only for the lifetime of its request is
+exactly the lie the store exists to prevent.
+
+The record holds the task id, its `contextId`, the current state with its
+timestamp, the full status-transition history, every artifact, message
+references for both sides of the exchange, and the authenticated `Principal`
+that created it. Reads are **principal-scoped**: a caller can only ever reach
+tasks filed under its own principal id, and there is no unscoped query in the
+store's API to reach for by mistake. With no `auth:` block configured every
+caller is unauthenticated and shares one partition.
+
+Retention is load-bearing rather than housekeeping — a task carries its history
+and its artifacts, so an unbounded store would grow with traffic rather than
+with the conversation. Both knobs are enforced on open and after every task
+creation, and a task is evicted when it exceeds **either** of them. Only
+**terminal** tasks are evictable: a live task is the one a client is most likely
+to be following, so it is never dropped mid-turn. Non-terminal tasks still
+*count* against the per-context cap, so a wedged in-flight task shows up as
+retention pressure instead of exempting itself from it.
+
+| Key                     | Type            | Default | Description |
+|-------------------------|-----------------|---------|-------------|
+| `tasks.ttl`             | duration string | `24h`   | How long a terminal task is kept after its last transition. `"0s"` disables age-based eviction and keeps tasks for the life of the session. A bare number is rejected: `600` reads as ten minutes to an operator and six hundred nanoseconds to Go. Must not be negative. |
+| `tasks.max_per_context` | int             | `200`   | How many tasks are kept per (principal, `contextId`) pair. `0` disables the cap. The cap is per **principal and** context, not per context alone, so one principal's traffic cannot evict another's tasks. Must not be negative. |
+
+The defaults are chosen for the standalone single-context listener: 24 hours is
+comfortably longer than any plausible client reconnect window, and 200 tasks is
+200 turns of history — far more than a client polls back over, and small enough
+that the worst case stays in the low megabytes.
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    tasks:
+      ttl: 72h
+      max_per_context: 50
+```
 
 #### `contextId` and the Nexus session
 

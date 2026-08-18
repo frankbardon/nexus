@@ -22,17 +22,37 @@ interop transport is not a Nexus UI, so nothing here is back-ported into
 
 ## Current maturity
 
-> `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**. The
-> task-store operations — `GetTask`, `ListTasks`, `CancelTask`,
-> `SubscribeToTask` — are routed, version-negotiated and authenticated, then
-> answered with `UnsupportedOperationError`: tasks are not retained between
-> calls yet.
+> `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**, and
+> every task they create is **persisted durably** in a principal-scoped,
+> session-scoped SQLite store. The read and control operations — `GetTask`,
+> `ListTasks`, `CancelTask`, `SubscribeToTask` — are routed, version-negotiated
+> and authenticated, then answered with `UnsupportedOperationError`: the store
+> exists, but nothing reads from it over the wire yet.
 
 The Agent Card reports this rather than advertising an intention:
 `capabilities.streaming`, `pushNotifications` and `extendedAgentCard` are all
 derived from the set of operations the plugin actually implements. Wiring an
 operation flips its capability in the same edit, so the card and the behaviour
 cannot disagree.
+
+## Task store
+
+Every task is recorded in `<session>/plugins/nexus.io.a2a/store.db`, opened
+through the engine's per-plugin [storage](../../architecture/storage.md)
+capability at session scope. The record carries the task id, its `contextId`,
+the current state and timestamp, the full status history, the artifacts, message
+references for both sides of the exchange, and the authenticated `Principal`
+that created it. The task row is written **before** the turn is allowed to
+start, and every transition is written through as the frame reporting it is
+queued for the wire, so the store never lags what a client has been told.
+
+Reads are principal-scoped by construction: the store hands out a view bound to
+one `Principal` and every statement on that view names `principal_id`. There is
+no unscoped query in the API, so enumerating another principal's tasks is not an
+expression the package can form.
+
+Retention (`tasks.ttl`, `tasks.max_per_context`) is documented in the
+[configuration reference](../../configuration/reference.md#task-retention).
 
 ## Details
 

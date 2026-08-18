@@ -1,6 +1,7 @@
 package a2a
 
 import (
+	"log/slog"
 	"sync"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
@@ -41,6 +42,16 @@ type run struct {
 	taskID    string
 	contextID string
 
+	// sink is the durable record of this task, already scoped to the principal
+	// that created it. Every frame the run produces is written through it
+	// before it is queued for the wire — see record. Nil only in transport-only
+	// tests that construct a run directly.
+	sink taskSink
+	// logger reports a store write that failed. A failed write does NOT fail
+	// the turn: the client is owed the answer the agent produced, and a store
+	// that cannot record it is an operator problem, not a protocol one.
+	logger *slog.Logger
+
 	// out carries every translated frame. See the concurrency note above.
 	out chan a2a.StreamResponse
 	// done is closed once a terminal frame has been queued, so later bus
@@ -63,11 +74,14 @@ type run struct {
 	finalText string
 }
 
-// newRun builds a run for one task.
-func newRun(taskID, contextID string) *run {
+// newRun builds a run for one task, bound to the durable record it writes
+// through to.
+func newRun(taskID, contextID string, sink taskSink, logger *slog.Logger) *run {
 	return &run{
 		taskID:    taskID,
 		contextID: contextID,
+		sink:      sink,
+		logger:    logger,
 		out:       make(chan a2a.StreamResponse, runQueueDepth),
 		done:      make(chan struct{}),
 	}
@@ -91,6 +105,7 @@ func (r *run) queue(frame a2a.StreamResponse) {
 		return
 	default:
 	}
+	r.record(frame)
 	select {
 	case r.out <- frame:
 	case <-r.done:
@@ -102,9 +117,49 @@ func (r *run) queue(frame a2a.StreamResponse) {
 // reader that has gone away. Dropping is unreachable in practice (a turn queues
 // three frames into a 256-slot buffer) and is preferable to a stuck engine.
 func (r *run) push(frame a2a.StreamResponse) {
+	r.record(frame)
 	select {
 	case r.out <- frame:
 	default:
+	}
+}
+
+// record persists one frame to the durable task record.
+//
+// This is the ONLY write-through point, and it sits on the two enqueue paths
+// rather than on each translator, so a transition cannot reach the wire without
+// reaching the store: adding a frame type to a translator persists it by
+// construction. It runs BEFORE the enqueue so the store never lags what a
+// client has already been told.
+//
+// Callers must not hold r.mu: this touches SQLite.
+func (r *run) record(frame a2a.StreamResponse) {
+	if r.sink == nil {
+		return
+	}
+	var err error
+	switch frame.Kind() {
+	case a2a.StreamPayloadStatusUpdate:
+		err = r.sink.RecordStatus(r.taskID, frame.StatusUpdate.Status)
+	case a2a.StreamPayloadArtifactUpdate:
+		err = r.sink.RecordArtifact(r.taskID, frame.ArtifactUpdate.Artifact)
+	default:
+		return
+	}
+	if err != nil && r.logger != nil {
+		r.logger.Warn("a2a task store write failed",
+			"task_id", r.taskID, "frame", string(frame.Kind()), "error", err)
+	}
+}
+
+// recordMessage persists one message reference, logging rather than failing the
+// turn if the store refuses it. Callers must not hold r.mu.
+func (r *run) recordMessage(ref messageRef) {
+	if r.sink == nil {
+		return
+	}
+	if err := r.sink.RecordMessage(r.taskID, ref); err != nil && r.logger != nil {
+		r.logger.Warn("a2a task store message write failed", "task_id", r.taskID, "error", err)
 	}
 }
 
@@ -186,6 +241,16 @@ func (r *run) complete() {
 		r.mu.Unlock()
 
 		if text != "" {
+			// The reply is recorded as a message reference as well as an
+			// artifact. The artifact is the OUTPUT; the reference is the other
+			// half of the exchange, so a stored task can answer "what was said"
+			// rather than only "what was produced". Both are bounded by the
+			// same retention policy.
+			r.recordMessage(messageRef{
+				MessageID: newMessageID(),
+				Role:      a2a.RoleAgent,
+				Text:      text,
+			})
 			r.push(a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(r.taskID, r.contextID,
 				a2a.NewTextArtifact(r.taskID+artifactSuffix, artifactName, text))))
 		}

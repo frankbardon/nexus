@@ -53,7 +53,7 @@ const authRealm = "nexus-a2a"
 // registers the active run and emits io.input) and calls endTurn once the
 // response has been rendered. It is satisfied by *Plugin.
 type turnBridge interface {
-	startTurn(in turnInput) (*run, *a2a.Error)
+	startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a.Error)
 	endTurn(r *run)
 }
 
@@ -245,8 +245,11 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(a2a.HeaderVersion, a2a.ProtocolVersion)
 
 	// Auth first: a caller who cannot be identified gets no signal about what
-	// the endpoint would have accepted.
-	if _, err := s.authorize(r); err != nil {
+	// the endpoint would have accepted. The resolved Principal is carried
+	// forward rather than discarded: it is what a created task is filed under,
+	// and what scopes every later read of it.
+	caller, err := s.authorize(r)
+	if err != nil {
 		s.denyJSONRPC(w, r, err)
 		return
 	}
@@ -290,7 +293,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 				"decoded %s params have type %T", call.Method, call.Params))
 			return
 		}
-		s.handleSendMessage(w, r, bind, req, call.Streaming())
+		s.handleSendMessage(w, r, caller, bind, req, call.Streaming())
 		return
 	}
 
@@ -334,7 +337,8 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.authorize(r); err != nil {
+	caller, err := s.authorize(r)
+	if err != nil {
 		s.denyREST(w, r, err)
 		return
 	}
@@ -372,9 +376,9 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 
 	switch route.Operation {
 	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			s.writeRESTError(w, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", err))
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			s.writeRESTError(w, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
 			return
 		}
 		req, protoErr := a2a.DecodeSendMessageRequest(body)
@@ -382,7 +386,7 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 			s.writeRESTError(w, protoErr)
 			return
 		}
-		s.handleSendMessage(w, r, binding{}, req, route.Streaming)
+		s.handleSendMessage(w, r, caller, binding{}, req, route.Streaming)
 		return
 	}
 

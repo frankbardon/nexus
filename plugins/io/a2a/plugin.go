@@ -31,6 +31,16 @@
 // two that can drift. The turn's final assistant text rides out as an Artifact
 // carrying a text Part.
 //
+// # Durability
+//
+// Tasks are not a transient side effect of the request that created them. Each
+// one is written to a session-scoped SQLite store (taskstore.go) BEFORE its turn
+// is allowed to start, and every status transition and artifact is written
+// through as the frame reporting it is queued for the wire. The record is filed
+// under the authenticated Principal, and the store's only read surface is scoped
+// to one principal, so a task can never be reached by a caller that did not
+// create it. Retention (tasks.ttl, tasks.max_per_context) bounds the store.
+//
 // # What this plugin does NOT do yet
 //
 // GetTask, ListTasks, CancelTask and SubscribeToTask are decoded, version-checked
@@ -38,7 +48,8 @@
 // the operation — see implementedOperations, which is the single switch that
 // both gates dispatch and determines what the Agent Card claims. Adding an entry
 // there flips the behaviour and the advertised capability together, so the two
-// cannot disagree.
+// cannot disagree. The store they will read from is already in place; what is
+// missing is the wire mapping, not the data.
 //
 // # Concurrency
 //
@@ -60,6 +71,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
 )
 
 const pluginID = "nexus.io.a2a"
@@ -101,6 +113,12 @@ type Plugin struct {
 	cfg    *config
 	card   *servedCard
 	server *Server
+
+	// tasks is the durable task store. Every task this listener creates is
+	// recorded there before its turn is allowed to start, and every transition
+	// is written through as the frame that reports it is queued. Reads are only
+	// reachable through a principal-scoped view — see taskstore.go.
+	tasks *taskStore
 
 	// sessionID is the Nexus session this listener serves. One process owns one
 	// session, which is what makes the contextId binding below single-valued.
@@ -177,6 +195,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.cfg = cfg
 
+	// The task store is a hard requirement, not a best-effort extra. Without it
+	// a task would exist only for the lifetime of the request that created it,
+	// which is precisely the lie the store exists to prevent — so a listener
+	// that cannot open one does not start at all.
+	if ctx.Storage == nil {
+		return fmt.Errorf("%s: no per-plugin storage was provided; A2A tasks must be durable", pluginID)
+	}
+	st, err := ctx.Storage(storage.ScopeSession)
+	if err != nil {
+		return fmt.Errorf("%s: opening session-scoped storage for the task store: %w", pluginID, err)
+	}
+	store, err := openTaskStore(st, cfg.retention, ctx.Logger)
+	if err != nil {
+		return err
+	}
+	p.tasks = store
+
 	// The card is rendered and validated at boot. A card that cannot be served
 	// is a configuration error, and an operator should learn about it from a
 	// failed start rather than from a partner's client.
@@ -219,6 +254,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"agent_card", card.card.Name,
 		"skills", len(card.card.Skills),
 		"implemented_operations", len(implementedOperations),
+		"task_ttl", cfg.retention.ttl,
+		"tasks_per_context", cfg.retention.maxPerContext,
 	)
 	return nil
 }

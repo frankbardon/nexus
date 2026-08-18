@@ -6,10 +6,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
 )
 
 // freeAddr reserves and releases a loopback port so a test listener can bind it
@@ -23,6 +27,37 @@ func freeAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 	return addr
+}
+
+// storageAt returns a per-plugin storage opener rooted at dir, built exactly as
+// the engine's lifecycle manager builds one, plus the func that releases its
+// SQLite handles.
+//
+// Closing matters: a restart-durability test that merely opened a second handle
+// alongside the first would prove only that SQLite allows two connections. The
+// tests here close the first set of handles and reopen from the files on disk,
+// which is what a restarted process actually does.
+func storageAt(t *testing.T, dir string) (func(storage.Scope) (storage.Storage, error), func()) {
+	t.Helper()
+	sessionDir := filepath.Join(dir, "session")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	mgr := storage.NewManager(dir, "", func() string { return sessionDir }, nil)
+	var once sync.Once
+	closeFn := func() { once.Do(func() { _ = mgr.Close() }) }
+	t.Cleanup(closeFn)
+	return func(scope storage.Scope) (storage.Storage, error) {
+		return mgr.Open(scope, pluginID)
+	}, closeFn
+}
+
+// testStorage is storageAt over a fresh per-test temp dir, for tests that never
+// need to simulate a restart.
+func testStorage(t *testing.T) func(storage.Scope) (storage.Storage, error) {
+	t.Helper()
+	opener, _ := storageAt(t, t.TempDir())
+	return opener
 }
 
 func discardLogger() *slog.Logger {
@@ -199,9 +234,10 @@ func TestReadyAndShutdownBindAndRelease(t *testing.T) {
 	addr := freeAddr(t)
 	p := New().(*Plugin)
 	if err := p.Init(engine.PluginContext{
-		Config: testConfig(t, map[string]any{"bind": addr}),
-		Bus:    engine.NewEventBus(),
-		Logger: discardLogger(),
+		Config:  testConfig(t, map[string]any{"bind": addr}),
+		Bus:     engine.NewEventBus(),
+		Logger:  discardLogger(),
+		Storage: testStorage(t),
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

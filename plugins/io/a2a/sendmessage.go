@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // binding selects the wire framing a response is rendered in. The zero value is
@@ -23,11 +24,17 @@ type binding struct {
 // handleSendMessage drives one Nexus agent turn and renders it, blocking or
 // streaming, in whichever binding the request arrived on.
 //
+// caller is the Principal the request authenticated as; the bridge files the
+// created task under it, which is what makes every later read of that task
+// scoped. It is a required parameter rather than something recovered from the
+// request, so a new call site cannot reach the bus without deciding whose task
+// it is creating.
+//
 // This goroutine is the SOLE reader of the run's frame channel and the SOLE
 // writer to the response. Bus handlers only ever push onto that channel — see
 // the concurrency note on run — so neither the SSEWriter nor the ResponseWriter
 // is ever touched concurrently.
-func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, b binding, req *a2a.SendMessageRequest, streaming bool) {
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, caller nexusauth.Principal, b binding, req *a2a.SendMessageRequest, streaming bool) {
 	in, protoErr := translateSendMessage(req)
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)
@@ -43,7 +50,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, b bin
 	// Refusals are answered BEFORE any stream is opened. A client that is turned
 	// away gets an ordinary error response it can read from the status and the
 	// body, rather than a 200 SSE stream whose only record is a failure.
-	run, protoErr := s.cfg.bridge.startTurn(in)
+	run, protoErr := s.cfg.bridge.startTurn(in, caller)
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)
 		return

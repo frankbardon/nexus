@@ -73,6 +73,9 @@ func TestSchemaAcceptsTheDocumentedShape(t *testing.T) {
     cors_origins:
       - https://ui.example.test
     bearer_token_env: NEXUS_A2A_TOKEN
+    tasks:
+      ttl: 24h
+      max_per_context: 200
     card:
       name: nexus
       description: A Nexus agent.
@@ -117,6 +120,19 @@ func TestSchemaAcceptsTheValidatorChain(t *testing.T) {
 // server and no warning at all.
 func TestSchemaRejectsMisspelledTopLevelKey(t *testing.T) {
 	mustReject(t, "    bearer_tokn: \"s3cret\"\n"+validCard, "bearer_tokn", "bearer_token")
+}
+
+// TestSchemaRejectsMisspelledRetentionKey guards the retention block. A typo
+// there is the worst kind of silent failure: the store would keep its default
+// policy while the operator believed they had changed it.
+func TestSchemaRejectsMisspelledRetentionKey(t *testing.T) {
+	mustReject(t, "    tasks:\n      max_per_ctx: 10\n"+validCard, "max_per_ctx")
+}
+
+// TestSchemaRejectsABareRetentionDuration pins the duration-string rule: 600
+// reads as ten minutes to an operator and six hundred nanoseconds to Go.
+func TestSchemaRejectsABareRetentionDuration(t *testing.T) {
+	mustReject(t, "    tasks:\n      ttl: 600\n"+validCard, "ttl")
 }
 
 // TestSchemaRejectsMisspelledCardKey guards the card block, which is where an

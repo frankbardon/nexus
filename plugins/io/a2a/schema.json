@@ -65,9 +65,31 @@
     },
     "card": {
       "$ref": "#/$defs/card"
+    },
+    "tasks": {
+      "$ref": "#/$defs/tasks"
     }
   },
   "$defs": {
+    "tasks": {
+      "description": "Retention policy for the durable task store (session-scoped SQLite, <session>/plugins/nexus.io.a2a/store.db). Retention is load-bearing rather than housekeeping: a task carries its full status history, its artifacts and its message references, so an unbounded store grows with traffic rather than with the conversation. Both knobs are enforced together \u2014 a task is evicted when it exceeds either.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "How long a TERMINAL task is kept after its last transition. Default 24h. \"0s\" disables age-based eviction and keeps tasks for the life of the session. Only terminal tasks are evictable; a live task is never dropped mid-turn."
+        },
+        "max_per_context": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many tasks are kept per (principal, contextId) pair. Default 200. 0 disables the cap. Non-terminal tasks count against it but are never the ones evicted, so a wedged in-flight task shows up as retention pressure rather than exempting itself."
+        }
+      }
+    },
     "card": {
       "description": "The hand-authored half of the Agent Card. Deliberately has no keys for interfaces, capabilities or security: those describe what the listener actually does and are derived, so an operator cannot state one that is false. Skills are hand-authored on purpose \u2014 the card is a public contract that must not track the internal tool catalog. Exactly one of card or card_file is required.",
       "type": "object",

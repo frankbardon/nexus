@@ -18,7 +18,8 @@ import (
 // is checked against behaviour rather than against intent — which is the whole
 // reason this harness exists.
 func TestContract_TurnMapping(t *testing.T) {
-	h := contract.NewContract(t, New, contract.WithPluginConfig(testConfig(t, nil)))
+	h := contract.NewContract(t, New, contract.WithSession(),
+		contract.WithPluginConfig(testConfig(t, nil)))
 
 	h.AssertSubscribesTo("agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error")
 
@@ -51,7 +52,8 @@ func TestContract_TurnMapping(t *testing.T) {
 // contract: an operation that is not implemented must not reach the bus at all,
 // so the not-implemented refusal cannot quietly acquire a side effect.
 func TestContract_UnwiredOperationsStayOffTheBus(t *testing.T) {
-	h := contract.NewContract(t, New, contract.WithPluginConfig(testConfig(t, nil)))
+	h := contract.NewContract(t, New, contract.WithSession(),
+		contract.WithPluginConfig(testConfig(t, nil)))
 
 	p, ok := h.Plugin().(*Plugin)
 	if !ok {
@@ -70,9 +72,10 @@ func TestContract_UnwiredOperationsStayOffTheBus(t *testing.T) {
 // TestContract_BootsThroughTheHarness asserts Init and Ready succeed under the
 // harness's PluginContext, which is what the engine hands every plugin.
 func TestContract_BootsThroughTheHarness(t *testing.T) {
-	h := contract.NewContract(t, New, contract.WithPluginConfig(testConfig(t, map[string]any{
-		"bearer_token": "s3cret",
-	})))
+	h := contract.NewContract(t, New, contract.WithSession(),
+		contract.WithPluginConfig(testConfig(t, map[string]any{
+			"bearer_token": "s3cret",
+		})))
 
 	p, ok := h.Plugin().(*Plugin)
 	if !ok {

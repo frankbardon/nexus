@@ -26,9 +26,10 @@ func newTestPlugin(t *testing.T, overrides map[string]any) (*Plugin, engine.Even
 		t.Fatal("New() did not return *Plugin")
 	}
 	if err := p.Init(engine.PluginContext{
-		Config: testConfig(t, overrides),
-		Bus:    bus,
-		Logger: discardLogger(),
+		Config:  testConfig(t, overrides),
+		Bus:     bus,
+		Logger:  discardLogger(),
+		Storage: testStorage(t),
 	}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

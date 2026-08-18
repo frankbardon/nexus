@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -27,6 +28,10 @@ const (
 	cfgKeyBearerToken    = "bearer_token"
 	cfgKeyBearerTokenEnv = "bearer_token_env"
 	cfgKeyAuth           = "auth"
+
+	cfgKeyTasks              = "tasks"
+	cfgKeyTasksTTL           = "ttl"
+	cfgKeyTasksMaxPerContext = "max_per_context"
 )
 
 // Defaults. The bind address is loopback for the same reason nexus.io.agui's
@@ -37,6 +42,30 @@ const (
 	defaultBindAddr    = "127.0.0.1:8091"
 	defaultJSONRPCPath = "/a2a"
 	defaultRESTPrefix  = "/a2a/v1"
+)
+
+// Task-retention defaults.
+//
+// Retention is load-bearing rather than housekeeping: every task carries its
+// status history and its artifacts, and the artifact side grows without bound
+// once tool results and inline file parts are recorded, so an unbounded store
+// would grow with traffic rather than with the conversation.
+//
+// defaultTaskTTL is 24 hours. A task is only useful to a client that still holds
+// its id, and an A2A client that has been away for a day has restarted, retried
+// or given up — GetTask on a day-old task answers a question nobody is asking.
+// A day is also comfortably longer than any plausible reconnect window, so the
+// TTL never expires a task a client is actually still following.
+//
+// defaultTasksPerContext is 200. A standalone listener serves one context and
+// runs one task per turn, so this is 200 turns of history: far more than a
+// client polls back over, small enough that the worst case — every task carrying
+// artifacts — stays in the low megabytes, and large enough that an ordinary
+// working session never reaches it. Both knobs are configurable; zero disables
+// either one.
+const (
+	defaultTaskTTL         = 24 * time.Hour
+	defaultTasksPerContext = 200
 )
 
 // config is the resolved plugin configuration.
@@ -65,6 +94,9 @@ type config struct {
 	// validators describes the configured chain in card terms, so the served
 	// securitySchemes cannot drift from what is actually enforced.
 	validators []validatorDescriptor
+
+	// retention bounds the durable task store. See defaultTaskTTL.
+	retention retention
 }
 
 // validatorDescriptor is the minimum a security-scheme derivation needs to know
@@ -117,6 +149,10 @@ func parseConfig(raw map[string]any) (*config, error) {
 		bindAddr:    defaultBindAddr,
 		jsonrpcPath: defaultJSONRPCPath,
 		restPrefix:  defaultRESTPrefix,
+		retention: retention{
+			ttl:           defaultTaskTTL,
+			maxPerContext: defaultTasksPerContext,
+		},
 	}
 
 	if v, ok := raw[cfgKeyBind].(string); ok && strings.TrimSpace(v) != "" {
@@ -158,6 +194,12 @@ func parseConfig(raw map[string]any) (*config, error) {
 	}
 	c.corsOrigins = parseCORSOrigins(raw[cfgKeyCORSOrigins])
 
+	policy, err := parseRetention(raw[cfgKeyTasks], c.retention)
+	if err != nil {
+		return nil, err
+	}
+	c.retention = policy
+
 	chain, descriptors, err := resolveAuth(raw)
 	if err != nil {
 		return nil, err
@@ -172,6 +214,72 @@ func parseConfig(raw map[string]any) (*config, error) {
 	c.card = card
 
 	return c, nil
+}
+
+// parseRetention resolves the `tasks:` block into a retention policy, starting
+// from the supplied defaults so an absent block, or a block that sets only one
+// knob, leaves the other at its default.
+//
+// A duration is a duration STRING ("24h", "90m"), never a bare number: "ttl: 600"
+// reads as ten minutes to an operator and six hundred nanoseconds to Go, and
+// silently picking either would be worse than an error naming the key. This is
+// the same rule pkg/nexusauth applies to its own duration keys.
+func parseRetention(raw any, defaults retention) (retention, error) {
+	out := defaults
+	if raw == nil {
+		return out, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return out, fmt.Errorf("%s: %s: want a mapping, got %T", pluginID, cfgKeyTasks, raw)
+	}
+
+	if v, present := m[cfgKeyTasksTTL]; present && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return out, fmt.Errorf("%s: %s.%s: want a duration string such as \"24h\", got %T",
+				pluginID, cfgKeyTasks, cfgKeyTasksTTL, v)
+		}
+		d, err := time.ParseDuration(strings.TrimSpace(s))
+		if err != nil {
+			return out, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, cfgKeyTasksTTL, err)
+		}
+		if d < 0 {
+			return out, fmt.Errorf("%s: %s.%s: must not be negative; use \"0s\" to keep tasks for the life of the session",
+				pluginID, cfgKeyTasks, cfgKeyTasksTTL)
+		}
+		out.ttl = d
+	}
+
+	if v, present := m[cfgKeyTasksMaxPerContext]; present && v != nil {
+		n, err := configInt(v)
+		if err != nil {
+			return out, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, cfgKeyTasksMaxPerContext, err)
+		}
+		if n < 0 {
+			return out, fmt.Errorf("%s: %s.%s: must not be negative; use 0 to keep every task",
+				pluginID, cfgKeyTasks, cfgKeyTasksMaxPerContext)
+		}
+		out.maxPerContext = n
+	}
+	return out, nil
+}
+
+// configInt reads an integer that YAML may have decoded as an int or a float.
+func configInt(v any) (int, error) {
+	switch n := v.(type) {
+	case int:
+		return n, nil
+	case int64:
+		return int(n), nil
+	case float64:
+		if n != float64(int(n)) {
+			return 0, fmt.Errorf("want a whole number, got %v", n)
+		}
+		return int(n), nil
+	default:
+		return 0, fmt.Errorf("want a whole number, got %T", v)
+	}
 }
 
 // resolveCard reads the hand-authored half of the Agent Card, from either the

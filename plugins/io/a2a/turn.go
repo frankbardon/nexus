@@ -7,16 +7,17 @@ import (
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // ErrorInfo reasons for the refusals the turn mapping originates. They ride the
 // google.rpc.ErrorInfo metadata so a client can branch on a stable token rather
 // than on prose.
 const (
-	reasonForeignContext  = "CONTEXT_NOT_SERVED"
-	reasonConcurrentTask  = "TASK_ALREADY_IN_FLIGHT"
-	reasonTaskNotRetained = "TASK_NOT_RETAINED"
-	reasonBlockingOnly    = "BLOCKING_ONLY"
+	reasonForeignContext = "CONTEXT_NOT_SERVED"
+	reasonConcurrentTask = "TASK_ALREADY_IN_FLIGHT"
+	reasonNoContinuation = "TASK_CONTINUATION_UNSUPPORTED"
+	reasonBlockingOnly   = "BLOCKING_ONLY"
 )
 
 // textMediaType is the media type this transport speaks. It matches the input
@@ -38,10 +39,16 @@ type turnInput struct {
 
 // --- bridge: inbound (server -> bus) and run lifecycle ---
 
-// startTurn binds the context, registers the single active run and emits the
-// inbound io.input. It returns the run, or the protocol error the caller must
-// answer with.
-func (p *Plugin) startTurn(in turnInput) (*run, *a2a.Error) {
+// startTurn binds the context, records the new task against the caller,
+// registers the single active run and emits the inbound io.input. It returns
+// the run, or the protocol error the caller must answer with.
+//
+// caller is the authenticated Principal the request resolved to — the zero
+// value when the listener runs with no validator chain. It is the ONLY way a
+// task reaches the store, so a task cannot be created without an owner: the
+// store's scoped view is derived from it here and handed to the run as a
+// write-only sink.
+func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a.Error) {
 	p.mu.Lock()
 	if p.active != nil {
 		p.mu.Unlock()
@@ -52,9 +59,25 @@ func (p *Plugin) startTurn(in turnInput) (*run, *a2a.Error) {
 		p.mu.Unlock()
 		return nil, protoErr
 	}
-	r := newRun(newTaskID(), contextID)
+	owner := p.tasks.For(caller)
+	r := newRun(newTaskID(), contextID, owner, p.logger)
 	p.active = r
 	p.mu.Unlock()
+
+	// The task is durable BEFORE the turn is allowed to start. Every later
+	// transition is an UPDATE against this row, so a task whose creation failed
+	// would silently drop its whole history; refusing here is the only reading
+	// that keeps the store and the wire in agreement.
+	if err := owner.Create(r.taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateSubmitted), messageRef{
+		MessageID: in.messageID,
+		Role:      a2a.RoleUser,
+		Text:      in.text,
+	}); err != nil {
+		p.endTurn(r)
+		p.logger.Error("a2a task could not be recorded", "task_id", r.taskID, "error", err)
+		return nil, a2a.Errorf(a2a.ErrorTypeInternal,
+			"the task could not be recorded durably, so the turn was not started")
+	}
 
 	ui := events.UserInput{
 		SchemaVersion: events.UserInputVersion,
@@ -250,14 +273,16 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 	msg := req.Message
 
 	// A message naming a task is a continuation of that task (specification
-	// section 3.4). Tasks are not retained between calls yet, so the honest
-	// answer is that the task is unknown — not a silently fresh turn under a
-	// task id the client believes it is resuming.
+	// section 3.4). Tasks are now retained durably, but nothing yet resumes one:
+	// a stored task is a record, not a resumable conversation, and reviving one
+	// needs the interrupt/resume path. So no task id is addressable here, and
+	// the refusal says so rather than starting a silently fresh turn under an id
+	// the client believes it is resuming.
 	if msg.TaskID != "" {
 		return turnInput{}, a2a.Errorf(a2a.ErrorTypeTaskNotFound,
-			"task %q is not known to this agent: tasks are not retained between calls yet, so a task cannot be continued",
+			"task %q cannot be addressed on this agent: continuing a task is not supported yet, so every message starts a new one",
 			msg.TaskID).
-			WithMetadata("detail", reasonTaskNotRetained)
+			WithMetadata("detail", reasonNoContinuation)
 	}
 	if msg.Role != a2a.RoleUser {
 		return turnInput{}, a2a.ErrInvalidParams(a2a.FieldViolation{
