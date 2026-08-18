@@ -1,8 +1,10 @@
 package a2a
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,9 +22,10 @@ import (
 // model.
 const runQueueDepth = 256
 
-// artifactSuffix names the one artifact a turn produces: the final assistant
-// text. Artifact ids must be unique within a task, and a task is one turn, so a
-// fixed suffix on the task id is unique by construction.
+// artifactSuffix names the artifact carrying the turn's final assistant text.
+// Artifact ids must be unique within a task, and a task is one turn, so a fixed
+// suffix on the task id is unique by construction. Tool results, written files
+// and the suppression notice carry their own suffixes — see artifacts.go.
 const artifactSuffix = "-response"
 
 // artifactName is the human-readable label on that artifact.
@@ -37,6 +40,12 @@ const artifactName = "response"
 // others never see it — and the whole point of SubscribeToTask is that every
 // attached stream sees the same sequence.
 type stream struct {
+	// nexusExtension records that this observer opted into the Nexus extension
+	// with the A2A-Extensions service parameter. It is fixed at attach time and
+	// read without the lock. Telemetry frames are copied ONLY into the channels
+	// of observers that set it — see run.emitTelemetry — so a client that did
+	// not ask for the extension is not force-fed it (specification section 8.4).
+	nexusExtension bool
 	// frames carries the run's frames to this observer, in run order.
 	frames chan a2a.StreamResponse
 	// dropped closes when the run will send this observer nothing further: it
@@ -47,10 +56,20 @@ type stream struct {
 	dropOne sync.Once
 }
 
-func newStream() *stream {
+// streamOptions is what an attaching observer declares about itself. It is a
+// struct rather than a bare bool so a later service parameter has somewhere to
+// land without touching every call site.
+type streamOptions struct {
+	// nexusExtension is the client's A2A-Extensions opt-in for the Nexus
+	// extension.
+	nexusExtension bool
+}
+
+func newStream(opts streamOptions) *stream {
 	return &stream{
-		frames:  make(chan a2a.StreamResponse, runQueueDepth),
-		dropped: make(chan struct{}),
+		nexusExtension: opts.nexusExtension,
+		frames:         make(chan a2a.StreamResponse, runQueueDepth),
+		dropped:        make(chan struct{}),
 	}
 }
 
@@ -100,6 +119,13 @@ type run struct {
 	logger *slog.Logger
 	// onTerminal releases the plugin's active-task slot. See newRun.
 	onTerminal func()
+	// policy bounds what this task may publish as artifacts. Immutable after
+	// construction.
+	policy artifactPolicy
+	// textOnly records that the requesting client restricted itself to text
+	// output modes, so this task publishes no JSON or inline-file parts. See
+	// runConfig.textOnly.
+	textOnly bool
 
 	// done is closed once a terminal frame has been queued, so later bus
 	// events for this run are dropped rather than queued behind a stream that
@@ -133,6 +159,26 @@ type run struct {
 	// on resume and on any terminal transition, so a task cannot be terminated
 	// twice by a timer that outlived the question it was watching.
 	inputTimer *time.Timer
+	// budget is this task's artifact allowance. See artifacts.go: unconditional
+	// tool-result artifacts times inline file parts times a disk-persisted store
+	// is an unbounded product, and this is what bounds it.
+	budget *artifactBudget
+	// seq numbers Nexus extension events within the task, so a client can
+	// reassemble their order across the two carriers the extension defines.
+	seq int
+	// artifactSeq is the fallback ordinal for an artifact whose natural id is
+	// missing (a tool result with no call id). It is separate from seq on
+	// purpose: the extension's sequence numbers are a client-visible ordering
+	// and must not be consumed by an id this transport minted for itself.
+	artifactSeq int
+	// extSubs counts attached observers that opted into the Nexus extension. It
+	// is what lets a translator skip building telemetry nobody asked for, which
+	// matters on a long tool-heavy turn.
+	extSubs int
+	// structuredSchema names the JSON schema the turn's output was constrained
+	// to, when an llm.request declared one. It only labels the artifact; the
+	// JSON part is emitted on the strength of the text parsing as JSON.
+	structuredSchema string
 }
 
 // parkedInput is the human-in-the-loop question a task is parked on.
@@ -159,17 +205,40 @@ func (p parkedInput) live() bool { return p.requestID != "" }
 // it HERE rather than in the HTTP handler is the whole of the detached-lifetime
 // change: a run now ends when its TASK ends, not when the request that started
 // it returns.
-func newRun(taskID, contextID string, sink taskSink, logger *slog.Logger, onTerminal func()) *run {
+func newRun(cfg runConfig) *run {
 	return &run{
-		taskID:     taskID,
-		contextID:  contextID,
-		sink:       sink,
-		logger:     logger,
-		onTerminal: onTerminal,
+		taskID:     cfg.taskID,
+		contextID:  cfg.contextID,
+		sink:       cfg.sink,
+		logger:     cfg.logger,
+		policy:     cfg.artifacts,
+		textOnly:   cfg.textOnly,
+		onTerminal: cfg.onTerminal,
 		done:       make(chan struct{}),
 		subs:       make(map[*stream]struct{}),
-		snapshot:   a2a.NewTask(taskID, contextID),
+		snapshot:   a2a.NewTask(cfg.taskID, cfg.contextID),
+		budget:     newArtifactBudget(cfg.artifacts.maxTaskBytes),
 	}
+}
+
+// runConfig is everything a run is constructed from. It is a struct rather than
+// a parameter list because the list had already reached the length where a
+// caller can transpose two arguments of the same type without the compiler
+// noticing.
+type runConfig struct {
+	taskID    string
+	contextID string
+	sink      taskSink
+	logger    *slog.Logger
+	// artifacts bounds what the task may publish.
+	artifacts artifactPolicy
+	// textOnly is set when the creating request's acceptedOutputModes named only
+	// text types. A2A lets a client state what it can render (section 3.2.2), and
+	// posting base64 file parts to a client that said "text/plain" would answer a
+	// question it did not ask. Non-text parts are then omitted, and a file
+	// degrades to the same metadata note an oversized one gets.
+	textOnly   bool
+	onTerminal func()
 }
 
 // attach registers a new observer and returns it alongside the task snapshot
@@ -179,11 +248,14 @@ func newRun(taskID, contextID string, sink taskSink, logger *slog.Logger, onTerm
 // accounts for every frame already emitted, and the stream receives every frame
 // emitted from here on. Taking them separately would either lose a frame emitted
 // in between or replay one the snapshot already reflects.
-func (r *run) attach() (*stream, a2a.Task) {
-	s := newStream()
+func (r *run) attach(opts streamOptions) (*stream, a2a.Task) {
+	s := newStream(opts)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.subs[s] = struct{}{}
+	if s.nexusExtension {
+		r.extSubs++
+	}
 	return s, cloneTask(r.snapshot)
 }
 
@@ -194,9 +266,22 @@ func (r *run) detach(s *stream) {
 		return
 	}
 	r.mu.Lock()
-	delete(r.subs, s)
+	r.removeLocked(s)
 	r.mu.Unlock()
 	s.drop()
+}
+
+// removeLocked forgets an observer and keeps the extension-subscriber count in
+// step. Every removal path goes through it, so the count cannot drift from the
+// map it summarizes. The caller holds r.mu.
+func (r *run) removeLocked(s *stream) {
+	if _, present := r.subs[s]; !present {
+		return
+	}
+	delete(r.subs, s)
+	if s.nexusExtension {
+		r.extSubs--
+	}
 }
 
 // terminated reports whether a terminal frame has been queued.
@@ -234,7 +319,7 @@ func (r *run) emit(frame a2a.StreamResponse) {
 			// This observer is too far behind to be given a coherent sequence.
 			// Deleting during range is defined behaviour in Go and only affects
 			// this one entry.
-			delete(r.subs, s)
+			r.removeLocked(s)
 			s.drop()
 			if r.logger != nil {
 				r.logger.Warn("a2a stream fell behind and was dropped",
@@ -283,6 +368,115 @@ func (r *run) recordMessage(ref messageRef) {
 	}
 }
 
+// emitTelemetry delivers one Nexus extension frame to the observers that asked
+// for the extension, and to nobody else.
+//
+// It is the deliberate exception to emit's "every frame is persisted first"
+// rule, and the exception is the point: telemetry is not task state. Persisting
+// it would write a WORKING transition into task_status_history for every
+// thinking step and tool call, so GetTask would replay a turn's reasoning as a
+// sequence of state changes the task never made — and a long turn would bloat
+// the store with them. It is also not folded into the snapshot, for the same
+// reason: a client attaching mid-turn opens on what the task IS, not on the last
+// thing it was told about.
+func (r *run) emitTelemetry(frame a2a.StreamResponse) {
+	if r.terminated() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for s := range r.subs {
+		if !s.nexusExtension {
+			continue
+		}
+		select {
+		case s.frames <- frame:
+		default:
+			r.removeLocked(s)
+			s.drop()
+			if r.logger != nil {
+				r.logger.Warn("a2a stream fell behind and was dropped",
+					"task_id", r.taskID, "queue_depth", runQueueDepth)
+			}
+		}
+	}
+}
+
+// emitNexus builds and delivers one Nexus extension event.
+//
+// The event is built LAZILY and only when at least one attached observer opted
+// in, which is what keeps the extension free for the common case: a tool-heavy
+// turn with no extension client marshals nothing at all.
+//
+// The status the frame carries is the task's CURRENT state rather than a
+// hardcoded WORKING. A telemetry frame emitted while the task is parked at
+// INPUT_REQUIRED must not tell a client the task went back to work; re-entering
+// an active state is exactly what the transition table permits for an agent
+// re-emitting a state with new information attached.
+func (r *run) emitNexus(build func() a2a.NexusEvent) {
+	if r.terminated() {
+		return
+	}
+	r.mu.Lock()
+	if r.extSubs == 0 {
+		r.mu.Unlock()
+		return
+	}
+	r.seq++
+	seq := r.seq
+	state := r.snapshot.Status.State
+	r.mu.Unlock()
+
+	if !state.Known() || state == a2a.TaskStateUnspecified {
+		state = a2a.TaskStateSubmitted
+	}
+	frame, err := nexusEventFrame(r.taskID, r.contextID, state, build().Seq(seq))
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warn("a2a nexus extension event could not be encoded",
+				"task_id", r.taskID, "error", err)
+		}
+		return
+	}
+	r.emitTelemetry(frame)
+}
+
+// publishArtifact charges an artifact against the task's budget and emits it, or
+// records that it was suppressed.
+//
+// The budget is the whole of the bound this story exists under: tool results are
+// artifacts unconditionally, files ride inline, and everything lands in a
+// disk-persisted store, so without a per-task ceiling the store grows with how
+// chatty a turn was rather than with how many turns there were. A refused
+// artifact is COUNTED and the first refusal mints one notice artifact saying so,
+// because the failure mode worth avoiding is not "the client got less" — it is
+// "the client got less and was not told".
+func (r *run) publishArtifact(art a2a.Artifact) {
+	if r.terminated() {
+		return
+	}
+	size := artifactSize(art)
+
+	r.mu.Lock()
+	admitted := r.budget.charge(size)
+	notice := false
+	suppressed := 0
+	if !admitted {
+		notice = r.budget.needsNotice()
+		suppressed = r.budget.suppressed
+	}
+	r.mu.Unlock()
+
+	if admitted {
+		r.emit(a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(r.taskID, r.contextID, art)))
+		return
+	}
+	if notice {
+		r.emit(a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(r.taskID, r.contextID,
+			suppressionNotice(r.taskID, suppressed))))
+	}
+}
+
 // --- bus event translation ---
 //
 // Each on* method translates one Nexus bus payload into zero or more A2A stream
@@ -310,6 +504,13 @@ func (r *run) onTurnStart(t events.TurnInfo) {
 // calls is an intermediate step of the agent loop, not the turn's answer, so
 // only a tool-call-free response contributes.
 func (r *run) onLLMResponse(resp events.LLMResponse) {
+	// Token accounting is reported for EVERY response, including the
+	// intermediate tool-calling ones: the cost of a turn is the sum of the calls
+	// it made, and reporting only the last would understate a ten-iteration turn
+	// by an order of magnitude.
+	if hasUsage(resp.Usage) {
+		r.emitNexus(func() a2a.NexusEvent { return usageEvent(r.taskID, r.contextID, resp) })
+	}
 	if len(resp.ToolCalls) > 0 || resp.Content == "" {
 		return
 	}
@@ -317,6 +518,96 @@ func (r *run) onLLMResponse(resp events.LLMResponse) {
 	r.finalText = resp.Content
 	r.mu.Unlock()
 }
+
+// onLLMRequest records the JSON schema the turn's output is constrained to, when
+// the request declared one.
+//
+// It only LABELS the response artifact. Whether a JSON part is emitted is
+// decided by whether the final text actually parses as JSON, because an output
+// schema can be enforced several ways in Nexus — a provider's native structured
+// output, a tool-use-as-schema simulation, or nexus.gate.json_schema validating
+// after the fact — and only the first of those is visible here. Keying the part
+// off the parse covers all three; keying the label off the request means the
+// label is only claimed when it is known to be true.
+//
+// A request tagged with _source belongs to a planner or another plugin's own
+// model call rather than to the turn's answer, and is ignored for the same
+// reason the ReAct agent ignores its response.
+func (r *run) onLLMRequest(req events.LLMRequest) {
+	if req.ResponseFormat == nil {
+		return
+	}
+	if _, internal := req.Metadata["_source"]; internal {
+		return
+	}
+	switch req.ResponseFormat.Type {
+	case "json_schema", "json_object":
+	default:
+		return
+	}
+	name := req.ResponseFormat.Name
+	if name == "" {
+		name = req.ResponseFormat.Type
+	}
+	r.mu.Lock()
+	r.structuredSchema = name
+	r.mu.Unlock()
+}
+
+// onThinking reports one reasoning step as extension telemetry. It is telemetry
+// and not an artifact on purpose: a reasoning step is how the agent reached its
+// answer, not part of the answer.
+func (r *run) onThinking(step events.ThinkingStep) {
+	if step.Content == "" {
+		return
+	}
+	r.emitNexus(func() a2a.NexusEvent { return thinkingEvent(r.taskID, r.contextID, step) })
+}
+
+// onToolCall reports a tool invocation as extension telemetry. The RESULT
+// becomes an artifact; the call does not, because a call is an intention and an
+// artifact is output.
+func (r *run) onToolCall(call events.ToolCall) {
+	if call.Name == "" || call.ID == "" {
+		return
+	}
+	r.emitNexus(func() a2a.NexusEvent { return toolCallEvent(r.taskID, r.contextID, call) })
+}
+
+// onToolResult publishes a tool outcome: the live extension signal first, then
+// the artifact that outlives the stream, then an artifact per file the result
+// reported writing.
+//
+// The tool-result artifact is UNCONDITIONAL. It is not behind a config flag, and
+// deliberately so: an interop transport whose observability depends on the
+// operator having switched it on is one a partner cannot rely on. The volume
+// that buys is answered by the budget rather than by a flag — see
+// publishArtifact.
+func (r *run) onToolResult(res events.ToolResult) {
+	if res.Name == "" {
+		return
+	}
+	r.emitNexus(func() a2a.NexusEvent {
+		return toolResultEvent(r.taskID, r.contextID, res, r.policy.maxToolOutputBytes)
+	})
+
+	r.mu.Lock()
+	r.artifactSeq++
+	seq := r.artifactSeq
+	r.mu.Unlock()
+	r.publishArtifact(toolResultArtifact(r.taskID, seq, res, r.policy, !r.textOnly))
+
+	for _, f := range detectWrittenFiles(res, r.policy) {
+		art, ok := fileArtifact(r.taskID, f, r.policy, !r.textOnly)
+		if !ok {
+			continue
+		}
+		r.publishArtifact(art)
+	}
+}
+
+// onSubagent reports delegated-work progress as extension telemetry.
+func (r *run) onSubagent(build func() a2a.NexusEvent) { r.emitNexus(build) }
 
 // onOutput records the assistant text the transport layer actually published.
 // It overwrites what llm.response supplied because an output gate may have
@@ -508,6 +799,9 @@ func (r *run) complete() {
 	r.terminate(func() {
 		r.mu.Lock()
 		text := r.finalText
+		schema := r.structuredSchema
+		suppressed := r.budget.suppressed
+		noticed := r.budget.noticed
 		r.mu.Unlock()
 
 		if text != "" {
@@ -522,11 +816,93 @@ func (r *run) complete() {
 				Text:      text,
 			})
 			r.emit(a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(r.taskID, r.contextID,
-				a2a.NewTextArtifact(r.taskID+artifactSuffix, artifactName, text))))
+				r.responseArtifact(text, schema))))
+		}
+		// The suppression notice is restated with the FINAL count on the same
+		// artifact id it was minted under. The store upserts by id, so the record
+		// ends with the true total rather than the count at the moment of the
+		// first refusal, and the wire carries exactly two frames for it however
+		// many artifacts were suppressed.
+		if suppressed > 0 && noticed {
+			r.emit(a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(r.taskID, r.contextID,
+				suppressionNotice(r.taskID, suppressed))))
 		}
 		r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
 			a2a.NewTaskStatus(a2a.TaskStateCompleted))))
 	})
+}
+
+// responseArtifact renders the turn's answer.
+//
+// The text part is always there, and always first: it is what every A2A client
+// can render, and demoting it would break clients that read parts[0]. When the
+// answer IS a JSON document, a second part carries it as real
+// application/json — a client that wants the structured value gets a document to
+// decode rather than a string to re-parse, which is the whole of "not buried in
+// text". Both parts describe the same answer; a client picks the one it can use.
+//
+// The schema name, when the turn's llm.request declared one, rides the artifact
+// metadata rather than a part, because it describes the content rather than
+// being content.
+func (r *run) responseArtifact(text, schema string) a2a.Artifact {
+	art := a2a.NewTextArtifact(r.taskID+artifactSuffix, artifactName, text)
+	if r.textOnly {
+		return art
+	}
+	raw, ok := structuredJSON(text)
+	if !ok {
+		return art
+	}
+	art.Parts = append(art.Parts, a2a.Part{Data: raw, MediaType: mediaTypeJSON})
+	if schema != "" {
+		art.Metadata = map[string]any{metadataJSONSchema: schema}
+	}
+	return art
+}
+
+// structuredJSON reports whether the turn's answer is a JSON document, returning
+// it verbatim so the client decodes exactly what the agent produced.
+//
+// Only an object or an array counts. A bare JSON scalar — 42, "yes", true — is
+// valid JSON and is also what an ordinary prose answer looks like to a parser,
+// so treating those as structured output would attach a redundant JSON part to
+// half the plain-text turns this transport serves.
+//
+// One fenced code block is unwrapped first, because a model told to answer in
+// JSON very often answers in a fence, and refusing to see through it would make
+// the feature depend on the model's formatting habits.
+func structuredJSON(text string) (json.RawMessage, bool) {
+	candidate := strings.TrimSpace(unfence(text))
+	if candidate == "" {
+		return nil, false
+	}
+	switch candidate[0] {
+	case '{', '[':
+	default:
+		return nil, false
+	}
+	if !json.Valid([]byte(candidate)) {
+		return nil, false
+	}
+	return json.RawMessage(candidate), true
+}
+
+// unfence strips a single surrounding markdown code fence, with or without a
+// language tag. Anything else is returned unchanged.
+func unfence(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") {
+		return text
+	}
+	body := strings.TrimPrefix(trimmed, "```")
+	body = strings.TrimSuffix(body, "```")
+	// The opening fence may carry a language tag on its own line.
+	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
+		if tag := strings.TrimSpace(body[:idx]); tag == "" || !strings.ContainsAny(tag, " \t{[") {
+			body = body[idx+1:]
+		}
+	}
+	return body
 }
 
 // fail terminates the task with FAILED, carrying the reason as the status

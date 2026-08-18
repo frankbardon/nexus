@@ -28,8 +28,39 @@
 // translates them into A2A stream frames. SendStreamingMessage writes them as
 // text/event-stream records; the blocking SendMessage folds the same frames into
 // the Task it returns, so both bindings answer from one translation rather than
-// two that can drift. The turn's final assistant text rides out as an Artifact
-// carrying a text Part.
+// two that can drift.
+//
+// # What a turn publishes
+//
+// Artifacts carry OUTPUT (specification section 3.7):
+//
+//   - The final assistant text, plus an application/json Part when that text is
+//     a JSON document, so structured output is a document rather than a string.
+//   - Every tool result, UNCONDITIONALLY. It is not behind a flag: an interop
+//     transport whose observability depends on the operator having enabled it is
+//     one a partner cannot rely on.
+//   - Every file the turn wrote, with contents inline as a base64 raw Part.
+//
+// The Nexus extension carries what A2A has no canonical field for — thinking
+// steps, tool calls, subagent progress and token usage — as
+// TaskStatusUpdateEvent.metadata keyed by a2a.NexusExtensionURI. It is declared
+// in the Agent Card and delivered ONLY to clients that opted in with the
+// A2A-Extensions service parameter, so a client that did not ask gets an
+// unpolluted canonical stream.
+//
+// Volume is bounded, and the bound is load-bearing rather than tuning:
+// unconditional tool-result artifacts, times inline base64 file parts, times a
+// disk-persisted store is an unbounded product. artifacts.max_file_bytes and
+// artifacts.max_tool_output_bytes bound one artifact, artifacts.max_task_bytes
+// bounds one task, and tasks.max_per_context bounds the store. Every cap
+// DEGRADES rather than drops: an over-cap file becomes a metadata note naming
+// it, and a task that spends its budget publishes a notice saying how much it
+// withheld. See artifacts.go.
+//
+// File detection is tool.result-based and therefore incomplete BY DESIGN: a file
+// is published only when a tool reports having written it (ToolResult.OutputFile,
+// or a structured key named by artifacts.file_sources). Snapshot-diffing the
+// workspace is out of scope, so an uninstrumented write is missed.
 //
 // # Durability
 //
@@ -202,26 +233,42 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 // enforces that, and each entry below earns its place by driving a frame:
 //
 //   - agent.turn.start  -> the WORKING status update
-//   - llm.response      -> the terminal assistant text (tool-call-free responses)
+//   - llm.request       -> the output schema the turn was constrained to
+//   - llm.response      -> the terminal assistant text (tool-call-free responses),
+//     and per-call token usage as extension telemetry
 //   - io.output         -> the same text after the output gates had their say
-//   - agent.turn.end    -> the artifact plus the COMPLETED status
+//   - agent.turn.end    -> the artifacts plus the COMPLETED status
 //   - core.error        -> a FAILED status when nothing will retry
 //   - hitl.requested    -> the INPUT_REQUIRED status carrying the question
 //   - hitl.responded    -> back to WORKING once the question is answered
+//   - tool.invoke       -> a tool call, as extension telemetry
+//   - tool.result       -> an ARTIFACT per result, plus an artifact per file the
+//     result reports having written, plus the same as telemetry
+//   - thinking.step     -> a reasoning step, as extension telemetry
+//   - subagent.started / .iteration / .complete -> delegated-work progress, as
+//     extension telemetry
 //
 // The two hitl.* entries are how a Nexus agent asking a human becomes A2A's own
 // interruption mechanism. They are SUBSCRIPTIONS, not calls: nexus.control.hitl
 // owns ask_user and the pending-request registry, and this plugin renders what
-// it sees on the bus rather than reaching into it.
+// it sees on the bus rather than reaching into it. The same is true of every
+// entry below it: this transport watches the bus and renders what it sees.
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "agent.turn.start", Priority: 50},
 		{EventType: "agent.turn.end", Priority: 50},
+		{EventType: "llm.request", Priority: 50},
 		{EventType: "llm.response", Priority: 50},
 		{EventType: "io.output", Priority: 50},
 		{EventType: "core.error", Priority: 50},
 		{EventType: "hitl.requested", Priority: 50},
 		{EventType: "hitl.responded", Priority: 50},
+		{EventType: "tool.invoke", Priority: 50},
+		{EventType: "tool.result", Priority: 50},
+		{EventType: "thinking.step", Priority: 50},
+		{EventType: "subagent.started", Priority: 50},
+		{EventType: "subagent.iteration", Priority: 50},
+		{EventType: "subagent.complete", Priority: 50},
 	}
 }
 
@@ -263,6 +310,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.cfg = cfg
+
+	// The directory reported file paths are resolved against and confined to.
+	// It defaults to the session's own files workspace because that is where
+	// nexus.tool.fileio writes unless an operator moved it, and because
+	// confining reads to a directory the SESSION owns is the difference between
+	// publishing what the turn produced and publishing whatever path a tool
+	// happened to name. With no session and no explicit setting there is no safe
+	// base, so file artifacts stay off rather than falling back to the process's
+	// working directory.
+	if cfg.artifacts.fileBaseDir == "" && ctx.Session != nil {
+		cfg.artifacts.fileBaseDir = ctx.Session.FilesDir()
+	}
 
 	// The task store is a hard requirement, not a best-effort extra. Without it
 	// a task would exist only for the lifetime of the request that created it,
@@ -307,6 +366,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("core.error", p.handleError, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.requested", p.handleHITLRequested, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.responded", p.handleHITLResponded, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.request", p.handleLLMRequest, engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithSource(pluginID)),
+		p.bus.Subscribe("thinking.step", p.handleThinking, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.started", p.handleSubagentStarted, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.iteration", p.handleSubagentIteration, engine.WithSource(pluginID)),
+		p.bus.Subscribe("subagent.complete", p.handleSubagentComplete, engine.WithSource(pluginID)),
 	)
 
 	// One line an operator can read the whole posture off: where it binds, what
@@ -328,6 +394,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"task_ttl", cfg.retention.ttl,
 		"tasks_per_context", cfg.retention.maxPerContext,
 		"input_timeout", cfg.inputTimeout,
+		"artifact_max_file_bytes", cfg.artifacts.maxFileBytes,
+		"artifact_max_tool_output_bytes", cfg.artifacts.maxToolOutputBytes,
+		"artifact_max_task_bytes", cfg.artifacts.maxTaskBytes,
+		"artifact_file_base_dir", cfg.artifacts.fileBaseDir,
+		"nexus_extension", a2a.NexusExtensionURI,
 	)
 	return nil
 }

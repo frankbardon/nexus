@@ -140,7 +140,7 @@ func resolvePageSize(requested *int) int {
 //     it last stopped: the snapshot is written and the stream closed. Nothing
 //     will ever update that task again, so parking the connection would be a
 //     promise this agent cannot keep. GetTask remains the way to read it.
-func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWriter, b binding, caller nexusauth.Principal, req *a2a.SubscribeToTaskRequest) {
+func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWriter, b binding, caller nexusauth.Principal, req *a2a.SubscribeToTaskRequest, opts streamOptions) {
 	rec, protoErr := s.lookupTask(caller, req.ID)
 	if protoErr != nil {
 		// Refused BEFORE any stream is opened, so the client reads the refusal
@@ -160,7 +160,7 @@ func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	sub, snapshot := live.attach()
+	sub, snapshot := live.attach(opts)
 	defer live.detach(sub)
 	// The run's snapshot wins for status and artifacts: it is atomic with the
 	// subscription, whereas the record was read a moment earlier and may already

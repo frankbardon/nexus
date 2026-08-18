@@ -1237,7 +1237,7 @@ func (p *Plugin) startTurnForTest(t *testing.T, contextID string) *run {
 	t.Helper()
 	r, sub, _, protoErr := p.startTurn(turnInput{
 		contextID: contextID, text: "another task", messageID: "m-next",
-	}, nexusauth.Principal{})
+	}, nexusauth.Principal{}, streamOptions{})
 	if protoErr != nil {
 		t.Fatalf("startTurn: %+v", protoErr)
 	}

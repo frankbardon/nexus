@@ -129,8 +129,10 @@ func TestPluginIdentity(t *testing.T) {
 	// contract harness checks it against runtime behaviour, this checks it is
 	// spelled the way the rest of the engine spells it.
 	wantSubs := []string{
-		"agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error",
-		"hitl.requested", "hitl.responded",
+		"agent.turn.start", "agent.turn.end", "llm.request", "llm.response", "io.output",
+		"core.error", "hitl.requested", "hitl.responded",
+		"tool.invoke", "tool.result", "thinking.step",
+		"subagent.started", "subagent.iteration", "subagent.complete",
 	}
 	var haveSubs []string
 	for _, sub := range p.Subscriptions() {

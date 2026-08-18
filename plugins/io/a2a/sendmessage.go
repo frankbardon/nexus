@@ -35,7 +35,7 @@ type binding struct {
 // writer to the response. Bus handlers only ever push onto that channel — see
 // the concurrency note on run — so neither the SSEWriter nor the ResponseWriter
 // is ever touched concurrently.
-func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, caller nexusauth.Principal, b binding, req *a2a.SendMessageRequest, streaming bool) {
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, caller nexusauth.Principal, b binding, req *a2a.SendMessageRequest, streaming bool, opts streamOptions) {
 	in, protoErr := translateSendMessage(req)
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)
@@ -66,9 +66,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 	// parked at, so the transitions the answer causes arrive as updates the
 	// client can follow rather than being folded into the opening frame.
 	if in.taskID != "" {
-		run, sub, opening, protoErr = s.cfg.bridge.resumeTurn(in, caller)
+		run, sub, opening, protoErr = s.cfg.bridge.resumeTurn(in, caller, opts)
 	} else {
-		run, sub, opening, protoErr = s.cfg.bridge.startTurn(in, caller)
+		run, sub, opening, protoErr = s.cfg.bridge.startTurn(in, caller, opts)
 	}
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)

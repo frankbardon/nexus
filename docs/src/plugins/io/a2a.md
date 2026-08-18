@@ -28,7 +28,9 @@ interop transport is not a Nexus UI, so nothing here is back-ported into
 > session-scoped SQLite store, `GetTask`, `ListTasks` and `SubscribeToTask`
 > **read it back**, a human-in-the-loop question **parks** the task at
 > `INPUT_REQUIRED` and is resumed by a message naming the same `taskId`, and
-> `CancelTask` **settles** a task at `CANCELED`.
+> `CancelTask` **settles** a task at `CANCELED`. A turn publishes its answer, its
+> structured output, **every** tool result and every file it wrote as Artifacts,
+> and the Nexus telemetry extension is declared and honoured.
 
 The Agent Card reports this rather than advertising an intention:
 `capabilities.streaming`, `pushNotifications` and `extendedAgentCard` are all
@@ -114,7 +116,7 @@ partition, which is another reason the listener binds loopback by default.
 | **ID** | `nexus.io.a2a` |
 | **Dependencies** | None |
 | **Requires** | None |
-| **Subscriptions** | `agent.turn.start`, `agent.turn.end`, `llm.response`, `io.output`, `core.error`, `hitl.requested`, `hitl.responded` |
+| **Subscriptions** | `agent.turn.start`, `agent.turn.end`, `llm.request`, `llm.response`, `io.output`, `core.error`, `hitl.requested`, `hitl.responded`, `tool.invoke`, `tool.result`, `thinking.step`, `subagent.started`, `subagent.iteration`, `subagent.complete` |
 | **Emissions** | `before:io.input`, `io.input`, `hitl.responded`, `hitl.cancel`, `cancel.request` |
 | **Listens?** | Yes — loopback by default (`127.0.0.1:8091`) |
 
@@ -126,7 +128,10 @@ SendMessage / SendStreamingMessage
                                                        │
         Task SUBMITTED  ◀── the request was accepted    │
         Task WORKING    ◀── agent.turn.start            ▼
-        Artifact (text) ◀── io.output / llm.response  the agent runs
+        Artifact (tool) ◀── tool.result               the agent runs
+        Artifact (file) ◀── a path a tool.result named
+        metadata (ext)  ◀── thinking.step / tool.invoke / subagent.* / usage
+        Artifact (text) ◀── io.output / llm.response
         Task COMPLETED  ◀── agent.turn.end
         Task FAILED     ◀── core.error (fatal or retries exhausted)
 ```
@@ -139,8 +144,9 @@ translation, so they cannot report different outcomes for the same turn.
 
 The turn's final assistant text is published as an Artifact carrying a text
 Part. It is taken from `io.output` rather than straight from the model, so
-whatever the output gates actually let through is what the client receives.
-Richer artifacts — tool results, files, structured output — are a later story.
+whatever the output gates actually let through is what the client receives. What
+else a turn publishes is covered in [What a turn
+publishes](#what-a-turn-publishes) below.
 
 Refusals worth knowing about, each carrying the error type the specification
 reserves for it: a non-text Part (`ContentTypeNotSupportedError`), an inline
@@ -149,6 +155,102 @@ task while one is in flight (`UnsupportedOperationError` — the listener fronts
 one agent loop, and two turns would interleave on the same bus).
 `configuration.returnImmediately` is honoured, and a message naming a `taskId`
 is a continuation rather than a refusal; both are covered below.
+
+## What a turn publishes
+
+A2A puts task **output** in artifacts and conversation in messages (§3.7). Four
+things a Nexus turn produces are output by that reading:
+
+| Artifact | Contents |
+|---|---|
+| `<taskId>-response` | The answer as a text Part, plus an `application/json` Part when the answer *is* a JSON document. |
+| `<taskId>-tool-<callId>` | One per tool result: the output as text (or the error, flagged), plus a JSON Part when the tool produced structured output. |
+| `<taskId>-file-<path>` | One per file the turn wrote: the bytes inline as a base64 `raw` Part, with the filename and media type. |
+| `<taskId>-artifacts-truncated` | Only when the task spent its artifact budget: how many artifacts were withheld. |
+
+**Structured output is a document, not a string.** When the final text parses as
+a JSON object or array — one surrounding markdown fence is unwrapped first — a
+second Part carries it as real `application/json`, so a client decodes rather
+than re-parses. The text Part stays first, because it is what every A2A client
+can render. When an `llm.request` declared a `json_schema`, the artifact's
+metadata names it under `nexus.output.schema`.
+
+**Tool results are artifacts unconditionally.** There is no key to disable them.
+An interop transport whose observability depends on the operator having switched
+it on is one a partner cannot rely on; the volume that buys is answered by the
+caps below rather than by a flag.
+
+**A human-in-the-loop question is not an artifact.** It rides the
+`INPUT_REQUIRED` status message and the task's message history — see
+[below](#human-in-the-loop-is-input_required). A request for input is not output,
+and putting it in the output channel as well would count one event twice.
+
+### Files, and what is missed
+
+A file is published only when a `tool.result` **reports** having written it:
+through the engine's `ToolResult.OutputFile` field (honoured for every tool), or
+through a structured-output key named by `artifacts.file_sources` — whose default
+rule is `nexus.tool.fileio`'s `write_file` reporting `path`.
+
+Snapshot-diffing the session workspace is deliberately out of scope, so **a write
+by an uninstrumented path is missed by design**. A shell command redirecting into
+a file reports stdout, stderr and an exit code and nothing about the file, so
+nothing is published for it — which is why `nexus.tool.shell` has no default rule
+rather than a rule that cannot fire. An operator whose shell wrapper *does*
+report a written path adds it to `artifacts.file_sources`.
+
+Every reported path is resolved against `artifacts.file_base_dir` (the session's
+`files/` directory unless configured) and **confined to it**, symlinks followed.
+A path that escapes is dropped rather than clamped: a tool reporting
+`../../.ssh/id_rsa` is either broken or hostile, and inlining what it named into
+a response that leaves the process cannot be walked back.
+
+### The caps are load-bearing
+
+Unconditional tool-result artifacts, times inline base64 file parts, times a
+disk-persisted store, is an unbounded product. Three caps make it bounded, and
+each one **degrades** rather than dropping silently:
+
+| Cap | Default | Over it |
+|---|---|---|
+| `artifacts.max_file_bytes` | 256 KiB | The file becomes a metadata note naming it, its size and the cap. |
+| `artifacts.max_tool_output_bytes` | 16 KiB | The text is truncated on a rune boundary with a note saying how much was shown. |
+| `artifacts.max_task_bytes` | 1 MiB | Further artifacts are suppressed and one notice artifact says how many. |
+
+The store's worst case is `artifacts.max_task_bytes x tasks.max_per_context` —
+about 200 MiB at the shipped defaults. Full key documentation is in the
+[configuration
+reference](../../configuration/reference.md#artifacts).
+
+`configuration.acceptedOutputModes` is honoured rather than merely validated: a
+request naming only text media types receives no JSON Part and no inline file
+contents, though the files are still reported as notes so the client knows they
+exist.
+
+## The Nexus extension
+
+Thinking steps, tool calls, subagent progress and token counts have no canonical
+A2A field, so they ride the Nexus extension:
+
+```
+https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1
+```
+
+It is declared in the Agent Card under `capabilities.extensions`, never
+`required`, and carried as `TaskStatusUpdateEvent.metadata` keyed by that URI.
+The status those frames carry is the task's **current** state rather than a
+hard-coded `WORKING`, so a telemetry frame emitted while the task is parked does
+not tell a client the task went back to work.
+
+A client opts in per request with the `A2A-Extensions` service parameter, and the
+response echoes back what was actually **activated**. A client that did not ask
+receives a stream with no extension metadata on it at all — the point of an
+opt-in is that it is honoured by not sending, not by the client filtering.
+
+Telemetry is the one frame class that is **not** persisted. Storing it would put
+a `WORKING` transition in the task's status history for every thinking step, so
+`GetTask` would replay a turn's reasoning as state changes the task never made.
+It is a live signal on an attached stream; the store records what the task *is*.
 
 ## A task outlives the request that started it
 
@@ -263,6 +365,11 @@ plugins:
   nexus.io.a2a:
     bind: "127.0.0.1:8091"
     bearer_token_env: NEXUS_A2A_TOKEN
+    artifacts:
+      # Every knob has a non-zero default; these are the shipped values.
+      max_file_bytes: 262144
+      max_tool_output_bytes: 16384
+      max_task_bytes: 1048576
     card:
       name: "Nexus Research Agent"
       description: "Runs research turns with web search and file tools."

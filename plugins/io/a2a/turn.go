@@ -49,6 +49,10 @@ type turnInput struct {
 	// starts a new one. A2A resumes an interrupted task by naming it here
 	// (specification section 3.4); see resumeTurn.
 	taskID string
+	// textOnly records that the request's acceptedOutputModes named text types
+	// only, so this task must publish no JSON or inline-file parts. See
+	// runConfig.textOnly.
+	textOnly bool
 }
 
 // --- bridge: inbound (server -> bus) and run lifecycle ---
@@ -67,7 +71,7 @@ type turnInput struct {
 // task reaches the store, so a task cannot be created without an owner: the
 // store's scoped view is derived from it here and handed to the run as a
 // write-only sink.
-func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error) {
+func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts streamOptions) (*run, *stream, a2a.Task, *a2a.Error) {
 	p.mu.Lock()
 	if p.active != nil {
 		p.mu.Unlock()
@@ -80,8 +84,16 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *str
 	}
 	owner := p.tasks.For(caller)
 	var r *run
-	r = newRun(newTaskID(), contextID, owner, p.logger, func() { p.endTurn(r) })
-	sub, opening := r.attach()
+	r = newRun(runConfig{
+		taskID:     newTaskID(),
+		contextID:  contextID,
+		sink:       owner,
+		logger:     p.logger,
+		artifacts:  p.cfg.artifacts,
+		textOnly:   in.textOnly,
+		onTerminal: func() { p.endTurn(r) },
+	})
+	sub, opening := r.attach(opts)
 	p.active = r
 	p.mu.Unlock()
 
@@ -188,7 +200,7 @@ func (p *Plugin) liveRun(taskID string) *run {
 // Every refusal below is resolved through the principal-scoped store first, so
 // a task belonging to somebody else is refused exactly as an unknown id is,
 // before anything about its state can leak.
-func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error) {
+func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal, opts streamOptions) (*run, *stream, a2a.Task, *a2a.Error) {
 	rec, found, err := p.tasks.For(caller).Get(in.taskID)
 	if err != nil {
 		p.logger.Error("a2a task lookup failed", "task_id", in.taskID, "error", err)
@@ -239,7 +251,7 @@ func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal) (*run, *st
 
 	// Attached BEFORE anything moves, so the transitions this call causes are
 	// delivered to this request rather than raced past it.
-	sub, opening := r.attach()
+	sub, opening := r.attach(opts)
 
 	// The task returns to WORKING BEFORE the answer reaches the bus, and the
 	// ordering is load-bearing rather than tidy: the moment hitl.responded is
@@ -594,6 +606,102 @@ func (p *Plugin) handleError(e engine.Event[any]) {
 	r.fail(reason)
 }
 
+// handleThinking, handleToolInvoke, handleToolResult and the three subagent
+// handlers below feed the parts of a turn A2A has no canonical field for.
+//
+// Two destinations, chosen by what the payload IS rather than by convenience:
+// a tool RESULT is output and becomes an artifact (plus a live telemetry
+// signal); everything else — reasoning, the decision to call a tool, delegated
+// progress, token counts — is telemetry only, and rides the Nexus extension on a
+// status update. See telemetry.go for why that split is the honest one.
+
+func (p *Plugin) handleThinking(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	step, ok := e.Payload.(events.ThinkingStep)
+	if !ok {
+		return
+	}
+	r.onThinking(step)
+}
+
+func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	call, ok := e.Payload.(events.ToolCall)
+	if !ok {
+		return
+	}
+	r.onToolCall(call)
+}
+
+func (p *Plugin) handleToolResult(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	res, ok := e.Payload.(events.ToolResult)
+	if !ok {
+		return
+	}
+	r.onToolResult(res)
+}
+
+func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	s, ok := e.Payload.(events.SubagentStarted)
+	if !ok {
+		return
+	}
+	r.onSubagent(func() a2a.NexusEvent { return subagentStartedEvent(r.taskID, r.contextID, s) })
+}
+
+func (p *Plugin) handleSubagentIteration(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	s, ok := e.Payload.(events.SubagentIteration)
+	if !ok {
+		return
+	}
+	r.onSubagent(func() a2a.NexusEvent { return subagentIterationEvent(r.taskID, r.contextID, s) })
+}
+
+func (p *Plugin) handleSubagentComplete(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	s, ok := e.Payload.(events.SubagentComplete)
+	if !ok {
+		return
+	}
+	r.onSubagent(func() a2a.NexusEvent { return subagentCompleteEvent(r.taskID, r.contextID, s) })
+}
+
+// handleLLMRequest records the output schema a turn was constrained to, so the
+// response artifact can name it. It is a read of the request only; nothing about
+// the request is changed or answered here.
+func (p *Plugin) handleLLMRequest(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	req, ok := e.Payload.(events.LLMRequest)
+	if !ok {
+		return
+	}
+	r.onLLMRequest(req)
+}
+
 // --- inbound translation ---
 
 // translateSendMessage reduces a SendMessageRequest to a turnInput, or reports
@@ -622,6 +730,7 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 		return turnInput{}, protoErr
 	}
 
+	textOnly := false
 	if cfg := req.Configuration; cfg != nil {
 		if cfg.TaskPushNotificationConfig != nil {
 			return turnInput{}, a2a.Errorf(a2a.ErrorTypePushNotificationNotSupported,
@@ -636,6 +745,7 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 		if protoErr := checkAcceptedOutputModes(cfg.AcceptedOutputModes); protoErr != nil {
 			return turnInput{}, protoErr
 		}
+		textOnly = acceptsTextOnly(cfg.AcceptedOutputModes)
 	}
 
 	// A message naming a task is a CONTINUATION of that task (specification
@@ -647,6 +757,7 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 		text:      text,
 		messageID: msg.MessageID,
 		taskID:    strings.TrimSpace(msg.TaskID),
+		textOnly:  textOnly,
 	}, nil
 }
 
@@ -696,6 +807,34 @@ func checkAcceptedOutputModes(modes []string) *a2a.Error {
 	}
 	return a2a.Errorf(a2a.ErrorTypeContentTypeNotSupported,
 		"this agent produces %s; the request accepts only %s", textMediaType, strings.Join(modes, ", "))
+}
+
+// acceptsTextOnly reports that the client named output modes and none of them
+// admits anything but text.
+//
+// This is the read side of acceptedOutputModes (specification section 3.2.2),
+// and it is honoured rather than merely validated: a task whose client said
+// "text/plain" publishes no application/json part and inlines no file contents,
+// because posting base64 to a client that told us it cannot render it is
+// answering a question it did not ask. Files are still REPORTED — as the same
+// metadata note an oversized file gets — so the client learns they exist.
+//
+// An empty list means no restriction, which is the common case and the one that
+// gets the full artifact set.
+func acceptsTextOnly(modes []string) bool {
+	if len(modes) == 0 {
+		return false
+	}
+	for _, mode := range modes {
+		switch normalized := strings.ToLower(strings.TrimSpace(mode)); {
+		case normalized == "*/*", normalized == "*":
+			return false
+		case strings.HasPrefix(normalized, "text/"), normalized == "text":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // --- refusals this bridge originates ---

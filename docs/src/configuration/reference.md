@@ -1524,7 +1524,10 @@ page.
 > Agent Card reports all of this honestly: `capabilities.streaming` is `true`
 > because both streaming operations are wired, while `pushNotifications` and
 > `extendedAgentCard` are `false`. (A2A declares no capability boolean for
-> cancellation; it is part of the core task surface.)
+> cancellation; it is part of the core task surface.) A turn publishes its final
+> text, its structured output, **every** tool result and every file it wrote as
+> Artifacts, and the card declares the Nexus telemetry extension — see
+> [Artifacts](#artifacts) and [The Nexus extension](#the-nexus-extension) below.
 
 | Key                     | Type         | Default              | Description |
 |-------------------------|--------------|----------------------|-------------|
@@ -1541,6 +1544,7 @@ page.
 | `card`                  | map          | *(absent)*           | The hand-authored Agent Card. Exactly one of `card` or `card_file` is **required**. See [Agent Card content](#agent-card-content) below. |
 | `card_file`             | string (path)| *(absent)*           | Path to a JSON file holding a complete A2A Agent Card document (camelCase wire shape). Expanded through `engine.ExpandPath`, so `~` and `~/...` work. Mutually exclusive with `card`. |
 | `tasks`                 | map          | *(absent)*           | Retention policy for the durable task store. Both knobs have non-zero defaults; see [Task retention](#task-retention) below. |
+| `artifacts`             | map          | *(absent)*           | What a turn publishes as Artifacts, and the caps that bound it. Every knob has a non-zero default; see [Artifacts](#artifacts) below. |
 
 **Schema-validated at boot.** The plugin ships `plugins/io/a2a/schema.json` and
 implements `ConfigSchema()`, so the engine validates this block — including
@@ -1561,6 +1565,10 @@ behaviour of the transport.
 | Task created `SUBMITTED` | the request is accepted |
 | Task `WORKING` | `agent.turn.start` |
 | Artifact with a text Part | the turn's final assistant text, taken from `io.output` (or the terminal `llm.response` when no output was published) |
+| An extra `application/json` Part on that artifact | the same text when it is a JSON document — see [Artifacts](#artifacts) |
+| One Artifact per tool result | every `tool.result`, unconditionally |
+| One Artifact per written file | a path a `tool.result` reported writing |
+| `TaskStatusUpdateEvent.metadata` under the Nexus extension URI | `thinking.step`, `tool.invoke`, `subagent.*`, and `llm.response` token usage — only for clients that opted in |
 | Task `COMPLETED` | `agent.turn.end` |
 | Task `FAILED` | a `core.error` that is fatal or has exhausted its retries, or a vetoed input |
 
@@ -1674,8 +1682,16 @@ retention pressure instead of exempting itself from it.
 
 The defaults are chosen for the standalone single-context listener: 24 hours is
 comfortably longer than any plausible client reconnect window, and 200 tasks is
-200 turns of history — far more than a client polls back over, and small enough
-that the worst case stays in the low megabytes.
+200 turns of history — far more than a client polls back over.
+
+**Sizing.** The artifact side of the store is bounded by
+`artifacts.max_task_bytes x tasks.max_per_context`, which at the shipped defaults
+is `1 MiB x 200` ≈ **200 MiB** in the worst case where every retained task
+saturates its artifact budget. No ordinary session approaches that — a turn's
+artifacts are the tool outputs it actually produced — but the product is stated
+rather than implied, so an operator who cannot afford the worst case lowers one
+of the two knobs by arithmetic instead of by guesswork. See
+[Artifacts](#artifacts).
 
 `input_timeout` is not retention — it is a **liveness** bound, and it defaults to
 a non-zero value for a reason worth stating. A parked task is not idle: the turn
@@ -1695,6 +1711,126 @@ plugins:
       max_per_context: 50
       input_timeout: 5m
 ```
+
+#### Artifacts
+
+A2A puts task **output** in artifacts and conversation in messages (§3.7). Four
+things a Nexus turn produces are output by that reading, and all four are
+published without an operator enabling anything:
+
+| Artifact | `artifactId` | Contents |
+|---|---|---|
+| The turn's answer | `<taskId>-response` | A text Part. Plus an `application/json` Part when the answer **is** a JSON document (one surrounding markdown fence is unwrapped first), so structured output is a document rather than a string a client has to re-parse. When an `llm.request` declared a `json_schema`, the artifact's metadata names it under `nexus.output.schema`. |
+| One per tool result | `<taskId>-tool-<callId>` | A text Part with the tool's output (or its error, flagged `nexus.tool.failed`), plus an `application/json` Part when the tool produced structured output. Metadata carries `nexus.tool.name` and `nexus.tool.callId`. |
+| One per written file | `<taskId>-file-<path>` | The file's bytes as an inline base64 `raw` Part with its filename and media type — or a metadata note when the file is over the cap. |
+| The suppression notice | `<taskId>-artifacts-truncated` | Present only when the task spent its artifact budget; says how many artifacts were withheld. |
+
+**Tool results are artifacts unconditionally.** There is no key to turn them off,
+deliberately: an interop transport whose observability depends on the operator
+having enabled it is one a partner cannot rely on. The volume that buys is
+answered by the caps below rather than by a flag.
+
+**A human-in-the-loop question is *not* an artifact.** It rides the
+`INPUT_REQUIRED` status message and the task's message history, which is where a
+request for input belongs — putting it in the output channel as well would count
+one event twice.
+
+**File detection is `tool.result`-based, and is incomplete by design.** A file is
+published only when a tool *reports* having written it: through the engine's own
+`ToolResult.OutputFile` field (honoured for every tool), or through a
+structured-output key named by `artifacts.file_sources`. Snapshot-diffing the
+session workspace is out of scope, so **a write by an uninstrumented path is
+missed** — a shell command redirecting into a file reports stdout and an exit
+code and nothing about the file, so nothing is published for it. `nexus.tool.shell`
+therefore has **no default rule**; an operator whose shell wrapper does report a
+written path adds one to `file_sources`.
+
+Every reported path is resolved against `artifacts.file_base_dir` and **confined
+to it**, symlinks followed. A path that escapes is dropped rather than clamped: a
+tool reporting `../../.ssh/id_rsa` is either broken or hostile, and inlining what
+it named into a response that leaves the process cannot be walked back.
+
+`configuration.acceptedOutputModes` is **honoured, not merely validated**: a
+request naming only text media types gets no `application/json` Part and no
+inline file contents. The files are still reported, as the same metadata note an
+oversized file gets, so the client learns they exist.
+
+| Key                              | Type            | Default   | Description |
+|----------------------------------|-----------------|-----------|-------------|
+| `artifacts.max_file_bytes`       | int (bytes)     | `262144`  | Largest file whose contents are inlined as a base64 `raw` Part. A larger file **degrades to a metadata note** naming the file, its size and the cap — never a silent drop and never an unbounded inline. `0` means no file is ever inlined; every detected file becomes a note. Inline content is base64 in JSON, so it costs roughly a third more on the wire than on disk. Must not be negative. |
+| `artifacts.max_tool_output_bytes`| int (bytes)     | `16384`   | Largest tool-result text carried on a tool-result artifact. Longer output is truncated on a rune boundary with a note saying how much was shown, and the artifact is flagged `nexus.artifact.truncated`. `0` disables the cap. Must not be negative. |
+| `artifacts.max_task_bytes`       | int (bytes)     | `1048576` | One task's total artifact budget, counting every artifact **except** the final response — which is the turn's answer and is never suppressed. When the budget is spent, further artifacts are suppressed and one notice artifact records how many. `0` disables the budget, which makes the store's artifact growth unbounded. Must not be negative. |
+| `artifacts.file_base_dir`        | string (path)   | *(the session's `files/` directory)* | Directory that reported file paths are resolved against and confined to. Expanded through `engine.ExpandPath`, so `~` works. Set it to match `nexus.tool.fileio`'s `base_dir` if you moved that. With no session and no value set, file artifacts are **disabled**: there is no safe base to resolve a relative path against. |
+| `artifacts.file_sources`         | `map<string, string or list<string>>` | `{write_file: [path]}` | Which structured-output keys of which tools carry the paths those tools wrote. The default matches `nexus.tool.fileio`'s `write_file`. Setting this key **replaces** the default wholesale rather than merging with it. `ToolResult.OutputFile` is always honoured on top of it, for every tool. |
+
+The caps are **load-bearing rather than tuning**. Unconditional tool-result
+artifacts, times inline base64 file parts, times a disk-persisted store, is an
+unbounded product; these three caps are what make it a bounded one. Per artifact
+it is `max_file_bytes` / `max_tool_output_bytes`; per task it is
+`max_task_bytes`; per store it is `max_task_bytes x tasks.max_per_context`.
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    artifacts:
+      max_file_bytes: 1048576
+      max_tool_output_bytes: 8192
+      max_task_bytes: 4194304
+      file_base_dir: "~/agent-workspace"
+      file_sources:
+        write_file: [path]
+        render_report: [output_path]
+```
+
+#### The Nexus extension
+
+Thinking steps, tool calls, subagent progress and token counts have no canonical
+A2A field. They ride the Nexus extension instead, whose URI is
+
+```
+https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1
+```
+
+There is **no configuration for it**: it is declared in the Agent Card under
+`capabilities.extensions` for the same reason the capability booleans are
+derived, and it is never `required` — everything it carries is supplementary, so
+a client that ignores it still receives a complete canonical stream.
+
+| Nexus event | Extension event kind | Payload |
+|---|---|---|
+| `thinking.step` | `thinking` | The reasoning text and its index within the turn. |
+| `tool.invoke` | `tool_call` | The call id, tool name and the JSON arguments the model produced. |
+| `tool.result` | `tool_result` | The call id, tool name, output (capped by `artifacts.max_tool_output_bytes`) and error. |
+| `subagent.started` / `.iteration` / `.complete` | `subagent` | The spawn id, phase, iteration and detail. A subagent that reported an error is phase `failed`. |
+| `llm.response` | `usage` | Per-call token accounting: input, output, cached, reasoning and total. Reported for **every** response including the intermediate tool-calling ones, so the turn's cost is the sum rather than the last call. |
+
+The carrier is `TaskStatusUpdateEvent.metadata`, keyed by the extension URI. The
+status those frames carry is the task's **current** state, not a hard-coded
+`WORKING`: a telemetry frame emitted while the task is parked at
+`INPUT_REQUIRED` must not tell a client the task went back to work.
+
+**Opt-in is per request and is honoured by not sending.** A client asks with the
+`A2A-Extensions` service parameter:
+
+```bash
+curl -sN localhost:8091/a2a \
+  -H 'A2A-Version: 1.0' \
+  -H 'A2A-Extensions: https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{…}}'
+```
+
+The response echoes `A2A-Extensions` with the extensions that were actually
+**activated**, so a client asking for several can tell which it got; an extension
+this agent does not speak produces no echo and no error. A client that asked for
+nothing receives a stream with no extension metadata on it at all.
+
+**Telemetry is not persisted.** It is the one frame class that does not go
+through the task store's write-through path. A stored telemetry frame would land
+in the status history as a `WORKING` transition, so `GetTask` would replay a
+turn's reasoning as state changes the task never made — and a long turn would
+fill the history table with them. `GetTask` and `SubscribeToTask`'s opening
+snapshot therefore carry the canonical task only; telemetry is a live signal on
+an attached stream.
 
 #### Reading tasks
 

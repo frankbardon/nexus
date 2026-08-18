@@ -33,6 +33,13 @@ const (
 	cfgKeyTasksTTL           = "ttl"
 	cfgKeyTasksMaxPerContext = "max_per_context"
 	cfgKeyTasksInputTimeout  = "input_timeout"
+
+	cfgKeyArtifacts            = "artifacts"
+	cfgKeyArtifactsMaxFile     = "max_file_bytes"
+	cfgKeyArtifactsMaxToolOut  = "max_tool_output_bytes"
+	cfgKeyArtifactsMaxTask     = "max_task_bytes"
+	cfgKeyArtifactsFileBaseDir = "file_base_dir"
+	cfgKeyArtifactsFileSources = "file_sources"
 )
 
 // Defaults. The bind address is loopback for the same reason nexus.io.agui's
@@ -128,6 +135,9 @@ type config struct {
 	// inputTimeout bounds a task parked at INPUT_REQUIRED. Zero disables the
 	// deadline. See defaultInputTimeout.
 	inputTimeout time.Duration
+
+	// artifacts bounds what a turn is allowed to publish. See artifacts.go.
+	artifacts artifactPolicy
 }
 
 // validatorDescriptor is the minimum a security-scheme derivation needs to know
@@ -185,6 +195,7 @@ func parseConfig(raw map[string]any) (*config, error) {
 			maxPerContext: defaultTasksPerContext,
 		},
 		inputTimeout: defaultInputTimeout,
+		artifacts:    defaultArtifactPolicy(),
 	}
 
 	if v, ok := raw[cfgKeyBind].(string); ok && strings.TrimSpace(v) != "" {
@@ -232,6 +243,12 @@ func parseConfig(raw map[string]any) (*config, error) {
 	}
 	c.retention = policy
 	c.inputTimeout = inputTimeout
+
+	artifacts, err := parseArtifacts(raw[cfgKeyArtifacts], c.artifacts)
+	if err != nil {
+		return nil, err
+	}
+	c.artifacts = artifacts
 
 	chain, descriptors, err := resolveAuth(raw)
 	if err != nil {

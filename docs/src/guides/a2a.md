@@ -52,6 +52,10 @@ reasoning and the `strict_version_header` opt-out.
 | Task lifecycle | `SUBMITTED` on accept → `WORKING` at `agent.turn.start` → `COMPLETED` at `agent.turn.end`, or `FAILED`. |
 | `Message.parts` (text) | The turn's prompt, emitted as `before:io.input` (vetoable) then `io.input`. |
 | `Artifact` with a text Part | The turn's final assistant text, taken from `io.output` so output gates have had their say. |
+| `Artifact` with an `application/json` Part | The same text when it is a JSON document — structured output as a document, not a string. |
+| `Artifact` per tool result | Every `tool.result`, unconditionally. |
+| `Artifact` per written file | A path a `tool.result` reported writing, with the bytes inline as base64. |
+| `TaskStatusUpdateEvent.metadata` under the Nexus extension URI | `thinking.step`, `tool.invoke`, `subagent.*` and per-call token usage — only for clients that opted in. |
 | Agent Card | Hand-authored config, with interfaces/capabilities/security derived from the live listener. |
 
 A multi-turn conversation is therefore **N Tasks sharing one `contextId`**, not
@@ -72,6 +76,9 @@ sequenceDiagram
     P->>B: before:io.input (vetoable), then io.input
     B->>A: agent.turn.start
     P-->>C: statusUpdate TASK_STATE_WORKING
+    A->>B: tool.invoke / tool.result
+    P-->>C: artifactUpdate (tool result)
+    P-->>C: statusUpdate WORKING + nexus extension metadata (opt-in only)
     A->>B: llm.response / io.output
     B->>A: agent.turn.end
     P-->>C: artifactUpdate (final text)
@@ -224,10 +231,14 @@ Four frames, in a fixed order:
    exist yet.
 2. A **status update** to `TASK_STATE_WORKING`, written when the agent turn
    starts.
-3. An **artifact update** carrying the final assistant text as a text Part.
+3. An **artifact update** carrying the final assistant text as a text Part. A
+   turn that called tools would interleave one artifact update per tool result
+   before this one, and a client that opted into the Nexus extension would see
+   telemetry on the `WORKING` status updates between them — see [What a turn
+   publishes](#what-a-turn-publishes).
 4. A **status update** to `TASK_STATE_COMPLETED`, which **closes the stream**.
 
-The artifact must precede the terminal status, and does: A2A closes a stream the
+Artifacts must precede the terminal status, and do: A2A closes a stream the
 moment a frame reports a terminal state, so an artifact queued after `COMPLETED`
 would be dropped and the client would see a completed task with no output.
 `TASK_STATE_FAILED`, `CANCELED` and `REJECTED` close the stream the same way, so
@@ -420,12 +431,107 @@ cannot disagree.
 | Cancel a task | `CancelTask` | `POST <rest_prefix>/tasks/{id}:cancel` | **Works** — routes through `control.cancel`, settles at `CANCELED`; a terminal task is `TaskNotCancelableError` |
 | Continue an interrupted task | `SendMessage` with `taskId` | `POST <rest_prefix>/message:send` | **Works** — routes the answer to the parked `hitl.requested`; same turn, no new task |
 | Return before the turn ends | `configuration.returnImmediately` | same | **Works** — answers with the task; follow it with `GetTask` / `SubscribeToTask` |
+| Receive the answer as an artifact | — | — | **Works** — a text Part, plus an `application/json` Part when the answer is a JSON document |
+| Receive tool results as artifacts | — | — | **Works** — one artifact per `tool.result`, unconditionally |
+| Receive written files as artifacts | — | — | **Works** — inline base64 `raw` Parts, capped by `artifacts.max_file_bytes`; detected from what a `tool.result` reports, so an uninstrumented write is missed by design |
+| Receive Nexus telemetry | `A2A-Extensions` service parameter | same header | **Works** — thinking steps, tool calls, subagent progress and token usage on `TaskStatusUpdateEvent.metadata`; declared in the card, opt-in per request |
 
 Every A2A operation outside the push-notification family is now wired. All read
 operations are scoped to the calling principal — another principal's task is
 indistinguishable from one that does not exist — and so are `CancelTask` and
 continuation, which resolve the task through the same scoped lookup before they
 reveal anything about its state.
+
+### What a turn publishes
+
+A2A puts task **output** in artifacts and conversation in messages (§3.7). A
+turn's artifacts are:
+
+| `artifactId` | Contents |
+|---|---|
+| `<taskId>-response` | The answer as a text Part. Plus an `application/json` Part when the answer *is* a JSON object or array — one surrounding markdown fence is unwrapped first — so structured output is a document rather than a string a client re-parses. |
+| `<taskId>-tool-<callId>` | One per tool result: the output as text (or the error, flagged `nexus.tool.failed` in the artifact metadata), plus an `application/json` Part when the tool produced structured output. |
+| `<taskId>-file-<path>` | One per file the turn wrote: the bytes inline as a base64 `raw` Part carrying the filename and media type. |
+| `<taskId>-artifacts-truncated` | Only when the task spent its artifact budget: how many artifacts were withheld. |
+
+Tool results are artifacts **unconditionally** — there is no key to turn them
+off, because an interop transport whose observability depends on the operator
+having enabled it is one a partner cannot rely on. The volume that buys is
+answered by caps, not by a flag: `artifacts.max_file_bytes` (256 KiB) bounds one
+inline file, `artifacts.max_tool_output_bytes` (16 KiB) bounds one tool output,
+and `artifacts.max_task_bytes` (1 MiB) bounds one task. Every cap **degrades**
+rather than dropping silently: an over-cap file becomes a metadata note naming
+it, over-cap output is truncated with a note, and a task past its budget
+publishes a notice saying how much it withheld.
+
+A human-in-the-loop question is **not** an artifact. It rides the
+`INPUT_REQUIRED` status message and the task's message history, which is where a
+request for input belongs.
+
+**File detection is `tool.result`-based, and is incomplete by design.** A file is
+published only when a tool reports having written it, through the engine's
+`ToolResult.OutputFile` field or a structured-output key named by
+`artifacts.file_sources` (default: `nexus.tool.fileio`'s `write_file` reporting
+`path`). Snapshot-diffing the workspace is out of scope, so a shell command
+redirecting into a file — which reports stdout and an exit code and nothing about
+the file — publishes nothing. `nexus.tool.shell` therefore has no default rule
+rather than one that could never fire.
+
+### The Nexus extension: telemetry A2A has no field for
+
+Thinking steps, tool calls, subagent progress and token counts are not output —
+they are how the agent got to its output — so they ride an extension (§8.4)
+rather than an artifact:
+
+```
+https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1
+```
+
+The card declares it under `capabilities.extensions`, never as `required`. Ask
+for it per request:
+
+```bash
+curl -sN localhost:8091/a2a \
+  -H 'A2A-Version: 1.0' \
+  -H 'A2A-Extensions: https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{
+        "messageId":"m-1","role":"ROLE_USER","parts":[{"text":"search for X"}]}}}'
+```
+
+The response echoes `A2A-Extensions` with what was actually **activated**, and
+the frames carry payloads like:
+
+```json
+{
+  "statusUpdate": {
+    "taskId": "task-01J…",
+    "contextId": "01J…",
+    "status": { "state": "TASK_STATE_WORKING", "timestamp": "2026-08-18T12:00:01Z" },
+    "metadata": {
+      "https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1": {
+        "kind": "tool_call",
+        "taskId": "task-01J…",
+        "sequence": 3,
+        "source": "tool.invoke",
+        "toolCall": { "callId": "call-1", "name": "web_search",
+                      "arguments": { "query": "X" } }
+      }
+    }
+  }
+}
+```
+
+Two things are worth knowing. The status those frames carry is the task's
+**current** state, so a telemetry frame emitted while the task is parked reports
+`TASK_STATE_INPUT_REQUIRED` rather than pretending the task went back to work.
+And telemetry is **not persisted** — storing it would put a `WORKING` transition
+in the task's status history for every thinking step, so `GetTask` would replay a
+turn's reasoning as state changes the task never made. It is a live signal on an
+attached stream.
+
+A client that does not send the header gets a stream with no extension metadata
+on it at all. That is the point of an opt-in: it is honoured by not sending.
 
 ### Human-in-the-loop: `INPUT_REQUIRED` and back
 
@@ -464,17 +570,13 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- **Richer artifacts.** Today a turn produces exactly one artifact: the final
-  assistant text. Tool results, files written during the turn, and structured
-  output are later work.
-- **The Nexus extension.** `pkg/a2a` defines an extension URI
-  (`…/a2a/extensions/agent-events/v1`) for the telemetry A2A has no canonical
-  representation for — thinking steps, tool calls, subagent progress, token
-  usage. It is codec-only: the serve plugin does not declare it on the card and
-  does not emit it.
 - **Outbound delegation** to remote A2A agents (a `delegate_a2a_<name>` tool per
   configured remote) and the **broker A2A front door** are separate pieces of
   work; neither exists yet.
+- **Workspace-wide file detection.** Files become artifacts only when a
+  `tool.result` reports the path (see [What a turn
+  publishes](#what-a-turn-publishes)); snapshot-diffing the session workspace is
+  deliberately out of scope, so a write by an uninstrumented path is missed.
 
 ## Deliberately unsupported
 

@@ -21,7 +21,9 @@ func TestContract_TurnMapping(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithSession(),
 		contract.WithPluginConfig(testConfig(t, nil)))
 
-	h.AssertSubscribesTo("agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error")
+	h.AssertSubscribesTo("agent.turn.start", "agent.turn.end", "llm.request", "llm.response",
+		"io.output", "core.error", "tool.invoke", "tool.result", "thinking.step",
+		"subagent.started", "subagent.iteration", "subagent.complete")
 
 	p, ok := h.Plugin().(*Plugin)
 	if !ok {
@@ -87,6 +89,52 @@ func TestContract_NonTurnOperationsStayOffTheBus(t *testing.T) {
 	}
 
 	h.AssertNotEmitted("io.input")
+	h.AssertNoUndeclaredEmissions()
+}
+
+// TestContract_ObservingATurnStaysOffTheBus pins the direction of the artifact
+// and telemetry work: the plugin RENDERS what it sees on the bus and publishes
+// nothing new because of it. A tool-heavy turn produces artifacts and extension
+// telemetry on the wire and exactly one emission — the io.input that started it.
+func TestContract_ObservingATurnStaysOffTheBus(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithSession(),
+		contract.WithPluginConfig(testConfig(t, nil)))
+
+	p, ok := h.Plugin().(*Plugin)
+	if !ok {
+		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
+	}
+	h.Bus().Subscribe("io.input", func(e engine.Event[any]) {
+		in, ok := e.Payload.(events.UserInput)
+		if !ok {
+			return
+		}
+		telemetryTurn("contract answer")(h.Bus(), in)
+	}, engine.WithSource("test.agent"))
+
+	rec := do(t, p.server, http.MethodPost, "/a2a",
+		withVersion("1.0"), withExtensions(a2a.NexusExtensionURI),
+		jsonrpcBody(t, a2a.MethodSendStreamingMessage,
+			sendMessageParams("drive a tool turn", "ctx-contract-tools")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("SendStreamingMessage status = %d: %s", rec.Code, rec.Body)
+	}
+
+	fs := frames(t, rec.Body.Bytes())
+	if len(nexusEvents(t, fs)) == 0 {
+		t.Error("an opted-in stream carried no extension telemetry")
+	}
+	artifacts := 0
+	for _, f := range fs {
+		if f.Kind() == a2a.StreamPayloadArtifactUpdate {
+			artifacts++
+		}
+	}
+	if artifacts < 2 {
+		t.Errorf("artifact frames = %d, want the tool result and the response", artifacts)
+	}
+
+	h.AssertEmitted("io.input")
 	h.AssertNoUndeclaredEmissions()
 }
 

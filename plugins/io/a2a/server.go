@@ -61,14 +61,14 @@ type agentBridge interface {
 	// startTurn binds the context, registers the active run, emits io.input and
 	// returns the run, the requesting client's attached stream, and the task
 	// snapshot that stream must open on.
-	startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error)
+	startTurn(in turnInput, caller nexusauth.Principal, opts streamOptions) (*run, *stream, a2a.Task, *a2a.Error)
 	// resumeTurn routes a message naming a task onto the question that task is
 	// parked on, and returns the SAME run with a fresh stream attached. It
 	// starts no turn: a resumed task continues the one that asked. Its snapshot
 	// is the state the task was in when the stream attached — INPUT_REQUIRED —
 	// so the transitions the answer causes arrive as updates rather than being
 	// folded into the opening frame.
-	resumeTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error)
+	resumeTurn(in turnInput, caller nexusauth.Principal, opts streamOptions) (*run, *stream, a2a.Task, *a2a.Error)
 	// cancelTask settles one of the caller's tasks at CANCELED and returns the
 	// stored record. An already-terminal task is refused, not rewritten.
 	cancelTask(caller nexusauth.Principal, taskID string) (a2a.Task, *a2a.Error)
@@ -283,10 +283,12 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Version next, before the body is read: 1.0 and 0.3 disagree about the
 	// shape of what is in it, so parsing before negotiating would be guessing.
-	if _, protoErr := s.serviceParams(r); protoErr != nil {
+	params, protoErr := s.serviceParams(r)
+	if protoErr != nil {
 		s.writeJSONRPCError(w, nil, protoErr)
 		return
 	}
+	opts := s.activateExtensions(w, params)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -319,7 +321,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
 			return
 		}
-		s.handleSendMessage(w, r, caller, bind, req, call.Streaming())
+		s.handleSendMessage(w, r, caller, bind, req, call.Streaming(), opts)
 		return
 
 	case a2a.MethodGetTask:
@@ -346,7 +348,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
 			return
 		}
-		s.handleSubscribeToTask(r.Context(), w, bind, caller, req)
+		s.handleSubscribeToTask(r.Context(), w, bind, caller, req, opts)
 		return
 
 	case a2a.MethodCancelTask:
@@ -405,10 +407,12 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, protoErr := s.serviceParams(r); protoErr != nil {
+	params, protoErr := s.serviceParams(r)
+	if protoErr != nil {
 		s.writeRESTError(w, protoErr)
 		return
 	}
+	opts := s.activateExtensions(w, params)
 
 	suffix := strings.TrimPrefix(r.URL.Path, s.cfg.cfg.restPrefix)
 	if suffix == "" {
@@ -443,12 +447,12 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 			s.writeRESTError(w, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
 			return
 		}
-		req, protoErr := a2a.DecodeSendMessageRequest(body)
-		if protoErr != nil {
-			s.writeRESTError(w, protoErr)
+		req, decodeErr := a2a.DecodeSendMessageRequest(body)
+		if decodeErr != nil {
+			s.writeRESTError(w, decodeErr)
 			return
 		}
-		s.handleSendMessage(w, r, caller, binding{}, req, route.Streaming)
+		s.handleSendMessage(w, r, caller, binding{}, req, route.Streaming, opts)
 		return
 
 	case a2a.MethodGetTask:
@@ -480,7 +484,7 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 			}))
 			return
 		}
-		s.handleSubscribeToTask(r.Context(), w, binding{}, caller, req)
+		s.handleSubscribeToTask(r.Context(), w, binding{}, caller, req, opts)
 		return
 
 	case a2a.MethodCancelTask:
@@ -562,6 +566,27 @@ func (s *Server) writeRESTBody(w http.ResponseWriter, status int, body a2a.RESTE
 // absent-header policy. See config.assumedVersion for the decision.
 func (s *Server) serviceParams(r *http.Request) (a2a.ServiceParams, *a2a.Error) {
 	return a2a.ParseServiceParamsAssuming(r.Header, r.URL.Query(), s.cfg.cfg.assumedVersion())
+}
+
+// activateExtensions resolves the client's A2A-Extensions opt-in and echoes back
+// the extensions this response actually activated.
+//
+// The echo is the half that matters for interop. Specification section 8.4 makes
+// an extension a NEGOTIATION: a client lists what it can handle and the agent
+// answers with what it will actually use, so a client asking for three
+// extensions can tell which one it got. Echoing only what was activated — rather
+// than reflecting the request header — is what makes that answer worth reading:
+// an unknown URI in the request produces no echo, which is the agent saying "I
+// do not speak that" without an error, exactly as an optional extension should.
+//
+// A client that asked for nothing gets no header and no telemetry, which is the
+// whole of "must not be force-fed".
+func (s *Server) activateExtensions(w http.ResponseWriter, params a2a.ServiceParams) streamOptions {
+	opts := streamOptions{nexusExtension: params.SupportsExtension(a2a.NexusExtensionURI)}
+	if opts.nexusExtension {
+		w.Header().Set(a2a.HeaderExtensions, a2a.NexusExtensionURI)
+	}
+	return opts
 }
 
 // errWrongParams reports a decoded parameter object whose type does not match

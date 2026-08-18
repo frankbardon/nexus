@@ -78,6 +78,15 @@ func buildCard(cfg *config) (*servedCard, error) {
 	card.Capabilities.PushNotifications = operationImplemented(a2a.MethodCreateTaskPushNotificationConfig)
 	card.Capabilities.ExtendedAgentCard = operationImplemented(a2a.MethodGetExtendedAgentCard)
 
+	// The Nexus extension is DECLARED here rather than configured, for the same
+	// reason capabilities are: a card that advertised an extension the listener
+	// does not emit, or stayed silent about one it does, is the confident wrong
+	// answer this split exists to prevent. It is never Required — everything it
+	// carries is supplementary, and a client that ignores it still gets a
+	// complete canonical stream — and it is delivered only to clients that ask
+	// for it by URI in the A2A-Extensions service parameter (section 8.4).
+	card.Capabilities.Extensions = []a2a.AgentExtension{a2a.NexusExtension()}
+
 	schemes, requirements := deriveSecurity(cfg.validators)
 	card.SecuritySchemes = schemes
 	card.SecurityRequirements = requirements

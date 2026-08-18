@@ -76,6 +76,14 @@ func TestSchemaAcceptsTheDocumentedShape(t *testing.T) {
     tasks:
       ttl: 24h
       max_per_context: 200
+    artifacts:
+      max_file_bytes: 262144
+      max_tool_output_bytes: 16384
+      max_task_bytes: 1048576
+      file_base_dir: "~/agent-workspace"
+      file_sources:
+        write_file: [path]
+        render_report: output_path
     card:
       name: nexus
       description: A Nexus agent.
@@ -133,6 +141,19 @@ func TestSchemaRejectsMisspelledRetentionKey(t *testing.T) {
 // reads as ten minutes to an operator and six hundred nanoseconds to Go.
 func TestSchemaRejectsABareRetentionDuration(t *testing.T) {
 	mustReject(t, "    tasks:\n      ttl: 600\n"+validCard, "ttl")
+}
+
+// TestSchemaRejectsMisspelledArtifactKey guards the artifact caps. A typo there
+// is the failure mode the caps exist to prevent: the operator believes they
+// lowered a bound and the default one is what actually holds.
+func TestSchemaRejectsMisspelledArtifactKey(t *testing.T) {
+	mustReject(t, "    artifacts:\n      max_task_byte: 1024\n"+validCard, "max_task_byte")
+}
+
+// TestSchemaRejectsANegativeArtifactCap pins the sign rule, so a cap can only
+// ever be a real bound or an explicit 0.
+func TestSchemaRejectsANegativeArtifactCap(t *testing.T) {
+	mustReject(t, "    artifacts:\n      max_file_bytes: -1\n"+validCard, "max_file_bytes")
 }
 
 // TestSchemaRejectsMisspelledCardKey guards the card block, which is where an

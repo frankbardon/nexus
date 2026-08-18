@@ -68,6 +68,9 @@
     },
     "tasks": {
       "$ref": "#/$defs/tasks"
+    },
+    "artifacts": {
+      "$ref": "#/$defs/artifacts"
     }
   },
   "$defs": {
@@ -587,6 +590,42 @@
           }
         }
       ]
+    },
+    "artifacts": {
+      "description": "What a turn publishes as A2A Artifacts, and the caps that bound it. Tool results become artifacts unconditionally and files written during the turn ride inline as base64 raw parts, so without caps the store would grow with how chatty a turn was rather than with how many turns there were. Every cap DEGRADES rather than drops: an over-cap file becomes a metadata note naming it, over-cap tool output is truncated with a note, and a task that spends its budget publishes one notice saying how many artifacts it withheld. The store's worst case is max_task_bytes x tasks.max_per_context.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Largest file whose contents are inlined as a base64 raw part, in bytes. Default 262144 (256 KiB). A larger file degrades to a metadata note naming the file and its size. 0 means no file is ever inlined: every detected file becomes a note. Inline content is base64 in JSON, so it costs roughly a third more on the wire than on disk."
+        },
+        "max_tool_output_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Largest tool-result text carried on a tool-result artifact, in bytes. Default 16384 (16 KiB). Longer output is truncated on a rune boundary with a note saying how much was shown. 0 disables the cap."
+        },
+        "max_task_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "One task's total artifact budget in bytes, counting every artifact except the final response. Default 1048576 (1 MiB). When it is spent, further artifacts are suppressed and one notice artifact records how many. 0 disables the budget, which makes the store's artifact growth unbounded."
+        },
+        "file_base_dir": {
+          "type": "string",
+          "description": "Directory that reported file paths are resolved against and confined to, expanded through engine.ExpandPath. Defaults to the session's files workspace, which is where nexus.tool.fileio writes unless an operator moved it. A reported path that escapes this directory (symlinks followed) is dropped, not clamped. With no session and no value set, file artifacts are disabled."
+        },
+        "file_sources": {
+          "type": "object",
+          "description": "Which structured-output keys of which tools carry the paths those tools wrote. Default {write_file: [path]}, matching nexus.tool.fileio. Setting this REPLACES the default wholesale. events.ToolResult.OutputFile is always honoured for every tool on top of this. Detection is tool.result-based by design: a write nothing reports is not published.",
+          "additionalProperties": {
+            "$ref": "#/$defs/stringOrStringList"
+          }
+        }
+      }
     }
   }
 }
