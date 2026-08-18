@@ -185,20 +185,83 @@ type taskRecord struct {
 	UpdatedAt     time.Time
 }
 
+// renderOptions tunes how a stored record is projected onto the wire.
+//
+// Both knobs come straight off the request objects: GetTask and ListTasks each
+// carry a historyLength, and ListTasks additionally defaults artifacts OFF so a
+// page of tasks does not drag every artifact body with it.
+type renderOptions struct {
+	// historyLength caps how many of the MOST RECENT history messages the
+	// rendered task carries. Nil means "no client-imposed limit" and zero means
+	// "omit history entirely" — the presence distinction the specification
+	// draws in section 3.2.4, which is why it is a pointer.
+	historyLength *int
+	// omitArtifacts drops the artifact bodies. ListTasks sets it unless the
+	// caller asked for artifacts explicitly.
+	omitArtifacts bool
+}
+
 // Task renders the record in the wire shape.
 //
-// History is deliberately absent: a2a.Message requires non-empty Parts, and this
-// store keeps message references rather than whole messages, so materializing
-// them here would fabricate a transcript. Deciding what GetTask puts in History
-// (and how configuration.historyLength is honoured) belongs to the story that
-// wires the read operations.
-func (r taskRecord) Task() a2a.Task {
-	return a2a.Task{
+// # What History contains, stated plainly
+//
+// It is the trail of message REFERENCES this store retained, rendered as text
+// messages — not a replay of Nexus's conversation. The authoritative transcript
+// belongs to memory.history; what is kept here is, per exchange, the
+// client-assigned messageId, the role and the text that travelled. Because this
+// transport accepts text parts only and emits text artifacts only, that
+// rendering is lossless for everything this agent can currently say or hear.
+// What it would NOT survive is a part this transport does not yet accept: a
+// file or data part would be recorded by its text (which is empty) and so is
+// skipped rather than rendered as an empty message, since a2a.Message requires
+// non-empty Parts.
+//
+// Section 3.7 explicitly leaves it to the server which messages are persisted
+// and warns clients not to assume all of them are present, so a bounded
+// reference trail is a conforming History rather than a partial one — and
+// retention (tasks.max_per_context, tasks.ttl) is what bounds it.
+//
+// Each message is stamped with this task's id and context so a client can
+// correlate it, exactly as the messages that produced it were.
+func (r taskRecord) Task(opt renderOptions) a2a.Task {
+	task := a2a.Task{
 		ID:        r.TaskID,
 		ContextID: r.ContextID,
 		Status:    r.Status,
-		Artifacts: r.Artifacts,
+		History:   r.history(opt.historyLength),
 	}
+	if !opt.omitArtifacts {
+		task.Artifacts = r.Artifacts
+	}
+	return task
+}
+
+// history renders the retained message references, honouring a client-supplied
+// cap. The cap keeps the MOST RECENT messages, which is what "historyLength"
+// means everywhere the specification uses it: a client asking for 2 wants the
+// last exchange, not the first.
+func (r taskRecord) history(limit *int) []a2a.Message {
+	if limit != nil && *limit <= 0 {
+		return nil
+	}
+	out := make([]a2a.Message, 0, len(r.Messages))
+	for _, ref := range r.Messages {
+		if ref.Text == "" || !ref.Role.Valid() {
+			// A reference with no text cannot be rendered: a Message requires
+			// non-empty Parts. Skipping is honest; an empty message would not be.
+			continue
+		}
+		out = append(out, a2a.NewMessage(ref.MessageID, ref.Role, a2a.TextPart(ref.Text)).
+			InContext(r.ContextID).
+			ForTask(r.TaskID))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	if limit != nil && *limit < len(out) {
+		out = out[len(out)-*limit:]
+	}
+	return out
 }
 
 // taskStore is the durable store. It deliberately exposes NO query surface: see
@@ -556,63 +619,184 @@ func (t *principalTasks) Get(taskID string) (taskRecord, bool, error) {
 	return rec, true, nil
 }
 
+// taskQuery is one ListTasks request reduced to what the store can answer.
+//
+// Every field is a NARROWING filter; none of them can widen the result set past
+// the principal the view is bound to, because that predicate is not part of this
+// struct at all — it is compiled into the statement. There is deliberately no
+// "principal" field here for a caller to set, forget or get wrong.
+type taskQuery struct {
+	// contextID restricts the listing to one conversational context. Empty means
+	// every context this principal has.
+	contextID string
+	// state restricts the listing to tasks currently in one state. Empty means
+	// any state.
+	state a2a.TaskState
+	// changedAfter restricts the listing to tasks whose CURRENT status was
+	// observed at or after this instant. The zero time means no lower bound.
+	changedAfter time.Time
+	// after is the keyset cursor a previous page ended on. The zero value starts
+	// at the newest task.
+	after listCursor
+	// limit caps the page. Zero or less means no limit.
+	limit int
+}
+
+// listCursor is the keyset position a page of tasks ended on.
+//
+// It is a keyset — (created_at, rowid), the exact tuple the listing is ordered
+// by — rather than an offset, because an offset cursor silently skips or repeats
+// rows when the underlying set changes between pages, and this set changes on
+// every turn and on every retention sweep. A keyset cursor names a POSITION, so
+// a task created or evicted while a client pages through cannot shift the rows
+// it has not seen yet.
+//
+// rowid breaks ties: created_at is nanosecond-precision but two tasks created
+// inside one clock tick would otherwise be an ambiguous position, and an
+// ambiguous cursor is an infinite loop or a dropped row.
+type listCursor struct {
+	createdAt int64
+	rowID     int64
+	// set distinguishes "start from the beginning" from a cursor that happens to
+	// carry zeroes.
+	set bool
+}
+
 // List returns this principal's tasks, newest first. An empty contextID means
 // "every context this principal has" — which is still only this principal's
 // tasks, because the predicate on principal_id is not optional.
 //
-// A limit of zero or less means no limit.
+// A limit of zero or less means no limit. It is the unfiltered, unpaginated
+// shorthand for Query.
 func (t *principalTasks) List(contextID string, limit int) ([]taskRecord, error) {
-	query := `SELECT task_id FROM tasks WHERE principal_id = ?`
-	args := []any{t.key}
-	if contextID != "" {
-		query += ` AND context_id = ?`
-		args = append(args, contextID)
-	}
-	query += ` ORDER BY created_at DESC, rowid DESC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+	recs, _, _, err := t.Query(taskQuery{contextID: contextID, limit: limit})
+	return recs, err
+}
+
+// Query returns one page of this principal's tasks, newest first, along with the
+// cursor for the following page and the total number of tasks MATCHING THE
+// FILTERS before pagination.
+//
+// The total is computed under the identical predicate, in the same call, so a
+// client's "3 of 40" is 40 of the same thing it is paging through rather than a
+// count of some looser set.
+//
+// The returned cursor's set field reports whether a further page exists: the
+// page query asks for one row more than the limit and the extra row is dropped,
+// so "is there more" is answered by the same statement that answers "what is on
+// this page" instead of by a second round trip that could disagree with it.
+func (t *principalTasks) Query(q taskQuery) ([]taskRecord, listCursor, int, error) {
+	filter, args := q.predicate()
+
+	// Both statements below repeat `WHERE principal_id = ?` in their own literal
+	// rather than sharing a fragment that carries it. That is what keeps the
+	// invariant checkable by reading the file: every SQL literal here that reads
+	// a task names principal_id itself.
+	var total int
+	if err := t.store.db.QueryRow(
+		`SELECT COUNT(*) FROM tasks WHERE principal_id = ?`+filter,
+		append([]any{t.key}, args...)...,
+	).Scan(&total); err != nil {
+		return nil, listCursor{}, 0, fmt.Errorf("%s: counting tasks: %w", pluginID, err)
 	}
 
-	ids, err := t.taskIDs(query, args)
-	if err != nil {
-		return nil, err
+	pageArgs := append([]any{t.key}, args...)
+	page := `SELECT task_id, created_at, rowid FROM tasks WHERE principal_id = ?` + filter
+	if q.after.set {
+		// Strictly AFTER the cursor in the listing's own order, which is
+		// descending: a smaller (created_at, rowid) is a later row.
+		page += ` AND (created_at < ? OR (created_at = ? AND rowid < ?))`
+		pageArgs = append(pageArgs, q.after.createdAt, q.after.createdAt, q.after.rowID)
 	}
+	page += ` ORDER BY created_at DESC, rowid DESC`
+	if q.limit > 0 {
+		page += ` LIMIT ?`
+		pageArgs = append(pageArgs, q.limit+1)
+	}
+
+	ids, cursors, err := t.page(page, pageArgs)
+	if err != nil {
+		return nil, listCursor{}, 0, err
+	}
+
+	var next listCursor
+	if q.limit > 0 && len(ids) > q.limit {
+		ids = ids[:q.limit]
+		cursors = cursors[:q.limit]
+		next = cursors[len(cursors)-1]
+	}
+
 	out := make([]taskRecord, 0, len(ids))
 	for _, id := range ids {
 		rec, found, err := t.Get(id)
 		if err != nil {
-			return nil, err
+			return nil, listCursor{}, 0, err
 		}
 		if found {
 			out = append(out, rec)
 		}
 	}
-	return out, nil
+	return out, next, total, nil
 }
 
-// taskIDs runs a scoped id query. It is separate only so the rows cursor is
-// closed before the per-task assembly reads run, which keeps a single pooled
-// connection from being held open across them.
-func (t *principalTasks) taskIDs(query string, args []any) ([]string, error) {
+// predicate renders the query's narrowing filters as a SQL fragment appended to
+// a statement that has ALREADY named principal_id. It never emits a principal
+// predicate of its own, so it cannot accidentally replace one.
+func (q taskQuery) predicate() (string, []any) {
+	var (
+		filter string
+		args   []any
+	)
+	if q.contextID != "" {
+		filter += ` AND context_id = ?`
+		args = append(args, q.contextID)
+	}
+	if q.state != "" {
+		filter += ` AND state = ?`
+		args = append(args, string(q.state))
+	}
+	if !q.changedAfter.IsZero() {
+		// state_at is the instant the CURRENT status was observed, which is what
+		// the specification's statusTimestampAfter filter selects on. The bound
+		// is inclusive, as the field name's "after" is defined to be in section
+		// 3.2 ("at or after").
+		filter += ` AND state_at >= ?`
+		args = append(args, q.changedAfter.UTC().UnixNano())
+	}
+	return filter, args
+}
+
+// page runs a scoped page query, returning the task ids in order alongside the
+// cursor position of each. It is separate only so the rows cursor is closed
+// before the per-task assembly reads run, which keeps a single pooled connection
+// from being held open across them.
+func (t *principalTasks) page(query string, args []any) ([]string, []listCursor, error) {
 	rows, err := t.store.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
+		return nil, nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
 	}
 	defer rows.Close()
 
-	var ids []string
+	var (
+		ids     []string
+		cursors []listCursor
+	)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
+		var (
+			id        string
+			createdAt int64
+			rowID     int64
+		)
+		if err := rows.Scan(&id, &createdAt, &rowID); err != nil {
+			return nil, nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
 		}
 		ids = append(ids, id)
+		cursors = append(cursors, listCursor{createdAt: createdAt, rowID: rowID, set: true})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
+		return nil, nil, fmt.Errorf("%s: listing tasks: %w", pluginID, err)
 	}
-	return ids, nil
+	return ids, cursors, nil
 }
 
 // --- record assembly ---

@@ -7,8 +7,8 @@
 # SendMessage and SendStreamingMessage drive a real Nexus turn: the message's
 # text becomes an io.input, the ReAct agent runs, and the turn is reported as one
 # A2A Task moving SUBMITTED -> WORKING -> COMPLETED with the final assistant text
-# as an artifact. The task-store operations (GetTask, ListTasks, CancelTask,
-# SubscribeToTask) are still answered with UnsupportedOperationError.
+# as an artifact. GetTask, ListTasks and SubscribeToTask read that task back from
+# the durable store; CancelTask is still answered with UnsupportedOperationError.
 #
 # nexus.io.test is present ONLY to supply mock LLM responses (mock_responses) so
 # no API key is needed — it has no scripted inputs; the A2A request is the sole
@@ -24,6 +24,9 @@
 #     -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":
 #          {"message":{"messageId":"m1","role":"ROLE_USER",
 #           "parts":[{"text":"hello"}],"contextId":"demo"}}}'
+#
+#   curl -s localhost:18191/a2a/v1/tasks \
+#     -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
 #
 #   go test -tags integration ./tests/integration/ -run TestA2AServe
 

@@ -891,3 +891,73 @@ func TestStoreLivesUnderTheSession(t *testing.T) {
 		t.Errorf("no task store at %s: %v", want, err)
 	}
 }
+
+// --- pagination ---
+
+// TestQueryPaginationIsStableUnderInsertion is why the cursor is a keyset rather
+// than an offset: a task created between two pages must not shift the rows the
+// client has not seen yet.
+//
+// With an offset cursor the insertion below would push one task down a slot and
+// the second page would repeat a row the first page already returned. With a
+// keyset cursor the second page continues from a POSITION, so the new task is
+// simply newer than the position and is not seen at all.
+func TestQueryPaginationIsStableUnderInsertion(t *testing.T) {
+	store := newStore(t, noRetention)
+	view := store.For(principal("partner-a"))
+	for i := range 4 {
+		mustCreate(t, view, fmt.Sprintf("task-%d", i), "ctx-1", submitted())
+	}
+
+	first, cursor, total, err := view.Query(taskQuery{limit: 2})
+	if err != nil {
+		t.Fatalf("Query page 1: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("totalSize = %d, want 4", total)
+	}
+	if got := taskIDsOf(first); len(got) != 2 || got[0] != "task-3" || got[1] != "task-2" {
+		t.Fatalf("page 1 = %v, want the two newest", got)
+	}
+	if !cursor.set {
+		t.Fatal("no cursor after a full page; the client cannot ask for the rest")
+	}
+
+	// A task arrives between the pages.
+	mustCreate(t, view, "task-new", "ctx-1", submitted())
+
+	second, next, total, err := view.Query(taskQuery{limit: 2, after: cursor})
+	if err != nil {
+		t.Fatalf("Query page 2: %v", err)
+	}
+	if got := taskIDsOf(second); len(got) != 2 || got[0] != "task-1" || got[1] != "task-0" {
+		t.Fatalf("page 2 = %v, want the two oldest with no repeats", got)
+	}
+	if next.set {
+		t.Errorf("a further page was offered after the last row")
+	}
+	if total != 5 {
+		t.Errorf("totalSize = %d on page 2, want the current 5", total)
+	}
+}
+
+// TestQueryFiltersAreScopedToOnePrincipal pins that no filter widens the result
+// set: another principal's task matching every criterion is still invisible.
+func TestQueryFiltersAreScopedToOnePrincipal(t *testing.T) {
+	store := newStore(t, noRetention)
+	a := store.For(principal("partner-a"))
+	b := store.For(principal("partner-b"))
+	mustCreate(t, a, "task-a", "ctx-shared", submitted())
+	mustCreate(t, b, "task-b", "ctx-shared", submitted())
+
+	recs, _, total, err := a.Query(taskQuery{contextID: "ctx-shared", state: a2a.TaskStateSubmitted})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if got := taskIDsOf(recs); len(got) != 1 || got[0] != "task-a" {
+		t.Fatalf("Query returned %v, want only partner-a's task", got)
+	}
+	if total != 1 {
+		t.Errorf("totalSize = %d, want 1; the count must carry the same predicate", total)
+	}
+}

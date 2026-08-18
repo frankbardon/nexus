@@ -42,20 +42,24 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 	}
 	if s.cfg.bridge == nil {
 		// Defensive: a Server constructed without a bridge cannot drive the bus.
-		s.writeError(w, b, a2a.Errorf(a2a.ErrorTypeInternal,
-			"the a2a serve transport is not wired to the event bus"))
+		s.writeError(w, b, errNoBridge())
 		return
 	}
 
 	// Refusals are answered BEFORE any stream is opened. A client that is turned
 	// away gets an ordinary error response it can read from the status and the
 	// body, rather than a 200 SSE stream whose only record is a failure.
-	run, protoErr := s.cfg.bridge.startTurn(in, caller)
+	run, sub, protoErr := s.cfg.bridge.startTurn(in, caller)
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)
 		return
 	}
 	defer s.cfg.bridge.endTurn(run)
+	// The subscription is attached by startTurn, before the turn can emit
+	// anything; releasing it here is the other half. Detaching does not end the
+	// task — a SubscribeToTask stream may still be watching it — it only says
+	// this response is finished with it.
+	defer run.detach(sub)
 
 	// Client disconnect: fail the task so the drain loop stops promptly and the
 	// active-task slot is released for the next caller. The stop channel keeps
@@ -72,20 +76,33 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 	}()
 
 	if streaming {
-		s.streamTask(ctx, w, b, run)
+		// A write failure on THIS connection fails the task: it is the request
+		// that started the turn, and there is nowhere else for the answer to go.
+		// A SubscribeToTask stream passes no such callback — a passive observer
+		// losing its socket must not kill somebody else's task.
+		s.pumpStream(ctx, w, b, sub, openingTask(run), run.fail)
 		return
 	}
-	s.blockOnTask(ctx, w, b, run)
+	s.blockOnTask(ctx, w, b, sub, run)
 }
 
-// streamTask renders the run as a text/event-stream, one StreamResponse per
-// record, until a frame reports a terminal state and closes the stream.
+// openingTask is the snapshot a freshly started turn opens on: SUBMITTED, no
+// artifacts. A2A requires a task to exist before any update event may name it,
+// and SUBMITTED is the state a task is created in (specification section 4.1).
+func openingTask(r *run) a2a.Task { return a2a.NewTask(r.taskID, r.contextID) }
+
+// pumpStream renders one attached observer as a text/event-stream: the opening
+// Task snapshot, then one StreamResponse per record until a frame reports a
+// terminal state and closes the stream.
 //
-// The opening Task frame is written here rather than queued, because A2A
-// requires a stream to open with a Task or a Message (specification section
-// 11.7) and writing it inline guarantees it precedes anything a bus handler has
-// already produced.
-func (s *Server) streamTask(ctx context.Context, w http.ResponseWriter, b binding, run *run) {
+// It is the SINGLE SSE writer path, shared by SendStreamingMessage and
+// SubscribeToTask, and this goroutine is the sole writer of this response. Bus
+// handlers never touch it; they only push onto sub.frames.
+//
+// A nil sub means there is nothing live to follow: the snapshot is written and
+// the stream ends. onBroken, when supplied, is called if this connection cannot
+// carry the stream — see the call sites for why only one of them supplies it.
+func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b binding, sub *stream, opening a2a.Task, onBroken func(string)) {
 	a2a.WriteSSEHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 
@@ -96,26 +113,40 @@ func (s *Server) streamTask(ctx context.Context, w http.ResponseWriter, b bindin
 		sse = a2a.NewSSEWriter(w)
 	}
 
-	if err := sse.WriteTask(run.openingTask()); err != nil {
-		s.cfg.logger.Debug("a2a sse open failed", "task_id", run.taskID, "error", err)
-		run.fail("the response stream could not be opened")
+	if err := sse.WriteTask(opening); err != nil {
+		s.cfg.logger.Debug("a2a sse open failed", "task_id", opening.ID, "error", err)
+		if onBroken != nil {
+			onBroken("the response stream could not be opened")
+		}
+		return
+	}
+	// A snapshot already in a terminal state closes the stream on the opening
+	// frame: subscribing to a finished task answers and hangs up.
+	if sse.Closed() || sub == nil {
 		return
 	}
 
 	for {
 		select {
-		case frame := <-run.out:
+		case frame := <-sub.frames:
 			if err := sse.Write(frame); err != nil {
 				// The transport is gone, or the agent produced a frame the stream
 				// contract refuses. Either way nothing more can be delivered on
-				// this connection, so the task is failed and the slot released.
-				s.cfg.logger.Debug("a2a sse write failed", "task_id", run.taskID, "error", err)
-				run.fail("the response stream could not be written")
+				// this connection.
+				s.cfg.logger.Debug("a2a sse write failed", "task_id", opening.ID, "error", err)
+				if onBroken != nil {
+					onBroken("the response stream could not be written")
+				}
 				return
 			}
 			if sse.Closed() {
 				return
 			}
+		case <-sub.dropped:
+			// This observer fell behind and the run stopped feeding it. Ending
+			// the response is the only honest move: the alternative is a gapped
+			// frame sequence a conforming client would reject anyway.
+			return
 		case <-ctx.Done():
 			return
 		}
@@ -129,15 +160,28 @@ func (s *Server) streamTask(ctx context.Context, w http.ResponseWriter, b bindin
 // It consumes exactly the frames the streaming path writes, folding each into
 // the Task snapshot, so the two bindings cannot report different outcomes for
 // the same turn.
-func (s *Server) blockOnTask(ctx context.Context, w http.ResponseWriter, b binding, run *run) {
-	task := run.openingTask()
+func (s *Server) blockOnTask(ctx context.Context, w http.ResponseWriter, b binding, sub *stream, run *run) {
+	task := openingTask(run)
 	for {
 		select {
-		case frame := <-run.out:
+		case frame := <-sub.frames:
 			if applyFrame(&task, frame) {
 				s.writeResult(w, b, a2a.TaskResponse(task))
 				return
 			}
+		case <-sub.dropped:
+			// The observer was dropped, so the terminal frame will never arrive
+			// on this channel. The task is failed and the failure is rendered
+			// here rather than awaited, since awaiting it would be waiting on a
+			// channel that is no longer being written to.
+			const reason = "the response could not be assembled: this request fell behind its own task"
+			run.fail(reason)
+			task.Status = a2a.NewTaskStatus(a2a.TaskStateFailed).WithMessage(
+				a2a.NewAgentMessage(newMessageID(), reason).
+					InContext(run.contextID).
+					ForTask(run.taskID))
+			s.writeResult(w, b, a2a.TaskResponse(task))
+			return
 		case <-ctx.Done():
 			// The caller is gone; there is nobody left to answer.
 			return

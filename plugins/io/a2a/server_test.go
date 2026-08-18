@@ -269,6 +269,9 @@ func TestOperationsReturnNotImplemented(t *testing.T) {
 	})
 
 	t.Run("rest", func(t *testing.T) {
+		// Driven off the codec's own route table and filtered by
+		// implementedOperations, for the same reason the JSON-RPC loop is: an
+		// operation that gets wired leaves this test by itself.
 		cases := []struct{ method, path string }{
 			{http.MethodGet, "/a2a/v1/tasks/task-1"},
 			{http.MethodGet, "/a2a/v1/tasks"},
@@ -276,6 +279,14 @@ func TestOperationsReturnNotImplemented(t *testing.T) {
 			{http.MethodPost, "/a2a/v1/tasks/task-1:subscribe"},
 		}
 		for _, c := range cases {
+			suffix := strings.TrimPrefix(c.path, "/a2a/v1")
+			route, _, found, _ := a2a.MatchRoute(c.method, suffix)
+			if !found {
+				t.Fatalf("%s %s does not resolve to an A2A route", c.method, c.path)
+			}
+			if operationImplemented(route.Operation) {
+				continue
+			}
 			t.Run(c.method+" "+c.path, func(t *testing.T) {
 				rec := do(t, s, c.method, c.path, withVersion("1.0"))
 				if rec.Code != http.StatusBadRequest {
@@ -387,14 +398,41 @@ func TestMalformedJSONRPCIsClassified(t *testing.T) {
 	}
 }
 
-// TestMessageOperationsAreWired is the counterpart to the test above: the two
+// TestMessageOperationsAreWired is the counterpart to the test above: the
 // operations this plugin implements must NOT answer with the not-implemented
 // refusal, and the card must agree.
 func TestMessageOperationsAreWired(t *testing.T) {
-	for _, method := range []string{a2a.MethodSendMessage, a2a.MethodSendStreamingMessage} {
+	for _, method := range []string{
+		a2a.MethodSendMessage,
+		a2a.MethodSendStreamingMessage,
+		a2a.MethodGetTask,
+		a2a.MethodListTasks,
+		a2a.MethodSubscribeToTask,
+	} {
 		if !operationImplemented(method) {
 			t.Errorf("%s is not marked implemented; the turn mapping and the card derive from this map", method)
 		}
+	}
+}
+
+// TestCardStreamingCapabilityCoversBothStreamingOperations pins the derivation
+// the card makes: streaming is claimed because both operations that open a
+// stream are wired, not because one of them once was.
+func TestCardStreamingCapabilityCoversBothStreamingOperations(t *testing.T) {
+	for _, method := range a2a.Methods() {
+		if !a2a.IsStreamingMethod(method) {
+			continue
+		}
+		if !operationImplemented(method) {
+			t.Fatalf("the card claims streaming while %s is unimplemented", method)
+		}
+	}
+	s := newTestServer(t, testConfig(t, nil))
+	if !s.cfg.card.card.Capabilities.Streaming {
+		t.Error("capabilities.streaming is false while both streaming operations are wired")
+	}
+	if s.cfg.card.card.Capabilities.PushNotifications || s.cfg.card.card.Capabilities.ExtendedAgentCard {
+		t.Error("the card claims a capability this plugin does not implement")
 	}
 }
 

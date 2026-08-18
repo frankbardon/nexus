@@ -22,12 +22,12 @@ interop transport is not a Nexus UI, so nothing here is back-ported into
 
 ## Current maturity
 
-> `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**, and
-> every task they create is **persisted durably** in a principal-scoped,
-> session-scoped SQLite store. The read and control operations — `GetTask`,
-> `ListTasks`, `CancelTask`, `SubscribeToTask` — are routed, version-negotiated
-> and authenticated, then answered with `UnsupportedOperationError`: the store
-> exists, but nothing reads from it over the wire yet.
+> `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**, every
+> task they create is **persisted durably** in a principal-scoped,
+> session-scoped SQLite store, and `GetTask`, `ListTasks` and `SubscribeToTask`
+> **read it back**. `CancelTask` is the one remaining operation: it is routed,
+> version-negotiated and authenticated, then answered with
+> `UnsupportedOperationError`.
 
 The Agent Card reports this rather than advertising an intention:
 `capabilities.streaming`, `pushNotifications` and `extendedAgentCard` are all
@@ -53,6 +53,54 @@ expression the package can form.
 
 Retention (`tasks.ttl`, `tasks.max_per_context`) is documented in the
 [configuration reference](../../configuration/reference.md#task-retention).
+
+## Reading tasks back
+
+| Operation | JSON-RPC | REST |
+|---|---|---|
+| `GetTask` | `{"method":"GetTask","params":{"id":"…"}}` | `GET <rest_prefix>/tasks/{id}` |
+| `ListTasks` | `{"method":"ListTasks","params":{…}}` | `GET <rest_prefix>/tasks?…` |
+| `SubscribeToTask` | `{"method":"SubscribeToTask","params":{"id":"…"}}` | `POST <rest_prefix>/tasks/{id}:subscribe` |
+
+**`GetTask`** returns the task with its status, its artifacts and its history.
+History is the trail of message *references* the store retained, rendered as
+text messages — the client-assigned `messageId`, the role and the text that
+travelled — not a replay of Nexus's own conversation buffer. Because this
+transport accepts text parts only and emits text artifacts only, that rendering
+is lossless for everything the agent can currently say or hear.
+`configuration.historyLength` is honoured: unset keeps everything retained, `0`
+omits history, and `N` keeps the **most recent** `N` messages.
+
+**`ListTasks`** pages the caller's own tasks, newest first, and supports every
+filter the specification defines: `contextId`, `status`, `statusTimestampAfter`
+(inclusive), `historyLength` and `includeArtifacts`. Artifacts are **off by
+default** to keep a page small, which is the specification's own default;
+history is not, so pass `historyLength=0` for a compact listing. `pageSize` defaults to 50 and is bounded to
+1–100. The `nextPageToken` is a **keyset** cursor over `(created_at, rowid)`,
+not an offset: a task created or evicted while a client is paging cannot make it
+skip or repeat a row. A token this server did not mint is an
+`InvalidParamsError` rather than a silent restart from the top.
+
+**`SubscribeToTask`** attaches an SSE stream to an existing task and always
+opens with the task's current state, so a client that joined mid-turn learns
+what it missed before it sees anything new. If the task is live, the subscriber
+joins the run's fan-out and receives exactly the frames every other attached
+stream receives. If it is already terminal, the opening snapshot carries the
+terminal state and the stream closes at once rather than hanging. A task that is
+neither — one this process was serving when it last stopped — gets its snapshot
+and then a close, because nothing will ever update it again.
+
+### Task ownership is not enumerable
+
+Every read goes through the store's principal-scoped view. A task belonging to
+**another** principal answers exactly as an id nobody ever minted does: the same
+`TaskNotFoundError`, the same HTTP 404, the same body, from the same single
+indexed lookup. There is no "exists but is not yours" response, because that
+would be an existence oracle for task ids the caller was never told — the same
+reasoning behind the session broker's `errTicketRejected`.
+
+With no `auth:` block configured every caller is unauthenticated and shares one
+partition, which is another reason the listener binds loopback by default.
 
 ## Details
 
@@ -91,11 +139,19 @@ Richer artifacts — tool results, files, structured output — are a later stor
 
 Refusals worth knowing about, each carrying the error type the specification
 reserves for it: a non-text Part (`ContentTypeNotSupportedError`), a message
-naming a `taskId` (`TaskNotFoundError` — nothing is retained to continue),
-`configuration.returnImmediately` (`UnsupportedOperationError` — a task returned
-early cannot be polled while `GetTask` is unwired), and a second task while one
-is in flight (`UnsupportedOperationError` — the listener fronts one agent loop,
-and two turns would interleave on the same bus).
+naming a `taskId` (`TaskNotFoundError` — nothing resumes a stored task yet),
+`configuration.returnImmediately` (`UnsupportedOperationError` — see below), and
+a second task while one is in flight (`UnsupportedOperationError` — the listener
+fronts one agent loop, and two turns would interleave on the same bus).
+
+`returnImmediately` is still refused, but no longer for the original reason. A
+task returned early *can* now be polled — `GetTask` and `SubscribeToTask` are
+wired. What stops it is lifetime: a run is registered as this listener's single
+active task and released when the request that started it returns, so returning
+early would release the slot mid-turn and leave the task stuck at `SUBMITTED`
+while the agent answered into the void. Detaching a run's lifetime from its
+request needs `CancelTask` alongside it, or a turn nobody is watching would hold
+the process's only agent loop with nothing able to interrupt it.
 
 ## `contextId` is the Nexus session
 
@@ -238,10 +294,21 @@ curl -sN localhost:18191/a2a \
 Each SSE record carries one `StreamResponse`: the opening Task in
 `TASK_STATE_SUBMITTED`, a `TASK_STATE_WORKING` status update, an artifact
 holding the reply, and the `TASK_STATE_COMPLETED` update that closes the stream.
-Send the same `contextId` again to continue the conversation. Swap the method
-for `GetTask` to see the `UnsupportedOperationError` (`-32004`) the unwired
-operations still return, or drop the `Authorization` header for the `401` and
-its RFC 6750 challenge.
+Send the same `contextId` again to continue the conversation.
+
+```bash
+# List the tasks this token owns, then read one back.
+curl -s 'localhost:18191/a2a/v1/tasks?pageSize=5' \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+
+curl -s localhost:18191/a2a/v1/tasks/<task-id> \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+```
+
+Swap the method for `CancelTask` to see the `UnsupportedOperationError`
+(`-32004`) the one unwired operation still returns, ask for a task id that does
+not exist for the `TaskNotFoundError` (`-32001`), or drop the `Authorization`
+header for the `401` and its RFC 6750 challenge.
 
 ## See also
 

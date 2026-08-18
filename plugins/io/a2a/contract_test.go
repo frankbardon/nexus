@@ -48,10 +48,12 @@ func TestContract_TurnMapping(t *testing.T) {
 	h.AssertNoUndeclaredEmissions()
 }
 
-// TestContract_UnwiredOperationsStayOffTheBus pins the other half of the
-// contract: an operation that is not implemented must not reach the bus at all,
-// so the not-implemented refusal cannot quietly acquire a side effect.
-func TestContract_UnwiredOperationsStayOffTheBus(t *testing.T) {
+// TestContract_NonTurnOperationsStayOffTheBus pins the other half of the
+// contract: only a message operation may reach the bus. An operation that is not
+// implemented must not acquire a side effect through its refusal, and the task
+// READ operations must not emit either — they answer from the store, and a read
+// that emitted io.input would start a turn nobody asked for.
+func TestContract_NonTurnOperationsStayOffTheBus(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithSession(),
 		contract.WithPluginConfig(testConfig(t, nil)))
 
@@ -59,10 +61,22 @@ func TestContract_UnwiredOperationsStayOffTheBus(t *testing.T) {
 	if !ok {
 		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
 	}
-	rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
-		jsonrpcBody(t, a2a.MethodGetTask, map[string]any{"id": "task-1"}))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("jsonrpc status = %d: %s", rec.Code, rec.Body)
+	calls := []struct {
+		method string
+		params map[string]any
+	}{
+		{a2a.MethodGetTask, map[string]any{"id": "task-1"}},
+		{a2a.MethodListTasks, map[string]any{}},
+		{a2a.MethodSubscribeToTask, map[string]any{"id": "task-1"}},
+		// Still unimplemented, so this one also covers the refusal path.
+		{a2a.MethodCancelTask, map[string]any{"id": "task-1"}},
+	}
+	for _, c := range calls {
+		rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
+			jsonrpcBody(t, c.method, c.params))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", c.method, rec.Code, rec.Body)
+		}
 	}
 
 	h.AssertNotEmitted("io.input")
@@ -88,8 +102,9 @@ func TestContract_BootsThroughTheHarness(t *testing.T) {
 	if len(card.SecuritySchemes) == 0 {
 		t.Error("a guarded listener published no securitySchemes for a client to discover")
 	}
-	// The card advertises streaming now that SendStreamingMessage is wired.
+	// The card advertises streaming now that both streaming operations —
+	// SendStreamingMessage and SubscribeToTask — are wired.
 	if !card.Capabilities.Streaming {
-		t.Error("capabilities.streaming is false while SendStreamingMessage is implemented")
+		t.Error("capabilities.streaming is false while the streaming operations are implemented")
 	}
 }

@@ -59,8 +59,11 @@ func buildCard(cfg *config) (*servedCard, error) {
 	}
 
 	// Capabilities are derived from what is actually wired, never configured.
-	// implementedOperations is empty in this story, so the card honestly reports
-	// streaming as false; it flips on its own when the operations land.
+	// streaming is true because BOTH streaming operations are implemented —
+	// SendStreamingMessage opens a stream on a new task, SubscribeToTask attaches
+	// one to an existing task — and it would flip back on its own if either the
+	// map or the dispatch stopped agreeing. Push notifications and the extended
+	// card remain unimplemented, so the card says so.
 	card.Capabilities.Streaming = operationImplemented(a2a.MethodSendStreamingMessage) ||
 		operationImplemented(a2a.MethodSubscribeToTask)
 	card.Capabilities.PushNotifications = operationImplemented(a2a.MethodCreateTaskPushNotificationConfig)

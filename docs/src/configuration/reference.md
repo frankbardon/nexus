@@ -1513,14 +1513,14 @@ worked end-to-end example; [`nexus.io.a2a`](../plugins/io/a2a.md) is the plugin
 page.
 
 > **Maturity.** `SendMessage` and `SendStreamingMessage` drive a real Nexus
-> turn, and every task they create is **persisted durably** — see
-> [Task retention](#task-retention) below. The read and control operations —
-> `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask` — are routed,
-> version-negotiated and authenticated, then answered with
-> `UnsupportedOperationError`; the store is in place but nothing is wired to
-> read from it over the wire yet. Sending a message that names a `taskId`
-> (continuing a task) is likewise refused. The Agent Card reports all of this
-> honestly: `capabilities.streaming` is `true`, `pushNotifications` and
+> turn; every task they create is **persisted durably** (see
+> [Task retention](#task-retention) below) and `GetTask`, `ListTasks` and
+> `SubscribeToTask` read it back — see [Reading tasks](#reading-tasks) below.
+> `CancelTask` is the one remaining operation: it is routed, version-negotiated
+> and authenticated, then answered with `UnsupportedOperationError`. Sending a
+> message that names a `taskId` (continuing a task) is likewise refused. The
+> Agent Card reports all of this honestly: `capabilities.streaming` is `true`
+> because both streaming operations are wired, while `pushNotifications` and
 > `extendedAgentCard` are `false`.
 
 | Key                     | Type         | Default              | Description |
@@ -1563,8 +1563,10 @@ behaviour of the transport.
 
 `SendMessage` **blocks** until the task is terminal and returns the finished
 Task, which is A2A's default (§3.2.2). `configuration.returnImmediately` is
-refused: a task returned early cannot be polled while `GetTask` is unwired, so
-the honest answer is an error rather than an unresolvable task id.
+refused — not because a task returned early could not be polled (`GetTask` and
+`SubscribeToTask` are wired), but because a run is this listener's single active
+task and is released when the request that started it returns, so returning
+early would release the slot mid-turn and leave the task frozen at `SUBMITTED`.
 `SendStreamingMessage` writes the same frames as SSE — an opening Task snapshot,
 status updates, the artifact, and the terminal status that closes the stream.
 
@@ -1621,6 +1623,46 @@ plugins:
       ttl: 72h
       max_per_context: 50
 ```
+
+#### Reading tasks
+
+`GetTask`, `ListTasks` and `SubscribeToTask` answer from the store above. There
+is no configuration for any of them; the behaviour below is fixed.
+
+| Operation | JSON-RPC | REST |
+|---|---|---|
+| `GetTask` | `params: {id, historyLength?}` | `GET <rest_prefix>/tasks/{id}?historyLength=` |
+| `ListTasks` | `params: {contextId?, status?, pageSize?, pageToken?, historyLength?, statusTimestampAfter?, includeArtifacts?}` | `GET <rest_prefix>/tasks?…` (§11.5 camelCase query parameters) |
+| `SubscribeToTask` | `params: {id}` → SSE | `POST <rest_prefix>/tasks/{id}:subscribe` → SSE |
+
+- **History** is the trail of message *references* the store retained, rendered
+  as text messages stamped with their task and context — not a replay of
+  `memory.history`. §3.7 leaves it to the server which messages are persisted,
+  so a bounded reference trail is a conforming history. `historyLength` unset
+  keeps everything retained, `0` omits history, and `N` keeps the most recent
+  `N` messages.
+- **`ListTasks` pagination** defaults to a page size of 50 and is bounded to
+  1–100 (§3.2). `nextPageToken` is an opaque **keyset** cursor over
+  `(created_at, rowid)`, not an offset, so a task created or evicted mid-walk
+  cannot make a client skip or repeat a row. A token this server did not mint is
+  an `InvalidParamsError`, not a silent restart. `totalSize` is counted under the
+  identical filters, so it counts the same set the client is paging through.
+- **`includeArtifacts` defaults to false**, per §3.2, so a page stays small;
+  `GetTask` always returns artifacts. History has no such default in the
+  specification and is therefore included in a listing unless the request caps
+  it — pass `historyLength: 0` for a compact page.
+- **`SubscribeToTask`** always opens with the task's current state. A live task
+  then streams the same frames every other attached stream receives — several
+  clients may follow one task and all see an identical sequence from the point
+  they joined. An already-terminal task yields its terminal snapshot and the
+  stream closes immediately. A task that is neither (one this process was
+  serving when it last stopped) gets its snapshot and then a close, since
+  nothing will ever update it again.
+- **Ownership is not enumerable.** Every read goes through the store's
+  principal-scoped view, so a task belonging to another principal answers
+  exactly as an unknown id does: the same `TaskNotFoundError`, the same HTTP
+  404, the same body, from the same single lookup. A distinct "exists but is not
+  yours" answer would be an existence oracle for ids the caller was never told.
 
 #### `contextId` and the Nexus session
 

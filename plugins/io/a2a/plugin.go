@@ -41,25 +41,39 @@
 // to one principal, so a task can never be reached by a caller that did not
 // create it. Retention (tasks.ttl, tasks.max_per_context) bounds the store.
 //
+// # Reading tasks back
+//
+// GetTask, ListTasks and SubscribeToTask answer from that store (tasks.go).
+// Every one of them goes through the store's principal-scoped view, so a task
+// belonging to another caller is reported exactly as an unknown task id is —
+// the same TaskNotFoundError, from the same single lookup, with no second query
+// whose presence or absence could leak the difference. SubscribeToTask attaches
+// to the live run when there is one and replays the current state first, so a
+// client that joins mid-turn is never told about an update to a task it has not
+// been shown.
+//
 // # What this plugin does NOT do yet
 //
-// GetTask, ListTasks, CancelTask and SubscribeToTask are decoded, version-checked
-// and authenticated, and then answered with an UnsupportedOperationError naming
-// the operation — see implementedOperations, which is the single switch that
-// both gates dispatch and determines what the Agent Card claims. Adding an entry
-// there flips the behaviour and the advertised capability together, so the two
-// cannot disagree. The store they will read from is already in place; what is
-// missing is the wire mapping, not the data.
+// CancelTask is decoded, version-checked and authenticated, and then answered
+// with an UnsupportedOperationError naming the operation — see
+// implementedOperations, which is the single switch that both gates dispatch and
+// determines what the Agent Card claims. Adding an entry there flips the
+// behaviour and the advertised capability together, so the two cannot disagree.
 //
 // # Concurrency
 //
-// The model is nexus.io.agui's, copied deliberately rather than reinvented. Bus
-// handlers run on arbitrary engine goroutines and NEVER touch the response
-// writer: each handler translates its payload and pushes frames onto the active
-// run's buffered channel. The HTTP handler goroutine is the sole reader of that
-// channel and the sole writer to the stream. A mutex guards the active-run
-// pointer and the bound context. Everything else the handlers read (the resolved
-// config, the rendered card, the validator chain) is immutable after Init.
+// The model is nexus.io.agui's, extended in one direction: from one observer per
+// run to many. Bus handlers run on arbitrary engine goroutines and NEVER touch a
+// response writer. Each handler translates its payload and hands the frames to
+// the active run, which — under one lock — folds them into the task snapshot and
+// copies them into every attached stream's buffered channel. Each of those
+// channels is drained by exactly ONE HTTP handler goroutine, which is the sole
+// writer of that goroutine's response. A stream too far behind to be given a
+// coherent sequence is dropped rather than allowed to stall the agent loop.
+//
+// A mutex guards the active-run pointer and the bound context. Everything else
+// the handlers read (the resolved config, the rendered card, the validator
+// chain) is immutable after Init.
 package a2a
 
 import (
@@ -94,12 +108,16 @@ const legacyBearerPrincipal = "bearer_token"
 // here plus the handler, and it is not possible to ship a card claiming
 // streaming while SendStreamingMessage refuses every caller.
 //
-// SendMessage and SendStreamingMessage are wired: both drive a real Nexus turn.
-// The task-store operations (GetTask, ListTasks, SubscribeToTask) and CancelTask
-// are not, so they stay out of the map and the card keeps reporting what is true.
+// SendMessage and SendStreamingMessage drive a real Nexus turn; GetTask,
+// ListTasks and SubscribeToTask read and follow the tasks those turns create.
+// CancelTask is the one operation still missing, so it stays out of the map and
+// the card keeps reporting what is true.
 var implementedOperations = map[string]bool{
 	a2a.MethodSendMessage:          true,
 	a2a.MethodSendStreamingMessage: true,
+	a2a.MethodGetTask:              true,
+	a2a.MethodListTasks:            true,
+	a2a.MethodSubscribeToTask:      true,
 }
 
 // operationImplemented reports whether an A2A operation is wired to real

@@ -269,12 +269,87 @@ Because this call reused `contextId: "demo"`, it ran in the **same session** as
 the streaming call above, with the first exchange still in history. A different
 `contextId` is refused — that is the payload shown [earlier](#one-process-serves-exactly-one-context).
 
-`configuration.returnImmediately` is refused with `UnsupportedOperationError`:
-a task returned early is only useful if the client can then poll it, and
-`GetTask` is not wired yet, so a non-blocking return would hand back a task id
-that can never be resolved.
+`configuration.returnImmediately` is refused with `UnsupportedOperationError`.
+Not because the task could not then be polled — `GetTask` and
+`SubscribeToTask` are wired now — but because of **lifetime**: a run is this
+listener's single active task and is released when the request that started it
+returns, so a non-blocking return would release the slot mid-turn and leave the
+task frozen at `SUBMITTED` while the agent answered into the void. Detaching a
+run's lifetime from its request needs `CancelTask` alongside it, or a turn
+nobody is watching would hold the process's only agent loop with nothing able to
+interrupt it.
 
-### 4. Failure shapes worth knowing
+### 4. Reading tasks back
+
+A task outlives the call that created it. Poll one:
+
+```bash
+curl -s localhost:18191/a2a/v1/tasks/<task-id> \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+```
+
+```json
+{"id":"task-e0fc24…","contextId":"demo",
+ "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"},
+ "artifacts":[{"artifactId":"task-e0fc24…-response","name":"response",
+   "parts":[{"text":"Hello from a mocked Nexus agent."}]}],
+ "history":[{"messageId":"m1","contextId":"demo","taskId":"task-e0fc24…",
+   "role":"ROLE_USER","parts":[{"text":"Are you still there?"}]},
+  {"messageId":"msg-de55c4…","contextId":"demo","taskId":"task-e0fc24…",
+   "role":"ROLE_AGENT","parts":[{"text":"Hello from a mocked Nexus agent."}]}]}
+```
+
+`history` is the trail of message **references** the store retained, rendered as
+text messages — not a replay of Nexus's conversation buffer. §3.7 leaves it to
+the server which messages are persisted and warns clients not to assume all of
+them are present, so a bounded reference trail is a conforming history.
+`historyLength` caps it: `0` omits it, `N` keeps the most recent `N`.
+
+List them, newest first. History is included unless you cap it, so
+`historyLength=0` is the compact listing:
+
+```bash
+curl -s 'localhost:18191/a2a/v1/tasks?pageSize=1&historyLength=0' \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+```
+
+```json
+{"tasks":[{"id":"task-e0fc24…","contextId":"demo",
+   "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"}}],
+ "nextPageToken":"","pageSize":1,"totalSize":1}
+```
+
+Artifacts are the other way round — omitted unless `includeArtifacts=true`,
+which is the specification's own default. The remaining filters are `contextId`,
+`status` and `statusTimestampAfter`. `nextPageToken` is empty when the walk is
+done and is a keyset cursor otherwise, so a task created while you page cannot
+make the walk skip or repeat a row.
+
+Re-attach a stream to a task, which replays its current state and then follows
+it live:
+
+```bash
+curl -sN -X POST localhost:18191/a2a/v1/tasks/<task-id>:subscribe \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0'
+```
+
+```
+data: {"task":{"id":"task-e0fc24…","contextId":"demo",
+  "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"},
+  "artifacts":[…],"history":[…]}}
+```
+
+On a finished task that is one frame — the terminal snapshot — and the stream
+closes. On a task still running it is the current snapshot followed by the same
+frames every other attached stream receives; several clients may watch one task
+at once and all of them see the identical sequence from the point they joined.
+
+**A task belonging to another principal answers exactly as an unknown task id
+does**: the same `TaskNotFoundError`, the same 404, the same body. There is no
+"exists but is not yours", because that is an existence oracle for ids the
+caller was never told.
+
+### 5. Failure shapes worth knowing
 
 Missing or bad credentials, on the JSON-RPC binding:
 
@@ -295,15 +370,23 @@ reserves for exactly that condition:
 curl -s localhost:18191/a2a \
   -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/a2a+json' \
-  -d '{"jsonrpc":"2.0","id":9,"method":"GetTask","params":{"id":"task-x"}}'
+  -d '{"jsonrpc":"2.0","id":9,"method":"CancelTask","params":{"id":"task-x"}}'
 ```
 
 ```json
 {"jsonrpc":"2.0","id":9,"error":{"code":-32004,
-  "message":"operation \"GetTask\" is not yet implemented by this agent",
+  "message":"operation \"CancelTask\" is not yet implemented by this agent",
   "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
-    "reason":"UNSUPPORTED_OPERATION",
-    "metadata":{"operation":"GetTask","detail":"OPERATION_NOT_IMPLEMENTED"}}]}}
+    "metadata":{"detail":"OPERATION_NOT_IMPLEMENTED","operation":"CancelTask"},
+    "reason":"UNSUPPORTED_OPERATION"}]}}
+```
+
+A task id that this caller cannot see — unknown, or owned by somebody else:
+
+```json
+{"jsonrpc":"2.0","id":9,"error":{"code":-32001,"message":"Task not found",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
+    "metadata":{"taskId":"task-x"},"reason":"TASK_NOT_FOUND"}]}}
 ```
 
 The full per-binding error-envelope table is in the [Configuration
@@ -320,14 +403,15 @@ cannot disagree.
 | Fetch the Agent Card | — | `GET /.well-known/agent-card.json` | **Works** |
 | Send a message, blocking | `SendMessage` | `POST <rest_prefix>/message:send` | **Works** |
 | Send a message, streaming | `SendStreamingMessage` | `POST <rest_prefix>/message:stream` | **Works** |
-| Read one task | `GetTask` | `GET <rest_prefix>/tasks/{id}` | Not yet — `UnsupportedOperationError` |
-| List tasks | `ListTasks` | `GET <rest_prefix>/tasks` | Not yet — `UnsupportedOperationError` |
+| Read one task | `GetTask` | `GET <rest_prefix>/tasks/{id}` | **Works** — status, artifacts, history; `historyLength` honoured |
+| List tasks | `ListTasks` | `GET <rest_prefix>/tasks` | **Works** — keyset pagination, `contextId` / `status` / `statusTimestampAfter` / `includeArtifacts` filters |
+| Re-subscribe to a task | `SubscribeToTask` | `POST <rest_prefix>/tasks/{id}:subscribe` | **Works** — replays current state, then follows live; several streams per task |
 | Cancel a task | `CancelTask` | `POST <rest_prefix>/tasks/{id}:cancel` | Not yet — `UnsupportedOperationError` |
-| Re-subscribe to a task | `SubscribeToTask` | `POST <rest_prefix>/tasks/{id}:subscribe` | Not yet — `UnsupportedOperationError` |
 
-Everything in the "not yet" rows is decoded, version-negotiated and
-authenticated before it is refused, so a client gets a well-formed protocol
-error rather than a 404.
+The one "not yet" row is decoded, version-negotiated and authenticated before it
+is refused, so a client gets a well-formed protocol error rather than a 404. All
+three read operations are scoped to the calling principal: another principal's
+task is indistinguishable from one that does not exist.
 
 ### Planned, not available today
 
@@ -335,13 +419,15 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- **`GetTask` / `ListTasks` / `SubscribeToTask`** are not wired to the wire yet.
-  Tasks *are* now retained durably — a principal-scoped SQLite store under the
-  session directory records every task, its transitions and its artifacts — but
-  no operation reads from it over the protocol, and nothing resumes a stored
-  task, which is why a message naming a `taskId` is still refused with
-  `TaskNotFoundError` rather than silently starting a fresh turn under an id the
-  client believes it is resuming.
+- **Resuming a stored task.** Reading one works; *continuing* one does not. A
+  message naming a `taskId` is still refused with `TaskNotFoundError` rather
+  than silently starting a fresh turn under an id the client believes it is
+  resuming — reviving a task needs the interrupt/resume path below.
+- **A task outliving its request.** A run is released when the request that
+  started it returns, so a client that disconnects mid-turn ends the task, and
+  `configuration.returnImmediately` is refused for the same reason. Both wait on
+  `CancelTask`: without it, a turn nobody is watching would hold this process's
+  only agent loop with nothing able to interrupt it.
 - **HITL as `TASK_STATE_INPUT_REQUIRED`.** The intended shape is that a Nexus
   `hitl.requested` parks the task in `INPUT_REQUIRED` with the question in
   `status.message`, and the client resumes by sending a new message carrying the

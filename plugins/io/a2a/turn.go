@@ -41,26 +41,32 @@ type turnInput struct {
 
 // startTurn binds the context, records the new task against the caller,
 // registers the single active run and emits the inbound io.input. It returns
-// the run, or the protocol error the caller must answer with.
+// the run and the requesting client's attached stream, or the protocol error the
+// caller must answer with.
+//
+// The stream is attached HERE rather than by the HTTP handler, before anything
+// can be emitted, so the requesting client cannot miss a frame produced between
+// the run being registered and its handler getting around to subscribing.
 //
 // caller is the authenticated Principal the request resolved to — the zero
 // value when the listener runs with no validator chain. It is the ONLY way a
 // task reaches the store, so a task cannot be created without an owner: the
 // store's scoped view is derived from it here and handed to the run as a
 // write-only sink.
-func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a.Error) {
+func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, *a2a.Error) {
 	p.mu.Lock()
 	if p.active != nil {
 		p.mu.Unlock()
-		return nil, errConcurrentTask()
+		return nil, nil, errConcurrentTask()
 	}
 	contextID, protoErr := p.bindContextLocked(in.contextID)
 	if protoErr != nil {
 		p.mu.Unlock()
-		return nil, protoErr
+		return nil, nil, protoErr
 	}
 	owner := p.tasks.For(caller)
 	r := newRun(newTaskID(), contextID, owner, p.logger)
+	sub, _ := r.attach()
 	p.active = r
 	p.mu.Unlock()
 
@@ -73,9 +79,10 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a
 		Role:      a2a.RoleUser,
 		Text:      in.text,
 	}); err != nil {
+		r.detach(sub)
 		p.endTurn(r)
 		p.logger.Error("a2a task could not be recorded", "task_id", r.taskID, "error", err)
-		return nil, a2a.Errorf(a2a.ErrorTypeInternal,
+		return nil, nil, a2a.Errorf(a2a.ErrorTypeInternal,
 			"the task could not be recorded durably, so the turn was not started")
 	}
 
@@ -108,7 +115,7 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a
 		"context_id", contextID,
 		"message_id", in.messageID,
 	)
-	return r, nil
+	return r, sub, nil
 }
 
 // endTurn releases the active-run slot if it still points at r.
@@ -125,6 +132,23 @@ func (p *Plugin) currentRun() *run {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.active
+}
+
+// liveRun returns the active run if it is the named task, and nil otherwise —
+// including when some OTHER task is in flight.
+//
+// It performs no authorization of its own and must not be reached without one:
+// every caller resolves the task through the principal-scoped store first, so
+// the task id it passes here is already known to belong to the caller. Matching
+// on the id alone here is therefore not a hole, it is the second half of a check
+// whose first half is the only way to learn the id.
+func (p *Plugin) liveRun(taskID string) *run {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active != nil && p.active.taskID == taskID {
+		return p.active
+	}
+	return nil
 }
 
 // bindContextLocked resolves an A2A contextId to this listener's Nexus session.
@@ -302,12 +326,25 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 				"this agent does not deliver push notifications; the agent card declares capabilities.pushNotifications as false")
 		}
 		if cfg.ReturnImmediately {
-			// Returning as soon as the task exists is only useful if the client
-			// can then observe it, and GetTask / SubscribeToTask are not wired.
-			// A non-blocking return would hand back a task id that can never be
-			// resolved, so the call is refused instead.
+			// STILL refused, but no longer for the original reason.
+			//
+			// The first reading was "a task returned early cannot be polled",
+			// and that stopped being true the moment GetTask and
+			// SubscribeToTask were wired. The reason it remains refused is a
+			// lifetime one: a run is registered as this listener's single
+			// active task and released when its originating request returns.
+			// Returning early would release the slot while the turn was still
+			// running, so the bus handlers would find no active run, and the
+			// task a client had just been handed would sit at SUBMITTED for
+			// ever while the agent answered into the void.
+			//
+			// Detaching the run's lifetime from its request is the fix, and it
+			// needs CancelTask alongside it: without one, a turn nobody is
+			// watching would hold the process's only agent loop with nothing
+			// able to interrupt it. Both are the next story. Refusing is the
+			// honest answer until then.
 			return turnInput{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
-				"configuration.returnImmediately is not supported: this agent cannot yet be polled for a task it returned early; use the blocking call or SendStreamingMessage").
+				"configuration.returnImmediately is not supported: this agent's task lifetime is bound to the request that started it, so a task returned early would be abandoned mid-turn; use the blocking call, or SendStreamingMessage and SubscribeToTask to watch it").
 				WithMetadata("detail", reasonBlockingOnly)
 		}
 		if protoErr := checkAcceptedOutputModes(cfg.AcceptedOutputModes); protoErr != nil {

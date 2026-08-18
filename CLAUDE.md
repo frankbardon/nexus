@@ -107,7 +107,7 @@ plugins/
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
-  io/a2a/                # A2A serve transport: /.well-known/agent-card.json + JSON-RPC and HTTP+JSON bindings; SendMessage/SendStreamingMessage map onto io.input and stream one Task per turn (SUBMITTED->WORKING->COMPLETED, final text as an Artifact); hand-authored agent card, securitySchemes derived from pkg/nexusauth validators; wire format from pkg/a2a
+  io/a2a/                # A2A serve transport: /.well-known/agent-card.json + JSON-RPC and HTTP+JSON bindings; SendMessage/SendStreamingMessage map onto io.input and stream one Task per turn (SUBMITTED->WORKING->COMPLETED, final text as an Artifact); GetTask/ListTasks/SubscribeToTask read them back from a principal-scoped session SQLite store (foreign task == unknown task); hand-authored agent card, securitySchemes derived from pkg/nexusauth validators; wire format from pkg/a2a
   io/agui/               # AG-UI serve transport: POST /agui accepts RunAgentInput, streams canonical AG-UI SSE (RunStarted→text/tool/reasoning→RunFinished); external-facing interop via pkg/agui wire, loopback+bearer+CORS
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation

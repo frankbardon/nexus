@@ -48,13 +48,30 @@ const (
 // authRealm is the RFC 7235 realm this listener challenges with.
 const authRealm = "nexus-a2a"
 
-// turnBridge is the seam between the HTTP server and the plugin's bus wiring.
-// The server hands a decoded SendMessage to startTurn (which binds the context,
-// registers the active run and emits io.input) and calls endTurn once the
-// response has been rendered. It is satisfied by *Plugin.
-type turnBridge interface {
-	startTurn(in turnInput, caller nexusauth.Principal) (*run, *a2a.Error)
+// agentBridge is the seam between the HTTP server and the plugin's bus wiring
+// and task store. It is satisfied by *Plugin.
+//
+// Every read method takes the authenticated Principal as its FIRST parameter,
+// and none of them offers an unscoped variant. That is not a style choice: it is
+// how the "another principal's task is indistinguishable from unknown" rule is
+// kept true at the seam as well as inside the store. A handler cannot ask this
+// interface a question that spans principals, because no such question can be
+// phrased.
+type agentBridge interface {
+	// startTurn binds the context, registers the active run, emits io.input and
+	// returns the run with the requesting client's attached stream.
+	startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, *a2a.Error)
+	// endTurn releases the active-run slot once the response has been rendered.
 	endTurn(r *run)
+	// lookupTask reads one of the caller's own tasks. A task belonging to
+	// anybody else is reported absent.
+	lookupTask(caller nexusauth.Principal, taskID string) (taskRecord, bool, error)
+	// queryTasks reads one page of the caller's own tasks, with the total number
+	// of matches and the cursor for the next page.
+	queryTasks(caller nexusauth.Principal, q taskQuery) ([]taskRecord, listCursor, int, error)
+	// liveRun returns the in-flight run for a task id, or nil. Callers must have
+	// resolved the id through lookupTask first — see the method's own comment.
+	liveRun(taskID string) *run
 }
 
 // serverConfig carries the resolved settings for the embedded HTTP server.
@@ -62,10 +79,11 @@ type serverConfig struct {
 	cfg    *config
 	card   *servedCard
 	logger *slog.Logger
-	// bridge drives the bus. A Server built without one answers every
-	// turn-driving operation with an internal error rather than panicking, which
-	// is what a directly-constructed Server in a transport-only test gets.
-	bridge turnBridge
+	// bridge drives the bus and reads the task store. A Server built without one
+	// answers every operation that needs either with an internal error rather
+	// than panicking, which is what a directly-constructed Server in a
+	// transport-only test gets.
+	bridge agentBridge
 }
 
 // Server is the embedded A2A HTTP server. It owns an *http.Server bound to a
@@ -289,11 +307,37 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
 		req, ok := call.Params.(*a2a.SendMessageRequest)
 		if !ok {
-			s.writeError(w, bind, a2a.Errorf(a2a.ErrorTypeInternal,
-				"decoded %s params have type %T", call.Method, call.Params))
+			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
 			return
 		}
 		s.handleSendMessage(w, r, caller, bind, req, call.Streaming())
+		return
+
+	case a2a.MethodGetTask:
+		req, ok := call.Params.(*a2a.GetTaskRequest)
+		if !ok {
+			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
+			return
+		}
+		s.handleGetTask(w, caller, bind, req)
+		return
+
+	case a2a.MethodListTasks:
+		req, ok := call.Params.(*a2a.ListTasksRequest)
+		if !ok {
+			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
+			return
+		}
+		s.handleListTasks(w, caller, bind, req)
+		return
+
+	case a2a.MethodSubscribeToTask:
+		req, ok := call.Params.(*a2a.SubscribeToTaskRequest)
+		if !ok {
+			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
+			return
+		}
+		s.handleSubscribeToTask(r.Context(), w, bind, caller, req)
 		return
 	}
 
@@ -352,7 +396,7 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 	if suffix == "" {
 		suffix = "/"
 	}
-	route, _, found, methodMismatch := a2a.MatchRoute(r.Method, suffix)
+	route, vars, found, methodMismatch := a2a.MatchRoute(r.Method, suffix)
 	switch {
 	case !found && methodMismatch:
 		// The path names a real operation but the verb is wrong. 405 with the
@@ -387,6 +431,38 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSendMessage(w, r, caller, binding{}, req, route.Streaming)
+		return
+
+	case a2a.MethodGetTask:
+		// Section 11.5: a GET carries its parameters in the path and the query
+		// string, named exactly as the JSON body would name them, so the two
+		// bindings decode into the same request object.
+		req, protoErr := a2a.ParseGetTaskQuery(vars["id"], r.URL.Query())
+		if protoErr != nil {
+			s.writeRESTError(w, protoErr)
+			return
+		}
+		s.handleGetTask(w, caller, binding{}, req)
+		return
+
+	case a2a.MethodListTasks:
+		req, protoErr := a2a.ParseListTasksQuery(r.URL.Query())
+		if protoErr != nil {
+			s.writeRESTError(w, protoErr)
+			return
+		}
+		s.handleListTasks(w, caller, binding{}, req)
+		return
+
+	case a2a.MethodSubscribeToTask:
+		req := &a2a.SubscribeToTaskRequest{ID: vars["id"], Tenant: r.URL.Query().Get("tenant")}
+		if req.ID == "" {
+			s.writeRESTError(w, a2a.ErrInvalidParams(a2a.FieldViolation{
+				Field: "id", Description: "task id is required",
+			}))
+			return
+		}
+		s.handleSubscribeToTask(r.Context(), w, binding{}, caller, req)
 		return
 	}
 
@@ -452,6 +528,15 @@ func (s *Server) writeRESTBody(w http.ResponseWriter, status int, body a2a.RESTE
 // absent-header policy. See config.assumedVersion for the decision.
 func (s *Server) serviceParams(r *http.Request) (a2a.ServiceParams, *a2a.Error) {
 	return a2a.ParseServiceParamsAssuming(r.Header, r.URL.Query(), s.cfg.cfg.assumedVersion())
+}
+
+// errWrongParams reports a decoded parameter object whose type does not match
+// the operation it was decoded for. It is unreachable while pkg/a2a's decoder
+// and this dispatch agree, and is written as an internal error rather than a
+// type assertion panic so a disagreement costs one request instead of the
+// process.
+func errWrongParams(method string, params any) *a2a.Error {
+	return a2a.Errorf(a2a.ErrorTypeInternal, "decoded %s params have type %T", method, params)
 }
 
 // notImplemented builds the answer an operation gets while it is wired but not

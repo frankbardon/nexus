@@ -298,3 +298,120 @@ func a2aSendBlocking(t *testing.T, messageID, text, contextID string) a2a.SendMe
 	}
 	return result
 }
+
+// a2aGet issues an authenticated GET against the REST binding.
+func a2aGet(t *testing.T, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, a2aURL(path), nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a2aToken)
+	req.Header.Set(a2a.HeaderVersion, a2a.ProtocolVersion)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return resp
+}
+
+// TestA2AServe_MockTaskReadOperations exercises the three read operations end to
+// end against a real engine, in mock mode: a turn runs, and the task it produced
+// is then polled, listed and re-subscribed to across BOTH bindings.
+func TestA2AServe_MockTaskReadOperations(t *testing.T) {
+	bootEngine(t, "configs/test-a2a-serve.yaml")
+	waitForListener(t, a2aBindAddr)
+
+	created := a2aSendBlocking(t, "m-read", "What is the mock answer?", "a2a-ctx-read")
+	if created.Task == nil {
+		t.Fatalf("SendMessage returned no task: %+v", created)
+	}
+	taskID := created.Task.ID
+
+	t.Run("GetTask over JSON-RPC", func(t *testing.T) {
+		resp := a2aPost(t, "/a2a", a2aRPC(a2a.MethodGetTask, map[string]any{"id": taskID}))
+		defer func() { _ = resp.Body.Close() }()
+		var envelope a2a.Response
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("GetTask refused: %+v", envelope.Error)
+		}
+		var task a2a.Task
+		if err := envelope.DecodeResult(&task); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		if task.ID != taskID || task.Status.State != a2a.TaskStateCompleted {
+			t.Fatalf("task = %+v, want the COMPLETED task %q", task, taskID)
+		}
+		if len(task.Artifacts) == 0 {
+			t.Error("the stored task came back with no artifacts")
+		}
+		if len(task.History) != 2 {
+			t.Errorf("history = %d messages, want the prompt and the reply", len(task.History))
+		}
+	})
+
+	t.Run("GetTask over REST", func(t *testing.T) {
+		resp := a2aGet(t, "/a2a/v1/tasks/"+taskID)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var task a2a.Task
+		if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if task.ID != taskID {
+			t.Errorf("id = %q, want %q", task.ID, taskID)
+		}
+	})
+
+	t.Run("GetTask on an unknown id is TaskNotFound", func(t *testing.T) {
+		resp := a2aGet(t, "/a2a/v1/tasks/task-does-not-exist")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+
+	t.Run("ListTasks over REST", func(t *testing.T) {
+		resp := a2aGet(t, "/a2a/v1/tasks?contextId=a2a-ctx-read")
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var list a2a.ListTasksResponse
+		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if list.TotalSize != 1 || len(list.Tasks) != 1 || list.Tasks[0].ID != taskID {
+			t.Fatalf("list = %+v, want exactly the one task in this context", list)
+		}
+		if len(list.Tasks[0].Artifacts) != 0 {
+			t.Error("artifacts are included by default; they must be opt-in")
+		}
+	})
+
+	t.Run("SubscribeToTask on the finished task closes at once", func(t *testing.T) {
+		resp := a2aPost(t, "/a2a/v1/tasks/"+taskID+":subscribe", nil)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != a2a.ContentTypeSSE {
+			t.Fatalf("content-type = %q, want %q", ct, a2a.ContentTypeSSE)
+		}
+		frames, err := a2a.NewSSEReader(resp.Body).ReadAll()
+		if err != nil {
+			t.Fatalf("reading the subscription stream: %v", err)
+		}
+		if len(frames) != 1 {
+			t.Fatalf("frames = %d, want exactly the terminal snapshot", len(frames))
+		}
+		if frames[0].Task == nil || frames[0].Task.Status.State != a2a.TaskStateCompleted {
+			t.Fatalf("opening frame = %+v, want a COMPLETED task snapshot", frames[0])
+		}
+	})
+}
