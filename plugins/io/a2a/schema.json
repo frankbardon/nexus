@@ -1,0 +1,566 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.io.a2a.json",
+  "title": "nexus.io.a2a",
+  "description": "A2A (Agent2Agent) serve transport. Every key here is read by parseConfig in plugins/io/a2a/config.go; the auth block is parsed by pkg/nexusauth, shared with cmd/nexus-broker and nexus.io.agui.",
+  "type": "object",
+  "additionalProperties": false,
+  "anyOf": [
+    {
+      "title": "inline card block",
+      "required": [
+        "card"
+      ]
+    },
+    {
+      "title": "card_file document",
+      "required": [
+        "card_file"
+      ]
+    }
+  ],
+  "properties": {
+    "bind": {
+      "type": "string",
+      "description": "host:port the HTTP listener binds to. Default 127.0.0.1:8091 (loopback), so the A2A endpoint is not network-exposed without explicit opt-in. An empty string falls back to the default."
+    },
+    "public_url": {
+      "type": "string",
+      "description": "Absolute base URL advertised in the Agent Card's supportedInterfaces, e.g. https://agent.example.com. Defaults to http://<bind>, which is correct for the loopback default and wrong the moment a reverse proxy is involved."
+    },
+    "jsonrpc_path": {
+      "type": "string",
+      "description": "Absolute path the JSON-RPC 2.0 binding is mounted at. Default /a2a. Must differ from rest_prefix."
+    },
+    "rest_prefix": {
+      "type": "string",
+      "description": "Absolute path prefix the HTTP+JSON/REST binding is mounted under; operation paths from A2A specification section 11.3 hang off it. Default /a2a/v1. Must differ from jsonrpc_path."
+    },
+    "strict_version_header": {
+      "type": "boolean",
+      "description": "How an absent A2A-Version service parameter is read. Default false: assume 1.0, the only version this listener has ever served. true restores the literal specification section 3.6.2 reading (absent means 0.3), which this codec does not speak and therefore rejects with VersionNotSupportedError."
+    },
+    "card_requires_auth": {
+      "type": "boolean",
+      "description": "Whether GET /.well-known/agent-card.json is gated by the validator chain. Default false: the card is the pre-authentication bootstrap document a client fetches to learn which credentials to obtain (specification sections 7.3 and 8.2), and the listener binds loopback by default. Set true only when bind is network-exposed and the card must be distributed out-of-band instead."
+    },
+    "cors_origins": {
+      "$ref": "#/$defs/stringOrStringList",
+      "description": "Allowed CORS origins. A YAML list, or a single comma-separated string. A lone \"*\" echoes any request Origin. Empty means no CORS header at all (same-origin only)."
+    },
+    "bearer_token": {
+      "type": "string",
+      "description": "Inline bearer token, desugared into a one-entry static validator. Takes precedence over bearer_token_env. Mutually exclusive with auth \u2014 that conflict is enforced in parseConfig, which owns the operator-facing message; it is deliberately NOT duplicated here so the two enforcement points cannot drift."
+    },
+    "bearer_token_env": {
+      "type": "string",
+      "description": "Name of an environment variable holding the bearer token. Consulted only when bearer_token is empty. Mutually exclusive with auth (see bearer_token)."
+    },
+    "auth": {
+      "$ref": "#/$defs/auth"
+    },
+    "card_file": {
+      "type": "string",
+      "description": "Path to a JSON file holding a complete A2A Agent Card. Expanded through engine.ExpandPath, so ~ works. Mutually exclusive with card. Its supportedInterfaces, capabilities, securitySchemes and securityRequirements are ignored and overwritten from the live listener configuration."
+    },
+    "card": {
+      "$ref": "#/$defs/card"
+    }
+  },
+  "$defs": {
+    "card": {
+      "description": "The hand-authored half of the Agent Card. Deliberately has no keys for interfaces, capabilities or security: those describe what the listener actually does and are derived, so an operator cannot state one that is false. Skills are hand-authored on purpose \u2014 the card is a public contract that must not track the internal tool catalog. Exactly one of card or card_file is required.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "version",
+        "skills"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable agent name. Required by the A2A specification."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable summary of what the agent does. Required by the A2A specification."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The agent's own version, independent of the A2A protocol version."
+        },
+        "documentation_url": {
+          "type": "string",
+          "description": "URL of human-readable documentation for the agent."
+        },
+        "icon_url": {
+          "type": "string",
+          "description": "URL of an icon representing the agent."
+        },
+        "provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "organization"
+          ],
+          "properties": {
+            "organization": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The operating organization's name."
+            },
+            "url": {
+              "type": "string",
+              "description": "The provider's website."
+            }
+          }
+        },
+        "default_input_modes": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Media types the agent accepts when a skill does not narrow them, e.g. text/plain."
+        },
+        "default_output_modes": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Media types the agent produces when a skill does not narrow them."
+        },
+        "skills": {
+          "type": "array",
+          "minItems": 1,
+          "description": "At least one skill. The A2A specification requires a non-empty skills list, and this plugin will not synthesize one.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "description"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Unique skill id within the card."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Human-readable skill name."
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the skill does."
+              },
+              "tags": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Keywords for discovery and filtering."
+              },
+              "examples": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Sample prompts that exercise the skill."
+              },
+              "input_modes": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Narrows default_input_modes for this skill."
+              },
+              "output_modes": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Narrows default_output_modes for this skill."
+              }
+            }
+          }
+        }
+      }
+    },
+    "auth": {
+      "description": "Validator-chain block, parsed by pkg/nexusauth.ChainFromMap \u2014 the same parser the session broker uses. `validators` is its only key: `admin_scope` is broker-only and is rejected here. Writing `auth:` with no value is the same as omitting it.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "validators": {
+          "description": "Validators to try, in order; the first that accepts wins. Absent, null or empty means authentication is disabled.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/validator"
+          }
+        }
+      }
+    },
+    "validator": {
+      "description": "One validators[] entry. The per-type keys are described by the if/then branches below rather than by one flat property list, because additionalProperties only sees properties declared in the same schema object \u2014 a flat list would have to allow every type's keys on every type, which is exactly the silent-typo hole this schema exists to close.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "static",
+            "jwks",
+            "introspect",
+            "proxy_headers"
+          ],
+          "description": "Validator implementation."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "static"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/staticValidator"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "jwks"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/jwksValidator"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "introspect"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/introspectValidator"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "proxy_headers"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/proxyHeadersValidator"
+          }
+        }
+      ]
+    },
+    "staticValidator": {
+      "description": "type: static \u2014 a table of shared bearer tokens, compared in constant time.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "tokens"
+      ],
+      "properties": {
+        "type": {
+          "const": "static"
+        },
+        "principal_claim": {
+          "type": "string",
+          "description": "Accepted and ignored: a static token carries no claim set."
+        },
+        "tenant_claim": {
+          "type": "string",
+          "description": "Accepted and ignored (see principal_claim)."
+        },
+        "scopes_claim": {
+          "type": "string",
+          "description": "Accepted and ignored (see principal_claim)."
+        },
+        "tokens": {
+          "type": "array",
+          "minItems": 1,
+          "description": "At least one entry. Duplicate token values are a config error, not last-one-wins.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "token",
+              "principal"
+            ],
+            "properties": {
+              "token": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The bearer token value."
+              },
+              "principal": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The principal id a request presenting this token acts as. Must be non-empty \u2014 an empty id behaves as a wildcard in ownership checks."
+              },
+              "tenant": {
+                "type": "string",
+                "description": "Optional tenant/workspace id."
+              },
+              "scopes": {
+                "$ref": "#/$defs/stringOrStringList",
+                "description": "Optional granted scopes. A string is split on whitespace; a list is taken verbatim."
+              }
+            }
+          }
+        }
+      }
+    },
+    "jwksValidator": {
+      "description": "type: jwks \u2014 OIDC JWTs verified against the issuer's published key set. Generic OIDC: no provider-specific defaults, so principal_claim has no fallback guess.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "issuer",
+        "jwks_url",
+        "audience",
+        "principal_claim"
+      ],
+      "properties": {
+        "type": {
+          "const": "jwks"
+        },
+        "principal_claim": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required: the claim that becomes Principal.ID."
+        },
+        "tenant_claim": {
+          "type": "string",
+          "description": "Optional: the claim that becomes Principal.Tenant."
+        },
+        "scopes_claim": {
+          "type": "string",
+          "description": "Optional: the claim that becomes Principal.Scopes."
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The exact value the token's iss claim must carry. Compared as an opaque string, trailing slash included."
+        },
+        "jwks_url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The issuer's JWKS endpoint. Must be absolute https, except to a loopback host."
+        },
+        "audience": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Acceptable aud values; a token carrying any of them passes. A lone string is one audience and is not split on whitespace."
+        },
+        "algorithms": {
+          "$ref": "#/$defs/jwsAlgorithms",
+          "description": "Accepted JWS algorithms. Default [\"RS256\"]. Asymmetric only \u2014 `none` and the HMAC family are not configurable at all."
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "How long a fetched key set is fresh. Default 10m."
+        },
+        "negative_cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "How long an unresolvable kid is remembered, and the minimum interval between on-demand fetches. Default 1m."
+        },
+        "http_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Bounds a single JWKS request. Default 5s."
+        },
+        "clock_skew": {
+          "$ref": "#/$defs/duration",
+          "description": "Leeway applied to exp and nbf. Default 1m, capped at 5m."
+        }
+      }
+    },
+    "introspectValidator": {
+      "description": "type: introspect \u2014 opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "introspection_url",
+        "client_id",
+        "principal_claim"
+      ],
+      "properties": {
+        "type": {
+          "const": "introspect"
+        },
+        "principal_claim": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required: the claim that becomes Principal.ID."
+        },
+        "tenant_claim": {
+          "type": "string",
+          "description": "Optional: the claim that becomes Principal.Tenant."
+        },
+        "scopes_claim": {
+          "type": "string",
+          "description": "Optional: the claim that becomes Principal.Scopes."
+        },
+        "introspection_url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The RFC 7662 endpoint. Must be absolute https, except to a loopback host."
+        },
+        "client_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required: the client id presented to the introspection endpoint."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "The client secret written inline. Mutually exclusive with client_secret_env."
+        },
+        "client_secret_env": {
+          "type": "string",
+          "description": "The NAME of an environment variable holding the client secret. Mutually exclusive with client_secret; a named variable that is unset or empty fails the boot."
+        },
+        "client_auth": {
+          "type": "string",
+          "enum": [
+            "basic",
+            "post"
+          ],
+          "description": "How the client credentials are presented. Default basic."
+        },
+        "token_type_hint": {
+          "type": "string",
+          "description": "The optional RFC 7662 \u00a72.1 token_type_hint parameter. Default access_token; set to \"\" to send no hint."
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "Maximum lifetime of a cached verdict. Default 1m, capped at 15m."
+        },
+        "negative_cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "How long a definitive refusal is remembered. Default 30s, capped at 15m."
+        },
+        "http_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Bounds a single introspection request. Default 5s."
+        }
+      }
+    },
+    "proxyHeadersValidator": {
+      "description": "type: proxy_headers \u2014 an identity a fronting authenticating proxy already established, honoured only for peers inside the CIDR allowlist.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "trusted_proxy_cidrs",
+        "principal_header"
+      ],
+      "properties": {
+        "type": {
+          "const": "proxy_headers"
+        },
+        "principal_claim": {
+          "type": "string",
+          "description": "Accepted and ignored: there is no claim set here, only headers."
+        },
+        "tenant_claim": {
+          "type": "string",
+          "description": "Accepted and ignored (see principal_claim)."
+        },
+        "scopes_claim": {
+          "type": "string",
+          "description": "Accepted and ignored (see principal_claim)."
+        },
+        "trusted_proxy_cidrs": {
+          "$ref": "#/$defs/stringOrStringList",
+          "description": "Required and non-empty: the networks whose peers may assert an identity through headers. This allowlist IS the security model \u2014 never 0.0.0.0/0 or ::/0."
+        },
+        "principal_header": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required: the header whose value becomes Principal.ID. No default is right for everyone."
+        },
+        "tenant_header": {
+          "type": "string",
+          "description": "Optional header whose value becomes Principal.Tenant."
+        },
+        "scopes_header": {
+          "type": "string",
+          "description": "Optional header whose value becomes Principal.Scopes, split on commas and/or whitespace."
+        }
+      }
+    },
+    "stringOrStringList": {
+      "description": "A single string or a list of strings \u2014 both spellings the nexusauth/agui parsers accept.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "duration": {
+      "description": "A Go duration string such as \"10m\", \"30s\" or \"1h30m\". A bare number is rejected on purpose: 600 reads as ten minutes to an operator and six hundred nanoseconds to Go.",
+      "type": "string",
+      "minLength": 1
+    },
+    "jwsAlgorithm": {
+      "type": "string",
+      "enum": [
+        "RS256",
+        "RS384",
+        "RS512",
+        "PS256",
+        "PS384",
+        "PS512",
+        "ES256",
+        "ES384",
+        "ES512"
+      ]
+    },
+    "jwsAlgorithms": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/jwsAlgorithm"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jwsAlgorithm"
+          }
+        }
+      ]
+    }
+  }
+}

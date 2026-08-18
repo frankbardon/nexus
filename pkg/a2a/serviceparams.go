@@ -79,6 +79,24 @@ func (p ServiceParams) Apply(h http.Header) {
 // It returns a VersionNotSupportedError when the requested version is not one
 // this codec speaks, and an InvalidRequestError when the version is malformed.
 func ParseServiceParams(h http.Header, q url.Values) (ServiceParams, *Error) {
+	return ParseServiceParamsAssuming(h, q, DefaultVersion)
+}
+
+// ParseServiceParamsAssuming is ParseServiceParams with the absent-parameter
+// fallback supplied by the caller instead of pinned to DefaultVersion.
+//
+// It exists because "what does an absent A2A-Version mean" is a DEPLOYMENT
+// policy, not a codec fact, and the codec should not force one on every host.
+// Section 3.6.2 says agents MUST read an empty value as 0.3, which this codec
+// then rejects as unsupported — spec-faithful, and correct for an agent that
+// ever served 0.3. An agent that has only ever served 1.0 has no such client to
+// protect and may prefer to read an absent parameter as 1.0 rather than refuse
+// a caller whose HTTP layer simply omitted a header. Both readings are
+// reachable through this function; neither is inherited silently.
+//
+// An empty assumeVersion falls back to DefaultVersion, so the strict reading is
+// what a caller that does not think about it gets.
+func ParseServiceParamsAssuming(h http.Header, q url.Values, assumeVersion string) (ServiceParams, *Error) {
 	var p ServiceParams
 
 	raw := ""
@@ -87,6 +105,9 @@ func ParseServiceParams(h http.Header, q url.Values) (ServiceParams, *Error) {
 	}
 	if raw == "" && q != nil {
 		raw = strings.TrimSpace(q.Get(HeaderVersion))
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(assumeVersion)
 	}
 	if raw == "" {
 		raw = DefaultVersion

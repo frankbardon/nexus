@@ -9,16 +9,12 @@ import (
 // nexusCard builds the card a Nexus serve plugin would publish, exercising every
 // required top-level field.
 func nexusCard() AgentCard {
-	card := NewAgentCard(AgentIdentity{
-		Name:             "nexus",
-		Description:      "Nexus agent harness exposed over A2A.",
-		Version:          "0.1.0",
-		DocumentationURL: "https://example.test/docs",
-		Provider:         &AgentProvider{Organization: "Nexus", URL: "https://example.test"},
-	})
+	card := NewAgentCard("nexus", "Nexus agent harness exposed over A2A.", "0.1.0")
+	card.DocumentationURL = "https://example.test/docs"
+	card.Provider = &AgentProvider{Organization: "Nexus", URL: "https://example.test"}
 	card = card.
-		WithInterface(TransportJSONRPC, "https://agent.example.test/a2a").
-		WithInterface(TransportHTTPJSON, "https://agent.example.test/a2a/v1").
+		WithInterface(BindingJSONRPC, "https://agent.example.test/a2a").
+		WithInterface(BindingHTTPJSON, "https://agent.example.test/a2a/v1").
 		WithSecurityScheme("bearer", BearerScheme("JWT", "Bearer token verified by pkg/nexusauth.")).
 		WithSecurityRequirement("bearer").
 		WithSkill(AgentSkill{
@@ -53,14 +49,24 @@ func TestAgentCardMarshalsToWellKnownDocument(t *testing.T) {
 		t.Fatalf("card is not valid JSON: %v", err)
 	}
 	for _, key := range []string{
-		"protocolVersion", "identity", "capabilities", "securitySchemes", "interfaces", "skills",
+		"name", "description", "version", "capabilities", "securitySchemes",
+		"supportedInterfaces", "skills", "defaultInputModes", "defaultOutputModes",
 	} {
 		if _, ok := doc[key]; !ok {
 			t.Errorf("card is missing required key %q", key)
 		}
 	}
-	if doc["protocolVersion"] != ProtocolVersion {
-		t.Errorf("protocolVersion = %v, want %q", doc["protocolVersion"], ProtocolVersion)
+
+	// The card is flat: there is no nested identity object, and no card-level
+	// protocol version. Both were plausible-looking inventions; neither exists.
+	if _, ok := doc["identity"]; ok {
+		t.Error("card serialized a nested identity object; the wire shape is flat")
+	}
+	if _, ok := doc["protocolVersion"]; ok {
+		t.Error("card serialized a top-level protocolVersion; the version is per-interface")
+	}
+	if _, ok := doc["interfaces"]; ok {
+		t.Error("card serialized interfaces; the field is supportedInterfaces")
 	}
 
 	// The three capability booleans are always stated, never inferred.
@@ -83,14 +89,17 @@ func TestAgentCardMarshalsToWellKnownDocument(t *testing.T) {
 		}
 	}
 
-	// Interfaces carry ProtoJSON transport names.
-	ifaces, ok := doc["interfaces"].([]any)
+	// Interfaces carry the open-form binding name and their own protocol version.
+	ifaces, ok := doc["supportedInterfaces"].([]any)
 	if !ok || len(ifaces) != 2 {
-		t.Fatalf("interfaces = %v", doc["interfaces"])
+		t.Fatalf("supportedInterfaces = %v", doc["supportedInterfaces"])
 	}
 	first, _ := ifaces[0].(map[string]any)
-	if first["transport"] != string(TransportJSONRPC) {
-		t.Errorf("interfaces[0].transport = %v, want %q", first["transport"], TransportJSONRPC)
+	if first["protocolBinding"] != string(BindingJSONRPC) {
+		t.Errorf("supportedInterfaces[0].protocolBinding = %v, want %q", first["protocolBinding"], BindingJSONRPC)
+	}
+	if first["protocolVersion"] != ProtocolVersion {
+		t.Errorf("supportedInterfaces[0].protocolVersion = %v, want %q", first["protocolVersion"], ProtocolVersion)
 	}
 
 	// The security scheme is the flattened oneof, not an inline kind string.
@@ -98,6 +107,21 @@ func TestAgentCardMarshalsToWellKnownDocument(t *testing.T) {
 	bearer, _ := schemes["bearer"].(map[string]any)
 	if _, ok := bearer["httpAuthSecurityScheme"]; !ok {
 		t.Errorf("bearer scheme did not serialize as httpAuthSecurityScheme: %v", bearer)
+	}
+
+	// A security requirement wraps its scopes in the proto's StringList, because
+	// a protobuf map value cannot be a bare repeated field.
+	reqs, ok := doc["securityRequirements"].([]any)
+	if !ok || len(reqs) != 1 {
+		t.Fatalf("securityRequirements = %v", doc["securityRequirements"])
+	}
+	req, _ := reqs[0].(map[string]any)
+	inner, ok := req["schemes"].(map[string]any)
+	if !ok {
+		t.Fatalf("securityRequirements[0].schemes = %v", req["schemes"])
+	}
+	if _, ok := inner["bearer"].(map[string]any); !ok {
+		t.Errorf("securityRequirements[0].schemes.bearer is not a StringList object: %v", inner["bearer"])
 	}
 
 	// And it round-trips.
@@ -108,14 +132,56 @@ func TestAgentCardMarshalsToWellKnownDocument(t *testing.T) {
 	if err := ValidateAgentCard(back); err != nil {
 		t.Fatalf("validate decoded: %v", err)
 	}
-	if back.Identity.Name != card.Identity.Name || len(back.Skills) != len(card.Skills) {
+	if back.Name != card.Name || len(back.Skills) != len(card.Skills) {
 		t.Errorf("round trip lost data: %+v", back)
 	}
-	if url, ok := back.InterfaceFor(TransportHTTPJSON); !ok || url != "https://agent.example.test/a2a/v1" {
-		t.Errorf("InterfaceFor(HTTP_JSON) = %q, %v", url, ok)
+	if url, ok := back.InterfaceFor(BindingHTTPJSON); !ok || url != "https://agent.example.test/a2a/v1" {
+		t.Errorf("InterfaceFor(HTTP+JSON) = %q, %v", url, ok)
 	}
 	if _, ok := back.Skill("chat"); !ok {
 		t.Error("decoded card lost the chat skill")
+	}
+}
+
+// TestAgentCardEncodeNormalizesRequiredRepeatedFields pins section 8.4.1: a
+// REQUIRED repeated field must be present even when empty, and [] is not null.
+func TestAgentCardEncodeNormalizesRequiredRepeatedFields(t *testing.T) {
+	card := AgentCard{Name: "n", Description: "d", Version: "1"}
+	data, err := EncodeAgentCard(&card)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"supportedInterfaces", "defaultInputModes", "defaultOutputModes", "skills"} {
+		v, ok := doc[key]
+		if !ok {
+			t.Errorf("%s absent; a required repeated field must be present", key)
+			continue
+		}
+		if _, ok := v.([]any); !ok {
+			t.Errorf("%s = %v, want an array (never null)", key, v)
+		}
+	}
+
+	// Normalization must not mutate the caller's card.
+	if card.Skills != nil || card.DefaultInputModes != nil {
+		t.Error("EncodeAgentCard mutated the card it was given")
+	}
+
+	// A skill's tags are likewise required.
+	card.Skills = []AgentSkill{{ID: "s", Name: "S", Description: "d"}}
+	data, err = EncodeAgentCard(&card)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.Contains(string(data), `"tags": []`) {
+		t.Errorf("skill tags were omitted rather than emitted as []:\n%s", data)
+	}
+	if card.Skills[0].Tags != nil {
+		t.Error("EncodeAgentCard mutated the caller's skill")
 	}
 }
 
@@ -149,7 +215,7 @@ func TestAgentCapabilitiesZeroValueIsSafe(t *testing.T) {
 	}
 
 	// NewAgentCard keeps push and extended-card off for this effort.
-	card := NewAgentCard(AgentIdentity{Name: "n", Version: "1"})
+	card := NewAgentCard("n", "d", "1")
 	if card.Capabilities.PushNotifications {
 		t.Error("NewAgentCard advertised pushNotifications")
 	}
@@ -165,27 +231,29 @@ func TestValidateAgentCardRequiredFields(t *testing.T) {
 	base := nexusCard()
 
 	cases := map[string]func(c *AgentCard){
-		"no protocol version":   func(c *AgentCard) { c.ProtocolVersion = "" },
-		"bad protocol version":  func(c *AgentCard) { c.ProtocolVersion = "one.oh" },
-		"no name":               func(c *AgentCard) { c.Identity.Name = "" },
-		"no version":            func(c *AgentCard) { c.Identity.Version = "" },
-		"no provider org":       func(c *AgentCard) { c.Identity.Provider = &AgentProvider{} },
-		"no interfaces":         func(c *AgentCard) { c.Interfaces = nil },
-		"no skills":             func(c *AgentCard) { c.Skills = nil },
-		"bad transport":         func(c *AgentCard) { c.Interfaces[0].Transport = "TRANSPORT_PROTOCOL_CARRIER_PIGEON" },
-		"no interface url":      func(c *AgentCard) { c.Interfaces[0].URL = "" },
-		"no skill id":           func(c *AgentCard) { c.Skills[0].ID = "" },
-		"no skill description":  func(c *AgentCard) { c.Skills[0].Description = "" },
-		"no extension uri":      func(c *AgentCard) { c.Capabilities.Extensions[0].URI = "" },
-		"undeclared scheme ref": func(c *AgentCard) { c.Security = []map[string][]string{{"nope": {}}} },
-		"undeclared skill scheme": func(c *AgentCard) {
-			c.Skills[0].Security = []map[string][]string{{"nope": {}}}
+		"no name":           func(c *AgentCard) { c.Name = "" },
+		"no description":    func(c *AgentCard) { c.Description = "" },
+		"no version":        func(c *AgentCard) { c.Version = "" },
+		"no provider org":   func(c *AgentCard) { c.Provider = &AgentProvider{URL: "https://x.test"} },
+		"no interfaces":     func(c *AgentCard) { c.SupportedInterfaces = nil },
+		"no skills":         func(c *AgentCard) { c.Skills = nil },
+		"no binding":        func(c *AgentCard) { c.SupportedInterfaces[0].ProtocolBinding = "" },
+		"no interface url":  func(c *AgentCard) { c.SupportedInterfaces[0].URL = "" },
+		"no iface version":  func(c *AgentCard) { c.SupportedInterfaces[0].ProtocolVersion = "" },
+		"bad iface version": func(c *AgentCard) { c.SupportedInterfaces[0].ProtocolVersion = "one.oh" },
+		"no skill id":       func(c *AgentCard) { c.Skills[0].ID = "" },
+		"no skill desc":     func(c *AgentCard) { c.Skills[0].Description = "" },
+		"no extension uri":  func(c *AgentCard) { c.Capabilities.Extensions[0].URI = "" },
+		"empty requirement": func(c *AgentCard) { c.SecurityRequirements = []SecurityRequirement{{}} },
+		"undeclared scheme": func(c *AgentCard) { c.SecurityRequirements = []SecurityRequirement{NewSecurityRequirement("nope")} },
+		"undeclared on skill": func(c *AgentCard) {
+			c.Skills[0].SecurityRequirements = []SecurityRequirement{NewSecurityRequirement("nope")}
 		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			card := base
-			card.Interfaces = append([]AgentInterface(nil), base.Interfaces...)
+			card.SupportedInterfaces = append([]AgentInterface(nil), base.SupportedInterfaces...)
 			card.Skills = append([]AgentSkill(nil), base.Skills...)
 			card.Capabilities.Extensions = append([]AgentExtension(nil), base.Capabilities.Extensions...)
 			mutate(&card)
@@ -200,6 +268,23 @@ func TestValidateAgentCardRequiredFields(t *testing.T) {
 	}
 }
 
+// TestValidateAgentCardAcceptsNonCoreBinding pins the open-vocabulary rule: a
+// binding this codec does not implement is still a legal card.
+func TestValidateAgentCardAcceptsNonCoreBinding(t *testing.T) {
+	card := nexusCard()
+	card.SupportedInterfaces = []AgentInterface{{
+		URL:             "wss://agent.example.test/a2a",
+		ProtocolBinding: "WEBSOCKET",
+		ProtocolVersion: "1.0",
+	}}
+	if err := ValidateAgentCard(&card); err != nil {
+		t.Fatalf("a non-core binding must not be rejected: %v", err)
+	}
+	if card.SupportedInterfaces[0].ProtocolBinding.Core() {
+		t.Error("WEBSOCKET reported as a core binding")
+	}
+}
+
 func TestValidateSecurityScheme(t *testing.T) {
 	valid := map[string]SecurityScheme{
 		"bearer":     BearerScheme("JWT", ""),
@@ -207,7 +292,7 @@ func TestValidateSecurityScheme(t *testing.T) {
 		"oidc":       OpenIDConnectScheme("https://idp.example.test/.well-known/openid-configuration", ""),
 		"mtls":       MutualTLSScheme(""),
 		"oauth2":     {OAuth2: &OAuth2SecurityScheme{Flows: OAuthFlows{ClientCredentials: &ClientCredentialsOAuthFlow{TokenURL: "https://idp.example.test/token"}}}},
-		"authzOAuth": {OAuth2: &OAuth2SecurityScheme{Flows: OAuthFlows{AuthorizationCode: &AuthorizationCodeOAuthFlow{AuthorizationURL: "a", TokenURL: "t"}}}},
+		"authzOAuth": {OAuth2: &OAuth2SecurityScheme{Flows: OAuthFlows{AuthorizationCode: &AuthorizationCodeOAuthFlow{AuthorizationURL: "a", TokenURL: "t", PKCERequired: true}}}},
 		"deviceCode": {OAuth2: &OAuth2SecurityScheme{Flows: OAuthFlows{DeviceCode: &DeviceCodeOAuthFlow{DeviceAuthorizationURL: "d", TokenURL: "t"}}}},
 	}
 	for name, scheme := range valid {
@@ -220,12 +305,17 @@ func TestValidateSecurityScheme(t *testing.T) {
 
 	invalid := map[string]SecurityScheme{
 		"empty":          {},
-		"two arms":       {APIKey: &APIKeySecurityScheme{Name: "k", In: APIKeyInHeader}, MutualTLS: &MutualTLSSecurityScheme{}},
-		"apiKey no name": {APIKey: &APIKeySecurityScheme{In: APIKeyInHeader}},
-		"apiKey bad in":  {APIKey: &APIKeySecurityScheme{Name: "k", In: "body"}},
+		"two arms":       {APIKey: &APIKeySecurityScheme{Name: "k", Location: APIKeyInHeader}, MutualTLS: &MutualTlsSecurityScheme{}},
+		"apiKey no name": {APIKey: &APIKeySecurityScheme{Location: APIKeyInHeader}},
+		"apiKey bad loc": {APIKey: &APIKeySecurityScheme{Name: "k", Location: "body"}},
 		"http no scheme": {HTTPAuth: &HTTPAuthSecurityScheme{}},
 		"oauth no flows": {OAuth2: &OAuth2SecurityScheme{}},
-		"oidc no url":    {OpenIDConnect: &OpenIDConnectSecurityScheme{}},
+		// flows is a oneof: two arms cannot be represented on the wire.
+		"oauth two flows": {OAuth2: &OAuth2SecurityScheme{Flows: OAuthFlows{
+			ClientCredentials: &ClientCredentialsOAuthFlow{TokenURL: "t"},
+			DeviceCode:        &DeviceCodeOAuthFlow{DeviceAuthorizationURL: "d", TokenURL: "t"},
+		}}},
+		"oidc no url": {OpenIDConnect: &OpenIdConnectSecurityScheme{}},
 	}
 	for name, scheme := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -233,6 +323,21 @@ func TestValidateSecurityScheme(t *testing.T) {
 				t.Fatal("invalid scheme accepted")
 			}
 		})
+	}
+}
+
+// TestAPIKeySchemeSerializesLocation pins the field name: the proto calls the
+// placement "location", not the OpenAPI-familiar "in".
+func TestAPIKeySchemeSerializesLocation(t *testing.T) {
+	data, err := json.Marshal(APIKeyScheme("X-Api-Key", APIKeyInHeader, ""))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"location":"header"`) {
+		t.Errorf("api key scheme = %s, want a \"location\" key", data)
+	}
+	if strings.Contains(string(data), `"in":`) {
+		t.Errorf("api key scheme serialized an \"in\" key: %s", data)
 	}
 }
 
@@ -252,15 +357,16 @@ func TestSecuritySchemeKind(t *testing.T) {
 	}
 }
 
-func TestTransportProtocolValid(t *testing.T) {
-	for _, tp := range []TransportProtocol{TransportJSONRPC, TransportGRPC, TransportHTTPJSON} {
-		if !tp.Valid() {
-			t.Errorf("%q reported invalid", tp)
+func TestProtocolBindingCore(t *testing.T) {
+	for _, b := range []ProtocolBinding{BindingJSONRPC, BindingGRPC, BindingHTTPJSON} {
+		if !b.Core() {
+			t.Errorf("%q reported non-core", b)
 		}
 	}
-	for _, tp := range []TransportProtocol{TransportUnspecified, "", "grpc"} {
-		if tp.Valid() {
-			t.Errorf("%q reported valid", tp)
+	// The ProtoJSON enum spellings are NOT the wire values; they must not match.
+	for _, b := range []ProtocolBinding{"", "jsonrpc", "TRANSPORT_PROTOCOL_JSONRPC", "HTTP_JSON"} {
+		if b.Core() {
+			t.Errorf("%q reported core", b)
 		}
 	}
 }
@@ -274,8 +380,8 @@ func TestAgentCardExtensionAccessors(t *testing.T) {
 	if !ok {
 		t.Fatal("Extension() missed the nexus extension")
 	}
-	if ext.Version != NexusExtensionVersion {
-		t.Errorf("extension version = %q, want %q", ext.Version, NexusExtensionVersion)
+	if ext.Params["version"] != NexusExtensionVersion {
+		t.Errorf("extension params.version = %v, want %q", ext.Params["version"], NexusExtensionVersion)
 	}
 	if len(card.RequiredExtensions()) != 0 {
 		t.Errorf("nexus extension must not be required: %v", card.RequiredExtensions())
@@ -292,8 +398,7 @@ func TestAgentCardExtensionAccessors(t *testing.T) {
 }
 
 func TestAgentCardWithSecuritySchemeDoesNotAliasMaps(t *testing.T) {
-	base := NewAgentCard(AgentIdentity{Name: "n", Version: "1"}).
-		WithSecurityScheme("a", MutualTLSScheme(""))
+	base := NewAgentCard("n", "d", "1").WithSecurityScheme("a", MutualTLSScheme(""))
 	derived := base.WithSecurityScheme("b", MutualTLSScheme(""))
 
 	if _, ok := base.SecuritySchemes["b"]; ok {
@@ -310,7 +415,7 @@ func TestAgentCardEncodeIsIndented(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if !strings.Contains(string(data), "\n  \"identity\"") {
+	if !strings.Contains(string(data), "\n  \"name\"") {
 		t.Errorf("card is not indented for human reading:\n%s", data)
 	}
 }

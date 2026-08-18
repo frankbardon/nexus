@@ -1,0 +1,81 @@
+# Test: nexus.io.a2a serve endpoint.
+#
+# Stands up the A2A HTTP listener: the /.well-known/agent-card.json discovery
+# document plus the JSON-RPC and HTTP+JSON/REST bindings, guarded by a shared
+# bearer token.
+#
+# NOTE for this stage of the effort: no A2A operation drives a turn yet. Every
+# operation is decoded, version-checked and authenticated, then answered with
+# UnsupportedOperationError, and the Agent Card honestly advertises
+# capabilities.streaming as false to match. The card endpoint is the surface
+# that is fully live.
+#
+# Run:
+#   bin/nexus -config configs/test-a2a-serve.yaml
+#   curl -s localhost:18191/.well-known/agent-card.json | jq
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.a2a
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Hello from a mocked Nexus agent."
+
+  nexus.io.a2a:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18191
+    # Loopback here, so the derived card URLs match the bind address. A real
+    # deployment behind a proxy sets this to the externally reachable origin.
+    public_url: http://127.0.0.1:18191
+    bearer_token: test-a2a-token
+    # The agent card is hand-authored on purpose: it is a public contract and
+    # must not track the internal tool catalog.
+    card:
+      name: nexus-test-agent
+      description: A Nexus harness exposed over A2A for interop testing.
+      version: 0.1.0
+      provider:
+        organization: Nexus
+        url: https://github.com/frankbardon/nexus
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: chat
+          name: Conversational turn
+          description: Run a single conversational turn against the configured agent loop.
+          tags: ["chat", "react"]
+          examples:
+            - "Summarize the repository README."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

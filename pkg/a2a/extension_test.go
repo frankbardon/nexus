@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,8 +12,13 @@ func TestNexusExtensionDeclaration(t *testing.T) {
 	if ext.URI != NexusExtensionURI {
 		t.Errorf("uri = %q, want %q", ext.URI, NexusExtensionURI)
 	}
-	if ext.Version != NexusExtensionVersion {
-		t.Errorf("version = %q, want %q", ext.Version, NexusExtensionVersion)
+	// The version rides the URI (section 4.6.3); AgentExtension has no version
+	// field, so the declaration republishes it as params data instead.
+	if !strings.HasSuffix(ext.URI, "/v"+strings.SplitN(NexusExtensionVersion, ".", 2)[0]) {
+		t.Errorf("uri %q does not carry the extension major version %q", ext.URI, NexusExtensionVersion)
+	}
+	if ext.Params["version"] != NexusExtensionVersion {
+		t.Errorf("params.version = %v, want %q", ext.Params["version"], NexusExtensionVersion)
 	}
 	if ext.Required {
 		t.Error("the nexus extension must be optional; everything it carries is supplementary")
@@ -21,9 +27,9 @@ func TestNexusExtensionDeclaration(t *testing.T) {
 		t.Error("declaration carries no description")
 	}
 
-	kinds, ok := ext.Metadata["eventKinds"].([]any)
+	kinds, ok := ext.Params["eventKinds"].([]any)
 	if !ok {
-		t.Fatalf("metadata.eventKinds = %v", ext.Metadata["eventKinds"])
+		t.Fatalf("params.eventKinds = %v", ext.Params["eventKinds"])
 	}
 	got := map[string]bool{}
 	for _, k := range kinds {
@@ -42,8 +48,8 @@ func TestNexusExtensionDeclaration(t *testing.T) {
 	}
 
 	// The declaration must survive a card round trip untouched.
-	card := NewAgentCard(AgentIdentity{Name: "n", Version: "1"}).
-		WithInterface(TransportJSONRPC, "https://a.test").
+	card := NewAgentCard("n", "d", "1").
+		WithInterface(BindingJSONRPC, "https://a.test").
 		WithSkill(AgentSkill{ID: "s", Name: "S", Description: "d"}).
 		WithExtension(ext)
 	data, err := EncodeAgentCard(&card)
@@ -58,11 +64,11 @@ func TestNexusExtensionDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("extension lost in the card round trip")
 	}
-	if decoded.Version != ext.Version || decoded.Required != ext.Required {
+	if decoded.URI != ext.URI || decoded.Required != ext.Required {
 		t.Errorf("declaration changed across the round trip: %+v", decoded)
 	}
-	if decoded.Metadata["metadataKey"] != NexusExtensionURI {
-		t.Errorf("metadata.metadataKey = %v", decoded.Metadata["metadataKey"])
+	if decoded.Params["metadataKey"] != NexusExtensionURI {
+		t.Errorf("params.metadataKey = %v", decoded.Params["metadataKey"])
 	}
 }
 

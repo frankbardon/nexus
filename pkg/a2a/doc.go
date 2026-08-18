@@ -94,6 +94,23 @@
 // an absent key; its zero value is the honest card for an agent supporting none
 // of them.
 //
+// Specification section 4.4 defers the card's field list entirely to a2a.proto,
+// which is the authority here. Three of its choices are easy to get wrong by
+// analogy with other manifest formats, so they are called out: the card is FLAT
+// (no nested identity object), there is NO card-level protocol version (the A2A
+// version is declared per AgentInterface), and the transport is an OPEN-FORM
+// STRING — "JSONRPC", "GRPC", "HTTP+JSON" — not a ProtoJSON enum. See
+// ProtocolBinding.
+//
+// # Version negotiation policy
+//
+// ParseServiceParams implements section 3.6.2 literally: an absent A2A-Version
+// means 0.3, which this codec does not speak and therefore rejects. Because
+// that reading refuses well-behaved 1.0 clients whose HTTP layer merely omitted
+// a header, ParseServiceParamsAssuming lets a serving host choose the fallback
+// explicitly. The choice belongs to the host, which knows whether it ever
+// served 0.3; it is not a codec-level default to be inherited by accident.
+//
 // # The Nexus extension
 //
 // NexusExtensionURI names the one extension this codebase defines. It carries

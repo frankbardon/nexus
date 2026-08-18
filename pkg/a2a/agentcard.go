@@ -5,33 +5,60 @@ import (
 	"fmt"
 )
 
-// Agent Card discovery types (specification section 8). The card is the
-// self-describing manifest an agent publishes at AgentCardPath. It tells a
-// client who the agent is, which bindings it exposes and at what URLs, how to
-// authenticate, what it can do, and which protocol extensions it speaks.
+// Agent Card discovery types (specification section 8, data model section 4.4).
+// The card is the self-describing manifest an agent publishes at AgentCardPath.
+// It tells a client who the agent is, which bindings it exposes and at what
+// URLs, how to authenticate, what it can do, and which protocol extensions it
+// speaks.
 //
 // The card is served as plain JSON, not as ContentTypeJSON: it is fetched by
 // ordinary HTTP clients before any A2A negotiation has happened.
+//
+// # Shape provenance
+//
+// Specification section 4.4 delegates every card type to the canonical Protocol
+// Buffer definition ("proto_to_table"), so a2a.proto — not the prose — is the
+// authority for field names, presence and nesting. Three consequences are worth
+// naming because they read as surprising next to other agent-manifest formats:
+//
+//   - The card is FLAT. There is no nested identity object: name, description,
+//     version, provider, documentationUrl and iconUrl sit at the top level.
+//   - There is no card-level protocol version. The A2A version is declared PER
+//     INTERFACE (AgentInterface.ProtocolVersion), which is what lets one agent
+//     serve 0.3 and 1.0 from different URLs — section 3.6.2's "agents CAN expose
+//     multiple interfaces for the same transport with different versions".
+//   - The transport is an OPEN-FORM STRING ("JSONRPC", "GRPC", "HTTP+JSON"), not
+//     a ProtoJSON enum. See ProtocolBinding.
 
 // ContentTypeAgentCard is the media type of a served Agent Card.
 const ContentTypeAgentCard = "application/json"
 
-// TransportProtocol names one of the three normative A2A bindings, using the
-// ProtoJSON enum spelling.
-type TransportProtocol string
+// ProtocolBinding names the protocol binding spoken at an AgentInterface URL.
+//
+// This is deliberately a string alias over an open vocabulary rather than a
+// closed enum: a2a.proto types AgentInterface.protocol_binding as a plain
+// string and documents it as "an open form string, to be easily extended for
+// other protocol bindings", naming JSONRPC, GRPC and HTTP+JSON as the three
+// officially supported values. A card MAY therefore advertise a binding this
+// codec has never heard of, and rejecting it would make this package the reason
+// a conforming card fails to parse.
+type ProtocolBinding string
 
-// Transport protocols an AgentInterface may advertise.
+// The three officially supported protocol bindings. Note the values are the
+// bare names from the proto comment, NOT ProtoJSON enum spellings: there is no
+// TransportProtocol enum in the specification.
 const (
-	TransportUnspecified TransportProtocol = "TRANSPORT_PROTOCOL_UNSPECIFIED"
-	TransportJSONRPC     TransportProtocol = "TRANSPORT_PROTOCOL_JSONRPC"
-	TransportGRPC        TransportProtocol = "TRANSPORT_PROTOCOL_GRPC"
-	TransportHTTPJSON    TransportProtocol = "TRANSPORT_PROTOCOL_HTTP_JSON"
+	BindingJSONRPC  ProtocolBinding = "JSONRPC"
+	BindingGRPC     ProtocolBinding = "GRPC"
+	BindingHTTPJSON ProtocolBinding = "HTTP+JSON"
 )
 
-// Valid reports whether the transport is one of the three addressable bindings.
-func (t TransportProtocol) Valid() bool {
-	switch t {
-	case TransportJSONRPC, TransportGRPC, TransportHTTPJSON:
+// Core reports whether the binding is one of the three the specification
+// officially defines. A binding outside this set is legal on the wire; Core
+// exists so a client can tell "I do not speak this" from "this is malformed".
+func (b ProtocolBinding) Core() bool {
+	switch b {
+	case BindingJSONRPC, BindingGRPC, BindingHTTPJSON:
 		return true
 	default:
 		return false
@@ -39,72 +66,71 @@ func (t TransportProtocol) Valid() bool {
 }
 
 // AgentCard is the agent's public manifest, served at AgentCardPath.
+//
+// Field order follows a2a.proto field numbers so a reader can diff the two side
+// by side.
 type AgentCard struct {
-	// ProtocolVersion is the Major.Minor A2A version the agent speaks. Required.
-	ProtocolVersion string `json:"protocolVersion"`
-	// Identity is who the agent is. Required.
-	Identity AgentIdentity `json:"identity"`
+	// Name is the human-readable agent name. Required.
+	Name string `json:"name"`
+	// Description is a human-readable summary of what the agent does. Required
+	// by the proto, so it is serialized even when empty.
+	Description string `json:"description"`
+	// SupportedInterfaces are the protocol endpoints the agent exposes, in
+	// preference order: the first entry is the preferred one (section 8.3.1).
+	// Required, and must be non-empty.
+	SupportedInterfaces []AgentInterface `json:"supportedInterfaces"`
+	// Provider identifies the organization operating the agent.
+	Provider *AgentProvider `json:"provider,omitempty"`
+	// Version is the agent's own version, independent of any protocol version.
+	// Required.
+	Version string `json:"version"`
+	// DocumentationURL points at human-readable documentation.
+	DocumentationURL string `json:"documentationUrl,omitempty"`
 	// Capabilities are the optional protocol features the agent supports.
 	// Required, and always serialized in full so a client never has to infer a
 	// capability from an absent field.
 	Capabilities AgentCapabilities `json:"capabilities"`
 	// SecuritySchemes declares, by name, every authentication scheme the agent
-	// accepts. Names are referenced from Security and from AgentSkill.Security.
+	// accepts. Names are referenced from SecurityRequirements and from
+	// AgentSkill.SecurityRequirements.
 	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes,omitempty"`
-	// Security lists the scheme requirement sets that apply agent-wide. Each
-	// entry is one alternative: satisfying any entry suffices, and within an
-	// entry every named scheme must be satisfied. The value is the scope list
-	// the scheme requires, empty for schemes without scopes.
-	Security []map[string][]string `json:"security,omitempty"`
-	// Interfaces are the protocol endpoints the agent exposes, one per binding
-	// and URL. Required, and must be non-empty.
-	Interfaces []AgentInterface `json:"interfaces"`
+	// SecurityRequirements lists the scheme requirement sets that apply
+	// agent-wide. Each entry is one alternative: satisfying any entry suffices,
+	// and within an entry every named scheme must be satisfied.
+	SecurityRequirements []SecurityRequirement `json:"securityRequirements,omitempty"`
+	// DefaultInputModes are the media types the agent accepts in message parts
+	// when a skill does not narrow them. Required.
+	DefaultInputModes []string `json:"defaultInputModes"`
+	// DefaultOutputModes are the media types the agent produces when a skill
+	// does not narrow them. Required.
+	DefaultOutputModes []string `json:"defaultOutputModes"`
 	// Skills describe what the agent can do. Required, and must be non-empty.
 	Skills []AgentSkill `json:"skills"`
-	// DefaultInputModes are the media types the agent accepts in message parts
-	// when a skill does not narrow them.
-	DefaultInputModes []string `json:"defaultInputModes,omitempty"`
-	// DefaultOutputModes are the media types the agent produces when a skill
-	// does not narrow them.
-	DefaultOutputModes []string `json:"defaultOutputModes,omitempty"`
 	// Signatures carry JWS detached signatures over the card, for clients that
 	// verify card provenance.
 	Signatures []AgentCardSignature `json:"signatures,omitempty"`
-	// Metadata is free-form custom data attached to the card.
-	Metadata map[string]any `json:"metadata,omitempty"`
-}
-
-// AgentIdentity is the who of an agent card.
-type AgentIdentity struct {
-	// Name is the human-readable agent name. Required.
-	Name string `json:"name"`
-	// Description is a human-readable summary of what the agent does.
-	Description string `json:"description,omitempty"`
-	// Version is the agent's own version, independent of the protocol version.
-	// Required.
-	Version string `json:"version"`
-	// DocumentationURL points at human-readable documentation.
-	DocumentationURL string `json:"documentationUrl,omitempty"`
 	// IconURL points at an icon representing the agent.
 	IconURL string `json:"iconUrl,omitempty"`
-	// Provider identifies the organization operating the agent.
-	Provider *AgentProvider `json:"provider,omitempty"`
 }
 
 // AgentProvider identifies the organization behind an agent.
 type AgentProvider struct {
+	// URL is the provider's website or relevant documentation. Required when a
+	// provider is given.
+	URL string `json:"url"`
 	// Organization is the provider's name. Required when a provider is given.
 	Organization string `json:"organization"`
-	// URL is the provider's website.
-	URL string `json:"url,omitempty"`
 }
 
 // AgentCapabilities declares the optional protocol features an agent supports.
 //
-// The three booleans are serialized unconditionally rather than with omitempty:
-// a discovery document should state a capability as false rather than leave a
-// client to infer it from an absent key. The zero value is therefore the
-// correct, honest card for an agent that supports none of them.
+// The three booleans are serialized unconditionally rather than with omitempty.
+// The proto marks them `optional bool`, and section 8.4.1's canonicalization
+// rules say an optional field that was explicitly set must be present in the
+// JSON even when its value equals the default — which is exactly the position
+// this codec takes: a discovery document should state a capability as false
+// rather than leave a client to infer it from an absent key. The zero value is
+// therefore the correct, honest card for an agent supporting none of them.
 type AgentCapabilities struct {
 	// Streaming reports support for SendStreamingMessage and SubscribeToTask.
 	Streaming bool `json:"streaming"`
@@ -118,32 +144,47 @@ type AgentCapabilities struct {
 }
 
 // AgentExtension declares one protocol extension in an agent card
-// (specification section 8.4). Clients opt in per request via the
+// (specification section 4.6.1). Clients opt in per request via the
 // A2A-Extensions service parameter.
+//
+// There is deliberately no version field: section 4.6.3 requires extensions to
+// carry their version inside the URI and requires a NEW URI for any breaking
+// change, so a separate version field would be a second, disagreeable source of
+// truth. See NexusExtensionURI for how this codebase applies that rule.
 type AgentExtension struct {
-	// URI uniquely identifies the extension. Required.
+	// URI uniquely identifies the extension, version included. Required.
 	URI string `json:"uri"`
-	// Version is the extension's own version.
-	Version string `json:"version,omitempty"`
-	// Description is a human-readable summary of what the extension adds.
+	// Description is a human-readable summary of how this agent uses the
+	// extension.
 	Description string `json:"description,omitempty"`
 	// Required reports whether a client must support the extension to interact
 	// with this agent at all. Optional extensions are the norm; a required one
 	// lets an agent refuse clients that would misread its output.
 	Required bool `json:"required,omitempty"`
-	// Metadata is extension-defined configuration data, whose shape the
-	// extension itself specifies.
-	Metadata map[string]any `json:"metadata,omitempty"`
+	// Params is extension-defined configuration data, whose shape the extension
+	// itself specifies (google.protobuf.Struct in the proto).
+	Params map[string]any `json:"params,omitempty"`
 }
 
-// AgentInterface binds one transport protocol to one endpoint URL. An agent
-// exposing both the JSON-RPC and REST bindings declares two interfaces.
+// AgentInterface binds one protocol binding, at one A2A protocol version, to
+// one endpoint URL. An agent exposing both the JSON-RPC and REST bindings
+// declares two interfaces; an agent serving 0.3 and 1.0 declares one per
+// version.
 type AgentInterface struct {
-	// Transport is the binding spoken at this URL. Required.
-	Transport TransportProtocol `json:"transport"`
-	// URL is the base URL of the endpoint. Operation paths are appended to it
-	// for the REST binding; the JSON-RPC binding POSTs to it directly. Required.
+	// URL is the endpoint address. For HTTP bindings it is the base URL that
+	// operation paths are appended to (REST) or POSTed to directly (JSON-RPC);
+	// for gRPC it is "hostname:port". Required.
 	URL string `json:"url"`
+	// ProtocolBinding is the binding spoken at this URL. Required.
+	ProtocolBinding ProtocolBinding `json:"protocolBinding"`
+	// Tenant is an opaque routing identifier for deployments serving several
+	// agents or tenants behind one A2A endpoint. When set, a client MUST echo
+	// it in the tenant field of every request to this interface (section
+	// 8.3.2). The protocol does not define its format or semantics.
+	Tenant string `json:"tenant,omitempty"`
+	// ProtocolVersion is the Major.Minor A2A version this interface exposes.
+	// Required.
+	ProtocolVersion string `json:"protocolVersion"`
 }
 
 // AgentSkill describes one capability the agent advertises.
@@ -154,18 +195,19 @@ type AgentSkill struct {
 	Name string `json:"name"`
 	// Description explains what the skill does. Required.
 	Description string `json:"description"`
-	// Tags are free-form labels for discovery and filtering.
-	Tags []string `json:"tags,omitempty"`
+	// Tags are keywords describing the skill's capabilities. Required by the
+	// proto, so the key is always present.
+	Tags []string `json:"tags"`
 	// Examples are sample prompts that exercise the skill.
 	Examples []string `json:"examples,omitempty"`
 	// InputModes narrows the card's default input media types for this skill.
 	InputModes []string `json:"inputModes,omitempty"`
 	// OutputModes narrows the card's default output media types for this skill.
 	OutputModes []string `json:"outputModes,omitempty"`
-	// Security narrows the card's agent-wide security requirements for this
-	// skill, for skills that need stronger credentials than the agent as a
-	// whole.
-	Security []map[string][]string `json:"security,omitempty"`
+	// SecurityRequirements narrows the card's agent-wide security requirements
+	// for this skill, for skills needing stronger credentials than the agent as
+	// a whole.
+	SecurityRequirements []SecurityRequirement `json:"securityRequirements,omitempty"`
 }
 
 // AgentCardSignature is a JWS detached signature over the card.
@@ -178,13 +220,36 @@ type AgentCardSignature struct {
 	Header map[string]any `json:"header,omitempty"`
 }
 
+// ---- Security requirements ----
+
+// StringList is the proto's wrapper for a repeated string inside a map value,
+// which protobuf maps cannot hold directly. It is why a security requirement's
+// scopes serialize as {"list": [...]} rather than as a bare array.
+type StringList struct {
+	List []string `json:"list,omitempty"`
+}
+
+// SecurityRequirement is one alternative set of credentials that satisfies
+// access: every scheme named in Schemes must be satisfied, and its StringList
+// carries the scopes that scheme requires (empty for schemes without scopes).
+type SecurityRequirement struct {
+	Schemes map[string]StringList `json:"schemes,omitempty"`
+}
+
+// NewSecurityRequirement builds a single-scheme requirement.
+func NewSecurityRequirement(scheme string, scopes ...string) SecurityRequirement {
+	if scopes == nil {
+		scopes = []string{}
+	}
+	return SecurityRequirement{Schemes: map[string]StringList{scheme: {List: scopes}}}
+}
+
 // ---- Security schemes ----
 
 // SecuritySchemeKind names which arm of a SecurityScheme oneof is set.
 type SecuritySchemeKind string
 
-// Security scheme kinds. The 1.0 revision removed the OAuth2 implicit and
-// password grants; they have no representation here on purpose.
+// Security scheme kinds.
 const (
 	SecuritySchemeUnset         SecuritySchemeKind = ""
 	SecuritySchemeAPIKey        SecuritySchemeKind = "apiKey"
@@ -201,12 +266,12 @@ type SecurityScheme struct {
 	APIKey *APIKeySecurityScheme `json:"apiKeySecurityScheme,omitempty"`
 	// HTTPAuth is an HTTP Authorization scheme such as Bearer or Basic.
 	HTTPAuth *HTTPAuthSecurityScheme `json:"httpAuthSecurityScheme,omitempty"`
-	// OAuth2 is an OAuth 2.0 scheme with one or more supported flows.
+	// OAuth2 is an OAuth 2.0 scheme with exactly one supported flow.
 	OAuth2 *OAuth2SecurityScheme `json:"oauth2SecurityScheme,omitempty"`
 	// OpenIDConnect is OpenID Connect Discovery.
-	OpenIDConnect *OpenIDConnectSecurityScheme `json:"openIdConnectSecurityScheme,omitempty"`
+	OpenIDConnect *OpenIdConnectSecurityScheme `json:"openIdConnectSecurityScheme,omitempty"`
 	// MutualTLS is client-certificate authentication.
-	MutualTLS *MutualTLSSecurityScheme `json:"mtlsSecurityScheme,omitempty"`
+	MutualTLS *MutualTlsSecurityScheme `json:"mtlsSecurityScheme,omitempty"`
 }
 
 // Kind reports which arm is set, or SecuritySchemeUnset when none is. It
@@ -251,40 +316,47 @@ func (l APIKeyLocation) Valid() bool {
 
 // APIKeySecurityScheme carries a credential in a named header, query parameter
 // or cookie.
+//
+// The placement field is named "location", not the OpenAPI-familiar "in": the
+// proto calls it location and section 5.5 derives the JSON names from the proto.
 type APIKeySecurityScheme struct {
-	// Name is the header, parameter or cookie name. Required.
-	Name string `json:"name"`
-	// In is where the credential travels. Required.
-	In APIKeyLocation `json:"in"`
 	// Description is a human-readable note about the scheme.
 	Description string `json:"description,omitempty"`
+	// Location is where the credential travels. Required.
+	Location APIKeyLocation `json:"location"`
+	// Name is the header, parameter or cookie name. Required.
+	Name string `json:"name"`
 }
 
 // HTTPAuthSecurityScheme is an HTTP Authorization scheme.
 type HTTPAuthSecurityScheme struct {
-	// Scheme is the HTTP auth scheme name, lowercase per RFC 7235: "bearer",
-	// "basic". Required.
+	// Description is a human-readable note about the scheme.
+	Description string `json:"description,omitempty"`
+	// Scheme is the HTTP auth scheme name as registered with IANA, e.g.
+	// "Bearer" or "Basic". Required.
 	Scheme string `json:"scheme"`
 	// BearerFormat hints at the bearer token's format, e.g. "JWT".
 	BearerFormat string `json:"bearerFormat,omitempty"`
-	// Description is a human-readable note about the scheme.
-	Description string `json:"description,omitempty"`
 }
 
 // OAuth2SecurityScheme is an OAuth 2.0 scheme.
 type OAuth2SecurityScheme struct {
-	// Flows are the supported grant flows. At least one is required.
+	// Description is a human-readable note about the scheme.
+	Description string `json:"description,omitempty"`
+	// Flows is the supported grant flow. Required, and exactly one arm is set.
 	Flows OAuthFlows `json:"flows"`
 	// OAuth2MetadataURL points at the RFC 8414 authorization server metadata
 	// document, letting a client discover endpoints rather than hardcode them.
 	OAuth2MetadataURL string `json:"oauth2MetadataUrl,omitempty"`
-	// Description is a human-readable note about the scheme.
-	Description string `json:"description,omitempty"`
 }
 
-// OAuthFlows enumerates the OAuth 2.0 grant flows an agent supports. The
-// implicit and resource-owner-password grants were removed in A2A 1.0 and are
-// deliberately absent.
+// OAuthFlows selects the OAuth 2.0 grant flow an agent supports. It is a proto
+// oneof, so exactly one arm is set — not a set of independently-toggled flows.
+//
+// The implicit and resource-owner-password grants exist in the proto but are
+// marked deprecated ("use Authorization Code + PKCE instead"). They are
+// deliberately absent here: this codec will not help anyone advertise a grant
+// the specification tells them not to use.
 type OAuthFlows struct {
 	// AuthorizationCode is the authorization code grant, with PKCE.
 	AuthorizationCode *AuthorizationCodeOAuthFlow `json:"authorizationCode,omitempty"`
@@ -299,6 +371,21 @@ func (f OAuthFlows) Empty() bool {
 	return f.AuthorizationCode == nil && f.ClientCredentials == nil && f.DeviceCode == nil
 }
 
+// set counts how many flow arms are populated, for the oneof check.
+func (f OAuthFlows) set() int {
+	n := 0
+	for _, present := range []bool{
+		f.AuthorizationCode != nil,
+		f.ClientCredentials != nil,
+		f.DeviceCode != nil,
+	} {
+		if present {
+			n++
+		}
+	}
+	return n
+}
+
 // AuthorizationCodeOAuthFlow is the authorization code grant.
 type AuthorizationCodeOAuthFlow struct {
 	// AuthorizationURL is the authorization endpoint. Required.
@@ -307,8 +394,11 @@ type AuthorizationCodeOAuthFlow struct {
 	TokenURL string `json:"tokenUrl"`
 	// RefreshURL is the refresh endpoint, when it differs from TokenURL.
 	RefreshURL string `json:"refreshUrl,omitempty"`
-	// Scopes maps scope name to human-readable description.
+	// Scopes maps scope name to human-readable description. Required.
 	Scopes map[string]string `json:"scopes,omitempty"`
+	// PKCERequired reports whether RFC 7636 PKCE is required for this flow. It
+	// should always be set for public clients and is recommended for all.
+	PKCERequired bool `json:"pkceRequired,omitempty"`
 }
 
 // ClientCredentialsOAuthFlow is the machine-to-machine grant.
@@ -317,7 +407,7 @@ type ClientCredentialsOAuthFlow struct {
 	TokenURL string `json:"tokenUrl"`
 	// RefreshURL is the refresh endpoint, when it differs from TokenURL.
 	RefreshURL string `json:"refreshUrl,omitempty"`
-	// Scopes maps scope name to human-readable description.
+	// Scopes maps scope name to human-readable description. Required.
 	Scopes map[string]string `json:"scopes,omitempty"`
 }
 
@@ -330,33 +420,36 @@ type DeviceCodeOAuthFlow struct {
 	TokenURL string `json:"tokenUrl"`
 	// RefreshURL is the refresh endpoint, when it differs from TokenURL.
 	RefreshURL string `json:"refreshUrl,omitempty"`
-	// Scopes maps scope name to human-readable description.
+	// Scopes maps scope name to human-readable description. Required.
 	Scopes map[string]string `json:"scopes,omitempty"`
 }
 
-// OpenIDConnectSecurityScheme is OpenID Connect Discovery.
-type OpenIDConnectSecurityScheme struct {
-	// OpenIDConnectURL is the OIDC discovery document URL. Required.
-	OpenIDConnectURL string `json:"openIdConnectUrl"`
+// OpenIdConnectSecurityScheme is OpenID Connect Discovery. The spelling matches
+// the proto message name, which is also what the JSON key derives from.
+type OpenIdConnectSecurityScheme struct {
 	// Description is a human-readable note about the scheme.
 	Description string `json:"description,omitempty"`
+	// OpenIdConnectURL is the OIDC discovery document URL. Required.
+	OpenIdConnectURL string `json:"openIdConnectUrl"`
 }
 
-// MutualTLSSecurityScheme is client-certificate authentication.
-type MutualTLSSecurityScheme struct {
+// MutualTlsSecurityScheme is client-certificate authentication.
+type MutualTlsSecurityScheme struct {
 	// Description is a human-readable note about the scheme.
 	Description string `json:"description,omitempty"`
 }
 
 // ---- Constructors ----
 
-// NewAgentCard builds a card stamped with this codec's protocol version and
-// with the capability booleans explicitly at their conservative defaults:
-// streaming on, push notifications and extended card off.
-func NewAgentCard(identity AgentIdentity) AgentCard {
+// NewAgentCard builds a card with the capability booleans explicitly at their
+// conservative defaults: streaming on, push notifications and extended card
+// off. The three required identity fields are taken as arguments because a card
+// without them cannot be served at all.
+func NewAgentCard(name, description, version string) AgentCard {
 	return AgentCard{
-		ProtocolVersion: ProtocolVersion,
-		Identity:        identity,
+		Name:        name,
+		Description: description,
+		Version:     version,
 		Capabilities: AgentCapabilities{
 			Streaming:         true,
 			PushNotifications: false,
@@ -365,9 +458,14 @@ func NewAgentCard(identity AgentIdentity) AgentCard {
 	}
 }
 
-// WithInterface appends a protocol endpoint and returns the card, for chaining.
-func (c AgentCard) WithInterface(transport TransportProtocol, url string) AgentCard {
-	c.Interfaces = append(c.Interfaces, AgentInterface{Transport: transport, URL: url})
+// WithInterface appends a protocol endpoint speaking this codec's protocol
+// version and returns the card, for chaining.
+func (c AgentCard) WithInterface(binding ProtocolBinding, url string) AgentCard {
+	c.SupportedInterfaces = append(c.SupportedInterfaces, AgentInterface{
+		URL:             url,
+		ProtocolBinding: binding,
+		ProtocolVersion: ProtocolVersion,
+	})
 	return c
 }
 
@@ -392,10 +490,7 @@ func (c AgentCard) WithSecurityScheme(name string, scheme SecurityScheme) AgentC
 // WithSecurityRequirement appends an agent-wide security requirement naming one
 // scheme and its scopes, and returns the card for chaining.
 func (c AgentCard) WithSecurityRequirement(name string, scopes ...string) AgentCard {
-	if scopes == nil {
-		scopes = []string{}
-	}
-	c.Security = append(c.Security, map[string][]string{name: scopes})
+	c.SecurityRequirements = append(c.SecurityRequirements, NewSecurityRequirement(name, scopes...))
 	return c
 }
 
@@ -409,28 +504,32 @@ func (c AgentCard) WithExtension(e AgentExtension) AgentCard {
 // BearerScheme builds an HTTP bearer-token security scheme.
 func BearerScheme(bearerFormat, description string) SecurityScheme {
 	return SecurityScheme{HTTPAuth: &HTTPAuthSecurityScheme{
-		Scheme:       "bearer",
+		Scheme:       "Bearer",
 		BearerFormat: bearerFormat,
 		Description:  description,
 	}}
 }
 
 // APIKeyScheme builds an API-key security scheme.
-func APIKeyScheme(name string, in APIKeyLocation, description string) SecurityScheme {
-	return SecurityScheme{APIKey: &APIKeySecurityScheme{Name: name, In: in, Description: description}}
+func APIKeyScheme(name string, location APIKeyLocation, description string) SecurityScheme {
+	return SecurityScheme{APIKey: &APIKeySecurityScheme{
+		Name:        name,
+		Location:    location,
+		Description: description,
+	}}
 }
 
 // OpenIDConnectScheme builds an OpenID Connect Discovery security scheme.
 func OpenIDConnectScheme(discoveryURL, description string) SecurityScheme {
-	return SecurityScheme{OpenIDConnect: &OpenIDConnectSecurityScheme{
-		OpenIDConnectURL: discoveryURL,
+	return SecurityScheme{OpenIDConnect: &OpenIdConnectSecurityScheme{
+		OpenIdConnectURL: discoveryURL,
 		Description:      description,
 	}}
 }
 
 // MutualTLSScheme builds a client-certificate security scheme.
 func MutualTLSScheme(description string) SecurityScheme {
-	return SecurityScheme{MutualTLS: &MutualTLSSecurityScheme{Description: description}}
+	return SecurityScheme{MutualTLS: &MutualTlsSecurityScheme{Description: description}}
 }
 
 // ---- Accessors ----
@@ -463,10 +562,11 @@ func (c AgentCard) RequiredExtensions() []string {
 	return out
 }
 
-// InterfaceFor returns the endpoint URL the agent exposes for a transport.
-func (c AgentCard) InterfaceFor(transport TransportProtocol) (string, bool) {
-	for _, i := range c.Interfaces {
-		if i.Transport == transport {
+// InterfaceFor returns the first endpoint URL the agent exposes for a binding.
+// Interfaces are ordered by preference, so "first" is "preferred".
+func (c AgentCard) InterfaceFor(binding ProtocolBinding) (string, bool) {
+	for _, i := range c.SupportedInterfaces {
+		if i.ProtocolBinding == binding {
 			return i.URL, true
 		}
 	}
@@ -487,8 +587,39 @@ func (c AgentCard) Skill(id string) (AgentSkill, bool) {
 
 // EncodeAgentCard serializes a card for serving at AgentCardPath, using indented
 // JSON since cards are read by humans as often as by clients.
+//
+// It normalizes the required repeated fields from nil to an empty array first.
+// Section 8.4.1 requires a REQUIRED field to be present even at its default
+// value, and a nil Go slice would marshal to null — which is a different JSON
+// value from [], and would change the canonical form a signature is computed
+// over. The card argument is not mutated.
 func EncodeAgentCard(c *AgentCard) ([]byte, error) {
-	data, err := json.MarshalIndent(c, "", "  ")
+	if c == nil {
+		return nil, fmt.Errorf("a2a: encode agent card: card is nil")
+	}
+	normalized := *c
+	if normalized.SupportedInterfaces == nil {
+		normalized.SupportedInterfaces = []AgentInterface{}
+	}
+	if normalized.DefaultInputModes == nil {
+		normalized.DefaultInputModes = []string{}
+	}
+	if normalized.DefaultOutputModes == nil {
+		normalized.DefaultOutputModes = []string{}
+	}
+	if normalized.Skills == nil {
+		normalized.Skills = []AgentSkill{}
+	}
+	skills := make([]AgentSkill, len(normalized.Skills))
+	copy(skills, normalized.Skills)
+	for i := range skills {
+		if skills[i].Tags == nil {
+			skills[i].Tags = []string{}
+		}
+	}
+	normalized.Skills = skills
+
+	data, err := json.MarshalIndent(&normalized, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("a2a: encode agent card: %w", err)
 	}
@@ -512,29 +643,27 @@ func ValidateAgentCard(c *AgentCard) *Error {
 	}
 
 	var violations []FieldViolation
-	if c.ProtocolVersion == "" {
+	if c.Name == "" {
+		violations = append(violations, FieldViolation{Field: "name", Description: "agent name is required"})
+	}
+	if c.Description == "" {
 		violations = append(violations, FieldViolation{
-			Field:       "protocolVersion",
-			Description: "protocol version is required",
+			Field:       "description",
+			Description: "agent description is required",
 		})
-	} else if _, err := NormalizeVersion(c.ProtocolVersion); err != nil {
-		violations = append(violations, FieldViolation{Field: "protocolVersion", Description: err.Error()})
 	}
-	if c.Identity.Name == "" {
-		violations = append(violations, FieldViolation{Field: "identity.name", Description: "agent name is required"})
+	if c.Version == "" {
+		violations = append(violations, FieldViolation{Field: "version", Description: "agent version is required"})
 	}
-	if c.Identity.Version == "" {
-		violations = append(violations, FieldViolation{Field: "identity.version", Description: "agent version is required"})
-	}
-	if c.Identity.Provider != nil && c.Identity.Provider.Organization == "" {
+	if c.Provider != nil && c.Provider.Organization == "" {
 		violations = append(violations, FieldViolation{
-			Field:       "identity.provider.organization",
+			Field:       "provider.organization",
 			Description: "provider organization is required",
 		})
 	}
-	if len(c.Interfaces) == 0 {
+	if len(c.SupportedInterfaces) == 0 {
 		violations = append(violations, FieldViolation{
-			Field:       "interfaces",
+			Field:       "supportedInterfaces",
 			Description: "at least one protocol interface is required",
 		})
 	}
@@ -548,17 +677,29 @@ func ValidateAgentCard(c *AgentCard) *Error {
 		return ErrInvalidParams(violations...)
 	}
 
-	for i, iface := range c.Interfaces {
-		if !iface.Transport.Valid() {
+	for i, iface := range c.SupportedInterfaces {
+		field := fmt.Sprintf("supportedInterfaces[%d]", i)
+		if iface.URL == "" {
+			return ErrInvalidParams(FieldViolation{Field: field + ".url", Description: "interface url is required"})
+		}
+		// The binding vocabulary is open (see ProtocolBinding), so the only
+		// check that can be made without rejecting a legal card is presence.
+		if iface.ProtocolBinding == "" {
 			return ErrInvalidParams(FieldViolation{
-				Field:       fmt.Sprintf("interfaces[%d].transport", i),
-				Description: fmt.Sprintf("unknown transport protocol %q", string(iface.Transport)),
+				Field:       field + ".protocolBinding",
+				Description: "protocol binding is required",
 			})
 		}
-		if iface.URL == "" {
+		if iface.ProtocolVersion == "" {
 			return ErrInvalidParams(FieldViolation{
-				Field:       fmt.Sprintf("interfaces[%d].url", i),
-				Description: "interface url is required",
+				Field:       field + ".protocolVersion",
+				Description: "protocol version is required",
+			})
+		}
+		if _, err := NormalizeVersion(iface.ProtocolVersion); err != nil {
+			return ErrInvalidParams(FieldViolation{
+				Field:       field + ".protocolVersion",
+				Description: err.Error(),
 			})
 		}
 	}
@@ -575,7 +716,7 @@ func ValidateAgentCard(c *AgentCard) *Error {
 		}
 	}
 
-	if err := validateSecurityRequirements(c.Security, "security", c.SecuritySchemes); err != nil {
+	if err := validateSecurityRequirements(c.SecurityRequirements, "securityRequirements", c.SecuritySchemes); err != nil {
 		return err
 	}
 
@@ -607,12 +748,18 @@ func validateSkill(s AgentSkill, field string, schemes map[string]SecurityScheme
 	if len(violations) > 0 {
 		return ErrInvalidParams(violations...)
 	}
-	return validateSecurityRequirements(s.Security, field+".security", schemes)
+	return validateSecurityRequirements(s.SecurityRequirements, field+".securityRequirements", schemes)
 }
 
-func validateSecurityRequirements(reqs []map[string][]string, field string, schemes map[string]SecurityScheme) *Error {
+func validateSecurityRequirements(reqs []SecurityRequirement, field string, schemes map[string]SecurityScheme) *Error {
 	for i, req := range reqs {
-		for name := range req {
+		if len(req.Schemes) == 0 {
+			return ErrInvalidParams(FieldViolation{
+				Field:       fmt.Sprintf("%s[%d].schemes", field, i),
+				Description: "security requirement must name at least one scheme",
+			})
+		}
+		for name := range req.Schemes {
 			if _, ok := schemes[name]; !ok {
 				return ErrInvalidParams(FieldViolation{
 					Field:       fmt.Sprintf("%s[%d]", field, i),
@@ -654,10 +801,10 @@ func ValidateSecurityScheme(s SecurityScheme, field string) *Error {
 				Description: "api key name is required",
 			})
 		}
-		if !s.APIKey.In.Valid() {
+		if !s.APIKey.Location.Valid() {
 			return ErrInvalidParams(FieldViolation{
-				Field:       field + ".apiKeySecurityScheme.in",
-				Description: fmt.Sprintf("must be one of %q, %q or %q, got %q", APIKeyInQuery, APIKeyInHeader, APIKeyInCookie, string(s.APIKey.In)),
+				Field:       field + ".apiKeySecurityScheme.location",
+				Description: fmt.Sprintf("must be one of %q, %q or %q, got %q", APIKeyInQuery, APIKeyInHeader, APIKeyInCookie, string(s.APIKey.Location)),
 			})
 		}
 	case SecuritySchemeHTTPAuth:
@@ -668,14 +815,16 @@ func ValidateSecurityScheme(s SecurityScheme, field string) *Error {
 			})
 		}
 	case SecuritySchemeOAuth2:
-		if s.OAuth2.Flows.Empty() {
+		// flows is a proto oneof: zero arms is unconfigured, two or more is a
+		// document that cannot be represented on the wire at all.
+		if n := s.OAuth2.Flows.set(); n != 1 {
 			return ErrInvalidParams(FieldViolation{
 				Field:       field + ".oauth2SecurityScheme.flows",
-				Description: "at least one oauth2 flow is required",
+				Description: fmt.Sprintf("exactly one oauth2 flow is required, got %d", n),
 			})
 		}
 	case SecuritySchemeOpenIDConnect:
-		if s.OpenIDConnect.OpenIDConnectURL == "" {
+		if s.OpenIDConnect.OpenIdConnectURL == "" {
 			return ErrInvalidParams(FieldViolation{
 				Field:       field + ".openIdConnectSecurityScheme.openIdConnectUrl",
 				Description: "openid connect discovery url is required",

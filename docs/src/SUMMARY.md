@@ -88,6 +88,7 @@
   - [Test IO](./plugins/io/test.md)
   - [Wails Desktop](./plugins/io/wails.md)
   - [Broker IO (dial-back)](./plugins/io/broker.md)
+  - [A2A Serve](./plugins/io/a2a.md)
   - [AG-UI Serve Transport](./plugins/io-agui.md)
 - [Observers](./plugins/observers/index.md)
   - [Thinking Persistence](./plugins/observers/thinking.md)

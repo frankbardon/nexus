@@ -1499,6 +1499,224 @@ disabled. Nothing keys behaviour on it yet — this transport serves a single
 engine/session per listener and admits one run at a time, so there is no second
 principal for an authorization decision to distinguish.
 
+### `nexus.io.a2a`
+
+Source: `plugins/io/a2a/`. Agent2Agent (A2A) **serve** transport: exposes this
+Nexus instance as an A2A agent over one HTTP listener carrying three surfaces —
+the `/.well-known/agent-card.json` discovery document, the JSON-RPC 2.0 binding,
+and the HTTP+JSON/REST binding. The wire format is `pkg/a2a` (A2A specification
+1.0.x); this plugin contributes the listener, the credential guard, the card
+assembly and the routing. Safe by default: binds loopback, optional auth through
+the shared `pkg/nexusauth` chain, and CORS off unless configured.
+
+> **Maturity.** Every operation is routed, version-negotiated and
+> authenticated, then answered with `UnsupportedOperationError` — no A2A
+> operation drives an agent turn yet. The Agent Card reports this honestly:
+> `capabilities.streaming` is `false` until the streaming operations are wired.
+> The discovery and authentication surfaces are complete.
+
+| Key                     | Type         | Default              | Description |
+|-------------------------|--------------|----------------------|-------------|
+| `bind`                  | string       | `127.0.0.1:8091`     | `host:port` the HTTP listener binds to. Loopback by default so the endpoint is not network-exposed without explicit opt-in. An empty string falls back to the default. |
+| `public_url`            | string       | `http://<bind>`      | Absolute base URL advertised in the card's `supportedInterfaces`. The default is right for the loopback bind and wrong the moment a reverse proxy is involved — set it to the externally reachable origin whenever `bind` is not what clients dial. A trailing `/` is trimmed. |
+| `jsonrpc_path`          | string       | `/a2a`               | Absolute path the JSON-RPC 2.0 binding is mounted at (`POST` only). Must differ from `rest_prefix`; a relative path or a collision is a boot error. |
+| `rest_prefix`           | string       | `/a2a/v1`            | Absolute path prefix the HTTP+JSON/REST binding is mounted under; the operation paths of A2A specification §11.3 (`/message:send`, `/tasks/{id}`, `/tasks/{id}:cancel`, …) hang off it. Must differ from `jsonrpc_path`. |
+| `strict_version_header` | bool         | `false`              | How an **absent** `A2A-Version` service parameter is read. See [A2A version negotiation](#a2a-version-negotiation) below. |
+| `card_requires_auth`    | bool         | `false`              | Whether `GET /.well-known/agent-card.json` is gated by the validator chain. See [Agent Card auth posture](#agent-card-auth-posture) below. |
+| `cors_origins`          | string or list<string> | *(empty)*  | Allowed CORS origins. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header at all (same-origin only). Accepts a YAML list **or** a single comma-separated string. |
+| `bearer_token`          | string       | *(empty)*            | Inline bearer token, desugared into a one-entry `static` validator. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
+| `bearer_token_env`      | string       | *(empty)*            | Name of an environment variable holding the bearer token. Used only when `bearer_token` is empty. Mutually exclusive with `auth`. |
+| `auth`                  | map          | *(absent)*           | Validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker and `nexus.io.agui` use, so `static`, `jwks`, `introspect` and `proxy_headers` are all available. The card's `securitySchemes` are derived from it — see [Agent Card security](#agent-card-security-schemes) below. Every rule documented under [Authentication (`auth:`)](#authentication-auth) applies verbatim; `auth.admin_scope` is broker-only and is rejected here. |
+| `card`                  | map          | *(absent)*           | The hand-authored Agent Card. Exactly one of `card` or `card_file` is **required**. See [Agent Card content](#agent-card-content) below. |
+| `card_file`             | string (path)| *(absent)*           | Path to a JSON file holding a complete A2A Agent Card document (camelCase wire shape). Expanded through `engine.ExpandPath`, so `~` and `~/...` work. Mutually exclusive with `card`. |
+
+**Schema-validated at boot.** The plugin ships `plugins/io/a2a/schema.json` and
+implements `ConfigSchema()`, so the engine validates this block — including
+everything under `auth:` and `card:` — **before `Init` runs**, with
+`additionalProperties: false` at every object level. The schema also enforces
+that one of `card`/`card_file` is present. The table above is the whole
+top-level surface; any key not listed is rejected.
+
+#### Agent Card content
+
+`card:` is the **hand-authored** half of the discovery document.
+
+| Key                            | Type            | Default     | Description |
+|--------------------------------|-----------------|-------------|-------------|
+| `card.name`                    | string          | *(required)*| Human-readable agent name. |
+| `card.description`             | string          | *(required)*| What the agent does. Required by the A2A specification, so it is always serialized. |
+| `card.version`                 | string          | *(required)*| The agent's own version, independent of the A2A protocol version. |
+| `card.documentation_url`       | string          | *(empty)*   | URL of human-readable documentation. |
+| `card.icon_url`                | string          | *(empty)*   | URL of an icon representing the agent. |
+| `card.provider.organization`   | string          | *(required when `provider` is set)* | The operating organization's name. |
+| `card.provider.url`            | string          | *(empty)*   | The provider's website. |
+| `card.default_input_modes`     | string or list<string> | *(empty)* | Media types the agent accepts when a skill does not narrow them, e.g. `text/plain`. |
+| `card.default_output_modes`    | string or list<string> | *(empty)* | Media types the agent produces when a skill does not narrow them. |
+| `card.skills`                  | list<map>       | *(required, ≥1)* | What the agent advertises it can do. |
+| `card.skills[].id`             | string          | *(required)*| Unique skill id within the card. |
+| `card.skills[].name`           | string          | *(required)*| Human-readable skill name. |
+| `card.skills[].description`    | string          | *(required)*| What the skill does. |
+| `card.skills[].tags`           | string or list<string> | *(empty)* | Keywords for discovery and filtering. |
+| `card.skills[].examples`       | string or list<string> | *(empty)* | Sample prompts that exercise the skill. |
+| `card.skills[].input_modes`    | string or list<string> | *(empty)* | Narrows `default_input_modes` for this skill. |
+| `card.skills[].output_modes`   | string or list<string> | *(empty)* | Narrows `default_output_modes` for this skill. |
+
+**Skills are deliberately hand-authored** — they are **not** derived from
+`nexus.skills` or the tool catalog. The card is a public contract: an internal
+catalog churns with every plugin an operator enables, and a discovery document
+that churned with it would both leak internal structure and break clients that
+keyed off it.
+
+**There are no keys for `supportedInterfaces`, `capabilities`,
+`securitySchemes` or `securityRequirements`, and there never will be.** Those
+describe what the listener actually does, so they are **derived** and overwrite
+whatever the card source carried — including a complete `card_file` document. A
+card naming a URL nothing is bound to, a capability nothing implements, or a
+scheme nothing enforces is worse than no card: it is a confident wrong answer.
+Concretely:
+
+- `supportedInterfaces` is `[{public_url + jsonrpc_path, JSONRPC, 1.0},
+  {public_url + rest_prefix, HTTP+JSON, 1.0}]`, in that preference order.
+- `capabilities.streaming` / `pushNotifications` / `extendedAgentCard` are
+  computed from the set of operations the plugin actually implements.
+- `securitySchemes` / `securityRequirements` come from the validator chain.
+
+The card is rendered and validated **at boot**: a card that could not be served
+fails the process start, not the first partner's request. It is served with an
+`ETag` (a hash of the card content, so an edit that does not bump
+`card.version` still invalidates a cache) and `Cache-Control: public,
+max-age=300`, per specification §8.6.1; `If-None-Match` yields `304`.
+
+#### Agent Card security schemes
+
+The card's `securitySchemes` and `securityRequirements` are derived from the
+configured validators, so what a client is told to present is what the chain
+enforces. One validator becomes one named scheme plus one requirement entry;
+the scheme name is the chain-order name `nexusauth` already assigned (`static`,
+`jwks`, `jwks#2`), so the card and the boot log name the same thing.
+
+| Validator type   | Scheme published |
+|------------------|------------------|
+| `static` (and the desugared `bearer_token`) | `httpAuthSecurityScheme` with `scheme: Bearer`. |
+| `jwks`           | `httpAuthSecurityScheme` with `scheme: Bearer`, `bearerFormat: JWT`; the description names the configured `issuer` and `audience` so a client knows where to obtain a token. |
+| `introspect`     | `httpAuthSecurityScheme` with `scheme: Bearer` and **no** `bearerFormat` — an introspected token is opaque by construction. |
+| `proxy_headers`  | **Nothing.** This validator accepts no client credential: it honours an identity a trusted fronting proxy already established and refuses those headers from anyone outside the CIDR allowlist. Publishing a scheme would instruct clients to send a header guaranteed to be ignored, or invite them to assert an identity directly. Auth is still enforced. |
+
+Requirements are emitted as **separate entries** rather than one entry naming
+every scheme, because that is the accurate translation of a `nexusauth.Chain`:
+the chain is first-success, so satisfying *any* validator suffices, and A2A
+spells "any of these alternatives" as separate members of the
+`securityRequirements` array. With no validators configured the card carries no
+`securitySchemes` at all, which is the honest document for a listener that
+admits everyone — and is why the bind address defaults to loopback.
+
+#### Agent Card auth posture
+
+`GET /.well-known/agent-card.json` is **unauthenticated by default**, even when
+every operation is guarded.
+
+Specification §8.2 makes the well-known URI a pre-authentication bootstrap step:
+a client fetches the card precisely to discover which credentials to obtain
+(§7.3, step 1), so gating it behind those same credentials is circular and
+breaks every conforming client. The specification's answer for a card that must
+stay private is a separate authenticated document behind
+`GetExtendedAgentCard` (§6.9), which this plugin does not implement and honestly
+declares as `false`.
+
+The counter-argument is real, and is why `card_requires_auth` exists: this card
+names a *private* agent, and its description, skills and examples may describe
+capability an operator would rather not publish. Two things answer it. First,
+the listener binds loopback by default, so the "public" document is not
+reachable from anywhere the operator did not deliberately open. Second, the
+card's contents are hand-authored for exactly this reason — nothing is derived
+from the tool catalog, so what the card reveals is what an operator chose to
+reveal.
+
+An operator who moves `bind` off loopback and still needs the card private sets
+`card_requires_auth: true` and distributes the document out-of-band, which §8.2
+explicitly sanctions ("Direct Configuration"). That is a real trade — it makes
+the agent undiscoverable to clients that have not already been told about it —
+so it is opt-in, not the default.
+
+`OPTIONS` preflight on every route is **never** authenticated: a browser does
+not attach `Authorization` to a preflight.
+
+#### A2A version negotiation
+
+Specification §3.6.2 says an agent MUST interpret an empty `A2A-Version` as
+`0.3`. `pkg/a2a` implements that literally, and since the codec speaks only
+`1.0`, the literal reading turns every header-less request into a
+`VersionNotSupportedError`. That rule exists to protect clients that predate the
+parameter — an agent that used to serve `0.3` must not silently reinterpret an
+old client's requests under new semantics.
+
+**This listener has no such client to protect**, so the default is the lenient
+reading:
+
+| `strict_version_header` | Absent `A2A-Version` is read as | Effect |
+|-------------------------|--------------------------------|--------|
+| `false` *(default)*     | `1.0`                          | The request is processed. Every response carries `A2A-Version: 1.0` so the client can see what it was processed as rather than infer it. |
+| `true`                  | `0.3`                          | The literal §3.6.2 behaviour: the request is refused with `VersionNotSupportedError`. |
+
+An *explicit* unsupported version (`A2A-Version: 0.3`) is refused under **both**
+settings — the policy only governs absence. The parameter may also ride a query
+parameter (`?A2A-Version=1.0`), which §3.6.1 permits.
+
+Set `strict_version_header: true` for a conformance harness, or for a
+deployment that will later front a `0.3` interface from the same origin.
+
+#### Error envelopes
+
+Each binding answers in its own shape, so a client parses one format per
+endpoint:
+
+| Condition | JSON-RPC binding | REST binding |
+|---|---|---|
+| Protocol error (bad params, unknown method, unsupported operation, unsupported version) | HTTP `200` with a JSON-RPC error object carrying the A2A code (`-32602`, `-32601`, `-32004`, `-32009`, …) and the request id echoed. `200` is the JSON-RPC contract: the outcome rides the body. | The §11.6 `google.rpc.Status` body with the A2A error's mapped HTTP status and a `google.rpc.ErrorInfo` detail (`domain: a2a-protocol.org`). |
+| Authentication / authorization refusal | HTTP `401`/`403`/`503` **plus** a JSON-RPC error object with code **`-32000`** and an `ErrorInfo` detail (`domain: nexus.io.a2a`). | The same `google.rpc.Status` shape with status `UNAUTHENTICATED` / `PERMISSION_DENIED` / `UNAVAILABLE`. |
+| Unknown path under `rest_prefix` | — | `404` with `MethodNotFoundError`. |
+| Known path, wrong verb | — | `405` with an `Allow` header naming the verb that would have worked. |
+
+A2A defines no authentication error in its taxonomy: §3.3.2 names "HTTP 401
+Unauthorized, gRPC UNAUTHENTICATED, **JSON-RPC custom error**", leaving the
+code to the implementation. `-32000` is the one value in JSON-RPC 2.0's
+implementation-defined server-error range that A2A does *not* claim for itself
+(A2A reserves `-32001`…`-32099`), so it cannot collide with a protocol error a
+client already knows how to interpret. The HTTP status stays the authoritative
+signal; the body exists so a client that only parses envelopes still gets a
+well-formed one. The RFC 6750 `WWW-Authenticate` challenge and the `Retry-After`
+on `503` follow the same status mapping `nexus.io.agui` and the broker use — the
+denial kinds are the shared package's transport contract, and one deployment
+should not answer the same refusal three different ways.
+
+#### Example
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    bind: "0.0.0.0:8091"
+    public_url: "https://agent.example.com"
+    bearer_token_env: NEXUS_A2A_TOKEN
+    cors_origins: ["https://console.example.com"]
+    card:
+      name: "Nexus Research Agent"
+      description: "Runs research turns with web search and file tools."
+      version: "1.2.0"
+      documentation_url: "https://example.com/docs/agent"
+      provider:
+        organization: "Example Inc."
+        url: "https://example.com"
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: research
+          name: "Research a topic"
+          description: "Searches the web and summarizes findings with citations."
+          tags: ["research", "search", "summarization"]
+          examples:
+            - "Summarize the last three papers on retrieval-augmented generation."
+```
+
 ### `nexus.io.realtime`
 
 Source: `plugins/io/realtime/plugin.go`. WebSocket bidirectional transport

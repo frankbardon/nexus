@@ -47,6 +47,13 @@ const NexusExtensionURI = "https://github.com/frankbardon/nexus/a2a/extensions/a
 
 // NexusExtensionVersion is the extension's own version, independent of the A2A
 // protocol version.
+//
+// It is NOT published as a separate card field: AgentExtension has no version
+// key, because specification section 4.6.3 requires the version to live inside
+// the URI and requires a NEW URI for any breaking change. The "/v1" suffix on
+// NexusExtensionURI is the wire-visible version; this constant exists so the
+// two cannot drift silently and so the value is available to code that reports
+// it (logs, the params block below).
 const NexusExtensionVersion = "1.0"
 
 // NexusExtensionDescription is the human-readable summary published in the
@@ -238,7 +245,7 @@ type NexusTokenUsage struct {
 // It is never Required: everything it carries is supplementary, so a client
 // that ignores it still receives a complete canonical stream.
 //
-// The declaration's metadata publishes the event kinds and the two carriers, so
+// The declaration's params publish the event kinds and the two carriers, so
 // a client can tell from the card alone what to expect and where to look for it
 // without fetching an out-of-band schema.
 func NexusExtension() AgentExtension {
@@ -248,10 +255,13 @@ func NexusExtension() AgentExtension {
 	}
 	return AgentExtension{
 		URI:         NexusExtensionURI,
-		Version:     NexusExtensionVersion,
 		Description: NexusExtensionDescription,
 		Required:    false,
-		Metadata: map[string]any{
+		// params is the proto's google.protobuf.Struct for extension-defined
+		// configuration. The version is republished here as data rather than as
+		// a card field, since AgentExtension has none (section 4.6.3).
+		Params: map[string]any{
+			"version":     NexusExtensionVersion,
 			"eventKinds":  kinds,
 			"carriers":    []any{"part", "metadata"},
 			"metadataKey": NexusExtensionURI,

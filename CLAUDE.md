@@ -33,7 +33,7 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Desktop app** (`cmd/desktop/`) — Reference multi-agent desktop app hosting hello-world + staffing-match agents.
 - **CLI entry point** (`cmd/nexus/main.go`) — Creates engine, registers plugins, runs with signal handling.
 - **Session broker** (`cmd/nexus-broker/`) — Standalone HTTP/WS gateway service (NOT a plugin) that fronts OS-isolated `nexus` instances behind one ingress: clients `claim` a lease, the broker cold-spawns a `nexus` subprocess that dials back via the `nexus.io.broker` plugin, and instances `release` on demand/idle/crash with sessions persisted on disk. See `docs/src/guides/session-broker.md`.
-- **Identity layer** (`pkg/nexusauth/`) — Shared credential verification: `Principal`, a `Validator` interface with `static`/`jwks`/`introspect`/`proxy_headers` implementations, and an ordered first-success `Chain` built from an `auth:` config block. Used by `cmd/nexus-broker` and `nexus.io.agui`; never issues credentials, only verifies them.
+- **Identity layer** (`pkg/nexusauth/`) — Shared credential verification: `Principal`, a `Validator` interface with `static`/`jwks`/`introspect`/`proxy_headers` implementations, and an ordered first-success `Chain` built from an `auth:` config block. Used by `cmd/nexus-broker`, `nexus.io.agui` and `nexus.io.a2a`; never issues credentials, only verifies them.
 - **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
@@ -107,6 +107,7 @@ plugins/
   io/test/               # Non-interactive test IO (scripted inputs, event collection, auto-approvals)
   io/wails/              # Wails-native transport for desktop shells (config-driven event bridging)
   io/broker/             # Dial-back IO transport: instances spawned by cmd/nexus-broker dial OUT to the broker gateway (not a listener)
+  io/a2a/                # A2A serve transport: /.well-known/agent-card.json + JSON-RPC and HTTP+JSON bindings; hand-authored agent card, securitySchemes derived from pkg/nexusauth validators; wire format from pkg/a2a
   io/agui/               # AG-UI serve transport: POST /agui accepts RunAgentInput, streams canonical AG-UI SSE (RunStarted→text/tool/reasoning→RunFinished); external-facing interop via pkg/agui wire, loopback+bearer+CORS
   memory/simple/         # Unbounded append-only history; reference/test impl for memory.history
   memory/capped/         # Default memory.history provider: sliding window, JSONL persistence, pair-safe truncation
