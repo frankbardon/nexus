@@ -299,3 +299,17 @@ var errorTypeByCode = func() map[int]ErrorType {
 	}
 	return out
 }()
+
+// errorTypeByReason recovers an error type from a received google.rpc.ErrorInfo
+// reason, which is how the REST binding disambiguates the several A2A errors
+// that share one HTTP status. Transport-level errors carry no reason and are
+// absent from this map.
+var errorTypeByReason = func() map[string]ErrorType {
+	out := make(map[string]ErrorType, len(errorSpecs))
+	for t, spec := range errorSpecs {
+		if spec.reason != "" {
+			out[spec.reason] = t
+		}
+	}
+	return out
+}()

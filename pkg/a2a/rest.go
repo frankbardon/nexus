@@ -375,3 +375,45 @@ func (e *Error) RESTError() (int, RESTError) {
 		Details: e.details(),
 	}}
 }
+
+// AsError converts a received REST error body back into an A2A Error. The error
+// type is recovered from the google.rpc.ErrorInfo reason when one is present,
+// since several A2A error types share an HTTP status; otherwise it falls back
+// to the first type mapping to that status, and finally to InternalError.
+func (e RESTError) AsError() *Error {
+	for _, detail := range e.Error.Details {
+		if detail["@type"] != TypeErrorInfo {
+			continue
+		}
+		reason, _ := detail["reason"].(string)
+		if t, ok := errorTypeByReason[reason]; ok {
+			return &Error{Type: t, Message: e.Error.Message, Details: e.Error.Details}
+		}
+	}
+	if t, ok := errorTypeByHTTPStatus(e.Error.Code); ok {
+		return &Error{Type: t, Message: e.Error.Message, Details: e.Error.Details}
+	}
+	return &Error{
+		Type:    ErrorTypeInternal,
+		Message: fmt.Sprintf("unmapped REST error status %d: %s", e.Error.Code, e.Error.Message),
+		Details: e.Error.Details,
+	}
+}
+
+// errorTypeByHTTPStatus finds a transport-level error type for an HTTP status.
+// Only the types that carry no ErrorInfo reason are eligible, because those are
+// the only ones a status code alone identifies unambiguously.
+func errorTypeByHTTPStatus(status int) (ErrorType, bool) {
+	for _, t := range []ErrorType{
+		ErrorTypeJSONParse,
+		ErrorTypeInvalidRequest,
+		ErrorTypeMethodNotFound,
+		ErrorTypeInvalidParams,
+		ErrorTypeInternal,
+	} {
+		if errorSpecs[t].httpStatus == status {
+			return t, true
+		}
+	}
+	return "", false
+}
