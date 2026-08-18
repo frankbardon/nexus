@@ -52,13 +52,39 @@
 // client that joins mid-turn is never told about an update to a task it has not
 // been shown.
 //
-// # What this plugin does NOT do yet
+// # Interruption and cancellation
 //
-// CancelTask is decoded, version-checked and authenticated, and then answered
-// with an UnsupportedOperationError naming the operation — see
-// implementedOperations, which is the single switch that both gates dispatch and
-// determines what the Agent Card claims. Adding an entry there flips the
-// behaviour and the advertised capability together, so the two cannot disagree.
+// A task leaves the ordinary WORKING path two ways, and both are bus-driven.
+//
+// A hitl.requested — a Nexus agent asking a human something — parks the task at
+// TASK_STATE_INPUT_REQUIRED with the question on the status message. The task
+// stays LIVE: attached streams stay open (specification section 11.7's close
+// rule keys off terminal states, which this is not), the transition is written
+// through to the store, and a client that reconnects meanwhile reads the
+// question from GetTask or from SubscribeToTask's opening snapshot. The client
+// answers with a new message naming the same taskId and contextId, which is
+// A2A's own resume mechanism (section 3.4): the answer is routed to
+// hitl.responded and the task returns to WORKING inside the SAME turn — no
+// io.input, no second task. Because a human takes human time, the wait has a
+// deadline (tasks.input_timeout); on expiry the task is failed and hitl.cancel
+// retracts the question so the agent loop stops waiting.
+//
+// A CancelTask settles the task at TASK_STATE_CANCELED, then tells the bus:
+// hitl.cancel if it was parked, then cancel.request, which is the
+// control.cancel capability's entry point — the same event the TUI emits. An
+// already-terminal task is refused with TaskNotCancelableError and nothing is
+// written.
+//
+// # Task lifetime is the task's, not the request's
+//
+// A run is registered as this listener's single active task and released when
+// the TASK reaches a terminal state, not when the HTTP request that started it
+// returns. So a client may disconnect mid-turn and reattach with
+// SubscribeToTask, a question may be parked for as long as answering it takes,
+// and configuration.returnImmediately is answerable rather than refused. The
+// cost is the reason CancelTask landed alongside: a turn nobody is watching
+// would otherwise hold the process's one agent loop with nothing able to
+// interrupt it.
 //
 // # Concurrency
 //
@@ -109,15 +135,18 @@ const legacyBearerPrincipal = "bearer_token"
 // streaming while SendStreamingMessage refuses every caller.
 //
 // SendMessage and SendStreamingMessage drive a real Nexus turn; GetTask,
-// ListTasks and SubscribeToTask read and follow the tasks those turns create.
-// CancelTask is the one operation still missing, so it stays out of the map and
-// the card keeps reporting what is true.
+// ListTasks and SubscribeToTask read and follow the tasks those turns create;
+// CancelTask settles one. Every A2A operation this codebase decodes outside the
+// push-notification family is therefore wired, and what remains out of the map —
+// the four *TaskPushNotificationConfig operations and GetExtendedAgentCard — is
+// deliberately unimplemented rather than pending.
 var implementedOperations = map[string]bool{
 	a2a.MethodSendMessage:          true,
 	a2a.MethodSendStreamingMessage: true,
 	a2a.MethodGetTask:              true,
 	a2a.MethodListTasks:            true,
 	a2a.MethodSubscribeToTask:      true,
+	a2a.MethodCancelTask:           true,
 }
 
 // operationImplemented reports whether an A2A operation is wired to real
@@ -177,6 +206,13 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 //   - io.output         -> the same text after the output gates had their say
 //   - agent.turn.end    -> the artifact plus the COMPLETED status
 //   - core.error        -> a FAILED status when nothing will retry
+//   - hitl.requested    -> the INPUT_REQUIRED status carrying the question
+//   - hitl.responded    -> back to WORKING once the question is answered
+//
+// The two hitl.* entries are how a Nexus agent asking a human becomes A2A's own
+// interruption mechanism. They are SUBSCRIPTIONS, not calls: nexus.control.hitl
+// owns ask_user and the pending-request registry, and this plugin renders what
+// it sees on the bus rather than reaching into it.
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "agent.turn.start", Priority: 50},
@@ -184,16 +220,31 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "llm.response", Priority: 50},
 		{EventType: "io.output", Priority: 50},
 		{EventType: "core.error", Priority: 50},
+		{EventType: "hitl.requested", Priority: 50},
+		{EventType: "hitl.responded", Priority: 50},
 	}
 }
 
-// Emissions declares the bus events the inbound mapping publishes: one turn's
-// worth of user input, gated first so the same guardrails that see a TUI keypress
-// see an A2A message.
+// Emissions declares the bus events the inbound mapping publishes:
+//
+//   - before:io.input / io.input — one turn's worth of user input, gated first
+//     so the same guardrails that see a TUI keypress see an A2A message.
+//   - hitl.responded — a message continuing an interrupted task, routed to the
+//     question that task is parked on. It is NOT an io.input: a resumed task
+//     continues the turn that asked, and emitting input would start a second.
+//   - hitl.cancel — the parked question is retracted when the task is canceled
+//     or its input deadline elapses, so the agent loop blocked in ask_user
+//     unblocks instead of waiting for an answer that is never coming.
+//   - cancel.request — CancelTask's route to the control.cancel capability. The
+//     same event the TUI and the browser transport emit; cancellation is that
+//     plugin's job, not this one's.
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"before:io.input",
 		"io.input",
+		"hitl.responded",
+		"hitl.cancel",
+		"cancel.request",
 	}
 }
 
@@ -254,6 +305,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("llm.response", p.handleLLMResponse, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("core.error", p.handleError, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleHITLRequested, engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.responded", p.handleHITLResponded, engine.WithSource(pluginID)),
 	)
 
 	// One line an operator can read the whole posture off: where it binds, what
@@ -274,6 +327,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"implemented_operations", len(implementedOperations),
 		"task_ttl", cfg.retention.ttl,
 		"tasks_per_context", cfg.retention.maxPerContext,
+		"input_timeout", cfg.inputTimeout,
 	)
 	return nil
 }

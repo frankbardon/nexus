@@ -59,10 +59,19 @@ const authRealm = "nexus-a2a"
 // phrased.
 type agentBridge interface {
 	// startTurn binds the context, registers the active run, emits io.input and
-	// returns the run with the requesting client's attached stream.
-	startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, *a2a.Error)
-	// endTurn releases the active-run slot once the response has been rendered.
-	endTurn(r *run)
+	// returns the run, the requesting client's attached stream, and the task
+	// snapshot that stream must open on.
+	startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error)
+	// resumeTurn routes a message naming a task onto the question that task is
+	// parked on, and returns the SAME run with a fresh stream attached. It
+	// starts no turn: a resumed task continues the one that asked. Its snapshot
+	// is the state the task was in when the stream attached — INPUT_REQUIRED —
+	// so the transitions the answer causes arrive as updates rather than being
+	// folded into the opening frame.
+	resumeTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error)
+	// cancelTask settles one of the caller's tasks at CANCELED and returns the
+	// stored record. An already-terminal task is refused, not rewritten.
+	cancelTask(caller nexusauth.Principal, taskID string) (a2a.Task, *a2a.Error)
 	// lookupTask reads one of the caller's own tasks. A task belonging to
 	// anybody else is reported absent.
 	lookupTask(caller nexusauth.Principal, taskID string) (taskRecord, bool, error)
@@ -339,6 +348,15 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleSubscribeToTask(r.Context(), w, bind, caller, req)
 		return
+
+	case a2a.MethodCancelTask:
+		req, ok := call.Params.(*a2a.CancelTaskRequest)
+		if !ok {
+			s.writeError(w, bind, errWrongParams(call.Method, call.Params))
+			return
+		}
+		s.handleCancelTask(w, caller, bind, req)
+		return
 	}
 
 	// Unreachable while implementedOperations and this switch agree. It is
@@ -463,6 +481,22 @@ func (s *Server) handleREST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSubscribeToTask(r.Context(), w, binding{}, caller, req)
+		return
+
+	case a2a.MethodCancelTask:
+		// Section 11.3 gives CancelTask a custom verb and an optional body; the
+		// path id is authoritative over anything in it.
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			s.writeRESTError(w, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
+			return
+		}
+		req, protoErr := a2a.DecodeCancelTaskRequest(vars["id"], body)
+		if protoErr != nil {
+			s.writeRESTError(w, protoErr)
+			return
+		}
+		s.handleCancelTask(w, caller, binding{}, req)
 		return
 	}
 

@@ -169,6 +169,39 @@ func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWrite
 	s.pumpStream(ctx, w, b, sub, snapshot, nil)
 }
 
+// ---- CancelTask ----
+
+// handleCancelTask settles one of the caller's tasks at TASK_STATE_CANCELED.
+//
+// The lookup is the same principal-scoped one every read uses, so a task
+// belonging to somebody else is refused exactly as an unknown id is — before
+// its state, and therefore whether it was cancelable, can be inferred.
+//
+// Cancelling an ALREADY-TERMINAL task answers TaskNotCancelableError and writes
+// nothing: a terminal state is final (section 3.1.1), so "cancel" on one is a
+// well-defined client mistake, not an instruction to rewrite history. The
+// distinction matters more than it looks — the alternative, treating it as a
+// no-op success, would tell a client its cancel took effect on a task that had
+// already completed and whose output it is about to read.
+func (s *Server) handleCancelTask(w http.ResponseWriter, caller nexusauth.Principal, b binding, req *a2a.CancelTaskRequest) {
+	if s.cfg.bridge == nil {
+		s.writeError(w, b, errNoBridge())
+		return
+	}
+	if req == nil || strings.TrimSpace(req.ID) == "" {
+		s.writeError(w, b, a2a.ErrInvalidParams(a2a.FieldViolation{
+			Field: "id", Description: "task id is required",
+		}))
+		return
+	}
+	task, protoErr := s.cfg.bridge.cancelTask(caller, req.ID)
+	if protoErr != nil {
+		s.writeError(w, b, protoErr)
+		return
+	}
+	s.writeResult(w, b, task)
+}
+
 // ---- shared plumbing ----
 
 // lookupTask resolves a task id to the caller's own record, or to the error the

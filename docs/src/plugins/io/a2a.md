@@ -22,18 +22,21 @@ interop transport is not a Nexus UI, so nothing here is back-ported into
 
 ## Current maturity
 
+> Every A2A operation outside the push-notification family is wired.
 > `SendMessage` and `SendStreamingMessage` **drive a real Nexus turn**, every
 > task they create is **persisted durably** in a principal-scoped,
-> session-scoped SQLite store, and `GetTask`, `ListTasks` and `SubscribeToTask`
-> **read it back**. `CancelTask` is the one remaining operation: it is routed,
-> version-negotiated and authenticated, then answered with
-> `UnsupportedOperationError`.
+> session-scoped SQLite store, `GetTask`, `ListTasks` and `SubscribeToTask`
+> **read it back**, a human-in-the-loop question **parks** the task at
+> `INPUT_REQUIRED` and is resumed by a message naming the same `taskId`, and
+> `CancelTask` **settles** a task at `CANCELED`.
 
 The Agent Card reports this rather than advertising an intention:
 `capabilities.streaming`, `pushNotifications` and `extendedAgentCard` are all
 derived from the set of operations the plugin actually implements. Wiring an
 operation flips its capability in the same edit, so the card and the behaviour
-cannot disagree.
+cannot disagree. A2A declares no capability boolean for cancellation — it is
+part of the core task surface — so the card's honest statement there is simply
+that `CancelTask` dispatches instead of refusing.
 
 ## Task store
 
@@ -87,8 +90,10 @@ what it missed before it sees anything new. If the task is live, the subscriber
 joins the run's fan-out and receives exactly the frames every other attached
 stream receives. If it is already terminal, the opening snapshot carries the
 terminal state and the stream closes at once rather than hanging. A task that is
-neither — one this process was serving when it last stopped — gets its snapshot
-and then a close, because nothing will ever update it again.
+neither gets its snapshot and then a close, because nothing will ever update it
+again — though a task this process was serving when it last stopped is settled at
+`FAILED` on open, so its snapshot names a real ending rather than a stale
+`WORKING`.
 
 ### Task ownership is not enumerable
 
@@ -109,8 +114,8 @@ partition, which is another reason the listener binds loopback by default.
 | **ID** | `nexus.io.a2a` |
 | **Dependencies** | None |
 | **Requires** | None |
-| **Subscriptions** | `agent.turn.start`, `agent.turn.end`, `llm.response`, `io.output`, `core.error` |
-| **Emissions** | `before:io.input`, `io.input` |
+| **Subscriptions** | `agent.turn.start`, `agent.turn.end`, `llm.response`, `io.output`, `core.error`, `hitl.requested`, `hitl.responded` |
+| **Emissions** | `before:io.input`, `io.input`, `hitl.responded`, `hitl.cancel`, `cancel.request` |
 | **Listens?** | Yes — loopback by default (`127.0.0.1:8091`) |
 
 ## How a message becomes a turn
@@ -138,20 +143,95 @@ whatever the output gates actually let through is what the client receives.
 Richer artifacts — tool results, files, structured output — are a later story.
 
 Refusals worth knowing about, each carrying the error type the specification
-reserves for it: a non-text Part (`ContentTypeNotSupportedError`), a message
-naming a `taskId` (`TaskNotFoundError` — nothing resumes a stored task yet),
-`configuration.returnImmediately` (`UnsupportedOperationError` — see below), and
-a second task while one is in flight (`UnsupportedOperationError` — the listener
-fronts one agent loop, and two turns would interleave on the same bus).
+reserves for it: a non-text Part (`ContentTypeNotSupportedError`), an inline
+`taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a second
+task while one is in flight (`UnsupportedOperationError` — the listener fronts
+one agent loop, and two turns would interleave on the same bus).
+`configuration.returnImmediately` is honoured, and a message naming a `taskId`
+is a continuation rather than a refusal; both are covered below.
 
-`returnImmediately` is still refused, but no longer for the original reason. A
-task returned early *can* now be polled — `GetTask` and `SubscribeToTask` are
-wired. What stops it is lifetime: a run is registered as this listener's single
-active task and released when the request that started it returns, so returning
-early would release the slot mid-turn and leave the task stuck at `SUBMITTED`
-while the agent answered into the void. Detaching a run's lifetime from its
-request needs `CancelTask` alongside it, or a turn nobody is watching would hold
-the process's only agent loop with nothing able to interrupt it.
+## A task outlives the request that started it
+
+A run is this listener's single active task and is released when the **task**
+reaches a terminal state, not when the HTTP request that started it returns.
+
+That one change is what makes the rest of this page possible. A client can
+disconnect mid-turn without failing its own task — the turn carries on, `GetTask`
+still answers, and `SubscribeToTask` reattaches to exactly where it got to. A
+question can stay parked for as long as a human takes to answer it. And
+`configuration.returnImmediately` is answerable: the call returns the task as it
+stands and the client follows it by other means (streaming ignores the flag,
+since a stream is already that follow-up).
+
+The cost is that a turn nobody is watching holds the slot until something ends
+it. `CancelTask` is that something, which is why the two landed together, and
+why an unanswered question has a deadline.
+
+A task left non-terminal by a **process restart** is settled at `FAILED` when the
+store next opens, with a status message saying the agent stopped while it was
+running. Nothing would ever move such a task again — no run drives it and no bus
+event will name it — and retention only evicts terminal tasks, so leaving it as
+found would mean an immortal row reporting `WORKING` for ever and counting
+against the per-context cap.
+
+## Human-in-the-loop is `INPUT_REQUIRED`
+
+When a Nexus agent asks a human something — `nexus.control.hitl`'s `ask_user`
+tool, or any plugin emitting `hitl.requested` — the task parks:
+
+```
+hitl.requested  ──▶  Task INPUT_REQUIRED, question on status.message
+                     (stream stays open; state written through to the store)
+
+SendMessage{taskId, contextId}  ──▶  hitl.responded  ──▶  Task WORKING
+                                                          (same turn, no io.input)
+```
+
+The task stays **live** while parked. Open SSE streams stay open — §11.7's close
+rule keys off terminal states and this is not one — because closing on a
+non-terminal state is indistinguishable client-side from a dropped connection. A
+parked stream is kept warm with SSE comment records so proxy idle timeouts do
+not kill it.
+
+The client resumes by sending a new message carrying the **same `taskId` and
+`contextId`**, which is A2A's own resume mechanism (§3.4). The answer is routed
+to `hitl.responded` and the task returns to `WORKING` **inside the turn that
+asked** — no `io.input` is emitted and no second task is created. A
+multiple-choice question renders its option ids into the question text, and an
+answer matching one of them (case-insensitively) is delivered as that choice
+rather than as free text.
+
+Continuing a task is refused with `UnsupportedOperationError` when it is already
+terminal, when the message names a different `contextId` than the task's, or
+when the task is not waiting for input. A `taskId` belonging to another
+principal answers exactly as an unknown one does: `TaskNotFoundError`.
+
+Because a parked task holds the process's one agent loop, the wait is bounded by
+`tasks.input_timeout` (default `15m`). On expiry the task is driven to `FAILED` —
+a real terminal transition, so the store, every attached subscriber and the
+client all agree — and `hitl.cancel` retracts the question so the blocked agent
+unblocks. `"0s"` disables the deadline; the consequence is a task that can stay
+parked until the process exits.
+
+## Cancelling a task
+
+`CancelTask` (`POST <rest_prefix>/tasks/{id}:cancel`) settles the task at
+`TASK_STATE_CANCELED` and **then** tells the bus, in that order:
+
+1. `hitl.cancel`, if the task was parked on a question — otherwise the agent
+   would stay blocked on an answer that is never coming.
+2. `cancel.request`, which is the `control.cancel` capability's entry point.
+   Cancellation is that plugin's job for every transport; this one asks, exactly
+   as the TUI and browser transports do.
+
+Settling first is what keeps the stream contract intact: once the task is
+terminal every later frame is dropped, so nothing produced by the teardown can
+arrive after the frame that closed the stream.
+
+Cancelling an **already-terminal** task is refused with `TaskNotCancelableError`
+(HTTP 400 / `FAILED_PRECONDITION`) and writes nothing. Reporting success would
+tell a client its cancel took effect on a task that had already completed and
+whose output it is about to read.
 
 ## `contextId` is the Nexus session
 

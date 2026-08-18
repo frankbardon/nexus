@@ -68,8 +68,15 @@ func TestContract_NonTurnOperationsStayOffTheBus(t *testing.T) {
 		{a2a.MethodGetTask, map[string]any{"id": "task-1"}},
 		{a2a.MethodListTasks, map[string]any{}},
 		{a2a.MethodSubscribeToTask, map[string]any{"id": "task-1"}},
-		// Still unimplemented, so this one also covers the refusal path.
+		// CancelTask is implemented now, and answers TaskNotFoundError for an id
+		// nothing minted — which is exactly the point here: refusing a task must
+		// not reach the bus either.
 		{a2a.MethodCancelTask, map[string]any{"id": "task-1"}},
+		// Still unimplemented, so this one covers the not-implemented refusal.
+		{a2a.MethodCreateTaskPushNotificationConfig, map[string]any{
+			"parent": "tasks/task-1",
+			"config": map[string]any{"name": "tasks/task-1/pushNotificationConfigs/1"},
+		}},
 	}
 	for _, c := range calls {
 		rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),

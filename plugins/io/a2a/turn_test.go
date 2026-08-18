@@ -490,19 +490,12 @@ func TestInboundRefusals(t *testing.T) {
 			},
 			wantCode: a2a.CodeContentTypeNotSupported,
 		},
-		"continuing an unknown task": {
+		"continuing a task nobody minted": {
 			params: map[string]any{"message": map[string]any{
 				"messageId": "m1", "role": string(a2a.RoleUser), "taskId": "task-ghost",
 				"parts": []any{map[string]any{"text": "carry on"}},
 			}},
 			wantCode: a2a.CodeTaskNotFound,
-		},
-		"a non-blocking call": {
-			params: map[string]any{
-				"message":       sendMessageParams("go", "")["message"],
-				"configuration": map[string]any{"returnImmediately": true},
-			},
-			wantCode: a2a.CodeUnsupportedOperation,
 		},
 		"a push notification config": {
 			params: map[string]any{

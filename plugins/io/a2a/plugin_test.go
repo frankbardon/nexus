@@ -128,7 +128,10 @@ func TestPluginIdentity(t *testing.T) {
 	// The declared contract is the one the turn mapping actually uses; the
 	// contract harness checks it against runtime behaviour, this checks it is
 	// spelled the way the rest of the engine spells it.
-	wantSubs := []string{"agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error"}
+	wantSubs := []string{
+		"agent.turn.start", "agent.turn.end", "llm.response", "io.output", "core.error",
+		"hitl.requested", "hitl.responded",
+	}
 	var haveSubs []string
 	for _, sub := range p.Subscriptions() {
 		haveSubs = append(haveSubs, sub.EventType)
@@ -136,7 +139,8 @@ func TestPluginIdentity(t *testing.T) {
 	if !slices.Equal(haveSubs, wantSubs) {
 		t.Errorf("Subscriptions() = %v, want %v", haveSubs, wantSubs)
 	}
-	if want := []string{"before:io.input", "io.input"}; !slices.Equal(p.Emissions(), want) {
+	want := []string{"before:io.input", "io.input", "hitl.responded", "hitl.cancel", "cancel.request"}
+	if !slices.Equal(p.Emissions(), want) {
 		t.Errorf("Emissions() = %v, want %v", p.Emissions(), want)
 	}
 	if p.Dependencies() != nil || p.Requires() != nil {

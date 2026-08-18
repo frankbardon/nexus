@@ -269,15 +269,17 @@ Because this call reused `contextId: "demo"`, it ran in the **same session** as
 the streaming call above, with the first exchange still in history. A different
 `contextId` is refused — that is the payload shown [earlier](#one-process-serves-exactly-one-context).
 
-`configuration.returnImmediately` is refused with `UnsupportedOperationError`.
-Not because the task could not then be polled — `GetTask` and
-`SubscribeToTask` are wired now — but because of **lifetime**: a run is this
-listener's single active task and is released when the request that started it
-returns, so a non-blocking return would release the slot mid-turn and leave the
-task frozen at `SUBMITTED` while the agent answered into the void. Detaching a
-run's lifetime from its request needs `CancelTask` alongside it, or a turn
-nobody is watching would hold the process's only agent loop with nothing able to
-interrupt it.
+`configuration.returnImmediately` answers with the task as it stands and lets
+the client follow it with `GetTask` or `SubscribeToTask`. That works because a
+run's lifetime is its **task's**, not its request's: the listener's single
+active-task slot is released when the task reaches a terminal state, so a client
+may also disconnect mid-turn and reattach later without failing its own task.
+The cost of that is why `CancelTask` exists — a turn nobody is watching would
+otherwise hold the process's only agent loop with nothing able to interrupt it.
+
+A blocking `SendMessage` returns on a terminal state **or** on
+`INPUT_REQUIRED`: a task waiting for the caller cannot be waited on by the
+caller.
 
 ### 4. Reading tasks back
 
@@ -363,22 +365,31 @@ Www-Authenticate: Bearer realm="nexus-a2a"
     "domain":"nexus.io.a2a","reason":"AUTHENTICATION_REQUIRED"}]}}
 ```
 
-An unimplemented operation, refused with the error type the specification
-reserves for exactly that condition:
+A deliberately unsupported operation, refused with the error type the
+specification reserves for exactly that condition:
 
 ```bash
 curl -s localhost:18191/a2a \
   -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/a2a+json' \
-  -d '{"jsonrpc":"2.0","id":9,"method":"CancelTask","params":{"id":"task-x"}}'
+  -d '{"jsonrpc":"2.0","id":9,"method":"GetExtendedAgentCard","params":{}}'
 ```
 
 ```json
 {"jsonrpc":"2.0","id":9,"error":{"code":-32004,
-  "message":"operation \"CancelTask\" is not yet implemented by this agent",
+  "message":"operation \"GetExtendedAgentCard\" is not supported by this agent",
   "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
-    "metadata":{"detail":"OPERATION_NOT_IMPLEMENTED","operation":"CancelTask"},
     "reason":"UNSUPPORTED_OPERATION"}]}}
+```
+
+Cancelling a task that has already finished — a well-defined mistake, not a
+silent no-op:
+
+```json
+{"jsonrpc":"2.0","id":9,"error":{"code":-32002,
+  "message":"task is in terminal state TASK_STATE_COMPLETED and cannot be canceled",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
+    "metadata":{"taskId":"task-01J…"},"reason":"TASK_NOT_CANCELABLE"}]}}
 ```
 
 A task id that this caller cannot see — unknown, or owned by somebody else:
@@ -406,12 +417,46 @@ cannot disagree.
 | Read one task | `GetTask` | `GET <rest_prefix>/tasks/{id}` | **Works** — status, artifacts, history; `historyLength` honoured |
 | List tasks | `ListTasks` | `GET <rest_prefix>/tasks` | **Works** — keyset pagination, `contextId` / `status` / `statusTimestampAfter` / `includeArtifacts` filters |
 | Re-subscribe to a task | `SubscribeToTask` | `POST <rest_prefix>/tasks/{id}:subscribe` | **Works** — replays current state, then follows live; several streams per task |
-| Cancel a task | `CancelTask` | `POST <rest_prefix>/tasks/{id}:cancel` | Not yet — `UnsupportedOperationError` |
+| Cancel a task | `CancelTask` | `POST <rest_prefix>/tasks/{id}:cancel` | **Works** — routes through `control.cancel`, settles at `CANCELED`; a terminal task is `TaskNotCancelableError` |
+| Continue an interrupted task | `SendMessage` with `taskId` | `POST <rest_prefix>/message:send` | **Works** — routes the answer to the parked `hitl.requested`; same turn, no new task |
+| Return before the turn ends | `configuration.returnImmediately` | same | **Works** — answers with the task; follow it with `GetTask` / `SubscribeToTask` |
 
-The one "not yet" row is decoded, version-negotiated and authenticated before it
-is refused, so a client gets a well-formed protocol error rather than a 404. All
-three read operations are scoped to the calling principal: another principal's
-task is indistinguishable from one that does not exist.
+Every A2A operation outside the push-notification family is now wired. All read
+operations are scoped to the calling principal — another principal's task is
+indistinguishable from one that does not exist — and so are `CancelTask` and
+continuation, which resolve the task through the same scoped lookup before they
+reveal anything about its state.
+
+### Human-in-the-loop: `INPUT_REQUIRED` and back
+
+A Nexus agent asking a human something (`ask_user`, or any plugin emitting
+`hitl.requested`) parks the task at `TASK_STATE_INPUT_REQUIRED` with the question
+on `status.message`. The task stays **live**: open SSE streams stay open, the
+state is written through to the store, and a blocking `SendMessage` returns the
+parked Task rather than waiting for a caller that is itself waiting on it.
+
+Answer it by sending a new message carrying the **same `taskId` and `contextId`**
+— A2A's own resume mechanism (§3.4):
+
+```bash
+curl -sS localhost:8091/a2a -H 'A2A-Version: 1.0' -H 'Content-Type: application/json' -d '{
+  "jsonrpc": "2.0", "id": 7, "method": "SendMessage",
+  "params": { "message": {
+    "messageId": "m-2", "role": "ROLE_USER",
+    "taskId": "task-01J…", "contextId": "01J…",
+    "parts": [ { "text": "staging" } ]
+  } }
+}' | jq '.result.task.status.state'
+```
+
+The task returns to `WORKING` **inside the turn that asked** — no second task,
+no second turn. The wait is bounded by `tasks.input_timeout` (default `15m`),
+after which the task is failed and the question retracted, because a parked task
+holds this process's one agent loop.
+
+Because a run now outlives the request that started it, the whole sequence
+survives a dropped connection: ask, disconnect, reattach with `SubscribeToTask`,
+answer, complete.
 
 ### Planned, not available today
 
@@ -419,24 +464,6 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- **Resuming a stored task.** Reading one works; *continuing* one does not. A
-  message naming a `taskId` is still refused with `TaskNotFoundError` rather
-  than silently starting a fresh turn under an id the client believes it is
-  resuming — reviving a task needs the interrupt/resume path below.
-- **A task outliving its request.** A run is released when the request that
-  started it returns, so a client that disconnects mid-turn ends the task, and
-  `configuration.returnImmediately` is refused for the same reason. Both wait on
-  `CancelTask`: without it, a turn nobody is watching would hold this process's
-  only agent loop with nothing able to interrupt it.
-- **HITL as `TASK_STATE_INPUT_REQUIRED`.** The intended shape is that a Nexus
-  `hitl.requested` parks the task in `INPUT_REQUIRED` with the question in
-  `status.message`, and the client resumes by sending a new message carrying the
-  same `taskId` — the specification's own resume mechanism. `pkg/a2a` already
-  implements the streaming half of that contract (a parked stream stays open;
-  `SSEWriter.Interrupted` reports the condition), but the serve plugin does not
-  yet raise it.
-- **Cancellation.** `CancelTask` will route through the `control.cancel`
-  capability and land the task in `TASK_STATE_CANCELED`.
 - **Richer artifacts.** Today a turn produces exactly one artifact: the final
   assistant text. Tool results, files written during the turn, and structured
   output are later work.

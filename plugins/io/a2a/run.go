@@ -1,8 +1,10 @@
 package a2a
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -96,6 +98,8 @@ type run struct {
 	// the turn: the client is owed the answer the agent produced, and a store
 	// that cannot record it is an operator problem, not a protocol one.
 	logger *slog.Logger
+	// onTerminal releases the plugin's active-task slot. See newRun.
+	onTerminal func()
 
 	// done is closed once a terminal frame has been queued, so later bus
 	// events for this run are dropped rather than queued behind a stream that
@@ -120,20 +124,51 @@ type run struct {
 	// Last write wins: llm.response supplies it, and io.output overwrites with
 	// whatever the output gates actually let through.
 	finalText string
+	// parked is the human-in-the-loop question this task is currently waiting
+	// on, or the zero value when it is not parked. It is what makes a resuming
+	// message routable: the client names the task, and this names the pending
+	// hitl.requested the answer belongs to.
+	parked parkedInput
+	// inputTimer bounds that wait. It is armed when the task parks and stopped
+	// on resume and on any terminal transition, so a task cannot be terminated
+	// twice by a timer that outlived the question it was watching.
+	inputTimer *time.Timer
 }
+
+// parkedInput is the human-in-the-loop question a task is parked on.
+//
+// It carries the choice ids as well as the request id because a client
+// answering over A2A can only send text: matching that text against a choice id
+// is what lets a multiple-choice ask_user be answered by a remote agent at all,
+// rather than degrading every question to free text.
+type parkedInput struct {
+	requestID string
+	choices   []string
+}
+
+// live reports whether this is a real parked question rather than the zero
+// value.
+func (p parkedInput) live() bool { return p.requestID != "" }
 
 // newRun builds a run for one task, bound to the durable record it writes
 // through to. It starts with no observers; the request that created the task
 // attaches one before the turn is allowed to emit anything.
-func newRun(taskID, contextID string, sink taskSink, logger *slog.Logger) *run {
+//
+// onTerminal is called exactly once, from inside the one-shot terminal
+// sequence, and is how the plugin's single active-task slot is returned. Wiring
+// it HERE rather than in the HTTP handler is the whole of the detached-lifetime
+// change: a run now ends when its TASK ends, not when the request that started
+// it returns.
+func newRun(taskID, contextID string, sink taskSink, logger *slog.Logger, onTerminal func()) *run {
 	return &run{
-		taskID:    taskID,
-		contextID: contextID,
-		sink:      sink,
-		logger:    logger,
-		done:      make(chan struct{}),
-		subs:      make(map[*stream]struct{}),
-		snapshot:  a2a.NewTask(taskID, contextID),
+		taskID:     taskID,
+		contextID:  contextID,
+		sink:       sink,
+		logger:     logger,
+		onTerminal: onTerminal,
+		done:       make(chan struct{}),
+		subs:       make(map[*stream]struct{}),
+		snapshot:   a2a.NewTask(taskID, contextID),
 	}
 }
 
@@ -303,14 +338,164 @@ func (r *run) onTurnEnd(t events.TurnInfo) bool {
 	r.mu.Lock()
 	bound := r.turnID
 	r.mu.Unlock()
-	// An empty TurnID on either side means "not correlatable"; the run takes it,
-	// because a transport that ignores an uncorrelatable turn end leaves the
-	// client waiting forever, which is the worse failure.
-	if bound != "" && t.TurnID != "" && bound != t.TurnID {
+	// A turn end naming a turn is only this task's if this task saw that turn
+	// start. Both halves matter:
+	//
+	//   - A DIFFERENT id is somebody else's turn, and always was.
+	//   - An id when this run has bound NONE is also somebody else's: a run is
+	//     registered before its io.input is emitted, so it cannot miss its own
+	//     turn start. This case became reachable when task lifetime detached
+	//     from the request — a cancellation releases the slot and then asks the
+	//     agent to stop, and the turn end that follows must not be able to
+	//     complete whichever task started next.
+	//
+	// An EMPTY id on the event is not correlatable at all, and the run takes it:
+	// ignoring it would leave the client waiting forever, which is worse.
+	if t.TurnID != "" && bound != t.TurnID {
 		return false
 	}
 	r.complete()
 	return true
+}
+
+// --- interruption: INPUT_REQUIRED and back ---
+
+// park moves the task to TASK_STATE_INPUT_REQUIRED, carrying the agent's
+// question on the attached status message, and arms the input deadline.
+//
+// INPUT_REQUIRED is an INTERRUPTION, not a termination (specification section
+// 3.1.1): the task stays live, any open stream stays open, and the client is
+// expected to resume by sending a new message naming the same taskId and
+// contextId. Everything about the parked state is therefore recoverable —
+// the transition is written through to the store like any other, so a client
+// that reconnects with GetTask or SubscribeToTask sees the question it missed.
+//
+// timeout bounds the wait; zero leaves the task parked indefinitely. onExpired
+// runs on the timer's own goroutine when it elapses. It reports whether the
+// task actually parked, so a question arriving after the task ended is visibly
+// ignored.
+func (r *run) park(in parkedInput, question string, timeout time.Duration, onExpired func()) bool {
+	if r.terminated() {
+		return false
+	}
+	r.mu.Lock()
+	// A second question replaces the first. The state graph permits
+	// INPUT_REQUIRED -> INPUT_REQUIRED precisely so an agent may restate what it
+	// is waiting for, and tracking only the newest request id is the honest
+	// reading: it is the one whose answer will unblock the agent loop.
+	r.parked = in
+	r.stopTimerLocked()
+	if timeout > 0 && onExpired != nil {
+		r.inputTimer = time.AfterFunc(timeout, onExpired)
+	}
+	r.mu.Unlock()
+
+	if question == "" {
+		question = "the agent is waiting for input"
+	}
+	message := a2a.NewAgentMessage(newMessageID(), question).
+		InContext(r.contextID).
+		ForTask(r.taskID)
+	if in.requestID != "" {
+		// The request id is carried as message metadata rather than being
+		// required of the client: A2A's resume mechanism is the taskId, and a
+		// conforming client needs nothing else. It is exposed because a Nexus
+		// client that also watches the bus can correlate the two views.
+		message.Metadata = map[string]any{metadataHITLRequestID: in.requestID}
+	}
+	// The question is recorded as a message reference as well as riding the
+	// status: history is what a reconnecting client reads, and a question that
+	// existed only on a status nobody was watching would be lost to it.
+	r.recordMessage(messageRef{MessageID: message.MessageID, Role: a2a.RoleAgent, Text: question})
+	r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateInputRequired).WithMessage(message))))
+	return true
+}
+
+// boundTurn returns the Nexus turn id this run bound to, empty when no turn
+// start has been observed.
+func (r *run) boundTurn() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.turnID
+}
+
+// pending returns the question this task is parked on, if any.
+func (r *run) pending() (parkedInput, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.parked, r.parked.live()
+}
+
+// unpark clears the parked question and stops its deadline, reporting the
+// question it cleared. It is the state half of resuming, split from the frame
+// half so a caller that must not emit (a cancellation) can still disarm.
+func (r *run) unpark(requestID string) (parkedInput, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.parked.live() {
+		return parkedInput{}, false
+	}
+	// An empty requestID matches whatever is parked: a response with no
+	// correlation id can only plausibly be for the one question outstanding.
+	if requestID != "" && requestID != r.parked.requestID {
+		return parkedInput{}, false
+	}
+	was := r.parked
+	r.parked = parkedInput{}
+	r.stopTimerLocked()
+	return was, true
+}
+
+// resume returns a parked task to WORKING. It reports whether it did, so a
+// response for a question this task is not waiting on is visibly ignored rather
+// than silently restating a state.
+func (r *run) resume(requestID string) bool {
+	if r.terminated() {
+		return false
+	}
+	if _, ok := r.unpark(requestID); !ok {
+		return false
+	}
+	r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateWorking))))
+	return true
+}
+
+// stopTimerLocked disarms the input deadline. The caller holds r.mu.
+func (r *run) stopTimerLocked() {
+	if r.inputTimer != nil {
+		r.inputTimer.Stop()
+		r.inputTimer = nil
+	}
+}
+
+// --- terminal transitions ---
+
+// terminate runs the one-shot terminal sequence: disarm the input deadline,
+// emit whatever frames describe the ending, close done so nothing further is
+// queued, and release the plugin's active-task slot.
+//
+// Every terminal path goes through it, which is what makes "the slot is
+// returned when the task ends" true by construction rather than by each caller
+// remembering. Ordering matters: the frames are emitted BEFORE done closes,
+// because emit drops anything queued after a terminal state.
+func (r *run) terminate(frames func()) bool {
+	fired := false
+	r.closeOne.Do(func() {
+		fired = true
+		r.mu.Lock()
+		r.parked = parkedInput{}
+		r.stopTimerLocked()
+		r.mu.Unlock()
+
+		frames()
+		close(r.done)
+		if r.onTerminal != nil {
+			r.onTerminal()
+		}
+	})
+	return fired
 }
 
 // complete emits the turn's artifact and the COMPLETED status, exactly once.
@@ -320,7 +505,7 @@ func (r *run) onTurnEnd(t events.TurnInfo) bool {
 // (specification section 11.7), so an artifact queued after COMPLETED would be
 // refused by SSEWriter and the client would see a completed task with no output.
 func (r *run) complete() {
-	r.closeOne.Do(func() {
+	r.terminate(func() {
 		r.mu.Lock()
 		text := r.finalText
 		r.mu.Unlock()
@@ -341,7 +526,6 @@ func (r *run) complete() {
 		}
 		r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
 			a2a.NewTaskStatus(a2a.TaskStateCompleted))))
-		close(r.done)
 	})
 }
 
@@ -351,18 +535,65 @@ func (r *run) complete() {
 // FAILED is a task state, not a transport error: the work failed, the protocol
 // did not. Section 11.7's terminal-close rule then ends the stream exactly as a
 // success would, so a client handles one shape of ending rather than two.
-func (r *run) fail(reason string) {
-	r.closeOne.Do(func() {
-		if reason == "" {
-			reason = "the agent turn failed"
-		}
+// It reports whether THIS call settled the task, so a caller that must only act
+// on a real transition (the input-deadline timer) can tell.
+func (r *run) fail(reason string) bool {
+	if reason == "" {
+		reason = "the agent turn failed"
+	}
+	return r.endWith(a2a.TaskStateFailed, reason)
+}
+
+// cancel terminates the task with CANCELED. It reports whether THIS call was
+// the one that settled the task, so a CancelTask racing the turn's own ending
+// can tell the client which of the two happened.
+func (r *run) cancel(reason string) bool {
+	if reason == "" {
+		reason = "the task was canceled"
+	}
+	return r.endWith(a2a.TaskStateCanceled, reason)
+}
+
+// endWith settles the task in a terminal state carrying reason as the status
+// message.
+func (r *run) endWith(state a2a.TaskState, reason string) bool {
+	return r.terminate(func() {
 		message := a2a.NewAgentMessage(newMessageID(), reason).
 			InContext(r.contextID).
 			ForTask(r.taskID)
 		r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
-			a2a.NewTaskStatus(a2a.TaskStateFailed).WithMessage(message))))
-		close(r.done)
+			a2a.NewTaskStatus(state).WithMessage(message))))
 	})
+}
+
+// snapshotTask returns the task as every frame emitted so far leaves it. It
+// carries no history: the store owns that, and a caller that needs the whole
+// record reads it back from there.
+func (r *run) snapshotTask() a2a.Task {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneTask(r.snapshot)
+}
+
+// describeQuestion renders a HITL request as the text an A2A client is asked.
+//
+// A2A messages on this transport are text, so a multiple-choice question has to
+// be flattened into one: the prompt, then the options by id. The ids are what
+// the client echoes back, so they are rendered verbatim rather than numbered —
+// a numbered list would invite an answer this agent cannot map onto a choice.
+func describeQuestion(prompt string, choices []events.HITLChoice) string {
+	if len(choices) == 0 {
+		return prompt
+	}
+	out := prompt + "\n\nAnswer with one of these option ids:"
+	for _, c := range choices {
+		label := c.Label
+		if label == "" {
+			label = c.ID
+		}
+		out += fmt.Sprintf("\n  %s — %s", c.ID, label)
+	}
+	return out
 }
 
 // applyFrame folds one stream frame into a Task snapshot. It reports whether the

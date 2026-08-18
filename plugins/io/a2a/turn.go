@@ -14,11 +14,21 @@ import (
 // google.rpc.ErrorInfo metadata so a client can branch on a stable token rather
 // than on prose.
 const (
-	reasonForeignContext = "CONTEXT_NOT_SERVED"
-	reasonConcurrentTask = "TASK_ALREADY_IN_FLIGHT"
-	reasonNoContinuation = "TASK_CONTINUATION_UNSUPPORTED"
-	reasonBlockingOnly   = "BLOCKING_ONLY"
+	reasonForeignContext  = "CONTEXT_NOT_SERVED"
+	reasonConcurrentTask  = "TASK_ALREADY_IN_FLIGHT"
+	reasonTaskTerminal    = "TASK_ALREADY_TERMINAL"
+	reasonTaskNotLive     = "TASK_NO_LONGER_LIVE"
+	reasonTaskNotAwaiting = "TASK_NOT_AWAITING_INPUT"
+	reasonContextMismatch = "TASK_CONTEXT_MISMATCH"
 )
+
+// metadataHITLRequestID is the message-metadata key an INPUT_REQUIRED question
+// carries its originating hitl.requested id under. See run.park.
+const metadataHITLRequestID = "nexus.hitl.requestId"
+
+// cancelSource is the events.CancelRequest.Source this transport identifies
+// itself as on the bus, alongside "tui", "browser" and the rest.
+const cancelSource = "a2a"
 
 // textMediaType is the media type this transport speaks. It matches the input
 // and output modes a stock card advertises.
@@ -35,6 +45,10 @@ type turnInput struct {
 	text string
 	// messageID is the client's message id, carried for logging only.
 	messageID string
+	// taskID is the task this message continues, empty for a message that
+	// starts a new one. A2A resumes an interrupted task by naming it here
+	// (specification section 3.4); see resumeTurn.
+	taskID string
 }
 
 // --- bridge: inbound (server -> bus) and run lifecycle ---
@@ -53,20 +67,21 @@ type turnInput struct {
 // task reaches the store, so a task cannot be created without an owner: the
 // store's scoped view is derived from it here and handed to the run as a
 // write-only sink.
-func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, *a2a.Error) {
+func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error) {
 	p.mu.Lock()
 	if p.active != nil {
 		p.mu.Unlock()
-		return nil, nil, errConcurrentTask()
+		return nil, nil, a2a.Task{}, errConcurrentTask()
 	}
 	contextID, protoErr := p.bindContextLocked(in.contextID)
 	if protoErr != nil {
 		p.mu.Unlock()
-		return nil, nil, protoErr
+		return nil, nil, a2a.Task{}, protoErr
 	}
 	owner := p.tasks.For(caller)
-	r := newRun(newTaskID(), contextID, owner, p.logger)
-	sub, _ := r.attach()
+	var r *run
+	r = newRun(newTaskID(), contextID, owner, p.logger, func() { p.endTurn(r) })
+	sub, opening := r.attach()
 	p.active = r
 	p.mu.Unlock()
 
@@ -82,7 +97,7 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *str
 		r.detach(sub)
 		p.endTurn(r)
 		p.logger.Error("a2a task could not be recorded", "task_id", r.taskID, "error", err)
-		return nil, nil, a2a.Errorf(a2a.ErrorTypeInternal,
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeInternal,
 			"the task could not be recorded durably, so the turn was not started")
 	}
 
@@ -115,10 +130,19 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal) (*run, *str
 		"context_id", contextID,
 		"message_id", in.messageID,
 	)
-	return r, sub, nil
+	return r, sub, opening, nil
 }
 
 // endTurn releases the active-run slot if it still points at r.
+//
+// It is called from the run's terminal sequence, NOT from the request that
+// started the turn. That is the whole of the detached-lifetime change: a task
+// outlives its originating HTTP request, so a client may disconnect mid-turn
+// and reattach later, a question may be parked for as long as a human takes to
+// answer it, and configuration.returnImmediately is answerable. The cost is
+// that a wedged turn holds the slot until something ends it — which is why
+// CancelTask landed in the same story, and why an unanswered question has a
+// deadline.
 func (p *Plugin) endTurn(r *run) {
 	p.mu.Lock()
 	if p.active == r {
@@ -149,6 +173,206 @@ func (p *Plugin) liveRun(taskID string) *run {
 		return p.active
 	}
 	return nil
+}
+
+// resumeTurn routes a message naming a task onto the question that task is
+// parked on, and returns the SAME run with a fresh stream attached.
+//
+// This is A2A's own resume mechanism (specification section 3.4): an
+// interrupted task is continued by sending a new message carrying the same
+// taskId and contextId. It is emphatically NOT a new turn — no io.input is
+// emitted, no second task is created, and the agent loop that asked the
+// question simply stops blocking. A client that got INPUT_REQUIRED and answered
+// it sees its answer land in the turn that asked.
+//
+// Every refusal below is resolved through the principal-scoped store first, so
+// a task belonging to somebody else is refused exactly as an unknown id is,
+// before anything about its state can leak.
+func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal) (*run, *stream, a2a.Task, *a2a.Error) {
+	rec, found, err := p.tasks.For(caller).Get(in.taskID)
+	if err != nil {
+		p.logger.Error("a2a task lookup failed", "task_id", in.taskID, "error", err)
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeInternal, "the task could not be read")
+	}
+	if !found {
+		return nil, nil, a2a.Task{}, a2a.ErrTaskNotFound(in.taskID)
+	}
+	if rec.Status.State.IsTerminal() {
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
+			"task %q is in terminal state %s and accepts no further messages; send a message with no taskId to start a new task",
+			in.taskID, rec.Status.State.String()).
+			WithMetadata("taskId", in.taskID).
+			WithMetadata("detail", reasonTaskTerminal)
+	}
+	// Section 3.4 requires the SAME contextId alongside the taskId. A client
+	// that omits it is taken to mean the task's own context; a client that names
+	// a different one is refused rather than quietly corrected, because the two
+	// readings of that request — "continue this task" and "start a conversation
+	// elsewhere" — have nothing in common.
+	if in.contextID != "" && in.contextID != rec.ContextID {
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
+			"message names task %q but context %q; a task is continued by naming the context it belongs to, %q",
+			in.taskID, in.contextID, rec.ContextID).
+			WithMetadata("taskId", in.taskID).
+			WithMetadata("contextId", rec.ContextID).
+			WithMetadata("detail", reasonContextMismatch)
+	}
+
+	r := p.liveRun(in.taskID)
+	if r == nil {
+		// Non-terminal in the store but not running here. The store's open-time
+		// sweep settles tasks a previous process left behind, so reaching this
+		// is a task that ended between the read above and now.
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
+			"task %q is no longer running on this agent and cannot be continued", in.taskID).
+			WithMetadata("taskId", in.taskID).
+			WithMetadata("detail", reasonTaskNotLive)
+	}
+	parked, ok := r.pending()
+	if !ok {
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
+			"task %q is not waiting for input; a message may only continue a task that reported %s",
+			in.taskID, a2a.TaskStateInputRequired.String()).
+			WithMetadata("taskId", in.taskID).
+			WithMetadata("detail", reasonTaskNotAwaiting)
+	}
+
+	// Attached BEFORE anything moves, so the transitions this call causes are
+	// delivered to this request rather than raced past it.
+	sub, opening := r.attach()
+
+	// The task returns to WORKING BEFORE the answer reaches the bus, and the
+	// ordering is load-bearing rather than tidy: the moment hitl.responded is
+	// emitted the agent loop unblocks and may run to completion inside that same
+	// dispatch, so a WORKING transition emitted afterwards would race a terminal
+	// one and be dropped. Moving first makes the sequence the client sees —
+	// INPUT_REQUIRED, WORKING, then whatever the turn does next — deterministic.
+	if !r.resume(parked.requestID) {
+		r.detach(sub)
+		return nil, nil, a2a.Task{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
+			"task %q stopped waiting for input before this answer arrived", in.taskID).
+			WithMetadata("taskId", in.taskID).
+			WithMetadata("detail", reasonTaskNotAwaiting)
+	}
+	r.recordMessage(messageRef{MessageID: in.messageID, Role: a2a.RoleUser, Text: in.text})
+
+	resp := events.HITLResponse{
+		SchemaVersion: events.HITLResponseVersion,
+		RequestID:     parked.requestID,
+	}
+	// A choices question is answered by echoing an option id. Anything else is
+	// free text, which is what free_text and both accept — and what a
+	// choices-only question will be told is invalid by the plugin that asked.
+	if id, matched := matchChoice(parked.choices, in.text); matched {
+		resp.ChoiceID = id
+	} else {
+		resp.FreeText = in.text
+	}
+	if err := p.bus.Emit("hitl.responded", resp); err != nil {
+		p.logger.Warn("a2a could not route an answer to the bus", "task_id", in.taskID, "error", err)
+	}
+
+	p.logger.Debug("a2a task resumed",
+		"task_id", r.taskID, "context_id", r.contextID, "hitl_request_id", parked.requestID)
+	return r, sub, opening, nil
+}
+
+// matchChoice resolves an answer's text against the parked question's option
+// ids, case-insensitively and ignoring surrounding whitespace. It reports the
+// canonical id, so the requesting plugin sees the id it published rather than
+// the client's spelling of it.
+func matchChoice(choices []string, text string) (string, bool) {
+	answer := strings.TrimSpace(text)
+	for _, id := range choices {
+		if strings.EqualFold(id, answer) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// cancelTask settles one of the caller's tasks at TASK_STATE_CANCELED and
+// returns the stored record as it now stands.
+//
+// Cancelling an ALREADY-TERMINAL task is refused with TaskNotCancelableError —
+// the error the specification reserves for exactly this (section 3.3.2) — and
+// nothing is written. A terminal state is final, so "cancel" on one is a
+// well-defined client mistake rather than an instruction to rewrite history.
+//
+// The A2A task is canceled synchronously and the bus is told afterwards, in
+// this order: the stream must not be able to carry a frame produced by the
+// teardown AFTER the terminal frame that closes it. Concretely the run is
+// settled first, which makes every later frame a no-op, and only then does the
+// cancellation reach the agent loop:
+//
+//  1. hitl.cancel, if the task was parked on a question — otherwise the agent
+//     would stay blocked on an answer that is never coming, and the process's
+//     one agent loop would be wedged by the very operation meant to free it.
+//  2. cancel.request, which is the control.cancel capability's own entry point.
+//     That plugin owns turn cancellation for every transport; this one asks
+//     rather than reaching into the agent, exactly as the TUI and browser do.
+func (p *Plugin) cancelTask(caller nexusauth.Principal, taskID string) (a2a.Task, *a2a.Error) {
+	owner := p.tasks.For(caller)
+	rec, found, err := owner.Get(taskID)
+	if err != nil {
+		p.logger.Error("a2a task lookup failed", "task_id", taskID, "error", err)
+		return a2a.Task{}, a2a.Errorf(a2a.ErrorTypeInternal, "the task could not be read")
+	}
+	if !found {
+		return a2a.Task{}, a2a.ErrTaskNotFound(taskID)
+	}
+	if rec.Status.State.IsTerminal() {
+		return a2a.Task{}, a2a.ErrTaskNotCancelable(taskID, rec.Status.State)
+	}
+
+	const reason = "the task was canceled by the client"
+	if r := p.liveRun(taskID); r != nil {
+		parked, wasParked := r.unpark("")
+		// The bus is told only if THIS call settled the task. A cancel racing
+		// the turn's own ending loses, and the loser must not retract a question
+		// that was answered or interrupt a turn that already finished.
+		if settled := r.cancel(reason); settled {
+			if wasParked {
+				_ = p.bus.Emit("hitl.cancel", events.HITLCancel{
+					SchemaVersion: events.HITLCancelVersion,
+					RequestID:     parked.requestID,
+					Reason:        reason,
+				})
+			}
+			_ = p.bus.Emit("cancel.request", events.CancelRequest{
+				SchemaVersion: events.CancelRequestVersion,
+				TurnID:        r.boundTurn(),
+				Source:        cancelSource,
+			})
+			p.logger.Info("a2a task canceled", "task_id", taskID, "was_parked", wasParked)
+		} else {
+			p.logger.Debug("a2a cancel raced the task's own ending", "task_id", taskID)
+		}
+	} else {
+		// Non-terminal with no run behind it. Settling it in the store is still
+		// the right answer: the client asked for a terminal state and there is
+		// nothing left to interrupt.
+		if err := owner.RecordStatus(taskID, canceledStatus(taskID, rec.ContextID, reason)); err != nil {
+			p.logger.Error("a2a task could not be canceled", "task_id", taskID, "error", err)
+			return a2a.Task{}, a2a.Errorf(a2a.ErrorTypeInternal, "the task could not be canceled")
+		}
+	}
+
+	// Re-read rather than render the run's snapshot: the store is the source of
+	// truth for every other read of a task, and answering CancelTask from a
+	// second place is how the two come to disagree.
+	settled, found, err := owner.Get(taskID)
+	if err != nil || !found {
+		return a2a.Task{}, a2a.Errorf(a2a.ErrorTypeInternal, "the canceled task could not be read back")
+	}
+	return settled.Task(renderOptions{}), nil
+}
+
+// canceledStatus builds the CANCELED status a task is settled at, carrying the
+// reason as its message.
+func canceledStatus(taskID, contextID, reason string) a2a.TaskStatus {
+	return a2a.NewTaskStatus(a2a.TaskStateCanceled).WithMessage(
+		a2a.NewAgentMessage(newMessageID(), reason).InContext(contextID).ForTask(taskID))
 }
 
 // bindContextLocked resolves an A2A contextId to this listener's Nexus session.
@@ -252,6 +476,96 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 	r.onOutput(o)
 }
 
+// handleHITLRequested parks the task at TASK_STATE_INPUT_REQUIRED when the
+// agent asks a human something.
+//
+// This is the mapping the specification already defines and Nexus already has
+// the machinery for: nexus.control.hitl owns ask_user, emits hitl.requested and
+// routes hitl.responded, and this transport never calls it — it watches the bus
+// and renders what it sees. The question travels on the status message, which
+// is where section 3.1.1 puts it, and the task stays LIVE: any open stream stays
+// open, and the client resumes by sending a message naming the same taskId.
+func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	req, ok := e.Payload.(events.HITLRequest)
+	if !ok {
+		return
+	}
+	in := parkedInput{requestID: req.ID}
+	for _, c := range req.Choices {
+		in.choices = append(in.choices, c.ID)
+	}
+	if !r.park(in, describeQuestion(req.Prompt, req.Choices), p.cfg.inputTimeout,
+		func() { p.expireInput(r, req.ID) }) {
+		return
+	}
+	p.logger.Debug("a2a task awaiting input",
+		"task_id", r.taskID, "hitl_request_id", req.ID, "timeout", p.cfg.inputTimeout)
+}
+
+// handleHITLResponded returns a parked task to WORKING once the question it was
+// waiting on is answered — by ANY route, not only by an A2A message. A TUI
+// operator, the hitl registry's on-disk answer, or another IO transport all end
+// up here, so the A2A view of the task tracks the agent rather than tracking
+// only what A2A itself did.
+//
+// A cancelled response resumes too. The agent loop is unblocked either way, and
+// the task is back at work — deciding what to do about a refused question is
+// the agent's business, not the transport's. The one case that must NOT resume
+// is a task already terminal, and that is handled structurally: a terminated run
+// drops every frame.
+func (p *Plugin) handleHITLResponded(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	resp, ok := e.Payload.(events.HITLResponse)
+	if !ok {
+		return
+	}
+	if r.resume(resp.RequestID) {
+		p.logger.Debug("a2a task resumed after input",
+			"task_id", r.taskID, "hitl_request_id", resp.RequestID, "cancelled", resp.Cancelled)
+	}
+}
+
+// expireInput enforces the input deadline: an unanswered question must not pin
+// this listener's single agent loop for ever.
+//
+// The task is driven to a REAL terminal state rather than the stream being
+// hung up, which is what pkg/a2a's parked-stream contract asks of a serving
+// layer: a state transition keeps the store, every attached subscriber and the
+// client's own view in agreement, where a silent close is indistinguishable
+// from a dropped connection. FAILED is the honest state — the work did not
+// complete, and nobody canceled it.
+//
+// The task is settled BEFORE hitl.cancel reaches the bus, so the synthetic
+// hitl.responded that follows finds a terminated run and cannot resurrect it.
+func (p *Plugin) expireInput(r *run, requestID string) {
+	if r.terminated() {
+		return
+	}
+	if _, ok := r.unpark(requestID); !ok {
+		// Answered, re-asked or ended in the moment the timer was firing.
+		return
+	}
+	reason := fmt.Sprintf(
+		"the agent asked for input and no answer arrived within %s, so the task was abandoned", p.cfg.inputTimeout)
+	if !r.fail(reason) {
+		return
+	}
+	p.logger.Warn("a2a task timed out awaiting input",
+		"task_id", r.taskID, "hitl_request_id", requestID, "timeout", p.cfg.inputTimeout)
+	_ = p.bus.Emit("hitl.cancel", events.HITLCancel{
+		SchemaVersion: events.HITLCancelVersion,
+		RequestID:     requestID,
+		Reason:        reason,
+	})
+}
+
 // handleError fails the task on an error nobody is going to recover from.
 //
 // The filter matters. A retryable error whose retries are NOT exhausted is a
@@ -296,18 +610,6 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 	}
 	msg := req.Message
 
-	// A message naming a task is a continuation of that task (specification
-	// section 3.4). Tasks are now retained durably, but nothing yet resumes one:
-	// a stored task is a record, not a resumable conversation, and reviving one
-	// needs the interrupt/resume path. So no task id is addressable here, and
-	// the refusal says so rather than starting a silently fresh turn under an id
-	// the client believes it is resuming.
-	if msg.TaskID != "" {
-		return turnInput{}, a2a.Errorf(a2a.ErrorTypeTaskNotFound,
-			"task %q cannot be addressed on this agent: continuing a task is not supported yet, so every message starts a new one",
-			msg.TaskID).
-			WithMetadata("detail", reasonNoContinuation)
-	}
 	if msg.Role != a2a.RoleUser {
 		return turnInput{}, a2a.ErrInvalidParams(a2a.FieldViolation{
 			Field:       "message.role",
@@ -325,37 +627,26 @@ func translateSendMessage(req *a2a.SendMessageRequest) (turnInput, *a2a.Error) {
 			return turnInput{}, a2a.Errorf(a2a.ErrorTypePushNotificationNotSupported,
 				"this agent does not deliver push notifications; the agent card declares capabilities.pushNotifications as false")
 		}
-		if cfg.ReturnImmediately {
-			// STILL refused, but no longer for the original reason.
-			//
-			// The first reading was "a task returned early cannot be polled",
-			// and that stopped being true the moment GetTask and
-			// SubscribeToTask were wired. The reason it remains refused is a
-			// lifetime one: a run is registered as this listener's single
-			// active task and released when its originating request returns.
-			// Returning early would release the slot while the turn was still
-			// running, so the bus handlers would find no active run, and the
-			// task a client had just been handed would sit at SUBMITTED for
-			// ever while the agent answered into the void.
-			//
-			// Detaching the run's lifetime from its request is the fix, and it
-			// needs CancelTask alongside it: without one, a turn nobody is
-			// watching would hold the process's only agent loop with nothing
-			// able to interrupt it. Both are the next story. Refusing is the
-			// honest answer until then.
-			return turnInput{}, a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
-				"configuration.returnImmediately is not supported: this agent's task lifetime is bound to the request that started it, so a task returned early would be abandoned mid-turn; use the blocking call, or SendStreamingMessage and SubscribeToTask to watch it").
-				WithMetadata("detail", reasonBlockingOnly)
-		}
+		// configuration.returnImmediately is now honoured rather than refused.
+		// It was refused while a run's lifetime was bound to its request —
+		// returning early would have released the active-task slot mid-turn and
+		// frozen the task at SUBMITTED. A run now ends when its TASK ends, so an
+		// early return is exactly what it claims to be: the task id, followed by
+		// GetTask or SubscribeToTask to watch the rest.
 		if protoErr := checkAcceptedOutputModes(cfg.AcceptedOutputModes); protoErr != nil {
 			return turnInput{}, protoErr
 		}
 	}
 
+	// A message naming a task is a CONTINUATION of that task (specification
+	// section 3.4), not a new one. Whether it is a legal continuation depends on
+	// state the store and the live run own, so it is decided by resumeTurn; all
+	// that happens here is that the id is carried through rather than refused.
 	return turnInput{
 		contextID: msg.ContextID,
 		text:      text,
 		messageID: msg.MessageID,
+		taskID:    strings.TrimSpace(msg.TaskID),
 	}, nil
 }
 

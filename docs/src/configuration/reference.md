@@ -1512,16 +1512,19 @@ the shared `pkg/nexusauth` chain, and CORS off unless configured. The
 worked end-to-end example; [`nexus.io.a2a`](../plugins/io/a2a.md) is the plugin
 page.
 
-> **Maturity.** `SendMessage` and `SendStreamingMessage` drive a real Nexus
-> turn; every task they create is **persisted durably** (see
-> [Task retention](#task-retention) below) and `GetTask`, `ListTasks` and
-> `SubscribeToTask` read it back — see [Reading tasks](#reading-tasks) below.
-> `CancelTask` is the one remaining operation: it is routed, version-negotiated
-> and authenticated, then answered with `UnsupportedOperationError`. Sending a
-> message that names a `taskId` (continuing a task) is likewise refused. The
+> **Maturity.** Every A2A operation outside the push-notification family is
+> wired. `SendMessage` and `SendStreamingMessage` drive a real Nexus turn; every
+> task they create is **persisted durably** (see [Task retention](#task-retention)
+> below) and `GetTask`, `ListTasks` and `SubscribeToTask` read it back — see
+> [Reading tasks](#reading-tasks) below. A task interrupted by a
+> human-in-the-loop question parks at `TASK_STATE_INPUT_REQUIRED` and is resumed
+> by a message naming the same `taskId`, and `CancelTask` settles a task at
+> `TASK_STATE_CANCELED` — see
+> [Interruption and cancellation](#interruption-and-cancellation) below. The
 > Agent Card reports all of this honestly: `capabilities.streaming` is `true`
 > because both streaming operations are wired, while `pushNotifications` and
-> `extendedAgentCard` are `false`.
+> `extendedAgentCard` are `false`. (A2A declares no capability boolean for
+> cancellation; it is part of the core task surface.)
 
 | Key                     | Type         | Default              | Description |
 |-------------------------|--------------|----------------------|-------------|
@@ -1561,23 +1564,80 @@ behaviour of the transport.
 | Task `COMPLETED` | `agent.turn.end` |
 | Task `FAILED` | a `core.error` that is fatal or has exhausted its retries, or a vetoed input |
 
-`SendMessage` **blocks** until the task is terminal and returns the finished
-Task, which is A2A's default (§3.2.2). `configuration.returnImmediately` is
-refused — not because a task returned early could not be polled (`GetTask` and
-`SubscribeToTask` are wired), but because a run is this listener's single active
-task and is released when the request that started it returns, so returning
-early would release the slot mid-turn and leave the task frozen at `SUBMITTED`.
-`SendStreamingMessage` writes the same frames as SSE — an opening Task snapshot,
-status updates, the artifact, and the terminal status that closes the stream.
+`SendMessage` **blocks** until the task reaches a state the caller has to act
+on and returns the Task, which is A2A's default (§3.2.2). That means a terminal
+state **or** `INPUT_REQUIRED`: a task waiting for the caller cannot be waited on
+by the caller. `SendStreamingMessage` writes the same frames as SSE — an opening
+Task snapshot, status updates, the artifact, and the terminal status that closes
+the stream.
+
+`configuration.returnImmediately` is **honoured**: the call answers with the
+task as it stands and the client follows it with `GetTask` or
+`SubscribeToTask`. It was refused for as long as a run's lifetime was its
+request's; see [Task lifetime](#task-lifetime) below. `SendStreamingMessage`
+ignores the flag, because a stream is already the follow-up it asks for.
 
 Other refusals, each with the error type the specification reserves for it: a
 non-text Part or an `acceptedOutputModes` list with no text type
-(`ContentTypeNotSupportedError`), a message naming a `taskId`
-(`TaskNotFoundError` — tasks are stored, but continuing one is not supported
-yet, so every message starts a new task), an inline
-`taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a second
-task while one is in flight (`UnsupportedOperationError`; the listener fronts
-one agent loop).
+(`ContentTypeNotSupportedError`), an inline `taskPushNotificationConfig`
+(`PushNotificationNotSupportedError`), and a second task while one is in flight
+(`UnsupportedOperationError`; the listener fronts one agent loop). A message
+naming a `taskId` is a **continuation**, not a refusal — see
+[Interruption and cancellation](#interruption-and-cancellation).
+
+#### Task lifetime
+
+A run is this listener's single active task and is released when the **task**
+reaches a terminal state — not when the HTTP request that started it returns.
+Three things follow, and they are the reason interruption works at all:
+
+- A client may **disconnect mid-turn** without failing its own task. The turn
+  carries on, `GetTask` still answers, and `SubscribeToTask` reattaches to
+  exactly where it got to.
+- A task may stay parked on a question for as long as answering it takes,
+  bounded by `tasks.input_timeout`.
+- `configuration.returnImmediately` is answerable.
+
+The cost is that a turn nobody is watching holds the slot until something ends
+it, which is why `CancelTask` is wired and why an unanswered question has a
+deadline. A task left non-terminal by a **process restart** is settled at
+`FAILED` when the store next opens: no run drives it, no bus event will ever
+name it, and only terminal tasks are evictable, so leaving it would be an
+immortal row reading `WORKING` for ever.
+
+#### Interruption and cancellation
+
+There is no configuration here beyond `tasks.input_timeout`; the behaviour is
+fixed.
+
+**A question parks the task.** When a Nexus agent asks a human something —
+`nexus.control.hitl`'s `ask_user` tool, or any plugin emitting `hitl.requested` —
+the task moves to `TASK_STATE_INPUT_REQUIRED` with the question on
+`status.message`, and a multiple-choice question renders its option ids into
+that text so a text-only A2A client can answer it. The task stays **live**: open
+SSE streams stay open (§11.7's close rule keys off terminal states, which this
+is not), the transition is written through to the store, and a client that
+reconnects reads the question from `GetTask` or from `SubscribeToTask`'s opening
+snapshot.
+
+**A message naming the same `taskId` resumes it** (§3.4). The answer is routed
+to `hitl.responded` and the task returns to `WORKING` **inside the same turn** —
+no `io.input`, no second task. An answer whose text matches one of the
+question's option ids (case-insensitively) is delivered as that choice; anything
+else is free text. Continuing a task is refused, with
+`UnsupportedOperationError`, when it is already terminal, when the message names
+a different `contextId` than the task's, or when the task is not waiting for
+input. A `taskId` that does not belong to the caller answers exactly as an
+unknown one does: `TaskNotFoundError`.
+
+**`CancelTask` settles the task at `TASK_STATE_CANCELED`,** then tells the bus —
+`hitl.cancel` if the task was parked, so the blocked agent loop unblocks, then
+`cancel.request`, which is the `control.cancel` capability's own entry point
+(the same event the TUI emits). Any open stream closes on the terminal frame.
+Cancelling an **already-terminal** task is refused with
+`TaskNotCancelableError` and writes nothing: a terminal state is final, so
+reporting success would tell a client its cancel took effect on a task that had
+already completed.
 
 #### Task retention
 
@@ -1610,11 +1670,22 @@ retention pressure instead of exempting itself from it.
 |-------------------------|-----------------|---------|-------------|
 | `tasks.ttl`             | duration string | `24h`   | How long a terminal task is kept after its last transition. `"0s"` disables age-based eviction and keeps tasks for the life of the session. A bare number is rejected: `600` reads as ten minutes to an operator and six hundred nanoseconds to Go. Must not be negative. |
 | `tasks.max_per_context` | int             | `200`   | How many tasks are kept per (principal, `contextId`) pair. `0` disables the cap. The cap is per **principal and** context, not per context alone, so one principal's traffic cannot evict another's tasks. Must not be negative. |
+| `tasks.input_timeout`   | duration string | `15m`   | How long a task may stay parked at `TASK_STATE_INPUT_REQUIRED` waiting for the client to answer the agent's question. On expiry the task is driven to `FAILED` (a real terminal transition, so every attached stream closes) and `hitl.cancel` retracts the question so the blocked agent loop unblocks. `"0s"` disables the deadline. A bare number is rejected, as for `ttl`. Must not be negative. |
 
 The defaults are chosen for the standalone single-context listener: 24 hours is
 comfortably longer than any plausible client reconnect window, and 200 tasks is
 200 turns of history — far more than a client polls back over, and small enough
 that the worst case stays in the low megabytes.
+
+`input_timeout` is not retention — it is a **liveness** bound, and it defaults to
+a non-zero value for a reason worth stating. A parked task is not idle: the turn
+that asked the question is blocked inside `ask_user`, holding this listener's
+single active-task slot and the process's one agent loop, so a question nobody
+answers pins the whole instance. **15 minutes** is measured against a human, not
+a machine — long enough for someone to be paged, read the question and reply,
+short enough that an abandoned question frees the instance within one coffee
+break. Set `"0s"` only if a task parked until the process exits is genuinely what
+you want.
 
 ```yaml
 plugins:
@@ -1622,6 +1693,7 @@ plugins:
     tasks:
       ttl: 72h
       max_per_context: 50
+      input_timeout: 5m
 ```
 
 #### Reading tasks
@@ -1657,7 +1729,8 @@ is no configuration for any of them; the behaviour below is fixed.
   they joined. An already-terminal task yields its terminal snapshot and the
   stream closes immediately. A task that is neither (one this process was
   serving when it last stopped) gets its snapshot and then a close, since
-  nothing will ever update it again.
+  nothing will ever update it again — though after a restart such a task is
+  settled at `FAILED` when the store opens, so the snapshot names a real ending.
 - **Ownership is not enumerable.** Every read goes through the store's
   principal-scoped view, so a task belonging to another principal answers
   exactly as an unknown id does: the same `TaskNotFoundError`, the same HTTP

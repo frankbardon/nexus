@@ -72,7 +72,7 @@
   },
   "$defs": {
     "tasks": {
-      "description": "Retention policy for the durable task store (session-scoped SQLite, <session>/plugins/nexus.io.a2a/store.db). Retention is load-bearing rather than housekeeping: a task carries its full status history, its artifacts and its message references, so an unbounded store grows with traffic rather than with the conversation. Both knobs are enforced together \u2014 a task is evicted when it exceeds either.",
+      "description": "Durable task store (session-scoped SQLite, <session>/plugins/nexus.io.a2a/store.db): retention plus the interruption deadline. Retention is load-bearing rather than housekeeping: a task carries its full status history, its artifacts and its message references, so an unbounded store grows with traffic rather than with the conversation. Both knobs are enforced together \u2014 a task is evicted when it exceeds either.",
       "type": [
         "object",
         "null"
@@ -87,6 +87,10 @@
           "type": "integer",
           "minimum": 0,
           "description": "How many tasks are kept per (principal, contextId) pair. Default 200. 0 disables the cap. Non-terminal tasks count against it but are never the ones evicted, so a wedged in-flight task shows up as retention pressure rather than exempting itself."
+        },
+        "input_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "How long a task may stay parked at TASK_STATE_INPUT_REQUIRED waiting for a client to answer the agent's question. Default 15m \u2014 long enough for a human to be paged and reply, short enough that an abandoned question does not pin this listener's single agent loop. On expiry the task is failed and hitl.cancel unblocks the waiting agent. \"0s\" disables the deadline and lets a task stay parked until the process exits."
         }
       }
     },

@@ -64,6 +64,15 @@ func buildCard(cfg *config) (*servedCard, error) {
 	// one to an existing task — and it would flip back on its own if either the
 	// map or the dispatch stopped agreeing. Push notifications and the extended
 	// card remain unimplemented, so the card says so.
+	//
+	// There is deliberately nothing here for CancelTask, and nothing missing
+	// either: AgentCapabilities declares exactly three booleans (specification
+	// section 4.4, transcribed from a2a.proto) and cancellation is not among
+	// them — A2A treats CancelTask as part of the core task surface rather than
+	// an optional capability. The card's honest statement about cancellation is
+	// therefore that the operation dispatches instead of answering
+	// UnsupportedOperationError, which implementedOperations is the single
+	// switch for.
 	card.Capabilities.Streaming = operationImplemented(a2a.MethodSendStreamingMessage) ||
 		operationImplemented(a2a.MethodSubscribeToTask)
 	card.Capabilities.PushNotifications = operationImplemented(a2a.MethodCreateTaskPushNotificationConfig)

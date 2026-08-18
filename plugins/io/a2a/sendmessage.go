@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
@@ -49,47 +50,71 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 	// Refusals are answered BEFORE any stream is opened. A client that is turned
 	// away gets an ordinary error response it can read from the status and the
 	// body, rather than a 200 SSE stream whose only record is a failure.
-	run, sub, protoErr := s.cfg.bridge.startTurn(in, caller)
+	//
+	// A message naming a task CONTINUES that task rather than starting one: the
+	// answer is routed to the question the task is parked on and the same run is
+	// followed, so a resumed task never becomes a second turn.
+	var (
+		run     *run
+		sub     *stream
+		opening a2a.Task
+	)
+	// The snapshot comes back with the stream because the two are taken under
+	// one lock: it accounts for exactly the frames emitted before the stream
+	// attached, and the channel carries exactly those emitted after. A new task
+	// opens on SUBMITTED; a resumed one opens on the INPUT_REQUIRED it was
+	// parked at, so the transitions the answer causes arrive as updates the
+	// client can follow rather than being folded into the opening frame.
+	if in.taskID != "" {
+		run, sub, opening, protoErr = s.cfg.bridge.resumeTurn(in, caller)
+	} else {
+		run, sub, opening, protoErr = s.cfg.bridge.startTurn(in, caller)
+	}
 	if protoErr != nil {
 		s.writeError(w, b, protoErr)
 		return
 	}
-	defer s.cfg.bridge.endTurn(run)
-	// The subscription is attached by startTurn, before the turn can emit
-	// anything; releasing it here is the other half. Detaching does not end the
-	// task — a SubscribeToTask stream may still be watching it — it only says
-	// this response is finished with it.
+	// The subscription is released when this response is finished with it.
+	// Detaching does NOT end the task: the run's lifetime is the task's, not
+	// this request's, so a SubscribeToTask stream may still be watching it and
+	// the turn carries on either way.
 	defer run.detach(sub)
 
-	// Client disconnect: fail the task so the drain loop stops promptly and the
-	// active-task slot is released for the next caller. The stop channel keeps
-	// this watcher from outliving the request.
+	// A client that vanishes mid-turn no longer fails its own task. The run
+	// outlives the request that started it, so the honest response to a dropped
+	// connection is to stop writing to it — the task keeps running, GetTask
+	// still answers, and SubscribeToTask reattaches to exactly where it got to.
+	// CancelTask is how a client that has genuinely given up says so.
 	ctx := r.Context()
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			run.fail("the client disconnected before the task finished")
-		case <-stop:
-		}
-	}()
 
-	if streaming {
-		// A write failure on THIS connection fails the task: it is the request
-		// that started the turn, and there is nowhere else for the answer to go.
-		// A SubscribeToTask stream passes no such callback — a passive observer
-		// losing its socket must not kill somebody else's task.
-		s.pumpStream(ctx, w, b, sub, openingTask(run), run.fail)
+	// configuration.returnImmediately (specification section 3.2.2): answer with
+	// the task as it stands and let the client follow it by other means.
+	// Streaming ignores it, because a stream IS the follow-up it asks for.
+	if !streaming && req.Configuration != nil && req.Configuration.ReturnImmediately {
+		run.detach(sub)
+		s.writeResult(w, b, a2a.TaskResponse(opening))
 		return
 	}
-	s.blockOnTask(ctx, w, b, sub, run)
+
+	if streaming {
+		// A write failure on THIS connection no longer fails the task either,
+		// for the same reason: the answer outlives the socket that asked for it.
+		s.pumpStream(ctx, w, b, sub, opening, nil)
+		return
+	}
+	s.blockOnTask(ctx, w, b, sub, run, opening)
 }
 
-// openingTask is the snapshot a freshly started turn opens on: SUBMITTED, no
-// artifacts. A2A requires a task to exist before any update event may name it,
-// and SUBMITTED is the state a task is created in (specification section 4.1).
-func openingTask(r *run) a2a.Task { return a2a.NewTask(r.taskID, r.contextID) }
+// parkedKeepaliveInterval is how often an SSE comment is written to a stream
+// parked on TASK_STATE_INPUT_REQUIRED.
+//
+// A parked stream is deliberately silent: the task is waiting for a human, and
+// nothing has happened. Proxies and load balancers read that silence as a dead
+// connection and close it, so pkg/a2a exposes SSEWriter.Ping for exactly this —
+// an SSE comment record keeps the socket warm without emitting a protocol frame
+// that says nothing happened. Twenty seconds sits under the common 30s and 60s
+// idle timeouts with room to spare.
+const parkedKeepaliveInterval = 20 * time.Second
 
 // pumpStream renders one attached observer as a text/event-stream: the opening
 // Task snapshot, then one StreamResponse per record until a frame reports a
@@ -126,13 +151,27 @@ func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b bindin
 		return
 	}
 
+	// The keepalive only ever fires on a parked stream; a working task produces
+	// frames of its own, and a comment between them would be noise.
+	keepalive := time.NewTicker(parkedKeepaliveInterval)
+	defer keepalive.Stop()
+
 	for {
 		select {
+		case <-keepalive.C:
+			if !sse.Interrupted() {
+				continue
+			}
+			if err := sse.Ping(); err != nil {
+				s.cfg.logger.Debug("a2a sse keepalive failed", "task_id", opening.ID, "error", err)
+				return
+			}
 		case frame := <-sub.frames:
 			if err := sse.Write(frame); err != nil {
 				// The transport is gone, or the agent produced a frame the stream
 				// contract refuses. Either way nothing more can be delivered on
-				// this connection.
+				// this connection — but the task is unaffected: it is followed by
+				// reattaching, not by holding one socket open.
 				s.cfg.logger.Debug("a2a sse write failed", "task_id", opening.ID, "error", err)
 				if onBroken != nil {
 					onBroken("the response stream could not be written")
@@ -153,34 +192,41 @@ func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b bindin
 	}
 }
 
-// blockOnTask renders the run as a single Task reply once it reaches a terminal
-// state. Blocking is A2A's default for SendMessage (specification section
-// 3.2.2): the call returns when the work is done, not when it was accepted.
+// blockOnTask renders the run as a single Task reply once it reaches a state
+// the client has to act on. Blocking is A2A's default for SendMessage
+// (specification section 3.2.2): the call returns when the work is done, not
+// when it was accepted.
+//
+// "Done" includes INTERRUPTED, not only terminal. A task that reaches
+// INPUT_REQUIRED is waiting for the caller, so continuing to block would be
+// waiting for a client that is itself waiting on this response — the deadlock
+// the interrupted states exist to avoid. The returned Task carries the question
+// on its status message, and the client answers by sending a new message naming
+// the same taskId.
 //
 // It consumes exactly the frames the streaming path writes, folding each into
 // the Task snapshot, so the two bindings cannot report different outcomes for
 // the same turn.
-func (s *Server) blockOnTask(ctx context.Context, w http.ResponseWriter, b binding, sub *stream, run *run) {
-	task := openingTask(run)
+func (s *Server) blockOnTask(ctx context.Context, w http.ResponseWriter, b binding, sub *stream, run *run, opening a2a.Task) {
+	task := opening
 	for {
 		select {
 		case frame := <-sub.frames:
-			if applyFrame(&task, frame) {
+			applyFrame(&task, frame)
+			if state := task.Status.State; state.IsTerminal() || state.IsInterrupted() {
 				s.writeResult(w, b, a2a.TaskResponse(task))
 				return
 			}
 		case <-sub.dropped:
 			// The observer was dropped, so the terminal frame will never arrive
-			// on this channel. The task is failed and the failure is rendered
-			// here rather than awaited, since awaiting it would be waiting on a
-			// channel that is no longer being written to.
-			const reason = "the response could not be assembled: this request fell behind its own task"
-			run.fail(reason)
-			task.Status = a2a.NewTaskStatus(a2a.TaskStateFailed).WithMessage(
-				a2a.NewAgentMessage(newMessageID(), reason).
-					InContext(run.contextID).
-					ForTask(run.taskID))
-			s.writeResult(w, b, a2a.TaskResponse(task))
+			// on this channel. This request cannot report the outcome — but it
+			// must not invent one either, and it no longer fails the task to
+			// produce something to say: the task is still running and the client
+			// holds its id. The task as last seen is returned, which is exactly
+			// what GetTask would answer a moment later.
+			s.cfg.logger.Warn("a2a blocking request fell behind its own task",
+				"task_id", run.taskID)
+			s.writeResult(w, b, a2a.TaskResponse(run.snapshotTask()))
 			return
 		case <-ctx.Done():
 			// The caller is gone; there is nobody left to answer.

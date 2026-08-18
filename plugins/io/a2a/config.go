@@ -32,6 +32,7 @@ const (
 	cfgKeyTasks              = "tasks"
 	cfgKeyTasksTTL           = "ttl"
 	cfgKeyTasksMaxPerContext = "max_per_context"
+	cfgKeyTasksInputTimeout  = "input_timeout"
 )
 
 // Defaults. The bind address is loopback for the same reason nexus.io.agui's
@@ -68,6 +69,32 @@ const (
 	defaultTasksPerContext = 200
 )
 
+// defaultInputTimeout bounds how long a task may sit at
+// TASK_STATE_INPUT_REQUIRED before it is abandoned.
+//
+// THE POLICY, and why it has a default at all:
+//
+// A parked task is not idle — it holds this listener's single active-task slot
+// and the process's one agent loop, because the turn that asked the question is
+// blocked inside ask_user waiting for an answer. A question nobody answers
+// would therefore pin the whole instance, and pkg/a2a's parked-stream contract
+// explicitly hands the deadline decision to the serving layer rather than
+// letting one be inherited by accident. So there is always a deadline, and it
+// is stated rather than implied.
+//
+// 15 minutes is the number, and it is chosen against a human, not a machine: a
+// question routed to a person has to survive being paged, read, thought about
+// and answered, which minutes-not-seconds covers and seconds does not. It is
+// also short enough that an abandoned question frees the instance inside one
+// coffee break rather than at the next restart.
+//
+// On expiry the task is driven to FAILED — a real terminal transition, written
+// through to the store and closing every attached stream — and hitl.cancel is
+// emitted so the waiting agent loop unblocks. "0s" disables the deadline for an
+// operator who genuinely wants a task parked until the process exits; the cost
+// of that choice is documented, not hidden.
+const defaultInputTimeout = 15 * time.Minute
+
 // config is the resolved plugin configuration.
 type config struct {
 	bindAddr    string
@@ -97,6 +124,10 @@ type config struct {
 
 	// retention bounds the durable task store. See defaultTaskTTL.
 	retention retention
+
+	// inputTimeout bounds a task parked at INPUT_REQUIRED. Zero disables the
+	// deadline. See defaultInputTimeout.
+	inputTimeout time.Duration
 }
 
 // validatorDescriptor is the minimum a security-scheme derivation needs to know
@@ -153,6 +184,7 @@ func parseConfig(raw map[string]any) (*config, error) {
 			ttl:           defaultTaskTTL,
 			maxPerContext: defaultTasksPerContext,
 		},
+		inputTimeout: defaultInputTimeout,
 	}
 
 	if v, ok := raw[cfgKeyBind].(string); ok && strings.TrimSpace(v) != "" {
@@ -194,11 +226,12 @@ func parseConfig(raw map[string]any) (*config, error) {
 	}
 	c.corsOrigins = parseCORSOrigins(raw[cfgKeyCORSOrigins])
 
-	policy, err := parseRetention(raw[cfgKeyTasks], c.retention)
+	policy, inputTimeout, err := parseTasks(raw[cfgKeyTasks], c.retention, c.inputTimeout)
 	if err != nil {
 		return nil, err
 	}
 	c.retention = policy
+	c.inputTimeout = inputTimeout
 
 	chain, descriptors, err := resolveAuth(raw)
 	if err != nil {
@@ -216,53 +249,72 @@ func parseConfig(raw map[string]any) (*config, error) {
 	return c, nil
 }
 
-// parseRetention resolves the `tasks:` block into a retention policy, starting
-// from the supplied defaults so an absent block, or a block that sets only one
-// knob, leaves the other at its default.
+// parseTasks resolves the `tasks:` block into a retention policy and the input
+// deadline, starting from the supplied defaults so an absent block, or a block
+// that sets only one knob, leaves the others at their defaults.
 //
 // A duration is a duration STRING ("24h", "90m"), never a bare number: "ttl: 600"
 // reads as ten minutes to an operator and six hundred nanoseconds to Go, and
 // silently picking either would be worse than an error naming the key. This is
 // the same rule pkg/nexusauth applies to its own duration keys.
-func parseRetention(raw any, defaults retention) (retention, error) {
+func parseTasks(raw any, defaults retention, defaultInput time.Duration) (retention, time.Duration, error) {
 	out := defaults
+	input := defaultInput
 	if raw == nil {
-		return out, nil
+		return out, input, nil
 	}
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return out, fmt.Errorf("%s: %s: want a mapping, got %T", pluginID, cfgKeyTasks, raw)
+		return out, input, fmt.Errorf("%s: %s: want a mapping, got %T", pluginID, cfgKeyTasks, raw)
 	}
 
 	if v, present := m[cfgKeyTasksTTL]; present && v != nil {
-		s, ok := v.(string)
-		if !ok {
-			return out, fmt.Errorf("%s: %s.%s: want a duration string such as \"24h\", got %T",
-				pluginID, cfgKeyTasks, cfgKeyTasksTTL, v)
-		}
-		d, err := time.ParseDuration(strings.TrimSpace(s))
+		d, err := taskDuration(v, cfgKeyTasksTTL,
+			"use \"0s\" to keep tasks for the life of the session")
 		if err != nil {
-			return out, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, cfgKeyTasksTTL, err)
-		}
-		if d < 0 {
-			return out, fmt.Errorf("%s: %s.%s: must not be negative; use \"0s\" to keep tasks for the life of the session",
-				pluginID, cfgKeyTasks, cfgKeyTasksTTL)
+			return out, input, err
 		}
 		out.ttl = d
+	}
+
+	if v, present := m[cfgKeyTasksInputTimeout]; present && v != nil {
+		d, err := taskDuration(v, cfgKeyTasksInputTimeout,
+			"use \"0s\" to let a task stay parked until the process exits")
+		if err != nil {
+			return out, input, err
+		}
+		input = d
 	}
 
 	if v, present := m[cfgKeyTasksMaxPerContext]; present && v != nil {
 		n, err := configInt(v)
 		if err != nil {
-			return out, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, cfgKeyTasksMaxPerContext, err)
+			return out, input, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, cfgKeyTasksMaxPerContext, err)
 		}
 		if n < 0 {
-			return out, fmt.Errorf("%s: %s.%s: must not be negative; use 0 to keep every task",
+			return out, input, fmt.Errorf("%s: %s.%s: must not be negative; use 0 to keep every task",
 				pluginID, cfgKeyTasks, cfgKeyTasksMaxPerContext)
 		}
 		out.maxPerContext = n
 	}
-	return out, nil
+	return out, input, nil
+}
+
+// taskDuration reads one non-negative duration key from the `tasks:` block.
+func taskDuration(v any, key, zeroHint string) (time.Duration, error) {
+	s, ok := v.(string)
+	if !ok {
+		return 0, fmt.Errorf("%s: %s.%s: want a duration string such as \"24h\", got %T",
+			pluginID, cfgKeyTasks, key, v)
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("%s: %s.%s: %w", pluginID, cfgKeyTasks, key, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s: %s.%s: must not be negative; %s", pluginID, cfgKeyTasks, key, zeroHint)
+	}
+	return d, nil
 }
 
 // configInt reads an integer that YAML may have decoded as an int or a float.

@@ -297,10 +297,100 @@ func openTaskStore(st storage.Storage, policy retention, logger *slog.Logger) (*
 		return nil, fmt.Errorf("%s: creating the task store schema: %w", pluginID, err)
 	}
 	s := &taskStore{db: db, retention: policy, logger: logger, now: time.Now}
+	// Order matters: settle the tasks a previous process abandoned FIRST, so the
+	// retention sweep that follows can evict them. Retention only ever drops
+	// terminal tasks, so a zombie left non-terminal would be immortal.
+	if err := s.settleOrphans(); err != nil {
+		return nil, fmt.Errorf("%s: settling tasks left in flight by a previous process: %w", pluginID, err)
+	}
 	if err := s.evict(); err != nil {
 		return nil, fmt.Errorf("%s: applying task retention on open: %w", pluginID, err)
 	}
 	return s, nil
+}
+
+// orphanReason is the status message a task left in flight by a stopped process
+// is settled with.
+const orphanReason = "the agent stopped while this task was still running, so it will never complete"
+
+// settleOrphans drives every non-terminal task to FAILED when the store opens.
+//
+// # Why a task can be non-terminal at open
+//
+// A task's state lives in two places while it runs: this store, and the in-memory
+// run driving it. Only the store survives a process exit, so a task the process
+// was serving when it stopped — a crash, a SIGKILL, an ordinary restart mid-turn —
+// stays recorded in whatever state it last reached. Nothing will ever move it
+// again: the run is gone, and no bus event will arrive for a turn that no longer
+// exists.
+//
+// Leaving it as it stands is the worst option. A client polling GetTask sees
+// WORKING for ever; SubscribeToTask can only hand it a snapshot and hang up,
+// which reads like a dropped connection rather than an ending; and retention
+// cannot evict it, because only terminal tasks are evictable — so a crash loop
+// accumulates immortal rows that count against the per-context cap and push
+// real tasks out of it.
+//
+// FAILED is the honest state. The work did not complete and nobody canceled it,
+// which is exactly what FAILED means; CANCELED would claim a decision nobody
+// made. The status message says what happened, so a client reading it back is
+// told the difference between "the agent failed at this" and "the agent went
+// away".
+//
+// # Why it is written through the principal-scoped path
+//
+// The repair does the same writes a live transition does — RecordStatus on a
+// principal-scoped view — rather than one broad UPDATE. The read below PROJECTS
+// each task's principal instead of filtering by one, which is what a
+// process-wide repair needs and what no request-serving path may ever do; every
+// write it drives then goes through the ordinary scoped statement, so the
+// store's "no unscoped write" invariant holds through the repair as well.
+func (s *taskStore) settleOrphans() error {
+	rows, err := s.db.Query(
+		`SELECT task_id, principal_id, principal FROM tasks WHERE terminal = 0`)
+	if err != nil {
+		return fmt.Errorf("reading tasks left in flight: %w", err)
+	}
+	type orphan struct {
+		taskID    string
+		principal nexusauth.Principal
+	}
+	var orphans []orphan
+	for rows.Next() {
+		var (
+			taskID        string
+			principalID   string
+			principalJSON string
+		)
+		if err := rows.Scan(&taskID, &principalID, &principalJSON); err != nil {
+			rows.Close()
+			return fmt.Errorf("reading tasks left in flight: %w", err)
+		}
+		var p nexusauth.Principal
+		if err := json.Unmarshal([]byte(principalJSON), &p); err != nil {
+			rows.Close()
+			return fmt.Errorf("decoding the principal of task %q: %w", taskID, err)
+		}
+		orphans = append(orphans, orphan{taskID: taskID, principal: p})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("reading tasks left in flight: %w", err)
+	}
+	rows.Close()
+
+	for _, o := range orphans {
+		status := a2a.NewTaskStatus(a2a.TaskStateFailed).WithMessage(
+			a2a.NewMessage(newMessageID(), a2a.RoleAgent, a2a.TextPart(orphanReason)))
+		if err := s.For(o.principal).RecordStatus(o.taskID, status); err != nil {
+			return fmt.Errorf("settling task %q: %w", o.taskID, err)
+		}
+	}
+	if len(orphans) > 0 && s.logger != nil {
+		s.logger.Warn("a2a tasks were left in flight by a previous process and have been failed",
+			"tasks", len(orphans))
+	}
+	return nil
 }
 
 // For returns the view of the store belonging to one principal. It is the ONLY
