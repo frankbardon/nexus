@@ -51,6 +51,17 @@ type spawnSpec struct {
 	// defeat the dial-back second factor entirely.
 	binaryEnv map[string]string
 
+	// inheritEnv is the broker-level `inherit_env` list verbatim: the extra
+	// variable NAMES (never values) a spawn may take from the broker's own
+	// environment. buildCommand unions it with alwaysInheritedEnv and copies
+	// across only what it names — everything else the broker process holds is
+	// dropped, which is the point of the key.
+	//
+	// It is carried on the spec rather than read from the Config inside
+	// buildCommand so that the whole environment a spawn will hold is decided by
+	// its spec, and a test can pin it without a Config.
+	inheritEnv []string
+
 	// spawnSecret is the per-lease second factor the instance must echo in its
 	// register frame (see newSpawnSecret). The claim path mints it, records the
 	// expected value on the lease, and passes it here; buildCommand injects it
@@ -127,9 +138,18 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	// without an `auth:` block and therefore does not enforce it — so that
 	// turning authentication on is a pure broker-config change and never
 	// requires a different spawn path.
-	env := os.Environ()
-	// Entry env sits between the broker process's own environment and the
-	// broker-owned variables: a variant may override something inherited from
+	// NOT os.Environ(). A spawned instance is handed a config the CALLER wrote,
+	// and every provider resolves its credential from an env var that config
+	// NAMES (`api_key_env` and its equivalents) while the same config chooses
+	// `base_url` — so anything left in the child's environment is both reachable
+	// and exfiltratable by whoever posted the claim. Wholesale inheritance
+	// therefore handed every claimant every secret the broker was started with,
+	// and no allowlist of *known* provider keys could have fixed it, because the
+	// caller picks the name. The only bound is the one applied here: a spawn
+	// carries what the OPERATOR declared and nothing else.
+	env := inheritedEnv(spec.inheritEnv)
+	// Entry env sits between what the broker's own environment contributed and
+	// the broker-owned variables: a variant may override something inherited from
 	// the broker's shell, which is the point of the key. Keys are applied in
 	// sorted order so a spawn's environment is byte-identical across restarts
 	// and a boot is reproducible; Go randomizes map iteration otherwise.
@@ -168,6 +188,130 @@ func sortedEnvKeys(env map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// alwaysInheritedEnv names the variables every spawn takes from the broker's own
+// environment REGARDLESS of what `inherit_env` says. They are not credentials
+// and are not optional:
+//
+//   - HOME decides where ~/.nexus is (pkg/engine/paths.go, via os.UserHomeDir).
+//     Without it an instance cannot create a session directory, so -recall has
+//     nothing to resume and the claim fails for a reason that has nothing to do
+//     with the operator's configuration.
+//   - PATH is what makes exec() and the shell tool work at all; a child without
+//     it can run nothing by name.
+//   - TZ and LANG decide how the instance renders times and text. Omitting them
+//     would silently move every instance to UTC and the C locale, which is a
+//     behaviour change dressed up as a security fix.
+//
+// Held sorted, because inheritedEnvNames returns a sorted union and starting
+// from a sorted base makes that obvious to a reader.
+var alwaysInheritedEnv = []string{"HOME", "LANG", "PATH", "TZ"}
+
+// brokerOwnedEnv names the three variables buildCommand injects itself, last, so
+// nothing an entry or the broker's shell contributes can displace them. It
+// exists so the boot log and config validation talk about the same set the
+// spawn path does, rather than three literals repeated in four places.
+var brokerOwnedEnv = []string{
+	brokerframe.EnvBrokerAddr,
+	brokerframe.EnvLeaseID,
+	brokerframe.EnvSpawnSecret,
+}
+
+// inheritedEnvNames returns the sorted, de-duplicated set of variable names a
+// spawn may take from the broker's environment: alwaysInheritedEnv plus whatever
+// `inherit_env` declared. Declaring a name that is already in the always-pass set
+// is redundant, not an error, so it collapses here rather than being rejected at
+// load — an operator listing PATH explicitly is being clear, not wrong.
+func inheritedEnvNames(configured []string) []string {
+	set := make(map[string]struct{}, len(alwaysInheritedEnv)+len(configured))
+	for _, name := range alwaysInheritedEnv {
+		set[name] = struct{}{}
+	}
+	for _, name := range configured {
+		if name = strings.TrimSpace(name); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// inheritedEnv returns the `KEY=VALUE` entries a spawn inherits from the broker's
+// own environment, in sorted key order for the same reproducibility reason
+// sortedEnvKeys exists.
+//
+// A declared name the broker does not actually hold is SKIPPED rather than
+// exported empty: an instance can tell "unset" from "set to the empty string",
+// and a provider that finds its api_key_env set to "" fails differently (and less
+// legibly) than one that finds it absent.
+func inheritedEnv(configured []string) []string {
+	names := inheritedEnvNames(configured)
+	env := make([]string, 0, len(names))
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+// spawnEnvNames returns, sorted, the NAMES of every variable one registry entry's
+// spawns will actually carry: what is inherited and present, what the entry
+// declares, and the three broker-owned variables.
+//
+// It exists for the boot log, and it reports what will be CARRIED rather than
+// what was declared on purpose. A name declared under `inherit_env` that the
+// broker process does not hold is therefore absent from the line, which is the
+// cheapest possible diagnostic for the failure this story introduces: an operator
+// who declared ANTHROPIC_API_KEY but did not export it into the broker's shell
+// sees that at boot instead of at the first turn.
+//
+// Values are never returned. The caller logs this, and half of these names are
+// credentials.
+func spawnEnvNames(configured []string, entryEnv map[string]string) []string {
+	set := make(map[string]struct{})
+	for _, name := range inheritedEnvNames(configured) {
+		if _, ok := os.LookupEnv(name); ok {
+			set[name] = struct{}{}
+		}
+	}
+	for key := range entryEnv {
+		set[key] = struct{}{}
+	}
+	for _, name := range brokerOwnedEnv {
+		set[name] = struct{}{}
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// missingInheritEnv returns the declared `inherit_env` names the broker process
+// does not actually hold, sorted. Nothing fails over it — an operator may well
+// run one broker.yaml across machines where only some of the names are set — but
+// it is worth one WARN at boot, because the alternative discovery path is an
+// instance failing to authenticate to a provider.
+func missingInheritEnv(configured []string) []string {
+	var missing []string
+	for _, name := range configured {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := os.LookupEnv(name); !ok {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // newSpawnSecret returns a 128-bit random hex secret for one instance spawn —

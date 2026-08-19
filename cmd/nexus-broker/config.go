@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -88,6 +89,30 @@ type Config struct {
 	// means `nexus`, and an operator must not be able to silently change what an
 	// existing client ends up spawning.
 	Binaries map[string]BinaryEntry `yaml:"binaries"`
+
+	// InheritEnv names the variables a spawned instance inherits from the
+	// BROKER'S OWN environment, on top of the always-pass set (HOME, LANG, PATH,
+	// TZ — see alwaysInheritedEnv) and the three broker-owned NEXUS_BROKER_*
+	// variables. Names only: a value is whatever the broker process holds, so
+	// this key declares what may cross the boundary, never what it is.
+	//
+	// Empty (the default) means an instance carries the always-pass set, its
+	// entry's `env:`, and nothing else. That is a DELIBERATE BREAK with the
+	// behaviour that preceded it, where a spawn simply took os.Environ(): a claim
+	// supplies the whole engine config, every provider resolves its credential
+	// from an env var that config NAMES (`api_key_env` and equivalents) and the
+	// same config sets `base_url` — so wholesale inheritance let any caller read
+	// any variable the broker held and post it wherever it liked. An allowlist of
+	// known provider key names could not have closed that, because the caller
+	// chooses the name; only reducing the environment to what the operator
+	// declared bounds it.
+	//
+	// It is broker-level rather than per-entry because it answers a question
+	// about the BROKER'S environment ("which of the things I was started with may
+	// leave this process"), which does not vary by which variant is spawned. A
+	// value that IS per-variant belongs in that entry's `env:`, which sets it
+	// outright instead of forwarding it.
+	InheritEnv []string `yaml:"inherit_env"`
 
 	// Warnings are non-fatal configuration complaints collected during the load
 	// — deprecated keys, folded aliases — for the caller to log.
@@ -453,6 +478,58 @@ func foldBinaryRegistry(declared map[string]BinaryEntry, alias *string) (map[str
 	return out, warnings, nil
 }
 
+// keyInheritEnv is the broker-level pass-through key, named in the errors
+// resolveInheritEnv produces so an operator can grep for it.
+const keyInheritEnv = "inherit_env"
+
+// resolveInheritEnv validates the declared `inherit_env` list and returns it
+// trimmed, de-duplicated and sorted.
+//
+// Sorted rather than as-written because the list decides a spawned process's
+// environment, and that environment is already built in sorted order so a boot is
+// reproducible (see sortedEnvKeys); an order-sensitive list would be the only
+// thing in the spawn path that was not.
+//
+// The three rejections are all "this entry can never do what it looks like it
+// does", which is exactly what a boot failure is for:
+//
+//   - An empty entry names no variable. It is almost always a stray `-` or a
+//     trailing comma in the YAML, and silently dropping it would hide the typo
+//     next to it.
+//   - A name containing `=` is not a variable name; an operator who wrote
+//     `FOO=bar` here meant an entry's `env:` map, which SETS a value, and saying
+//     so is more useful than exporting a variable literally called "FOO=bar".
+//   - A NEXUS_BROKER_* name is meaningless: buildCommand injects those three
+//     last, so declaring one changes nothing at all. Accepting it would leave an
+//     operator believing they had configured the dial-back.
+func resolveInheritEnv(declared []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(declared))
+	// nil, not an empty slice: an undeclared list must stay indistinguishable from
+	// DefaultConfig's zero value, which the defaults test compares structurally.
+	var out []string
+	for _, raw := range declared {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("%s: an entry is empty; every entry must name a variable to inherit from the broker's own environment", keyInheritEnv)
+		}
+		if strings.Contains(name, "=") {
+			return nil, fmt.Errorf("%s: %q is a name=value pair, not a variable name; %s forwards a variable the broker already holds, and binaries.<name>.env is where a value is set",
+				keyInheritEnv, name, keyInheritEnv)
+		}
+		if slices.Contains(brokerOwnedEnv, name) {
+			return nil, fmt.Errorf("%s: %s is set by the broker on every spawn and cannot be inherited; remove it",
+				keyInheritEnv, name)
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // sortedBinaryNames returns a registry map's keys in a stable order.
 //
 // Every walk of the registry goes through this, because Go randomizes map
@@ -704,6 +781,16 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.Binaries = binaries
 	cfg.Warnings = append(cfg.Warnings, warnings...)
+
+	// Validated here, with the registry, because the two together decide the
+	// whole environment a spawn will hold — and a mistake in either is a mistake
+	// about what leaves this process, which must fail the boot rather than one
+	// claim.
+	inheritEnv, err := resolveInheritEnv(cfg.InheritEnv)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.InheritEnv = inheritEnv
 
 	// Trimmed before expansion so a whitespace-only value reads as "unset"
 	// (persistence disabled) rather than as a directory literally named " ".

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -80,20 +81,7 @@ func run() error {
 		"admin_scope", cfg.AdminScope,
 	)
 
-	// One line per registry entry, carrying the RESOLVED path and not just the
-	// configured one. A bare `path` goes through the broker process's own PATH, so
-	// `nexus` can silently be a different build than the operator has in mind —
-	// a stale copy in ~/go/bin ahead of /usr/local/bin, say. That surprise has to
-	// be visible in the boot log, where it can be compared against a deploy, rather
-	// than inferred later from an instance behaving oddly.
-	for _, name := range sortedBinaryNames(cfg.Binaries) {
-		entry := cfg.Binaries[name]
-		logger.Info("binary registry entry",
-			"name", name,
-			"path", entry.Path,
-			"resolved_path", entry.ResolvedPath,
-		)
-	}
+	logBinaryRegistry(logger, cfg)
 
 	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
 	// the claim request's Host header. That is fine for a directly-reachable
@@ -377,4 +365,52 @@ func run() error {
 	}
 	logger.Info("nexus-broker stopped")
 	return nil
+}
+
+// logBinaryRegistry writes the boot lines describing what each registry entry
+// will spawn AND what environment those spawns will hold.
+//
+// Split out of run() so it can be asserted against a log sink: the environment a
+// spawn carries is now a security boundary, and "the operator can see what crosses
+// it" is a property worth a test rather than a hope.
+func logBinaryRegistry(logger *slog.Logger, cfg Config) {
+	// One line per registry entry, carrying the RESOLVED path and not just the
+	// configured one. A bare `path` goes through the broker process's own PATH, so
+	// `nexus` can silently be a different build than the operator has in mind —
+	// a stale copy in ~/go/bin ahead of /usr/local/bin, say. That surprise has to
+	// be visible in the boot log, where it can be compared against a deploy, rather
+	// than inferred later from an instance behaving oddly.
+	//
+	// The line also names the ENTIRE environment those spawns will carry, because
+	// an instance no longer inherits the broker's own environment wholesale and
+	// the operator has to be able to see what it does get. Names only, never
+	// values — several of them are credentials by construction, and the whole
+	// point of the key is that they do not leak.
+	//
+	// A name declared under `inherit_env` that this broker does not actually hold
+	// is absent from the line rather than listed as empty, so "I exported the key
+	// and it still is not there" is answerable from the boot log; missing declared
+	// names are called out once, below, rather than once per entry.
+	for _, name := range sortedBinaryNames(cfg.Binaries) {
+		entry := cfg.Binaries[name]
+		logger.Info("binary registry entry",
+			"name", name,
+			"path", entry.Path,
+			"resolved_path", entry.ResolvedPath,
+			"spawn_env", strings.Join(spawnEnvNames(cfg.InheritEnv, entry.Env), ","),
+		)
+	}
+
+	// Declared but not held. It is a WARN and not a boot failure on purpose: one
+	// broker.yaml is legitimately deployed across machines where only some of the
+	// names are exported, and refusing to start would make the safe configuration
+	// (declare everything any instance might want) the fragile one. The cost of
+	// getting it wrong is an instance that cannot reach a provider, so it is said
+	// out loud here rather than discovered at the first turn.
+	if missing := missingInheritEnv(cfg.InheritEnv); len(missing) > 0 {
+		logger.Warn("inherit_env names variables this broker's own environment does not hold, "+
+			"so no spawned instance will carry them; export them into the broker's environment "+
+			"or set them under binaries.<name>.env",
+			"missing", strings.Join(missing, ","))
+	}
 }

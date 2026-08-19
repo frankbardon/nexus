@@ -997,3 +997,62 @@ func TestA2ATaskSettingsResolve(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfigInheritEnv covers the broker-level pass-through list: what a
+// valid document yields, and the three shapes that fail the boot.
+//
+// The list is returned trimmed, de-duplicated and SORTED because it decides a
+// spawned process's environment, and that environment is already assembled in
+// sorted order so a boot is reproducible.
+func TestLoadConfigInheritEnv(t *testing.T) {
+	t.Run("trims, dedupes and sorts", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte(`
+inherit_env:
+  - OPENAI_API_KEY
+  - "  ANTHROPIC_API_KEY  "
+  - OPENAI_API_KEY
+`))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		want := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+		if !reflect.DeepEqual(cfg.InheritEnv, want) {
+			t.Errorf("InheritEnv = %v, want %v", cfg.InheritEnv, want)
+		}
+	})
+
+	t.Run("defaults to empty", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte("listen_addr: \":9090\"\n"))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if len(cfg.InheritEnv) != 0 {
+			t.Errorf("InheritEnv = %v, want empty: an undeclared broker must forward nothing beyond the always-pass set", cfg.InheritEnv)
+		}
+	})
+
+	for name, tc := range map[string]struct{ yaml, wants string }{
+		"empty entry": {
+			yaml:  "inherit_env:\n  - \"\"\n",
+			wants: "is empty",
+		},
+		"name=value pair": {
+			yaml:  "inherit_env:\n  - \"FOO=bar\"\n",
+			wants: "not a variable name",
+		},
+		"broker-owned name": {
+			yaml:  "inherit_env:\n  - NEXUS_BROKER_SPAWN_SECRET\n",
+			wants: "cannot be inherited",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatalf("LoadConfigFromBytes accepted %q", tc.yaml)
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.wants)
+			}
+		})
+	}
+}
