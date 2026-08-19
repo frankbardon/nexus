@@ -50,6 +50,21 @@ type wsConn struct {
 	closed chan struct{}
 	once   sync.Once
 
+	// replayMu guards replay.
+	replayMu sync.Mutex
+
+	// replay holds frames the write pump must write BEFORE anything queued on
+	// send. It is how a resuming client's buffered tail reaches the socket
+	// ahead of the live stream.
+	//
+	// It is a separate staging slice rather than a pre-fill of send because
+	// send is bounded at 256 frames while a replay is bounded in BYTES — a
+	// megabyte of token deltas is thousands of frames, so priming the queue
+	// would silently drop most of a replay against the very buffer that exists
+	// to prevent silent loss. Staging it costs nothing: the frames are already
+	// encoded and already retained by the lease's replay buffer.
+	replay [][]byte
+
 	// closeStatus and closeReason record the status code and reason the conn
 	// was shut down with. They are written exactly once inside shutdown's
 	// once.Do, so reading them after observing closed is race-free. They let a
@@ -79,6 +94,29 @@ func (c *wsConn) queue(data []byte) bool {
 	default:
 		return false
 	}
+}
+
+// primeReplay stages frames to be written ahead of everything queued on send.
+// It is called once, while the registry still holds its lock and before the
+// conn is published as a lease's client, so nothing can be queued in front of
+// the staged frames.
+func (c *wsConn) primeReplay(frames [][]byte) {
+	if len(frames) == 0 {
+		return
+	}
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	c.replay = append(c.replay, frames...)
+}
+
+// takeReplay returns the staged frames and clears the staging slice, so the
+// bytes are released as soon as the write pump has drained them.
+func (c *wsConn) takeReplay() [][]byte {
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	frames := c.replay
+	c.replay = nil
+	return frames
 }
 
 // shutdown closes the underlying WebSocket exactly once with the given status.
@@ -1118,21 +1156,77 @@ func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret strin
 // AttachClient binds a client connection to a known lease. It fails if the
 // lease is unknown or already has a client connection (single client per
 // lease for now).
+//
+// It attaches with NO replay: the connection sees the live stream from
+// whatever the lease sends next, which is what a first connect wants and what
+// every connect did before resumption existed. A reconnecting client that
+// wants the tail it missed calls AttachClientFrom instead.
 func (r *Registry) AttachClient(id string, conn *wsConn) error {
+	_, err := r.attachClient(id, conn, nil)
+	return err
+}
+
+// AttachClientFrom binds a client connection to a known lease AND stages
+// whatever the lease's replay buffer still holds after sequence `after`, plus
+// an explicit gap notice when the buffer cannot reach back that far.
+//
+// The returned clientResume is for the audit record; the frames themselves are
+// already staged on conn by the time it returns, so the caller only has to
+// start the write pump.
+//
+// The snapshot, the staging and the publication of conn as the lease's client
+// all happen under the registry lock, in that order. That is what makes the
+// replay exact rather than approximate: until conn is published no sender can
+// see it, so no live frame can be queued in front of — or duplicated into —
+// the staged tail.
+func (r *Registry) AttachClientFrom(id string, conn *wsConn, after uint64) (clientResume, error) {
+	return r.attachClient(id, conn, &after)
+}
+
+// attachClient is the single attach path. A nil `after` attaches with no
+// replay; a non-nil one resumes from that sequence.
+func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientResume, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
-		return fmt.Errorf("unknown lease: %s", id)
+		return clientResume{}, fmt.Errorf("unknown lease: %s", id)
 	}
 	if l.client != nil {
-		return fmt.Errorf("lease %s already has a client connection", id)
+		return clientResume{}, fmt.Errorf("lease %s already has a client connection", id)
 	}
+
+	var resume clientResume
+	if after != nil && l.clientStream != nil {
+		resume = l.clientStream.resumeFrom(*after)
+		staged := resume.frames
+		if resume.gap != nil {
+			// The notice goes FIRST. A client that is told what it lost only
+			// after being handed the survivors has already rendered them as a
+			// continuous stream, which is the failure this whole path exists to
+			// remove.
+			data, err := resume.gap.encode(id)
+			if err != nil {
+				// Encoding a gap notice cannot fail with a well-formed payload,
+				// but refusing the connection on a broker-side marshalling bug
+				// would be worse than the gap: attach live and let the client
+				// notice the sequence jump, which is exactly the pre-resume
+				// behaviour.
+				r.logger.Error("could not encode a stream gap notice; attaching the client "+
+					"without one, so the gap is detectable from the sequence only",
+					"lease_id", id, "error", err)
+			} else {
+				staged = append([][]byte{data}, staged...)
+			}
+		}
+		conn.primeReplay(staged)
+	}
+
 	l.client = conn
 	if l.instance != nil {
 		l.state = leaseStateActive
 	}
-	return nil
+	return resume, nil
 }
 
 // DetachInstance clears the instance connection from a lease (e.g. on the

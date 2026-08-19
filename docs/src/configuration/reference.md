@@ -3343,7 +3343,7 @@ auth:
 | `run_as`             | map      | *(absent)* | The **default OS credential** spawned instances run under — `uid` and `gid`, both required whenever the block is written — for every `binaries:` entry that does not declare its own. Absent (the default) means instances run as the broker's own uid and gid, exactly as they always have, and the spawn is byte-identical to what it was before this key existed. An entry's [`run_as`](#binary-registry-binaries) **replaces** this outright rather than merging field by field. Validated at boot: a block with only one of the two fields, a negative id, or an id above 4294967295 **fails startup** naming the key (and, for an entry, the entry). Requires the broker to run as **root** or hold `CAP_SETUID` **and** `CAP_SETGID`; otherwise every claim selecting such an entry fails to spawn. See [Running instances as another user](#running-instances-as-another-user-run_as) below. |
 | `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
-| `client_replay_buffer_bytes` | int | `1048576` (1 MiB) | How many bytes of **already-sent, client-bound frames** each lease retains so a client that missed them can be replayed. The broker stamps a **monotonic, per-lease sequence** (`seq`, counting from 1) on every frame it sends a lease's client, and keeps the encoded bytes here, evicting **oldest first** once the bound is reached. Both of the gateway's loss paths — no client attached, and an attached client whose send queue is full — retain the frame rather than discarding it, so the gap is both **detectable** (the sequence jumps) and **recoverable** (the frames are still held). Only client-bound frames are sequenced and buffered: instance-bound frames carry no `seq` and are not retained, so nothing on the dial-back side changed. The bound is in **bytes, not frames**, because client-bound payloads run from a few-byte token delta to a hundred-kilobyte tool result — a frame count would say nothing about memory. **Worst-case memory across the broker is this value × [`max_concurrent`](#session-broker-nexus-broker)** — 8 MiB at both defaults; with `max_concurrent: 0` (unlimited) it is unbounded, so pair the two. A single frame larger than the whole bound is not retained at all (it is evicted immediately) rather than breaching the bound. Set it to `0` to **disable retention** while leaving sequencing intact: loss stays visible to the client, but the broker keeps nothing to replay. A **negative** value is a boot failure naming the key. The buffer is **in-memory and dies with the lease**: it is never journaled, `state_dir` does not persist it, and a broker restart starts every lease's sequence again at 1 with an empty buffer. |
+| `client_replay_buffer_bytes` | int | `1048576` (1 MiB) | How many bytes of **already-sent, client-bound frames** each lease retains so a client that missed them can be replayed. The broker stamps a **monotonic, per-lease sequence** (`seq`, counting from 1) on every frame it sends a lease's client, and keeps the encoded bytes here, evicting **oldest first** once the bound is reached. Both of the gateway's loss paths — no client attached, and an attached client whose send queue is full — retain the frame rather than discarding it, so the gap is both **detectable** (the sequence jumps) and **recoverable** (the frames are still held). Only client-bound frames are sequenced and buffered: instance-bound frames carry no `seq` and are not retained, so nothing on the dial-back side changed. The bound is in **bytes, not frames**, because client-bound payloads run from a few-byte token delta to a hundred-kilobyte tool result — a frame count would say nothing about memory. **Worst-case memory across the broker is this value × [`max_concurrent`](#session-broker-nexus-broker)** — 8 MiB at both defaults; with `max_concurrent: 0` (unlimited) it is unbounded, so pair the two. A single frame larger than the whole bound is not retained at all (it is evicted immediately) rather than breaching the bound. Set it to `0` to **disable retention** while leaving sequencing intact: loss stays visible to the client, but the broker keeps nothing to replay. A **negative** value is a boot failure naming the key. Clients reach the retained frames with [`?from_seq=`](#ws-leaselease_id-http-api-not-yaml) on the client socket, which replays the retained tail before the live stream and announces an explicit `stream-gap` frame when the bound can no longer cover the requested resume point. The buffer is **in-memory and dies with the lease**: it is never journaled, `state_dir` does not persist it, and a broker restart starts every lease's sequence again at 1 with an empty buffer. |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
@@ -4967,6 +4967,58 @@ by a store that never issued anything.
 After the upgrade, only inbound `io` frames (client → instance) reset the
 `idle_timeout` timer, and a frame whose `lease_id` does not match the socket's
 lease is dropped.
+
+#### `?from_seq=<n>` — resuming a dropped stream
+
+A **second** query parameter, orthogonal to the credential: `?from_seq=<n>` states
+the highest [`seq`](#session-broker-nexus-broker) the client received before its
+socket dropped. The broker replays every frame it still retains **after** `n`,
+oldest first, and only then continues with the live stream — replayed frames
+always precede live ones. It is a query parameter for the same reason `?ticket=`
+is (a browser cannot set headers on a WebSocket upgrade, and there is no
+client → broker control frame to carry it in), and the two **compose in any
+order**.
+
+`?from_seq=` is **not a credential.** Ticket precedence, ownership and every
+refusal above are unchanged by its presence: it can never widen what a caller may
+connect to, only what an already-admitted caller is handed first.
+
+| Value | Behaviour |
+|-------|-----------|
+| Absent | The live stream only — byte for byte what every connect did before resumption existed. |
+| `0` | Replay **everything** the buffer still holds. Not the same as absent: it is a client saying it has seen nothing. |
+| `n` > 0 | Replay the retained frames with `seq > n`. |
+| `n` greater than the lease's last `seq` | Reported as a `restarted` gap (see below) and the whole retained buffer is replayed — the client's numbering came from a stream that no longer exists. |
+| Malformed (not a number, negative, out of range) | Treated as **absent**, never refused. A resume is an optimisation on top of a connection that works without it, so a client bug in building the URL costs the replay, not the session. |
+
+The replay is **not** bounded by the connection's 256-frame send queue — it is
+written ahead of it — so the full [`client_replay_buffer_bytes`](#session-broker-nexus-broker)
+worth of frames replays intact however many frames that is.
+
+**When the buffer cannot cover the resume point**, the socket opens with a
+`stream-gap` frame *before* anything else, naming the range that is gone:
+
+```json
+{"version":1,"lease_id":"…","signal":"stream-gap",
+ "payload":{"reason":"evicted","requested_from_seq":41,"missing_from_seq":42,"missing_through_seq":118}}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `reason` | `evicted` — the frames aged out of the bounded buffer. `restarted` — `requested_from_seq` is ahead of this lease's stream, which is what a lease restored across a broker restart looks like (the buffer is in-memory, so a restored lease renumbers from 1). |
+| `requested_from_seq` | Echoes the `from_seq` presented, so a client with several sockets in flight can tell which request it answers. |
+| `missing_from_seq`, `missing_through_seq` | **Inclusive** bounds of the frames the broker can no longer supply. Both are **omitted** when nothing is nameable — a `restarted` stream has no missing range under the new numbering. |
+
+The gap frame carries **no `seq`**: it describes one connection, not the lease's
+frame stream, so numbering it would make the stream's sequence depend on how often
+a client dropped. A gap is a **normal outcome a client must handle**, not an
+error — it is what any disconnection longer than the buffer produces. Adding the
+`stream-gap` signal needed no `brokerframe` version bump for the same reason `seq`
+did not: it is only ever sent to a client that opted in by presenting `?from_seq=`.
+
+The reconnect recipe end to end — mint a fresh ticket, send `from_seq`, handle the
+gap — is in the
+[session broker guide](../guides/session-broker.md#reconnecting-and-resuming-a-stream).
 
 ### `GET /leases` (HTTP API, not YAML)
 

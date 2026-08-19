@@ -2,6 +2,8 @@ package main
 
 import (
 	"container/list"
+	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
@@ -169,7 +171,15 @@ func (s *clientStream) retainLocked(seq uint64, data []byte) {
 func (s *clientStream) replayFrom(after uint64) ([][]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.replayFromLocked(after)
+}
 
+// replayFromLocked is replayFrom's body. Caller must hold s.mu. It exists so
+// resumeFrom can take the replay AND the surrounding sequence bounds under a
+// single acquisition: reading them separately would let an eviction land in
+// between and make the reported missing range describe a buffer state that
+// never existed.
+func (s *clientStream) replayFromLocked(after uint64) ([][]byte, bool) {
 	// Nothing has been sent yet, or the caller is already current: an empty
 	// replay is complete by definition.
 	if after >= s.next-1 {
@@ -191,6 +201,136 @@ func (s *clientStream) replayFrom(after uint64) ([][]byte, bool) {
 		out = append(out, bf.data)
 	}
 	return out, complete
+}
+
+// Gap reasons. They are wire values on a stream-gap frame, so a client can
+// branch on them without parsing prose.
+const (
+	// gapReasonEvicted means the frames immediately after the client's resume
+	// point have already been evicted from the replay buffer. The missing range
+	// names exactly which frames the broker can no longer supply.
+	gapReasonEvicted = "evicted"
+
+	// gapReasonRestarted means the resume point is AHEAD of this lease's
+	// stream — the client claims to have seen frames the broker has not sent.
+	// The one way that happens in practice is a lease restored from the journal
+	// after a broker restart: the buffer is in-memory, so the restored lease
+	// numbers again from 1. The client's position is void, not merely stale, so
+	// the broker replays everything it holds and says why.
+	gapReasonRestarted = "restarted"
+)
+
+// clientGap is the payload of a stream-gap frame: the range of client-bound
+// frames the broker cannot supply to a resuming client, and why.
+//
+// It is a NAMED RANGE rather than a bare "you missed something" flag because
+// the client is the only party that can decide what to do about it, and that
+// decision depends on how much is gone: a UI can re-render from its own
+// transcript for a handful of token deltas and must tell the user for a
+// thousand.
+type clientGap struct {
+	// Reason is gapReasonEvicted or gapReasonRestarted.
+	Reason string `json:"reason"`
+
+	// RequestedFromSeq echoes the from_seq the client presented, so a client
+	// with several sockets in flight can tell which request this answers.
+	RequestedFromSeq uint64 `json:"requested_from_seq"`
+
+	// MissingFromSeq and MissingThroughSeq are the inclusive bounds of the
+	// frames the broker no longer holds. Both are omitted when nothing is
+	// nameable — a restarted stream that has sent nothing yet, or one whose
+	// buffer still covers its whole history.
+	MissingFromSeq    uint64 `json:"missing_from_seq,omitempty"`
+	MissingThroughSeq uint64 `json:"missing_through_seq,omitempty"`
+}
+
+// encode renders the gap as the client-bound frame that announces it. The frame
+// is deliberately unsequenced (Seq stays zero) — see SignalStreamGap.
+func (g clientGap) encode(leaseID string) ([]byte, error) {
+	payload, err := json.Marshal(g)
+	if err != nil {
+		return nil, fmt.Errorf("encoding stream gap payload: %w", err)
+	}
+	data, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalStreamGap,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encoding stream gap frame: %w", err)
+	}
+	return data, nil
+}
+
+// clientResume is what a reconnecting client is owed: the retained frames to
+// replay, oldest first, and the gap that precedes them when the buffer could
+// not cover the requested resume point.
+type clientResume struct {
+	// frames are the retained encoded frames with seq > the effective resume
+	// point, oldest first.
+	frames [][]byte
+
+	// gap is nil when the buffer covered the resume point exactly. When it is
+	// set the client must be told BEFORE it is handed frames.
+	gap *clientGap
+
+	// lastSeq is the highest sequence the lease had assigned at the instant the
+	// resume was computed. It is for the audit record, not the wire.
+	lastSeq uint64
+}
+
+// resumeFrom computes what a client resuming after sequence `after` is owed:
+// the retained tail, plus an explicit gap when the buffer no longer reaches
+// back to that point.
+//
+// Everything is read under ONE acquisition of s.mu, so the replayed frames and
+// the range the gap names always describe the same buffer.
+//
+// Two shapes of gap are possible and they are told apart deliberately:
+//
+//   - The resume point is behind what the buffer still holds — frames were
+//     evicted. The client missed a specific, nameable range.
+//   - The resume point is ahead of the stream — the client's numbering came
+//     from a different stream (a lease restored across a broker restart
+//     renumbers from 1). Reporting that as an eviction would name an inverted
+//     range and tell the client to expect frames that will never come, so it
+//     gets its own reason and the whole retained buffer is replayed instead.
+func (s *clientStream) resumeFrom(after uint64) clientResume {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	last := s.next - 1
+	reason := ""
+	effective := after
+	if after > last {
+		// The client is ahead of us. Its position means nothing against THIS
+		// stream, so resume it from the start of what we hold rather than from a
+		// sequence that will never be reached.
+		effective = 0
+		reason = gapReasonRestarted
+	}
+
+	frames, complete := s.replayFromLocked(effective)
+	if complete && reason == "" {
+		return clientResume{frames: frames, lastSeq: last}
+	}
+	if reason == "" {
+		reason = gapReasonEvicted
+	}
+
+	gap := clientGap{Reason: reason, RequestedFromSeq: after}
+	if !complete {
+		// The missing range runs from the first frame the client did not have to
+		// the last one the buffer cannot produce: either the frame before the
+		// oldest one still retained, or — with nothing retained at all — every
+		// frame the lease has sent.
+		gap.MissingFromSeq = effective + 1
+		gap.MissingThroughSeq = last
+		if front := s.buf.Front(); front != nil {
+			gap.MissingThroughSeq = front.Value.(*bufferedFrame).seq - 1
+		}
+	}
+	return clientResume{frames: frames, gap: &gap, lastSeq: last}
 }
 
 // lastSeq returns the sequence of the most recently assigned frame, or 0 if the

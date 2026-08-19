@@ -752,10 +752,55 @@ A **ticket** is the one credential the broker itself mints. End to end:
    mitigation for that.
 4. **Reconnecting needs a fresh one.** `POST /ticket/{lease_id}`, authenticated
    with the credential the lease was claimed with, mints a replacement. Do *not*
-   re-claim: that spawns a new instance and abandons the live session.
+   re-claim: that spawns a new instance and abandons the live session. Send the
+   fresh ticket **together with `?from_seq=`** so the broker also replays what
+   the socket missed — the full recipe is [below](#reconnecting-and-resuming-a-stream).
 5. **Non-browser clients can skip tickets entirely** and send
    `Authorization: Bearer <token>` on the handshake instead — the same token the
    lease was claimed with.
+
+#### Reconnecting and resuming a stream
+
+A dropped socket is not a lost session: the lease, the instance and the
+[replay buffer](#frame-sequencing-and-the-replay-buffer) all survive it. The
+whole reconnect, end to end:
+
+1. **Remember the last `seq` you received.** Every client-bound frame carries
+   one. Keep the highest.
+2. **Do not re-claim.** `POST /claim` spawns a *new* instance and abandons the
+   live session. The lease id you already hold is still the right one.
+3. **Mint a fresh ticket** with `POST /ticket/{lease_id}`, authenticated with the
+   credential the lease was claimed with — the original ticket burned on the
+   first connect and lives only 30 seconds anyway. A client that can set headers
+   can skip this and send `Authorization: Bearer <token>` instead.
+4. **Reconnect with both parameters**:
+   `ws_url + "?ticket=" + encodeURIComponent(ticket) + "&from_seq=" + lastSeq`.
+   They compose freely and in any order; `?from_seq=` is not a credential and
+   changes nothing about how the ticket is judged.
+5. **Handle the two possible openings.** Either the buffer covered you — the
+   frames you missed arrive first, in order, followed by the live stream — or it
+   did not, and the socket opens with a **`stream-gap` frame** naming what is
+   gone. **A gap is a normal outcome, not an error**: it is what a long
+   disconnection or a chatty agent produces against a bounded buffer, and a
+   client that does not handle it is a client that will render a hole as if it
+   were continuous prose. See
+   [when the buffer cannot cover you](#when-the-buffer-cannot-cover-you).
+
+```js
+// lastSeq is tracked by the message handler: ws.onmessage = e => {
+//   const f = JSON.parse(e.data); if (f.seq) lastSeq = f.seq; ... }
+const { ticket } = await (await fetch(
+  `http://localhost:8080/ticket/${lease_id}`, { method: "POST", headers: auth })).json();
+
+const params = new URLSearchParams({ from_seq: String(lastSeq) });
+if (ticket) params.set("ticket", ticket);   // absent when the broker has no auth: block
+const ws = new WebSocket(`${ws_url}?${params}`);
+```
+
+Omitting `?from_seq=` connects to the live stream only, exactly as a first
+connect does — and so does a value the broker cannot parse. A malformed
+`from_seq` is treated as **absent** rather than refused, so a bug in building
+the URL costs you the replay and not the session.
 
 A non-empty `?ticket=` **wins exclusively**: when both are presented the
 `Authorization` header is not consulted at all, and a ticket failure is final
@@ -1270,9 +1315,13 @@ ws.onopen = () => {
 };
 
 // reconnecting later? the ticket is single-use and 30s-lived — mint a fresh one
-// rather than re-claiming, which would spawn a NEW instance.
+// rather than re-claiming, which would spawn a NEW instance — and send the
+// highest seq you received as ?from_seq= so the broker replays what you missed.
 // const { ticket: next } = await (await fetch(
 //   `http://localhost:8080/ticket/${lease_id}`, { method: "POST", headers: auth })).json();
+// new WebSocket(`${ws_url}?ticket=${encodeURIComponent(next)}&from_seq=${lastSeq}`);
+// a "stream-gap" frame on the new socket means the buffer could not cover you:
+// it names the missing range, and handling it is the client's job.
 
 // later: release the instance (the session persists on disk)
 await fetch(`http://localhost:8080/release/${lease_id}`, { method: "POST", headers: auth });
@@ -1338,6 +1387,65 @@ Four properties are worth stating plainly:
 Setting `client_replay_buffer_bytes: 0` disables retention while leaving
 sequencing intact — loss stays visible to the client, but the broker keeps
 nothing to replay with.
+
+#### Resuming from the buffer
+
+The buffer is reached with **`?from_seq=<n>`** on the client socket:
+
+```
+ws://localhost:8080/lease/lease-abc123?ticket=<value>&from_seq=41
+```
+
+`n` is the highest `seq` the client received. The broker replays every retained
+frame **after** it, oldest first, and only then continues with the live stream —
+replayed frames always precede live ones, whatever else is in flight when the
+socket opens. `?from_seq=0` means "I have seen nothing": it replays everything
+the buffer still holds, which is not the same as omitting the parameter (that
+asks for the live stream only).
+
+It is a query parameter for the same reason [`?ticket=`](#connecting-the-ticket-flow)
+is one — a browser cannot set headers on a WebSocket handshake, and the first
+frame a client sends is already routed straight through to the instance, so
+there is no control frame to carry it in. The two parameters compose and
+`?from_seq=` is **not a credential**: it never widens what a caller may connect
+to, and ownership is checked exactly as it is without it.
+
+The replay is not capped by the connection's 256-frame send queue — it is
+written ahead of it — so a full megabyte of buffered token deltas replays
+intact.
+
+#### When the buffer cannot cover you
+
+If the frames right after `from_seq` have already been evicted, the socket opens
+with a **`stream-gap` frame** before anything else:
+
+```json
+{"version":1,"lease_id":"a1b2…","signal":"stream-gap",
+ "payload":{"reason":"evicted","requested_from_seq":41,"missing_from_seq":42,"missing_through_seq":118}}
+```
+
+- `missing_from_seq` … `missing_through_seq` are the **inclusive** bounds of what
+  the broker can no longer supply. The frames it *can* still supply follow
+  immediately, then the live stream.
+- `reason` is `evicted` — the frames aged out of a bounded buffer — or
+  `restarted`, which means `from_seq` is **ahead** of this lease's stream. That
+  is the [restart](#what-a-restart-actually-does) case: a lease restored from the
+  journal renumbers from 1, so the client's position belongs to a stream that no
+  longer exists. Its old numbering is void; the broker replays everything it now
+  holds and the missing-range fields are omitted, because none can be named.
+- The gap frame carries **no `seq`**. It describes one *connection*, not the
+  lease's frame stream, so numbering it would make the stream's sequence depend
+  on how often a client dropped.
+
+**Treat a gap as a normal outcome and handle it.** It is what a disconnection
+longer than the buffer produces, and the client is the only party that can decide
+what to do: re-render from its own transcript, tell the user output is missing,
+or start a fresh view. Ignoring it puts you back where the sequence was
+introduced to stop you being — rendering a hole as continuous output.
+
+Adding `stream-gap` needed no `brokerframe` version bump, for the same reason
+`seq` did not: the broker only ever emits it to a client that asked for a resume,
+so nothing built against an older broker can be handed a signal it cannot decode.
 
 ## The A2A front door (`agents:`)
 

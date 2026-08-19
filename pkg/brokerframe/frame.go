@@ -77,12 +77,30 @@ const (
 	// client and the instance. The broker forwards these without parsing
 	// their contents.
 	SignalIO Signal = "io"
+
+	// SignalStreamGap tells a CLIENT that a range of client-bound frames it
+	// asked to resume from can no longer be supplied. Frame.Payload names the
+	// missing range; the broker's client gateway is the only thing that emits
+	// it, and only in answer to a resume request.
+	//
+	// It carries no Seq: a gap notice is a property of one CONNECTION, not of
+	// the lease's frame stream, so numbering it would shift every subsequent
+	// sequence for a client that reconnects and make the stream's numbering
+	// depend on how often a client dropped. It is written ahead of whatever
+	// the broker can still replay, so a client learns what it lost before it
+	// is handed what survived.
+	//
+	// An instance never sends or receives one. Adding it needed no Version
+	// bump for the same reason Frame.Seq did not: a broker only ever emits it
+	// to a client that opted in by presenting `?from_seq=`, so no peer built
+	// against an older broker can be handed a signal it cannot decode.
+	SignalStreamGap Signal = "stream-gap"
 )
 
 // valid reports whether s is a recognized signal.
 func (s Signal) valid() bool {
 	switch s {
-	case SignalRegister, SignalReady, SignalSessionIDReport, SignalShutdown, SignalIO:
+	case SignalRegister, SignalReady, SignalSessionIDReport, SignalShutdown, SignalIO, SignalStreamGap:
 		return true
 	default:
 		return false

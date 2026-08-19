@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -35,6 +37,18 @@ const (
 	// never-log-the-value rule — exists to contain the exposure this carrier
 	// implies (URLs reach proxy access logs, browser history and referrers).
 	ticketQueryParam = "ticket"
+
+	// fromSeqQueryParam is the query parameter a reconnecting client states the
+	// highest sequence it received on in, so the broker can replay what it
+	// still holds beyond that point before resuming the live stream.
+	//
+	// A query parameter for exactly the reason `?ticket=` is one: a browser
+	// cannot set headers on a WebSocket upgrade, and there is no client →
+	// broker control frame to carry it in — the first frame a client sends is
+	// already routed straight through to the instance. Unlike a ticket it is
+	// not a credential and carries no secret, so putting it in a URL costs
+	// nothing.
+	fromSeqQueryParam = "from_seq"
 )
 
 // errTicketRejected is THE refusal for every way a presented ticket can fail:
@@ -397,8 +411,20 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wc := newWSConn(conn)
-	if err := g.registry.AttachClient(leaseID, wc); err != nil {
-		g.logger.Warn("rejecting client connection", "lease_id", leaseID, "error", err)
+	// A resuming client stages its replay INSIDE the attach, under the registry
+	// lock, so no live frame can be queued in front of it. Without `?from_seq=`
+	// the attach is the one that predates resumption, byte for byte.
+	var (
+		resume    clientResume
+		attachErr error
+	)
+	if fromSeq, resuming := parseFromSeq(r.URL.Query()); resuming {
+		resume, attachErr = g.registry.AttachClientFrom(leaseID, wc, fromSeq)
+	} else {
+		attachErr = g.registry.AttachClient(leaseID, wc)
+	}
+	if attachErr != nil {
+		g.logger.Warn("rejecting client connection", "lease_id", leaseID, "error", attachErr)
 		_ = conn.Close(websocket.StatusPolicyViolation, "lease unavailable")
 		return
 	}
@@ -408,6 +434,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// one exposure the broker actually controls.
 	g.logger.Info("client connected", "lease_id", leaseID,
 		"principal_id", caller.ID, "credential", string(credential))
+	g.logResume(leaseID, resume)
 
 	ctx, cancelPumps := context.WithCancel(g.rootCtx)
 	defer cancelPumps()
@@ -426,6 +453,53 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	g.registry.DetachClient(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")
 	g.logger.Info("client disconnected", "lease_id", leaseID)
+}
+
+// parseFromSeq reads the resume point off a client handshake's query string.
+// It reports whether the client asked to resume at all, which is NOT the same
+// as a zero sequence: `?from_seq=0` is a client saying it has seen nothing and
+// wants everything the buffer still holds, while an absent parameter is a
+// client asking for the live stream only.
+//
+// A MALFORMED value — not a number, negative, out of range, or repeated with a
+// bad first value — is treated as ABSENT rather than refused. A resume is an
+// optimisation on top of a connection that works without it, so a client bug
+// in building the URL should cost the resume, not the session: refusing the
+// handshake would turn a cosmetic defect into an outage. The value is not a
+// credential, so nothing is being authorised leniently here.
+func parseFromSeq(query url.Values) (uint64, bool) {
+	raw := query.Get(fromSeqQueryParam)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+// logResume records what a resuming client was handed. A resume with nothing
+// to replay and no gap is silent: it is the steady state of a client that
+// reconnects promptly, and logging it would drown the record that matters.
+func (g *Gateway) logResume(leaseID string, resume clientResume) {
+	if resume.gap == nil {
+		if len(resume.frames) > 0 {
+			g.logger.Info("replaying buffered frames to a resuming client",
+				"lease_id", leaseID, "frames", len(resume.frames), "last_seq", resume.lastSeq)
+		}
+		return
+	}
+	g.logger.Warn("a resuming client could not be fully replayed; it has been told which "+
+		"frames are gone. Raise client_replay_buffer_bytes if this is routine rather than "+
+		"the tail of a long disconnection",
+		"lease_id", leaseID,
+		"reason", resume.gap.Reason,
+		"requested_from_seq", resume.gap.RequestedFromSeq,
+		"missing_from_seq", resume.gap.MissingFromSeq,
+		"missing_through_seq", resume.gap.MissingThroughSeq,
+		"replayed_frames", len(resume.frames),
+		"last_seq", resume.lastSeq)
 }
 
 // resolveClientPrincipal resolves the identity behind a client WebSocket
@@ -566,9 +640,26 @@ func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []b
 	}
 }
 
-// writePump drains wc.send and writes each frame to the WebSocket until the
-// context is cancelled or the connection is closed.
+// writePump writes wc's staged replay, then drains wc.send and writes each
+// frame to the WebSocket until the context is cancelled or the connection is
+// closed.
+//
+// The staged replay goes first and goes out UNCONDITIONALLY — it is not
+// select-ed against the send channel — which is what makes "replayed frames
+// precede live ones" a property of the pump rather than a race between two
+// producers. It is also why a replay is staged rather than queued: the send
+// channel holds 256 frames and a replay is bounded in bytes, so a megabyte of
+// token deltas would otherwise be truncated on its way out of the very buffer
+// that exists to stop frames being lost.
 func (g *Gateway) writePump(ctx context.Context, wc *wsConn) {
+	for _, data := range wc.takeReplay() {
+		if err := wc.conn.Write(ctx, websocket.MessageText, data); err != nil {
+			if ctx.Err() == nil {
+				g.logger.Debug("write pump ended during replay", "error", err)
+			}
+			return
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
