@@ -71,11 +71,24 @@ type a2aTurnInput struct {
 
 // ---- starting and continuing a turn ----
 
-// startTask mints a task, leases an instance and sends it the client's message.
+// startTask mints a task, admits it to its conversation's serial queue, and —
+// if the conversation is free — leases an instance and sends it the client's
+// message.
 //
-// The observer is attached BEFORE the input is sent, so the requesting client
-// cannot miss a frame produced between the instance being handed the message
-// and the handler getting around to subscribing.
+// The order is deliberate and every step of it is load-bearing:
+//
+//  1. The task is created and its durable record written FIRST, so a client that
+//     is handed a task id can read that task back from the moment it has one,
+//     even if the broker dies in the next instruction.
+//  2. The observer is attached BEFORE anything can move the task, so the
+//     requesting client cannot miss a frame produced between the instance being
+//     handed the message and the handler getting around to subscribing.
+//  3. The queue is entered before the instance is acquired, so two simultaneous
+//     messages on one conversation cannot both reach the agent loop.
+//
+// A QUEUED task returns here with nothing sent and its opening SUBMITTED
+// snapshot. It is a complete, streamable, cancellable, readable task — it simply
+// has not started yet, which is exactly what SUBMITTED means.
 //
 // Every refusal happens before a single frame is emitted, so a client that is
 // turned away gets an ordinary error response rather than a 200 stream whose
@@ -83,12 +96,16 @@ type a2aTurnInput struct {
 func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2aTurnInput, caller nexusauth.Principal) (*a2aTask, *a2aStream, a2a.Task, *a2a.Error) {
 	contextID := strings.TrimSpace(in.contextID)
 	if contextID == "" {
-		// A broker is multi-context by construction — one instance per task —
-		// so a client that named no context is simply given one, rather than
-		// being bound to a process-wide session the way a standalone serving
-		// instance is.
+		// A broker is multi-context by construction — one instance per
+		// conversation — so a client that named no context is simply given one,
+		// rather than being bound to a process-wide session the way a standalone
+		// serving instance is.
 		contextID = newA2AContextID()
 	}
+	// The same composite key a2aLeaseManager files its instance under, which is
+	// the point: the queue serializes exactly the tasks that would otherwise
+	// share one agent loop.
+	queueKey := a2aContextKey(caller.ID, card.profile, contextID)
 
 	task := newA2ATask(a2aTaskConfig{
 		taskID:    newA2ATaskID(),
@@ -96,25 +113,79 @@ func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2a
 		profile:   card.profile,
 		owner:     caller,
 		logger:    s.logger,
+		// The WRITE-ONLY view of the store, scoped to this caller. A task can
+		// therefore only ever write to its own principal's records, and has no
+		// lookup within reach at all.
+		sink:         s.store.For(caller, card.profile),
+		inputTimeout: s.inputTimeout,
 	})
 	// Wired after construction because the callback closes over the task it
-	// belongs to. Both halves are one-shot from the task's side: onTerminal runs
-	// inside terminate's sync.Once.
+	// belongs to. All three halves are one-shot from the task's side: onTerminal
+	// runs inside terminate's sync.Once.
 	task.onTerminal = func() {
 		s.tasks.remove(task)
-		if task.instance != nil {
-			task.instance.Release()
+		if instance := task.leasedInstance(); instance != nil {
+			instance.Release()
 		}
+		// Last, and unconditional: whatever ended this task, the conversation is
+		// now free and the next message queued on it must start.
+		s.queues.finish(queueKey, task)
 	}
 
 	// Attached first: from here on every frame the task emits is delivered to
 	// this observer, and the snapshot it opens on accounts for everything before.
 	sub, opening := task.attach()
+	s.tasks.add(task)
+	s.store.For(caller, card.profile).Create(task.taskID, contextID,
+		a2a.NewTaskStatus(a2a.TaskStateSubmitted),
+		a2aStoredMessage{MessageID: in.messageID, Role: a2a.RoleUser, Text: in.text})
 
+	if !s.queues.enter(queueKey, task, func() { s.promoteTask(card, in, caller, task) }) {
+		// Queued behind a live turn on this conversation. Nothing has been sent
+		// and no instance has been acquired; the client is answered with a task
+		// in SUBMITTED and will see WORKING when its turn comes.
+		return task, sub, opening, nil
+	}
+
+	if protoErr := s.beginTurn(ctx, card, in, caller, task); protoErr != nil {
+		// The turn never reached an agent. The task is settled rather than
+		// removed, so the durable record does not keep a SUBMITTED husk that
+		// nothing will ever move — and settling is what forgets the task, frees
+		// the conversation and releases anything it had acquired.
+		task.fail(protoErr.Message)
+		task.detach(sub)
+		return nil, nil, a2a.Task{}, protoErr
+	}
+	if task.terminated() {
+		// A spawn failure the provider CLASSIFIED settled the task instead of
+		// refusing the request. The snapshot already carries the terminal state,
+		// so both bindings close on it exactly as they would on a turn that ran
+		// and failed.
+		return task, sub, task.snapshotTask(), nil
+	}
+
+	s.logger.Debug("a2a task started",
+		"profile", card.profile, "task_id", task.taskID,
+		"context_id", contextID, "message_id", in.messageID)
+	return task, sub, opening, nil
+}
+
+// beginTurn acquires the instance a task runs on and hands it the client's
+// message. It is the half of starting a turn that is identical whether the task
+// started immediately or waited in a queue.
+//
+// A nil return does NOT mean the turn is running: a spawn failure the provider
+// classified settles the task terminally and returns nil, because "REJECTED,
+// because the agent could not be started" is an answer in the vocabulary the
+// client already speaks. A client never has to learn that this broker runs
+// agents in leased subprocesses, which is the entire premise of the ingress. A
+// non-nil return is the other case — the broker has no way to run agents at all,
+// which is not a property of the task.
+func (s *A2AServer) beginTurn(ctx context.Context, card *servedAgentCard, in a2aTurnInput, caller nexusauth.Principal, task *a2aTask) *a2a.Error {
 	instance, err := s.leases.Acquire(ctx, a2aLeaseRequest{
 		profile:   s.profiles[card.profile],
 		name:      card.profile,
-		contextID: contextID,
+		contextID: task.contextID,
 		owner:     caller,
 		hooks: a2aInstanceHooks{
 			Deliver: task.deliver,
@@ -122,43 +193,59 @@ func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2a
 		},
 	})
 	if err != nil {
-		// A failure the provider CLASSIFIED is answered as a terminal task rather
-		// than as a protocol error: the client asked an agent a question, and
-		// "REJECTED, because the agent could not be started" is an answer in the
-		// vocabulary it already speaks. It never has to learn that this broker runs
-		// agents in leased subprocesses, which is the entire premise of the ingress.
-		//
-		// The frames are emitted BEFORE the snapshot is taken, so the snapshot a
-		// blocking caller is answered with — and the opening frame a streaming
-		// caller gets — already carries the terminal state. Both bindings then close
-		// on it exactly as they would on a turn that ran and failed.
 		if state, reason, classified := a2aSpawnOutcome(err); classified {
 			s.logger.Warn("a2a task settled without ever reaching an agent instance",
 				"profile", card.profile, "task_id", task.taskID,
-				"context_id", contextID, "state", state.String(), "error", err)
+				"context_id", task.contextID, "state", state.String(), "error", err)
 			task.endWith(state, reason)
-			return task, sub, task.snapshotTask(), nil
+			return nil
 		}
-		task.detach(sub)
-		return nil, nil, a2a.Task{}, errLeaseUnavailable(card.profile, err)
+		return errLeaseUnavailable(card.profile, err)
 	}
-	task.instance = instance
-	s.tasks.add(task)
+	// Bound before the send, because the send goes through it.
+	task.useInstance(instance)
 
 	if err := task.send(brokerIOMessage{Type: ioTypeInput, Content: in.text}); err != nil {
 		// The message never reached the agent, so there is no turn to report on.
-		// The task is removed and the lease released rather than left as a
-		// SUBMITTED husk a client would have to cancel.
-		s.tasks.remove(task)
-		instance.Release()
-		task.detach(sub)
-		return nil, nil, a2a.Task{}, errSendFailed(card.profile, err)
+		// The caller settles the task, which releases the lease.
+		return errSendFailed(card.profile, err)
 	}
+	return nil
+}
 
-	s.logger.Debug("a2a task started",
+// promoteTask starts a turn that has been waiting for its conversation.
+//
+// It runs on a goroutine the queue owns, and is DETACHED from the request that
+// submitted the task. That is deliberate: a queued turn was accepted, and a
+// client that hangs up while waiting has not withdrawn it — it can read the
+// result with GetTask, or reattach with SubscribeToTask. Tying the spawn to the
+// original request context would cancel a turn the broker had already promised
+// to run.
+//
+// The WORKING transition is minted HERE rather than waiting for the instance's
+// first payload, and only here. For a task that never queued, "the instance said
+// something" is the honest first sign of work; for a queued one the transition
+// out of SUBMITTED is caused by the BROKER — the conversation became free — and a
+// client that was told it is waiting has to be told when it stops.
+func (s *A2AServer) promoteTask(card *servedAgentCard, in a2aTurnInput, caller nexusauth.Principal, task *a2aTask) {
+	if task.terminated() {
+		return
+	}
+	if protoErr := s.beginTurn(context.Background(), card, in, caller, task); protoErr != nil {
+		// There is no request left to answer, so the refusal becomes the task's
+		// own ending. FAILED rather than a protocol error for the same reason a
+		// classified spawn failure is: by the time a queued task is promoted, the
+		// only vocabulary left is task state.
+		task.fail(protoErr.Message)
+		return
+	}
+	if task.terminated() {
+		return
+	}
+	task.ensureWorking()
+	s.logger.Debug("a2a queued task started",
 		"profile", card.profile, "task_id", task.taskID,
-		"context_id", contextID, "message_id", in.messageID)
-	return task, sub, opening, nil
+		"context_id", task.contextID, "message_id", in.messageID)
 }
 
 // resumeTask routes a message naming a task onto the question that task is
@@ -171,7 +258,10 @@ func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2a
 // question simply stops blocking.
 func (s *A2AServer) resumeTask(card *servedAgentCard, in a2aTurnInput, caller nexusauth.Principal) (*a2aTask, *a2aStream, a2a.Task, *a2a.Error) {
 	task, found := s.tasks.get(caller, in.taskID)
-	if !found {
+	// A task addressed through ANOTHER profile's route is reported absent, exactly
+	// as one belonging to another caller is: a profile is a distinct public agent,
+	// and the two cases must not be tellable apart.
+	if !found || task.profile != card.profile {
 		return nil, nil, a2a.Task{}, a2a.ErrTaskNotFound(in.taskID)
 	}
 	if task.terminated() {
@@ -221,6 +311,10 @@ func (s *A2AServer) resumeTask(card *servedAgentCard, in a2aTurnInput, caller ne
 			WithMetadata("detail", a2aReasonTaskNotAwaiting)
 	}
 
+	// Recorded before it is sent, so a task read back later says what it was
+	// asked to do with the question as well as what it answered.
+	task.recordInbound(in.messageID, in.text)
+
 	answer := brokerIOMessage{Type: ioTypeHITLResponse, RequestID: parked.requestID}
 	// A multiple-choice question is answered by echoing an option id. Anything
 	// else is free text, which is what a free-text question expects and what a
@@ -262,13 +356,20 @@ func (s *A2AServer) resumeTask(card *servedAgentCard, in a2aTurnInput, caller ne
 // (specification section 3.3.2): a terminal state is final, so "cancel" on one
 // is a well-defined client mistake rather than an instruction to rewrite
 // history.
-func (s *A2AServer) cancelTask(caller nexusauth.Principal, taskID string) (a2a.Task, *a2a.Error) {
-	task, found := s.tasks.get(caller, taskID)
+func (s *A2AServer) cancelTask(caller nexusauth.Principal, profile, taskID string) (a2a.Task, *a2a.Error) {
+	// The DURABLE record decides whether the task exists, and the live registry
+	// decides whether it can still be canceled. Splitting the two is what lets a
+	// finished task be told it is not cancelable rather than that it never
+	// existed — before the store, a task that had ended was simply gone from
+	// memory and every cancel on one answered TaskNotFound, which is a worse
+	// answer than the specification's own.
+	rec, found := s.store.For(caller, profile).Get(taskID)
 	if !found {
 		return a2a.Task{}, a2a.ErrTaskNotFound(taskID)
 	}
-	if task.terminated() {
-		return a2a.Task{}, a2a.ErrTaskNotCancelable(taskID, task.snapshotTask().Status.State)
+	task, live := s.tasks.get(caller, taskID)
+	if !live || task.profile != profile || task.terminated() {
+		return a2a.Task{}, a2a.ErrTaskNotCancelable(taskID, rec.status().State)
 	}
 
 	settled := task.cancel(a2aCancelReason)
@@ -283,13 +384,19 @@ func (s *A2AServer) cancelTask(caller nexusauth.Principal, taskID string) (a2a.T
 	// Told after the fact, and a failure here is recorded rather than returned:
 	// the client's task IS canceled — that is what the returned Task says — and
 	// reporting an error would suggest otherwise.
-	if err := task.send(brokerIOMessage{
-		Type:   ioTypeCancel,
-		TurnID: task.boundTurn(),
-		Source: ioCancelSource,
-	}); err != nil {
-		s.logger.Warn("a2a task was canceled but the instance could not be told",
-			"profile", task.profile, "task_id", taskID, "error", err)
+	//
+	// A task cancelled while it was still QUEUED has no instance at all, and that
+	// is not a failure to report: nothing was ever sent, so there is nothing to
+	// stop.
+	if task.leasedInstance() != nil {
+		if err := task.send(brokerIOMessage{
+			Type:   ioTypeCancel,
+			TurnID: task.boundTurn(),
+			Source: ioCancelSource,
+		}); err != nil {
+			s.logger.Warn("a2a task was canceled but the instance could not be told",
+				"profile", task.profile, "task_id", taskID, "error", err)
+		}
 	}
 	s.logger.Info("a2a task canceled", "profile", task.profile, "task_id", taskID)
 	return task.snapshotTask(), nil
@@ -344,7 +451,7 @@ func (s *A2AServer) handleSendMessage(w http.ResponseWriter, r *http.Request, ca
 
 // handleCancelTask settles a task and answers with it.
 func (s *A2AServer) handleCancelTask(w http.ResponseWriter, r *http.Request, card *servedAgentCard, b a2aBinding, req *a2a.CancelTaskRequest) {
-	task, protoErr := s.cancelTask(callerPrincipal(r), req.ID)
+	task, protoErr := s.cancelTask(callerPrincipal(r), card.profile, req.ID)
 	if protoErr != nil {
 		s.writeA2AError(w, card.profile, b, protoErr)
 		return

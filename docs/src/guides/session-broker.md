@@ -1124,15 +1124,17 @@ A few rules worth knowing before you write the block; the full key list is in th
 **A broker with no `agents:` block is unchanged in every respect** — no routes
 are registered, no card is built, and nothing new appears in the boot log.
 
-> **Current state.** `SendMessage`, `SendStreamingMessage` and `CancelTask` are
-> driven end to end: a message starts (or resumes) a real isolated instance and
-> the turn is translated back into A2A frames — see
-> [One conversation, one instance](#one-conversation-one-instance-contextid) and
-> [What the A2A ingress translates](#what-the-a2a-ingress-translates) below.
-> `GetTask`, `ListTasks` and `SubscribeToTask` still answer a well-formed
-> `UnsupportedOperationError` carrying `detail: OPERATION_NOT_IMPLEMENTED`: all
-> three read a task after it has ended, which needs a durable per-principal task
-> record the ingress does not yet keep — it holds live tasks only.
+> **Current state.** `SendMessage`, `SendStreamingMessage`, `CancelTask`,
+> `GetTask`, `ListTasks` and `SubscribeToTask` are all driven end to end: a
+> message starts (or resumes) a real isolated instance, the turn is translated
+> back into A2A frames, and the task stays readable afterwards — see
+> [One conversation, one instance](#one-conversation-one-instance-contextid),
+> [What the A2A ingress translates](#what-the-a2a-ingress-translates) and
+> [Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask)
+> below. The push-notification operations and `GetExtendedAgentCard` still answer
+> a well-formed `UnsupportedOperationError` carrying
+> `detail: OPERATION_NOT_IMPLEMENTED`, and the matching card capabilities are
+> `false`.
 
 ### One conversation, one instance (`contextId`)
 
@@ -1280,6 +1282,98 @@ the rest absent rather than faking them**: the IO envelope carries no tool
 results, so it publishes no tool, file or budget artifacts. See
 [Plugin contracts](plugin-contracts.md) for the wider pattern.
 
+### Reading tasks back (`GetTask`, `ListTasks`, `SubscribeToTask`)
+
+A2A tasks outlive the call that created them, and on a broker they outlive far
+more than that: the instance that ran a task is released when the conversation
+goes quiet, and the broker process itself restarts. A client asks about a task
+*precisely* when those things have happened, so the broker keeps a **durable
+record of every task** in `<state_dir>/a2a-tasks.jsonl` — the same
+append-and-compact file shape as the lease journal, so a `state_dir` holds one
+kind of thing rather than two.
+
+```bash
+# What did that task end up doing?
+curl -s https://broker.example/agents/support/a2a/v1/tasks/task-abc123 \
+  -H 'Authorization: Bearer <token>' | jq '.status.state, .artifacts[0]'
+
+# What has this conversation been asked lately?
+curl -s 'https://broker.example/agents/support/a2a/v1/tasks?contextId=ctx-42&pageSize=10' \
+  -H 'Authorization: Bearer <token>' | jq '.tasks[].id'
+
+# Reattach to a task that is still running.
+curl -sN -X POST https://broker.example/agents/support/a2a/v1/tasks/task-abc123:subscribe \
+  -H 'Authorization: Bearer <token>'
+```
+
+Four things about these three operations:
+
+- **They answer from the record, not from memory** — even while the task is
+  live. Every frame is persisted before it is delivered, so the record is never
+  behind what a client has already been told, and there is one answer to the
+  question rather than two that can differ.
+- **They are scoped to the authenticated caller *and* to the profile they were
+  addressed to, and a task outside that scope is *indistinguishable* from one
+  that never existed.** Same error, same status, same body. A distinct "exists
+  but is not yours" answer would be an existence oracle for ids the caller was
+  never told — the same reasoning behind the broker's single `unknown lease`
+  refusal. Profile is part of the key for the same reason it is part of a
+  conversation's: `ListTasks` on the research agent lists research tasks, not
+  the caller's support conversations.
+- **`SubscribeToTask` reattaches to a live task** and receives exactly the frames
+  every other attached stream receives, opening on the state it missed. A task
+  that is already terminal gets its state and an immediate EOF rather than an
+  open socket nothing will ever write to; a task still queued gets its
+  `SUBMITTED` snapshot and a stream that stays open until its turn runs.
+- **A task left in flight by a stopped broker is settled at `FAILED`** when the
+  store reopens, with a status message saying so. A client polling `GetTask`
+  gets an ending rather than `WORKING` for ever.
+
+**With no `state_dir` the store is memory-only.** All three operations still
+answer, but only for tasks this process ran. That is the same bargain such a
+broker has already made for its leases.
+
+Retention is a real policy and is configurable — `a2a.tasks.ttl` (default `24h`)
+and `a2a.tasks.max_per_context` (default `50`), plus a fixed global ceiling and a
+16 KiB cap on stored text. A turn's *streamed* output is never truncated; only
+the stored copy is, and it says so when it happens. The numbers and the reasoning
+behind each are in the
+[configuration reference](../configuration/reference.md#a2a-task-retention-a2atasks).
+
+### Two messages on one conversation queue
+
+A Nexus instance runs **one agent loop**. Send it two inputs while a turn is in
+flight and you do not get two turns — you get one turn with both messages mixed
+into it. So the broker will not do that: **a conversation runs one task at a
+time.**
+
+A second message on a `contextId` whose task is still live is accepted and
+queued. Its task sits in `TASK_STATE_SUBMITTED` — the specification's own word
+for "accepted, not yet started" — with nothing sent to any instance, until the
+task ahead of it is terminal. Then it moves to `TASK_STATE_WORKING` and runs. A
+queued task is a complete task the whole time: readable with `GetTask`,
+streamable with `SubscribeToTask`, cancellable with `CancelTask`.
+
+The queue is per **(caller, profile, `contextId`)**, so two conversations never
+wait on each other, and it advances on exactly one event: a task reaching a
+terminal state. That is what makes it robust rather than fragile —
+
+- the instance crashing or being idle-released fails the active task, which
+  promotes the next one, which **acquires a fresh instance** and carries the
+  conversation on from its session;
+- cancelling a queued task removes it and disturbs nothing;
+- a queued turn is detached from the request that submitted it, so a client that
+  hangs up has not withdrawn its message.
+
+**The one case that needs a deadline is a question nobody answers.** A task at
+`TASK_STATE_INPUT_REQUIRED` keeps the queue on purpose: the agent loop is blocked
+inside `ask_user`, so starting the next turn would send input to an instance that
+cannot read it. `a2a.tasks.input_timeout` (default `15m`, `"0s"` disables) is
+what stops that being a deadlock — on expiry the task is driven to `FAILED`,
+every attached stream closes, the instance is told to cancel the turn, and the
+queue moves. Fifteen minutes is chosen against a human: a question routed to a
+person has to survive being paged, read, thought about and answered.
+
 ## Capacity and queueing
 
 `max_concurrent` caps live instances. Each claim acquires a slot **before**
@@ -1361,6 +1455,15 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   sessions created before the feature (or by another broker) have none. An
   unrecorded session resumes unchecked, so
   [do not treat the `409` as a guarantee](#a-resume-re-uses-the-binary-that-created-the-session).
+- **A2A task history is bounded, and the bound is lossy by design.** The task
+  store keeps 24 hours of finished tasks, 50 per conversation, 2048 in total, and
+  16 KiB of text per artifact or message — see
+  [Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask). A
+  task evicted by any of those reads back as **unknown**, which is
+  indistinguishable from an id that never existed, and a long answer reads back
+  truncated (marked as such). Nothing warns a client that this happened. If you
+  need a durable transcript, take one from the engine session rather than from
+  the broker's task record, which is a read-back convenience and not an archive.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but

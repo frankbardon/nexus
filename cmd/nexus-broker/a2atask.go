@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -58,6 +59,11 @@ const (
 	a2aDefaultQuestion    = "the agent is waiting for input"
 	a2aInstanceGoneReason = "the agent instance stopped responding before the turn finished"
 )
+
+// a2aInputTimeoutReason is what a task abandoned at INPUT_REQUIRED is failed
+// with. It names the deadline, because the only actionable thing a client can do
+// about it is answer faster or ask its operator to raise a2a.tasks.input_timeout.
+const a2aInputTimeoutReason = "the agent asked a question and no answer arrived within %s, so the turn was abandoned"
 
 // a2aStream is one attached observer of a task: a SendStreamingMessage
 // response, or a blocking SendMessage waiting for a frame it must answer on.
@@ -113,14 +119,25 @@ type a2aTask struct {
 	owner  nexusauth.Principal
 	logger *slog.Logger
 
-	// instance is the leased instance this task drives. Payloads go out through
-	// it; payloads come back through deliver.
-	instance a2aInstance
+	// sink is the durable record this task writes through to. Every frame is
+	// persisted BEFORE it is delivered (see emit), so a client that reads
+	// GetTask immediately after receiving a frame can never be told something
+	// older than what it already holds.
+	//
+	// It is the WRITE-ONLY view of the store: a task translating instance
+	// payloads has no lookup within reach. Nil is tolerated so a directly
+	// constructed task in a test needs no store.
+	sink a2aTaskSink
+
+	// inputTimeout bounds how long this task may sit at INPUT_REQUIRED before it
+	// is abandoned. Zero disables the deadline. See armInputDeadlineLocked for
+	// why there is one at all.
+	inputTimeout time.Duration
 
 	// onTerminal is called exactly once, from inside the terminal sequence. It
-	// is how the ingress forgets a finished task and releases its lease, so
-	// "the lease is returned when the task ends" holds by construction rather
-	// than by each caller remembering.
+	// is how the ingress forgets a finished task, releases its lease and lets
+	// the next task on the conversation start, so all three hold by construction
+	// rather than by each caller remembering.
 	onTerminal func()
 
 	done     chan struct{}
@@ -129,6 +146,15 @@ type a2aTask struct {
 	mu       sync.Mutex
 	snapshot a2a.Task
 	subs     map[*a2aStream]struct{}
+	// instance is the leased instance this task drives. Payloads go out through
+	// it; payloads come back through deliver.
+	//
+	// It is guarded because a QUEUED task is given its instance by the promotion
+	// goroutine, while a CancelTask on an HTTP goroutine may be reading it at the
+	// same moment.
+	instance a2aInstance
+	// inputTimer is the armed input deadline, nil when none is armed.
+	inputTimer *time.Timer
 	// working records that the WORKING transition has been emitted, so the
 	// first sign of life from the instance moves the task and later ones do
 	// not restate it.
@@ -155,13 +181,15 @@ type a2aTask struct {
 // a parameter list because the list had reached the length where two same-typed
 // arguments can be transposed without the compiler noticing.
 type a2aTaskConfig struct {
-	taskID     string
-	contextID  string
-	profile    string
-	owner      nexusauth.Principal
-	logger     *slog.Logger
-	instance   a2aInstance
-	onTerminal func()
+	taskID       string
+	contextID    string
+	profile      string
+	owner        nexusauth.Principal
+	logger       *slog.Logger
+	instance     a2aInstance
+	sink         a2aTaskSink
+	inputTimeout time.Duration
+	onTerminal   func()
 }
 
 func newA2ATask(cfg a2aTaskConfig) *a2aTask {
@@ -169,17 +197,39 @@ func newA2ATask(cfg a2aTaskConfig) *a2aTask {
 		cfg.logger = slog.Default()
 	}
 	return &a2aTask{
-		taskID:     cfg.taskID,
-		contextID:  cfg.contextID,
-		profile:    cfg.profile,
-		owner:      cfg.owner,
-		logger:     cfg.logger,
-		instance:   cfg.instance,
-		onTerminal: cfg.onTerminal,
-		done:       make(chan struct{}),
-		subs:       make(map[*a2aStream]struct{}),
-		snapshot:   a2a.NewTask(cfg.taskID, cfg.contextID),
+		taskID:       cfg.taskID,
+		contextID:    cfg.contextID,
+		profile:      cfg.profile,
+		owner:        cfg.owner,
+		logger:       cfg.logger,
+		instance:     cfg.instance,
+		sink:         cfg.sink,
+		inputTimeout: cfg.inputTimeout,
+		onTerminal:   cfg.onTerminal,
+		done:         make(chan struct{}),
+		subs:         make(map[*a2aStream]struct{}),
+		snapshot:     a2a.NewTask(cfg.taskID, cfg.contextID),
 	}
+}
+
+// useInstance binds this task to the leased instance it drives.
+//
+// It is a setter rather than a constructor field because a QUEUED task is
+// created long before it is given one: the instance is acquired at promotion,
+// which happens on another goroutine once the task ahead of it settles.
+func (t *a2aTask) useInstance(instance a2aInstance) {
+	t.mu.Lock()
+	t.instance = instance
+	t.mu.Unlock()
+}
+
+// leasedInstance returns the instance this task drives, nil when it has not been
+// given one — which is exactly the state of a task still waiting in its
+// conversation's queue.
+func (t *a2aTask) leasedInstance() a2aInstance {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.instance
 }
 
 // ---- observers ----
@@ -235,6 +285,10 @@ func (t *a2aTask) emit(frame a2a.StreamResponse) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	applyA2AFrame(&t.snapshot, frame)
+	// Persisted BEFORE the fan-out, so the durable record is never behind what a
+	// client has already been told. A read that raced a frame must answer with
+	// the frame, not with the state before it.
+	t.persistLocked(frame)
 	for s := range t.subs {
 		select {
 		case s.frames <- frame:
@@ -247,6 +301,43 @@ func (t *a2aTask) emit(frame a2a.StreamResponse) {
 				"profile", t.profile, "task_id", t.taskID, "queue_depth", a2aStreamQueueDepth)
 		}
 	}
+}
+
+// persistLocked writes one frame through to the durable record. Caller MUST hold
+// t.mu.
+//
+// Only STATUS and ARTIFACT frames reach the store, which is also the whole of
+// what a frame can be — and it is why the store's growth is bounded by the shape
+// of a turn rather than by its volume. A turn that streams ten thousand deltas
+// emits no frame for any of them: the deltas are accumulated in memory and only
+// the finished answer becomes an artifact, so a long turn writes the same
+// handful of records a short one does.
+func (t *a2aTask) persistLocked(frame a2a.StreamResponse) {
+	if t.sink == nil {
+		return
+	}
+	switch frame.Kind() {
+	case a2a.StreamPayloadStatusUpdate:
+		t.sink.RecordStatus(t.taskID, frame.StatusUpdate.Status)
+	case a2a.StreamPayloadArtifactUpdate:
+		t.sink.RecordArtifact(t.taskID, frame.ArtifactUpdate.Artifact)
+	}
+}
+
+// recordInbound writes a message the CLIENT sent into the task's history.
+//
+// It is separate from persistLocked because an inbound message is not a frame:
+// nothing is emitted for it, and an A2A stream never carries one. It is recorded
+// so a task read back later says what it was asked, not only what it answered.
+func (t *a2aTask) recordInbound(messageID, text string) {
+	if t.sink == nil || text == "" {
+		return
+	}
+	t.sink.RecordMessage(t.taskID, a2aStoredMessage{
+		MessageID: messageID,
+		Role:      a2a.RoleUser,
+		Text:      text,
+	})
 }
 
 // snapshotTask returns the task as every frame emitted so far leaves it. It is
@@ -471,8 +562,11 @@ func (t *a2aTask) park(in a2aParked, question string) bool {
 	t.mu.Lock()
 	// A second question replaces the first: the state graph permits
 	// INPUT_REQUIRED -> INPUT_REQUIRED precisely so an agent may restate what it
-	// is waiting for, and only the newest request id will unblock it.
+	// is waiting for, and only the newest request id will unblock it. The
+	// deadline restarts with it, for the same reason: the client is being asked
+	// something new.
 	t.parked = in
+	t.armInputDeadlineLocked()
 	t.mu.Unlock()
 
 	if question == "" {
@@ -515,7 +609,73 @@ func (t *a2aTask) unpark(requestID string) (a2aParked, bool) {
 	}
 	was := t.parked
 	t.parked = a2aParked{}
+	t.disarmInputDeadlineLocked()
 	return was, true
+}
+
+// ---- the input deadline ----
+
+// armInputDeadlineLocked starts the clock on a parked question. Caller MUST hold
+// t.mu.
+//
+// THE POLICY, stated because a queue makes it load-bearing rather than merely
+// tidy. A task at INPUT_REQUIRED is not idle: the agent loop that asked the
+// question is blocked inside ask_user, so the task holds its leased instance AND
+// its conversation's serial queue. A question nobody answers would therefore pin
+// the conversation for ever and strand every task queued behind it — the exact
+// deadlock serial queueing would otherwise introduce. So there is always a
+// deadline unless an operator explicitly removes it (a2a.tasks.input_timeout,
+// "0s"), and the deadline is a real terminal transition rather than a nudge:
+// FAILED, which closes every attached stream, advances the queue, and lets the
+// task be evicted by retention like any other finished task.
+func (t *a2aTask) armInputDeadlineLocked() {
+	t.disarmInputDeadlineLocked()
+	if t.inputTimeout <= 0 {
+		return
+	}
+	t.inputTimer = time.AfterFunc(t.inputTimeout, t.expireInputDeadline)
+}
+
+// disarmInputDeadlineLocked stops any armed deadline. Caller MUST hold t.mu.
+func (t *a2aTask) disarmInputDeadlineLocked() {
+	if t.inputTimer != nil {
+		t.inputTimer.Stop()
+		t.inputTimer = nil
+	}
+}
+
+// expireInputDeadline abandons a task whose question went unanswered.
+//
+// It re-checks that the task is still parked, because the timer fires on its own
+// goroutine and may lose a race with the answer it was waiting for. Losing that
+// race must be a no-op, not a failed task the client had already answered.
+//
+// The instance is told AFTER the task is settled, and only then: the frames that
+// close the client's stream must not be able to race a payload produced by the
+// teardown. The cancellation is what unblocks the agent loop; a failure to
+// deliver it is logged rather than returned, because the client's task IS failed
+// either way.
+func (t *a2aTask) expireInputDeadline() {
+	if t.terminated() {
+		return
+	}
+	if _, parked := t.pending(); !parked {
+		return
+	}
+	if !t.fail(fmt.Sprintf(a2aInputTimeoutReason, t.inputTimeout)) {
+		return
+	}
+	t.logger.Warn("a2a task abandoned: the agent's question went unanswered",
+		"profile", t.profile, "task_id", t.taskID, "context_id", t.contextID,
+		"input_timeout", t.inputTimeout)
+	if err := t.send(brokerIOMessage{
+		Type:   ioTypeCancel,
+		TurnID: t.boundTurn(),
+		Source: ioCancelSource,
+	}); err != nil {
+		t.logger.Warn("a2a task was abandoned but the instance could not be told to stop waiting",
+			"profile", t.profile, "task_id", t.taskID, "error", err)
+	}
 }
 
 // resume returns a parked task to WORKING, reporting whether it did.
@@ -545,6 +705,7 @@ func (t *a2aTask) terminate(frames func()) bool {
 		fired = true
 		t.mu.Lock()
 		t.parked = a2aParked{}
+		t.disarmInputDeadlineLocked()
 		t.mu.Unlock()
 
 		frames()
@@ -637,10 +798,11 @@ func (t *a2aTask) instanceGone(reason string) bool {
 // protocol error the client must see, whereas a cancellation that could not be
 // delivered has already settled the task and only needs recording.
 func (t *a2aTask) send(msg brokerIOMessage) error {
-	if t.instance == nil {
+	instance := t.leasedInstance()
+	if instance == nil {
 		return fmt.Errorf("task %s has no leased instance", t.taskID)
 	}
-	return t.instance.SendIO(msg)
+	return instance.SendIO(msg)
 }
 
 // ---- helpers ----

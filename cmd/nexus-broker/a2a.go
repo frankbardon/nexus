@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 )
@@ -79,19 +80,25 @@ const a2aReasonNotImplemented = "OPERATION_NOT_IMPLEMENTED"
 // Both the blocking and the streaming shapes of SendMessage are driven by the
 // same translation, so they cannot report different outcomes for one turn.
 //
+// The three task reads: GetTask, ListTasks and SubscribeToTask are served from
+// the broker's durable task store (a2ataskstore.go), which is why they can be
+// answered at all — the record outlives the instance that produced it and the
+// broker process that started it, which is precisely when a client needs them.
+// Every one of them is scoped to the authenticated principal.
+//
 // WHAT IS NOT, and why the absences are honest rather than arbitrary:
 //
-//   - GetTask and ListTasks read a task AFTER it has ended, which needs a
-//     durable per-principal record. This ingress keeps only live tasks in
-//     memory, so answering from it would report "unknown task" for every task
-//     that had finished — worse than refusing.
-//   - SubscribeToTask reattaches to a task, which is the same read.
-//   - The push-notification operations and GetExtendedAgentCard are unbuilt,
-//     and the card declares both capabilities false.
+//   - The push-notification operations are unbuilt: the broker has no outbound
+//     delivery path, and the card declares capabilities.pushNotifications false.
+//   - GetExtendedAgentCard is unbuilt: a profile publishes one card, and there is
+//     no second, authenticated document to hand out.
 var brokerImplementedOperations = map[string]bool{
 	a2a.MethodSendMessage:          true,
 	a2a.MethodSendStreamingMessage: true,
 	a2a.MethodCancelTask:           true,
+	a2a.MethodGetTask:              true,
+	a2a.MethodListTasks:            true,
+	a2a.MethodSubscribeToTask:      true,
 }
 
 // brokerOperationImplemented reports whether the ingress drives an operation.
@@ -138,9 +145,25 @@ type A2AServer struct {
 	// the lease provider the config and binary its profile names.
 	profiles map[string]AgentProfile
 
-	// tasks is the live-task registry. Every task in it is running on a leased
-	// instance; a task is forgotten the moment it settles.
+	// tasks is the live-task registry: the tasks this process is driving right
+	// now. A task is forgotten the moment it settles, because everything a client
+	// can ask about a finished task is answered from store instead.
 	tasks *a2aTasks
+
+	// store is the DURABLE task record. It is what makes GetTask, ListTasks and
+	// SubscribeToTask answerable after the instance — or the broker — that ran a
+	// task has gone, and it is never nil: with no state_dir configured it is a
+	// memory-only store, so the operations still answer for the life of the
+	// process rather than refusing.
+	store *a2aTaskStore
+
+	// queues serializes concurrent tasks on one conversation. See a2aqueue.go.
+	queues *a2aContextQueues
+
+	// inputTimeout is how long a task may sit at INPUT_REQUIRED before it is
+	// abandoned, which is also what stops a queue deadlocking behind an
+	// unanswered question. Zero disables it.
+	inputTimeout time.Duration
 
 	// leases produces the instance a turn runs on. It defaults to a provider
 	// that refuses everything, so an ingress built without a lifecycle answers
@@ -163,7 +186,13 @@ func NewA2AServer(logger *slog.Logger, cfg Config) (*A2AServer, error) {
 		logger:   logger,
 		profiles: cfg.Agents,
 		tasks:    newA2ATasks(),
-		leases:   unwiredLeaseProvider{},
+		// A memory-only store by default. run() replaces it with the durable one
+		// when a state_dir is configured; building one here unconditionally means
+		// the read operations never have to branch on whether a store exists.
+		store:        newA2ATaskStore(logger, cfg.A2ATaskRetention),
+		queues:       newA2AContextQueues(logger),
+		inputTimeout: cfg.A2AInputTimeout,
+		leases:       unwiredLeaseProvider{},
 	}
 	if len(cfg.Agents) == 0 {
 		return s, nil
@@ -194,6 +223,20 @@ func (s *A2AServer) enabled() bool { return s != nil && len(s.cards) > 0 }
 // rendered — and because a test supplies a provider that never starts a
 // process. Calling it more than once replaces the provider; the ingress does
 // not reload, so there is no live task to reconcile.
+// useTaskStore installs the durable task store.
+//
+// It is a setter for the same reason useLeaseProvider is: opening the store
+// touches the filesystem, and run() owns the policy for what to do when that
+// fails — warn and carry on with the memory-only store the constructor already
+// installed, rather than refusing to boot. A nil store is ignored, so a failed
+// open cannot leave the ingress without one.
+func (s *A2AServer) useTaskStore(store *a2aTaskStore) {
+	if store == nil {
+		return
+	}
+	s.store = store
+}
+
 func (s *A2AServer) useLeaseProvider(p a2aLeaseProvider) {
 	if p == nil {
 		p = unwiredLeaseProvider{}
@@ -207,6 +250,13 @@ func (s *A2AServer) useLeaseProvider(p a2aLeaseProvider) {
 func (s *A2AServer) Shutdown() {
 	if s == nil || s.tasks == nil {
 		return
+	}
+	// The queues are closed FIRST, and the order is load-bearing: settling a task
+	// makes it terminal, which is the event the queue advances on, so settling
+	// without this would spawn an instance for every message queued behind a task
+	// the broker is in the middle of cancelling.
+	if s.queues != nil {
+		s.queues.stop()
 	}
 	s.tasks.shutdown("the broker is shutting down, so the turn was ended before it finished")
 }
@@ -251,6 +301,18 @@ func (s *A2AServer) logStartupState(cfg Config) {
 		return
 	}
 	s.logger.Info("a2a ingress enabled", "profiles", len(s.cards), "base_url", cfg.A2ABaseURL)
+	// The retention policy is stated at boot rather than left to be discovered:
+	// it decides how long a client can read a task back for, and an operator who
+	// tuned it needs to see the value this process actually resolved. A state_dir
+	// is called out because without one the whole store is memory-only, which is
+	// the difference between "tasks survive a restart" and "they do not".
+	s.logger.Info("a2a task retention",
+		"state_dir", cfg.StateDir,
+		"durable", cfg.StateDir != "",
+		"ttl", cfg.A2ATaskRetention.ttl,
+		"max_per_context", cfg.A2ATaskRetention.maxPerContext,
+		"max_tasks", maxA2ATaskRecords,
+		"input_timeout", cfg.A2AInputTimeout)
 	// An ingress with no way to produce an instance answers every operation with
 	// errLeaseUnavailable. That is a confusing failure to meet at runtime and a
 	// trivial one to read at boot, so it is stated here rather than left to be
@@ -422,6 +484,36 @@ func (s *A2AServer) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleCancelTask(w, r, card, b, req)
 		return
+
+	case a2a.MethodGetTask:
+		req, ok := call.Params.(*a2a.GetTaskRequest)
+		if !ok {
+			s.writeJSONRPCError(w, card.profile, call.ID(),
+				a2a.Errorf(a2a.ErrorTypeInternal, "operation %q decoded to an unexpected parameter type", call.Method))
+			return
+		}
+		s.handleGetTask(w, r, card, b, req)
+		return
+
+	case a2a.MethodListTasks:
+		req, ok := call.Params.(*a2a.ListTasksRequest)
+		if !ok {
+			s.writeJSONRPCError(w, card.profile, call.ID(),
+				a2a.Errorf(a2a.ErrorTypeInternal, "operation %q decoded to an unexpected parameter type", call.Method))
+			return
+		}
+		s.handleListTasks(w, r, card, b, req)
+		return
+
+	case a2a.MethodSubscribeToTask:
+		req, ok := call.Params.(*a2a.SubscribeToTaskRequest)
+		if !ok {
+			s.writeJSONRPCError(w, card.profile, call.ID(),
+				a2a.Errorf(a2a.ErrorTypeInternal, "operation %q decoded to an unexpected parameter type", call.Method))
+			return
+		}
+		s.handleSubscribeToTask(r.Context(), w, r, card, b, req)
+		return
 	}
 
 	// Unreachable: every entry in brokerImplementedOperations has a case above.
@@ -527,6 +619,43 @@ func (s *A2AServer) handleREST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleCancelTask(w, r, card, a2aBinding{}, req)
+		return
+
+	case a2a.MethodGetTask:
+		// Section 11.5: a GET carries its parameters in the path and the query
+		// string, named exactly as the JSON body would name them, so the two
+		// bindings decode into the same request object.
+		req, protoErr := a2a.ParseGetTaskQuery(vars["id"], r.URL.Query())
+		if protoErr != nil {
+			s.writeRESTError(w, card.profile, protoErr)
+			return
+		}
+		s.handleGetTask(w, r, card, a2aBinding{}, req)
+		return
+
+	case a2a.MethodListTasks:
+		req, protoErr := a2a.ParseListTasksQuery(r.URL.Query())
+		if protoErr != nil {
+			s.writeRESTError(w, card.profile, protoErr)
+			return
+		}
+		s.handleListTasks(w, r, card, a2aBinding{}, req)
+		return
+
+	case a2a.MethodSubscribeToTask:
+		// Section 11.3's custom-verb shape again: an optional body, with the path
+		// id authoritative over anything in it.
+		body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxA2ABody))
+		if readErr != nil {
+			s.writeRESTError(w, card.profile, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
+			return
+		}
+		req, protoErr := a2a.DecodeSubscribeToTaskRequest(vars["id"], body)
+		if protoErr != nil {
+			s.writeRESTError(w, card.profile, protoErr)
+			return
+		}
+		s.handleSubscribeToTask(r.Context(), w, r, card, a2aBinding{}, req)
 		return
 	}
 

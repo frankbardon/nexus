@@ -178,11 +178,13 @@ func a2aSpawnOutcome(err error) (a2a.TaskState, string, bool) {
 
 // a2aTasks is the ingress's live-task registry.
 //
-// It holds only LIVE tasks: a task is forgotten the moment it reaches a
-// terminal state, because the durable record a finished task is read back from
-// is a separate concern. That is why GetTask and ListTasks are not among the
-// implemented operations — answering them from this map would answer "unknown
-// task" for every task that had finished, which is worse than refusing.
+// It holds only LIVE tasks: a task is forgotten the moment it reaches a terminal
+// state, because everything a client can ask about a finished task is answered
+// from a2aTaskStore instead. The two answer different questions — this one knows
+// which tasks can still be sent to, cancelled or streamed from; the store knows
+// what every task did — and keeping them separate is what stops a finished task
+// holding a stream channel and an instance handle for as long as somebody might
+// want to read it.
 //
 // Lookups are PRINCIPAL-SCOPED, and a task belonging to another caller is
 // reported exactly as one that does not exist. Anything else is an oracle: a

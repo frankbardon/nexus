@@ -3312,6 +3312,14 @@ agents:
           name: "Answer questions"
           description: "Answers a customer question and cites its sources."
 
+# Optional. Settings every `agents:` profile shares. Omit it and the defaults
+# below apply.
+a2a:
+  tasks:
+    ttl: 24h                  # how long a finished task stays readable
+    max_per_context: 50       # how many tasks are kept per caller+conversation
+    input_timeout: 15m        # how long a task may wait at INPUT_REQUIRED
+
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
   admin_scope: "nexus.broker.admin"   # scope that unlocks the operator view of GET /leases
@@ -3334,10 +3342,14 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`, written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+| `a2a`                | map      | *(absent)* | Settings shared by every [`agents:`](#agent-profiles-agents) profile. Today it holds one sub-block, `a2a.tasks`, which bounds the durable A2A **task store**. It is separate from `agents:` because nothing in it is per profile: the store is one file, with one retention policy, for the whole broker. Absent means every default below applies. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.ttl`      | duration | `24h`      | How long a **terminal** task stays readable after its last transition. `"0s"` keeps every task until a cap evicts it. Must be a duration **string** (`"24h"`, `"90m"`) — a bare number fails the boot rather than being read as nanoseconds. A negative value is a boot failure naming the key. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.max_per_context` | int | `50`   | How many tasks are kept per (**caller**, `contextId`) pair. `0` disables the cap. The cap is per caller as well as per context so one principal's traffic cannot evict another's — an eviction channel is still a channel. Only **terminal** tasks are evictable; a live task counts against the cap but is never dropped. A negative value is a boot failure. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.input_timeout` | duration | `15m` | How long a task may sit at `TASK_STATE_INPUT_REQUIRED` before the broker abandons it: the task is driven to `TASK_STATE_FAILED` and the instance is told to cancel the turn. `"0s"` disables the deadline. This is also the **queue deadlock policy** — a parked task holds its conversation's serial queue and its leased instance, so without a deadline one unanswered question would strand every message behind it. Must be a duration string; a negative value is a boot failure. See [Serial task queueing](#serial-task-queueing). |
 | `agents`             | map      | *(absent)* | The named **A2A agent profiles** this broker publishes, keyed by the name their routes are namespaced under. Each profile binds a Nexus config, a `binaries:` entry and an Agent Card, so a third-party A2A client can address an agent by URL instead of supplying the full nexus config `POST /claim` demands. Entry fields are listed under [Agent profiles](#agent-profiles-agents) below. **Absent (the default) means this broker has no A2A ingress at all** — no routes are registered and nothing new appears in the boot log, so a `broker.yaml` written before profiles existed behaves exactly as it did. Validated at boot: an empty or non-URL-safe profile name, a name that collides with another after trimming, a missing `config`, a `binary` that is not in the registry, a card missing a required field, or a config file that does not resolve to a readable file **fails startup**.
 
 ### Binary registry (`binaries`)
@@ -3588,18 +3600,34 @@ client's message becomes the `input` payload a leased instance's
 [`nexus.io.broker`](#nexusiobroker) plugin turns into `io.input`, and everything
 the instance sends back is translated into A2A frames — see
 [the session broker guide](../guides/session-broker.md#what-the-a2a-ingress-translates)
-for the payload-by-payload mapping. `capabilities.streaming` on every profile
-card is `true` as a result, because it is derived from this same set rather than
-configured.
+for the payload-by-payload mapping.
 
-**`GetTask`, `ListTasks` and `SubscribeToTask` answer
-`UnsupportedOperationError`** (JSON-RPC code `-32004` with HTTP `200`; REST `400`
-with a `FAILED_PRECONDITION` google.rpc.Status body), carrying
-`detail: OPERATION_NOT_IMPLEMENTED` to say "not yet" rather than "never". All
-three read a task *after* it has ended, which needs a durable per-principal
-record the ingress does not keep — it holds live tasks only. The push
-notification operations and `GetExtendedAgentCard` are refused for the same
-shape of reason, and both card capabilities are `false`.
+**`GetTask`, `ListTasks` and `SubscribeToTask` are dispatched too**, served from
+the broker's durable [task store](#a2a-task-retention-a2atasks) rather than from
+memory — which is why they can be answered at all after the instance that ran a
+task has been released or the broker has restarted, precisely when a client asks.
+Every one of them is scoped to the authenticated principal **and to the profile
+it was addressed to**: a task belonging to another caller — or to another profile
+— is **byte-for-byte the same refusal as one that never existed**
+(`TaskNotFoundError`), because a distinct "exists but is not yours" answer is an
+existence oracle for ids the caller was never told. The profile is part of the
+key for the same reason it is part of a conversation's: two profiles are two
+different public agents with two different configs, so `ListTasks` on one must
+not list the other's conversations. `ListTasks` supports
+`contextId`, `status` and `statusTimestampAfter` filters, `historyLength`,
+`includeArtifacts` (default `false`) and keyset pagination via `pageSize` /
+`pageToken`; a `pageToken` this broker did not mint is an `InvalidParamsError`
+rather than a silent restart from the top.
+
+`capabilities.streaming` on every profile card is `true` as a result, because it
+is derived from this operation set rather than configured — both
+`SendStreamingMessage` and `SubscribeToTask` are dispatched.
+
+**The push notification operations and `GetExtendedAgentCard` are still
+refused**, with `UnsupportedOperationError` (JSON-RPC code `-32004` with HTTP
+`200`; REST `400` with a `FAILED_PRECONDITION` google.rpc.Status body) carrying
+`detail: OPERATION_NOT_IMPLEMENTED` to say "not yet" rather than "never". Both
+matching card capabilities are `false`.
 
 The routes authenticate, decode and validate whatever the operation: a malformed
 JSON-RPC envelope is still told it is malformed. A path naming no configured
@@ -3685,6 +3713,96 @@ Both are constants, not config keys: they bound the broker's own handshake with 
 process it started, not a policy an operator tunes. A **second** message on a
 live conversation pays neither — it goes straight to the running instance — which
 is the whole reason the instance is kept alive between turns.
+
+#### Serial task queueing
+
+**A conversation runs one task at a time.** A Nexus instance runs one agent
+loop, and two `input` payloads sent to it while a turn is in flight do not
+produce two turns — they interleave into whatever the loop does next. So a second
+message on a `contextId` whose task is still live is *accepted* and *queued*: it
+sits in `TASK_STATE_SUBMITTED`, with nothing sent to any instance, until the
+task ahead of it is terminal, and then moves to `TASK_STATE_WORKING`.
+
+`TASK_STATE_SUBMITTED` is the honest rendering — [§3.1.1](https://a2a-protocol.org)
+defines it as "accepted, not yet started", which is exactly a queued turn. A
+queued task is a complete task: it has an id, it can be read with `GetTask`,
+streamed with `SubscribeToTask`, and cancelled with `CancelTask`.
+
+The queue is keyed by **(caller, profile, `contextId`)** — the same key the
+instance is filed under — so two conversations never wait on each other, and two
+principals using the same `contextId` get two instances and two queues.
+
+It advances on exactly one event: **a task reaching a terminal state**. Every way
+a turn can end funnels through there, so the queue survives things going wrong:
+
+| What happens | What the queue does |
+|---|---|
+| The turn completes, fails or is cancelled | The next task is promoted and starts. |
+| The instance is released while idle, or crashes | The active task settles at `FAILED`; the next task is promoted and **acquires a fresh instance**, which resumes the conversation from its session. |
+| A queued task is cancelled before it starts | It leaves the queue; nothing else is disturbed and the task behind it still runs. |
+| The active task parks at `TASK_STATE_INPUT_REQUIRED` | It **keeps** the queue: the agent loop is blocked inside `ask_user`, so starting the next turn would send input to an instance that cannot read it. `a2a.tasks.input_timeout` is what stops that being a deadlock — see below. |
+
+A promoted turn is **detached from the request that submitted it**: a client that
+hangs up while queued has not withdrawn its message, and can read the result with
+`GetTask` or reattach with `SubscribeToTask`.
+
+#### A2A task retention (`a2a.tasks`)
+
+Every A2A task the broker runs is recorded in `<state_dir>/a2a-tasks.jsonl`, in
+the same append-and-compact shape as the [lease journal](#lease-durability-state_dir)
+and the A2A context index (`a2a-contexts.jsonl`). One
+mechanism, one failure policy, one thing for an operator to know about a
+`state_dir` — a database for this one file was rejected on those grounds.
+
+The record is what makes `GetTask`, `ListTasks` and `SubscribeToTask` answer
+after the instance is gone. It carries the task's identity, its current status
+and status message, its response artifact and a bounded trail of the messages the
+client sent, keyed by **owner first** so a task is not reachable without a
+principal, and scoped to the **profile** it was addressed to.
+
+**With no `state_dir` the store is memory-only**: every read still answers for
+the life of the process, and nothing survives a restart. The reads refusing would
+be a far worse degradation than losing them across a restart, which is what such
+a broker has already chosen for its leases.
+
+**A task left in flight by a stopped broker is settled at `TASK_STATE_FAILED`
+when the store opens**, with a status message saying the broker stopped. Leaving
+it as it stood would show a client `WORKING` for ever, and would make the record
+immortal — only terminal tasks are evictable, so a crash loop would accumulate
+records that count against the cap and push real tasks out of it.
+
+**Retention is load-bearing, not housekeeping.** A broker records a task for
+every turn every client ever runs, so an unbounded policy would grow with
+*traffic* rather than with any one conversation:
+
+| Bound | Value | Configurable | Why this number |
+|---|---|---|---|
+| `a2a.tasks.ttl` | `24h` | yes (`"0s"` disables) | A task is only useful to a client that still holds its id, and a client that has been away for a day has restarted, retried or given up. A day is also far longer than any plausible reconnect window, so the TTL never expires a task somebody is still following. It matches [`nexus.io.a2a`](#nexusioa2a)'s default deliberately: the same client talking to the same agent must not find its history disappearing on a different schedule depending on whether a broker is in front of it. |
+| `a2a.tasks.max_per_context` | `50` | yes (`0` disables) | 50 turns of readable history per conversation is far more than a client polls back over. It is **lower** than `nexus.io.a2a`'s 200 because a standalone listener serves exactly one context — its per-context cap is also its total — whereas a broker holds every conversation at once, so the number multiplies. |
+| Total tasks retained | `2048` | no | The backstop that makes the store's footprint statable: the per-context cap alone bounds nothing when the number of contexts is unbounded. Eviction takes the **oldest terminal** records first. |
+| Stored text per artifact or message | `16 KiB` | no | The store's real growth term. A turn's answer is unbounded and the record is rewritten on each transition, so an uncapped answer would be written several times at whatever size it happened to be. 16 KiB is roughly four thousand words. It is not a config key because it is a property of this storage substrate rather than a deployment choice. |
+
+Two consequences worth stating plainly:
+
+- **Only the stored copy is truncated.** A client attached while the turn ran
+  received the whole answer; a truncated stored copy carries a marker saying so,
+  so a later `GetTask` cannot mistake an excerpt for the whole.
+- **Streamed deltas are never stored.** A record is written only when a task
+  changes state or publishes an artifact, so a turn that streams thousands of
+  chunks writes the same handful of lines a one-word turn does. The store scales
+  with the *shape* of a turn, not its volume.
+
+`a2a.tasks.input_timeout` (default `15m`, `"0s"` disables) is the third knob and
+is not about storage at all: it bounds how long a task may sit at
+`TASK_STATE_INPUT_REQUIRED`. A parked task holds its leased instance **and** its
+conversation's [serial queue](#serial-task-queueing), because the agent loop that
+asked the question is blocked inside `ask_user`. On expiry the task is driven to
+`TASK_STATE_FAILED` — a real terminal transition that closes every attached
+stream and frees the queue — and the instance is sent a cancellation so its loop
+unblocks. Fifteen minutes is chosen against a human: a question routed to a
+person has to survive being paged, read, thought about and answered. Setting
+`"0s"` removes the deadline, and with it the guarantee that a queue behind an
+unanswered question ever moves.
 
 ### Lease durability (`state_dir`)
 

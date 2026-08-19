@@ -142,20 +142,16 @@ func TestA2ACardIsServedPerProfile(t *testing.T) {
 // call, and refuses it with a well-formed UnsupportedOperationError rather than
 // a 404 or an HTML error page.
 //
-// GetTask is the subject rather than SendMessage, which is dispatched now (see
-// a2aturn_test.go). Reading a task back needs the durable record a later story
-// adds, so keeping the assertion on a genuinely unimplemented operation keeps
-// this test about the REFUSAL SHAPE rather than about which story is in
-// flight.
-//
-// The error TYPE matters. Section 3.3.4 uses UnsupportedOperationError for
-// exactly this condition, and the card backs it up by advertising the matching
-// capability as false — so a client gets a refusal it already knows how to
-// handle.
+// GetExtendedAgentCard is the subject. It was GetTask until the task store
+// landed; the three task reads are dispatched now, and the only operations left
+// unimplemented are the push-notification family and the extended card. Section
+// 3.3.4 assigns UnsupportedOperationError to exactly this one, and the card
+// backs the refusal up by advertising capabilities.extendedAgentCard as false —
+// so a client gets a refusal it already knows how to handle.
 func TestA2AJSONRPCAnswersNotImplemented(t *testing.T) {
 	ts := newA2ATestServer(t, a2aTestConfig(t, ""))
 
-	body := `{"jsonrpc":"2.0","id":7,"method":"GetTask","params":{"id":"task-1"}}`
+	body := `{"jsonrpc":"2.0","id":7,"method":"GetExtendedAgentCard","params":{}}`
 	resp, err := http.Post(ts.URL+agentJSONRPCPath("support"), a2a.ContentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST jsonrpc: %v", err)
@@ -197,10 +193,47 @@ func TestA2AJSONRPCAnswersNotImplemented(t *testing.T) {
 	if want := a2a.NewError(a2a.ErrorTypeUnsupportedOperation, "").Code(); envelope.Error.Code != want {
 		t.Errorf("error code = %d, want %d (UnsupportedOperationError)", envelope.Error.Code, want)
 	}
-	// The message says NOT YET, not merely "unsupported": that is the difference
-	// a partner integrating against this broker needs to read.
-	if !strings.Contains(envelope.Error.Message, "not yet implemented") {
-		t.Errorf("error message = %q, want it to say the operation is not yet implemented", envelope.Error.Message)
+	// The message names the OPERATION, so a client with several calls in flight
+	// can tell which one was refused.
+	if !strings.Contains(envelope.Error.Message, a2a.MethodGetExtendedAgentCard) {
+		t.Errorf("error message = %q, want it to name %s", envelope.Error.Message, a2a.MethodGetExtendedAgentCard)
+	}
+}
+
+// TestA2AImplementedOperationsAndCardAgree pins the invariant the card is built
+// on: capabilities are DERIVED from brokerImplementedOperations, so a story that
+// flips an operation cannot leave the advertised card behind, and one that
+// advertises a capability cannot do so without a handler.
+func TestA2AImplementedOperationsAndCardAgree(t *testing.T) {
+	cfg := a2aTestConfig(t, "")
+	agents, err := NewA2AServer(testLogger(), cfg)
+	if err != nil {
+		t.Fatalf("NewA2AServer: %v", err)
+	}
+	card := agents.cards["support"].card
+
+	// streaming is true because BOTH streaming operations are dispatched: a turn
+	// can be streamed as it runs, and an existing task can be subscribed to.
+	if !card.Capabilities.Streaming {
+		t.Error("capabilities.streaming = false, but the ingress dispatches the streaming operations")
+	}
+	for _, op := range []string{a2a.MethodSendStreamingMessage, a2a.MethodSubscribeToTask} {
+		if !brokerOperationImplemented(op) {
+			t.Errorf("%s is not implemented, so capabilities.streaming would be a lie", op)
+		}
+	}
+	// The two capabilities that remain false must have no handler behind them.
+	if card.Capabilities.PushNotifications || brokerOperationImplemented(a2a.MethodCreateTaskPushNotificationConfig) {
+		t.Error("pushNotifications is advertised or dispatched; neither is built")
+	}
+	if card.Capabilities.ExtendedAgentCard || brokerOperationImplemented(a2a.MethodGetExtendedAgentCard) {
+		t.Error("extendedAgentCard is advertised or dispatched; neither is built")
+	}
+	// And the reads this story implements are genuinely dispatched.
+	for _, op := range []string{a2a.MethodGetTask, a2a.MethodListTasks, a2a.MethodSubscribeToTask} {
+		if !brokerOperationImplemented(op) {
+			t.Errorf("%s must be implemented by this story", op)
+		}
 	}
 }
 
@@ -235,10 +268,16 @@ func TestA2AJSONRPCRejectsAMalformedCall(t *testing.T) {
 
 // TestA2ARESTAnswersNotImplemented: the same contract on the HTTP+JSON binding,
 // where an A2A error carries a real HTTP status and the google.rpc.Status body.
+//
+// A push-notification route is the subject, and it is the one that still
+// exercises THIS package's refusal rather than the codec's: pkg/a2a decodes no
+// parameters for it, but the REST route table declares it so a server can answer
+// it properly, so the request reaches brokerOperationImplemented and is refused
+// by a2aNotImplemented with the "not yet implemented" wording.
 func TestA2ARESTAnswersNotImplemented(t *testing.T) {
 	ts := newA2ATestServer(t, a2aTestConfig(t, ""))
 
-	resp, err := http.Get(ts.URL + agentRESTPrefix("support") + "/tasks/task-1")
+	resp, err := http.Get(ts.URL + agentRESTPrefix("support") + "/tasks/task-1/pushNotificationConfigs/cfg-1")
 	if err != nil {
 		t.Fatalf("GET rest: %v", err)
 	}
@@ -257,6 +296,11 @@ func TestA2ARESTAnswersNotImplemented(t *testing.T) {
 	}
 	if recovered := body.AsError(); recovered.Type != a2a.ErrorTypeUnsupportedOperation {
 		t.Errorf("error round-trips to %q, want UnsupportedOperationError", recovered.Type)
+	}
+	// The message says NOT YET, not merely "unsupported": that is the difference
+	// a partner integrating against this broker needs to read.
+	if !strings.Contains(body.Error.Message, "not yet implemented") {
+		t.Errorf("error message = %q, want it to say the operation is not yet implemented", body.Error.Message)
 	}
 }
 

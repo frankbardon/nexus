@@ -378,7 +378,7 @@ func (s *brokerConformSession) cancel() error {
 	if s.task == nil {
 		return errors.New("the vector canceled a task that was never created")
 	}
-	if _, protoErr := s.server.cancelTask(nexusauth.Principal{}, s.task.taskID); protoErr != nil {
+	if _, protoErr := s.server.cancelTask(nexusauth.Principal{}, "support", s.task.taskID); protoErr != nil {
 		return fmt.Errorf("cancelTask refused: %s", protoErr.Message)
 	}
 	return nil

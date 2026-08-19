@@ -223,7 +223,98 @@ type Config struct {
 	// whenever Agents is empty — see resolveA2ABaseURL for why it is resolved at
 	// load rather than per request.
 	A2ABaseURL string `yaml:"-"`
+
+	// A2A is the `a2a:` block: the settings every `agents:` profile shares.
+	//
+	// It is separate from `agents:` because nothing in it is per profile. The
+	// task store is one store for the whole broker — one file in state_dir, one
+	// retention policy, one set of caps — so hanging its knobs off each profile
+	// would invite an operator to configure four different retentions for one
+	// file and be silently given whichever was resolved last.
+	A2A A2ASettings `yaml:"a2a"`
+
+	// A2ATaskRetention and A2AInputTimeout are the resolved, validated form of
+	// the `a2a.tasks:` block. They are not YAML keys: LoadConfigFromBytes derives
+	// them so a negative duration fails the BOOT rather than producing a store
+	// that silently keeps nothing, and so "absent" and "explicitly zero" stay
+	// distinguishable — zero DISABLES both knobs, which an absent key must not.
+	A2ATaskRetention a2aTaskRetention `yaml:"-"`
+	A2AInputTimeout  time.Duration    `yaml:"-"`
 }
+
+// A2ASettings is the `a2a:` block.
+type A2ASettings struct {
+	// Tasks bounds the durable A2A task store.
+	Tasks A2ATaskSettings `yaml:"tasks"`
+}
+
+// A2ATaskSettings is the `a2a.tasks:` block.
+//
+// Every field is a POINTER so that "the key was not written" is distinguishable
+// from "the key was written as zero". The distinction is load-bearing here: zero
+// means DISABLED for all three knobs — keep every task for ever, never cap a
+// context, let a question wait until the process exits — and an absent key must
+// get the default instead, not the disabled behaviour.
+//
+// The key names and their meanings are nexus.io.a2a's, deliberately: an operator
+// who has configured the standalone A2A listener already knows what `ttl`,
+// `max_per_context` and `input_timeout` do, and two spellings of one policy
+// would be a needless second thing to learn.
+type A2ATaskSettings struct {
+	// TTL is how long a terminal task is kept after its last transition.
+	// "0s" keeps every task until a cap evicts it.
+	TTL *time.Duration `yaml:"ttl"`
+
+	// MaxPerContext is how many tasks are kept per (caller, contextId).
+	// 0 disables the cap.
+	MaxPerContext *int `yaml:"max_per_context"`
+
+	// InputTimeout is how long a task may sit at TASK_STATE_INPUT_REQUIRED
+	// before the broker abandons it. "0s" disables the deadline.
+	InputTimeout *time.Duration `yaml:"input_timeout"`
+}
+
+// A2A task defaults.
+//
+// Retention is load-bearing rather than housekeeping. A broker persists a record
+// for every task every client ever runs, and the store folds into memory, so an
+// unbounded policy would grow with TRAFFIC rather than with any conversation.
+//
+// defaultA2ATaskTTL is 24 hours, the same number nexus.io.a2a uses and for the
+// same reason: a task is only useful to a client that still holds its id, and an
+// A2A client that has been away for a day has restarted, retried or given up. A
+// day is also comfortably longer than any plausible reconnect window, so the TTL
+// never expires a task somebody is still following. Matching the standalone
+// listener matters on its own — the same client talking to the same agent must
+// not find its task history disappearing on a different schedule depending on
+// whether a broker is in front of it.
+//
+// defaultA2ATasksPerContext is 50, and it is deliberately LOWER than
+// nexus.io.a2a's 200. A standalone listener serves exactly one context, so its
+// per-context cap is also its total. A broker serves an unbounded number of them
+// at once, so the per-context number multiplies by however many conversations
+// are in flight; 50 turns of readable history per conversation is far more than
+// a client polls back over, and it keeps the global ceiling
+// (maxA2ATaskRecords) a backstop rather than the working limit.
+//
+// defaultA2AInputTimeout is 15 minutes, matching nexus.io.a2a. It is the
+// deadlock policy for serial queueing as much as a resource bound: a task parked
+// at INPUT_REQUIRED holds its conversation's queue AND its leased instance,
+// because the agent loop that asked the question is blocked inside ask_user. A
+// question nobody answers would therefore pin the conversation for ever, so
+// there is always a deadline and it is stated rather than implied. Fifteen
+// minutes is chosen against a human, not a machine: a question routed to a
+// person has to survive being paged, read, thought about and answered. On expiry
+// the task is driven to FAILED — a real terminal transition that closes every
+// attached stream, frees the queue and tells the instance to cancel the turn.
+// "0s" disables the deadline for an operator who genuinely wants a task parked
+// until its instance is reaped; the cost of that choice is documented, not
+// hidden.
+const (
+	defaultA2ATaskTTL         = 24 * time.Hour
+	defaultA2ATasksPerContext = 50
+	defaultA2AInputTimeout    = 15 * time.Minute
+)
 
 // BinaryEntry is one named nexus variant in the broker's spawn registry. The
 // map key — not a field — is the name a claim selects it by, so an entry cannot
@@ -540,6 +631,11 @@ func DefaultConfig() Config {
 		ReattachWindow:   defaultReattachWindow,
 		AdminScope:       defaultAdminScope,
 		AuthChain:        nexusauth.NewChain(),
+		A2ATaskRetention: a2aTaskRetention{
+			ttl:           defaultA2ATaskTTL,
+			maxPerContext: defaultA2ATasksPerContext,
+		},
+		A2AInputTimeout: defaultA2AInputTimeout,
 	}
 }
 
@@ -667,7 +763,54 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 		}
 		cfg.A2ABaseURL = baseURL
 	}
+
+	// The `a2a.tasks:` block is resolved unconditionally, not only when profiles
+	// exist: a document that misspells a retention value is wrong whether or not
+	// the ingress it configures is switched on, and failing only for brokers that
+	// happen to front an agent would let the mistake sit unnoticed until the day
+	// somebody adds one.
+	retention, inputTimeout, err := resolveA2ATaskSettings(cfg.A2A.Tasks,
+		cfg.A2ATaskRetention, cfg.A2AInputTimeout)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.A2ATaskRetention = retention
+	cfg.A2AInputTimeout = inputTimeout
+
 	return cfg, nil
+}
+
+// resolveA2ATaskSettings folds the `a2a.tasks:` block onto the defaults and
+// validates it.
+//
+// A key that was not written keeps its default; a key written as zero DISABLES
+// that knob, which is why the block is parsed through pointers. A NEGATIVE value
+// is refused rather than clamped: "-1h" has no reading a broker could act on,
+// and silently treating it as "disabled" would hide a typo behind a policy
+// change nobody asked for.
+func resolveA2ATaskSettings(block A2ATaskSettings, defaults a2aTaskRetention, defaultInput time.Duration) (a2aTaskRetention, time.Duration, error) {
+	out := defaults
+	input := defaultInput
+
+	if block.TTL != nil {
+		if *block.TTL < 0 {
+			return out, input, fmt.Errorf("a2a.tasks.ttl: must not be negative; use \"0s\" to keep every task until a cap evicts it")
+		}
+		out.ttl = *block.TTL
+	}
+	if block.MaxPerContext != nil {
+		if *block.MaxPerContext < 0 {
+			return out, input, fmt.Errorf("a2a.tasks.max_per_context: must not be negative; use 0 to keep every task")
+		}
+		out.maxPerContext = *block.MaxPerContext
+	}
+	if block.InputTimeout != nil {
+		if *block.InputTimeout < 0 {
+			return out, input, fmt.Errorf("a2a.tasks.input_timeout: must not be negative; use \"0s\" to let a task stay parked until its instance is reaped")
+		}
+		input = *block.InputTimeout
+	}
+	return out, input, nil
 }
 
 // parseAdvertiseAddr splits a raw advertise_addr into the WebSocket scheme a

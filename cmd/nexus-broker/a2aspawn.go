@@ -461,10 +461,15 @@ func (m *a2aLeaseManager) pruneLocked() {
 // cheap — so the thing that talks to the instance has to outlive a turn too.
 //
 // FAN-OUT, not routing. Every observer is handed every payload, and each task
-// decides for itself which ones are its own (see a2aTask.bindTurn). Serial
-// queueing of concurrent turns on one context is a later story; until it lands,
-// two simultaneous turns on one conversation both see the instance's output,
-// which is imprecise but never loses a payload.
+// decides for itself which ones are its own (see a2aTask.bindTurn).
+//
+// That is correct rather than approximate because of what sits above it: the
+// ingress admits ONE ACTIVE TASK per conversation (a2aqueue.go), and a task only
+// attaches here once it has been admitted. So the set of observers on a live
+// instance is at most one task plus, briefly, one that is detaching as it
+// settles — never two tasks watching two different turns and guessing which
+// output is theirs. Fan-out then costs nothing and loses nothing, and the
+// turn-id binding a task does is a consistency check rather than a router.
 type a2aLeaseBinding struct {
 	manager *a2aLeaseManager
 	leaseID string

@@ -263,6 +263,25 @@ func run() error {
 	// this binary.
 	if agents.enabled() {
 		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+
+		// The durable A2A task store. It is what lets GetTask, ListTasks and
+		// SubscribeToTask answer for a task whose instance was released hours ago
+		// or whose broker process has since restarted — which is precisely when a
+		// client asks.
+		//
+		// It shares the two indexes' failure policy: an unusable file degrades the
+		// store to memory-only, which still answers every read for the life of
+		// this process, rather than refusing to boot. NewA2AServer already
+		// installed a memory-only store, so a failure here simply leaves it in
+		// place.
+		taskStore, err := openA2ATaskStore(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a task store; tasks will be readable for the life of "+
+				"this process but not after a restart",
+				"state_dir", cfg.StateDir, "error", err)
+		}
+		agents.useTaskStore(taskStore)
+		defer func() { _ = taskStore.Close() }()
 	}
 	agents.logStartupState(cfg)
 

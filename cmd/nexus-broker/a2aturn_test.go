@@ -212,7 +212,7 @@ func TestCancelSettlesAndTellsTheInstance(t *testing.T) {
 	// events.StatusUpdate has no TurnID field, so a status payload never does.
 	instance.deliver(brokerIOMessage{Type: ioTypeStreamDelta, Content: "working", TurnID: "turn-7"})
 
-	settled, protoErr := server.cancelTask(nexusauth.Principal{}, task.taskID)
+	settled, protoErr := server.cancelTask(nexusauth.Principal{}, "support", task.taskID)
 	if protoErr != nil {
 		t.Fatalf("cancelTask: %s", protoErr.Message)
 	}
@@ -234,7 +234,7 @@ func TestCancelSettlesAndTellsTheInstance(t *testing.T) {
 
 	// A second cancel is refused rather than rewriting a terminal state, and the
 	// task is no longer live.
-	if _, protoErr := server.cancelTask(nexusauth.Principal{}, task.taskID); protoErr == nil {
+	if _, protoErr := server.cancelTask(nexusauth.Principal{}, "support", task.taskID); protoErr == nil {
 		t.Error("cancelling a settled task was accepted; want TaskNotCancelableError")
 	}
 	if !instance.wasReleased() {
@@ -393,7 +393,7 @@ func TestTasksAreScopedToTheirOwner(t *testing.T) {
 	instance.deliver(brokerIOMessage{Type: ioTypeHITLRequest, RequestID: "q-1", Prompt: "?", TurnID: "t1"})
 
 	stranger := nexusauth.Principal{ID: "mallory"}
-	if _, protoErr := server.cancelTask(stranger, task.taskID); protoErr == nil {
+	if _, protoErr := server.cancelTask(stranger, "support", task.taskID); protoErr == nil {
 		t.Error("a stranger canceled somebody else's task")
 	} else if protoErr.Type != a2a.ErrorTypeTaskNotFound {
 		t.Errorf("error type = %s, want TaskNotFoundError (indistinguishable from an unknown id)", protoErr.Type)
