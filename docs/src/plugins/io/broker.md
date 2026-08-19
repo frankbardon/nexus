@@ -59,6 +59,64 @@ lease at boot and accepts the re-registration, so a surviving instance rejoins
 with no plugin configuration and no client involvement. See
 [Surviving a restart](../../guides/session-broker.md#surviving-a-restart-set-state_dir).
 
+### Output is buffered across a reconnect
+
+Everything the instance emits while that socket is down is **held, not dropped**.
+
+The reason is the backoff above. A broker restart puts the instance into the
+reconnect loop for anywhere from 250 ms to several seconds, and the agent keeps
+running throughout — so the window in which reattach is supposed to be seamless
+is exactly the window in which output is produced with nowhere to go. Outbound
+frames used to be written inline and discarded when the write failed, which lost
+them **on the instance side**, before the broker had ever seen them and therefore
+out of reach of the broker's own
+[client replay buffer](../../guides/session-broker.md#frame-sequencing-and-the-replay-buffer).
+
+How it behaves:
+
+| | |
+|---|---|
+| **Bound** | 1 MiB per instance, fixed (not configurable) |
+| **Measured in** | bytes, not frames |
+| **Eviction** | oldest first |
+| **On overflow** | a `WARN` naming `dropped_frames`, `dropped_bytes` and `limit_bytes`, rate-limited to one per second with cumulative counts |
+| **Flushed** | after the `register` / `ready` / `session-id-report` handshake of the next session |
+
+The bound is in **bytes** because outbound payloads span orders of magnitude — a
+token delta is a few bytes, a tool result is tens of kilobytes — so a frame count
+says nothing about how much memory a disconnected instance can pin. 1 MiB holds
+many seconds of streaming for a chatty agent and still holds several whole tool
+results for one that only emits large frames; it is the same figure as the
+broker's per-lease `client_replay_buffer_bytes` default, so the two halves of one
+stream pin comparable memory. Oldest-first eviction keeps the most recent tail,
+which is the part a client reattaching after a gap actually needs. A single frame
+larger than the whole bound is not retained at all — the alternative is a bound
+one big tool result can breach.
+
+The flush happens **after** the handshake, never before it: a buffered frame that
+overtook the `register` frame would reach a broker that has not yet bound the
+socket to the lease. A single write pump drains the buffer oldest-first, which is
+also what makes emission order the wire order however many bus handlers are
+producing at once, and a frame is removed from the buffer only once it has been
+written — a write that fails on a dying socket leaves it at the head for the next
+session.
+
+`SendIO` never touches the socket. Bus dispatch is synchronous, so it runs on the
+goroutine producing the agent's output; enqueuing under a short-lived lock keeps
+a slow or dead link from stalling the agent.
+
+Two cases deliberately do **not** buffer:
+
+- A **dormant** plugin (no `broker_addr` or no `lease_id`) never dials, so its
+  output is dropped at `DEBUG` exactly as before rather than pinning a megabyte
+  for a link that is not coming up.
+- **Shutdown** flushes on a bound, not on a promise. `Shutdown` gives the write
+  pump up to 2 seconds to drain a live socket — so the last output before a
+  locally initiated shutdown still reaches the broker — and skips the wait
+  entirely when nothing is connected. A non-empty buffer can never turn a
+  graceful shutdown into a hang. (On the broker-initiated path the `shutdown`
+  frame has already ended the session, so there is no socket left to flush to.)
+
 ### Outbound (engine bus → broker → client)
 
 These engine events are forwarded as IO messages inside broker frames:
@@ -116,6 +174,9 @@ handling) it sends a `shutdown` frame. The plugin then:
 The plugin never hard-exits mid-write; the engine owns teardown ordering. The
 broker bounds how long it waits for the process and force-kills it if the
 graceful path overruns (`release_grace`).
+
+Anything still in the outbound buffer is flushed on a bound rather than waited
+out — see [Output is buffered across a reconnect](#output-is-buffered-across-a-reconnect).
 
 ## Security
 
