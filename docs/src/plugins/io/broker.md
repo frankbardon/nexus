@@ -117,6 +117,40 @@ Two cases deliberately do **not** buffer:
   graceful shutdown into a hang. (On the broker-initiated path the `shutdown`
   frame has already ended the session, so there is no socket left to flush to.)
 
+### The dial-back socket is probed, not assumed live
+
+The reconnect loop above only helps once the instance *knows* the link is gone,
+and a half-open TCP connection does not announce itself: a host that slept, moved
+network, or had its flow dropped by a NAT leaves a socket that is still open, still
+accepts writes, and never delivers another byte. Left undetected, an instance in
+that state fills its 1 MiB outbound buffer against a socket nobody will ever
+drain — evicting its own oldest frames — while the write pump sits happily in a
+`Write` the kernel accepts.
+
+So the plugin **pings the broker every 15 seconds** and drops the dial-back
+socket once the broker has answered nothing for **45 seconds** (three consecutive
+probes), which unwinds the session and redials through the usual backoff. The
+outbound buffer is untouched by the teardown, so whatever was pending goes out
+after the next handshake. The broker probes in the other direction on the same
+cadence — see
+[Detecting a dead socket](../../guides/session-broker.md#detecting-a-dead-socket).
+
+Three properties are worth stating:
+
+- **The deadline is three intervals, not one.** A single unanswered ping proves
+  very little (a GC pause, a saturated uplink, a broker mid-compaction), and on
+  this side a needless reconnect is not free — it replays the handshake and
+  re-flushes the buffer. Sustained silence is the trigger, not a hiccup.
+- **An idle link is never dropped.** A ping is answered by the broker's WebSocket
+  stack whether or not anyone is typing, so an instance parked in a long tool
+  call, or one whose user stepped away, survives indefinitely. A timeout on
+  `Read` would tear such links down at exactly the moments they are most
+  expensive to lose, which is why the probe is a ping.
+- **No wire change.** Ping and pong are RFC 6455 control frames, not
+  `brokerframe` signals: no new signal, no version bump, and nothing that can
+  skew against an older broker. There is no configuration key — the interval and
+  deadline are constants.
+
 ### Outbound (engine bus → broker → client)
 
 These engine events are forwarded as IO messages inside broker frames:

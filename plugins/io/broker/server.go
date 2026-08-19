@@ -104,6 +104,40 @@ const (
 	// well inside the plugin's own 5 s shutdown budget, so a stuck socket
 	// cannot turn a graceful shutdown into a hang.
 	defaultOutboundFlushTimeout = 2 * time.Second
+
+	// defaultPingInterval is how often this instance probes the broker with a
+	// WebSocket ping, and defaultBrokerReadDeadline is how long the broker may
+	// answer NOTHING before the dial-back socket is declared dead and torn
+	// down so runLoop redials.
+	//
+	// THE RELATIONSHIP IS THE POINT: the deadline is three whole intervals, so
+	// the broker has to miss three consecutive pings before its socket is
+	// dropped. One unanswered ping proves very little — a GC pause, a
+	// saturated uplink, a broker mid-compaction — and a deadline at or just
+	// above one interval would turn each of those into a needless reconnect,
+	// which on this side is not free: a reconnect replays the register/ready
+	// handshake and re-flushes the outbound buffer. A deadline that
+	// comfortably exceeds the interval makes sustained silence, not one
+	// hiccup, the trigger.
+	//
+	// They mirror the gateway's own defaultPingInterval /
+	// defaultPeerReadDeadline (cmd/nexus-broker/gateway.go) so an operator
+	// reads one cadence rather than two. The two ends probe INDEPENDENTLY and
+	// nothing requires them to agree — the values are duplicated rather than
+	// shared because a ping is a transport concern and has no place in
+	// pkg/brokerframe, which describes the IO envelope.
+	//
+	// Detection here matters even though the broker probes too: this end is
+	// the one holding buffered output. Without a probe an instance whose link
+	// went half-open would keep filling its 1 MiB outbound buffer against a
+	// socket that will never drain, evicting its own oldest frames, while the
+	// write pump sits happily in a Write that the kernel accepts into a send
+	// queue nobody is reading.
+	defaultPingInterval = 15 * time.Second
+
+	// defaultBrokerReadDeadline is documented with defaultPingInterval above:
+	// three intervals of total silence, not one.
+	defaultBrokerReadDeadline = 3 * defaultPingInterval
 )
 
 // client is the dial-back WebSocket client. Unlike the listener-style
@@ -179,6 +213,13 @@ type client struct {
 	// the caller's context expires — whichever comes first.
 	flushTimeout time.Duration
 
+	// pingInterval and brokerReadDeadline configure the liveness pump — see
+	// defaultPingInterval for what they mean and why the second is three times
+	// the first. Fields rather than bare constants so tests can shrink them to
+	// milliseconds; a non-positive pingInterval disables liveness checking.
+	pingInterval       time.Duration
+	brokerReadDeadline time.Duration
+
 	runCtx    context.Context
 	runCancel context.CancelFunc
 	done      chan struct{}
@@ -235,7 +276,11 @@ func newClient(logger *slog.Logger, cfg clientConfig, onIO func(ioMessage), onSh
 		outSignal:    make(chan struct{}, 1),
 		dropLogEvery: outboundDropLogEvery,
 		flushTimeout: defaultOutboundFlushTimeout,
-		done:         make(chan struct{}),
+
+		pingInterval:       defaultPingInterval,
+		brokerReadDeadline: defaultBrokerReadDeadline,
+
+		done: make(chan struct{}),
 	}
 }
 
@@ -390,8 +435,84 @@ func (c *client) session() error {
 	pumpCtx, pumpCancel := context.WithCancel(c.runCtx)
 	defer pumpCancel()
 	go c.writePump(pumpCtx, conn)
+	// The liveness pump starts alongside the write pump and for the same
+	// session. conn.Ping needs a concurrent reader to collect the pong, which
+	// the readPump below provides for as long as this session lives.
+	go c.livenessPump(pumpCtx, conn)
 
 	return c.readPump(conn)
+}
+
+// livenessPump probes the broker with a WebSocket ping every pingInterval and
+// tears the socket down once the broker has failed to answer for
+// brokerReadDeadline. Closing is what enforces the deadline: it makes readPump's
+// blocked Read return an error, which unwinds session and lets runLoop redial
+// with its usual backoff — the same path a broker restart takes.
+//
+// WHY A PING RATHER THAN A READ TIMEOUT. Wrapping conn.Read in a timeout would
+// be wrong: Read returns on a DATA message and nothing else, and the broker
+// sends this instance data only when a client types. An instance sitting in a
+// long tool call, or one whose user has stepped away, is legitimately silent for
+// as long as it likes, so a read timeout would tear down healthy links at
+// exactly the moments they are most expensive to lose. A ping is answered by the
+// broker's WebSocket stack whether or not anyone is typing, so silence in the
+// face of one means the socket is gone and nothing else.
+//
+// conn.Ping is used rather than a hand-rolled brokerframe signal deliberately:
+// it waits for the matching pong, so one call is both halves of the probe, and a
+// ping is a transport concern that has no business in the IO envelope (no new
+// brokerframe.Signal, so no version bump and no skew against an older broker —
+// ping/pong is in RFC 6455, not in this protocol).
+//
+// A single ping failure does NOT tear anything down. Only the accumulated
+// silence since the last successful pong is compared against the deadline.
+func (c *client) livenessPump(ctx context.Context, conn *websocket.Conn) {
+	if c.pingInterval <= 0 || conn == nil {
+		return
+	}
+	ticker := time.NewTicker(c.pingInterval)
+	defer ticker.Stop()
+
+	lastPong := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		// Bounded by one interval so a wedged socket cannot park this
+		// goroutine and so probes never overlap; the deadline is enforced by
+		// the accumulated silence below, not by this timeout.
+		pingCtx, cancel := context.WithTimeout(ctx, c.pingInterval)
+		err := conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			lastPong = time.Now()
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		silent := time.Since(lastPong)
+		if silent < c.brokerReadDeadline {
+			c.logger.Debug("broker did not answer a ping",
+				"silent_for", silent, "error", err)
+			continue
+		}
+		c.logger.Warn("broker stopped answering pings; dropping the dial-back socket and redialling. "+
+			"The connection is half-open — this host slept, moved network, or had its flow dropped "+
+			"by a NAT — and would otherwise have looked healthy until the OS keepalive noticed",
+			"silent_for", silent, "deadline", c.brokerReadDeadline,
+			"lease_id", c.cfg.leaseID, "error", err)
+		// Guarded on identity for the same reason writePump's teardown is: a
+		// pump that outlived its session must never close its successor's
+		// connection. Buffered output survives — the buffer is not touched
+		// here, so whatever was pending goes out after the next handshake.
+		c.abortConnIf(conn)
+		return
+	}
 }
 
 // writePump drains the outbound buffer onto conn for the life of one session.
@@ -640,6 +761,27 @@ func (c *client) closeConnIf(target *websocket.Conn, status websocket.StatusCode
 	c.conn = nil
 	c.mu.Unlock()
 	_ = target.Close(status, reason)
+}
+
+// abortConnIf is closeConnIf for a peer that has already stopped answering: it
+// takes the same identity guard but skips the WebSocket close handshake.
+//
+// The distinction is load-bearing. Conn.Close writes a close frame and then
+// waits up to FIVE SECONDS for the broker to echo one, taking the connection's
+// read lock to do so — the lock readPump holds while blocked in Read. Against a
+// half-open socket that reply never arrives, so a graceful close would spend the
+// whole five seconds before the read pump unwinds and runLoop redials, on top of
+// the deadline already spent detecting the fault. CloseNow tears the connection
+// down at once, which is the honest description of what happened to it anyway.
+func (c *client) abortConnIf(target *websocket.Conn) {
+	c.mu.Lock()
+	if c.conn != target {
+		c.mu.Unlock()
+		return
+	}
+	c.conn = nil
+	c.mu.Unlock()
+	_ = target.CloseNow()
 }
 
 // closeConn closes and clears the active connection if any.

@@ -28,6 +28,56 @@ const (
 	// first (register) frame before rejecting the dial-back.
 	registerTimeout = 10 * time.Second
 
+	// defaultPingInterval is how often each frame pump asks its peer for a
+	// pong, and defaultPeerReadDeadline is how long a peer may answer NOTHING
+	// before the gateway declares its socket dead and closes it.
+	//
+	// THE RELATIONSHIP IS THE POINT: the deadline is three whole intervals, so
+	// a peer has to miss three consecutive pings before it is detached. A
+	// single unanswered ping proves very little — a stop-the-world GC pause, a
+	// saturated uplink, a laptop that slept for four seconds, a process the
+	// scheduler starved — and a deadline set at or just above one interval
+	// would turn every one of those into a dropped session. A deadline that
+	// comfortably exceeds the interval buys the redundancy that makes the
+	// signal trustworthy: silence sustained across 45 seconds and three
+	// independent probes is a dead socket, not a hiccup.
+	//
+	// The absolute numbers are chosen against the failure they exist to catch.
+	// A half-open TCP connection — a slept laptop, a moved network, a NAT
+	// table that dropped the flow — is invisible to both ends until something
+	// writes, and the OS keepalive that would eventually notice runs on a
+	// two-hour default. 45 seconds is fast enough that a client reconnects
+	// while its replay buffer still holds the stream (E3-S1/S2) and slow
+	// enough to cost one control frame per peer per 15 seconds.
+	//
+	// This is emphatically NOT idle reaping. A ping is answered by the
+	// WebSocket stack itself, so a session sitting untouched for an hour with
+	// no user input answers every one of them and survives indefinitely.
+	// Releasing genuinely idle leases is a separate policy owned by
+	// `idle_timeout`, which is stamped only by real client → instance IO.
+	defaultPingInterval = 15 * time.Second
+
+	// defaultPeerReadDeadline is documented with defaultPingInterval above:
+	// three intervals of total silence, not one.
+	defaultPeerReadDeadline = 3 * defaultPingInterval
+
+	// peerUnresponsiveReason is the close reason a socket detached for
+	// unanswered pings carries. The peer that earned it is by definition not
+	// reading, so this is for the log and for a slow-but-alive peer that does
+	// eventually drain its socket.
+	peerUnresponsiveReason = "peer unresponsive"
+)
+
+// peerRole names which end of a lease a frame pump is pumping, for log records
+// only. It never reaches the wire.
+type peerRole string
+
+const (
+	peerInstance peerRole = "instance"
+	peerClient   peerRole = "client"
+)
+
+const (
 	// ticketQueryParam is the query parameter a client presents its single-use
 	// lease ticket in on the client WebSocket handshake.
 	//
@@ -124,6 +174,14 @@ type Gateway struct {
 	// it could present was ever minted here.
 	tickets *ticketStore
 
+	// pingInterval and peerReadDeadline configure the liveness pump — see
+	// defaultPingInterval for what they mean and why the second is three times
+	// the first. They are fields rather than bare constants so tests can shrink
+	// them to milliseconds; nothing else writes them, and a non-positive
+	// pingInterval disables liveness checking entirely.
+	pingInterval     time.Duration
+	peerReadDeadline time.Duration
+
 	// rootCtx is cancelled on Shutdown so all read/write pumps exit.
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -139,12 +197,14 @@ func NewGateway(logger *slog.Logger, registry *Registry, auth *authGuard, ticket
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	return &Gateway{
-		logger:     logger,
-		registry:   registry,
-		auth:       auth,
-		tickets:    tickets,
-		rootCtx:    rootCtx,
-		rootCancel: rootCancel,
+		logger:           logger,
+		registry:         registry,
+		auth:             auth,
+		tickets:          tickets,
+		pingInterval:     defaultPingInterval,
+		peerReadDeadline: defaultPeerReadDeadline,
+		rootCtx:          rootCtx,
+		rootCancel:       rootCancel,
 	}
 }
 
@@ -235,6 +295,7 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	defer cancelPumps()
 
 	go g.writePump(ctx, wc)
+	go g.livenessPump(ctx, leaseID, peerInstance, wc)
 	// Instance read pump: forward decoded frames to the lease's client conn.
 	// Lifecycle signals from the instance are observed here so the gateway can
 	// unblock POST /claim when the engine reports ready.
@@ -440,6 +501,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	defer cancelPumps()
 
 	go g.writePump(ctx, wc)
+	go g.livenessPump(ctx, leaseID, peerClient, wc)
 	// Client read pump: forward decoded frames to the lease's instance conn.
 	// Stamp last-activity ONLY for real user input (io frames flowing client →
 	// instance) so the idle sweeper resets on genuine activity and not on
@@ -553,6 +615,82 @@ func (g *Gateway) resolveClientPrincipal(r *http.Request, leaseID string) (nexus
 		return nexusauth.Principal{}, credentialBearer, err
 	}
 	return p, credentialBearer, nil
+}
+
+// livenessPump probes one peer with a WebSocket ping every pingInterval and
+// closes its socket once the peer has failed to answer for peerReadDeadline.
+// Closing is what enforces the deadline: it makes the blocked read in readPump
+// return an error, which runs the ordinary detach path — the same one a peer
+// that hung up cleanly takes.
+//
+// WHY A PING RATHER THAN A READ TIMEOUT. The obvious implementation — wrap each
+// conn.Read in a context.WithTimeout — is wrong here, and dangerously so. Read
+// returns on a DATA message and on nothing else; the library answers pings and
+// consumes pongs inside that blocked call without ever surfacing them. So a
+// timeout on Read measures how long since the peer last said something, which is
+// exactly what a healthy idle session does not do. It would reap every session
+// whose user stepped away, which is precisely the bug idle_timeout's own policy
+// (and E4-S1) exists to get right. A ping, by contrast, is answered by the
+// peer's WebSocket stack whether or not there is a human at the far end, so
+// silence in the face of one means the socket is gone and nothing else.
+//
+// conn.Ping is used rather than a hand-rolled brokerframe signal deliberately.
+// It waits for the matching pong, so one call is both halves of the probe; it
+// works against a peer that speaks no Nexus protocol at all; and a ping is a
+// transport concern that has no business in the IO envelope. It requires a
+// concurrent reader to collect the pong — see its doc comment — which both
+// pumps satisfy, since each is started alongside a readPump that immediately
+// blocks in Read.
+//
+// A ping failure alone does NOT detach. Only the accumulated silence since the
+// last successful pong is compared against the deadline, so the three-interval
+// redundancy described on defaultPingInterval is real rather than nominal.
+func (g *Gateway) livenessPump(ctx context.Context, leaseID string, role peerRole, wc *wsConn) {
+	if g.pingInterval <= 0 || wc == nil || wc.conn == nil {
+		return
+	}
+	ticker := time.NewTicker(g.pingInterval)
+	defer ticker.Stop()
+
+	lastPong := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wc.closed:
+			return
+		case <-ticker.C:
+		}
+
+		// The probe is bounded by one interval so a wedged socket cannot park
+		// this goroutine indefinitely and so probes never overlap; the deadline
+		// is enforced by the accumulated silence below, not by this timeout.
+		pingCtx, cancel := context.WithTimeout(ctx, g.pingInterval)
+		err := wc.conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			lastPong = time.Now()
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		silent := time.Since(lastPong)
+		if silent < g.peerReadDeadline {
+			g.logger.Debug("peer did not answer a ping",
+				"lease_id", leaseID, "peer", string(role),
+				"silent_for", silent, "error", err)
+			continue
+		}
+		g.logger.Warn("peer stopped answering pings; closing its socket so the lease detaches. "+
+			"The connection is half-open — the peer's host slept, moved network, or had its flow "+
+			"dropped by a NAT — and would otherwise have looked healthy until the OS keepalive noticed",
+			"lease_id", leaseID, "peer", string(role),
+			"silent_for", silent, "deadline", g.peerReadDeadline, "error", err)
+		wc.abort(websocket.StatusGoingAway, peerUnresponsiveReason)
+		return
+	}
 }
 
 // readPump reads frames from wc, decodes them (protocol-aware), and hands each

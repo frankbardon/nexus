@@ -133,6 +133,32 @@ func (c *wsConn) shutdown(status websocket.StatusCode, reason string) {
 	})
 }
 
+// abort is shutdown for a peer that has already stopped answering: it records
+// the same status and reason, but skips the WebSocket close handshake.
+//
+// The distinction is load-bearing rather than cosmetic. Conn.Close writes a
+// close frame and then waits up to FIVE SECONDS for the peer to echo one, and it
+// takes the connection's read lock to do so — a lock the read pump is holding
+// while blocked in Read. So a graceful close against a socket whose peer is
+// gone leaves the conn attached, and the lease believing it has a peer, for
+// those five seconds. That is the whole bounded-detection property the liveness
+// pump exists to provide, spent waiting for a reply that is not coming.
+//
+// CloseNow tears the underlying connection down at once, which unblocks the read
+// pump immediately and runs the ordinary detach path. The peer sees an abnormal
+// closure instead of a coded one, which is the honest description of what
+// happened to it.
+func (c *wsConn) abort(status websocket.StatusCode, reason string) {
+	c.once.Do(func() {
+		c.closeStatus = status
+		c.closeReason = reason
+		close(c.closed)
+		if c.conn != nil {
+			_ = c.conn.CloseNow()
+		}
+	})
+}
+
 // lease holds the paired connections plus bookkeeping for a single claimed
 // instance. Fields are guarded by Registry.mu — never read or mutate them
 // outside a Registry method (with the documented exception of ready/readyOnce,

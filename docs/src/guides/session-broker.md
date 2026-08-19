@@ -1447,6 +1447,56 @@ Adding `stream-gap` needed no `brokerframe` version bump, for the same reason
 `seq` did not: the broker only ever emits it to a client that asked for a resume,
 so nothing built against an older broker can be handed a signal it cannot decode.
 
+### Detecting a dead socket
+
+A TCP connection can die without either end being told. A laptop that sleeps, a
+phone that moves from Wi-Fi to cellular, a NAT table that ages out an idle flow —
+in every case the socket stays *open* on the far end's books, writes are still
+accepted into a send queue, and nothing surfaces until the OS keepalive
+eventually notices, which on a default configuration is on the order of **hours**.
+Until then the broker believes a lease has a peer that is never going to read
+another byte.
+
+So **both frame pumps probe their peer**, in both directions:
+
+- The broker pings each attached **client** and each attached **instance** every
+  **15 seconds**.
+- The instance's dial-back client pings the **broker** on the same cadence.
+- A peer that answers nothing for **45 seconds** — three consecutive probes — has
+  its socket torn down. On the broker side that detaches the connection from the
+  lease (the lease itself survives, so a client can reconnect and
+  [resume](#resuming-from-the-buffer)); on the instance side it drops the
+  dial-back socket and redials with the usual backoff, with buffered output
+  intact.
+
+The deadline is three times the interval **on purpose**. One unanswered ping
+proves very little — a stop-the-world GC pause, a saturated uplink, a starved
+process — and a deadline set at or just above the interval would turn each of
+those into a dropped connection. Requiring sustained silence across three
+independent probes is what makes the signal worth acting on.
+
+Two things follow that are easy to get wrong:
+
+- **This is not idle reaping, and it never reaps an idle session.** The probe is
+  a WebSocket ping, answered by the peer's *WebSocket stack* whether or not there
+  is a human at the far end. A session sitting untouched overnight with no user
+  input answers every one of them and survives indefinitely. Releasing genuinely
+  idle leases is a separate policy, owned by
+  [`idle_timeout`](#idle-reaping) — which is stamped only by real client →
+  instance input, never by a ping.
+- **It is not part of the frame protocol.** Ping and pong are RFC 6455 control
+  frames, not `brokerframe` signals, so there is no new signal, no version bump,
+  and nothing a client has to implement: any conformant WebSocket client already
+  answers. There is no configuration key either — the interval and deadline are
+  constants.
+
+The unresponsive-peer teardown skips the WebSocket close handshake. A graceful
+close writes a close frame and then waits up to five seconds for the peer to echo
+it, which against a peer that has already stopped answering is five seconds of
+the lease still believing it has a socket — exactly the bounded detection the
+probe exists to provide. A peer torn down this way sees an abnormal closure,
+which is the honest description of what happened to it.
+
 ## The A2A front door (`agents:`)
 
 Everything above assumes a **Nexus-aware client**: `POST /claim` requires the
@@ -1832,6 +1882,11 @@ releases it through the same teardown path as `POST /release` (so the session is
 persisted). Only inbound `io` input frames (client → instance) reset the idle
 timer — output, pings, and control frames do not. Set `idle_timeout` to `0` to
 disable idle reaping.
+
+This is the **only** policy that releases a lease for inactivity. The liveness
+probe described under [Detecting a dead socket](#detecting-a-dead-socket) does
+not: it detaches sockets that have stopped answering at the transport level and
+never touches a peer that is merely quiet.
 
 **This applies to [A2A](#the-a2a-front-door-agents) instances too**, and it is
 what makes them affordable: every message the A2A ingress sends counts as client
