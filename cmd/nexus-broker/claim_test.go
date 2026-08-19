@@ -1619,6 +1619,63 @@ func TestWarnIfAdvertiseAddrMissing(t *testing.T) {
 	}
 }
 
+// TestWarnIfAdvertiseSchemeUnserved asserts the sibling boot warning: a TLS
+// advertise_addr on a broker that serves cleartext says so out loud, and every
+// scheme the broker can actually honour stays silent.
+//
+// The cases drive raw advertise_addr strings through parseAdvertiseAddr rather
+// than setting AdvertiseScheme by hand, because wss:// and https:// are distinct
+// operator inputs that collapse to one internal scheme — asserting on the raw
+// form is the only way to pin that both of them warn.
+func TestWarnIfAdvertiseSchemeUnserved(t *testing.T) {
+	cases := []struct {
+		name          string
+		advertiseAddr string
+		wantWarn      bool
+	}{
+		{"wss:// warns", "wss://broker-1.example.com", true},
+		{"https:// warns", "https://broker-1.example.com", true},
+		{"ws:// is quiet", "ws://broker-1.example.com:8080", false},
+		{"bare host:port is quiet", "broker-1.example.com:8080", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme, host, err := parseAdvertiseAddr(tc.advertiseAddr)
+			if err != nil {
+				t.Fatalf("parseAdvertiseAddr(%q): %v", tc.advertiseAddr, err)
+			}
+			cfg := Config{
+				ListenAddr:      ":8080",
+				AdvertiseAddr:   tc.advertiseAddr,
+				AdvertiseScheme: scheme,
+				AdvertiseHost:   host,
+			}
+
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			warnIfAdvertiseSchemeUnserved(logger, cfg)
+
+			out := buf.String()
+			if !tc.wantWarn {
+				if out != "" {
+					t.Fatalf("expected no warning for %q, got %q", tc.advertiseAddr, out)
+				}
+				return
+			}
+			if !strings.Contains(out, "level=WARN") {
+				t.Fatalf("expected a WARN record, got %q", out)
+			}
+			// The assumption, not just the symptom: an operator who sees this
+			// behind a proxy has to be able to tell it is expected.
+			for _, want := range []string{"advertise_addr", "cleartext", "proxy"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("warning %q does not mention %q", out, want)
+				}
+			}
+		})
+	}
+}
+
 // TestClaim_AdvertiseAddrDrivesReturnedWSURL is the end-to-end proof: the ws_url
 // in a real claim response names the advertised address, not the request Host the
 // claim arrived on (which for an httptest server is 127.0.0.1:<random>).

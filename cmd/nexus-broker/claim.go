@@ -746,3 +746,30 @@ func warnIfAdvertiseAddrMissing(logger *slog.Logger, cfg Config) {
 		"set advertise_addr to the address clients use to reach this broker",
 		"listen_addr", cfg.ListenAddr)
 }
+
+// warnIfAdvertiseSchemeUnserved logs one WARN at boot when advertise_addr names
+// a TLS scheme (wss:// or https://, both of which normalize to "wss") while this
+// broker serves cleartext — which it always does, since it has no TLS listener
+// and terminates nothing itself.
+//
+// It is a WARNING and deliberately not a boot refusal: a wss:// advertise_addr
+// in front of a TLS-terminating proxy is the documented, supported deployment
+// (see "Behind a proxy" in docs/src/guides/session-broker.md), and this process
+// cannot tell whether such a proxy exists. Refusing to boot would break the
+// intended configuration; saying nothing leaves an operator who forgot the proxy
+// with no signal at all beyond clients failing to connect.
+//
+// It sits beside warnIfAdvertiseAddrMissing because it is the same kind of
+// statement: a claim about how clients reach this broker that only the operator
+// can confirm, and that nothing later in the process gets a chance to check.
+func warnIfAdvertiseSchemeUnserved(logger *slog.Logger, cfg Config) {
+	if cfg.AdvertiseScheme != "wss" {
+		return
+	}
+	logger.Warn("advertise_addr names a TLS scheme but this broker serves cleartext: "+
+		"it has no TLS listener, so the wss:// ws_url returned by POST /claim is correct "+
+		"ONLY if a TLS-terminating proxy fronts this broker; "+
+		"expected behind such a proxy, and a misconfiguration otherwise",
+		"advertise_addr", cfg.AdvertiseAddr,
+		"listen_addr", cfg.ListenAddr)
+}

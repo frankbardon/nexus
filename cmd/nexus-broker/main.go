@@ -90,6 +90,11 @@ func run() error {
 	// the two apart — so the only place to say so is here, at boot.
 	warnIfAdvertiseAddrMissing(logger, cfg)
 
+	// The mirror image: a wss:// advertise_addr promises TLS this process does not
+	// serve. That is correct behind a TLS-terminating proxy and wrong without one,
+	// and only the operator knows which — so it warns rather than refusing to boot.
+	warnIfAdvertiseSchemeUnserved(logger, cfg)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

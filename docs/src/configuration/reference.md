@@ -4827,6 +4827,12 @@ logs one `WARN` at startup naming the consequence: `ws_url`s will be derived fro
 each request's `Host` header. The broker still starts — this shape is correct for
 a directly-reachable broker.
 
+A `wss://` or `https://` `advertise_addr` likewise logs one `WARN` at startup: the
+broker has no TLS listener, so it is advertising a scheme it does not serve. The
+broker still starts, because that is exactly right behind a TLS-terminating proxy
+and the process cannot tell whether one is there. Advertise `ws://` (or a bare
+`host:port`) on a broker nothing fronts.
+
 This resolution is **client-facing only**. The `/instance` dial-back address
 handed to a spawned instance is resolved separately and always collapses a
 wildcard bind to `127.0.0.1`, because instances are same-host by design;

@@ -443,6 +443,18 @@ startup, and the wildcard-bind-without-`advertise_addr` shape logs a `WARN` at
 boot. A directly-reachable broker can leave the key empty. Full precedence table:
 [`ws_url` resolution](../configuration/reference.md#ws_url-resolution).
 
+**A `wss://` or `https://` `advertise_addr` also logs a `WARN` at boot** — the
+broker has no TLS listener and always serves cleartext, so it is announcing a
+scheme it does not itself terminate. **Behind a TLS-terminating proxy that warning
+is expected and correct**: the proxy serves `wss://` to clients and forwards
+cleartext to the broker, which is exactly the deployment above. The broker cannot
+see whether such a proxy is in front of it, which is why this is a warning and
+never a boot refusal — refusing would break the supported configuration. Treat it
+as a misconfiguration only if nothing terminates TLS ahead of the broker, in which
+case clients dialing `wss://` will fail to connect. To silence it on a
+directly-reachable broker, advertise the scheme it actually serves (`ws://`, or a
+bare `host:port`).
+
 ### Surviving a restart: set `state_dir`
 
 Lease state — which instances this broker spawned, who claimed them, and what
