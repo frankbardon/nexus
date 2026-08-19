@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -57,6 +58,33 @@ const (
 // resume path deliberately does not carry the variant: there the id under test
 // is the one the broker passed in.
 func NewSessionID(variant string) string { return variant + "-new-session" }
+
+// TurnAnswer is the text a stub publishes as the answer to an `input` payload.
+//
+// It carries the three facts an A2A test needs to prove what the broker did,
+// and it carries them in the ANSWER rather than in a side channel because the
+// answer is the only thing an A2A client ever sees: the linked-in variant (which
+// binary ran), the engine session (which conversation this is), and whether the
+// process was started with -recall (whether history was replayed or a fresh
+// session begun). Two spawns of one conversation produce the same session with
+// different recall flags, which is what makes a transparent re-spawn assertable
+// from the client side alone.
+func TurnAnswer(variant, sessionID string, recalled bool) string {
+	return fmt.Sprintf("%s|%s|%t", variant, sessionID, recalled)
+}
+
+// ioPayload is the handful of instance-IO fields the stub needs to hold up its
+// end of a turn. It is deliberately NOT the broker's full brokerIOMessage: a
+// fixture that mirrored every field would have to be kept in step with a struct
+// it does not implement, and the contract test that guards that mirror already
+// exists on the broker side.
+type ioPayload struct {
+	Type    string `json:"type"`
+	TurnID  string `json:"turn_id,omitempty"`
+	Content string `json:"content,omitempty"`
+	Role    string `json:"role,omitempty"`
+	State   string `json:"state,omitempty"`
+}
 
 // EnvReportPrefix selects which environment variables a stub will disclose in
 // its report. Reporting the whole environment would be simpler and is not done
@@ -149,6 +177,30 @@ func Run(variant string) {
 	// sibling instances stay untouched.
 	crashAfterReady := os.Getenv("STUB_CRASH_AFTER_READY") == "1"
 
+	// When STUB_TURN_DELAY is a parseable duration the stub waits that long
+	// mid-turn — after announcing `status: thinking`, before publishing its
+	// answer. It is what makes a turn's WORKING window long enough to observe
+	// from outside the process: the default stub answers in microseconds, so a
+	// test about what happens WHILE a turn is running would otherwise be racing
+	// a turn that is already over.
+	//
+	// An unparseable value is treated as no delay rather than an exit: the stub's
+	// job is to be a nexus instance, and refusing to boot over a malformed test
+	// knob would report the failure as a spawn failure, which is a different
+	// thing entirely.
+	turnDelay, _ := time.ParseDuration(os.Getenv("STUB_TURN_DELAY"))
+
+	// When STUB_CRASH_MID_TURN=1 the stub dies AFTER a turn has visibly started:
+	// it publishes `status: thinking`, so anything watching has seen the turn
+	// move off its opening state, and then exits abnormally without answering.
+	//
+	// It is deliberately distinct from STUB_CRASH_AFTER_READY, which dies on the
+	// first inbound frame and therefore never lets a turn start at all. The two
+	// exercise different halves of the same guarantee — a crash before a turn
+	// begins, and a crash with a turn in flight — and collapsing them into one
+	// switch would leave the second untested.
+	crashMidTurn := os.Getenv("STUB_CRASH_MID_TURN") == "1"
+
 	// When STUB_RECONNECT=1 the stub mirrors the real nexus.io.broker plugin's
 	// reconnect loop (plugins/io/broker/server.go): a dropped connection is
 	// retried with backoff until a shutdown frame arrives. It is what makes the
@@ -157,12 +209,15 @@ func Run(variant string) {
 	reconnect := os.Getenv("STUB_RECONNECT") == "1"
 
 	sess := session{
+		recalled:        *recall != "",
 		addr:            addr,
 		leaseID:         leaseID,
 		spawnSecret:     spawnSecret,
 		sessionID:       sessionID,
 		ignoreShutdown:  ignoreShutdown,
 		crashAfterReady: crashAfterReady,
+		crashMidTurn:    crashMidTurn,
+		turnDelay:       turnDelay,
 		report: Report{
 			Variant: variant,
 			Args:    rawArgs,
@@ -221,13 +276,22 @@ func reportedEnv() map[string]string {
 
 // session is one dial-back attempt's worth of state.
 type session struct {
+	// recalled records whether this process was started with -recall, which is
+	// what a turn's answer discloses so a test can tell a resumed conversation
+	// from a fresh one without reading the broker's logs.
+	recalled        bool
 	addr            string
 	leaseID         string
 	spawnSecret     string
 	sessionID       string
 	ignoreShutdown  bool
 	crashAfterReady bool
-	report          Report
+	// crashMidTurn kills the process once a turn is visibly under way; see the
+	// STUB_CRASH_MID_TURN comment in Run.
+	crashMidTurn bool
+	// turnDelay stretches a turn's WORKING window; see STUB_TURN_DELAY in Run.
+	turnDelay time.Duration
+	report    Report
 }
 
 // run dials the broker, performs the register/ready/session-id handshake, and
@@ -264,6 +328,10 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 		return false, err
 	}
 
+	// turns counts the turns this connection has served, so each one is announced
+	// under its own turn id — a broker anchors a task to a turn, and two turns
+	// sharing an id would let one task adopt the other's output.
+	turns := 0
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -279,6 +347,20 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				// Simulate an unexpected crash mid-session: exit abnormally
 				// without the graceful shutdown handshake.
 				os.Exit(7)
+			}
+			// An `input` payload is a TURN, and a turn is answered with the
+			// payload sequence every shipped Nexus agent loop produces: a progress
+			// status, the published output, then `status: idle` — which is the only
+			// end-of-turn signal the instance IO envelope carries. Echoing it
+			// instead (the default below) would leave anything driving a turn
+			// waiting forever for an ending that never comes.
+			//
+			// Everything that is NOT an input still echoes verbatim, so every test
+			// written against the echo loop is untouched.
+			if isInputPayload(frame.Payload) {
+				turns++
+				s.answerTurn(ctx, conn, turns)
+				continue
 			}
 			payload := frame.Payload
 			if string(payload) == ReportRequest {
@@ -307,6 +389,66 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 			return true, nil
 		}
 	}
+}
+
+// isInputPayload reports whether an IO payload is a user turn. A payload that
+// is not an object at all — the raw echo fixtures send one — is not an input,
+// which is what keeps the default echo behaviour intact.
+func isInputPayload(payload []byte) bool {
+	var msg ioPayload
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return false
+	}
+	return msg.Type == "input"
+}
+
+// answerTurn plays one complete turn back over the dial-back socket.
+//
+// The three payloads are the minimum a broker-side A2A mapping needs to render
+// a task: any sign of life moves it to WORKING, the `output` supplies the
+// response artifact's text, and `status: idle` completes it.
+func (s session) answerTurn(ctx context.Context, conn *websocket.Conn, turn int) {
+	turnID := fmt.Sprintf("turn-%d", turn)
+
+	// The opening status goes out on its own, before any delay or crash, because
+	// it is what moves a watching task off its opening state. A crash or a pause
+	// that happened before it would be indistinguishable from a spawn that never
+	// produced a turn.
+	if !s.emit(ctx, conn, ioPayload{Type: "status", State: "thinking"}) {
+		return
+	}
+	if s.crashMidTurn {
+		// No graceful shutdown handshake and no answer: this is what a nexus
+		// instance killed by the OOM killer mid-turn looks like from the broker.
+		os.Exit(9)
+	}
+	if s.turnDelay > 0 {
+		time.Sleep(s.turnDelay)
+	}
+
+	for _, msg := range []ioPayload{
+		{Type: "output", TurnID: turnID, Role: "assistant",
+			Content: TurnAnswer(s.report.Variant, s.sessionID, s.recalled)},
+		{Type: "status", State: "idle"},
+	} {
+		if !s.emit(ctx, conn, msg) {
+			return
+		}
+	}
+}
+
+// emit writes one IO payload, reporting whether the write succeeded so a caller
+// can stop playing a turn into a socket that is already gone.
+func (s session) emit(ctx context.Context, conn *websocket.Conn, msg ioPayload) bool {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+	return write(ctx, conn, brokerframe.Frame{
+		LeaseID: s.leaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: payload,
+	}) == nil
 }
 
 func write(ctx context.Context, conn *websocket.Conn, f brokerframe.Frame) error {

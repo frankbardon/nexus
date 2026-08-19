@@ -162,6 +162,30 @@ func run() error {
 		defer func() { _ = sessionBinaries.Close() }()
 	}
 
+	// The durable A2A context → session index. It is what lets a message on a
+	// contextId whose instance was released (or whose broker restarted) resume the
+	// conversation instead of starting a new one, and it is opened ONLY when the
+	// broker actually fronts A2A profiles — a broker with no `agents:` block must
+	// not gain a file it will never write to.
+	//
+	// It shares state_dir's fate and the session→binary index's failure policy: an
+	// index that cannot be opened degrades continuity to the life of this process,
+	// which is exactly what a broker with no state_dir already has. Refusing to
+	// boot over it would trade a degraded feature for an outage.
+	var a2aContexts *a2aContextIndex
+	if len(cfg.Agents) > 0 {
+		a2aContexts, err = openA2AContextIndex(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a context index; a conversation whose agent instance "+
+				"has stopped will start a fresh session instead of resuming after a broker restart",
+				"state_dir", cfg.StateDir, "error", err)
+			a2aContexts = nil
+		}
+		if a2aContexts != nil {
+			defer func() { _ = a2aContexts.Close() }()
+		}
+	}
+
 	// The spawn-secret derivation key. It shares state_dir's fate: present and
 	// stable when durability is on, absent (and secrets random per spawn, as they
 	// always were) when it is off. Loaded AFTER openLeaseStore because that is
@@ -213,6 +237,54 @@ func run() error {
 	// holds a finished response rather than the Config it came from.
 	binaries := NewBinariesServer(logger, cfg.Binaries)
 
+	// The A2A ingress. Each `agents:` profile publishes an Agent Card and the two
+	// HTTP bindings under its own path namespace, so a third-party A2A client can
+	// address an agent by URL instead of supplying a full nexus config the way
+	// POST /claim demands.
+	//
+	// Cards are rendered HERE, at boot, so a card that is not servable — a
+	// missing skill, a security scheme that cannot be derived — fails the start
+	// rather than the first client that fetches it. With no `agents:` block this
+	// builds an empty server that registers no routes at all.
+	agents, err := NewA2AServer(logger, cfg)
+	if err != nil {
+		logger.Error("failed to build the a2a agent profiles", "error", err)
+		return err
+	}
+	// The lifecycle behind the ingress. It is installed BEFORE logStartupState so
+	// the boot log tells the truth: that method warns loudly when no provider is
+	// wired, and wiring it afterwards would print a warning about a broker that is
+	// in fact fully assembled.
+	//
+	// It is given the CLAIM SERVER rather than the runner or the registry alone,
+	// because every instance it starts goes through the same spawn spine POST
+	// /claim uses — capacity slot, spawn secret, recorded-binary reconciliation,
+	// bounded ready wait, crash watcher. There is one way to boot an instance in
+	// this binary.
+	if agents.enabled() {
+		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+
+		// The durable A2A task store. It is what lets GetTask, ListTasks and
+		// SubscribeToTask answer for a task whose instance was released hours ago
+		// or whose broker process has since restarted — which is precisely when a
+		// client asks.
+		//
+		// It shares the two indexes' failure policy: an unusable file degrades the
+		// store to memory-only, which still answers every read for the life of
+		// this process, rather than refusing to boot. NewA2AServer already
+		// installed a memory-only store, so a failure here simply leaves it in
+		// place.
+		taskStore, err := openA2ATaskStore(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a task store; tasks will be readable for the life of "+
+				"this process but not after a restart",
+				"state_dir", cfg.StateDir, "error", err)
+		}
+		agents.useTaskStore(taskStore)
+		defer func() { _ = taskStore.Close() }()
+	}
+	agents.logStartupState(cfg)
+
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
 	// disables it. It runs until sweepCtx is cancelled on shutdown.
@@ -256,6 +328,12 @@ func run() error {
 	// a control-plane read, and a caller that cannot claim has no business
 	// learning which variants an operator deploys.
 	binaries.Register(guarded)
+	// Behind the SAME guard again, card included. An A2A caller is refused by
+	// exactly the middleware that refuses a /claim caller, so there is one
+	// authentication policy on this binary rather than two — see the auth-posture
+	// comment on handleAgentCard for why the discovery document is inside it
+	// here and outside it in nexus.io.a2a.
+	agents.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -286,6 +364,10 @@ func run() error {
 
 	stopSweep()
 	gateway.Shutdown()
+	// Settle any A2A task still in flight before the listener goes away, so a
+	// streaming client is told the turn ended rather than being left on a socket
+	// nothing will ever write to again.
+	agents.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

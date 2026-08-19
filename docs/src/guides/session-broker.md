@@ -21,7 +21,7 @@ crashes.
                           ┌───────────────────────────────────────┐
                           │            nexus-broker               │
    client ──HTTP POST────▶│  /claim /release/{id} /ticket/{id}    │
-                          │  /leases                              │
+                          │  /leases  /agents/{name}/…  (A2A)     │
           ◀──lease+ws_url─│                                       │
           ──WebSocket────▶│  /lease/{id}  ◀──frames──▶  /instance │
                           └───────────────────────────────────────┘
@@ -286,6 +286,18 @@ corrupt or torn index is skipped line by line and **never prevents the broker fr
 booting** — an index that cannot be opened at all only logs a `WARN` and turns the
 mapping off. See
 [Session → binary index](../configuration/reference.md#session--binary-index-session-binariesjsonl).
+
+The durable **A2A context → session** mapping lives in a third file,
+`<state_dir>/a2a-contexts.jsonl`, written only when the broker has an
+[`agents:` block](#the-a2a-front-door-agents). It is what lets a message on a
+`contextId` whose instance has stopped resume the conversation after a restart
+rather than starting a new one, and it follows the session → binary index in
+every respect: separate from the journal for the same reason, capped at 4096
+bindings with the oldest dropped first, rewritten on open and every 256 appends,
+tolerant of a torn trailing record, and **never a boot failure** — an index that
+cannot be opened logs a `WARN` and continuity falls back to the life of the
+process. See
+[Conversation lifecycle](#one-conversation-one-instance-contextid).
 
 The journal is compacted on open and every 512 appends, so it holds roughly the
 live lease set rather than the whole history. A write that fails is logged and
@@ -1031,6 +1043,374 @@ The IO message shapes carried inside broker frames (`output`, `stream.delta`,
 `input`, `approval.response`, …) are documented on the
 [`nexus.io.broker` plugin page](../plugins/io/broker.md#how-it-works).
 
+## The A2A front door (`agents:`)
+
+Everything above assumes a **Nexus-aware client**: `POST /claim` requires the
+full nexus config as inline YAML, so the caller must know Nexus exists and which
+plugins to activate. A third-party [A2A](https://a2a-protocol.org) client knows
+none of that.
+
+The `agents:` block is the answer. Each **profile** binds a nexus config, a
+[binary registry](#serving-several-nexus-variants-the-binary-registry) entry and
+an Agent Card under one name, and publishes that name's A2A endpoints. The
+client names an agent by URL; the operator decided long ago what running it
+means.
+
+```yaml
+# broker.yaml
+advertise_addr: "https://broker.example"    # the origin the agent cards advertise
+state_dir: "~/.nexus/broker"                # needed for continuity across a restart
+
+agents:
+  support:
+    binary: nexus                           # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"         # the nexus config instances of this profile boot with
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+
+a2a:                                        # optional; every value below is the default
+  tasks:
+    ttl: "24h"                              # how long a finished task stays readable
+    max_per_context: 50                     # tasks kept per (caller, conversation)
+    input_timeout: "15m"                    # how long a question may wait on a human
+```
+
+The `a2a:` block is **not** per profile, deliberately: the task store is one
+file with one retention policy for the whole broker, so hanging its knobs off
+each profile would invite four different retentions for one file. Its keys and
+their meanings are `nexus.io.a2a`'s, so an operator who has configured the
+standalone listener already knows them — see
+[Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask) and
+[Two messages on one conversation queue](#two-messages-on-one-conversation-queue)
+for what each one actually governs.
+
+That publishes three routes, namespaced under the profile name so profiles
+cannot collide:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /agents/support/.well-known/agent-card.json` | The profile's Agent Card |
+| `POST /agents/support/a2a` | JSON-RPC 2.0 binding |
+| `/agents/support/a2a/v1/...` | HTTP+JSON (REST) binding |
+
+```bash
+curl -s https://broker.example/agents/support/.well-known/agent-card.json \
+  -H 'Authorization: Bearer <token>' | jq
+```
+
+**Profiles are the unit of public identity: one card, one persona, one config.**
+Two agents that should look different to the outside world are two profiles, not
+one profile with a switch.
+
+A few rules worth knowing before you write the block; the full key list is in the
+[configuration reference](../configuration/reference.md#agent-profiles-agents).
+
+- **A profile name is a URL path segment.** Letters, digits, `-`, `_` and `.`
+  only. Names are compared with whitespace trimmed, so `"support ":` and
+  `support:` collide and fail the boot.
+- **An unknown `binary` fails startup**, naming the alternatives — it does not
+  fall back to the reserved `nexus` entry, for the same reason `POST /claim`
+  answers `400` rather than quietly spawning the base binary for a caller that
+  asked for a vision build.
+- **A missing `config` file fails startup** too, resolved and stat()ed at boot
+  like every registry path, so a typo is caught at deploy time rather than by the
+  first A2A request.
+- **You author identity; the broker derives the rest.** `supportedInterfaces`,
+  `capabilities` and `securitySchemes` have no config keys: they describe what
+  the broker actually serves, and an operator must not be able to state one that
+  is false. In particular the card's security schemes come from the broker's own
+  [`auth:`](#authentication) chain, so a published card cannot advertise a
+  credential the broker does not accept.
+- **Set `advertise_addr`.** A card must carry absolute URLs. With profiles
+  configured and a wildcard bind (`:8080`) and no `advertise_addr`, the broker
+  refuses to start rather than publish a URL no client can dial.
+- **Every A2A route is behind the same `auth:` guard as `/claim`, the card
+  included.** A refusal is the broker's usual `{"error": "..."}` envelope. This
+  differs from the standalone [`nexus.io.a2a`](../plugins/io/a2a.md) plugin,
+  which serves its card unauthenticated: that one binds loopback, the broker is
+  an ingress. Hand clients a credential out-of-band, which the specification's
+  "Direct Configuration" discovery path explicitly sanctions.
+
+**A broker with no `agents:` block is unchanged in every respect** — no routes
+are registered, no card is built, and nothing new appears in the boot log.
+
+> **Current state.** `SendMessage`, `SendStreamingMessage`, `CancelTask`,
+> `GetTask`, `ListTasks` and `SubscribeToTask` are all driven end to end: a
+> message starts (or resumes) a real isolated instance, the turn is translated
+> back into A2A frames, and the task stays readable afterwards — see
+> [One conversation, one instance](#one-conversation-one-instance-contextid),
+> [What the A2A ingress translates](#what-the-a2a-ingress-translates) and
+> [Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask)
+> below. The push-notification operations and `GetExtendedAgentCard` still answer
+> a well-formed `UnsupportedOperationError` carrying
+> `detail: OPERATION_NOT_IMPLEMENTED`, and the matching card capabilities are
+> `false`.
+
+### One conversation, one instance (`contextId`)
+
+An A2A client holds a **`contextId`**. The broker holds leases. **The client
+never learns the second thing exists.**
+
+```
+contextId ──(durable index)──▶ engine session id ──(the /claim spawn spine)──▶ lease
+```
+
+The middle term is what makes the trick work. A lease is mortal — it is released
+when a conversation goes quiet, it dies when its instance crashes — but an engine
+session is a directory on disk that outlives every process that opened it. So a
+message on a context whose instance has gone is not an error to report; it is a
+session to resume.
+
+| What the broker knows about the `contextId` | What the message does |
+|---|---|
+| Nothing — a new conversation, or a message with no `contextId` at all (one is minted) | Spawns an instance with **no** `-recall`. |
+| A live instance | Goes straight to it. History is what the running engine holds; nothing is replayed. |
+| A live lease already running that context's session, which this process lost track of (a broker **restart** with a surviving instance) | **Adopts** it, rather than putting a second engine on one session directory. |
+| A session with no live instance — idle-released, crashed, or a restart | Spawns a new instance with **`-recall <session id>`** so the engine replays the history. |
+
+**Nothing about any of that reaches the client.** It sends a message and gets an
+answer. There is no claim, no lease id, no reconnect, and no "your session
+expired".
+
+```bash
+# First message: this cold-spawns an isolated nexus instance.
+curl -s https://broker.example/agents/support/a2a \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' -d '{
+    "jsonrpc":"2.0","id":1,"method":"SendMessage",
+    "params":{"message":{"messageId":"m1","role":"ROLE_USER",
+      "contextId":"conv-42","parts":[{"text":"How do I rotate my API key?"}]}}}'
+
+# An hour later, after idle_timeout released the instance: same call, same
+# contextId. The broker re-spawns with -recall and the conversation continues.
+```
+
+**Continuity is keyed by `(principal, profile, contextId)`.** A2A lets a client
+choose its own `contextId`, so keying on it alone would let anyone name someone
+else's conversation and be handed that session's history. A colliding
+`contextId` under a different principal — or a different profile — resolves to
+the caller's **own** binding instead. With no `auth:` block every caller is the
+same anonymous principal, exactly as lease ownership already behaves.
+
+**Durability needs [`state_dir`](#surviving-a-restart-set-state_dir).** The
+binding is written to `<state_dir>/a2a-contexts.jsonl`, a separate append-only
+index beside the lease journal for the same reason the
+[session → binary index](#serving-several-nexus-variants-the-binary-registry) is
+separate: the journal is compacted down to live leases, and a resume always
+happens after the lease was released. Without `state_dir` a conversation is
+resumable only for as long as the broker process lives.
+
+**And the index is capped at 4096 bindings, oldest dropped first — which is
+lossy, deliberately, and silent.** Nothing ever retires a binding, because being
+resumable later is the entire point of one, so the key space has no natural
+bound and a cap is the only thing keeping the file finite. A conversation whose
+binding is evicted reads back as *unknown*, and unknown means *new*: the next
+message on that `contextId` starts a **fresh session** and the client is told
+nothing — the agent has simply forgotten. The degradation is always to
+forgetting, never to answering with the wrong session, and 4096 is generous for
+exactly that reason. If a conversation must survive indefinitely, keep the
+engine session id rather than relying on this file. See
+[A2A context → session index](../configuration/reference.md#a2a-context--session-index-a2a-contextsjsonl).
+
+**An A2A-created lease is an ordinary lease.** It is listed by `GET /leases`,
+owned by the A2A caller, counted against `max_concurrent`, torn down by
+`POST /release`, watched for crashes, and **reaped by `idle_timeout`**. Every
+message the ingress sends resets the idle timer, exactly as a WebSocket client's
+input does — so an active conversation is never reaped mid-turn, and a finished
+one is released like anything else. The instance is deliberately **not** released
+at the end of each turn: that would make every message a cold boot.
+
+**A spawn that fails settles the task; it never hangs.**
+
+| Condition | Task state |
+|---|---|
+| Unknown `binary`, a session created by a different binary, an unreadable or empty profile `config` | `TASK_STATE_REJECTED` — the broker refused; the same message will fail the same way until an operator changes something |
+| The instance died booting, never signalled ready, the broker is at capacity, or a surviving instance is still mid-reattach | `TASK_STATE_FAILED` — attempted and did not come up; a retry may succeed |
+
+The terminal status message explains what happened **without naming a lease**.
+
+**What this costs in latency.** The broker's two internal handshake bounds are
+the same ones a `POST /claim` caller already waits on, and they apply to the
+*first* message of a conversation and to a message that re-spawns one:
+
+| Bound | Value | What an A2A caller sees |
+|---|---|---|
+| Ready wait | 30s | A cold spawn blocks the request until the instance is ready. Worst case: 30s, then a `FAILED` task. |
+| Session-report grace | 5s | Waited after ready, for the instance's session id. Not on the answer path — a report that never arrives only costs the conversation its durable binding, so a later resume starts fresh instead of replaying. |
+
+Both are constants rather than config keys: they bound the broker's handshake
+with a process it started, not a policy to tune. **A second message on a live
+conversation pays neither** — it goes straight to the running instance, which is
+the entire reason the instance is kept alive between turns.
+
+### What the A2A ingress translates
+
+The broker sits between two protocols it did not design. On one side an A2A
+client speaks tasks, states and artifacts; on the other a leased `nexus`
+instance speaks the flat IO envelope its
+[`nexus.io.broker`](../plugins/io/broker.md) plugin puts inside every `SignalIO`
+frame. Until now the broker forwarded that envelope without looking at it. It
+now reads it, and this is the whole of the mapping.
+
+**Inbound — A2A to the instance:**
+
+| A2A | IO payload sent to the instance |
+|---|---|
+| A message with no `taskId` | `{"type":"input","content":"…"}` — which the instance turns into `io.input` |
+| A message naming a parked `taskId` | `{"type":"hitl.response","request_id":"…","choice_id"\|"free_text":"…"}` |
+| `CancelTask` | `{"type":"cancel","turn_id":"…","source":"broker.a2a"}` |
+
+The message's text parts are joined with a blank line. A non-text part is
+**refused** with `ContentTypeNotSupportedError` rather than dropped: the `input`
+payload is a single string, so there is nowhere for a file to go.
+
+**Outbound — the instance to A2A.** `turn_id` is what anchors a task: the first
+payload carrying one binds the task to that Nexus turn, and a payload naming a
+different turn is ignored.
+
+| IO payload | A2A |
+|---|---|
+| any first payload | `SUBMITTED` → `WORKING` status update |
+| `stream.delta` | accumulates the answer text; mints no frame of its own |
+| `stream.end` | closes the current response segment; **does not** end the task |
+| `output` | replaces the accumulated text with what the output gates published |
+| `status` (`thinking`, `tool_running`, …) | keeps the task `WORKING` |
+| `status` (`idle`) | publishes the answer artifact, then `COMPLETED` |
+| `hitl.request` | `INPUT_REQUIRED` carrying the question, options included |
+| `cancel.complete` | `CANCELED` |
+| the instance going away | `FAILED` naming the cause |
+
+Three of those are worth stating outright, because they are the decisions a
+second reader would otherwise get wrong:
+
+- **`stream.end` does not complete the task; `status: idle` does.** A turn can
+  produce several model responses (each tool round is one), and the instance
+  runs its output gates *after* the last of them. Completing at a stream end
+  would publish the model's draft rather than what Nexus decided to say.
+- **The answer usually comes from the deltas, not from `output`.** Every shipped
+  agent loop tags its `io.output` with `streamed=true`, and `nexus.io.broker`
+  drops those — so on the ordinary streaming path the deltas are the only text
+  the envelope carries. An `output` payload, when one does arrive, wins.
+- **A payload the broker does not understand is ignored, never a task failure.**
+  The envelope is shared with every other broker client, so an instance may
+  legitimately send something this ingress has no A2A meaning for — a tool
+  `approval.request` is the live example — and an instance newer than the broker
+  in front of it must keep working.
+
+Because the frames a client sees must not depend on which Nexus deployment
+answered, this mapping and the standalone [`nexus.io.a2a`](../plugins/io/a2a.md)
+plugin are both judged by the same conformance corpus (`pkg/a2a/a2aconform`).
+
+**The broker satisfies 5 of the corpus's 9 vectors and skips 4, and the four are
+skipped rather than faked.** The IO envelope carries **no tool results** —
+`nexus.io.broker` subscribes to neither `tool.invoke` nor `tool.result`, and its
+payload has no field for either — so there is nothing broker-side to publish a
+tool, file or artifact-budget vector from. That is a property of the transport,
+not a gap in this effort, and it is the one place a broker-fronted agent is
+genuinely less expressive than a standalone one: **the same agent behind
+`nexus.io.a2a` returns tool results and written files as artifacts; behind the
+broker it returns only the turn's answer.** The corpus reports the skips by name
+on every run, and a mapping that declared a feature it cannot produce would pass
+a vector by lying about its transport. See
+[Plugin contracts](plugin-contracts.md) for the wider pattern.
+
+### Reading tasks back (`GetTask`, `ListTasks`, `SubscribeToTask`)
+
+A2A tasks outlive the call that created them, and on a broker they outlive far
+more than that: the instance that ran a task is released when the conversation
+goes quiet, and the broker process itself restarts. A client asks about a task
+*precisely* when those things have happened, so the broker keeps a **durable
+record of every task** in `<state_dir>/a2a-tasks.jsonl` — the same
+append-and-compact file shape as the lease journal, so a `state_dir` holds one
+kind of thing rather than two.
+
+```bash
+# What did that task end up doing?
+curl -s https://broker.example/agents/support/a2a/v1/tasks/task-abc123 \
+  -H 'Authorization: Bearer <token>' | jq '.status.state, .artifacts[0]'
+
+# What has this conversation been asked lately?
+curl -s 'https://broker.example/agents/support/a2a/v1/tasks?contextId=ctx-42&pageSize=10' \
+  -H 'Authorization: Bearer <token>' | jq '.tasks[].id'
+
+# Reattach to a task that is still running.
+curl -sN -X POST https://broker.example/agents/support/a2a/v1/tasks/task-abc123:subscribe \
+  -H 'Authorization: Bearer <token>'
+```
+
+Four things about these three operations:
+
+- **They answer from the record, not from memory** — even while the task is
+  live. Every frame is persisted before it is delivered, so the record is never
+  behind what a client has already been told, and there is one answer to the
+  question rather than two that can differ.
+- **They are scoped to the authenticated caller *and* to the profile they were
+  addressed to, and a task outside that scope is *indistinguishable* from one
+  that never existed.** Same error, same status, same body. A distinct "exists
+  but is not yours" answer would be an existence oracle for ids the caller was
+  never told — the same reasoning behind the broker's single `unknown lease`
+  refusal. Profile is part of the key for the same reason it is part of a
+  conversation's: `ListTasks` on the research agent lists research tasks, not
+  the caller's support conversations.
+- **`SubscribeToTask` reattaches to a live task** and receives exactly the frames
+  every other attached stream receives, opening on the state it missed. A task
+  that is already terminal gets its state and an immediate EOF rather than an
+  open socket nothing will ever write to; a task still queued gets its
+  `SUBMITTED` snapshot and a stream that stays open until its turn runs.
+- **A task left in flight by a stopped broker is settled at `FAILED`** when the
+  store reopens, with a status message saying so. A client polling `GetTask`
+  gets an ending rather than `WORKING` for ever.
+
+**With no `state_dir` the store is memory-only.** All three operations still
+answer, but only for tasks this process ran. That is the same bargain such a
+broker has already made for its leases.
+
+Retention is a real policy and is configurable — `a2a.tasks.ttl` (default `24h`)
+and `a2a.tasks.max_per_context` (default `50`), plus a fixed global ceiling and a
+16 KiB cap on stored text. A turn's *streamed* output is never truncated; only
+the stored copy is, and it says so when it happens. The numbers and the reasoning
+behind each are in the
+[configuration reference](../configuration/reference.md#a2a-task-retention-a2atasks).
+
+### Two messages on one conversation queue
+
+A Nexus instance runs **one agent loop**. Send it two inputs while a turn is in
+flight and you do not get two turns — you get one turn with both messages mixed
+into it. So the broker will not do that: **a conversation runs one task at a
+time.**
+
+A second message on a `contextId` whose task is still live is accepted and
+queued. Its task sits in `TASK_STATE_SUBMITTED` — the specification's own word
+for "accepted, not yet started" — with nothing sent to any instance, until the
+task ahead of it is terminal. Then it moves to `TASK_STATE_WORKING` and runs. A
+queued task is a complete task the whole time: readable with `GetTask`,
+streamable with `SubscribeToTask`, cancellable with `CancelTask`.
+
+The queue is per **(caller, profile, `contextId`)**, so two conversations never
+wait on each other, and it advances on exactly one event: a task reaching a
+terminal state. That is what makes it robust rather than fragile —
+
+- the instance crashing or being idle-released fails the active task, which
+  promotes the next one, which **acquires a fresh instance** and carries the
+  conversation on from its session;
+- cancelling a queued task removes it and disturbs nothing;
+- a queued turn is detached from the request that submitted it, so a client that
+  hangs up has not withdrawn its message.
+
+**The one case that needs a deadline is a question nobody answers.** A task at
+`TASK_STATE_INPUT_REQUIRED` keeps the queue on purpose: the agent loop is blocked
+inside `ask_user`, so starting the next turn would send input to an instance that
+cannot read it. `a2a.tasks.input_timeout` (default `15m`, `"0s"` disables) is
+what stops that being a deadlock — on expiry the task is driven to `FAILED`,
+every attached stream closes, the instance is told to cancel the turn, and the
+queue moves. Fifteen minutes is chosen against a human: a question routed to a
+person has to survive being paged, read, thought about and answered.
+
 ## Capacity and queueing
 
 `max_concurrent` caps live instances. Each claim acquires a slot **before**
@@ -1048,6 +1428,13 @@ releases it through the same teardown path as `POST /release` (so the session is
 persisted). Only inbound `io` input frames (client → instance) reset the idle
 timer — output, pings, and control frames do not. Set `idle_timeout` to `0` to
 disable idle reaping.
+
+**This applies to [A2A](#the-a2a-front-door-agents) instances too**, and it is
+what makes them affordable: every message the A2A ingress sends counts as client
+input, so an active conversation is never reaped, and a conversation nobody is
+having stops costing a process. The next message on that `contextId` re-spawns
+the instance with `-recall`, so the client sees continuity rather than a
+released session.
 
 ## v1 caveats
 
@@ -1105,6 +1492,30 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   sessions created before the feature (or by another broker) have none. An
   unrecorded session resumes unchecked, so
   [do not treat the `409` as a guarantee](#a-resume-re-uses-the-binary-that-created-the-session).
+- **A2A conversation continuity is bounded, and the bound is lossy by design.**
+  The `contextId` → session index holds at most **4096** bindings and drops the
+  oldest first; a broker with no `state_dir` keeps none across a restart. An
+  evicted binding reads back as *unknown*, so the next message on that
+  conversation starts a **fresh session** with no history and **nothing tells the
+  client** — see
+  [One conversation, one instance](#one-conversation-one-instance-contextid). The
+  failure is always forgetting, never answering from the wrong session.
+- **A2A task history is bounded, and the bound is lossy by design.** The task
+  store keeps 24 hours of finished tasks, 50 per conversation, 2048 in total, and
+  16 KiB of text per artifact or message — see
+  [Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask). A
+  task evicted by any of those reads back as **unknown**, which is
+  indistinguishable from an id that never existed, and a long answer reads back
+  truncated (marked as such). Nothing warns a client that this happened. If you
+  need a durable transcript, take one from the engine session rather than from
+  the broker's task record, which is a read-back convenience and not an archive.
+- **A broker-fronted agent publishes fewer artifacts than a standalone one.** The
+  instance IO envelope carries no tool results, so a turn's tool output and the
+  files it wrote do **not** become A2A artifacts here — only the turn's answer
+  does. The same agent served directly by
+  [`nexus.io.a2a`](../plugins/io/a2a.md) returns all three. This is measured
+  rather than asserted: the shared conformance corpus records the broker mapping
+  at **5 of 9 vectors, 4 skipped**, and names the skips on every run.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but
@@ -1120,4 +1531,6 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
 - [Authentication (`auth:`)](../configuration/reference.md#authentication-auth) —
   every validator key, default and validation rule, plus the per-route status
   mapping and the audit-record shape.
+- [A2A](a2a.md) — the protocol the `agents:` block speaks, and the standalone
+  serving plugin the broker's cards are modelled on.
 - [Sessions](../architecture/sessions.md) — on-disk session layout and `-recall`.

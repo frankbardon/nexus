@@ -184,6 +184,25 @@ type lease struct {
 	// binary named empty string". Guarded by Registry.mu.
 	binary string
 
+	// ioSink, when set, receives every SignalIO payload this lease's instance
+	// sends, IN ADDITION to the normal client forwarding.
+	//
+	// It exists because the A2A ingress has no client WebSocket. A /claim client
+	// is a socket the gateway relays frames to; an A2A caller is an HTTP request
+	// the broker answers, so something in-process has to read the instance's
+	// payloads. The gateway's instance read pump already decodes every frame, so
+	// this is a hook on the decode it was doing anyway rather than a second pump.
+	//
+	// It does NOT displace the client conn: a lease may legitimately have both
+	// (an operator attaching a client to an A2A-created lease to watch it), and
+	// the sink is additive so neither observer starves the other.
+	//
+	// The function is invoked on the gateway's instance read-pump goroutine and
+	// MUST NOT block — the mapping behind it only ever appends to buffered
+	// channels. Guarded by Registry.mu for the pointer swap only; the call itself
+	// happens outside the lock.
+	ioSink func(brokerIOMessage)
+
 	// process is the broker's handle on the spawned instance process. It is
 	// stored so later stories (release, crash, capacity) can manage the
 	// process lifecycle; pid is cached for logging and inspection.
@@ -1118,6 +1137,91 @@ func (r *Registry) InstanceConn(id string) *wsConn {
 		return nil
 	}
 	return l.instance
+}
+
+// SetIOSink installs (or clears, with a nil fn) the in-process observer of this
+// lease's instance IO payloads. It is a no-op for an unknown lease.
+//
+// It is set-then-read rather than a subscriber list because a lease has at most
+// one in-process observer: the A2A ingress's binding for that lease, which
+// itself fans out to however many tasks are running on it. Keeping the registry
+// side single-valued means the registry never has to reason about observer
+// lifetimes — the binding does, and the sink dies with the lease.
+func (r *Registry) SetIOSink(id string, fn func(brokerIOMessage)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l, ok := r.leases[id]; ok {
+		l.ioSink = fn
+	}
+}
+
+// ioSink returns the lease's in-process IO observer, or nil when there is none.
+// The gateway calls it per SignalIO frame and skips decoding entirely when it
+// answers nil, so a lease with no A2A task attached pays nothing.
+func (r *Registry) ioSink(id string) func(brokerIOMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return nil
+	}
+	return l.ioSink
+}
+
+// InstanceAttached reports whether a lease is live, not being torn down, and has
+// its instance dial-back connection bound — i.e. whether a payload sent to it
+// now has somewhere to go.
+//
+// It is the "can I still use this?" predicate the A2A ingress asks before
+// reusing the instance it started for a context. Has() is not enough: a lease
+// mid-release is still in the map, and a lease whose instance socket dropped is
+// still in the map too, and sending to either produces a turn that silently
+// never runs.
+func (r *Registry) InstanceAttached(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	return ok && !l.releasing && l.instance != nil
+}
+
+// LeaseForSession answers "is some live lease already running this engine
+// session", reporting the lease id and whether its instance is attached.
+//
+// It exists to stop the broker booting a SECOND process on one session
+// directory. Two engines sharing a session directory do not fail loudly; they
+// interleave writes into one history and one set of per-plugin data dirs, and
+// the damage surfaces much later as a conversation that lost turns. The window
+// where this is reachable is real: after a broker restart the A2A ingress has
+// forgotten which lease served a context, restart recovery has restored the
+// lease the surviving instance is reattaching to, and the durable context index
+// still names the session — so without this check the next A2A message would
+// spawn a duplicate.
+//
+// found=false means no live lease holds the session and it is safe to spawn.
+// found=true with attached=false is the restart window: the lease is restored
+// and its instance has not dialled back yet. That case is deliberately NOT
+// reported as "safe to spawn" — the caller must wait or refuse rather than
+// double-boot.
+//
+// A lease being torn down is skipped: its session is on its way to being free,
+// and the caller's retry (or the next message) will find it gone.
+//
+// It is a linear walk for the same reason BinaryForSession is: the registry is
+// bounded by max_concurrent, and a second index would be state to keep in step
+// for nothing.
+func (r *Registry) LeaseForSession(sessionID string) (id string, attached, found bool) {
+	if sessionID == "" {
+		return "", false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for leaseID, l := range r.leases {
+		if l.sessionID != sessionID || l.releasing {
+			continue
+		}
+		return leaseID, l.instance != nil, true
+	}
+	return "", false, false
 }
 
 // Has reports whether a lease id is known to the registry.

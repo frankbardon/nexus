@@ -902,3 +902,98 @@ func TestLoadConfigPartialOverrideKeepsDefaults(t *testing.T) {
 		t.Errorf("IdleTimeout = %v, want default %v", cfg.IdleTimeout, def.IdleTimeout)
 	}
 }
+
+// TestA2ATaskSettingsResolve covers the `a2a.tasks:` block: defaults when a key
+// is absent, DISABLED when it is written as zero, and a boot failure for a value
+// that has no reading.
+//
+// The absent/zero distinction is the whole reason the block is parsed through
+// pointers, and it is the one a test has to pin: reading an absent key as zero
+// would silently switch retention off for every broker that never configured it.
+func TestA2ATaskSettingsResolve(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		yaml          string
+		wantTTL       time.Duration
+		wantPerCtx    int
+		wantInput     time.Duration
+		wantLoadError string
+	}{
+		{
+			name:       "absent block keeps every default",
+			yaml:       "listen_addr: \":8080\"\n",
+			wantTTL:    defaultA2ATaskTTL,
+			wantPerCtx: defaultA2ATasksPerContext,
+			wantInput:  defaultA2AInputTimeout,
+		},
+		{
+			name:       "one key set leaves the others alone",
+			yaml:       "a2a:\n  tasks:\n    ttl: 1h\n",
+			wantTTL:    time.Hour,
+			wantPerCtx: defaultA2ATasksPerContext,
+			wantInput:  defaultA2AInputTimeout,
+		},
+		{
+			name:       "zero disables rather than defaulting",
+			yaml:       "a2a:\n  tasks:\n    ttl: 0s\n    max_per_context: 0\n    input_timeout: 0s\n",
+			wantTTL:    0,
+			wantPerCtx: 0,
+			wantInput:  0,
+		},
+		{
+			name:       "every knob set",
+			yaml:       "a2a:\n  tasks:\n    ttl: 72h\n    max_per_context: 10\n    input_timeout: 90s\n",
+			wantTTL:    72 * time.Hour,
+			wantPerCtx: 10,
+			wantInput:  90 * time.Second,
+		},
+		{
+			name:          "a negative ttl is refused",
+			yaml:          "a2a:\n  tasks:\n    ttl: -1h\n",
+			wantLoadError: "a2a.tasks.ttl",
+		},
+		{
+			name:          "a negative cap is refused",
+			yaml:          "a2a:\n  tasks:\n    max_per_context: -1\n",
+			wantLoadError: "a2a.tasks.max_per_context",
+		},
+		{
+			name:          "a negative input timeout is refused",
+			yaml:          "a2a:\n  tasks:\n    input_timeout: -5m\n",
+			wantLoadError: "a2a.tasks.input_timeout",
+		},
+		{
+			// A duration is a duration STRING, never a bare number: "600" reads as
+			// ten minutes to an operator and six hundred nanoseconds to Go, and
+			// silently picking either would be worse than an error naming the key.
+			name:          "a bare number is refused",
+			yaml:          "a2a:\n  tasks:\n    ttl: 600\n",
+			wantLoadError: "time.Duration",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := LoadConfigFromBytes([]byte(c.yaml))
+			if c.wantLoadError != "" {
+				if err == nil {
+					t.Fatalf("the config loaded; want an error naming %s", c.wantLoadError)
+				}
+				if !strings.Contains(err.Error(), c.wantLoadError) {
+					t.Fatalf("error = %v, want it to name %s", err, c.wantLoadError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfigFromBytes: %v", err)
+			}
+			if cfg.A2ATaskRetention.ttl != c.wantTTL {
+				t.Errorf("ttl = %v, want %v", cfg.A2ATaskRetention.ttl, c.wantTTL)
+			}
+			if cfg.A2ATaskRetention.maxPerContext != c.wantPerCtx {
+				t.Errorf("max_per_context = %d, want %d", cfg.A2ATaskRetention.maxPerContext, c.wantPerCtx)
+			}
+			if cfg.A2AInputTimeout != c.wantInput {
+				t.Errorf("input_timeout = %v, want %v", cfg.A2AInputTimeout, c.wantInput)
+			}
+		})
+	}
+}

@@ -1,0 +1,100 @@
+{
+  "id": "oversized-file-degrades",
+  "title": "A file over the inline cap degrades to a metadata note instead of being dropped",
+  "rationale": "Inline file contents are base64 in JSON and land in a disk-persisted task store, so they must be bounded. The bound must DEGRADE rather than drop: an oversized file still produces an artifact, naming the file, its real size and the cap that excluded it, so a client is told the file exists and why it is not attached and can fetch it another way. The failure mode worth preventing is not 'the client got less' — it is 'the client got less and was not told'. A file UNDER the cap rides inline as a raw part with a media type derived from its name, and the two cases sit in one vector so the contrast cannot be lost.",
+  "features": ["turn", "tool_artifacts", "file_artifacts"],
+  "policy": {"maxFileBytes": 1024},
+  "steps": [
+    {"kind": "message", "text": "write the report", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {
+      "kind": "tool_result",
+      "callId": "call-1",
+      "tool": "write_file",
+      "output": "wrote report.txt",
+      "structured": {"path": "report.txt"},
+      "file": {"path": "report.txt", "bytes": 4096}
+    },
+    {
+      "kind": "tool_result",
+      "callId": "call-2",
+      "tool": "write_file",
+      "output": "wrote notes.md",
+      "structured": {"path": "notes.md"},
+      "file": {"path": "notes.md", "bytes": 64}
+    },
+    {"kind": "agent_text", "text": "The report and the notes are written."},
+    {"kind": "assert_active"},
+    {"kind": "output", "text": "The report and the notes are written."},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-tool-call-1",
+        "artifactName": "write_file",
+        "parts": [
+          {"kind": "text", "contains": ["wrote report.txt"]},
+          {"kind": "data", "mediaType": "application/json", "jsonEquals": {"path": "report.txt"}}
+        ]
+      },
+      {
+        "kind": "artifact",
+        "note": "over the cap: a metadata note, never a silent drop and never an inlined payload",
+        "artifactId": "{taskId}-file-report.txt",
+        "artifactName": "report.txt",
+        "metadata": {
+          "nexus.artifact.omitted": true,
+          "nexus.file.path": "report.txt",
+          "nexus.file.bytes": 4096
+        },
+        "parts": [
+          {
+            "kind": "text",
+            "contains": ["report.txt", "4096 bytes", "not attached", "1024 byte inline limit"]
+          }
+        ]
+      },
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-tool-call-2",
+        "artifactName": "write_file",
+        "parts": [
+          {"kind": "text", "contains": ["wrote notes.md"]},
+          {"kind": "data", "mediaType": "application/json", "jsonEquals": {"path": "notes.md"}}
+        ]
+      },
+      {
+        "kind": "artifact",
+        "note": "under the cap: the contents ride inline, typed by the filename",
+        "artifactId": "{taskId}-file-notes.md",
+        "artifactName": "notes.md",
+        "metadata": {"nexus.file.path": "notes.md", "nexus.file.bytes": 64},
+        "metadataAbsent": ["nexus.artifact.omitted"],
+        "parts": [
+          {
+            "kind": "raw",
+            "mediaType": "text/markdown; charset=utf-8",
+            "filename": "notes.md",
+            "bytes": 64
+          }
+        ]
+      },
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "parts": [{"kind": "text", "equals": "The report and the notes are written."}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}

@@ -253,10 +253,30 @@ func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	// Mode and Choices ride along for the same reason nexus.io.browser sends
+	// them: a responder answers a multiple-choice question with a choice id, and
+	// a payload carrying only the prompt gives it no way to know what the ids
+	// are. Mode is normalized here rather than downstream so every consumer sees
+	// one spelling of the default.
+	mode := string(req.Mode)
+	if mode == "" {
+		mode = string(events.HITLModeFreeText)
+	}
+	choices := make([]ioChoice, 0, len(req.Choices))
+	for _, c := range req.Choices {
+		choices = append(choices, ioChoice{ID: c.ID, Label: c.Label})
+	}
+	if len(choices) == 0 {
+		// nil rather than an empty slice, so omitempty keeps a free-text
+		// question's frame byte-identical to what it was before choices existed.
+		choices = nil
+	}
 	p.client.SendIO(ioMessage{
 		Type:      "hitl.request",
 		RequestID: req.ID,
 		Prompt:    req.Prompt,
+		Mode:      mode,
+		Choices:   choices,
 		TurnID:    req.TurnID,
 	})
 }

@@ -1,0 +1,51 @@
+{
+  "id": "artifact-budget-suppression",
+  "title": "A task that exhausts its artifact budget says so, once, and restates the final count",
+  "rationale": "Unconditional tool-result artifacts times inline file parts times a persisted store is an unbounded product, so a task carries a total artifact budget. An exhausted budget must not simply stop producing artifacts: the FIRST refusal mints one notice artifact naming how many were suppressed, and the notice is restated with the FINAL count on the SAME artifact id when the task ends, so the record settles on the truth while the wire carries exactly two frames however many artifacts were refused. The turn's own answer is never charged against the budget — a client that asked a question is always owed its answer.",
+  "features": ["turn", "tool_artifacts", "artifact_budget"],
+  "policy": {"maxTaskBytes": 1500, "maxToolOutputBytes": 0},
+  "steps": [
+    {"kind": "message", "text": "dump both tables", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "tool_result", "callId": "call-1", "tool": "dump", "output": "a", "outputRepeat": 2000},
+    {"kind": "tool_result", "callId": "call-2", "tool": "dump", "output": "b", "outputRepeat": 2000},
+    {"kind": "agent_text", "text": "Both dumps were too large to attach."},
+    {"kind": "output", "text": "Both dumps were too large to attach."},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "note": "minted on the FIRST refusal, carrying the count so far",
+        "artifactId": "{taskId}-artifacts-truncated",
+        "artifactName": "artifacts-truncated",
+        "metadata": {"nexus.artifact.suppressedCount": 1},
+        "parts": [{"kind": "text", "contains": ["1 artifact(s)", "artifact budget"]}]
+      },
+      {
+        "kind": "artifact",
+        "note": "the answer is never charged against the budget",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "parts": [{"kind": "text", "equals": "Both dumps were too large to attach."}]
+      },
+      {
+        "kind": "artifact",
+        "note": "restated on the same id with the final total; the store upserts rather than duplicates",
+        "artifactId": "{taskId}-artifacts-truncated",
+        "artifactName": "artifacts-truncated",
+        "metadata": {"nexus.artifact.suppressedCount": 2},
+        "parts": [{"kind": "text", "contains": ["2 artifact(s)", "artifact budget"]}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}
