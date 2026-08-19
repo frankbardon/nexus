@@ -213,6 +213,22 @@ func run() error {
 	// holds a finished response rather than the Config it came from.
 	binaries := NewBinariesServer(logger, cfg.Binaries)
 
+	// The A2A ingress. Each `agents:` profile publishes an Agent Card and the two
+	// HTTP bindings under its own path namespace, so a third-party A2A client can
+	// address an agent by URL instead of supplying a full nexus config the way
+	// POST /claim demands.
+	//
+	// Cards are rendered HERE, at boot, so a card that is not servable — a
+	// missing skill, a security scheme that cannot be derived — fails the start
+	// rather than the first client that fetches it. With no `agents:` block this
+	// builds an empty server that registers no routes at all.
+	agents, err := NewA2AServer(logger, cfg)
+	if err != nil {
+		logger.Error("failed to build the a2a agent profiles", "error", err)
+		return err
+	}
+	agents.logStartupState(cfg)
+
 	// The idle sweeper releases leases with no real client input for
 	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
 	// disables it. It runs until sweepCtx is cancelled on shutdown.
@@ -256,6 +272,12 @@ func run() error {
 	// a control-plane read, and a caller that cannot claim has no business
 	// learning which variants an operator deploys.
 	binaries.Register(guarded)
+	// Behind the SAME guard again, card included. An A2A caller is refused by
+	// exactly the middleware that refuses a /claim caller, so there is one
+	// authentication policy on this binary rather than two — see the auth-posture
+	// comment on handleAgentCard for why the discovery document is inside it
+	// here and outside it in nexus.io.a2a.
+	agents.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

@@ -26,7 +26,8 @@ import (
 // nexus_binary_path), advertise_addr (client-reachable address),
 // max_concurrent (capacity cap),
 // idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
-// queue_wait_timeout (FIFO capacity wait), and auth (client authentication).
+// queue_wait_timeout (FIFO capacity wait), auth (client authentication), and
+// agents (the named A2A profiles this broker publishes).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
 	ListenAddr string `yaml:"listen_addr"`
@@ -193,6 +194,35 @@ type Config struct {
 	// once per process. It is never nil after a successful load, and a chain with
 	// no validators is disabled, not permissive.
 	AuthChain *nexusauth.Chain `yaml:"-"`
+
+	// AuthValidators describes the parsed `auth:` block one entry per validator,
+	// in chain order. It is not a YAML key: LoadConfigFromBytes keeps what
+	// building the chain already had to parse.
+	//
+	// It exists because a Chain is deliberately opaque — it exposes only its
+	// validator NAMES, since nothing on the request path may care what a
+	// validator is made of. The Agent Card's securitySchemes do care: a card
+	// must tell a client WHAT to present (a shared bearer token, an OIDC JWT
+	// from a named issuer), and deriving that from the config is what keeps the
+	// published card from claiming a credential the broker does not actually
+	// accept. Nil when no `auth:` block is configured.
+	AuthValidators []nexusauth.ValidatorConfig `yaml:"-"`
+
+	// Agents is the `agents:` block: the named A2A profiles this broker
+	// publishes, keyed by the name their routes are namespaced under.
+	//
+	// NIL (the default) means this broker has no A2A ingress at all — no card,
+	// no JSON-RPC endpoint, no REST endpoint, and nothing new in the boot log.
+	// That is what keeps a broker.yaml written before profiles existed behaving
+	// exactly as it did.
+	Agents map[string]AgentProfile `yaml:"agents"`
+
+	// A2ABaseURL is the absolute origin the Agent Cards advertise their
+	// endpoints under, derived from advertise_addr (or, failing that, from a
+	// listen_addr that names a dialable host). Not a YAML key, and empty
+	// whenever Agents is empty — see resolveA2ABaseURL for why it is resolved at
+	// load rather than per request.
+	A2ABaseURL string `yaml:"-"`
 }
 
 // BinaryEntry is one named nexus variant in the broker's spawn registry. The
@@ -541,6 +571,12 @@ func LoadConfig(path string) (Config, error) {
 	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
 		return Config{}, fmt.Errorf("broker config: %w", err)
 	}
+	// Same split, same reasoning, one step later: a profile's config path is
+	// environmental, so it is verified here rather than in the pure parser. A
+	// broker with no `agents:` block does no work at all.
+	if err := resolveAgentProfiles(cfg.Agents); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -599,11 +635,38 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	// misconfigured `auth:` block from a failed boot rather than from requests
 	// being refused (or worse, waved through) in production. nexusauth's errors
 	// name the offending key and path.
-	chain, err := nexusauth.ChainFromMap(cfg.Auth)
+	//
+	// Parsed and built in two steps rather than through the one-call
+	// ChainFromMap, because the intermediate Config is worth keeping: the Agent
+	// Card's securitySchemes are derived from it (see Config.AuthValidators).
+	// The behaviour is identical — ChainFromMap is exactly these two calls.
+	authCfg, err := nexusauth.ParseConfig(cfg.Auth)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	chain, err := nexusauth.BuildChain(authCfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("broker config: %w", err)
 	}
 	cfg.AuthChain = chain
+	cfg.AuthValidators = authCfg.Validators
+
+	// Profiles last: validating one needs the folded binary registry (to reject
+	// a binary that does not exist) and the resolved advertise/listen addresses
+	// (to derive the origin its card advertises), so both have to be settled
+	// first.
+	agents, err := foldAgentProfiles(cfg.Agents, cfg.Binaries)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.Agents = agents
+	if len(cfg.Agents) > 0 {
+		baseURL, err := resolveA2ABaseURL(cfg.AdvertiseScheme, cfg.AdvertiseHost, cfg.ListenAddr)
+		if err != nil {
+			return Config{}, fmt.Errorf("broker config: %w", err)
+		}
+		cfg.A2ABaseURL = baseURL
+	}
 	return cfg, nil
 }
 

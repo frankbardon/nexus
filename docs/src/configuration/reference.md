@@ -3297,6 +3297,21 @@ state_dir: ""                 # empty = lease state is in-memory only; see below
 broker_id: ""                 # empty = generated once and persisted in state_dir
 reattach_window: 60s          # how long a lease restored after a restart waits for its instance
 
+# Optional. The A2A front door: one public agent per profile. Omit the whole
+# block and the broker has no A2A ingress, exactly as before.
+agents:
+  support:
+    binary: nexus               # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
   admin_scope: "nexus.broker.admin"   # scope that unlocks the operator view of GET /leases
@@ -3323,6 +3338,7 @@ auth:
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+| `agents`             | map      | *(absent)* | The named **A2A agent profiles** this broker publishes, keyed by the name their routes are namespaced under. Each profile binds a Nexus config, a `binaries:` entry and an Agent Card, so a third-party A2A client can address an agent by URL instead of supplying the full nexus config `POST /claim` demands. Entry fields are listed under [Agent profiles](#agent-profiles-agents) below. **Absent (the default) means this broker has no A2A ingress at all** — no routes are registered and nothing new appears in the boot log, so a `broker.yaml` written before profiles existed behaves exactly as it did. Validated at boot: an empty or non-URL-safe profile name, a name that collides with another after trimming, a missing `config`, a `binary` that is not in the registry, a card missing a required field, or a config file that does not resolve to a readable file **fails startup**.
 
 ### Binary registry (`binaries`)
 
@@ -3411,6 +3427,167 @@ inferred later from an instance behaving oddly.
 > restarted midway through a variant rollout, while a binary is momentarily
 > absent, will not come up — but an operator learns about a typo or a missing
 > build at deploy time instead of from a user's failed claim.
+
+### Agent profiles (`agents`)
+
+An **agent profile** is one public agent this broker fronts: a Nexus config to
+boot, a [binary registry](#binary-registry-binaries) entry to boot it with, and
+the Agent Card that describes the result to the world. Each profile publishes its
+own [A2A](https://a2a-protocol.org) endpoints under its own path namespace.
+
+Profiles exist because [`POST /claim`](#post-claim-http-api-not-yaml) cannot be
+an A2A front door: a claim carries the **full nexus config as inline YAML**,
+which no third-party A2A client can supply — it does not know Nexus exists, let
+alone which plugins to activate. A profile moves that decision broker-side, so
+the client names an agent by URL and the operator decided long ago what running
+that agent means.
+
+> **Rejected alternative:** carrying the Nexus config through A2A
+> `Message.metadata`. That works only for Nexus-aware clients, which defeats the
+> point of speaking a standard protocol.
+
+```yaml
+agents:
+  support:                                  # the name every route is namespaced under
+    binary: nexus                           # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"         # ExpandPath applies here too
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      documentation_url: "https://acme.example/docs/support-agent"
+      icon_url: "https://acme.example/icons/support.png"
+      provider:
+        organization: "Acme"
+        url: "https://acme.example"
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+          tags: ["support", "qa"]
+          examples: ["How do I rotate my API key?"]
+  research:
+    binary: vision                          # any entry of the binaries registry
+    config: "~/agents/research.yaml"
+    card:
+      name: "Research Agent"
+      description: "Reads documents and summarizes them."
+      version: "0.1.0"
+      skills:
+        - id: "summarize"
+          name: "Summarize"
+          description: "Summarizes a supplied document."
+```
+
+| Profile field | Type   | Default             | Description |
+|---------------|--------|---------------------|-------------|
+| `binary`      | string | `nexus` (reserved)  | Which [`binaries:`](#binary-registry-binaries) entry this profile spawns. **Omitted means the reserved `nexus` entry**, exactly as an omitted `binary` on `POST /claim` does — an omitted binary has one meaning in this broker, not two. An **unknown** name is a **boot failure** naming the alternatives, not a fallback to `nexus`: quietly spawning the base binary for an agent an operator bound to a vision build produces a session that merely behaves oddly, which is far harder to diagnose than a refusal. |
+| `config`      | string | *(required)*        | Path to the Nexus config file instances of this profile boot with. Funneled through `ExpandPath` (supports `~`), resolved to an absolute path and **stat()ed at boot**: a path that does not exist, is a directory, or cannot be read **fails startup** naming the profile. Its *contents* are not parsed here — whether it is a valid Nexus config is the engine's judgement, made by the instance that boots it. |
+| `card`        | map    | *(required)*        | The hand-authored half of this profile's [Agent Card](#agent-card-agentsnamecard). Required: an A2A agent MUST publish a card, and the broker will not invent a name, description or skill list on an operator's behalf. |
+
+**Profile names are URL path segments**, so they are validated more strictly than
+binary registry names: letters, digits, `-`, `_` and `.` only, and not starting
+with `.`. A name carrying a slash would silently restructure the route tree; one
+carrying a space, colon or percent would round-trip differently through URL
+encoding than through the card, so a client would dial a URL the broker never
+registered. Names are compared with surrounding whitespace trimmed, so
+`"support ":` and `support:` are a **duplicate** and fail the boot.
+
+#### Agent Card (`agents.<name>.card`)
+
+The keys are spelled exactly as [`nexus.io.a2a`](#nexusioa2a)'s inline `card:`
+block spells them, so a card authored for a standalone serving instance pastes
+in unchanged.
+
+| Card field             | Type            | Default      | Description |
+|------------------------|-----------------|--------------|-------------|
+| `name`                 | string          | *(required)* | The agent's public name. |
+| `description`          | string          | *(required)* | The agent's public description. |
+| `version`              | string          | *(required)* | The **agent's** version, not the protocol's. |
+| `documentation_url`    | string          | *(empty)*    | Human-readable documentation for this agent. |
+| `icon_url`             | string          | *(empty)*    | Icon for client UIs. |
+| `provider.organization`| string          | *(required when `provider` is present)* | The organization behind the agent. |
+| `provider.url`         | string          | *(empty)*    | The provider's public URL. |
+| `default_input_modes`  | list of string  | *(empty)*    | Media types the agent accepts when a message does not say otherwise. |
+| `default_output_modes` | list of string  | *(empty)*    | Media types the agent produces when a message does not say otherwise. |
+| `skills`               | list of object  | *(required, ≥1)* | The public capability listing. |
+| `skills[].id`          | string          | *(required)* | Stable skill identifier. |
+| `skills[].name`        | string          | *(required)* | Human-readable skill name. |
+| `skills[].description` | string          | *(required)* | What the skill does. |
+| `skills[].tags`        | list of string  | *(empty)*    | Free-form tags for discovery. |
+| `skills[].examples`    | list of string  | *(empty)*    | Example prompts for this skill. |
+| `skills[].input_modes` | list of string  | *(empty)*    | Per-skill override of `default_input_modes`. |
+| `skills[].output_modes`| list of string  | *(empty)*    | Per-skill override of `default_output_modes`. |
+
+**There are deliberately no keys for `supportedInterfaces`, `capabilities`,
+`securitySchemes` or `securityRequirements`.** They are **derived** from what the
+broker actually serves and overwrite anything a card source carried:
+
+- `supportedInterfaces` — the profile's own JSON-RPC and HTTP+JSON URLs, absolute,
+  built from the origin below. JSON-RPC leads, because the list is ordered by
+  preference and it has the widest client support today. `tenant` is left
+  **unset**: profiles do not share an endpoint URL, so the path segment already
+  routes, and a second routing signal would have to be reconciled with it.
+- `capabilities` — `streaming`, `pushNotifications` and `extendedAgentCard` all
+  follow the set of operations the ingress actually implements. **All three are
+  `false` today** (see [A2A routes](#a2a-routes-http-api-not-yaml)).
+- `securitySchemes` / `securityRequirements` — derived from the broker's
+  [`auth:`](#authentication-auth) chain, one scheme and one requirement per
+  validator, named with nexusauth's chain-order names (`static`, `jwks`,
+  `jwks#2`). Separate requirement entries are the accurate translation of a
+  first-success chain: satisfying **any** validator suffices. A `proxy_headers`
+  validator is deliberately **not** advertised — it accepts no client credential,
+  so publishing a scheme would tell clients to send a header guaranteed to be
+  ignored. With no `auth:` block both fields are omitted entirely.
+
+**The card's origin comes from `advertise_addr`.** A card must carry absolute
+URLs, and `advertise_addr` is already the key that answers "where do clients
+reach this broker" (`ws://` → `http://`, `wss://` → `https://`). With
+`advertise_addr` unset the origin falls back to `listen_addr`, but **only when it
+names a dialable host**: a wildcard bind (`:8080`, `0.0.0.0:8080`) with profiles
+configured **fails startup** naming `advertise_addr`, because a card advertising
+`http://:8080/agents/support/a2a` would be a confidently wrong answer handed to
+every client that fetches it.
+
+#### A2A routes (HTTP API, not YAML)
+
+Each profile publishes three routes, namespaced under its own name so profiles
+cannot collide and nothing can shadow an existing broker route (none of which
+starts with `/agents/`):
+
+| Route | Purpose |
+|-------|---------|
+| `GET`/`HEAD /agents/<profile>/.well-known/agent-card.json` | The profile's Agent Card. Served with `ETag` and `Cache-Control: public, max-age=300`; a conditional request with `If-None-Match` answers **304**. |
+| `POST /agents/<profile>/a2a` | The JSON-RPC 2.0 binding. |
+| `/agents/<profile>/a2a/v1/...` | The HTTP+JSON (REST) binding, including A2A's custom verbs (`/tasks/{id}:cancel`). |
+
+The card is published **per profile** rather than at the origin's well-known URI
+because [specification §8.2](https://a2a-protocol.org) scopes that URI to an
+origin, which can name exactly one agent. A broker fronts several, so each card
+lives under its profile and advertises its own absolute URLs; a client handed a
+profile's card URL — §8.2's "Direct Configuration" — needs nothing else.
+
+**Every A2A route is behind the broker's [`auth:`](#authentication-auth) guard,
+the card included.** A refusal is the broker's standard envelope
+(`{"error":"authentication required"}`, `401`/`403`/`503` with the usual
+`WWW-Authenticate` challenge) — the same middleware, and the same answer, that
+`POST /claim` gives. This differs from [`nexus.io.a2a`](#nexusioa2a), which
+serves its card unauthenticated: that plugin binds loopback by default, whereas
+the broker is an ingress whose standing policy is that even `GET /binaries`
+requires a credential. Clients are given a credential out-of-band before they
+fetch the card, which §8.2 explicitly sanctions. A broker with no `auth:` block
+serves the card to everyone, exactly as it serves every other route.
+
+**Every operation currently answers `UnsupportedOperationError`** (JSON-RPC code
+`-32004` with HTTP `200`; REST `400` with a `FAILED_PRECONDITION`
+google.rpc.Status body), carrying `detail: OPERATION_NOT_IMPLEMENTED` to say "not
+yet" rather than "never". The routes authenticate, decode and validate — a
+malformed JSON-RPC envelope is still told it is malformed — but nothing yet
+translates an A2A message onto the broker's instance wire. A path naming no
+configured profile is a **404** in the binding's own error shape, never a
+fallback to some default agent.
 
 ### Lease durability (`state_dir`)
 

@@ -21,7 +21,7 @@ crashes.
                           ┌───────────────────────────────────────┐
                           │            nexus-broker               │
    client ──HTTP POST────▶│  /claim /release/{id} /ticket/{id}    │
-                          │  /leases                              │
+                          │  /leases  /agents/{name}/…  (A2A)     │
           ◀──lease+ws_url─│                                       │
           ──WebSocket────▶│  /lease/{id}  ◀──frames──▶  /instance │
                           └───────────────────────────────────────┘
@@ -1031,6 +1031,95 @@ The IO message shapes carried inside broker frames (`output`, `stream.delta`,
 `input`, `approval.response`, …) are documented on the
 [`nexus.io.broker` plugin page](../plugins/io/broker.md#how-it-works).
 
+## The A2A front door (`agents:`)
+
+Everything above assumes a **Nexus-aware client**: `POST /claim` requires the
+full nexus config as inline YAML, so the caller must know Nexus exists and which
+plugins to activate. A third-party [A2A](https://a2a-protocol.org) client knows
+none of that.
+
+The `agents:` block is the answer. Each **profile** binds a nexus config, a
+[binary registry](#serving-several-nexus-variants-the-binary-registry) entry and
+an Agent Card under one name, and publishes that name's A2A endpoints. The
+client names an agent by URL; the operator decided long ago what running it
+means.
+
+```yaml
+# broker.yaml
+advertise_addr: "https://broker.example"    # the origin the agent cards advertise
+
+agents:
+  support:
+    binary: nexus                           # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"         # the nexus config instances of this profile boot with
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+```
+
+That publishes three routes, namespaced under the profile name so profiles
+cannot collide:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /agents/support/.well-known/agent-card.json` | The profile's Agent Card |
+| `POST /agents/support/a2a` | JSON-RPC 2.0 binding |
+| `/agents/support/a2a/v1/...` | HTTP+JSON (REST) binding |
+
+```bash
+curl -s https://broker.example/agents/support/.well-known/agent-card.json \
+  -H 'Authorization: Bearer <token>' | jq
+```
+
+**Profiles are the unit of public identity: one card, one persona, one config.**
+Two agents that should look different to the outside world are two profiles, not
+one profile with a switch.
+
+A few rules worth knowing before you write the block; the full key list is in the
+[configuration reference](../configuration/reference.md#agent-profiles-agents).
+
+- **A profile name is a URL path segment.** Letters, digits, `-`, `_` and `.`
+  only. Names are compared with whitespace trimmed, so `"support ":` and
+  `support:` collide and fail the boot.
+- **An unknown `binary` fails startup**, naming the alternatives — it does not
+  fall back to the reserved `nexus` entry, for the same reason `POST /claim`
+  answers `400` rather than quietly spawning the base binary for a caller that
+  asked for a vision build.
+- **A missing `config` file fails startup** too, resolved and stat()ed at boot
+  like every registry path, so a typo is caught at deploy time rather than by the
+  first A2A request.
+- **You author identity; the broker derives the rest.** `supportedInterfaces`,
+  `capabilities` and `securitySchemes` have no config keys: they describe what
+  the broker actually serves, and an operator must not be able to state one that
+  is false. In particular the card's security schemes come from the broker's own
+  [`auth:`](#authentication) chain, so a published card cannot advertise a
+  credential the broker does not accept.
+- **Set `advertise_addr`.** A card must carry absolute URLs. With profiles
+  configured and a wildcard bind (`:8080`) and no `advertise_addr`, the broker
+  refuses to start rather than publish a URL no client can dial.
+- **Every A2A route is behind the same `auth:` guard as `/claim`, the card
+  included.** A refusal is the broker's usual `{"error": "..."}` envelope. This
+  differs from the standalone [`nexus.io.a2a`](../plugins/io/a2a.md) plugin,
+  which serves its card unauthenticated: that one binds loopback, the broker is
+  an ingress. Hand clients a credential out-of-band, which the specification's
+  "Direct Configuration" discovery path explicitly sanctions.
+
+**A broker with no `agents:` block is unchanged in every respect** — no routes
+are registered, no card is built, and nothing new appears in the boot log.
+
+> **Current state.** The routes are mounted, authenticated and decoded, but every
+> operation answers a well-formed `UnsupportedOperationError` carrying
+> `detail: OPERATION_NOT_IMPLEMENTED`: nothing yet translates an A2A message onto
+> the broker's instance wire, and nothing yet spawns an instance to run it. The
+> Agent Card says so honestly — `streaming`, `pushNotifications` and
+> `extendedAgentCard` are all `false`, derived from the operations that are
+> actually implemented rather than configured.
+
 ## Capacity and queueing
 
 `max_concurrent` caps live instances. Each claim acquires a slot **before**
@@ -1120,4 +1209,6 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
 - [Authentication (`auth:`)](../configuration/reference.md#authentication-auth) —
   every validator key, default and validation rule, plus the per-route status
   mapping and the audit-record shape.
+- [A2A](a2a.md) — the protocol the `agents:` block speaks, and the standalone
+  serving plugin the broker's cards are modelled on.
 - [Sessions](../architecture/sessions.md) — on-disk session layout and `-recall`.
