@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1725,5 +1727,219 @@ func TestLogBinaryRegistry_NamesTheSpawnEnvironment(t *testing.T) {
 	// a future attribute cannot reintroduce the leak.
 	if strings.Contains(buf.String(), "super-secret-value") {
 		t.Errorf("the boot log printed an environment VALUE, not just a name:\n%s", buf.String())
+	}
+}
+
+// TestBuildCommand_NoRunAsLeavesTheSpawnUnchanged is the compatibility half of
+// run_as: a broker that does not configure it must build the same *exec.Cmd it
+// built before the key existed.
+//
+// SysProcAttr is asserted to be nil rather than "has no Credential" on purpose.
+// A non-nil SysProcAttr changes which path os/exec takes for every spawn, so
+// leaving one behind would be a behaviour change even with every field zero.
+func TestBuildCommand_NoRunAsLeavesTheSpawnUnchanged(t *testing.T) {
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/nexus/bin/nexus",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+	})
+
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("SysProcAttr = %+v, want nil when no run_as is configured", cmd.SysProcAttr)
+	}
+}
+
+// TestBuildCommand_RunAsSetsCredentialAndHome pins both halves of the credential
+// drop, because either alone is broken.
+//
+// The Credential is what makes the process boundary a privilege boundary. HOME is
+// what makes the instance able to work at all once it is over that boundary: it
+// resolves ~/.nexus (pkg/engine/paths.go), so an instance running as another uid
+// while still pointed at the BROKER'S home cannot create its session directory
+// and every claim fails at the first write.
+func TestBuildCommand_RunAsSetsCredentialAndHome(t *testing.T) {
+	t.Setenv("HOME", "/home/broker")
+
+	uid, gid := 1002, 1003
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/builds/nexus-vision",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		runAs:      &RunAsSpec{UID: &uid, GID: &gid, ResolvedHome: "/home/nexus-vision"},
+	})
+
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatalf("SysProcAttr = %+v, want a Credential", cmd.SysProcAttr)
+	}
+	if got := cmd.SysProcAttr.Credential.Uid; got != uint32(uid) {
+		t.Errorf("Credential.Uid = %d, want %d", got, uid)
+	}
+	if got := cmd.SysProcAttr.Credential.Gid; got != uint32(gid) {
+		t.Errorf("Credential.Gid = %d, want %d", got, gid)
+	}
+	// Left nil with NoSetGroups false, so the child calls setgroups(0, NULL) and
+	// drops the broker's supplementary groups. Keeping them would leave the
+	// instance holding most of what the key exists to take away.
+	if groups := cmd.SysProcAttr.Credential.Groups; len(groups) != 0 {
+		t.Errorf("Credential.Groups = %v, want none (supplementary groups are dropped)", groups)
+	}
+	if cmd.SysProcAttr.Credential.NoSetGroups {
+		t.Error("Credential.NoSetGroups is set, so the broker's supplementary groups survive into the instance")
+	}
+
+	if got, _ := lastEnvValue(cmd.Env, "HOME"); got != "/home/nexus-vision" {
+		t.Errorf("child HOME = %q, want the run_as user's home; the broker's own HOME must not survive the credential drop", got)
+	}
+}
+
+// TestBuildCommand_EntryEnvHomeBeatsRunAsHome pins the escape hatch: an operator
+// who keeps instance state somewhere other than a home directory sets HOME under
+// the entry's `env`, and that wins.
+//
+// It is the same layering `env` already had, and it is why a uid with no passwd
+// entry is a boot failure that names this key rather than a dead end.
+func TestBuildCommand_EntryEnvHomeBeatsRunAsHome(t *testing.T) {
+	t.Setenv("HOME", "/home/broker")
+
+	uid, gid := 1002, 1003
+	cmd := buildCommand(spawnSpec{
+		binaryPath: "/opt/builds/nexus-vision",
+		configPath: "/tmp/claim-123.yaml",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		binaryEnv:  map[string]string{"HOME": "/var/lib/nexus/vision"},
+		runAs:      &RunAsSpec{UID: &uid, GID: &gid, ResolvedHome: "/home/nexus-vision"},
+	})
+
+	if got, _ := lastEnvValue(cmd.Env, "HOME"); got != "/var/lib/nexus/vision" {
+		t.Errorf("child HOME = %q, want the entry's declared data dir", got)
+	}
+}
+
+// TestApplyRunAs_ExtendsSysProcAttr guards the seam E4-S2 lands on: that story
+// sets Setpgid on the SAME struct, so a credential drop that assigned
+// SysProcAttr wholesale would silently undo it (and vice versa).
+func TestApplyRunAs_ExtendsSysProcAttr(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	// Stand-in for whatever a later story sets on this struct.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	uid, gid := 1002, 1003
+	applyRunAs(cmd, &RunAsSpec{UID: &uid, GID: &gid})
+
+	if !cmd.SysProcAttr.Setpgid {
+		t.Error("applyRunAs replaced SysProcAttr instead of extending it; a field another story set was dropped")
+	}
+	if cmd.SysProcAttr.Credential == nil {
+		t.Fatal("applyRunAs set no Credential")
+	}
+}
+
+// TestExecRunner_RunAsWithoutPrivilegeFailsTheSpawn covers the failure an
+// operator is most likely to hit: run_as configured on a broker that is not
+// privileged to set it.
+//
+// The point is WHERE it fails. os/exec reports a refused setgroups/setgid/setuid
+// synchronously from Start, so the claim gets an error immediately instead of an
+// instance that never dials back and is given up on at the ready deadline. The
+// message has to name run_as, because "fork/exec: operation not permitted" on its
+// own points at the binary rather than at the credential.
+//
+// Actually DROPPING privilege cannot be tested without root; this asserts the
+// refusal path only.
+func TestExecRunner_RunAsWithoutPrivilegeFailsTheSpawn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: setting an arbitrary credential would succeed, so there is no refusal to observe")
+	}
+	binary, err := exec.LookPath("true")
+	if err != nil {
+		t.Skipf("no `true` binary on PATH to spawn: %v", err)
+	}
+
+	// uid 1 (daemon) is not this process, so the drop requires privilege the test
+	// does not have.
+	uid, gid := 1, 1
+	handle, err := execRunner{}.start(context.Background(), spawnSpec{
+		binaryPath: binary,
+		configPath: "/dev/null",
+		leaseID:    "lease-abc",
+		brokerAddr: "ws://127.0.0.1:8080/instance",
+		runAs:      &RunAsSpec{UID: &uid, GID: &gid},
+	})
+	if err == nil {
+		_ = handle.kill()
+		_ = handle.wait()
+		t.Skip("the credential drop unexpectedly succeeded; this host grants it without root")
+	}
+	if !strings.Contains(err.Error(), "run_as") {
+		t.Errorf("error = %v, want it to name run_as so the operator knows which key refused the spawn", err)
+	}
+	if !strings.Contains(err.Error(), "uid 1 gid 1") {
+		t.Errorf("error = %v, want it to name the credential that was refused", err)
+	}
+}
+
+// TestClaim_HandsTheRunnerTheEntrysRunAs is the wiring: the credential the load
+// folded onto an entry is the one the spawn is actually given.
+func TestClaim_HandsTheRunnerTheEntrysRunAs(t *testing.T) {
+	uid, gid := 1002, 1003
+	cfg := variantRegistryConfig()
+	vision := cfg.Binaries["vision"]
+	vision.RunAs = &RunAsSpec{UID: &uid, GID: &gid, ResolvedHome: "/home/nexus-vision"}
+	cfg.Binaries["vision"] = vision
+
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(4242)}
+	ts, reg, cs := newClaimTestServer(t, runner, cfg)
+	cs.sessionReportGrace = 50 * time.Millisecond
+
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		respCh <- postClaim(t, ts.URL, `{"binary":"vision","config":"engine:\n  name: test\n"}`)
+	}()
+
+	spec := awaitSpawn(t, runner)
+	if spec.runAs == nil || spec.runAs.UID == nil || *spec.runAs.UID != uid {
+		t.Fatalf("spec.runAs = %+v, want the vision entry's credential", spec.runAs)
+	}
+	if spec.runAs.ResolvedHome != "/home/nexus-vision" {
+		t.Errorf("spec.runAs.ResolvedHome = %q, want the home resolved at boot", spec.runAs.ResolvedHome)
+	}
+
+	// Let the parked claim finish so teardown does not block on the ready deadline.
+	reg.MarkReady(spec.leaseID)
+	select {
+	case resp := <-respCh:
+		resp.Body.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("claim never completed after the instance was marked ready")
+	}
+}
+
+// TestLogBinaryRegistry_NamesTheRunAsCredential pins the operator's view of who
+// an entry's instances will run as, alongside what environment they carry.
+func TestLogBinaryRegistry_NamesTheRunAsCredential(t *testing.T) {
+	uid, gid := 1002, 1003
+	cfg := DefaultConfig()
+	cfg.Binaries = map[string]BinaryEntry{
+		reservedBinaryName: {
+			Path:         "nexus",
+			ResolvedPath: "/usr/local/bin/nexus",
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid, ResolvedHome: "/home/nexus"},
+		},
+	}
+
+	var buf bytes.Buffer
+	logBinaryRegistry(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})), cfg)
+	records := decodeLogRecords(t, buf.Bytes())
+	if len(records) == 0 {
+		t.Fatalf("no log records:\n%s", buf.String())
+	}
+	if got := records[0]["run_as"]; got != "1002:1003" {
+		t.Errorf("run_as = %v, want \"1002:1003\"", got)
+	}
+	if got := records[0]["run_as_home"]; got != "/home/nexus" {
+		t.Errorf("run_as_home = %v, want the resolved home", got)
 	}
 }

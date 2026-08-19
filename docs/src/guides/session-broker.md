@@ -324,6 +324,99 @@ binaries:
 - **No hot reload.** The registry is read, folded and resolved once at startup.
   Adding, changing or removing an entry means **restarting the broker**.
 
+### Running instances as another user: `run_as`
+
+By default a claimed instance runs as the **broker's own user**, with the
+broker's `HOME`. Two claims are two processes, but they are not two principals:
+either one can read the other's session directory under `~/.nexus/sessions/`,
+and either can read `<state_dir>/spawn-key` — which is enough to derive any live
+lease's dial-back secret and impersonate its instance.
+
+`run_as` drops each spawn to a uid and gid you choose. It is declared per
+registry entry, with a broker-level default, because the separation that matters
+is between **variants**:
+
+```yaml
+# broker.yaml
+run_as:                          # default for entries that declare none
+  uid: 1500
+  gid: 1500
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:                      # replaces the default outright — never merged
+      uid: 1501
+      gid: 1501
+
+  support:
+    path: /opt/builds/nexus-support
+    run_as:
+      uid: 1502
+      gid: 1502
+    env:
+      HOME: /var/lib/nexus/support    # keep this variant's state off a home dir
+```
+
+Both `uid` and `gid` are required whenever the block is written: a uid alone
+leaves instances in the broker's primary group, which looks like a boundary in
+the config and is not one on disk. Ids are numeric, not names — a name resolves
+against a passwd database a hardened container may not carry, and can mean
+different users on two hosts. Every mistake is a **boot failure** naming the
+entry and the value, like the rest of the registry.
+
+**`HOME` follows the credential.** `HOME` is what resolves `~/.nexus`, so an
+instance running as another uid while still pointed at the *broker's* home
+cannot create its session directory and the claim fails at its first write. The
+broker resolves the `run_as` user's home from the passwd database at boot and
+hands the spawn that `HOME`. Set `env.HOME` on the entry to put that variant's
+state somewhere else — a data dir under `/var/lib`, say — and that value wins.
+
+**Where a `run_as` instance's sessions live.** In `<that HOME>/.nexus/sessions/`.
+So sessions are consistent **per registry entry**: two entries under different
+credentials keep their sessions in different trees, and one entry's instances all
+share one. Resumes stay correct because a session already records the entry that
+created it and a resume naming a different entry is refused with a `409` — see
+[A resume re-uses the binary that created the session](#a-resume-re-uses-the-binary-that-created-the-session)
+— so a session is never replayed under an entry whose `HOME` would not contain
+it.
+
+> **The broker must be privileged.** Setting a child's credentials — including
+> the `setgroups(0, NULL)` that drops the broker's supplementary groups —
+> requires **root**, or `CAP_SETUID` and `CAP_SETGID` on Linux, *even when the
+> uid you name is the broker's own*. A broker that configures `run_as` without
+> it logs one `WARN` at boot and fails every claim that selects such an entry at
+> **spawn** — an immediate `500 spawning instance` with the refused credential in
+> the broker log, not a claim that hangs until the ready timeout.
+
+The boot log names each entry's credential and the home its sessions will live
+under, beside the path and spawn environment:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision spawn_env=… run_as=1501:1501 run_as_home=/home/nexus-vision
+```
+
+#### What `run_as` does and does not buy
+
+It buys one thing, and it is the thing the default lacks: instances run as a
+**different user** from the broker and from each other's variant, so the OS —
+not the broker's own bookkeeping — is what stops one from reading another's
+sessions or the broker's `spawn-key`.
+
+It does **not**:
+
+- sandbox the filesystem, restrict the network, or cap CPU and memory. A claim
+  still supplies the whole engine config, and the shell and file tools still run
+  with everything that uid can reach;
+- separate two instances of the **same** entry from each other — they share a
+  credential and a session tree;
+- protect an instance from the caller who claimed it. That caller chose its
+  config and drives its tools.
+
+Grant each `run_as` user only what its instances need, and keep the broker's
+`state_dir` unreadable to them (it is `0700`, owned by the broker's user).
+
 ### Behind a proxy: set `advertise_addr`
 
 A lease is in-memory state on **one** broker process, so the `ws_url` a claim

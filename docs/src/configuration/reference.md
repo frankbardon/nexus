@@ -3339,6 +3339,7 @@ auth:
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
 | `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
 | `inherit_env`        | list of string | *(empty)* | The variables a spawned instance inherits from the **broker's own environment**, by **name** only. A spawn carries the always-pass set (`HOME`, `LANG`, `PATH`, `TZ`), everything named here that the broker process actually holds, its entry's [`env`](#binary-registry-binaries), and the three broker-owned `NEXUS_BROKER_*` variables — **and nothing else**. Empty (the default) means an instance carries no provider credential from the broker's shell, which is a **deliberate break** with the earlier behaviour of passing `os.Environ()` through wholesale; see [Instance environment](#instance-environment-inherit_env) below and the guide's migration note. Entries are trimmed, de-duplicated and sorted at load. An empty entry, a `NAME=value` pair (this key forwards a variable, it does not set one — use `binaries.<name>.env` for that) or a `NEXUS_BROKER_*` name (injected by the broker on every spawn, so declaring it does nothing) is a **boot failure** naming the key. A declared name the broker does not hold is **not** an error: it is skipped, omitted from the per-entry boot log line, and named once in a startup `WARN`. |
+| `run_as`             | map      | *(absent)* | The **default OS credential** spawned instances run under — `uid` and `gid`, both required whenever the block is written — for every `binaries:` entry that does not declare its own. Absent (the default) means instances run as the broker's own uid and gid, exactly as they always have, and the spawn is byte-identical to what it was before this key existed. An entry's [`run_as`](#binary-registry-binaries) **replaces** this outright rather than merging field by field. Validated at boot: a block with only one of the two fields, a negative id, or an id above 4294967295 **fails startup** naming the key (and, for an entry, the entry). Requires the broker to run as **root** or hold `CAP_SETUID` **and** `CAP_SETGID`; otherwise every claim selecting such an entry fails to spawn. See [Running instances as another user](#running-instances-as-another-user-run_as) below. |
 | `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
 | `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
@@ -3381,6 +3382,7 @@ binaries:
 | `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
 | `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
 | `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **over** what the spawn inherited from the broker (the always-pass set and [`inherit_env`](#instance-environment-inherit_env)) and **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker, hand it the wrong lease, or supply its own spawn secret. This is where a value that is a property of the **variant** belongs; `inherit_env` is where a value that lives in the **broker's own environment** belongs. |
+| `run_as`      | map               | *(absent)* | The OS credential **this entry's** instances are exec()d under: `uid` and `gid`, both required whenever the block is written. Overrides the broker-level [`run_as`](#session-broker-nexus-broker) outright — an entry that declares it does not merge with the default. Absent and with no broker-level default, instances run as the broker's own user, which is what every spawn did before this key existed. When it is set, **`HOME` follows the credential**: the spawn's `HOME` is the `run_as` user's home directory from the passwd database, unless this entry's `env` sets `HOME` itself. A uid whose home cannot be resolved and whose entry does not set `env.HOME` **fails startup** naming the entry. Supplementary groups are **dropped** (`setgroups(0, NULL)`), so the instance holds only the declared gid. See [Running instances as another user](#running-instances-as-another-user-run_as). |
 
 **Selecting an entry.** A claim picks one with the optional `binary` field of
 its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
@@ -3485,6 +3487,97 @@ Use `inherit_env` when the value lives in the broker's own environment (a secret
 injected by systemd, Kubernetes or a secrets agent) and `binaries.<name>.env`
 when the value is a property of the variant. A claim's own `config` can of
 course still carry a credential inline, in which case neither key is involved.
+
+### Running instances as another user (`run_as`)
+
+Without `run_as`, every claimed instance runs as the **broker's own uid** with
+the broker's `HOME`. The process boundary between two claims is then not a
+privilege boundary: one tenant's instance can read every other tenant's session
+directory under `~/.nexus/sessions/`, and it can read `<state_dir>/spawn-key` —
+which is enough to derive any live lease's dial-back secret and impersonate its
+instance. `run_as` is what turns a separate process into a separate principal.
+
+```yaml
+# broker.yaml
+run_as:                       # the default for every entry that declares none
+  uid: 1500
+  gid: 1500
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:                   # replaces the default outright — not merged
+      uid: 1501
+      gid: 1501
+
+  support:
+    path: /opt/builds/nexus-support
+    run_as:
+      uid: 1502
+      gid: 1502
+    env:
+      HOME: /var/lib/nexus/support   # operator-set data dir; wins over the passwd home
+```
+
+- **Per entry over a broker default.** The interesting separation is between
+  *variants*: a vision build and a support agent want to be apart from each
+  other, not merely from the host. An entry that writes `run_as` replaces the
+  broker-level block **wholesale** — a uid taken from one place and a gid from
+  another is a credential nobody wrote down.
+- **Both fields are required** whenever the block is written. A uid without a gid
+  leaves instances in the broker's primary group, so their session files stay
+  reachable from it — a boundary that looks complete in the config and is not one
+  on disk.
+- **Ids are numeric**, not user names. Resolving a name needs the passwd
+  database, which a hardened container may not carry, and a name that resolves
+  differently on two hosts is a silent privilege change.
+- **`HOME` follows the credential.** `HOME` is what resolves `~/.nexus`, so an
+  instance dropped to another uid while still pointed at the broker's home cannot
+  create its session directory and every claim fails at the first write. The
+  broker therefore resolves the `run_as` user's home from the passwd database at
+  boot and gives the spawn that `HOME`; an entry's `env.HOME` overrides it and is
+  the way to put instance state somewhere other than a home directory. A uid with
+  no resolvable home and no `env.HOME` **fails startup**, naming the entry and
+  the key that fixes it.
+- **Sessions are consistent per registry entry.** Two entries running under
+  different credentials keep their sessions in different trees. Resume stays
+  correct because a session already records the entry that created it and a
+  resume under a different entry is refused with **409** — see
+  [Resume inherits the recorded binary](#resume-inherits-the-recorded-binary) —
+  so a session can never be replayed under an entry whose `HOME` would not
+  contain it.
+- **Supplementary groups are dropped.** The child calls `setgroups(0, NULL)`, so
+  it holds only the declared gid; keeping the broker's group memberships would
+  leave the instance able to reach most of what the key exists to take away.
+
+**The broker must be privileged.** Setting a child's credentials — including
+dropping supplementary groups — requires **root**, or `CAP_SETUID` and
+`CAP_SETGID` on Linux. This is true even when the `uid` named is the broker's
+own. A broker configured with `run_as` that lacks the privilege logs one `WARN`
+at boot:
+
+```
+level=WARN msg="run_as is configured but this broker does not run as root, ..." euid=501
+```
+
+and every claim that selects such an entry fails **at spawn**, immediately, with
+**HTTP 500** `{"error":"spawning instance"}` and a broker-side log line naming
+the refused credential — not a claim that hangs until the ready timeout.
+
+Each entry's credential and resolved home appear in the boot log beside its path
+and spawn environment:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision spawn_env=… run_as=1501:1501 run_as_home=/home/nexus-vision
+```
+
+**What `run_as` does not do.** It separates instances from the broker's user and
+from each other's user. It does not sandbox the filesystem, restrict the network,
+or bound CPU and memory — a claim still supplies the whole engine config, and the
+shell and file tools still run with whatever that uid can reach. Nor does it
+protect an instance from the *claimant*: the caller who claimed a lease owns what
+that instance does.
 
 ### Binary resolution
 

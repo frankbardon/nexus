@@ -352,11 +352,15 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	// changes under a running broker cannot make one claim spawn a different
 	// build than the next.
 	handle, err := s.runner.start(ctx, spawnSpec{
-		binaryName:      binaryName,
-		binaryPath:      entry.ResolvedPath,
-		binaryArgs:      entry.Args,
-		binaryEnv:       entry.Env,
-		inheritEnv:      s.cfg.InheritEnv,
+		binaryName: binaryName,
+		binaryPath: entry.ResolvedPath,
+		binaryArgs: entry.Args,
+		binaryEnv:  entry.Env,
+		inheritEnv: s.cfg.InheritEnv,
+		// The entry's EFFECTIVE credential: its own `run_as`, or the broker-level
+		// default folded onto it at boot. Nil for every entry that declared
+		// neither, which is the spawn this broker has always performed.
+		runAs:           entry.RunAs,
 		configPath:      configPath,
 		leaseID:         leaseID,
 		brokerAddr:      brokerAddr,

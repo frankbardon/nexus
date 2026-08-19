@@ -8,9 +8,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,6 +115,17 @@ type Config struct {
 	// value that IS per-variant belongs in that entry's `env:`, which sets it
 	// outright instead of forwarding it.
 	InheritEnv []string `yaml:"inherit_env"`
+
+	// RunAs is the DEFAULT OS credential spawned instances run under, for every
+	// registry entry that does not declare its own. Absent (the default) means
+	// instances run as the broker's own uid and gid, exactly as they always have.
+	//
+	// It is the fallback rather than the whole answer because the interesting
+	// separation is between VARIANTS: a broker fronting a vision build and a
+	// support agent wants those two apart from each other, not merely apart from
+	// the host. An entry that declares `run_as` replaces this outright; see
+	// BinaryEntry.RunAs and foldRunAs.
+	RunAs *RunAsSpec `yaml:"run_as"`
 
 	// Warnings are non-fatal configuration complaints collected during the load
 	// — deprecated keys, folded aliases — for the caller to log.
@@ -373,6 +386,22 @@ type BinaryEntry struct {
 	// or hand it the wrong lease, so the broker's values always win.
 	Env map[string]string `yaml:"env"`
 
+	// RunAs is the OS credential this entry's instances are exec()d under. Absent
+	// (the default) means the broker's own uid and gid, which is what every spawn
+	// has always used.
+	//
+	// It is per ENTRY, with the broker-level `run_as` as the fallback, for the
+	// same reason `env` is per entry: an operator who fronts a vision build and a
+	// support agent from one broker wants them separated from EACH OTHER, not
+	// merely from the host. An entry that declares the key REPLACES the broker
+	// default outright rather than merging field by field — a uid taken from one
+	// place and a gid from another is a credential nobody wrote down.
+	//
+	// After LoadConfigFromBytes this holds the EFFECTIVE credential (the entry's
+	// own, or the folded broker default), so nothing downstream has to know which
+	// of the two it came from — see foldRunAs.
+	RunAs *RunAsSpec `yaml:"run_as"`
+
 	// ResolvedPath is the ABSOLUTE, verified executable this entry spawns: Path
 	// after tilde expansion, after a PATH lookup if Path was a bare name, and
 	// after a stat that confirmed a regular file with an execute bit.
@@ -387,6 +416,226 @@ type BinaryEntry struct {
 	// Empty after LoadConfigFromBytes alone, which parses but deliberately does
 	// not touch the filesystem — see LoadConfig.
 	ResolvedPath string `yaml:"-"`
+}
+
+// RunAsSpec is the OS credential a spawned instance runs under: the uid and gid
+// the broker sets on the child before exec.
+//
+// # Why the broker offers this at all
+//
+// Without it every instance runs as the BROKER'S uid with the broker's HOME, so
+// the process boundary between two claims is not a privilege boundary: one
+// tenant's instance can read every other tenant's session directory under
+// ~/.nexus/sessions, and it can read <state_dir>/spawn-key — which is enough to
+// derive any live lease's dial-back secret and impersonate its instance. Dropping
+// to a different uid is what turns "a separate process" into "a separate
+// principal".
+//
+// Both fields are pointers so "not written" is distinguishable from "written as
+// 0": uid 0 is root, and defaulting an unwritten uid to it would be the worst
+// possible reading of a half-filled block.
+type RunAsSpec struct {
+	// UID is the numeric user id the instance runs as. Numeric rather than a
+	// name: resolving a name needs the passwd database, which is exactly the
+	// thing a hardened deployment may not have inside the container the broker
+	// runs in, and a name that resolves differently on two hosts is a silent
+	// privilege change.
+	UID *int `yaml:"uid"`
+
+	// GID is the numeric group id the instance runs as. Required whenever UID is
+	// set — see validateRunAs.
+	GID *int `yaml:"gid"`
+
+	// ResolvedHome is the HOME a spawn under this credential is given, and it is
+	// not a YAML key: LoadConfig derives it from the run_as user's passwd entry,
+	// following the ResolvedPath precedent.
+	//
+	// It exists because run_as without a HOME story is broken on arrival. HOME is
+	// what resolves ~/.nexus (pkg/engine/paths.go), so an instance dropped to
+	// another uid while still pointed at the BROKER'S home directory cannot write
+	// its own session directory, and every claim fails at the first write. HOME
+	// therefore follows the credential.
+	//
+	// Empty means the entry's `env` already sets HOME — the operator-set data dir
+	// — in which case nothing is looked up and that value stands. It is also empty
+	// after LoadConfigFromBytes alone, which touches no filesystem and reads no
+	// passwd database.
+	ResolvedHome string `yaml:"-"`
+}
+
+// keyRunAs is the config key, named in every error validateRunAs produces so an
+// operator can grep for it.
+const keyRunAs = "run_as"
+
+// maxUnixID is the largest value a uid or gid can carry over to
+// syscall.Credential, whose fields are uint32. Rejecting out-of-range values at
+// load rather than truncating them in the spawn path is the difference between a
+// boot failure naming the entry and an instance quietly running as a uid the
+// operator never wrote.
+// Typed as int64 so the bound is the same on a 32-bit build, where a plain int
+// cannot hold it.
+const maxUnixID int64 = 1<<32 - 1
+
+// validateRunAs checks one declared `run_as` block. scope is the key path the
+// errors are reported under ("run_as", or "binaries: vision: run_as"), so a
+// broker-level mistake and a per-entry one each name the place they were written.
+//
+// A nil spec is the key being absent, which is always valid: run_as is opt-in and
+// its absence must leave a spawn byte-identical to what it was before the key
+// existed.
+//
+// Requiring BOTH fields whenever either is written is deliberate. A uid without a
+// gid leaves the instance in the broker's primary group, so its files stay
+// group-accessible to the broker's other instances — a boundary that looks
+// complete in the config and is not. There is no reading of a half-written block
+// that is safer than refusing it.
+func validateRunAs(scope string, spec *RunAsSpec) error {
+	if spec == nil {
+		return nil
+	}
+	switch {
+	case spec.UID == nil && spec.GID == nil:
+		return fmt.Errorf("%s: declares neither uid nor gid; remove the block to run instances as the broker's own user, or set both", scope)
+	case spec.UID == nil:
+		return fmt.Errorf("%s: gid is set but uid is not; set both, because a group change alone leaves instances running as the broker's user", scope)
+	case spec.GID == nil:
+		return fmt.Errorf("%s: uid is set but gid is not; set both, because a uid change alone leaves instances in the broker's primary group and their session files reachable from it", scope)
+	}
+	if err := validateUnixID(scope, "uid", *spec.UID); err != nil {
+		return err
+	}
+	return validateUnixID(scope, "gid", *spec.GID)
+}
+
+// validateUnixID rejects an id the kernel cannot represent. Negative is the
+// realistic mistake (a YAML `-1`, or a placeholder nobody filled in); the upper
+// bound exists because the value is carried in a uint32 and a silent wrap would
+// spawn instances as an arbitrary user.
+func validateUnixID(scope, field string, id int) error {
+	if id < 0 || int64(id) > maxUnixID {
+		return fmt.Errorf("%s.%s: %d is not a valid unix id; it must be between 0 and %d", scope, field, id, maxUnixID)
+	}
+	return nil
+}
+
+// foldRunAs validates the broker-level `run_as` default and every entry's own,
+// then folds the default into the entries that declared none — so after this
+// every entry carries the EFFECTIVE credential and the spawn path never has to
+// consult two places.
+//
+// The default is folded rather than consulted at spawn time for the reason
+// foldBinaryRegistry folds the deprecated alias: one resolved answer per entry,
+// decided once at boot, is what makes the boot log able to state what each entry
+// will actually do.
+//
+// Each entry gets a COPY of the default, not a pointer to it, because
+// resolveRunAsHomes writes a per-entry answer onto it — an entry whose `env`
+// already sets HOME resolves nothing, and sharing one struct would let that
+// entry's outcome depend on which other entry was walked first.
+func foldRunAs(binaries map[string]BinaryEntry, brokerDefault *RunAsSpec) error {
+	if err := validateRunAs(keyRunAs, brokerDefault); err != nil {
+		return err
+	}
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		if err := validateRunAs(fmt.Sprintf("binaries: %s: %s", name, keyRunAs), entry.RunAs); err != nil {
+			return err
+		}
+		effective := entry.RunAs
+		if effective == nil {
+			effective = brokerDefault
+		}
+		if effective == nil {
+			continue
+		}
+		spec := *effective
+		entry.RunAs = &spec
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// envHomeKey is the environment variable HOME, spelled once so the passwd lookup
+// and the spawn path agree on what an entry's `env` has to name to opt out of it.
+const envHomeKey = "HOME"
+
+// resolveRunAsHomes fills in ResolvedHome for every entry that runs under a
+// run_as credential, from the passwd database, and refuses the boot when it
+// cannot.
+//
+// This is the environmental half of the key and therefore lives in LoadConfig
+// beside resolveBinaryRegistry, not in the pure parser: the same bytes
+// legitimately resolve differently on two hosts.
+//
+// # Why HOME follows the credential
+//
+// HOME is what resolves ~/.nexus (pkg/engine/paths.go). An instance dropped to
+// another uid while still holding the BROKER'S HOME cannot create
+// ~/.nexus/sessions/<id>, so the claim fails at the first write — and if it
+// could write there, the isolation the key was configured for would be undone
+// by every instance sharing one session tree anyway.
+//
+// Sessions are therefore consistent PER REGISTRY ENTRY, which is the granularity
+// the rest of the broker already binds them at: a session records the entry that
+// created it and a resume under a different entry is refused with a 409 (see
+// resolveSpawnBinary), so a session can never be replayed under an entry whose
+// HOME would not contain it.
+//
+// An entry whose `env` already sets HOME is left alone. That is the escape hatch
+// for a deployment that keeps instance state somewhere other than a home
+// directory — a data dir under /var/lib, say — and it is why a uid with no passwd
+// entry is a boot failure that names the alternative rather than a fatal dead end.
+func resolveRunAsHomes(binaries map[string]BinaryEntry) error {
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		if entry.RunAs == nil || entry.RunAs.UID == nil {
+			continue
+		}
+		if _, ok := entry.Env[envHomeKey]; ok {
+			continue
+		}
+		uid := *entry.RunAs.UID
+		home, err := runAsHomeDir(uid)
+		if err != nil {
+			return fmt.Errorf("binaries: %s: %s.uid %d: %w; set binaries.%s.env.%s to the directory that user's instances should keep their sessions in",
+				name, keyRunAs, uid, err, name, envHomeKey)
+		}
+		entry.RunAs.ResolvedHome = home
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// runAsHomeDir returns the home directory recorded for a uid.
+//
+// A relative home is refused rather than used: HOME is resolved by the INSTANCE,
+// whose working directory the broker does not control, so a relative value would
+// place one entry's sessions in different directories depending on how the broker
+// happened to be started.
+func runAsHomeDir(uid int) (string, error) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return "", fmt.Errorf("no home directory could be resolved for that user: %w", err)
+	}
+	home := strings.TrimSpace(u.HomeDir)
+	if home == "" {
+		return "", fmt.Errorf("that user has no home directory recorded")
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("that user's home directory %q is not absolute", home)
+	}
+	return home, nil
+}
+
+// registryUsesRunAs reports whether any entry spawns under a credential other
+// than the broker's own. It exists for the boot WARN — see logBinaryRegistry.
+func registryUsesRunAs(binaries map[string]BinaryEntry) bool {
+	for _, entry := range binaries {
+		if entry.RunAs != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedBinaryName is the registry entry that must exist after every load. It
@@ -744,6 +993,13 @@ func LoadConfig(path string) (Config, error) {
 	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
 		return Config{}, fmt.Errorf("broker config: %w", err)
 	}
+	// Same split, one step later: which directory a uid calls home is a property
+	// of the machine, not of the document, so it is answered here rather than in
+	// the pure parser. It runs for run_as entries only, so a broker that does not
+	// use the key reads no passwd database at all.
+	if err := resolveRunAsHomes(cfg.Binaries); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
 	// Same split, same reasoning, one step later: a profile's config path is
 	// environmental, so it is verified here rather than in the pure parser. A
 	// broker with no `agents:` block does no work at all.
@@ -791,6 +1047,14 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("broker config: %w", err)
 	}
 	cfg.InheritEnv = inheritEnv
+
+	// Folded after the registry exists, because the broker-level default only
+	// means anything relative to the entries it applies to — and validated in the
+	// same breath, so a uid nobody can represent fails the boot naming the entry
+	// rather than truncating into some other user at the first claim.
+	if err := foldRunAs(cfg.Binaries, cfg.RunAs); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
 
 	// Trimmed before expansion so a whitespace-only value reads as "unset"
 	// (persistence disabled) rather than as a directory literally named " ".

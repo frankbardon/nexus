@@ -1056,3 +1056,218 @@ inherit_env:
 		})
 	}
 }
+
+// TestLoadConfig_RunAsEntryOverridesBrokerDefault pins the placement decision:
+// the broker-level key is a DEFAULT, and an entry that declares its own replaces
+// it outright rather than merging field by field.
+//
+// Wholesale replacement matters because a merged credential — a uid from the
+// entry and a gid from the broker block — is one nobody wrote down, and it would
+// be the credential a whole variant's files end up owned by.
+func TestLoadConfig_RunAsEntryOverridesBrokerDefault(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+run_as:
+  uid: 1000
+  gid: 1000
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:
+      uid: 1002
+      gid: 1003
+  support:
+    path: /opt/builds/nexus-support
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+
+	want := map[string][2]int{
+		// The entry's own.
+		"vision": {1002, 1003},
+		// The broker default, folded in.
+		"support":          {1000, 1000},
+		reservedBinaryName: {1000, 1000},
+	}
+	for name, ids := range want {
+		entry, ok := cfg.Binaries[name]
+		if !ok {
+			t.Fatalf("registry has no %q entry", name)
+		}
+		if entry.RunAs == nil || entry.RunAs.UID == nil || entry.RunAs.GID == nil {
+			t.Fatalf("%s: run_as = %+v, want uid %d gid %d", name, entry.RunAs, ids[0], ids[1])
+		}
+		if *entry.RunAs.UID != ids[0] || *entry.RunAs.GID != ids[1] {
+			t.Errorf("%s: run_as = %d:%d, want %d:%d", name, *entry.RunAs.UID, *entry.RunAs.GID, ids[0], ids[1])
+		}
+	}
+
+	// Folded as a COPY: resolveRunAsHomes writes a per-entry answer onto the spec,
+	// so two entries sharing the broker default must not share one struct.
+	if cfg.Binaries["support"].RunAs == cfg.Binaries[reservedBinaryName].RunAs {
+		t.Error("two entries share one RunAsSpec; a per-entry resolution would leak between them")
+	}
+}
+
+// TestLoadConfig_RunAsWithoutRunAsIsUnchanged is the compatibility assertion: a
+// config that never mentions the key leaves every entry with no credential at
+// all, which is what makes the spawn path byte-identical to what it was.
+func TestLoadConfig_RunAsWithoutRunAsIsUnchanged(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.RunAs != nil {
+		t.Errorf("cfg.RunAs = %+v, want nil", cfg.RunAs)
+	}
+	for name, entry := range cfg.Binaries {
+		if entry.RunAs != nil {
+			t.Errorf("%s: run_as = %+v, want nil when the key is never written", name, entry.RunAs)
+		}
+	}
+}
+
+// TestLoadConfig_RunAsInvalidValueFailsBoot checks that every malformed
+// credential is a BOOT failure naming where it was written — the same precedent
+// the registry already sets for a missing or non-executable path.
+//
+// A half-written block is refused rather than completed: a uid with no gid leaves
+// instances in the broker's primary group, which looks like a boundary in the
+// config and is not one on disk.
+func TestLoadConfig_RunAsInvalidValueFailsBoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantParts []string
+	}{
+		{
+			name: "negative uid on an entry",
+			yaml: "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: -1\n      gid: 20\n",
+			// Names the entry, the field, and the offending value.
+			wantParts: []string{"binaries: vision: run_as.uid", "-1"},
+		},
+		{
+			name:      "uid without gid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: 1002\n",
+			wantParts: []string{"binaries: vision: run_as", "gid"},
+		},
+		{
+			name:      "gid without uid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      gid: 1002\n",
+			wantParts: []string{"binaries: vision: run_as", "uid"},
+		},
+		{
+			name:      "empty block on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as: {}\n",
+			wantParts: []string{"binaries: vision: run_as", "neither uid nor gid"},
+		},
+		{
+			name:      "out-of-range gid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: 1002\n      gid: 4294967296\n",
+			wantParts: []string{"binaries: vision: run_as.gid", "4294967296"},
+		},
+		{
+			name:      "negative uid at broker level",
+			yaml:      "run_as:\n  uid: -5\n  gid: 20\n",
+			wantParts: []string{"run_as.uid", "-5"},
+		},
+		{
+			name:      "half-written block at broker level",
+			yaml:      "run_as:\n  gid: 20\n",
+			wantParts: []string{"run_as", "uid"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatal("LoadConfigFromBytes accepted an invalid run_as")
+			}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error = %v, want it to mention %q", err, part)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveRunAsHomes_UsesTheEntrysDeclaredHome checks the escape hatch and,
+// with it, the property that makes the boot survivable in a container with no
+// passwd entry for the uid: an entry whose `env` sets HOME is never looked up.
+func TestResolveRunAsHomes_UsesTheEntrysDeclaredHome(t *testing.T) {
+	// A uid no passwd database is going to hold, so a lookup would certainly fail.
+	uid, gid := 4294967290, 4294967290
+	binaries := map[string]BinaryEntry{
+		"vision": {
+			Path:         "/opt/builds/nexus-vision",
+			ResolvedPath: "/opt/builds/nexus-vision",
+			Env:          map[string]string{"HOME": "/var/lib/nexus/vision"},
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	if err := resolveRunAsHomes(binaries); err != nil {
+		t.Fatalf("resolveRunAsHomes: %v", err)
+	}
+	if got := binaries["vision"].RunAs.ResolvedHome; got != "" {
+		t.Errorf("ResolvedHome = %q, want empty: the entry's env sets HOME and that value stands", got)
+	}
+}
+
+// TestResolveRunAsHomes_UnresolvableUIDFailsBoot pins the other side: run_as
+// without a HOME story is broken on arrival, so a uid the broker cannot resolve
+// a home for refuses the boot and names the key that fixes it, rather than
+// spawning instances that fail at their first write.
+func TestResolveRunAsHomes_UnresolvableUIDFailsBoot(t *testing.T) {
+	uid, gid := 4294967290, 4294967290
+	if _, err := runAsHomeDir(uid); err == nil {
+		t.Skipf("uid %d resolves on this host, so there is no failure to observe", uid)
+	}
+
+	binaries := map[string]BinaryEntry{
+		"vision": {
+			Path:         "/opt/builds/nexus-vision",
+			ResolvedPath: "/opt/builds/nexus-vision",
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	err := resolveRunAsHomes(binaries)
+	if err == nil {
+		t.Fatal("resolveRunAsHomes accepted a uid with no resolvable home")
+	}
+	for _, part := range []string{"binaries: vision", "run_as.uid", "binaries.vision.env.HOME"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error = %v, want it to mention %q", err, part)
+		}
+	}
+}
+
+// TestResolveRunAsHomes_ResolvesFromPasswd exercises the real lookup against the
+// one uid every host is guaranteed to be able to answer for: the broker's own.
+func TestResolveRunAsHomes_ResolvesFromPasswd(t *testing.T) {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	want, err := runAsHomeDir(uid)
+	if err != nil {
+		t.Skipf("this host cannot resolve its own uid %d in the passwd database: %v", uid, err)
+	}
+
+	binaries := map[string]BinaryEntry{
+		reservedBinaryName: {
+			Path:         "nexus",
+			ResolvedPath: "/usr/local/bin/nexus",
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	if err := resolveRunAsHomes(binaries); err != nil {
+		t.Fatalf("resolveRunAsHomes: %v", err)
+	}
+	if got := binaries[reservedBinaryName].RunAs.ResolvedHome; got != want {
+		t.Errorf("ResolvedHome = %q, want %q", got, want)
+	}
+}

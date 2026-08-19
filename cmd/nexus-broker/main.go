@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -391,14 +392,41 @@ func logBinaryRegistry(logger *slog.Logger, cfg Config) {
 	// is absent from the line rather than listed as empty, so "I exported the key
 	// and it still is not there" is answerable from the boot log; missing declared
 	// names are called out once, below, rather than once per entry.
+	//
+	// run_as is appended only when the entry actually declares one (or inherits
+	// the broker default), so a broker that does not use the key logs exactly the
+	// line it logged before the key existed.
 	for _, name := range sortedBinaryNames(cfg.Binaries) {
 		entry := cfg.Binaries[name]
-		logger.Info("binary registry entry",
+		attrs := []any{
 			"name", name,
 			"path", entry.Path,
 			"resolved_path", entry.ResolvedPath,
 			"spawn_env", strings.Join(spawnEnvNames(cfg.InheritEnv, entry.Env), ","),
-		)
+		}
+		if cred := entry.RunAs; cred != nil && cred.UID != nil && cred.GID != nil {
+			attrs = append(attrs, "run_as", fmt.Sprintf("%d:%d", *cred.UID, *cred.GID))
+			// The home this entry's sessions will live under, when the broker
+			// resolved one. Absent means the entry's own `env` sets HOME, which the
+			// spawn_env list above already names.
+			if cred.ResolvedHome != "" {
+				attrs = append(attrs, "run_as_home", cred.ResolvedHome)
+			}
+		}
+		logger.Info("binary registry entry", attrs...)
+	}
+
+	// run_as configured on a broker that cannot use it. It is a WARN rather than a
+	// boot failure because the privilege can legitimately arrive later (a
+	// capability granted by the supervisor, a container started differently), and
+	// because the failure it predicts is already loud: the spawn fails at Start
+	// and the claim reports it. Saying so at boot turns "every claim 500s" into
+	// one line an operator can act on.
+	if registryUsesRunAs(cfg.Binaries) && os.Geteuid() != 0 {
+		logger.Warn("run_as is configured but this broker does not run as root, so it cannot set a spawned "+
+			"instance's credentials at all — every claim selecting such an entry will fail to spawn. "+
+			"Run the broker as root (or grant it CAP_SETUID and CAP_SETGID) or remove run_as",
+			"euid", os.Geteuid())
 	}
 
 	// Declared but not held. It is a WARN and not a boot failure on purpose: one

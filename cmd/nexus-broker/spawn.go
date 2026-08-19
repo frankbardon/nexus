@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 )
@@ -62,6 +63,17 @@ type spawnSpec struct {
 	// its spec, and a test can pin it without a Config.
 	inheritEnv []string
 
+	// runAs is the EFFECTIVE OS credential this spawn runs under — the selected
+	// entry's `run_as`, or the broker-level default folded into it at boot (see
+	// foldRunAs). Nil means the credential the broker itself holds, which is what
+	// every spawn used before the key existed.
+	//
+	// It carries the resolved HOME with it rather than having buildCommand look
+	// one up, because the whole environment a spawn will hold is decided by its
+	// spec — and because a passwd lookup per claim would let one entry's sessions
+	// move under a running broker.
+	runAs *RunAsSpec
+
 	// spawnSecret is the per-lease second factor the instance must echo in its
 	// register frame (see newSpawnSecret). The claim path mints it, records the
 	// expected value on the lease, and passes it here; buildCommand injects it
@@ -105,6 +117,17 @@ type execRunner struct{}
 func (execRunner) start(_ context.Context, spec spawnSpec) (processHandle, error) {
 	cmd := buildCommand(spec)
 	if err := cmd.Start(); err != nil {
+		// A credential the broker is not privileged to set fails HERE, at Start:
+		// the child reports the setgroups/setgid/setuid errno back over its status
+		// pipe between fork and exec, so os/exec surfaces it synchronously. That is
+		// what makes a misconfigured run_as a claim that fails at once with a
+		// reason, rather than an instance that never dials back and is only given
+		// up on at the ready deadline half a minute later.
+		if cred := spec.runAs; cred != nil && cred.UID != nil && cred.GID != nil {
+			return nil, fmt.Errorf("starting nexus instance as run_as uid %d gid %d "+
+				"(the broker process must be root, or hold CAP_SETUID and CAP_SETGID, to change a child's credentials): %w",
+				*cred.UID, *cred.GID, err)
+		}
 		return nil, fmt.Errorf("starting nexus instance: %w", err)
 	}
 	return &execProcess{cmd: cmd}, nil
@@ -148,6 +171,19 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	// caller picks the name. The only bound is the one applied here: a spawn
 	// carries what the OPERATOR declared and nothing else.
 	env := inheritedEnv(spec.inheritEnv)
+	// HOME FOLLOWS run_as. It is appended after the inherited half, so it beats
+	// the broker's own HOME that alwaysInheritedEnv just contributed.
+	//
+	// Without this the key is broken on arrival: HOME is what resolves ~/.nexus
+	// (pkg/engine/paths.go), so an instance dropped to another uid while still
+	// pointed at the BROKER'S home directory cannot create its session directory
+	// and the claim fails at the first write. It is resolved at boot from the
+	// run_as user's passwd entry (resolveRunAsHomes) and is empty when the entry's
+	// `env` sets HOME itself — that map is applied next and would win regardless,
+	// which is the operator-set data dir escape hatch.
+	if spec.runAs != nil && spec.runAs.ResolvedHome != "" {
+		env = append(env, envHomeKey+"="+spec.runAs.ResolvedHome)
+	}
 	// Entry env sits between what the broker's own environment contributed and
 	// the broker-owned variables: a variant may override something inherited from
 	// the broker's shell, which is the point of the key. Keys are applied in
@@ -169,10 +205,45 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	)
 	cmd.Env = env
 
+	applyRunAs(cmd, spec.runAs)
+
 	// Surface the child's logs through the broker's stderr for observability.
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd
+}
+
+// applyRunAs sets the OS credential the child is exec()d under, or does nothing
+// at all when no run_as is configured — which is what keeps an unconfigured
+// broker's spawn byte-identical to what it was before this existed (SysProcAttr
+// stays nil, so os/exec takes exactly the path it always did).
+//
+// SysProcAttr is EXTENDED here, never assigned wholesale: E4-S2 sets Setpgid on
+// the same struct, and either story replacing it would silently drop whichever
+// field the other set. Any later story that needs a process attribute adds a
+// field the same way.
+//
+// Groups is left nil with NoSetGroups false on purpose. That makes the child call
+// setgroups(0, NULL), dropping every supplementary group the broker held — a
+// credential change that kept the broker's group memberships would leave the
+// instance holding whatever those groups can reach, which is most of what the key
+// exists to take away.
+//
+// setgroups is itself privileged, so this is also why run_as needs root (or
+// CAP_SETUID + CAP_SETGID) even when the uid it names is the broker's own: an
+// unprivileged broker cannot make this call at all, and the spawn fails at Start.
+func applyRunAs(cmd *exec.Cmd, spec *RunAsSpec) {
+	if spec == nil || spec.UID == nil || spec.GID == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// Range-checked at load (validateUnixID), so neither conversion can wrap.
+	cmd.SysProcAttr.Credential = &syscall.Credential{
+		Uid: uint32(*spec.UID),
+		Gid: uint32(*spec.GID),
+	}
 }
 
 // sortedEnvKeys returns an entry's env map keys in a stable order.
