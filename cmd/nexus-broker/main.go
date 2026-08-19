@@ -308,6 +308,10 @@ func run() error {
 
 	stopSweep()
 	gateway.Shutdown()
+	// Settle any A2A task still in flight before the listener goes away, so a
+	// streaming client is told the turn ended rather than being left on a socket
+	// nothing will ever write to again.
+	agents.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

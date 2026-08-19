@@ -3580,14 +3580,34 @@ requires a credential. Clients are given a credential out-of-band before they
 fetch the card, which §8.2 explicitly sanctions. A broker with no `auth:` block
 serves the card to everyone, exactly as it serves every other route.
 
-**Every operation currently answers `UnsupportedOperationError`** (JSON-RPC code
-`-32004` with HTTP `200`; REST `400` with a `FAILED_PRECONDITION`
-google.rpc.Status body), carrying `detail: OPERATION_NOT_IMPLEMENTED` to say "not
-yet" rather than "never". The routes authenticate, decode and validate — a
-malformed JSON-RPC envelope is still told it is malformed — but nothing yet
-translates an A2A message onto the broker's instance wire. A path naming no
-configured profile is a **404** in the binding's own error shape, never a
-fallback to some default agent.
+**`SendMessage`, `SendStreamingMessage` and `CancelTask` are dispatched.** A
+client's message becomes the `input` payload a leased instance's
+[`nexus.io.broker`](#nexusiobroker) plugin turns into `io.input`, and everything
+the instance sends back is translated into A2A frames — see
+[the session broker guide](../guides/session-broker.md#what-the-a2a-ingress-translates)
+for the payload-by-payload mapping. `capabilities.streaming` on every profile
+card is `true` as a result, because it is derived from this same set rather than
+configured.
+
+**`GetTask`, `ListTasks` and `SubscribeToTask` answer
+`UnsupportedOperationError`** (JSON-RPC code `-32004` with HTTP `200`; REST `400`
+with a `FAILED_PRECONDITION` google.rpc.Status body), carrying
+`detail: OPERATION_NOT_IMPLEMENTED` to say "not yet" rather than "never". All
+three read a task *after* it has ended, which needs a durable per-principal
+record the ingress does not keep — it holds live tasks only. The push
+notification operations and `GetExtendedAgentCard` are refused for the same
+shape of reason, and both card capabilities are `false`.
+
+The routes authenticate, decode and validate whatever the operation: a malformed
+JSON-RPC envelope is still told it is malformed. A path naming no configured
+profile is a **404** in the binding's own error shape, never a fallback to some
+default agent.
+
+**A broker that cannot start an instance answers `InternalError`** carrying
+`detail: INSTANCE_PROVIDER_NOT_WIRED` (or `INSTANCE_UNAVAILABLE`), and logs a
+warning at boot naming the missing piece. The translation is complete; what a
+release without the instance lifecycle is missing is the machinery that produces
+a Nexus process to run the turn on.
 
 ### Lease durability (`state_dir`)
 

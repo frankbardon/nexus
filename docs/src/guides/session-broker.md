@@ -1112,13 +1112,76 @@ A few rules worth knowing before you write the block; the full key list is in th
 **A broker with no `agents:` block is unchanged in every respect** — no routes
 are registered, no card is built, and nothing new appears in the boot log.
 
-> **Current state.** The routes are mounted, authenticated and decoded, but every
-> operation answers a well-formed `UnsupportedOperationError` carrying
-> `detail: OPERATION_NOT_IMPLEMENTED`: nothing yet translates an A2A message onto
-> the broker's instance wire, and nothing yet spawns an instance to run it. The
-> Agent Card says so honestly — `streaming`, `pushNotifications` and
-> `extendedAgentCard` are all `false`, derived from the operations that are
-> actually implemented rather than configured.
+> **Current state.** `SendMessage`, `SendStreamingMessage` and `CancelTask` are
+> translated end to end (below). `GetTask`, `ListTasks` and `SubscribeToTask`
+> still answer a well-formed `UnsupportedOperationError` carrying
+> `detail: OPERATION_NOT_IMPLEMENTED`: all three read a task after it has ended,
+> which needs a durable record the ingress does not yet keep. What is also still
+> missing is the machinery that STARTS an instance for a turn — until it is
+> wired, every message is answered with `InternalError` carrying
+> `detail: INSTANCE_PROVIDER_NOT_WIRED`, and the broker says so at boot.
+
+### What the A2A ingress translates
+
+The broker sits between two protocols it did not design. On one side an A2A
+client speaks tasks, states and artifacts; on the other a leased `nexus`
+instance speaks the flat IO envelope its
+[`nexus.io.broker`](../plugins/io/broker.md) plugin puts inside every `SignalIO`
+frame. Until now the broker forwarded that envelope without looking at it. It
+now reads it, and this is the whole of the mapping.
+
+**Inbound — A2A to the instance:**
+
+| A2A | IO payload sent to the instance |
+|---|---|
+| A message with no `taskId` | `{"type":"input","content":"…"}` — which the instance turns into `io.input` |
+| A message naming a parked `taskId` | `{"type":"hitl.response","request_id":"…","choice_id"\|"free_text":"…"}` |
+| `CancelTask` | `{"type":"cancel","turn_id":"…","source":"broker.a2a"}` |
+
+The message's text parts are joined with a blank line. A non-text part is
+**refused** with `ContentTypeNotSupportedError` rather than dropped: the `input`
+payload is a single string, so there is nowhere for a file to go.
+
+**Outbound — the instance to A2A.** `turn_id` is what anchors a task: the first
+payload carrying one binds the task to that Nexus turn, and a payload naming a
+different turn is ignored.
+
+| IO payload | A2A |
+|---|---|
+| any first payload | `SUBMITTED` → `WORKING` status update |
+| `stream.delta` | accumulates the answer text; mints no frame of its own |
+| `stream.end` | closes the current response segment; **does not** end the task |
+| `output` | replaces the accumulated text with what the output gates published |
+| `status` (`thinking`, `tool_running`, …) | keeps the task `WORKING` |
+| `status` (`idle`) | publishes the answer artifact, then `COMPLETED` |
+| `hitl.request` | `INPUT_REQUIRED` carrying the question, options included |
+| `cancel.complete` | `CANCELED` |
+| the instance going away | `FAILED` naming the cause |
+
+Three of those are worth stating outright, because they are the decisions a
+second reader would otherwise get wrong:
+
+- **`stream.end` does not complete the task; `status: idle` does.** A turn can
+  produce several model responses (each tool round is one), and the instance
+  runs its output gates *after* the last of them. Completing at a stream end
+  would publish the model's draft rather than what Nexus decided to say.
+- **The answer usually comes from the deltas, not from `output`.** Every shipped
+  agent loop tags its `io.output` with `streamed=true`, and `nexus.io.broker`
+  drops those — so on the ordinary streaming path the deltas are the only text
+  the envelope carries. An `output` payload, when one does arrive, wins.
+- **A payload the broker does not understand is ignored, never a task failure.**
+  The envelope is shared with every other broker client, so an instance may
+  legitimately send something this ingress has no A2A meaning for — a tool
+  `approval.request` is the live example — and an instance newer than the broker
+  in front of it must keep working.
+
+Because the frames a client sees must not depend on which Nexus deployment
+answered, this mapping and the standalone [`nexus.io.a2a`](../plugins/io/a2a.md)
+plugin are both judged by the same conformance corpus (`pkg/a2a/a2aconform`).
+The broker satisfies the five vectors its transport can express and **declares
+the rest absent rather than faking them**: the IO envelope carries no tool
+results, so it publishes no tool, file or budget artifacts. See
+[Plugin contracts](plugin-contracts.md) for the wider pattern.
 
 ## Capacity and queueing
 

@@ -67,18 +67,32 @@ const a2aReasonNotImplemented = "OPERATION_NOT_IMPLEMENTED"
 // brokerImplementedOperations is the set of A2A operations this ingress drives
 // end to end.
 //
-// It is EMPTY, and that is the honest state of this story: the routes are
-// mounted, authenticated and decoded, but nothing yet translates an A2A message
-// into the broker's ioMessage wire or spawns an instance to run it. Every
-// operation therefore answers UnsupportedOperationError, and the Agent Card
-// advertises every optional capability as false because it is derived from this
-// same map (see buildAgentCard).
-//
 // It is a map rather than a scattering of `if` statements so that the story
-// which implements an operation flips exactly one place and the card follows on
-// its own — the card and the dispatch cannot drift, because they read the same
-// value.
-var brokerImplementedOperations = map[string]bool{}
+// which implements an operation flips exactly one place and the Agent Card
+// follows on its own — the card and the dispatch cannot drift, because they
+// read the same value (see buildAgentCard).
+//
+// WHAT IS IN IT. The three message operations: a client's message becomes the
+// `input` payload a leased instance's nexus.io.broker plugin turns into
+// io.input, everything the instance sends back is translated into A2A frames
+// (see a2atask.go), and CancelTask settles a live task and tells the instance.
+// Both the blocking and the streaming shapes of SendMessage are driven by the
+// same translation, so they cannot report different outcomes for one turn.
+//
+// WHAT IS NOT, and why the absences are honest rather than arbitrary:
+//
+//   - GetTask and ListTasks read a task AFTER it has ended, which needs a
+//     durable per-principal record. This ingress keeps only live tasks in
+//     memory, so answering from it would report "unknown task" for every task
+//     that had finished — worse than refusing.
+//   - SubscribeToTask reattaches to a task, which is the same read.
+//   - The push-notification operations and GetExtendedAgentCard are unbuilt,
+//     and the card declares both capabilities false.
+var brokerImplementedOperations = map[string]bool{
+	a2a.MethodSendMessage:          true,
+	a2a.MethodSendStreamingMessage: true,
+	a2a.MethodCancelTask:           true,
+}
 
 // brokerOperationImplemented reports whether the ingress drives an operation.
 func brokerOperationImplemented(operation string) bool {
@@ -119,6 +133,19 @@ type A2AServer struct {
 
 	// names is the profile list in a stable order, for the boot log.
 	names []string
+
+	// profiles is the resolved `agents:` block, so a dispatched turn can hand
+	// the lease provider the config and binary its profile names.
+	profiles map[string]AgentProfile
+
+	// tasks is the live-task registry. Every task in it is running on a leased
+	// instance; a task is forgotten the moment it settles.
+	tasks *a2aTasks
+
+	// leases produces the instance a turn runs on. It defaults to a provider
+	// that refuses everything, so an ingress built without a lifecycle answers
+	// with a clear error instead of panicking on a nil interface.
+	leases a2aLeaseProvider
 }
 
 // NewA2AServer renders every configured profile's Agent Card and returns the
@@ -132,7 +159,12 @@ func NewA2AServer(logger *slog.Logger, cfg Config) (*A2AServer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &A2AServer{logger: logger}
+	s := &A2AServer{
+		logger:   logger,
+		profiles: cfg.Agents,
+		tasks:    newA2ATasks(),
+		leases:   unwiredLeaseProvider{},
+	}
 	if len(cfg.Agents) == 0 {
 		return s, nil
 	}
@@ -153,6 +185,31 @@ func NewA2AServer(logger *slog.Logger, cfg Config) (*A2AServer, error) {
 
 // enabled reports whether any profile is configured.
 func (s *A2AServer) enabled() bool { return s != nil && len(s.cards) > 0 }
+
+// useLeaseProvider installs the machinery that produces an agent instance for a
+// turn.
+//
+// It is a setter rather than a constructor parameter because the provider needs
+// the registry, the spawner and the gateway — all built after the cards are
+// rendered — and because a test supplies a provider that never starts a
+// process. Calling it more than once replaces the provider; the ingress does
+// not reload, so there is no live task to reconcile.
+func (s *A2AServer) useLeaseProvider(p a2aLeaseProvider) {
+	if p == nil {
+		p = unwiredLeaseProvider{}
+	}
+	s.leases = p
+}
+
+// Shutdown settles every live task so no client is left holding a stream the
+// broker will never write to again. A task settled this way reports FAILED with
+// the reason, exactly as an instance dying mid-turn does.
+func (s *A2AServer) Shutdown() {
+	if s == nil || s.tasks == nil {
+		return
+	}
+	s.tasks.shutdown("the broker is shutting down, so the turn was ended before it finished")
+}
 
 // Register wires the A2A routes onto a mux. It takes a routeMux so run() can
 // register it behind the auth guard, exactly as POST /claim and GET /binaries
@@ -194,6 +251,15 @@ func (s *A2AServer) logStartupState(cfg Config) {
 		return
 	}
 	s.logger.Info("a2a ingress enabled", "profiles", len(s.cards), "base_url", cfg.A2ABaseURL)
+	// An ingress with no way to produce an instance answers every operation with
+	// errLeaseUnavailable. That is a confusing failure to meet at runtime and a
+	// trivial one to read at boot, so it is stated here rather than left to be
+	// discovered one refused request at a time.
+	if _, unwired := s.leases.(unwiredLeaseProvider); unwired {
+		s.logger.Warn("a2a ingress has no agent instance provider wired: " +
+			"the routes answer and the cards are served, but every message will be refused " +
+			"until the broker can start a Nexus instance to run a turn on")
+	}
 	for _, name := range s.names {
 		profile := cfg.Agents[name]
 		s.logger.Info("a2a agent profile",
@@ -327,19 +393,41 @@ func (s *A2AServer) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Every operation lands here today: the ingress routes and decodes, and then
-	// says plainly that it cannot yet run a turn. Decoding first is what makes
-	// the refusal worth returning — a malformed request is still told it is
-	// malformed, so a client integrating against this broker can get its
-	// envelope right before the operation exists.
+	// Decoding happens before the implemented check so a malformed request is
+	// still told it is malformed, rather than being answered with a refusal
+	// about the operation it was trying to name.
 	if !brokerOperationImplemented(call.Method) {
 		s.writeJSONRPCError(w, card.profile, call.ID(), a2aNotImplemented(call.Method))
 		return
 	}
 
-	// Unreachable while brokerImplementedOperations is empty. Written as an
-	// internal error rather than a panic so that adding an entry to the map
-	// without adding a handler costs one request instead of the process.
+	b := a2aBinding{jsonrpc: true, id: call.ID()}
+	switch call.Method {
+	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
+		req, ok := call.Params.(*a2a.SendMessageRequest)
+		if !ok {
+			s.writeJSONRPCError(w, card.profile, call.ID(),
+				a2a.Errorf(a2a.ErrorTypeInternal, "operation %q decoded to an unexpected parameter type", call.Method))
+			return
+		}
+		s.handleSendMessage(w, r, card, b, req, call.Streaming())
+		return
+
+	case a2a.MethodCancelTask:
+		req, ok := call.Params.(*a2a.CancelTaskRequest)
+		if !ok {
+			s.writeJSONRPCError(w, card.profile, call.ID(),
+				a2a.Errorf(a2a.ErrorTypeInternal, "operation %q decoded to an unexpected parameter type", call.Method))
+			return
+		}
+		s.handleCancelTask(w, r, card, b, req)
+		return
+	}
+
+	// Unreachable: every entry in brokerImplementedOperations has a case above.
+	// Written as an internal error rather than a panic so that adding an entry
+	// to the map without adding a handler costs one request instead of the
+	// process.
 	s.writeJSONRPCError(w, card.profile, call.ID(),
 		a2a.Errorf(a2a.ErrorTypeInternal, "operation %q is marked implemented but has no handler", call.Method))
 }
@@ -387,7 +475,7 @@ func (s *A2AServer) handleREST(w http.ResponseWriter, r *http.Request) {
 	if suffix == "" {
 		suffix = "/"
 	}
-	route, _, found, methodMismatch := a2a.MatchRoute(r.Method, suffix)
+	route, vars, found, methodMismatch := a2a.MatchRoute(r.Method, suffix)
 	switch {
 	case !found && methodMismatch:
 		// The path names a real operation but the verb is wrong. 405 with the
@@ -410,7 +498,39 @@ func (s *A2AServer) handleREST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unreachable while brokerImplementedOperations is empty; see handleJSONRPC.
+	switch route.Operation {
+	case a2a.MethodSendMessage, a2a.MethodSendStreamingMessage:
+		body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxA2ABody))
+		if readErr != nil {
+			s.writeRESTError(w, card.profile, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
+			return
+		}
+		req, decodeErr := a2a.DecodeSendMessageRequest(body)
+		if decodeErr != nil {
+			s.writeRESTError(w, card.profile, decodeErr)
+			return
+		}
+		s.handleSendMessage(w, r, card, a2aBinding{}, req, route.Streaming)
+		return
+
+	case a2a.MethodCancelTask:
+		// Section 11.3 gives CancelTask a custom verb and an optional body; the
+		// path id is authoritative over anything in it.
+		body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxA2ABody))
+		if readErr != nil {
+			s.writeRESTError(w, card.profile, a2a.Errorf(a2a.ErrorTypeInternal, "reading request body: %v", readErr))
+			return
+		}
+		req, protoErr := a2a.DecodeCancelTaskRequest(vars["id"], body)
+		if protoErr != nil {
+			s.writeRESTError(w, card.profile, protoErr)
+			return
+		}
+		s.handleCancelTask(w, r, card, a2aBinding{}, req)
+		return
+	}
+
+	// Unreachable; see handleJSONRPC.
 	s.writeRESTError(w, card.profile,
 		a2a.Errorf(a2a.ErrorTypeInternal, "operation %q is marked implemented but has no handler", route.Operation))
 }

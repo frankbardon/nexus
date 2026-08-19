@@ -45,8 +45,25 @@ type ioMessage struct {
 	// hitl.request / hitl.response
 	RequestID string `json:"request_id,omitempty"`
 	Prompt    string `json:"prompt,omitempty"`
-	ChoiceID  string `json:"choice_id,omitempty"`
-	FreeText  string `json:"free_text,omitempty"`
+	// Mode and Choices carry a multiple-choice question's shape, spelled
+	// exactly as ui.HITLRequestMessage spells them so every transport renders
+	// one question the same way.
+	//
+	// They exist because a prompt ALONE is not an answerable question: the
+	// responder replies with a choice_id, and without the option list it has no
+	// way to learn what the ids are. nexus.io.browser has always forwarded both
+	// (plugins/io/browser/plugin.go, handleHITLRequest); this transport dropped
+	// them, so a multiple-choice ask_user reached a broker client as bare prose
+	// it could only answer as free text. Adding them is a parity fix, not a new
+	// capability.
+	//
+	// Both are omitempty and both are additive: an older broker forwards the
+	// SignalIO payload verbatim and a client that does not read them behaves
+	// exactly as before, so no brokerframe.Version bump is implied.
+	Mode     string     `json:"mode,omitempty"`
+	Choices  []ioChoice `json:"choices,omitempty"`
+	ChoiceID string     `json:"choice_id,omitempty"`
+	FreeText string     `json:"free_text,omitempty"`
 
 	// cancel.complete (server -> client). Pointer so we can distinguish
 	// "not set" from "explicit false".
@@ -54,6 +71,14 @@ type ioMessage struct {
 
 	// cancel (client -> server)
 	Source string `json:"source,omitempty"`
+}
+
+// ioChoice is one option of a multiple-choice hitl.request, mirroring
+// ui.HITLChoiceMessage. The ID is what a responder echoes back in ChoiceID; the
+// Label is display text and may be empty, in which case a renderer shows the id.
+type ioChoice struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
 }
 
 // client is the dial-back WebSocket client. Unlike the listener-style

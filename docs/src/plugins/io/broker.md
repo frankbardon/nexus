@@ -76,6 +76,19 @@ These engine events are forwarded as IO messages inside broker frames:
 Output already delivered as `stream.delta` chunks is not re-sent as a final
 `output` message (the plugin skips `io.output` events flagged `streamed`).
 
+A `hitl.request` carries the question's `mode` and `choices` alongside its
+`prompt`, spelled exactly as `nexus.io.browser` spells them. A responder answers
+a multiple-choice question with a `choice_id`, so a payload carrying only the
+prompt gives it no way to learn what the ids are. Both fields are `omitempty`, so
+a free-text question's payload is byte-identical to one with no options at all —
+a consumer that ignores them behaves exactly as it did before they existed.
+
+The broker itself is now a second reader of this envelope: its
+[A2A ingress](../../guides/session-broker.md#what-the-a2a-ingress-translates)
+decodes these payloads to drive A2A tasks. A field added here must be mirrored
+in `cmd/nexus-broker`, and a test enforces that (it parses this plugin's source
+and fails if the two declarations disagree).
+
 ### Inbound (client → broker → engine bus)
 
 Inbound IO messages are decoded and injected onto the bus:

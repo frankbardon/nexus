@@ -137,9 +137,16 @@ func TestA2ACardIsServedPerProfile(t *testing.T) {
 	}
 }
 
-// TestA2AJSONRPCAnswersNotImplemented is this story's operational contract: the
-// route exists, decodes a real A2A call, and refuses it with a well-formed
-// UnsupportedOperationError rather than a 404 or an HTML error page.
+// TestA2AJSONRPCAnswersNotImplemented is the operational contract for an
+// operation this ingress does NOT drive: the route exists, decodes a real A2A
+// call, and refuses it with a well-formed UnsupportedOperationError rather than
+// a 404 or an HTML error page.
+//
+// GetTask is the subject rather than SendMessage, which is dispatched now (see
+// a2aturn_test.go). Reading a task back needs the durable record a later story
+// adds, so keeping the assertion on a genuinely unimplemented operation keeps
+// this test about the REFUSAL SHAPE rather than about which story is in
+// flight.
 //
 // The error TYPE matters. Section 3.3.4 uses UnsupportedOperationError for
 // exactly this condition, and the card backs it up by advertising the matching
@@ -148,8 +155,7 @@ func TestA2ACardIsServedPerProfile(t *testing.T) {
 func TestA2AJSONRPCAnswersNotImplemented(t *testing.T) {
 	ts := newA2ATestServer(t, a2aTestConfig(t, ""))
 
-	body := `{"jsonrpc":"2.0","id":7,"method":"SendMessage","params":{"message":` +
-		`{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"hello"}]}}}`
+	body := `{"jsonrpc":"2.0","id":7,"method":"GetTask","params":{"id":"task-1"}}`
 	resp, err := http.Post(ts.URL+agentJSONRPCPath("support"), a2a.ContentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST jsonrpc: %v", err)
@@ -232,16 +238,15 @@ func TestA2AJSONRPCRejectsAMalformedCall(t *testing.T) {
 func TestA2ARESTAnswersNotImplemented(t *testing.T) {
 	ts := newA2ATestServer(t, a2aTestConfig(t, ""))
 
-	resp, err := http.Post(ts.URL+agentRESTPrefix("support")+a2a.PathSendMessage,
-		a2a.ContentTypeJSON, strings.NewReader(`{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"hi"}]}}`))
+	resp, err := http.Get(ts.URL + agentRESTPrefix("support") + "/tasks/task-1")
 	if err != nil {
-		t.Fatalf("POST rest: %v", err)
+		t.Fatalf("GET rest: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST rest = %d, want 400 (UnsupportedOperationError's mapped status): %s", resp.StatusCode, raw)
+		t.Fatalf("GET rest = %d, want 400 (UnsupportedOperationError's mapped status): %s", resp.StatusCode, raw)
 	}
 	var body a2a.RESTError
 	if err := json.Unmarshal(raw, &body); err != nil {

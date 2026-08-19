@@ -80,17 +80,27 @@ func TestAgentCardLeavesTenantUnset(t *testing.T) {
 	}
 }
 
-// TestAgentCardCapabilitiesAreDerivedNotConfigured asserts the card tells the
-// truth about a broker that cannot yet run a turn: every optional capability is
-// false, because brokerImplementedOperations is empty.
+// TestAgentCardCapabilitiesAreDerivedNotConfigured asserts every optional
+// capability tracks what the ingress actually dispatches, never what an
+// operator wrote.
 //
-// A card claiming streaming before a stream can be opened is worse than no card:
-// a client would open one and hang.
+// streaming is TRUE now that SendStreamingMessage is dispatched: the ingress
+// opens a real SSE stream and writes the turn onto it. The other two stay false
+// because nothing implements them, and each assertion is tied back to the
+// operation map rather than to a literal, so the card and the dispatch cannot
+// disagree — which is the property this test exists for.
 func TestAgentCardCapabilitiesAreDerivedNotConfigured(t *testing.T) {
 	cfg := cardTestConfig(t, "")
 	card := mustBuildCard(t, cfg, "support").card
-	if card.Capabilities.Streaming {
-		t.Error("capabilities.streaming = true, but no streaming operation is implemented")
+
+	wantStreaming := brokerOperationImplemented(a2a.MethodSendStreamingMessage) ||
+		brokerOperationImplemented(a2a.MethodSubscribeToTask)
+	if card.Capabilities.Streaming != wantStreaming {
+		t.Errorf("capabilities.streaming = %v, want %v: it must track the dispatched operations",
+			card.Capabilities.Streaming, wantStreaming)
+	}
+	if !wantStreaming {
+		t.Error("no streaming operation is dispatched; SendStreamingMessage was expected to be")
 	}
 	if card.Capabilities.PushNotifications {
 		t.Error("capabilities.pushNotifications = true, but push notifications are not implemented")
