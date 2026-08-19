@@ -315,6 +315,15 @@ client all agree — and `hitl.cancel` retracts the question so the blocked agen
 unblocks. `"0s"` disables the deadline; the consequence is a task that can stay
 parked until the process exits.
 
+**A client must act on the `INPUT_REQUIRED` frame, not on the stream ending.**
+Holding the stream open is deliberate (above), so a client that drains a stream
+to its end before reading it will wait until a deadline fires rather than seeing
+the question. Nexus's own outbound leg has that shape today, which is why a
+[`nexus.agent.a2a_remote`](../agents/a2a-remote.md#chaining-needs-stream-false-against-a-remote-that-holds-the-stream-open)
+remote pointed at this listener needs `stream: false` to chain a question. The
+blocking `SendMessage` binding has no such requirement: it returns the parked
+Task as soon as it parks.
+
 ## Cancelling a task
 
 `CancelTask` (`POST <rest_prefix>/tasks/{id}:cancel`) settles the task at

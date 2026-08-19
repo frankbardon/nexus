@@ -444,6 +444,26 @@ indistinguishable from one that does not exist — and so are `CancelTask` and
 continuation, which resolve the task through the same scoped lookup before they
 reveal anything about its state.
 
+### Outbound: what `nexus.agent.a2a_remote` does today
+
+The table above is the **serve** leg. The [outbound
+leg](../plugins/agents/a2a-remote.md) stands on its own:
+
+| Capability | Status |
+|---|---|
+| Fetch a remote's Agent Card, lazily on first use | **Works** — a remote that is down cannot fail this instance's boot; the tool description is rebuilt from the card and re-registered once |
+| Delegate a task, streaming | **Works** — `SendStreamingMessage`, frames republished as `io.output` / `subagent.iteration` while the run is live |
+| Delegate a task, blocking | **Works** — `stream: false` selects `SendMessage` |
+| Both bindings | **Works** — `binding: jsonrpc` (default) or `http+json`, or pin an endpoint and skip discovery |
+| Fold the terminal status message and the artifacts into one tool result | **Works** — XML-tagged, `CDATA`-wrapped, binary and URL parts described rather than inlined |
+| Credentials: `bearer`, `oauth2_client_credentials`, `mtls` | **Works** — per remote, never inherited, validated at `Init` |
+| Cancel the remote task when the local turn is cancelled | **Works** — `cancel.active` → `CancelTask`, and the same abandonment on every walk-away |
+| Chained human-in-the-loop | **Works with `stream: false`.** Against a remote that HOLDS a streaming connection open across an `INPUT_REQUIRED` park — which is what `nexus.io.a2a` does — the streaming path never surfaces the question. See [Chaining human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation) |
+| Consume the Nexus extension's telemetry from a remote Nexus | **Works** — requested by default, mapped onto `subagent.iteration` |
+| Result caching | **Works** — successes only, never one a human answered for |
+| Posture budgets | **Partial by design** — only `default_budget.timeout` and `max_recursion_depth` cross the boundary; a posture setting the token or tool-call budget is refused |
+| Push-notification webhooks | **Not supported** — see [Deliberately unsupported](#deliberately-unsupported) |
+
 ### What a turn publishes
 
 A2A puts task **output** in artifacts and conversation in messages (§3.7). A
@@ -605,6 +625,32 @@ question went unanswered *and told not to answer it itself*.
 `AUTH_REQUIRED` is deliberately not chained: it asks for a credential, and no
 answer a person types is one.
 
+#### Nexus→Nexus chaining needs `stream: false` today
+
+A2A leaves it to the server whether an `INPUT_REQUIRED` park closes the SSE
+stream, and both readings are legal. `nexus.io.a2a` **holds it open** (keep-alive
+comments, no terminal frame) so a client can keep following the task;
+`nexus.agent.a2a_remote` **drains a stream to its end** before acting on what it
+read. Composed, those two choices deadlock: the question sits on a stream nobody
+is going to close, and the delegation ends when the caller's own budget or
+`stream_idle_timeout` fires — without ever putting the question in front of a
+person.
+
+The blocking binding has no such problem: `SendMessage` returns the parked Task
+the moment it parks (§3.2.2), which is the signal the chaining path needs. So
+set `stream: false` on a remote Nexus agent you expect to ask questions:
+
+```yaml
+  nexus.agent.a2a_remote:
+    agents:
+      - name: peer
+        base_url: http://127.0.0.1:8091
+        stream: false          # required for chained questions against nexus.io.a2a
+```
+
+This is a recorded defect on the outbound leg, not a design decision.
+`tests/integration/a2a_loopback_test.go` pins the working shape.
+
 ### Planned, not available today
 
 Do not build against these. Everything below is either refused outright or
@@ -675,8 +721,10 @@ partial output arrived.
 resumes the remote task with the **same `taskId` and `contextId`**, which is A2A's
 own resume mechanism (§3.4). The delegating model never sees the question and is
 never given the chance to answer it, because a model handed a question only a
-person can settle will invent an answer and then act on it. See [Chaining
-human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation).
+person can settle will invent an answer and then act on it. Against a remote that
+holds its stream open across the park — `nexus.io.a2a` does — this needs
+`stream: false`; see [Chaining human-in-the-loop across a
+delegation](#chaining-human-in-the-loop-across-a-delegation).
 
 **A long delegation is not a black box.** The remote's narration becomes
 `io.output` and, for a remote Nexus instance, its own tool calls and subagent
@@ -712,7 +760,9 @@ than half-honoured.
 
 Because `nexus.io.a2a` speaks the same wire, pointing `a2a_remote` at another
 Nexus instance's serve endpoint is a complete Nexus→Nexus loopback, which is the
-cheapest faithful end-to-end proof of both directions at once.
+cheapest faithful end-to-end proof of both directions at once — and is what
+`tests/integration/a2a_loopback_test.go` does. See [Nexus↔Nexus
+loopback](#nexusnexus-loopback) for what that proves and what it does not.
 
 ## Deliberately unsupported
 
@@ -786,6 +836,35 @@ output encodes the drift instead of catching it. And if a mapping cannot satisfy
 a vector, the vector is not weakened: either the mapping has a bug, or the
 expectation is wrong and the fix lands in the vector *with* a rationale saying
 why the old one was.
+
+### Nexus↔Nexus loopback
+
+The corpus checks one mapping against a written-down expectation. The loopback
+checks the two **legs** against each other: `tests/integration/a2a_loopback_test.go`
+boots two real engines — one running `nexus.agent.a2a_remote`, one running
+`nexus.io.a2a` on `127.0.0.1:18192` — and drives a full delegation between them
+under mocked LLM responses, so it needs no API key and runs in a couple of
+seconds inside the standard tagged suite.
+
+| Config | Role |
+|---|---|
+| `configs/test-a2a-loopback-caller.yaml` | the delegating engine, bearer credential, mock LLM |
+| `configs/test-a2a-loopback-server.yaml` | the callee's listener, bearer-guarded, mock LLM |
+| `configs/test-a2a-loopback-hitl-server.yaml` | the same callee, but its agent calls `ask_user` |
+
+It covers card fetch, a streaming run to `COMPLETED`, artifact return, bearer
+acceptance *and* refusal, a chained question answered on the caller's side, the
+two input deadlines (`tasks.input_timeout` and `hitl.input_timeout`) racing each
+other, and a local cancellation settling the remote task at `CANCELED`.
+
+**What it proves, and what it does not.** Conformance for this integration is
+**self-defined**: hand-written vectors plus this loopback. No external A2A
+implementation and no third-party test kit is in either path. The loopback
+therefore proves the two Nexus mappings are self-consistent — what one emits, the
+other reads — and says nothing about interoperating with somebody else's agent.
+That is a recorded limitation, not an oversight; the corpus above exists
+precisely because a loopback cannot catch a shared misreading of the
+specification.
 
 ## Securing a listener
 

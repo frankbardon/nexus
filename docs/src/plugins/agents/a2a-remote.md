@@ -287,6 +287,29 @@ Whichever fires:
 `hitl.max_rounds` (default `4`) bounds a remote that answers every answer with
 another question; `0` removes the cap and leaves the call budget as the only one.
 
+### Chaining needs `stream: false` against a remote that holds the stream open
+
+**Known limitation, and it bites the Nexus→Nexus case at the default settings.**
+
+A2A leaves it to the server whether an `INPUT_REQUIRED` park closes the SSE
+stream or holds it open, and both readings are legal. This plugin reads a stream
+to its **end** before it acts on what it read, so:
+
+| Remote's behaviour at `INPUT_REQUIRED` | `stream: true` (default) | `stream: false` |
+|---|---|---|
+| Closes the stream (§11.7 permits it) | Chaining works | Chaining works |
+| Holds the stream open — **which is what [`nexus.io.a2a`](../io/a2a.md) does**, with keep-alive comments | The question never reaches a human; the delegation ends when the call budget or `stream_idle_timeout` fires | Chaining works |
+
+So a Nexus instance delegating to another Nexus instance that may ask questions
+must set `stream: false` for that remote today. The blocking `SendMessage`
+binding returns the parked Task as soon as it parks (§3.2.2), which is exactly
+the signal the chaining path needs. The cost is losing [live
+progress](#live-progress) for that remote, since there are no frames to
+republish.
+
+`tests/integration/a2a_loopback_test.go` pins the working shape; the streaming
+shape is a recorded defect, not a design decision.
+
 `AUTH_REQUIRED` is **not** routed to a human. The remote is asking for a
 credential, and no answer a person types is one — the fix is a `credentials`
 block, and the tool error says so.
@@ -328,7 +351,7 @@ them is an engine-level failure, and the parent agent's loop continues normally.
 | Stream ends before a terminal state | "the agent closed the stream … without finishing its task. Any output above is partial." |
 | Malformed / non-conformant frames | "the agent sent a response this client cannot read … a defect in the remote" |
 | A2A protocol error from the remote | "the agent refused the request (`<ErrorType>`): …" |
-| HTTP `401`/`403` | "The credentials this instance presents are not accepted; an operator must fix the configuration." |
+| HTTP `401`/`403` | "The credentials this instance presents are not accepted; an operator must fix the configuration." — *when the remote reports the refusal as an HTTP status.* A remote that answers a refusal inside a JSON-RPC error envelope instead (which `nexus.io.a2a` does) surfaces as the protocol-error row above; either way the delegation fails cleanly and the message names the refusal. |
 | HTTP `429` / `5xx` | "The agent is rate limiting / failing on its side; try again later." |
 | Whole-call budget exhausted | "the agent did not finish within the `<budget>` budget for this call. Any output above is partial." |
 | Task ends `FAILED` / `REJECTED` | "ended its task in state `TASK_STATE_FAILED`: `<the remote's explanation>`" |
@@ -471,11 +494,34 @@ Because [`nexus.io.a2a`](../io/a2a.md) speaks the same wire, you can point
     agents:
       - name: local_peer
         base_url: http://127.0.0.1:8091
+        credentials:
+          type: bearer
+          token_env: PEER_A2A_TOKEN
 ```
 
 This loopback topology is the cheapest faithful end-to-end proof of the outbound
 path — one Nexus instance delegating to another over A2A, with no third-party
-implementation in the test path.
+implementation in the test path. It ships as three runnable configs and one
+integration test:
+
+| File | Role |
+|---|---|
+| `configs/test-a2a-loopback-caller.yaml` | The delegating engine: `nexus.agent.a2a_remote` pointed at the callee, bearer credential, mock LLM. |
+| `configs/test-a2a-loopback-server.yaml` | The callee: `nexus.io.a2a` on `127.0.0.1:18192`, bearer-guarded, mock LLM. |
+| `configs/test-a2a-loopback-hitl-server.yaml` | The same callee, but its mocked agent calls `ask_user`, so the task parks at `INPUT_REQUIRED`. |
+| `tests/integration/a2a_loopback_test.go` | Boots both engines and drives card fetch, a streaming run to `COMPLETED`, artifact return, bearer acceptance *and* refusal, a chained question answered on the caller's side, the two input deadlines racing each other, and cancellation crossing the boundary. |
+
+```bash
+go test -tags integration ./tests/integration/ -run TestA2ALoopback -v
+```
+
+**What the loopback does and does not prove.** It proves the two Nexus mappings
+are self-consistent — that what one emits, the other reads. It does **not**
+prove third-party interoperability: no external A2A implementation and no
+conformance test kit is in that path. The expectations that are not
+self-referential live in the shared corpus at `pkg/a2a/a2aconform`, which
+`nexus.io.a2a` is driven against separately; see [Conformance: one corpus, two
+mappings](../../guides/a2a.md#conformance-one-corpus-two-mappings).
 
 ## See also
 

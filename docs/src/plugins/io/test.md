@@ -27,6 +27,9 @@ plugins:
         action: deny
     ask_responses:                   # canned answers for io.ask events
       - "yes"
+    hitl_responses:                  # canned answers for hitl.requested events
+      - "staging"
+    hitl_auto_respond: true          # answer hitl.requested at all (default: true)
     mock_responses:                  # synthetic LLM responses (no real API calls)
       - content: "Hello! I'm a test assistant."
       - content: "Here are the files: main.go, go.mod"
@@ -57,6 +60,31 @@ mock_responses:
         arguments: '{"command": "ls"}'
   - content: "Done listing files."
 ```
+
+### Human-in-the-loop Answers
+
+Every `hitl.requested` — `ask_user`, an approval-policy gate, a remote A2A agent
+parking at `INPUT_REQUIRED` — is answered automatically. The answer is the next
+`hitl_responses` entry (a bare string is `free_text`; a
+`{choice_id: ..., free_text: ...}` map sets either field), else the request's own
+`default_choice_id`, else an empty answer. The last entry repeats.
+
+Set `hitl_auto_respond: false` to answer **nothing**. The question is still
+collected for assertions, but the plugin that asked it stays blocked, so a test
+can hand ownership of the answer to something else: another transport, a
+subscription in the test body, or — as in
+`tests/integration/a2a_loopback_test.go` — a second engine's human. Without it a
+question can never be observed outstanding, because this plugin settles it inside
+the same dispatch.
+
+### Session Ending
+
+`io.session.end` is emitted when the last scripted input's turn completes, when
+`timeout` elapses, or when a turn is still in flight **three seconds** after the
+last input was sent — the stalled-turn detector, which exists so a permanently
+vetoed turn does not hang until the global timeout. That three-second cutoff is
+not configurable, so a test whose turn legitimately waits longer (a delegation
+parked on a human, say) must arrange for the wait to end inside it.
 
 ### Input Feeding
 
@@ -90,6 +118,7 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 | `io.approval.request` | Auto-respond per approval config |
 | `plan.approval.request` | Auto-respond per approval config |
 | `io.ask` | Respond with canned answers |
+| `hitl.requested` | Respond per `hitl_responses` / `hitl_auto_respond` |
 | `agent.turn.start` | Track turn depth for input pacing |
 | `agent.turn.end` | Detect idle state, trigger next input or session end |
 | `*` (wildcard) | Collect all events for assertions |
@@ -103,4 +132,5 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 | `io.approval.response` | In response to approval requests |
 | `plan.approval.response` | In response to plan approval requests |
 | `io.ask.response` | In response to ask events |
+| `hitl.responded` | In response to `hitl.requested`, unless `hitl_auto_respond: false` |
 | `io.session.end` | After all inputs processed or timeout |

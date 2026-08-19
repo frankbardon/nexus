@@ -2420,6 +2420,7 @@ Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
 | `approval_mode`          | string   | `approve`   | `approve`, `deny`, `per-prompt`. |
 | `approval_rules`         | list     | *(empty)*   | Per-prompt rules: each `{match: <substring>, action: <approve|deny>}`. |
 | `hitl_responses`         | list     | *(empty)*   | Scripted answers to `hitl.requested` events. Bare strings are treated as `free_text`; `{choice_id: ..., free_text: ...}` maps populate the corresponding response fields. |
+| `hitl_auto_respond`      | bool     | `true`      | Whether `hitl.requested` is answered automatically (the next `hitl_responses` entry, else the request's `default_choice_id`, else an empty answer). Set `false` to leave a question genuinely unanswered so something else owns the answer — another transport, or another engine, as in the [A2A loopback](../guides/a2a.md#nexusnexus-loopback). The event is still collected either way. |
 | `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
 | `timeout`                | duration | `60s`       | Session timeout. |
 | `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
