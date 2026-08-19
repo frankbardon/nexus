@@ -139,7 +139,7 @@ func TestClientStream_ResumeFromReportsTheOwedTail(t *testing.T) {
 	t.Run("fully covered", func(t *testing.T) {
 		s := newClientStream(defaultClientReplayBufferBytes)
 		for i := 0; i < 5; i++ {
-			if _, _, err := s.send(nil, ioFrame("lease", 8)); err != nil {
+			if _, _, err := s.send(ioFrame("lease", 8)); err != nil {
 				t.Fatalf("send: %v", err)
 			}
 		}
@@ -158,7 +158,7 @@ func TestClientStream_ResumeFromReportsTheOwedTail(t *testing.T) {
 	t.Run("already current replays nothing", func(t *testing.T) {
 		s := newClientStream(defaultClientReplayBufferBytes)
 		for i := 0; i < 3; i++ {
-			if _, _, err := s.send(nil, ioFrame("lease", 8)); err != nil {
+			if _, _, err := s.send(ioFrame("lease", 8)); err != nil {
 				t.Fatalf("send: %v", err)
 			}
 		}
@@ -185,7 +185,7 @@ func TestClientStream_ResumeFromReportsTheOwedTail(t *testing.T) {
 		)
 		s := newClientStream(limit)
 		for i := 0; i < sent; i++ {
-			if _, _, err := s.send(nil, ioFrame("lease", 100)); err != nil {
+			if _, _, err := s.send(ioFrame("lease", 100)); err != nil {
 				t.Fatalf("send: %v", err)
 			}
 		}
@@ -228,7 +228,7 @@ func TestClientStream_ResumeFromReportsTheOwedTail(t *testing.T) {
 		// can be answered only with the truth about what is gone.
 		s := newClientStream(0)
 		for i := 0; i < 6; i++ {
-			if _, _, err := s.send(nil, ioFrame("lease", 8)); err != nil {
+			if _, _, err := s.send(ioFrame("lease", 8)); err != nil {
 				t.Fatalf("send: %v", err)
 			}
 		}
@@ -253,7 +253,7 @@ func TestClientStream_ResumeFromReportsTheOwedTail(t *testing.T) {
 		// is asking for frames that will never exist under this numbering.
 		s := newClientStream(defaultClientReplayBufferBytes)
 		for i := 0; i < 3; i++ {
-			if _, _, err := s.send(nil, ioFrame("lease", 8)); err != nil {
+			if _, _, err := s.send(ioFrame("lease", 8)); err != nil {
 				t.Fatalf("send: %v", err)
 			}
 		}

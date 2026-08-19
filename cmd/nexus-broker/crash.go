@@ -7,17 +7,10 @@ const (
 	// exited UNEXPECTEDLY — i.e. not through a deliberate release. It is the
 	// non-timing signal that distinguishes a crash from a graceful release and
 	// selects the client's close status via clientCloseForReason.
+	//
+	// The close code it selects, crashCloseStatus, lives with the broker's
+	// other application-defined close codes in closecodes.go.
 	reasonCrash = "crash"
-
-	// crashCloseStatus is the WebSocket close code the gateway uses when an
-	// instance crashes, so a connected client can tell a crash apart from a
-	// normal release (which uses websocket.StatusGoingAway). It sits in the
-	// application-defined range (4000-4999).
-	crashCloseStatus = websocket.StatusCode(4500)
-
-	// crashCloseReason is the human-readable close reason paired with
-	// crashCloseStatus.
-	crashCloseReason = "instance crashed"
 )
 
 // clientCloseForReason maps a lease's teardown reason to the WebSocket close

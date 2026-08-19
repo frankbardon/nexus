@@ -71,6 +71,17 @@ type bufferedFrame struct {
 // client's send queue. That is what guarantees the bytes reach the socket in
 // sequence order even if two goroutines ever send on one lease at once: a client
 // that sees seq N+1 can trust it did not miss N to a race.
+//
+// It also OWNS the attached client connection, rather than the lease holding it
+// alongside. That is not bookkeeping tidiness: it puts "which socket is
+// attached" and "which sequence this frame gets" under one lock. When the lease
+// held the conn, a sender read it under Registry.mu, released that lock, and
+// only then took its number — so a frame that read "no client" microseconds
+// before an attach was still numbered after the attach's replay snapshot, and
+// reached neither the replay nor the socket. The freshly attached client saw a
+// sequence jump it could only recover from by resuming again. With one lock
+// there is no such window: a frame is either numbered before the snapshot (so
+// the replay carries it) or after the publication (so the socket does).
 type clientStream struct {
 	mu sync.Mutex
 
@@ -88,6 +99,11 @@ type clientStream struct {
 
 	// buf holds *bufferedFrame oldest-first.
 	buf *list.List
+
+	// conn is the attached client connection, or nil when no client is
+	// attached. Exactly one client at a time: attach displaces its predecessor
+	// rather than refusing, and hands it back so the caller can close it.
+	conn *wsConn
 }
 
 // newClientStream returns a stream that retains at most limit bytes. A
@@ -97,9 +113,12 @@ func newClientStream(limit int) *clientStream {
 }
 
 // send sequences one client-bound frame, retains it for replay, and hands it to
-// conn's send queue. conn may be nil, which is the "no client attached" case:
-// the frame is still sequenced and still retained, so a client that attaches (or
-// re-attaches) later can be told what it missed.
+// the attached client's send queue. With no client attached the frame is still
+// sequenced and still retained, so a client that attaches (or re-attaches) later
+// can be told what it missed.
+//
+// The attached conn is read under the SAME acquisition that assigns the
+// sequence, which is the whole reason the stream owns it — see the type comment.
 //
 // The frame is RE-ENCODED here, which is also where Secret is cleared: a
 // client-bound frame must never carry the per-spawn secret, and re-encoding is
@@ -108,7 +127,7 @@ func newClientStream(limit int) *clientStream {
 // It returns the assigned sequence and what became of the frame. An encode
 // failure returns the error WITHOUT consuming a sequence, so the numbering a
 // client sees stays gapless for reasons that are not loss.
-func (s *clientStream) send(conn *wsConn, f brokerframe.Frame) (uint64, clientFrameOutcome, error) {
+func (s *clientStream) send(f brokerframe.Frame) (uint64, clientFrameOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -122,13 +141,82 @@ func (s *clientStream) send(conn *wsConn, f brokerframe.Frame) (uint64, clientFr
 	s.next++
 	s.retainLocked(seq, data)
 
-	if conn == nil {
+	if s.conn == nil {
 		return seq, clientFrameBuffered, nil
 	}
-	if !conn.queue(data) {
+	if !s.conn.queue(data) {
 		return seq, clientFrameDropped, nil
 	}
 	return seq, clientFrameDelivered, nil
+}
+
+// attach publishes conn as the stream's client connection and returns both what
+// the client is owed and the connection it DISPLACED, if any.
+//
+// A non-nil after resumes from that sequence: the retained tail is snapshotted,
+// rendered by stage (which prepends a gap notice when one is due) and staged on
+// conn ahead of the live stream. A nil after attaches with no replay at all.
+//
+// Everything happens under s.mu — the snapshot, the staging AND the publication
+// — which is what makes a resume exact rather than approximate. Nothing can be
+// sequenced into the window between reading the buffer and publishing the conn,
+// because sequencing takes this same lock.
+//
+// The displaced conn is RETURNED rather than closed here: closing a socket is a
+// network operation with its own timeouts and has no business running under the
+// stream lock. Its caller owns the teardown.
+//
+// stage runs under s.mu and must not call back into the stream.
+func (s *clientStream) attach(conn *wsConn, after *uint64, stage func(clientResume) [][]byte) (clientResume, *wsConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var resume clientResume
+	if after != nil {
+		resume = s.resumeFromLocked(*after)
+		staged := resume.frames
+		if stage != nil {
+			staged = stage(resume)
+		}
+		conn.primeReplay(staged)
+	}
+
+	evicted := s.conn
+	s.conn = conn
+	return resume, evicted
+}
+
+// detach clears conn as the stream's client, and reports whether it was still
+// the attached one.
+//
+// The identity check is what makes a displaced connection harmless: an evicted
+// socket's read pump ends and calls detach exactly as a clean disconnect does,
+// and must NOT unattach the connection that superseded it.
+func (s *clientStream) detach(conn *wsConn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn == nil || s.conn != conn {
+		return false
+	}
+	s.conn = nil
+	return true
+}
+
+// detachAny clears whatever client is attached and returns it, for teardown
+// paths that close the socket rather than matching one.
+func (s *clientStream) detachAny() *wsConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn := s.conn
+	s.conn = nil
+	return conn
+}
+
+// attached returns the currently attached client connection, or nil.
+func (s *clientStream) attached() *wsConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn
 }
 
 // retainLocked appends one frame to the buffer and evicts oldest-first until
@@ -279,6 +367,19 @@ type clientResume struct {
 	lastSeq uint64
 }
 
+// clientAttach is the outcome of publishing a client connection on a lease:
+// what the client is owed, and whether it displaced a predecessor.
+//
+// evicted is reported back to the gateway rather than merely logged in the
+// registry because the gateway is the only layer that knows WHICH credential
+// admitted the connection that did the displacing. An eviction is an
+// authorization-relevant event, so its audit record belongs where the identity
+// is.
+type clientAttach struct {
+	resume  clientResume
+	evicted bool
+}
+
 // resumeFrom computes what a client resuming after sequence `after` is owed:
 // the retained tail, plus an explicit gap when the buffer no longer reaches
 // back to that point.
@@ -298,7 +399,13 @@ type clientResume struct {
 func (s *clientStream) resumeFrom(after uint64) clientResume {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.resumeFromLocked(after)
+}
 
+// resumeFromLocked is resumeFrom's body. Caller must hold s.mu. It exists so
+// attach can take the resume AND the publication of the new conn under a single
+// acquisition — the property that makes a replay exact.
+func (s *clientStream) resumeFromLocked(after uint64) clientResume {
 	last := s.next - 1
 	reason := ""
 	effective := after

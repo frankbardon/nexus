@@ -169,7 +169,11 @@ type lease struct {
 	state     leaseState
 	createdAt time.Time
 	instance  *wsConn
-	client    *wsConn
+
+	// The CLIENT connection is deliberately not a field here: it lives on
+	// clientStream, which owns it under the same lock that assigns sequence
+	// numbers. Read it through lease.clientConn. See the clientStream type
+	// comment for why splitting the two was a race.
 
 	// owner is the verified identity that claimed this lease, stamped once at
 	// creation from the authenticated Principal on the POST /claim request. It is
@@ -331,6 +335,16 @@ type lease struct {
 	// release. Remove uses it to pick the client's close status, and a future
 	// /leases endpoint (E4-S1) can surface it.
 	reason string
+}
+
+// clientConn returns the lease's attached client connection, or nil when no
+// client is attached (or the lease somehow has no stream, which only a
+// hand-built test lease can be).
+func (l *lease) clientConn() *wsConn {
+	if l.clientStream == nil {
+		return nil
+	}
+	return l.clientStream.attached()
 }
 
 // Registry is the gateway's shared, mutex-guarded map of lease id → lease.
@@ -1171,7 +1185,7 @@ func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret strin
 		return fmt.Errorf("lease %s already has an instance connection", id)
 	}
 	l.instance = conn
-	if l.client != nil {
+	if l.clientConn() != nil {
 		l.state = leaseStateActive
 	} else {
 		l.state = leaseStateRegistered
@@ -1179,80 +1193,120 @@ func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret strin
 	return nil
 }
 
-// AttachClient binds a client connection to a known lease. It fails if the
-// lease is unknown or already has a client connection (single client per
-// lease for now).
+// AttachClient binds a client connection to a known lease. It fails only if the
+// lease is unknown.
 //
 // It attaches with NO replay: the connection sees the live stream from
 // whatever the lease sends next, which is what a first connect wants and what
 // every connect did before resumption existed. A reconnecting client that
 // wants the tail it missed calls AttachClientFrom instead.
-func (r *Registry) AttachClient(id string, conn *wsConn) error {
-	_, err := r.attachClient(id, conn, nil)
-	return err
+func (r *Registry) AttachClient(id string, conn *wsConn) (clientAttach, error) {
+	return r.attachClient(id, conn, nil)
 }
 
 // AttachClientFrom binds a client connection to a known lease AND stages
 // whatever the lease's replay buffer still holds after sequence `after`, plus
 // an explicit gap notice when the buffer cannot reach back that far.
 //
-// The returned clientResume is for the audit record; the frames themselves are
+// The returned clientAttach is for the audit record; the frames themselves are
 // already staged on conn by the time it returns, so the caller only has to
 // start the write pump.
-//
-// The snapshot, the staging and the publication of conn as the lease's client
-// all happen under the registry lock, in that order. That is what makes the
-// replay exact rather than approximate: until conn is published no sender can
-// see it, so no live frame can be queued in front of — or duplicated into —
-// the staged tail.
-func (r *Registry) AttachClientFrom(id string, conn *wsConn, after uint64) (clientResume, error) {
+func (r *Registry) AttachClientFrom(id string, conn *wsConn, after uint64) (clientAttach, error) {
 	return r.attachClient(id, conn, &after)
 }
 
 // attachClient is the single attach path. A nil `after` attaches with no
 // replay; a non-nil one resumes from that sequence.
-func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientResume, error) {
+//
+// A LEASE CARRIES ONE CLIENT, AND THE NEWEST ATTACH WINS. It used to be the
+// oldest: a second connection was refused and the gateway closed it. That made
+// the lease unreachable in exactly the situation the reconnect flow exists for —
+// a half-open socket looks attached from the broker's side for as long as
+// nothing writes to it, so the genuine client's fresh, correctly authenticated
+// reconnect was refused on behalf of a socket that no longer had a peer. Liveness
+// probing bounds that window but cannot remove it, because the client always
+// notices its own dead connection before the broker's next probe does.
+//
+// Displacing is safe HERE and only here because the caller has already proved
+// ownership: the gateway checks it before the upgrade, so the only principal that
+// can evict a lease's client is the one that owns the lease. An eviction
+// primitive a stranger could reach would be a denial of service on another
+// tenant's session, which is why nothing on this path may be reordered to run
+// before that check.
+//
+// The swap itself is atomic against sending — the stream owns the conn — so no
+// frame can be numbered into a window between the outgoing conn leaving and the
+// incoming one arriving. The displaced socket is closed by the caller, outside
+// the lock.
+func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientAttach, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
-		return clientResume{}, fmt.Errorf("unknown lease: %s", id)
+		r.mu.Unlock()
+		return clientAttach{}, fmt.Errorf("unknown lease: %s", id)
 	}
-	if l.client != nil {
-		return clientResume{}, fmt.Errorf("lease %s already has a client connection", id)
+	if l.clientStream == nil {
+		// Defensive: every lease is minted with a stream. Attaching without one
+		// would leave a client that is never sent anything.
+		r.mu.Unlock()
+		return clientAttach{}, fmt.Errorf("lease %s has no client stream", id)
 	}
 
-	var resume clientResume
-	if after != nil && l.clientStream != nil {
-		resume = l.clientStream.resumeFrom(*after)
-		staged := resume.frames
-		if resume.gap != nil {
-			// The notice goes FIRST. A client that is told what it lost only
-			// after being handed the survivors has already rendered them as a
-			// continuous stream, which is the failure this whole path exists to
-			// remove.
-			data, err := resume.gap.encode(id)
-			if err != nil {
-				// Encoding a gap notice cannot fail with a well-formed payload,
-				// but refusing the connection on a broker-side marshalling bug
-				// would be worse than the gap: attach live and let the client
-				// notice the sequence jump, which is exactly the pre-resume
-				// behaviour.
-				r.logger.Error("could not encode a stream gap notice; attaching the client "+
-					"without one, so the gap is detectable from the sequence only",
-					"lease_id", id, "error", err)
-			} else {
-				staged = append([][]byte{data}, staged...)
-			}
+	resume, evicted := l.clientStream.attach(conn, after, func(res clientResume) [][]byte {
+		if res.gap == nil {
+			return res.frames
 		}
-		conn.primeReplay(staged)
-	}
+		// The notice goes FIRST. A client that is told what it lost only after
+		// being handed the survivors has already rendered them as a continuous
+		// stream, which is the failure this whole path exists to remove.
+		data, err := res.gap.encode(id)
+		if err != nil {
+			// Encoding a gap notice cannot fail with a well-formed payload, but
+			// refusing the connection on a broker-side marshalling bug would be
+			// worse than the gap: attach live and let the client notice the
+			// sequence jump, which is exactly the pre-resume behaviour.
+			r.logger.Error("could not encode a stream gap notice; attaching the client "+
+				"without one, so the gap is detectable from the sequence only",
+				"lease_id", id, "error", err)
+			return res.frames
+		}
+		return append([][]byte{data}, res.frames...)
+	})
 
-	l.client = conn
 	if l.instance != nil {
 		l.state = leaseStateActive
 	}
-	return resume, nil
+	owner := l.owner
+	r.mu.Unlock()
+
+	if evicted == nil {
+		return clientAttach{resume: resume}, nil
+	}
+
+	// The displaced socket is closed with a CODED close, not an abort, because
+	// the code is the whole point: a client has to be able to tell "you were
+	// superseded" from "the instance crashed" and from "the lease was released",
+	// and an abort's abnormal closure says none of those things.
+	//
+	// It runs in its own goroutine because a coded close writes a close frame and
+	// then waits up to five seconds for the peer to echo one — and the peer being
+	// gone is the single most likely reason this eviction is happening at all.
+	// Waiting for it would make the new client's connect hostage to the dead one.
+	// Nothing waits on the result: the stream has already stopped referring to
+	// this conn, so it is out of the data path from the moment attach returned.
+	go evicted.shutdown(evictedCloseStatus, evictedCloseReason)
+
+	// The AUDIT record for an eviction is the gateway's, because the gateway is
+	// where the credential that admitted the displacing connection is known. This
+	// one is the mechanical half — the socket teardown — and is kept at Debug so
+	// an eviction produces exactly one operator-facing record. The owner is
+	// stated because by construction it IS the principal that displaced: the
+	// gateway refuses anyone else before the upgrade.
+	r.logger.Debug("closing the client socket displaced by a newer connection",
+		"lease_id", id, "principal_id", owner.ID, "reason", evictedCloseReason,
+		"close_status", int(evictedCloseStatus))
+
+	return clientAttach{resume: resume, evicted: true}, nil
 }
 
 // DetachInstance clears the instance connection from a lease (e.g. on the
@@ -1272,18 +1326,20 @@ func (r *Registry) DetachInstance(id string, conn *wsConn) {
 }
 
 // DetachClient clears the client connection from a lease.
+//
+// It detaches conn only if conn is STILL the attached one. A displaced socket
+// runs this path too — its read pump ends the moment eviction closes it — and
+// must not unattach the connection that superseded it, nor walk the lease back
+// out of `active` while a live client is streaming.
 func (r *Registry) DetachClient(id string, conn *wsConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
-	if !ok {
+	if !ok || l.clientStream == nil {
 		return
 	}
-	if l.client == conn {
-		l.client = nil
-		if l.instance != nil {
-			l.state = leaseStateRegistered
-		}
+	if l.clientStream.detach(conn) && l.instance != nil {
+		l.state = leaseStateRegistered
 	}
 }
 
@@ -1296,13 +1352,15 @@ func (r *Registry) ClientConn(id string) *wsConn {
 	if !ok {
 		return nil
 	}
-	return l.client
+	return l.clientConn()
 }
 
 // SendClientFrame is the ONE way a frame reaches a lease's client. It assigns
 // the next per-lease sequence, retains the encoded bytes in the lease's replay
 // buffer, and queues them on the attached client connection — all under the
-// stream's own lock, so the wire order can never disagree with the numbering.
+// stream's own lock, so the wire order can never disagree with the numbering and
+// an attach happening at the same instant either precedes the frame (and
+// replays it) or follows it (and receives it live).
 //
 // It sequences and retains the frame EVEN WHEN NO CLIENT IS ATTACHED, and even
 // when an attached client's send queue is full. Those are precisely the two
@@ -1321,7 +1379,6 @@ func (r *Registry) SendClientFrame(id string, f brokerframe.Frame) (uint64, clie
 		return 0, clientFrameDropped, errUnknownLease
 	}
 	stream := l.clientStream
-	conn := l.client
 	r.mu.Unlock()
 
 	if stream == nil {
@@ -1330,7 +1387,7 @@ func (r *Registry) SendClientFrame(id string, f brokerframe.Frame) (uint64, clie
 		// say so rather than silently forwarding.
 		return 0, clientFrameDropped, fmt.Errorf("lease %s has no client stream", id)
 	}
-	seq, outcome, err := stream.send(conn, f)
+	seq, outcome, err := stream.send(f)
 	if err != nil {
 		return 0, clientFrameDropped, fmt.Errorf("encoding client-bound frame for lease %s: %w", id, err)
 	}
@@ -1473,7 +1530,10 @@ func (r *Registry) Has(id string) bool {
 func (r *Registry) Remove(id string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
-	var released LeaseRecord
+	var (
+		released   LeaseRecord
+		clientConn *wsConn
+	)
 	if ok {
 		// Projected while the lease still exists and under the same lock that
 		// deletes it, so the record cannot observe a half-torn-down lease.
@@ -1492,6 +1552,11 @@ func (r *Registry) Remove(id string) {
 		// the lease pointer — so "the map forgot it" is not the same as "the
 		// memory is gone". This makes it the same thing.
 		if l.clientStream != nil {
+			// Take the client conn under the same lock that deletes the lease, so
+			// an attach racing this teardown either published before the take (and
+			// is closed below) or finds a lease that is already gone. Closing it
+			// happens outside the lock, where every other socket teardown does.
+			clientConn = l.clientStream.detachAny()
 			l.clientStream.release()
 		}
 		delete(r.leases, id)
@@ -1513,13 +1578,13 @@ func (r *Registry) Remove(id string) {
 	if l.instance != nil {
 		l.instance.shutdown(websocket.StatusGoingAway, "lease closed")
 	}
-	if l.client != nil {
+	if clientConn != nil {
 		// The client's close status is derived from the teardown reason so a
 		// connected client can tell a crash apart from a normal release. The
 		// reason was set under mu before Remove was called; the lock/unlock
 		// above is the barrier that publishes it.
 		status, reason := clientCloseForReason(l.reason)
-		l.client.shutdown(status, reason)
+		clientConn.shutdown(status, reason)
 	}
 
 	// Journal the teardown LAST, outside the lock and after the peers have been

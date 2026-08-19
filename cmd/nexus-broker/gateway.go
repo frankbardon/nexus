@@ -472,19 +472,28 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wc := newWSConn(conn)
-	// A resuming client stages its replay INSIDE the attach, under the registry
-	// lock, so no live frame can be queued in front of it. Without `?from_seq=`
-	// the attach is the one that predates resumption, byte for byte.
+	// A resuming client stages its replay INSIDE the attach, under the lease's
+	// stream lock, so no live frame can be queued in front of it. Without
+	// `?from_seq=` the attach is the one that predates resumption, byte for byte.
+	//
+	// The attach also DISPLACES any connection already on the lease, which is
+	// safe only because ownership was checked above, before the upgrade: the
+	// principal doing the displacing is by then known to own the lease. A
+	// stranger is refused with the indistinguishable 404 and evicts nothing.
 	var (
-		resume    clientResume
+		attach    clientAttach
 		attachErr error
 	)
 	if fromSeq, resuming := parseFromSeq(r.URL.Query()); resuming {
-		resume, attachErr = g.registry.AttachClientFrom(leaseID, wc, fromSeq)
+		attach, attachErr = g.registry.AttachClientFrom(leaseID, wc, fromSeq)
 	} else {
-		attachErr = g.registry.AttachClient(leaseID, wc)
+		attach, attachErr = g.registry.AttachClient(leaseID, wc)
 	}
 	if attachErr != nil {
+		// Reachable now only for a lease that vanished between the ownership
+		// check and the attach — a release or a crash landing in that window. The
+		// close reason is unchanged, because from the client's side the outcome
+		// is unchanged: the lease it asked for is not available to stream.
 		g.logger.Warn("rejecting client connection", "lease_id", leaseID, "error", attachErr)
 		_ = conn.Close(websocket.StatusPolicyViolation, "lease unavailable")
 		return
@@ -494,8 +503,20 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// the credential itself — a ticket value must not reach the log, which is the
 	// one exposure the broker actually controls.
 	g.logger.Info("client connected", "lease_id", leaseID,
-		"principal_id", caller.ID, "credential", string(credential))
-	g.logResume(leaseID, resume)
+		"principal_id", caller.ID, "credential", string(credential),
+		"evicted_previous_client", attach.evicted)
+	if attach.evicted {
+		// Logged separately, and at Warn, because it is the one connect outcome
+		// that took something away from somebody: whichever socket was streaming
+		// this lease has just been closed on this principal's authority.
+		g.logger.Warn("this connection displaced the lease's previous client, which has been "+
+			"closed. A client must not keep two connections open to one lease — they will "+
+			"evict each other",
+			"lease_id", leaseID, "principal_id", caller.ID,
+			"credential", string(credential), "reason", evictedCloseReason,
+			"close_status", int(evictedCloseStatus))
+	}
+	g.logResume(leaseID, attach.resume)
 
 	ctx, cancelPumps := context.WithCancel(g.rootCtx)
 	defer cancelPumps()

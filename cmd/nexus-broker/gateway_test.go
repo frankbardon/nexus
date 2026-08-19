@@ -929,10 +929,11 @@ func assertRefusedBeforeUpgrade(t *testing.T, wantStatus int, conn *websocket.Co
 // a ticket minted for {lease, principal} opens the socket, is consumed by doing
 // so, and cannot be replayed.
 //
-// The replay attempt is made only AFTER the first client has detached, so its
-// refusal cannot be the one-client-per-lease rule wearing a 401; and a FRESH
-// ticket is redeemed at the end, so the refusal in the middle means "that ticket
-// is spent" rather than "this endpoint stopped working".
+// The replay attempt is made only AFTER the first client has detached, so the
+// lease is in the same state it was for the first connect and nothing about the
+// attach differs; and a FRESH ticket is redeemed at the end, so the refusal in
+// the middle means "that ticket is spent" rather than "this endpoint stopped
+// working".
 func TestGatewayClient_TicketConnectsAndBurns(t *testing.T) {
 	env := newTestGatewayEnv(t, mustAuthChain(t, twoPrincipalAuthYAML), nil)
 	leaseID := newOwnedLease(t, env.reg, ownerPrincipal)
@@ -953,8 +954,8 @@ func TestGatewayClient_TicketConnectsAndBurns(t *testing.T) {
 		t.Errorf("outstanding tickets after a ticket connect = %d, want 0 (the ticket did not burn)", got)
 	}
 
-	// Free the lease's client slot so the replay below is refused on credential
-	// grounds and nothing else.
+	// Detach first, so the replay below is judged against a lease in exactly the
+	// state the first connect found it in.
 	conn.Close(websocket.StatusNormalClosure, "")
 	waitFor(t, func() bool { return env.reg.ClientConn(leaseID) == nil })
 

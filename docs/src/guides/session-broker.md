@@ -785,6 +785,12 @@ whole reconnect, end to end:
    client that does not handle it is a client that will render a hole as if it
    were continuous prose. See
    [when the buffer cannot cover you](#when-the-buffer-cannot-cover-you).
+6. **Do not wait for the old socket to die first.** A reconnect **displaces**
+   whatever connection the lease still has — including a half-open one the broker
+   has not noticed yet — and closes it with code `4501`. That is the supported
+   path, not a race you have to avoid; what you must not do is keep both sockets
+   open. See
+   [one client per lease](#one-client-per-lease-the-newest-connection-wins).
 
 ```js
 // lastSeq is tracked by the message handler: ws.onmessage = e => {
@@ -1446,6 +1452,53 @@ introduced to stop you being — rendering a hole as continuous output.
 Adding `stream-gap` needed no `brokerframe` version bump, for the same reason
 `seq` did not: the broker only ever emits it to a client that asked for a resume,
 so nothing built against an older broker can be handed a signal it cannot decode.
+
+#### One client per lease: the newest connection wins
+
+A lease carries exactly **one** client connection, and opening a second one does
+not multiplex the stream: it **displaces** the first. The older socket is closed
+at once with close code **`4501`**, and everything from that moment — replayed
+frames and live ones alike — goes to the new connection.
+
+**A client must never keep two connections open to one lease.** They will evict
+each other in a loop, and neither will see a whole stream. If you are unsure
+whether your previous socket is really gone, just reconnect: displacing it is the
+supported outcome, and it is what the reconnect recipe above relies on.
+
+The newest connection wins rather than the oldest **on purpose**. A half-open
+socket — a slept laptop, a moved network, a dropped NAT flow — still looks
+attached from the broker's side until something writes to it, and the client
+always notices its own dead connection long before the broker's
+[liveness probe](#detecting-a-dead-socket) does. Refusing the second connection,
+which is what the broker used to do, therefore made the lease unreachable in
+exactly the situation the fresh-ticket reconnect exists for: the genuine owner,
+correctly authenticated, turned away on behalf of a socket with no peer.
+
+Two things bound that power:
+
+- **Only the lease's owner can displace it.** Ownership is checked *before* the
+  upgrade, so a caller who does not own the lease gets the same
+  `404 {"error":"unknown lease"}` an unknown lease gets and evicts nothing.
+  Eviction is never reachable across tenants.
+- **It composes with `?from_seq=`.** The displacing connection is a normal
+  attach: it is replayed the tail it names, gap notice and all, before the live
+  stream resumes. Eviction does not bypass the replay cursor.
+
+Every eviction is recorded in the broker log with the lease id, the principal
+that caused it and the close reason, so a client stuck in a reconnect war is
+visible from the operator's side rather than only from the user's.
+
+#### Client close codes
+
+The broker uses the RFC 6455 application range (4000-4999) for the two teardowns
+where the difference changes what a client should do next. Everything else — a
+manual release, an idle reap, a shutdown — closes with an ordinary going-away.
+
+| Close code | Reason text | What happened | What the client should do |
+|---|---|---|---|
+| `1001` | `lease closed` | The lease was released, idle-reaped, or the broker is shutting down. | The session is over. Claim a new lease if the user wants another. |
+| `4500` | `instance crashed` | The instance process exited unexpectedly. | The session is gone — do **not** reconnect to this lease. Claim a new one. |
+| `4501` | `superseded by a newer client connection` | Another socket attached to this lease and took over. | The lease is alive and streaming somewhere else. Do **not** reconnect in a loop; usually this connection is the one that has been replaced by your own newer tab or retry. |
 
 ### Detecting a dead socket
 

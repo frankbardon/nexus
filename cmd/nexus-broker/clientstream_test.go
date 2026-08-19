@@ -79,7 +79,7 @@ func TestClientStream_SequenceReachesTheClientOnTheWire(t *testing.T) {
 	leaseID := newStreamTestLease(t, reg)
 
 	client := newWSConn(nil)
-	if err := reg.AttachClient(leaseID, client); err != nil {
+	if _, err := reg.AttachClient(leaseID, client); err != nil {
 		t.Fatalf("attach client: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestClientStream_SecretIsStrippedOnClientBoundFrames(t *testing.T) {
 	leaseID := newStreamTestLease(t, reg)
 
 	client := newWSConn(nil)
-	if err := reg.AttachClient(leaseID, client); err != nil {
+	if _, err := reg.AttachClient(leaseID, client); err != nil {
 		t.Fatalf("attach client: %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestClientStream_FullSendQueueStillBuffers(t *testing.T) {
 	leaseID := newStreamTestLease(t, reg)
 
 	client := newWSConn(nil)
-	if err := reg.AttachClient(leaseID, client); err != nil {
+	if _, err := reg.AttachClient(leaseID, client); err != nil {
 		t.Fatalf("attach client: %v", err)
 	}
 	// Fill the send queue so the next queue() returns false, exactly as a client
@@ -269,7 +269,7 @@ func TestClientStream_EvictsOldestAtByteBound(t *testing.T) {
 
 	const sent = 40
 	for i := 0; i < sent; i++ {
-		if _, _, err := s.send(nil, ioFrame("lease", 100)); err != nil {
+		if _, _, err := s.send(ioFrame("lease", 100)); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
@@ -316,7 +316,7 @@ func TestClientStream_EvictsOldestAtByteBound(t *testing.T) {
 // rather than breaching it.
 func TestClientStream_OversizedFrameIsNotRetained(t *testing.T) {
 	s := newClientStream(64)
-	if _, _, err := s.send(nil, ioFrame("lease", 4096)); err != nil {
+	if _, _, err := s.send(ioFrame("lease", 4096)); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	if got := s.bufferedBytes(); got != 0 {
@@ -333,7 +333,7 @@ func TestClientStream_OversizedFrameIsNotRetained(t *testing.T) {
 func TestClientStream_ZeroBoundSequencesWithoutRetaining(t *testing.T) {
 	s := newClientStream(0)
 	for i := 0; i < 3; i++ {
-		seq, _, err := s.send(nil, ioFrame("lease", 32))
+		seq, _, err := s.send(ioFrame("lease", 32))
 		if err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
@@ -403,7 +403,7 @@ func TestClientStream_ReplayFrom(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newClientStream(tc.limit)
 			for i := 0; i < tc.sent; i++ {
-				if _, _, err := s.send(nil, ioFrame("lease", 50)); err != nil {
+				if _, _, err := s.send(ioFrame("lease", 50)); err != nil {
 					t.Fatalf("send %d: %v", i, err)
 				}
 			}
@@ -424,6 +424,9 @@ func TestClientStream_ReplayFrom(t *testing.T) {
 func TestClientStream_ConcurrentSendsKeepWireOrder(t *testing.T) {
 	s := newClientStream(1 << 20)
 	client := newWSConn(nil)
+	if _, evicted := s.attach(client, nil, nil); evicted != nil {
+		t.Fatalf("attach displaced %v on a fresh stream", evicted)
+	}
 
 	const senders, each = 8, 32
 	done := make(chan struct{})
@@ -431,7 +434,7 @@ func TestClientStream_ConcurrentSendsKeepWireOrder(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for j := 0; j < each; j++ {
-				if _, _, err := s.send(client, ioFrame("lease", 8)); err != nil {
+				if _, _, err := s.send(ioFrame("lease", 8)); err != nil {
 					t.Errorf("send: %v", err)
 					return
 				}
