@@ -552,8 +552,13 @@ replaces it with a description built from the card's own `skills` and
 re-registers the tool once.
 
 Every failure — unreachable card, refused binding, protocol error, dead stream,
-exhausted budget, a task that ends `FAILED`, a task parked at `INPUT_REQUIRED` —
-becomes a clean `tool.result` error, never an engine-level failure.
+exhausted budget, a task that ends `FAILED` — becomes a clean `tool.result`
+error, never an engine-level failure.
+
+A remote that parks at `INPUT_REQUIRED` is **not** a failure: the question is
+raised on the local bus as `hitl.requested`, the human's answer resumes the
+remote task with the same `taskId` and `contextId`, and the delegation carries on.
+The delegating model never sees the question. See the `hitl` block below.
 
 | Key                   | Type   | Default | Description |
 |-----------------------|--------|---------|-------------|
@@ -569,7 +574,9 @@ becomes a clean `tool.result` error, never an engine-level failure.
 | `message_timeout`     | duration | `0s`  | Default deadline for a non-streaming `SendMessage`. Zero means none — a blocking send legitimately takes as long as the remote's work does. |
 | `stream_open_timeout` | duration | `30s` | Default deadline for a streaming call's response *headers*. `"0s"` disables it. |
 | `stream_idle_timeout` | duration | `5m`  | Default bound on total silence on an open stream. `"0s"` disables it. |
-| `extensions`          | list   | *(none)* | A2A protocol extension URIs to request via the `A2A-Extensions` service parameter. A server activates only what a client asked for. |
+| `progress`            | bool   | `true`  | Republish a remote run's incremental progress onto the local bus as `io.output` and `subagent.iteration`, so a long delegation is visible to the TUI, browser, AG-UI and A2A-serve transports. |
+| `hitl`                | map    | *(see below)* | Chained human-in-the-loop policy for a remote that parks at `INPUT_REQUIRED`. |
+| `extensions`          | list   | *(the Nexus extension)* | A2A protocol extension URIs to request via the `A2A-Extensions` service parameter. A server activates only what a client asked for. **Defaults to the [Nexus extension](../guides/a2a.md#the-nexus-extension-telemetry-a2a-has-no-field-for) URI**, because this plugin consumes a remote Nexus instance's telemetry to republish its progress; a remote that does not know the extension ignores the header. Set `[]` to request none. |
 | `retry`               | map    | *(see below)* | Default retry policy for outbound calls. |
 
 Every key from `binding` down is a **default**; each `agents[]` entry may
@@ -595,9 +602,39 @@ Each `agents[]` entry:
 | `message_timeout`     | duration | *(plugin default)* | Per-agent override. |
 | `stream_open_timeout` | duration | *(plugin default)* | Per-agent override. |
 | `stream_idle_timeout` | duration | *(plugin default)* | Per-agent override. |
+| `progress`            | bool   | *(plugin default)* | Per-agent override. |
+| `hitl`                | map    | *(plugin default)* | Per-agent override, key by key: a block setting only `enabled` leaves `input_timeout` and `max_rounds` inherited. |
 | `extensions`          | list   | *(plugin default)* | Per-agent override; replaces rather than merges. |
 | `retry`               | map    | *(plugin default)* | Per-agent override. |
 | `credentials`         | map    | *(none)* | Credential this instance presents to **this** remote. Per agent only — see below. |
+
+The `hitl` block, at either level:
+
+| Key             | Type     | Default | Description |
+|-----------------|----------|---------|-------------|
+| `enabled`       | bool     | `true`  | Route a remote's `INPUT_REQUIRED` question to a human via `hitl.requested`, and resume the remote task with the answer. `false` restores the pre-chaining behaviour: a parked task becomes a clean tool error carrying the question. |
+| `input_timeout` | duration | `15m`   | Deadline for **one** question waiting on a human. The outbound twin of `nexus.io.a2a`'s `tasks.input_timeout`. `"0s"` removes this deadline specifically. |
+| `max_rounds`    | int      | `4`     | How many times one delegated call may bounce a question back to the human. `0` removes the cap. |
+
+**Two deadlines run while a task is parked, and the earlier one wins.** The
+whole-call `timeout` keeps running — a remote waiting on a human is still work
+this session authorized, and pausing the budget is how an unanswered question
+pins a session for ever — and `hitl.input_timeout` bounds the individual
+question. With the `5m` default `timeout` the **call budget expires first**, so
+`input_timeout` only bites once `timeout` is raised; an operator who expects a
+remote to ask questions should raise both. Whichever fires, the outcome is the
+same and the tool error names the deadline that fired: the question is retracted
+with `hitl.cancel`, the remote task is cancelled with `CancelTask`, and the
+delegating model is told the question went unanswered **and told not to answer it
+itself**.
+
+`AUTH_REQUIRED` is deliberately **not** routed to a human — no answer a person
+types into a chat is a credential — and reports that the agent's `credentials`
+need configuring.
+
+Anything a human answered is **never cached**. A person's answer is a decision
+made at a moment, and replaying it for a later identical task would apply that
+decision again without asking.
 
 The `credentials` block exists **only** inside an `agents[]` entry. There is
 deliberately no plugin-level default: a default credential silently applied to a
@@ -697,7 +734,14 @@ an error naming the key.
 
 **Caching.** Successful outcomes are cached in the LRU under a content hash of
 (remote identity, posture version, task, canonicalized context). Failures are
-never cached, so a remote that was briefly down is retried rather than replayed.
+never cached, so a remote that was briefly down is retried rather than replayed,
+and neither is any outcome a human answered a question for.
+
+**Cancellation.** `cancel.active` — the event `nexus.control.cancel` emits once a
+cancellation is happening — retracts any question this plugin put in front of a
+human, issues `CancelTask` to every remote task in flight, and aborts the calls.
+The same abandonment runs on the ordinary exits too: if this instance walks away
+from a remote task that has not reached a terminal state, it tells the remote.
 
 ### `nexus.scene`
 

@@ -36,6 +36,12 @@ const (
 	cfgKeyStreamOpenTimeout = "stream_open_timeout"
 	cfgKeyStreamIdleTimeout = "stream_idle_timeout"
 	cfgKeyExtensions        = "extensions"
+	cfgKeyProgress          = "progress"
+
+	cfgKeyHITL             = "hitl"
+	cfgKeyHITLEnabled      = "enabled"
+	cfgKeyHITLInputTimeout = "input_timeout"
+	cfgKeyHITLMaxRounds    = "max_rounds"
 
 	cfgKeyRetry            = "retry"
 	cfgKeyRetryMaxAttempts = "max_attempts"
@@ -63,6 +69,31 @@ const (
 	// its own tool calls, which minutes covers and seconds does not. A posture
 	// budget or explicit config narrows it; see resolveTimeout.
 	defaultCallTimeout = 5 * time.Minute
+
+	// defaultInputTimeout bounds how long ONE remote question may wait for a
+	// human before this plugin gives up on it.
+	//
+	// It is the outbound twin of nexus.io.a2a's tasks.input_timeout, and the
+	// number is deliberately the same: a question routed to a person has to
+	// survive being paged, read, thought about and answered, which
+	// minutes-not-seconds covers. "0s" removes this deadline specifically.
+	//
+	// It is NOT the only deadline. The whole-call budget keeps running while a
+	// task sits at INPUT_REQUIRED — a remote parked on a question is still work
+	// this session started and is still accountable to the budget that
+	// authorized it — so the effective wait is whichever of the two expires
+	// first. With the 5m default call timeout that is the CALL budget, not this
+	// key; an operator who expects a remote to ask questions raises `timeout`
+	// as well. Both expiries are reported distinctly so a transcript says which
+	// one fired.
+	defaultInputTimeout = 15 * time.Minute
+
+	// defaultMaxHITLRounds bounds how many times one delegated call may bounce
+	// a question back to the human. A remote that answers every answer with
+	// another question would otherwise turn a single tool call into an
+	// unbounded interrogation. Zero removes the cap, leaving the call budget as
+	// the only bound.
+	defaultMaxHITLRounds = 4
 )
 
 // bindingNames maps the config spelling of a protocol binding onto the wire
@@ -91,6 +122,63 @@ type transport struct {
 	streamIdleTimeout *time.Duration
 	extensions        []string
 	retry             *a2aclient.RetryPolicy
+
+	// progress gates republishing a remote run's incremental progress onto the
+	// local bus. It is not an a2aclient option — it governs what this plugin
+	// does with the frames it reads — but it inherits the same way, because
+	// "this remote is too chatty for my TUI" is a per-remote decision.
+	progress *bool
+
+	// hitl is the chained human-in-the-loop policy for this remote.
+	hitl hitlPolicy
+}
+
+// hitlPolicy is the chained human-in-the-loop policy: what happens when a
+// remote parks its task at TASK_STATE_INPUT_REQUIRED.
+//
+// Like transport, every field is a pointer so an agent-level block that sets
+// one knob leaves the others inherited, and `enabled: false` is
+// distinguishable from unset.
+type hitlPolicy struct {
+	enabled      *bool
+	inputTimeout *time.Duration
+	maxRounds    *int
+}
+
+// inherit fills the receiver's unset fields from base.
+func (h hitlPolicy) inherit(base hitlPolicy) hitlPolicy {
+	out := h
+	if out.enabled == nil {
+		out.enabled = base.enabled
+	}
+	if out.inputTimeout == nil {
+		out.inputTimeout = base.inputTimeout
+	}
+	if out.maxRounds == nil {
+		out.maxRounds = base.maxRounds
+	}
+	return out
+}
+
+// on reports whether a remote question should be routed to a human. It is on by
+// default: the alternative is handing the question to the delegating MODEL,
+// which invites it to invent an answer only a person can give.
+func (h hitlPolicy) on() bool { return h.enabled == nil || *h.enabled }
+
+// wait is the dedicated deadline for one question. See defaultInputTimeout.
+func (h hitlPolicy) wait() time.Duration {
+	if h.inputTimeout == nil {
+		return defaultInputTimeout
+	}
+	return *h.inputTimeout
+}
+
+// rounds is the cap on questions per delegated call, zero meaning uncapped.
+func (h hitlPolicy) rounds() int {
+	if h.maxRounds == nil {
+		return defaultMaxHITLRounds
+	}
+	return *h.maxRounds
 }
 
 // inherit returns t with every field the receiver leaves unset filled from
@@ -128,6 +216,10 @@ func (t transport) inherit(base transport) transport {
 	if out.retry == nil {
 		out.retry = base.retry
 	}
+	if out.progress == nil {
+		out.progress = base.progress
+	}
+	out.hitl = out.hitl.inherit(base.hitl)
 	return out
 }
 
@@ -166,6 +258,12 @@ func (t transport) options() []a2aclient.Option {
 // carries an INPUT_REQUIRED park, and a blocking SendMessage is the narrower
 // choice an operator opts into.
 func (t transport) streaming() bool { return t.stream == nil || *t.stream }
+
+// republishProgress reports whether a remote run's incremental progress should
+// be mirrored onto the local bus. Absent configuration it is: a delegation the
+// local transports cannot see is a black box, and that is the failure this
+// exists to prevent.
+func (t transport) republishProgress() bool { return t.progress == nil || *t.progress }
 
 // callTimeout is the configured whole-call deadline, zero when unset.
 func (t transport) callTimeout() time.Duration {
@@ -243,6 +341,18 @@ func parseConfig(raw map[string]any) (*config, error) {
 	defaults, err := parseTransport(raw, "")
 	if err != nil {
 		return nil, err
+	}
+	// The Nexus extension is requested by DEFAULT, because this plugin is now
+	// its consumer: a remote Nexus instance publishes its tool calls and its own
+	// subagent progress only through the extension, and a client that does not
+	// ask for it sees a delegation that is a black box from the first frame to
+	// the last. Asking costs one service-parameter header; specification section
+	// 8.4 requires a server to activate only the extensions it recognizes, and
+	// this one declares itself optional, so a remote that has never heard of it
+	// answers exactly as it would have. An operator who wants the header gone
+	// sets `extensions: []`.
+	if defaults.extensions == nil {
+		defaults.extensions = []string{a2a.NexusExtensionURI}
 	}
 	c.defaults = defaults
 
@@ -345,6 +455,9 @@ func parseTransport(m map[string]any, where string) (transport, error) {
 	if v, ok := m[cfgKeyStream].(bool); ok {
 		t.stream = &v
 	}
+	if v, ok := m[cfgKeyProgress].(bool); ok {
+		t.progress = &v
+	}
 
 	durations := []struct {
 		key string
@@ -388,7 +501,50 @@ func parseTransport(m map[string]any, where string) (transport, error) {
 		}
 		t.retry = &policy
 	}
+
+	if v, present := m[cfgKeyHITL]; present && v != nil {
+		policy, err := parseHITL(v, key(cfgKeyHITL))
+		if err != nil {
+			return t, err
+		}
+		t.hitl = policy
+	}
 	return t, nil
+}
+
+// parseHITL resolves a `hitl:` block. Every key is optional and an absent one
+// stays nil so it can inherit; the defaults are applied at read time by
+// hitlPolicy's accessors rather than here, so a plugin-level block that sets
+// only max_rounds does not freeze the other two at their defaults for every
+// agent.
+func parseHITL(raw any, where string) (hitlPolicy, error) {
+	var out hitlPolicy
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return out, fmt.Errorf("%s: %s: want a mapping, got %T", pluginID, where, raw)
+	}
+	if v, ok := m[cfgKeyHITLEnabled].(bool); ok {
+		out.enabled = &v
+	}
+	if v, present := m[cfgKeyHITLInputTimeout]; present && v != nil {
+		d, err := configDuration(v, where+"."+cfgKeyHITLInputTimeout)
+		if err != nil {
+			return out, err
+		}
+		out.inputTimeout = &d
+	}
+	if v, present := m[cfgKeyHITLMaxRounds]; present && v != nil {
+		n, err := configInt(v)
+		if err != nil {
+			return out, fmt.Errorf("%s: %s.%s: %w", pluginID, where, cfgKeyHITLMaxRounds, err)
+		}
+		if n < 0 {
+			return out, fmt.Errorf("%s: %s.%s: must not be negative; use 0 to remove the cap",
+				pluginID, where, cfgKeyHITLMaxRounds)
+		}
+		out.maxRounds = &n
+	}
+	return out, nil
 }
 
 // parseRetry resolves a `retry:` block, starting from the client's default

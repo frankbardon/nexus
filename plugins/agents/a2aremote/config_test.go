@@ -203,3 +203,145 @@ func TestSanitizeToolSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestParseConfigHITLDefaults(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"agents": []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+	})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	policy := cfg.agents[0].transport.hitl
+	if !policy.on() {
+		t.Error("chained human-in-the-loop should default to on")
+	}
+	if got := policy.wait(); got != defaultInputTimeout {
+		t.Errorf("input_timeout = %s, want %s", got, defaultInputTimeout)
+	}
+	if got := policy.rounds(); got != defaultMaxHITLRounds {
+		t.Errorf("max_rounds = %d, want %d", got, defaultMaxHITLRounds)
+	}
+	if !cfg.agents[0].transport.republishProgress() {
+		t.Error("progress republishing should default to on")
+	}
+}
+
+// TestParseConfigHITLInheritsPerKey: an agent-level block that sets one knob
+// must leave the others inherited, not reset to their defaults.
+func TestParseConfigHITLInheritsPerKey(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"progress": false,
+		"hitl": map[string]any{
+			"input_timeout": "2m",
+			"max_rounds":    9,
+		},
+		"agents": []any{
+			map[string]any{"name": "inherits", "base_url": "https://a.internal"},
+			map[string]any{
+				"name":     "overrides",
+				"base_url": "https://b.internal",
+				"progress": true,
+				"hitl":     map[string]any{"enabled": false},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	inherits, overrides := cfg.agents[0], cfg.agents[1]
+
+	if got := inherits.transport.hitl.wait(); got != 2*time.Minute {
+		t.Errorf("inherited input_timeout = %s, want 2m", got)
+	}
+	if got := inherits.transport.hitl.rounds(); got != 9 {
+		t.Errorf("inherited max_rounds = %d, want 9", got)
+	}
+	if !inherits.transport.hitl.on() {
+		t.Error("inherited hitl should stay on")
+	}
+	if inherits.transport.republishProgress() {
+		t.Error("inherited progress should be off")
+	}
+
+	if overrides.transport.hitl.on() {
+		t.Error("agent-level hitl.enabled=false should win")
+	}
+	if got := overrides.transport.hitl.wait(); got != 2*time.Minute {
+		t.Errorf("agent-level block must not reset input_timeout: got %s", got)
+	}
+	if !overrides.transport.republishProgress() {
+		t.Error("agent-level progress=true should win")
+	}
+}
+
+// TestParseConfigExtensionsDefaultToTheNexusExtension pins the default this
+// plugin now depends on: without it, a remote Nexus instance sends none of the
+// telemetry the progress republishing consumes.
+func TestParseConfigExtensionsDefaultToTheNexusExtension(t *testing.T) {
+	cfg, err := parseConfig(map[string]any{
+		"agents": []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+	})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	got := cfg.agents[0].transport.extensions
+	if len(got) != 1 || got[0] != a2a.NexusExtensionURI {
+		t.Errorf("extensions = %v, want the Nexus extension URI", got)
+	}
+
+	cleared, err := parseConfig(map[string]any{
+		"extensions": []any{},
+		"agents":     []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+	})
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if got := cleared.agents[0].transport.extensions; len(got) != 0 {
+		t.Errorf("an explicit empty list must request none, got %v", got)
+	}
+}
+
+func TestParseConfigHITLRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want string
+	}{
+		{
+			name: "negative max_rounds",
+			raw: map[string]any{
+				"hitl":   map[string]any{"max_rounds": -1},
+				"agents": []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+			},
+			want: "must not be negative",
+		},
+		{
+			name: "bare number input_timeout",
+			raw: map[string]any{
+				"hitl":   map[string]any{"input_timeout": 600},
+				"agents": []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+			},
+			want: "want a duration string",
+		},
+		{
+			name: "hitl is not a mapping",
+			raw: map[string]any{
+				"hitl":   "on",
+				"agents": []any{map[string]any{"name": "a", "base_url": "https://a.internal"}},
+			},
+			want: "want a mapping",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseConfig(tc.raw)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}

@@ -304,13 +304,18 @@ func TestFailedRemoteTaskIsAToolError(t *testing.T) {
 	}
 }
 
+// TestInterruptedRemoteTaskIsACleanToolError pins the UNCHAINED behaviour, which
+// is what an operator gets after switching chaining off. The chained path — the
+// default — is covered in hitl_test.go.
 func TestInterruptedRemoteTaskIsACleanToolError(t *testing.T) {
 	agent := newTestAgent(t, testAgentConfig{
 		frames: func(*a2a.SendMessageRequest) []a2a.StreamResponse {
 			return interruptedRun("t1", "c1", "which fiscal year?")
 		},
 	})
-	h := boot(t, oneAgent(agent.URL(), nil))
+	h := boot(t, oneAgent(agent.URL(), map[string]any{
+		"hitl": map[string]any{"enabled": false},
+	}))
 	res := invoke(t, h, "delegate_a2a_researcher", map[string]any{"task": "anything"})
 
 	if res.Error == "" {

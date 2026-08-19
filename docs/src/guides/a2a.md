@@ -566,6 +566,45 @@ Because a run now outlives the request that started it, the whole sequence
 survives a dropped connection: ask, disconnect, reattach with `SubscribeToTask`,
 answer, complete.
 
+### Chaining human-in-the-loop across a delegation
+
+The mapping runs both ways, and the two halves compose.
+
+Inbound (above), a Nexus agent's `hitl.requested` becomes an `INPUT_REQUIRED`
+status on the task it is serving. Outbound,
+[`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md) does the mirror
+image: a remote that parks at `INPUT_REQUIRED` has its question raised as a local
+`hitl.requested`, and the human's answer is sent back as an ordinary message
+carrying the **same `taskId` and `contextId`**.
+
+```
+        human
+          ^  hitl.requested / hitl.responded
+          |
+   [ Nexus A ] --A2A--> [ Nexus B ] --A2A--> [ agent C ]
+                          ^                     |
+                          |  INPUT_REQUIRED     |  INPUT_REQUIRED
+                          +---------------------+
+```
+
+C asks. B's `a2a_remote` turns that into B's own `hitl.requested`; B's
+`nexus.io.a2a` turns *that* into B's task parking at `INPUT_REQUIRED`; A's
+`a2a_remote` turns *that* into the question the human at the top actually sees.
+The answer walks back down, each hop resuming its own task under its own
+`taskId`. Nothing in the chain has to know how long it is.
+
+Both directions bound the wait, with the same key name and the same default:
+`tasks.input_timeout` on the serving side and `hitl.input_timeout` on the calling
+side, both `15m`, both disabled with `"0s"`. On the calling side the whole-call
+`timeout` **also** keeps running while the task is parked, and the earlier
+deadline wins — with the `5m` default `timeout` that is the call budget, so raise
+it for a remote you expect to ask questions. Either way the question is retracted
+with `hitl.cancel`, the remote task is cancelled, and the model is told the
+question went unanswered *and told not to answer it itself*.
+
+`AUTH_REQUIRED` is deliberately not chained: it asks for a credential, and no
+answer a person types is one.
+
 ### Planned, not available today
 
 Do not build against these. Everything below is either refused outright or
@@ -574,11 +613,6 @@ visible, not so it can be relied on.
 
 - The **broker A2A front door** — one isolated instance per caller, fronted by
   `cmd/nexus-broker` — is a separate piece of work and does not exist yet.
-- **Chaining a remote's `INPUT_REQUIRED` into the local human-in-the-loop
-  surface**, and republishing a remote run's incremental progress onto the local
-  bus, are not wired yet. Today a parked remote task is reported to the calling
-  model as a clean tool error carrying the question; see [Delegating to a remote
-  agent](#delegating-to-a-remote-agent).
 - **Workspace-wide file detection.** Files become artifacts only when a
   `tool.result` reports the path (see [What a turn
   publishes](#what-a-turn-publishes)); snapshot-diffing the session workspace is
@@ -607,8 +641,8 @@ That registers `delegate_a2a_researcher`. Calling it sends the delegated task to
 the remote, drains the stream the remote answers with, and folds the terminal
 result back into the tool result.
 
-Five decisions in that path are worth stating here, because they are the ones a
-reader of this guide is most likely to be surprised by.
+Several decisions in that path are worth stating here, because they are the ones
+a reader of this guide is most likely to be surprised by.
 
 **Remotes come from configuration only.** The tool schema exposes no `url`,
 `endpoint` or `host` parameter. A model-chosen address would be a server-side
@@ -631,11 +665,32 @@ from a tool's raw output and one artifact from the next. Remote text rides in
 telemetry parts are dropped.
 
 **Nothing is an engine-level failure.** An unreachable card, a refused binding, a
-dead stream, an exhausted budget, a task that ends `FAILED`, and a task parked at
-`INPUT_REQUIRED` all become a clean tool error carrying a sentence the calling
-model can act on, alongside whatever partial output arrived. The parked case
-carries the remote's question and tells the model to re-delegate with the answer
-included; chaining it into the local `ask_user` surface is separate work.
+dead stream, an exhausted budget and a task that ends `FAILED` all become a clean
+tool error carrying a sentence the calling model can act on, alongside whatever
+partial output arrived.
+
+**A remote's question reaches the human, not the model.** A remote parking at
+`INPUT_REQUIRED` is not a failure: the question is raised on the local bus as
+`hitl.requested` — the same event `ask_user` produces — and the human's answer
+resumes the remote task with the **same `taskId` and `contextId`**, which is A2A's
+own resume mechanism (§3.4). The delegating model never sees the question and is
+never given the chance to answer it, because a model handed a question only a
+person can settle will invent an answer and then act on it. See [Chaining
+human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation).
+
+**A long delegation is not a black box.** The remote's narration becomes
+`io.output` and, for a remote Nexus instance, its own tool calls and subagent
+activity arrive through the Nexus extension and become `subagent.iteration`, so
+the TUI, the browser, AG-UI and the A2A serve transport can all render progress.
+This is why `extensions` defaults to the Nexus extension URI: a remote that has
+never heard of it answers exactly as before, and a remote Nexus answers with the
+telemetry that makes the delegation legible.
+
+**Cancelling the local turn cancels the remote task.** `cancel.active` retracts
+any pending question and issues `CancelTask` to every remote in flight. More
+generally: if this instance walks away from a non-terminal remote task — an
+exhausted budget, a broken stream, a question nobody answered — it tells the
+remote rather than leaving it working for a caller that has gone.
 
 **Credentials are per remote and checked at boot.** Each `agents[]` entry carries
 its own `credentials:` block — `bearer`, `oauth2_client_credentials` or `mtls` —

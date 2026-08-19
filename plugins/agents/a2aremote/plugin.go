@@ -117,6 +117,19 @@ type Plugin struct {
 	// them rather than leaving them writing to a bus that is going away.
 	wg sync.WaitGroup
 
+	// mu guards live, pendingHITL and closing. All three are written from the
+	// goroutines running remote calls and read from the bus dispatch goroutine.
+	mu sync.Mutex
+	// live is every delegated call in flight, keyed by spawn id, so a local
+	// cancellation can reach the remote tasks they own. See cancel.go.
+	live map[string]*session
+	// pendingHITL maps a hitl.requested id to the call waiting for its answer.
+	// See hitl.go.
+	pendingHITL map[string]chan events.HITLResponse
+	// closing is set by Shutdown before it waits, so no goroutine is added to
+	// the wait group after the wait began.
+	closing bool
+
 	unsubs []func()
 }
 
@@ -124,6 +137,8 @@ type Plugin struct {
 func New() engine.Plugin {
 	return &Plugin{
 		remotes:     map[string]*remote{},
+		live:        map[string]*session{},
+		pendingHITL: map[string]chan events.HITLResponse{},
 		credentials: buildCredential,
 	}
 }
@@ -153,6 +168,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.bus = ctx.Bus
 	p.ctx, p.cancel = context.WithCancel(context.Background())
+
+	if p.live == nil {
+		p.live = map[string]*session{}
+	}
+	if p.pendingHITL == nil {
+		p.pendingHITL = map[string]chan events.HITLResponse{}
+	}
 
 	cfg, err := parseConfig(ctx.Config)
 	if err != nil {
@@ -191,6 +213,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("tool.invoke", p.onToolInvoke, engine.WithPriority(50), engine.WithSource(pluginID)),
+		// The answer to a chained question, from whichever transport rendered
+		// it. See hitl.go.
+		p.bus.Subscribe("hitl.responded", p.onHITLResponded, engine.WithPriority(50), engine.WithSource(pluginID)),
+		// A local cancellation, propagated to the remote as CancelTask. See
+		// cancel.go.
+		p.bus.Subscribe("cancel.active", p.onCancelActive, engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 	return nil
 }
@@ -290,6 +318,19 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 		unsub()
 	}
 	p.unsubs = nil
+
+	// Every remote task still in flight is abandoned the same way a cancelled
+	// turn abandons one: the process is going away, and a task left running on
+	// somebody else's machine for a caller that no longer exists is the same
+	// waste whether a user or a signal ended the turn.
+	for _, s := range p.liveSessions() {
+		s.cancelLocally("the delegating instance is shutting down")
+	}
+
+	p.mu.Lock()
+	p.closing = true
+	p.mu.Unlock()
+
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -310,21 +351,37 @@ func (p *Plugin) Shutdown(ctx context.Context) error {
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
+		{EventType: "hitl.responded", Priority: 50},
+		{EventType: "cancel.active", Priority: 50},
 	}
 }
 
 // Emissions lists what this plugin puts on the bus.
 //
-// It is deliberately short. Republishing a remote run's incremental progress —
-// its text deltas, its own tool calls, its subagent activity — is a separate
-// concern and is not done here, so nothing in this list claims it.
+// Three groups. The tool surface (register, the vetoable result and the result)
+// and the subagent lifecycle bracket a delegation. io.output and
+// subagent.iteration are a remote run's progress, republished as it arrives so a
+// long delegation is not a black box to the local transports; see progress.go.
+// The hitl.* trio is a remote's question travelling to a human and being
+// retracted when nobody answers; see hitl.go.
+//
+// hitl.responded is conspicuously ABSENT, and must stay absent. This plugin asks
+// the question and waits — it never answers one. Emitting a response here would
+// be Nexus answering on the human's behalf, which is the exact failure the
+// chained human-in-the-loop path exists to prevent, and the contract test
+// asserts it never happens.
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"tool.register",
 		"before:tool.result",
 		"tool.result",
 		"subagent.started",
+		"subagent.iteration",
 		"subagent.complete",
+		"io.output",
+		"before:hitl.requested",
+		"hitl.requested",
+		"hitl.cancel",
 	}
 }
 
@@ -355,11 +412,9 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 
 	// Run off the dispatch loop: a remote call takes as long as the remote's
 	// work does, and the bus dispatches synchronously.
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.spawn(func() {
 		p.respond(tc, p.runRemote(p.ctx, ra, in))
-	}()
+	})
 }
 
 // parseInvocation reads the tool arguments.
@@ -406,6 +461,30 @@ func (p *Plugin) emitStarted(spawnID string, ra *remote, in invocation) {
 	})
 	p.logger.Info("a2a_remote delegating",
 		"agent", ra.cfg.name, "tool", ra.cfg.toolName, "spawn_id", spawnID)
+}
+
+// emitOutput republishes a remote's own narration as local assistant output,
+// under the delegated run's turn id rather than the caller's, so a transport can
+// group it separately from the local turn that asked for it.
+func (p *Plugin) emitOutput(content, turnID string) {
+	_ = p.bus.Emit("io.output", events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       content,
+		Role:          "assistant",
+		TurnID:        turnID,
+	})
+}
+
+// emitIteration reports one unit of remote progress against the delegated run.
+func (p *Plugin) emitIteration(spawnID, parentTurn string, iteration int, content string, calls []events.ToolCallRequest) {
+	_ = p.bus.Emit("subagent.iteration", events.SubagentIteration{
+		SchemaVersion: events.SubagentIterationVersion,
+		SpawnID:       spawnID,
+		Iteration:     iteration,
+		Content:       content,
+		ToolCalls:     calls,
+		ParentTurnID:  parentTurn,
+	})
 }
 
 func (p *Plugin) emitComplete(spawnID, parentTurn string, out outcome) {

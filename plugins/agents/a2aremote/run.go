@@ -45,7 +45,7 @@ type budget struct {
 // into outcome.err as a sentence the calling model can act on, because a
 // delegating agent's next move depends on knowing WHY the remote did not
 // answer, and an engine-level failure would deny it that.
-func (p *Plugin) runRemote(ctx context.Context, ra *remote, in invocation) outcome {
+func (p *Plugin) runRemote(parent context.Context, ra *remote, in invocation) outcome {
 	spawnID := engine.GenerateID()[:16]
 	depth := in.parentDepth + 1
 
@@ -90,23 +90,53 @@ func (p *Plugin) runRemote(ctx context.Context, ra *remote, in invocation) outco
 	if in.timeout > 0 {
 		timeout = in.timeout
 	}
+
+	// The call always gets a cancellable context, even with no timeout: it is
+	// the handle the local cancellation path pulls, and a call that could not be
+	// cancelled would keep a remote working for a turn the user has abandoned.
+	//
+	// The budget's deadline is set here rather than around the message alone
+	// because it must keep running while the task sits at INPUT_REQUIRED. A
+	// remote waiting on a human is still work this session authorized, and
+	// pausing the budget for the wait is how a question nobody answers pins the
+	// session for ever.
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	if timeout > 0 {
-		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
-	out := p.call(ctx, ra, in, timeout)
+	sess := newSession(p, ra, spawnID, in.parentTurn, cancel)
+	p.trackSession(sess)
+	defer p.untrackSession(sess)
 
-	if p.cache != nil && !out.failed() {
+	out := p.call(ctx, ra, sess, in, timeout)
+
+	// A task this call is walking away from — because the budget ran out, the
+	// stream broke, the human never answered or the local turn was cancelled —
+	// is cancelled on the remote. Leaving it running would burn somebody else's
+	// tokens on an answer nobody is left to read. It self-noops for a task that
+	// already reached a terminal state.
+	sess.abandon("the delegating call ended before the task did")
+
+	if p.cache != nil && !out.failed() && !out.humanInput {
 		p.cache.put(key, out)
 	}
 	p.emitComplete(spawnID, in.parentTurn, out)
 	return out
 }
 
-// call performs discovery and the message exchange.
-func (p *Plugin) call(ctx context.Context, ra *remote, in invocation, timeout time.Duration) outcome {
+// call performs discovery and then drives the exchange to a terminal state,
+// looping through as many human answers as the remote asks for.
+//
+// The loop is the substance. A2A has no resume operation: a task parked at
+// INPUT_REQUIRED is continued by an ORDINARY message carrying the same taskId
+// and contextId (specification section 3.4), so each round here is a fresh send
+// whose identity is what makes it a continuation. The accumulated result carries
+// artifacts across rounds, because a resumed stream is a new connection and the
+// remote is under no obligation to resend what it already delivered.
+func (p *Plugin) call(ctx context.Context, ra *remote, s *session, in invocation, timeout time.Duration) outcome {
 	// Discovery, lazily, on first use. A card that will not resolve is fatal to
 	// THIS call and to nothing else: the plugin booted without it and the next
 	// call will try again, since a2aclient caches a card only on success.
@@ -118,42 +148,103 @@ func (p *Plugin) call(ctx context.Context, ra *remote, in invocation, timeout ti
 	// of itself is available. Publish it once.
 	p.refreshDescription(ra)
 
+	streaming := ra.streamingSupported()
+	policy := ra.cfg.transport.hitl
 	req := buildRequest(in)
 
-	if ra.streamingSupported() {
-		res, err := ra.client.Run(ctx, req)
-		if err != nil {
-			return p.streamOutcome(ra, res, err, timeout)
-		}
-		return classify(ra, fromStream(res))
-	}
+	var acc remoteResult
+	humanInput := false
 
-	resp, err := ra.client.SendMessage(ctx, req)
-	if err != nil {
-		return outcome{err: p.describeFailure(ra, err, timeout)}
+	for round := 0; ; round++ {
+		r, err := p.exchange(ctx, ra, s, req, streaming)
+		acc = acc.merge(r)
+
+		if err != nil {
+			// A failed stream keeps the frames that DID arrive, so a task that
+			// broke after producing partial output still hands that output to
+			// the calling model alongside the reason it stopped. A blocking
+			// send has no partial state to keep.
+			var out outcome
+			if streaming {
+				out = classify(ra, acc)
+			}
+			out.err = p.describeFailure(ra, err, timeout)
+			out.humanInput = humanInput
+			return out
+		}
+
+		// Anything that is not a live task parked on a question is this call's
+		// answer, for better or worse.
+		if !policy.on() || acc.state != a2a.TaskStateInputRequired || acc.taskID == "" {
+			out := classify(ra, acc)
+			out.humanInput = humanInput
+			return out
+		}
+
+		if max := policy.rounds(); max > 0 && round >= max {
+			return exhaustedRoundsOutcome(ra.cfg.name, max, humanBase(ra, acc, humanInput))
+		}
+
+		answer := p.askHuman(ctx, s, acc.statusText, round)
+		humanInput = true
+		if answer.verdict != answerGiven {
+			return parkedOutcome(ra.cfg.name, acc.statusText, answer, policy.wait(),
+				humanBase(ra, acc, humanInput))
+		}
+
+		p.logger.Info("a2a_remote resuming a remote task with the human's answer",
+			"agent", ra.cfg.name, "spawn_id", s.spawnID,
+			"task_id", acc.taskID, "context_id", acc.contextID, "round", round+1)
+
+		req = a2aclient.ResumeText(acc.taskID, acc.contextID,
+			"nexus-"+engine.GenerateID()[:16], answer.text)
 	}
-	return classify(ra, fromSendMessage(resp))
 }
 
-// streamOutcome folds a failed stream: the frames that DID arrive are kept, so
-// a task that failed after producing partial output still hands that output to
-// the calling model alongside the reason it stopped.
-func (p *Plugin) streamOutcome(ra *remote, res a2aclient.StreamResult, err error, timeout time.Duration) outcome {
-	out := classify(ra, fromStream(res))
-	out.err = p.describeFailure(ra, err, timeout)
+// humanBase renders the partial answer an abandoned delegation still carries,
+// with the interruption's own error text left off — the caller supplies a more
+// specific one.
+func humanBase(ra *remote, r remoteResult, humanInput bool) outcome {
+	out := rawOutcome(ra, r)
+	out.humanInput = humanInput
 	return out
+}
+
+// exchange performs one send and returns what the remote answered with.
+//
+// The streaming arm reads the frames itself rather than calling a2aclient.Run,
+// which drains them internally: every frame is handed to the session on its way
+// past so a long delegation reports progress on the local bus instead of going
+// silent for minutes. The accumulated result is otherwise identical to Run's.
+func (p *Plugin) exchange(ctx context.Context, ra *remote, s *session, req a2a.SendMessageRequest, streaming bool) (remoteResult, error) {
+	if !streaming {
+		resp, err := ra.client.SendMessage(ctx, req)
+		if err != nil {
+			return remoteResult{}, err
+		}
+		r := fromSendMessage(resp)
+		s.noteTask(r.taskID, r.contextID)
+		s.noteState(r.state)
+		return r, nil
+	}
+
+	stream, err := ra.client.SendStreamingMessage(ctx, req)
+	if err != nil {
+		return remoteResult{}, err
+	}
+	defer stream.Close()
+
+	for frame := range stream.Frames() {
+		s.observe(frame)
+	}
+	return fromStream(stream.Result()), stream.Err()
 }
 
 // classify turns a successfully-transported answer into an outcome. A clean
 // transport does not mean a successful task: FAILED, REJECTED, CANCELED and
 // INPUT_REQUIRED all arrive over a stream that ran to its end.
 func classify(ra *remote, r remoteResult) outcome {
-	out := outcome{
-		output:    fold(ra.cfg.name, r),
-		taskID:    r.taskID,
-		contextID: r.contextID,
-		state:     r.state,
-	}
+	out := rawOutcome(ra, r)
 
 	switch {
 	case r.state == a2a.TaskStateFailed, r.state == a2a.TaskStateRejected:
@@ -166,10 +257,23 @@ func classify(ra *remote, r remoteResult) outcome {
 	case r.state == a2a.TaskStateCanceled:
 		out.err = fmt.Sprintf("the remote A2A agent %q cancelled its task", ra.cfg.name)
 
+	case r.state == a2a.TaskStateAuthRequired:
+		// AUTH_REQUIRED is NOT routed to a human, unlike INPUT_REQUIRED. The
+		// remote is asking for a credential, and no answer a person types into a
+		// chat is one: the fix is a credentials block in this instance's
+		// configuration. Saying so beats prompting somebody for a token.
+		out.err = fmt.Sprintf(
+			"the remote A2A agent %q paused in state %s: it needs credentials this instance did not present",
+			ra.cfg.name, string(r.state))
+		if q := strings.TrimSpace(r.statusText); q != "" {
+			out.err += " (" + oneLine(q) + ")"
+		}
+		out.err += ". An operator must configure this agent's credentials; retrying will not fix it."
+
 	case r.state.IsInterrupted():
-		// The remote is parked waiting for something this one-shot call cannot
-		// supply. Reporting it as a clean error — with the question — lets the
-		// calling model answer it in the next delegated call rather than stall.
+		// Reached only when chained human-in-the-loop is switched off for this
+		// remote. With it on, an INPUT_REQUIRED task never gets here — the
+		// question goes to a person and the task is resumed. See hitl.go.
 		out.err = fmt.Sprintf(
 			"the remote A2A agent %q paused in state %s and is waiting for input",
 			ra.cfg.name, string(r.state))
@@ -179,6 +283,18 @@ func classify(ra *remote, r remoteResult) outcome {
 		out.err += ". Re-delegate with the answer included in the task."
 	}
 	return out
+}
+
+// rawOutcome folds a remote result into the tool output without judging it. It
+// is classify's first half, split out so the human-in-the-loop paths can supply
+// their own verdict over the same folded document.
+func rawOutcome(ra *remote, r remoteResult) outcome {
+	return outcome{
+		output:    fold(ra.cfg.name, r),
+		taskID:    r.taskID,
+		contextID: r.contextID,
+		state:     r.state,
+	}
 }
 
 // describeFailure renders a transport or protocol failure as a sentence the

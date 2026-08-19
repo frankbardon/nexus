@@ -48,6 +48,9 @@ plugins:
 
   nexus.agent.a2a_remote:
     timeout: 3m
+    hitl:
+      input_timeout: 10m
+      max_rounds: 3
     agents:
       - name: researcher
         base_url: https://research.internal
@@ -57,11 +60,16 @@ plugins:
         tool_name: ask_legal
         stream: false
         timeout: 30s
+        progress: false
+        hitl:
+          enabled: false
 ```
 
 Every transport key (`binding`, `stream`, the four timeouts, `retry`,
-`extensions`, `validate_card`) exists at both levels: at the plugin level as a
-default and inside an `agents[]` entry as an override.
+`extensions`, `validate_card`, `progress`, `hitl`) exists at both levels: at the
+plugin level as a default and inside an `agents[]` entry as an override. The
+`hitl` block inherits key by key, so an agent that sets only `enabled` keeps the
+plugin-level `input_timeout` and `max_rounds`.
 
 ### `base_url`, not an endpoint
 
@@ -178,12 +186,131 @@ prompt-injected content:
 |---|---|
 | `Ready()`, and once per remote after its card resolves | `tool.register` |
 | Call starts (including a cache hit) | `subagent.started` |
+| Remote narrates on a non-terminal status message | `io.output` (under the delegated run's own turn id, `a2a_remote_<spawn>`) |
+| Remote reports a tool call or subagent progress via the Nexus extension | `subagent.iteration` |
+| Remote parks at `INPUT_REQUIRED` | `before:hitl.requested` (vetoable), then `hitl.requested` |
+| A question is abandoned or the turn is cancelled | `hitl.cancel` |
 | Call ends | `subagent.complete` — carries the folded result or the error |
 | Result published | `before:tool.result` (vetoable), then `tool.result` |
 
-Republishing a remote run's *incremental* progress — its text deltas, its own
-tool calls, its subagent activity — is deliberately **not** done here yet, and
-`Emissions()` does not claim it.
+Subscriptions: `tool.invoke`, `hitl.responded` (the human's answer, from
+whichever transport rendered the question) and `cancel.active`.
+
+`hitl.responded` is conspicuously **absent** from the emissions and must stay
+absent — this plugin asks questions and waits, it never answers one. The contract
+test asserts it.
+
+## Live progress
+
+A delegated call takes as long as the remote's work does. Without republishing,
+the only thing a local transport sees is a `subagent.started`, a long silence and
+a `subagent.complete` — an operator cannot tell a remote that is working from one
+that has hung, and the browser, AG-UI and A2A-serve transports have nothing to
+render either.
+
+So each frame the remote streams is mapped onto the bus as it arrives, following
+the [`agui_remote`](agui-remote.md) precedent:
+
+| Frame | Republished as | Why |
+|---|---|---|
+| Non-terminal status update carrying a message | `io.output` | A2A's own extension-free progress channel (§3.1.1): the remote narrating. |
+| Nexus extension `tool_call` telemetry | `subagent.iteration` with the call | The remote's own tool use, which A2A has no canonical field for. |
+| Nexus extension `subagent` telemetry | `subagent.iteration` with the phase and detail | The remote's own delegations. |
+| Artifact frames | *(nothing)* | An artifact is **output**, and all of it is folded into the tool result. Emitting it twice would put the remote's answer in the local conversation before the delegating agent had decided what to do with it. |
+| Terminal status message | *(nothing)* | That is the answer, and it rides in the tool result. |
+| `INPUT_REQUIRED` status message | *(nothing)* | That is a question for a human, not progress — see below. |
+| Nexus extension `thinking` / `usage` telemetry | *(nothing)* | Reasoning belongs in the remote's transcript; tokens are the remote's spend under the remote's budget. Surfacing either locally would misattribute it. |
+
+Because the tool-call and subagent rows depend on the Nexus extension, the
+`extensions` key **defaults to the Nexus extension URI**. A remote that has never
+heard of it answers exactly as it would have (§8.4 requires a server to activate
+only extensions it recognizes, and this one declares itself optional); a remote
+Nexus instance answers with the telemetry that makes the table above useful. Set
+`extensions: []` to send none.
+
+Set `progress: false` (plugin-wide or per agent) to silence the republishing for
+a chatty remote. Task identity is still tracked, so cancellation and resumption
+are unaffected.
+
+## Chained human-in-the-loop
+
+When a remote parks its task at `TASK_STATE_INPUT_REQUIRED`, the question travels
+on the status message (§3.1.1) and the task stays **live**. A2A has no resume
+operation: the task is continued by sending an **ordinary message carrying the
+same `taskId` and `contextId`** (§3.4), and that identity is what makes the
+message a continuation rather than a new conversation.
+
+```
+remote parks at INPUT_REQUIRED
+      -> before:hitl.requested (vetoable)  -> hitl.requested
+      -> [ a human answers, via any transport ]  -> hitl.responded
+      -> SendStreamingMessage with the SAME taskId + contextId
+      -> remote continues to a terminal state
+```
+
+**The delegating model never sees the question.** That is the point. A question a
+remote agent cannot answer for itself is almost always one only a person can
+settle — which deployment, which fiscal year, whose budget — and handing it to
+the model that asked for the delegation invites it to invent an answer and then
+act on it. There is no code path that gives the model one.
+
+`nexus.control.hitl` is reached **only over the bus**, exactly as the approval
+gates and memory plugins reach it. It need not even be active: any transport that
+renders `hitl.requested` and answers with `hitl.responded` serves.
+
+**It composes.** A Nexus instance serving over [`nexus.io.a2a`](../io/a2a.md)
+turns its own `hitl.requested` into an `INPUT_REQUIRED` status; this plugin turns
+an inbound `INPUT_REQUIRED` into a local `hitl.requested`. Chain two of them and a
+question raised two hops down arrives in front of the human at the top, each hop
+resuming its own task under its own `taskId`.
+
+### Deadlines while parked
+
+Two run concurrently and the earlier one wins.
+
+| Deadline | Default | What it bounds |
+|---|---|---|
+| `timeout` (the whole-call budget) | `5m` | The entire delegation. **It keeps running while the task is parked** — a remote waiting on a human is still work this session authorized. |
+| `hitl.input_timeout` | `15m` | One question waiting on a human. The outbound twin of `nexus.io.a2a`'s `tasks.input_timeout`. |
+
+With the defaults the **call budget expires first**, which makes `input_timeout`
+the looser of the two; raise `timeout` for a remote you expect to ask questions.
+Whichever fires:
+
+1. the question is retracted with `hitl.cancel`, so no stale prompt is left in a
+   UI or in the hitl registry's on-disk queue;
+2. the remote task is cancelled with `CancelTask`, so nobody is left working for
+   a caller that has gone away;
+3. the delegation ends as a clean tool error naming **which** deadline fired,
+   carrying the question, and telling the model explicitly not to answer it.
+
+`hitl.max_rounds` (default `4`) bounds a remote that answers every answer with
+another question; `0` removes the cap and leaves the call budget as the only one.
+
+`AUTH_REQUIRED` is **not** routed to a human. The remote is asking for a
+credential, and no answer a person types is one — the fix is a `credentials`
+block, and the tool error says so.
+
+Outcomes a human answered for are **never cached**: a person's answer is a
+decision made at a moment, and replaying it for a later identical task would
+apply that decision again without asking.
+
+## Cancellation
+
+`cancel.active` — the event `nexus.control.cancel` emits once a cancellation is
+actually happening, and the same one the LLM providers abort on — propagates to
+every remote in flight:
+
+1. any question this delegation put in front of a human is retracted with
+   `hitl.cancel`;
+2. `CancelTask` (§3.3) is issued for every remote task whose id is known;
+3. the call's context is cancelled, so the stream reader unblocks and the tool
+   result is published as a cancellation rather than a hang.
+
+The same abandonment runs on the ordinary exits — an exhausted budget, a broken
+stream, an unanswered question, engine shutdown. The rule is one sentence: if
+this instance walks away from a remote task that has not reached a terminal
+state, it tells the remote. A task that already finished is left alone.
 
 ## Failure behavior
 
@@ -206,12 +333,13 @@ them is an engine-level failure, and the parent agent's loop continues normally.
 | Whole-call budget exhausted | "the agent did not finish within the `<budget>` budget for this call. Any output above is partial." |
 | Task ends `FAILED` / `REJECTED` | "ended its task in state `TASK_STATE_FAILED`: `<the remote's explanation>`" |
 | Task ends `CANCELED` | "cancelled its task" |
-| Task parks at `INPUT_REQUIRED` / `AUTH_REQUIRED` | "paused … and is waiting for input: `<the question>`. Re-delegate with the answer included in the task." |
+| Task parks at `INPUT_REQUIRED`, chaining **off** | "paused … and is waiting for input: `<the question>`. Re-delegate with the answer included in the task." |
+| Task parks at `INPUT_REQUIRED`, question unanswered | "asked a question and no answer arrived within `<deadline>` … It was put to a human and is unanswered — do NOT answer it on their behalf." |
+| Task parks at `INPUT_REQUIRED`, question declined | "asked a question and it was declined: `<the human's reason>` … do NOT answer it on their behalf." |
+| Remote asks more than `hitl.max_rounds` times | "asked for input `<n>` times in one delegation, which is the configured limit … Try a more specific task, or raise `hitl.max_rounds`." |
+| Task parks at `AUTH_REQUIRED` | "it needs credentials this instance did not present … An operator must configure this agent's credentials; retrying will not fix it." |
 | Delegation depth cap reached | "delegation depth limit reached … Answer from what you already have, or delegate from a shallower point." |
 | Named posture missing or unenforceable | An error naming the posture and the key at fault. |
-
-A remote parked at `INPUT_REQUIRED` is reported rather than chained into the
-local human-in-the-loop surface; that chaining is separate work.
 
 ## Caching
 
@@ -220,9 +348,12 @@ the remote's identity, the posture version, the task, and the canonicalized
 context — mirroring the local [`delegate`](delegate.md) cache, so a posture edit
 invalidates stale entries.
 
-**Only successes are cached.** A failed outcome is never stored, so a remote that
-was briefly down, rate limited or mid-deploy is genuinely retried on the next
-call rather than answering from a cached failure until the process restarts.
+**Only successes are cached, and only ones no human answered for.** A failed
+outcome is never stored, so a remote that was briefly down, rate limited or
+mid-deploy is genuinely retried on the next call rather than answering from a
+cached failure until the process restarts. A delegation a human answered a
+question for is not stored either — see [Chained
+human-in-the-loop](#chained-human-in-the-loop).
 
 A cache hit still emits the `subagent.started` / `subagent.complete` pair so
 observers see the call. Set `cache: false` to disable, `cache_size: 0` to disable

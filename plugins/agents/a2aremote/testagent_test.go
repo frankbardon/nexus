@@ -57,6 +57,9 @@ type testAgent struct {
 	// bodies records every A2A request body, so a test can assert what was
 	// actually sent to the remote.
 	bodies [][]byte
+	// cancelled records every task id CancelTask was called for, which is how a
+	// test proves a local cancellation reached the remote.
+	cancelled []string
 }
 
 func newTestAgent(t *testing.T, cfg testAgentConfig) *testAgent {
@@ -107,6 +110,13 @@ func (a *testAgent) counts() (cards, sends int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.cardHits, a.sendHits
+}
+
+// cancelledTasks returns every task id the agent was asked to cancel.
+func (a *testAgent) cancelledTasks() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.cancelled...)
 }
 
 func (a *testAgent) lastBody() []byte {
@@ -187,6 +197,15 @@ func (a *testAgent) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		a.writeResult(w, call.ID(), resp)
 
+	case a2a.MethodCancelTask:
+		req := call.Params.(*a2a.CancelTaskRequest)
+		a.mu.Lock()
+		a.cancelled = append(a.cancelled, req.ID)
+		a.mu.Unlock()
+		task := a2a.NewTask(req.ID, "c1")
+		task.Status = a2a.NewTaskStatus(a2a.TaskStateCanceled)
+		a.writeResult(w, call.ID(), task)
+
 	case a2a.MethodSendStreamingMessage:
 		req := call.Params.(*a2a.SendMessageRequest)
 		frames := completedRun("task-1", "ctx-1", "the remote's answer")
@@ -264,5 +283,91 @@ func interruptedRun(taskID, contextID, question string) []a2a.StreamResponse {
 	return []a2a.StreamResponse{
 		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
 		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, status)),
+	}
+}
+
+// narratedRun reports progress on a WORKING status message before completing,
+// which is A2A's own extension-free progress channel.
+func narratedRun(taskID, contextID, narration, output string) []a2a.StreamResponse {
+	working := a2a.NewTaskStatus(a2a.TaskStateWorking).
+		WithMessage(a2a.NewAgentMessage("m-progress", narration))
+	return []a2a.StreamResponse{
+		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, working)),
+		a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(taskID, contextID,
+			a2a.NewTextArtifact("art-1", "answer", output))),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateCompleted))),
+	}
+}
+
+// telemetryRun carries a Nexus extension event in a status update's metadata,
+// which is how a remote Nexus instance reports what A2A has no field for.
+func telemetryRun(t *testing.T, taskID, contextID string, event a2a.NexusEvent) []a2a.StreamResponse {
+	t.Helper()
+	metadata, err := a2a.NexusEventMetadata(event)
+	if err != nil {
+		t.Fatalf("encode nexus event: %v", err)
+	}
+	update := a2a.NewStatusUpdate(taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateWorking))
+	update.Metadata = metadata
+	return []a2a.StreamResponse{
+		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
+		a2a.StreamStatusUpdate(update),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateCompleted))),
+	}
+}
+
+// resumption records what a resuming message carried, so a test can assert the
+// task identity A2A requires of a continuation.
+type resumption struct {
+	taskID    string
+	contextID string
+	text      string
+}
+
+// resumeRecorder collects the resuming messages a remote received. It is shared
+// between the test goroutine and the agent's handler goroutines.
+type resumeRecorder struct {
+	mu   sync.Mutex
+	seen []resumption
+}
+
+func (r *resumeRecorder) record(in resumption) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, in)
+}
+
+func (r *resumeRecorder) all() []resumption {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]resumption(nil), r.seen...)
+}
+
+// askThenAnswer parks on a question, then completes once the resuming message
+// arrives. The recorded resumption is what proves the continuation addressed the
+// SAME task and context rather than starting a new conversation.
+func askThenAnswer(taskID, contextID, question string, rec *resumeRecorder) func(*a2a.SendMessageRequest) []a2a.StreamResponse {
+	return func(req *a2a.SendMessageRequest) []a2a.StreamResponse {
+		if req.Message.TaskID == "" {
+			return interruptedRun(taskID, contextID, question)
+		}
+		rec.record(resumption{
+			taskID:    req.Message.TaskID,
+			contextID: req.Message.ContextID,
+			text:      messageText(&req.Message),
+		})
+		return completedRun(taskID, contextID, "the answer was "+messageText(&req.Message))
+	}
+}
+
+// alwaysAsking never settles: every message, first or resuming, parks the task
+// on another question. It is how the round cap is exercised.
+func alwaysAsking(taskID, contextID, question string) func(*a2a.SendMessageRequest) []a2a.StreamResponse {
+	return func(*a2a.SendMessageRequest) []a2a.StreamResponse {
+		return interruptedRun(taskID, contextID, question)
 	}
 }

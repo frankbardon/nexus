@@ -60,28 +60,64 @@ func TestContract_FailureStaysOnTheDeclaredSurface(t *testing.T) {
 	h.AssertNoUndeclaredEmissions()
 }
 
-// TestContract_NoProgressEventsYet is a negative contract. Republishing a
-// remote run's incremental progress onto the local bus is a separate piece of
-// work, and Emissions() must not claim it before the code does — an over-broad
-// declaration is exactly the drift this harness exists to catch.
-func TestContract_NoProgressEventsYet(t *testing.T) {
-	agent := newTestAgent(t, testAgentConfig{})
+// TestContract_ProgressIsDeclaredAndEmitted replaces the negative contract this
+// test used to be. Republishing a remote run's progress IS done now, so
+// Emissions() claims it — and the claim is checked against what a real
+// delegation actually puts on the bus, not against intent.
+//
+// The negative half survives, narrowed to the things this plugin still must not
+// emit. hitl.responded is the one that matters: emitting it would be Nexus
+// answering a human's question on their behalf.
+func TestContract_ProgressIsDeclaredAndEmitted(t *testing.T) {
+	agent := newTestAgent(t, testAgentConfig{
+		frames: func(*a2a.SendMessageRequest) []a2a.StreamResponse {
+			return narratedRun("t1", "c1", "reading the sources", "the answer")
+		},
+	})
 	h := contract.NewContract(t, New, contract.WithPluginConfig(oneAgent(agent.URL(), nil)))
 
 	invoke(t, h, "delegate_a2a_researcher", map[string]any{"task": "anything"})
 
-	h.AssertNotEmitted("io.output")
-	h.AssertNotEmitted("subagent.iteration")
+	h.AssertEmitted("io.output")
 
 	declared := map[string]bool{}
 	for _, e := range h.Plugin().Emissions() {
 		declared[e] = true
 	}
-	for _, e := range []string{"io.output", "subagent.iteration", "llm.request", "tool.invoke"} {
+	for _, e := range []string{"io.output", "subagent.iteration", "hitl.requested", "hitl.cancel"} {
+		if !declared[e] {
+			t.Errorf("Emissions() does not declare %q, which this plugin emits", e)
+		}
+	}
+	for _, e := range []string{"hitl.responded", "llm.request", "tool.invoke", "thinking.step", "cancel.request"} {
 		if declared[e] {
 			t.Errorf("Emissions() declares %q, which this plugin does not emit", e)
 		}
 	}
+
+	h.AssertNotEmitted("hitl.responded")
+	h.AssertNoUndeclaredEmissions()
+}
+
+// TestContract_ChainedHITLStaysOnTheDeclaredSurface drives the whole chained
+// human-in-the-loop round trip through a real bus and checks that every event it
+// produces is one the plugin declared.
+func TestContract_ChainedHITLStaysOnTheDeclaredSurface(t *testing.T) {
+	agent := newTestAgent(t, testAgentConfig{frames: askThenAnswer("t1", "c1", "which year?", &resumeRecorder{})})
+	h := contract.NewContract(t, New, contract.WithPluginConfig(oneAgent(agent.URL(), nil)))
+
+	h.AssertSubscribesTo("tool.invoke", "hitl.responded", "cancel.active")
+	answerHITL(t, h, "1999")
+
+	res := invoke(t, h, "delegate_a2a_researcher", map[string]any{"task": "anything"})
+	if res.Error != "" {
+		t.Fatalf("chained HITL should have completed the delegation: %s", res.Error)
+	}
+
+	h.AssertEmitted("before:hitl.requested")
+	h.AssertEmitted("hitl.requested")
+	assertPluginNeverAnswered(t, h)
+	h.AssertNoUndeclaredEmissions()
 }
 
 // TestConfigSchemaCoversEveryParsedKey guards the boot-breaking drift the
@@ -96,7 +132,9 @@ func TestConfigSchemaCoversEveryParsedKey(t *testing.T) {
 		cfgKeyBinding, cfgKeyValidateCard, cfgKeyStream, cfgKeyTimeout,
 		cfgKeyRequestTimeout, cfgKeyMessageTimeout, cfgKeyStreamOpenTimeout,
 		cfgKeyStreamIdleTimeout, cfgKeyExtensions, cfgKeyRetry,
+		cfgKeyProgress, cfgKeyHITL,
 	}
+	hitlKeys := []string{cfgKeyHITLEnabled, cfgKeyHITLInputTimeout, cfgKeyHITLMaxRounds}
 	agentKeys := []string{
 		cfgKeyName, cfgKeyBaseURL, cfgKeyJSONRPCEndpoint, cfgKeyRESTEndpoint,
 		cfgKeyToolName, cfgKeyDescription, cfgKeyPosture,
@@ -110,7 +148,7 @@ func TestConfigSchemaCoversEveryParsedKey(t *testing.T) {
 		cfgKeyCertFile, cfgKeyKeyFile, cfgKeyCAFile, cfgKeyServerName,
 	}
 
-	all := append(append(append(pluginKeys, agentKeys...), retryKeys...), credentialKeys...)
+	all := append(append(append(append(pluginKeys, agentKeys...), retryKeys...), hitlKeys...), credentialKeys...)
 	for _, key := range all {
 		if !strings.Contains(schema, `"`+key+`"`) {
 			t.Errorf("schema.json does not declare the %q key that parseConfig reads", key)

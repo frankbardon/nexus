@@ -19,7 +19,7 @@
     "extensions": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "A2A protocol extension URIs to request via the A2A-Extensions service parameter. A server activates only the extensions a client asked for. An empty list at agent level overrides an inherited plugin-level list."
+      "description": "A2A protocol extension URIs to request via the A2A-Extensions service parameter. A server activates only the extensions a client asked for. Defaults to the Nexus extension URI (https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1), because this plugin consumes a remote Nexus instance's telemetry to republish its progress; set an empty list to request none. An empty list at agent level overrides an inherited plugin-level list."
     },
     "credentials": {
       "type": "object",
@@ -101,6 +101,26 @@
         "server_name": {
           "type": "string",
           "description": "mtls: override the TLS server name used for SNI and certificate verification, for a remote reached by an address its certificate does not name."
+        }
+      }
+    },
+    "hitl": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Chained human-in-the-loop policy: what happens when a remote parks its task at TASK_STATE_INPUT_REQUIRED. With it on, the question is raised on the local bus as hitl.requested and the human's answer resumes the remote task with the same taskId and contextId. The delegating model never sees the question and is never given the chance to answer it.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Route a remote's INPUT_REQUIRED question to a human. Defaults to true. When false, a parked task becomes a clean tool error carrying the question, as it did before chaining existed."
+        },
+        "input_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Deadline for ONE question waiting on a human. Defaults to \"15m\", matching nexus.io.a2a's tasks.input_timeout. \"0s\" removes this deadline specifically; the whole-call timeout still applies, since it keeps running while the task is parked. The effective wait is whichever expires first, so with the default 5m call timeout this key is the looser of the two."
+        },
+        "max_rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many times one delegated call may bounce a question back to the human. Defaults to 4. Zero removes the cap, leaving the call budget as the only bound."
         }
       }
     },
@@ -192,6 +212,11 @@
             "$ref": "#/$defs/duration",
             "description": "Bound on total silence on an open stream, measured in bytes read so SSE keep-alive comments count as life. Defaults to \"5m\"; raise it for a slow remote. \"0s\" disables it."
           },
+          "progress": {
+            "type": "boolean",
+            "description": "Republish this remote's incremental progress (its narration and, via the Nexus extension, its tool calls and subagent activity) onto the local bus as io.output and subagent.iteration. Defaults to true."
+          },
+          "hitl": { "$ref": "#/$defs/hitl" },
           "extensions": { "$ref": "#/$defs/extensions" },
           "retry": { "$ref": "#/$defs/retry" },
           "credentials": { "$ref": "#/$defs/credentials" }
@@ -241,6 +266,11 @@
       "$ref": "#/$defs/duration",
       "description": "Default stream-idle bound for every agent. Defaults to \"5m\"."
     },
+    "progress": {
+      "type": "boolean",
+      "description": "Default for every agent's progress. Defaults to true."
+    },
+    "hitl": { "$ref": "#/$defs/hitl" },
     "extensions": { "$ref": "#/$defs/extensions" },
     "retry": { "$ref": "#/$defs/retry" }
   }

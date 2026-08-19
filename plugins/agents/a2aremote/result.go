@@ -38,6 +38,13 @@ type outcome struct {
 	contextID string
 	// state is the terminal task state observed, empty for a message reply.
 	state a2a.TaskState
+
+	// humanInput records that a human answered a question for this call. It
+	// keeps the outcome OUT of the result cache: a person's answer is a decision
+	// made at a moment, and replaying it for a later identical task would apply
+	// that decision again without asking, which is a policy change wearing a
+	// performance optimization's clothes.
+	humanInput bool
 }
 
 // failed reports whether the outcome carries an error, which is what keeps it
@@ -60,6 +67,50 @@ type remoteResult struct {
 	statusText string
 	// artifacts are the task's outputs, chunk-reassembled.
 	artifacts []a2a.Artifact
+}
+
+// merge folds a later exchange in the same task onto an earlier one.
+//
+// It exists because a task resumed after INPUT_REQUIRED streams on a FRESH
+// connection: the remote has already delivered whatever it delivered before the
+// question and is not obliged to send it again. Artifacts therefore accumulate
+// across rounds, keyed by artifact id so a re-sent artifact replaces rather than
+// duplicates. The reply and the status text do NOT accumulate — they are the
+// LATEST word, and carrying an earlier round's question forward as if it were
+// the answer is exactly the confusion to avoid.
+func (r remoteResult) merge(next remoteResult) remoteResult {
+	out := next
+	if out.taskID == "" {
+		out.taskID = r.taskID
+	}
+	if out.contextID == "" {
+		out.contextID = r.contextID
+	}
+	out.artifacts = mergeArtifacts(r.artifacts, next.artifacts)
+	return out
+}
+
+// mergeArtifacts appends later artifacts to earlier ones, replacing any that
+// carry an id already seen.
+func mergeArtifacts(prev, next []a2a.Artifact) []a2a.Artifact {
+	if len(prev) == 0 {
+		return next
+	}
+	out := append([]a2a.Artifact(nil), prev...)
+	for _, artifact := range next {
+		replaced := false
+		for i := range out {
+			if out[i].ArtifactID != "" && out[i].ArtifactID == artifact.ArtifactID {
+				out[i] = artifact
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, artifact)
+		}
+	}
+	return out
 }
 
 // fromStream normalizes a streaming call's accumulated result.
