@@ -1286,6 +1286,59 @@ The IO message shapes carried inside broker frames (`output`, `stream.delta`,
 `input`, `approval.response`, …) are documented on the
 [`nexus.io.broker` plugin page](../plugins/io/broker.md#how-it-works).
 
+### Frame sequencing and the replay buffer
+
+Every frame the broker sends a client carries a **sequence number**: `seq`, a
+per-lease counter that starts at 1 and increments by exactly one for every frame,
+whatever its signal.
+
+```json
+{"version":1,"lease_id":"a1b2…","signal":"io","seq":42,"payload":{"type":"stream.delta","content":"…"}}
+```
+
+It exists because the gateway has two places where a client-bound frame can fail
+to reach its socket — **no client is attached**, and an attached client whose
+send queue is full — and before sequencing both of them logged and continued.
+A client had no way to tell that it had lost anything, which for a streaming agent
+is the worst shape of failure: it silently corrupts what the user believes the
+agent said. A gap in `seq` makes that loss visible.
+
+**Track the sequence and treat a jump as an error.** A client that sees `seq`
+advance by more than one has missed output and should say so rather than render
+the remainder as if it were complete.
+
+Alongside the sequence, each lease keeps a **replay buffer**: the encoded bytes
+of the frames it has already sent, bounded by
+[`client_replay_buffer_bytes`](../configuration/reference.md#session-broker-nexus-broker)
+(1 MiB by default) and evicted **oldest first**. Both loss paths retain the frame
+rather than discarding it, so a missed range is not only detectable but
+recoverable.
+
+Four properties are worth stating plainly:
+
+- **Only client-bound frames are sequenced.** Frames flowing client → instance
+  carry no `seq` and are not buffered. The broker assigns the number, so an
+  instance needs no protocol awareness and nothing on the dial-back side changed.
+- **The bound is in bytes, not frames.** A client-bound payload runs from a
+  few-byte token delta to a hundred-kilobyte tool result, so a frame count would
+  say nothing about how much memory a lease can pin. Worst-case retention across
+  the whole broker is `client_replay_buffer_bytes` × `max_concurrent` — 8 MiB at
+  both defaults. Set `max_concurrent: 0` (unlimited) and that product is
+  unbounded too, so size the two together.
+- **The buffer is in-memory and dies with the lease.** Nothing about it is
+  journaled: `state_dir` does not persist it, releasing a lease frees it
+  immediately, and **a broker restart does not preserve it**. A lease restored
+  from the journal after a restart starts a fresh stream — its sequence begins
+  again at 1 with an empty buffer, which is itself the signal to a reconnecting
+  client that its stream did not survive.
+- **`seq` is additive on the wire.** It is omitted when zero, so a peer built
+  against an older broker decodes a sequenced frame cleanly and ignores the key.
+  Adding it needed no `brokerframe` version bump.
+
+Setting `client_replay_buffer_bytes: 0` disables retention while leaving
+sequencing intact — loss stays visible to the client, but the broker keeps
+nothing to replay with.
+
 ## The A2A front door (`agents:`)
 
 Everything above assumes a **Nexus-aware client**: `POST /claim` requires the

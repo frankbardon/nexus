@@ -130,6 +130,27 @@ type Frame struct {
 	// frames; empty otherwise.
 	SessionID string `json:"session_id,omitempty"`
 
+	// Seq is the broker-assigned, per-lease sequence number of a CLIENT-BOUND
+	// frame. It counts from 1 and increments by exactly one for every frame the
+	// broker sends a lease's client, whatever the signal, so a client can detect
+	// a gap rather than silently believing a truncated stream.
+	//
+	// THE BROKER ASSIGNS IT, ON CLIENT-BOUND FRAMES ONLY. An instance never sets
+	// it and never reads it: instance-bound frames carry no sequence at all, so
+	// the dial-back side needs no protocol awareness and nothing about it
+	// changed. Anything an instance puts here is overwritten by the broker
+	// before the frame reaches a client.
+	//
+	// It is OPTIONAL on the wire (`omitempty`) and zero means "unsequenced" —
+	// which is what every instance-bound frame is, and what every frame from a
+	// broker predating this field was. That is why adding it needed no Version
+	// bump: an older peer decodes a sequenced frame cleanly and ignores the key.
+	//
+	// The sequence is per LEASE, not per broker or per connection: two leases
+	// number independently from 1, and the counter lives and dies with the lease
+	// (it does not survive a broker restart).
+	Seq uint64 `json:"seq,omitempty"`
+
 	// Payload is an opaque IO payload, meaningful on SignalIO frames. The
 	// broker forwards it untouched between client and instance.
 	Payload json.RawMessage `json:"payload,omitempty"`

@@ -202,6 +202,10 @@ func run() error {
 	// pairing consulted, and before anything is served, since the setter is not safe
 	// to call alongside a live lease transition.
 	registry.useSessionBinaryIndex(sessionBinaries)
+	// Wired before any lease exists, because the bound is stamped on each lease's
+	// stream at creation. Worst-case retention across the broker is this value
+	// times max_concurrent.
+	registry.useClientReplayBuffer(cfg.ClientReplayBufferBytes)
 
 	// Restart recovery. It runs BEFORE anything is served, because a surviving
 	// instance is already dialing /instance on its reconnect backoff and every

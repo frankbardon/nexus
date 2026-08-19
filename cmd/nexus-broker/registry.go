@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/frankbardon/nexus/pkg/brokerframe"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
@@ -248,6 +249,17 @@ type lease struct {
 	// registration must clear the same bar. Guarded by Registry.mu.
 	restored bool
 
+	// clientStream is this lease's client-bound frame sequencer and replay
+	// buffer (see clientstream.go). It is created with the lease and released by
+	// Remove, and is the reason a client can tell a truncated stream from a
+	// finished one.
+	//
+	// It is NOT guarded by Registry.mu: it owns its own mutex, and holding
+	// Registry.mu across a frame send would put the whole registry behind every
+	// forwarded token. The POINTER is set once at lease creation and never
+	// reassigned, so reading it under mu and using it outside is race-free.
+	clientStream *clientStream
+
 	// reason records why the lease is being (or was) torn down: "" while live,
 	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
 	// set under Registry.mu at the moment releasing latches, so it is a
@@ -314,6 +326,17 @@ type Registry struct {
 	// NOT guarded by mu: it owns its own lock and is only assigned at wiring time.
 	sessionBinaries *sessionBinaryIndex
 
+	// clientReplayLimit is the byte bound every new lease's clientStream is
+	// created with, from `client_replay_buffer_bytes`. It is read only while
+	// minting a lease, so the worst-case retention across the broker is this
+	// value times max_concurrent.
+	//
+	// NewRegistry seeds it with defaultClientReplayBufferBytes so a registry
+	// built without wiring (every unit test, and the paths that predate this)
+	// buffers exactly as a configured one does; useClientReplayBuffer overrides
+	// it at wiring time.
+	clientReplayLimit int
+
 	// brokerID and advertiseAddr are stamped on every record so a future shared
 	// store can tell whose lease is whose without a data migration. advertiseAddr
 	// is the RAW config value, verbatim as the operator wrote it, not the parsed
@@ -333,11 +356,12 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 		logger = slog.Default()
 	}
 	return &Registry{
-		logger:        logger,
-		now:           time.Now,
-		maxConcurrent: maxConcurrent,
-		waiters:       list.New(),
-		leases:        make(map[string]*lease),
+		logger:            logger,
+		now:               time.Now,
+		maxConcurrent:     maxConcurrent,
+		clientReplayLimit: defaultClientReplayBufferBytes,
+		waiters:           list.New(),
+		leases:            make(map[string]*lease),
 	}
 }
 
@@ -350,6 +374,16 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 // Call it once at wiring time, before the broker serves: it is not safe to call
 // concurrently with Remove.
 func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
+
+// useClientReplayBuffer sets the per-lease client-bound replay bound in bytes.
+// A non-positive limit disables retention: frames are still sequenced, so a
+// client can still DETECT loss, but the broker keeps nothing to replay.
+//
+// Like useTicketStore it is a setter rather than a NewRegistry parameter, so the
+// dozens of existing registry tests do not have to name a knob they do not
+// exercise. Call it once at wiring time, before the broker serves: it affects
+// leases minted after it and is not safe to call concurrently with NewLease.
+func (r *Registry) useClientReplayBuffer(limit int) { r.clientReplayLimit = limit }
 
 // useLeaseStore binds the durability store every lease transition is journaled
 // to, along with the broker identity stamped on each record.
@@ -578,6 +612,7 @@ func (r *Registry) insertLeaseLocked(id string, owner nexusauth.Principal) error
 		sessionReported: make(chan struct{}),
 		exited:          make(chan struct{}),
 		hasSlot:         true,
+		clientStream:    newClientStream(r.clientReplayLimit),
 	}
 	return nil
 }
@@ -654,6 +689,13 @@ func (r *Registry) RestoreLease(spec restoreSpec) error {
 		sessionID:       spec.sessionID,
 		binary:          spec.binary,
 		pid:             spec.pid,
+		// A restored lease starts a FRESH stream at sequence 1 with an empty
+		// buffer. The buffer is in-memory and died with the old process, and
+		// nothing on disk records where the sequence had got to — so restarting
+		// the count is the only honest option. A client that reconnects across a
+		// broker restart sees the sequence go backwards, which is the signal that
+		// its stream did not survive.
+		clientStream: newClientStream(r.clientReplayLimit),
 	}
 	r.leases[spec.id] = l
 	if spec.sessionID != "" {
@@ -1137,6 +1179,61 @@ func (r *Registry) ClientConn(id string) *wsConn {
 	return l.client
 }
 
+// SendClientFrame is the ONE way a frame reaches a lease's client. It assigns
+// the next per-lease sequence, retains the encoded bytes in the lease's replay
+// buffer, and queues them on the attached client connection — all under the
+// stream's own lock, so the wire order can never disagree with the numbering.
+//
+// It sequences and retains the frame EVEN WHEN NO CLIENT IS ATTACHED, and even
+// when an attached client's send queue is full. Those are precisely the two
+// paths that used to log and continue, leaving the client believing it had
+// heard everything the agent said; retaining the frame is what makes them
+// recoverable and the sequence is what makes them visible.
+//
+// It returns errUnknownLease for a lease that no longer exists — a frame in
+// flight when a lease is torn down has nowhere to go and nothing to be replayed
+// to, so it is dropped, not buffered.
+func (r *Registry) SendClientFrame(id string, f brokerframe.Frame) (uint64, clientFrameOutcome, error) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	if !ok {
+		r.mu.Unlock()
+		return 0, clientFrameDropped, errUnknownLease
+	}
+	stream := l.clientStream
+	conn := l.client
+	r.mu.Unlock()
+
+	if stream == nil {
+		// Defensive: every lease is minted with a stream. A nil one would mean an
+		// unsequenced client, which is the failure this story exists to remove, so
+		// say so rather than silently forwarding.
+		return 0, clientFrameDropped, fmt.Errorf("lease %s has no client stream", id)
+	}
+	seq, outcome, err := stream.send(conn, f)
+	if err != nil {
+		return 0, clientFrameDropped, fmt.Errorf("encoding client-bound frame for lease %s: %w", id, err)
+	}
+	return seq, outcome, nil
+}
+
+// ClientReplayFrom returns the retained client-bound frames for a lease with a
+// sequence greater than after, oldest first, and reports whether the buffer
+// still accounts for every frame in that range (see clientStream.replayFrom).
+//
+// It is the read seam for the resume handshake: nothing in the broker calls it
+// yet beyond its tests.
+func (r *Registry) ClientReplayFrom(id string, after uint64) ([][]byte, bool, error) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	r.mu.Unlock()
+	if !ok || l.clientStream == nil {
+		return nil, false, errUnknownLease
+	}
+	frames, complete := l.clientStream.replayFrom(after)
+	return frames, complete, nil
+}
+
 // InstanceConn returns the instance connection bound to a lease, or nil if
 // the lease is unknown or has no instance attached.
 func (r *Registry) InstanceConn(id string) *wsConn {
@@ -1268,6 +1365,14 @@ func (r *Registry) Remove(id string) {
 		if l.hasSlot {
 			l.hasSlot = false
 			r.releaseSlotLocked()
+		}
+		// Free the replay buffer here rather than leaving it to the garbage
+		// collector. Remove is the single teardown sink, and a projected record,
+		// an A2A binding or a test can outlive the map entry while still holding
+		// the lease pointer — so "the map forgot it" is not the same as "the
+		// memory is gone". This makes it the same thing.
+		if l.clientStream != nil {
+			l.clientStream.release()
 		}
 		delete(r.leases, id)
 	}

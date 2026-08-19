@@ -28,6 +28,7 @@ import (
 // of nexus variants this broker may spawn, superseding the deprecated
 // nexus_binary_path), advertise_addr (client-reachable address),
 // max_concurrent (capacity cap),
+// client_replay_buffer_bytes (per-lease client-bound replay retention),
 // idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
 // queue_wait_timeout (FIFO capacity wait), auth (client authentication), and
 // agents (the named A2A profiles this broker publishes).
@@ -168,6 +169,30 @@ type Config struct {
 	// MaxConcurrent caps the number of live instances. Placeholder for the
 	// capacity story.
 	MaxConcurrent int `yaml:"max_concurrent"`
+
+	// ClientReplayBuffer is the raw `client_replay_buffer_bytes` key: how many
+	// bytes of already-sent, client-bound frames each lease retains so a client
+	// that missed them can be replayed.
+	//
+	// It is a POINTER so "not written" and "written as 0" stay distinguishable.
+	// Absent takes defaultClientReplayBufferBytes; an explicit 0 DISABLES
+	// retention while leaving sequencing intact, which is the supported way to
+	// say "I want loss to be detectable but I will not pay memory for it"; a
+	// negative value is a boot failure rather than a silent clamp, because it has
+	// no reading a broker could act on.
+	//
+	// The bound is in BYTES rather than frames deliberately: client-bound
+	// payloads run from a few-byte token delta to a hundred-kilobyte tool result,
+	// so a frame count says nothing about how much memory a lease can pin. Use
+	// ClientReplayBufferBytes, not this field — this one is the unresolved input.
+	ClientReplayBuffer *int `yaml:"client_replay_buffer_bytes"`
+
+	// ClientReplayBufferBytes is the RESOLVED per-lease replay bound. It is not a
+	// YAML key: LoadConfigFromBytes folds ClientReplayBuffer onto the default so
+	// every reader sees one settled number.
+	//
+	// Worst-case broker-wide retention is this value times MaxConcurrent.
+	ClientReplayBufferBytes int `yaml:"-"`
 
 	// IdleTimeout is how long an idle instance survives before teardown.
 	// Placeholder for the lifecycle story.
@@ -948,15 +973,16 @@ const defaultAdminScope = "nexus.broker.admin"
 // only ever takes effect once auth IS configured.
 func DefaultConfig() Config {
 	return Config{
-		ListenAddr:       ":8080",
-		NexusBinaryPath:  defaultNexusBinaryPath,
-		MaxConcurrent:    8,
-		IdleTimeout:      5 * time.Minute,
-		QueueWaitTimeout: 30 * time.Second,
-		ReleaseGrace:     defaultReleaseGrace,
-		ReattachWindow:   defaultReattachWindow,
-		AdminScope:       defaultAdminScope,
-		AuthChain:        nexusauth.NewChain(),
+		ListenAddr:              ":8080",
+		NexusBinaryPath:         defaultNexusBinaryPath,
+		MaxConcurrent:           8,
+		ClientReplayBufferBytes: defaultClientReplayBufferBytes,
+		IdleTimeout:             5 * time.Minute,
+		QueueWaitTimeout:        30 * time.Second,
+		ReleaseGrace:            defaultReleaseGrace,
+		ReattachWindow:          defaultReattachWindow,
+		AdminScope:              defaultAdminScope,
+		AuthChain:               nexusauth.NewChain(),
 		A2ATaskRetention: a2aTaskRetention{
 			ttl:           defaultA2ATaskTTL,
 			maxPerContext: defaultA2ATasksPerContext,
@@ -1054,6 +1080,16 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	// rather than truncating into some other user at the first claim.
 	if err := foldRunAs(cfg.Binaries, cfg.RunAs); err != nil {
 		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+
+	// Folded onto the default here so every reader of the config sees one settled
+	// number, and so a value with no sane reading fails the BOOT rather than
+	// quietly sizing every lease's buffer wrong for the life of the process.
+	if cfg.ClientReplayBuffer != nil {
+		if *cfg.ClientReplayBuffer < 0 {
+			return Config{}, fmt.Errorf("broker config: client_replay_buffer_bytes: must not be negative; use 0 to disable replay retention")
+		}
+		cfg.ClientReplayBufferBytes = *cfg.ClientReplayBuffer
 	}
 
 	// Trimmed before expansion so a whitespace-only value reads as "unset"

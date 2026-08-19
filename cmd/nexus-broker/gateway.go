@@ -224,9 +224,7 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	// Instance read pump: forward decoded frames to the lease's client conn.
 	// Lifecycle signals from the instance are observed here so the gateway can
 	// unblock POST /claim when the engine reports ready.
-	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
-		return g.registry.ClientConn(id)
-	}, func(f brokerframe.Frame) {
+	g.readPump(ctx, leaseID, wc, g.forwardToClient, func(f brokerframe.Frame) {
 		switch f.Signal {
 		case brokerframe.SignalReady:
 			g.registry.MarkReady(leaseID)
@@ -419,9 +417,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// Stamp last-activity ONLY for real user input (io frames flowing client →
 	// instance) so the idle sweeper resets on genuine activity and not on
 	// instance output, pings, or control frames.
-	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
-		return g.registry.InstanceConn(id)
-	}, func(f brokerframe.Frame) {
+	g.readPump(ctx, leaseID, wc, g.forwardToInstance, func(f brokerframe.Frame) {
 		if f.Signal == brokerframe.SignalIO {
 			g.registry.markActivity(leaseID)
 		}
@@ -485,12 +481,14 @@ func (g *Gateway) resolveClientPrincipal(r *http.Request, leaseID string) (nexus
 	return p, credentialBearer, nil
 }
 
-// readPump reads frames from wc, decodes them (protocol-aware), and forwards
-// each to the peer connection resolved by peerFor. The optional observe
-// callback is invoked for every decoded frame before forwarding, letting the
-// caller react to lifecycle signals (e.g. ready) without disturbing routing.
-// It returns when the connection closes or its context is cancelled.
-func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peerFor func(string) *wsConn, observe func(brokerframe.Frame)) {
+// readPump reads frames from wc, decodes them (protocol-aware), and hands each
+// to forward, which is direction-specific: forwardToInstance pipes the raw
+// bytes through untouched, forwardToClient sequences and buffers them first.
+// The optional observe callback is invoked for every decoded frame before
+// forwarding, letting the caller react to lifecycle signals (e.g. ready)
+// without disturbing routing. It returns when the connection closes or its
+// context is cancelled.
+func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forward func(string, brokerframe.Frame, []byte), observe func(brokerframe.Frame)) {
 	for {
 		_, data, err := wc.conn.Read(ctx)
 		if err != nil {
@@ -514,16 +512,57 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peer
 			continue
 		}
 
-		peer := peerFor(leaseID)
-		if peer == nil {
-			g.logger.Debug("no peer attached, dropping frame",
-				"lease_id", leaseID, "signal", frame.Signal)
-			continue
-		}
-		if !peer.queue(data) {
-			g.logger.Warn("peer send buffer full, dropping frame",
-				"lease_id", leaseID, "signal", frame.Signal)
-		}
+		forward(leaseID, frame, data)
+	}
+}
+
+// forwardToInstance relays one client-originated frame to the lease's instance
+// connection, verbatim.
+//
+// Instance-bound frames are deliberately NOT sequenced and NOT buffered: the
+// broker assigns sequences on the client-bound side only, so an instance needs
+// no protocol awareness and nothing on the dial-back side changed. Both loss
+// paths here — no instance attached, and an instance whose send queue is full —
+// still log and continue, exactly as they always did.
+func (g *Gateway) forwardToInstance(leaseID string, frame brokerframe.Frame, data []byte) {
+	peer := g.registry.InstanceConn(leaseID)
+	if peer == nil {
+		g.logger.Debug("no peer attached, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal)
+		return
+	}
+	if !peer.queue(data) {
+		g.logger.Warn("peer send buffer full, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal)
+	}
+}
+
+// forwardToClient relays one instance-originated frame to the lease's client,
+// through the lease's sequencer and replay buffer.
+//
+// The raw bytes are deliberately discarded: SendClientFrame re-encodes the
+// decoded frame so it can stamp the sequence, which is also what strips any
+// Secret an instance might have set on a frame headed for a client.
+//
+// Neither loss path is fatal any more. With no client attached the frame is
+// retained rather than dropped, so a client that attaches later can be caught
+// up; with a full send queue it is retained too, and the existing warning still
+// fires because a client that is not draining its socket is still an operator
+// problem worth naming.
+func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []byte) {
+	seq, outcome, err := g.registry.SendClientFrame(leaseID, frame)
+	if err != nil {
+		g.logger.Debug("dropping client-bound frame for a lease that is gone",
+			"lease_id", leaseID, "signal", frame.Signal, "error", err)
+		return
+	}
+	switch outcome {
+	case clientFrameBuffered:
+		g.logger.Debug("no client attached; frame retained for replay",
+			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
+	case clientFrameDropped:
+		g.logger.Warn("peer send buffer full, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
 	}
 }
 
