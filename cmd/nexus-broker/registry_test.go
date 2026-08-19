@@ -20,6 +20,23 @@ func testOwner() nexusauth.Principal {
 	}
 }
 
+// testSpawnSecret is the value the seed helpers record on a lease and then echo
+// back through AttachInstance. It is a real secret rather than "" because the
+// registry requires one on EVERY registration — a seed helper that could attach
+// without one would be exercising a path the broker no longer has.
+const testSpawnSecret = "3f8c1a06d54b27e9b0af7c31d629e845"
+
+// attachTestInstance mints the lease's spawn secret and attaches an instance
+// with it, in the order the claim path does: record before anything could dial
+// back, then present the recorded value.
+func attachTestInstance(t *testing.T, reg *Registry, id string, conn *wsConn) {
+	t.Helper()
+	reg.SetSpawnSecret(id, testSpawnSecret)
+	if err := reg.AttachInstance(id, conn, testSpawnSecret); err != nil {
+		t.Fatalf("AttachInstance: %v", err)
+	}
+}
+
 // TestLeaseOwner_StampedAtCreation covers the base case for both constructors:
 // the owner handed to NewLease is the owner LeaseOwner reports back, in full.
 func TestLeaseOwner_StampedAtCreation(t *testing.T) {
@@ -143,9 +160,7 @@ func TestLeaseOwner_SurvivesLifecycleTransitions(t *testing.T) {
 	assertOwner("pending", leaseStatePending)
 
 	instance := newWSConn(nil)
-	if err := reg.AttachInstance(id, instance, "", false); err != nil {
-		t.Fatalf("AttachInstance: %v", err)
-	}
+	attachTestInstance(t, reg, id, instance)
 	assertOwner("registered", leaseStateRegistered)
 
 	client := newWSConn(nil)

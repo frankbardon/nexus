@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -183,20 +184,34 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	leaseID := frame.LeaseID
+
+	// Every refusal from here down — skewed frame version, unknown lease, absent
+	// secret, wrong secret — gets the SAME policy-violation close and the SAME
+	// reason text. The distinctions live in the log and nowhere else: a dialer
+	// that could tell "no such lease" from "wrong secret" could enumerate live
+	// lease ids by differencing the two, and lease ids are the thing the secret
+	// exists to stop being sufficient.
+
+	// The register frame must declare the schema version this broker speaks.
+	// brokerframe.Encode stamps it on every frame and Decode deliberately
+	// tolerates any value "so callers can decide how to react"; this is the
+	// caller deciding. It is checked BEFORE the secret so a mismatched build is
+	// diagnosed as skew rather than as whatever its frame happened to omit.
+	if frame.Version != brokerframe.Version {
+		g.logInstanceRegistrationRefused(leaseID, versionSkewError{presented: frame.Version})
+		_ = conn.Close(websocket.StatusPolicyViolation, instanceRefusedReason)
+		return
+	}
+
 	wc := newWSConn(conn)
 	// The register frame must carry BOTH the lease id and the per-spawn secret
-	// the broker handed this child through its environment. Enforcement is gated
-	// on authentication being configured at all: with no `auth:` block the
-	// secret is ignored, so an older nexus binary at nexus_binary_path keeps
-	// working in an unauthenticated deployment exactly as it did.
-	//
-	// Every refusal — unknown lease, absent secret, wrong secret — gets the SAME
-	// policy-violation close and the same reason text. The distinctions live in
-	// the log below and nowhere else: a dialer that could tell "no such lease"
-	// from "wrong secret" could enumerate live lease ids by differencing the two.
-	if err := g.registry.AttachInstance(leaseID, wc, frame.Secret, g.auth.enabled()); err != nil {
+	// the broker handed this child through its environment. The secret is
+	// required unconditionally — see Registry.AttachInstance for why gating it on
+	// `auth:` was authenticating the dial-back socket with a value that travels
+	// in ws_urls and logs.
+	if err := g.registry.AttachInstance(leaseID, wc, frame.Secret); err != nil {
 		g.logInstanceRegistrationRefused(leaseID, err)
-		_ = conn.Close(websocket.StatusPolicyViolation, "unknown lease")
+		_ = conn.Close(websocket.StatusPolicyViolation, instanceRefusedReason)
 		return
 	}
 
@@ -260,29 +275,66 @@ func (g *Gateway) deliverIO(leaseID string, f brokerframe.Frame) {
 	sink(msg)
 }
 
+// instanceRefusedReason is the WebSocket close reason every refused dial-back
+// gets, whatever the cause. It deliberately reads as the unknown-lease case, so
+// a dialer holding a guessed lease id learns nothing from the difference between
+// "there is no such lease" and "there is, and you failed its secret".
+const instanceRefusedReason = "unknown lease"
+
+// errRegisterVersionSkew means the register frame declared a brokerframe schema
+// version this broker does not speak. It is a distinct sentinel, alongside
+// errSpawnSecretAbsent and errSpawnSecretMismatch, purely so
+// logInstanceRegistrationRefused can name the cause; on the wire it is the same
+// refusal as all the others.
+var errRegisterVersionSkew = errors.New("register frame schema version does not match this broker")
+
+// versionSkewError carries the version the instance declared, so the audit
+// record can state the actual skew rather than "a mismatch". It unwraps to
+// errRegisterVersionSkew so errors.Is keeps working for anything that only cares
+// about the class.
+type versionSkewError struct{ presented int }
+
+func (e versionSkewError) Error() string {
+	return fmt.Sprintf("%s: instance sent version %d, this broker speaks version %d",
+		errRegisterVersionSkew, e.presented, brokerframe.Version)
+}
+
+func (e versionSkewError) Unwrap() error { return errRegisterVersionSkew }
+
 // logInstanceRegistrationRefused emits the audit record for a rejected
 // dial-back. The wire response is identical for every cause; this is the ONLY
 // place they are told apart.
 //
-// The absent-secret case gets its own message, and says out loud that the
-// instance binary may predate the protocol, because that is the failure an
-// operator will otherwise misdiagnose. The symptom of a version-skewed
+// The version-skew and absent-secret cases get their own messages because they
+// are the failures an operator will otherwise misdiagnose. A mismatched
 // nexus_binary_path is indistinguishable from a network fault at the claim
 // layer: every claim times out with "instance did not become ready in time"
 // while the child process is alive, connecting fine, and being silently hung up
-// on. Naming the cause here is what turns a day of packet captures into a
-// binary upgrade.
+// on. Naming the cause here is what turns a day of packet captures into a binary
+// upgrade — and since the spawn secret became mandatory, "upgrade the binary" is
+// the answer to both of them rather than "drop the auth block".
 //
 // No record carries the presented secret. Refusing to log a credential is not
 // optional just because this one was rejected — a near-miss value is exactly
 // what makes a log worth stealing.
 func (g *Gateway) logInstanceRegistrationRefused(leaseID string, err error) {
+	var skew versionSkewError
 	switch {
+	case errors.As(err, &skew):
+		g.logger.Warn("rejecting instance registration: its register frame declares a broker frame "+
+			"schema version this broker does not speak. The binary the binaries registry entry for "+
+			"this lease points at is a different build from this broker: upgrade whichever is older "+
+			"so both speak the same version",
+			"lease_id", leaseID,
+			"instance_frame_version", skew.presented,
+			"broker_frame_version", brokerframe.Version,
+			"error", err)
 	case errors.Is(err, errSpawnSecretAbsent):
 		g.logger.Warn("rejecting instance registration: its register frame carried NO spawn secret, "+
-			"but this broker has an auth block and therefore requires one. "+
-			"The most likely cause is that the instance binary at nexus_binary_path predates the "+
-			"spawn-secret protocol: upgrade it, or remove the auth block to run this broker unauthenticated",
+			"and this broker requires one for every registration — with or without an auth block. "+
+			"The most likely cause is that the instance binary the binaries registry entry points at "+
+			"predates the spawn-secret protocol: upgrade it. Removing the auth block no longer makes "+
+			"this work",
 			"lease_id", leaseID, "error", err)
 	case errors.Is(err, errSpawnSecretMismatch):
 		g.logger.Warn("rejecting instance registration: its register frame carried the WRONG spawn secret. "+

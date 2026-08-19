@@ -2322,7 +2322,7 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it, unless the lease was restored after a broker restart. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty does **not** make the plugin dormant — it dials and is refused. Every broker requires it, with or without an `auth:` block. |
 
 The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
 alone is a poor authenticator for it: the same value appears in `ws_url`s, client
@@ -2340,15 +2340,16 @@ recompute the value a surviving instance still holds; the secret itself is still
 never written to disk. See
 [Restart recovery](#restart-recovery-reattach_window).
 
-Enforcement on the broker side is **gated on the broker having an `auth:` block**
-(see the Session broker section below), with one exception. With no `auth:` block
-the secret is ignored, so a `nexus` build that predates the protocol keeps
-working wherever the broker's [binary registry](#binary-registry-binaries) points
-at one; with one configured, such a build is refused and the broker logs a
-message naming version skew as the likely cause. The exception is a
-lease **restored after a broker restart**, which always requires the secret
-regardless of `auth:` — a live pid is not proof of identity. The value is never
-logged and never appears in `GET /leases`.
+Enforcement on the broker side is **unconditional**: every register frame must
+carry the secret, with or without an `auth:` block, on a freshly claimed lease or
+on one restored after a broker restart. It used to be gated on `auth:`, which
+meant an unauthenticated broker authenticated its dial-back socket with a lease id
+alone — a value that travels in `ws_url`s, client requests and logs. **A `nexus`
+build that predates the protocol is therefore now refused everywhere**, and
+removing the `auth:` block is no longer a workaround; upgrade the binary the
+[binary registry](#binary-registry-binaries) entry points at. The value is never
+logged and never appears in `GET /leases`. See
+[Instance dial-back authentication](#instance-dial-back-authentication-ws-instance).
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
 payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
@@ -3345,7 +3346,7 @@ auth:
 | `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir), [A2A context → session index](#a2a-context--session-index-a2a-contextsjsonl) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
-| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes. It does **not** govern the instance dial-back on `WS /instance`, which always requires the per-spawn secret. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
 | `a2a`                | map      | *(absent)* | Settings shared by every [`agents:`](#agent-profiles-agents) profile. Today it holds one sub-block, `a2a.tasks`, which bounds the durable A2A **task store**. It is separate from `agents:` because nothing in it is per profile: the store is one file, with one retention policy, for the whole broker. Absent means every default below applies. See [A2A task retention](#a2a-task-retention-a2atasks). |
 | `a2a.tasks.ttl`      | duration | `24h`      | How long a **terminal** task stays readable after its last transition. `"0s"` keeps every task until a cap evicts it. Must be a duration **string** (`"24h"`, `"90m"`) — a bare number fails the boot rather than being read as nanoseconds. A negative value is a boot failure naming the key. See [A2A task retention](#a2a-task-retention-a2atasks). |
 | `a2a.tasks.max_per_context` | int | `50`   | How many tasks are kept per (**caller**, `contextId`) pair. `0` disables the cap. The cap is per caller as well as per context so one principal's traffic cannot evict another's — an eviction channel is still a channel. Only **terminal** tasks are evictable; a live task counts against the cap but is never dropped. A negative value is a boot failure. See [A2A task retention](#a2a-task-retention-a2atasks). |
@@ -4006,12 +4007,13 @@ an instance dials `/instance` and presents both the correct lease id **and** the
 correct spawn secret. Once it does, the lease is fully ordinary: idle sweeping,
 crash watching, ownership checks and `POST /release` all apply unchanged.
 
-**A restored lease always requires the spawn secret, even with no `auth:`
-block.** Liveness is not identity: the pid recorded before the restart may have
-been recycled to an unrelated process, and a signal-0 probe (the portable check
-on Linux and macOS) cannot see the difference. Admitting a dialer on a lease id
-alone would hand a stranger's process a client's session, so this check is not
-configurable.
+**Liveness is not identity**, which is why a restored lease is not handed to
+whoever dials in naming it: the pid recorded before the restart may have been
+recycled to an unrelated process, and a signal-0 probe (the portable check on
+Linux and macOS) cannot see the difference. Admitting a dialer on a lease id alone
+would hand a stranger's process a client's session. The spawn secret settles it,
+and it is required on **every** registration — restored or not, `auth:` block or
+not (see [Instance dial-back authentication](#instance-dial-back-authentication-ws-instance)).
 
 **How the secret survives when it is never written down.** The per-spawn secret
 is **derived**, not stored: `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`. The
@@ -4480,23 +4482,36 @@ to the `NEXUS_BROKER_ADDR` / `NEXUS_BROKER_LEASE_ID` /
 
 #### Instance dial-back authentication (`WS /instance`)
 
-The `auth:` block also gates the **instance** dial-back, not just the
-control-plane routes. With it configured, the `register` frame must carry both a
-known `lease_id` **and** the per-spawn secret the broker minted for that lease
-(128 bits of `crypto/rand`, injected through the child's environment at exec).
-Anything else — an unknown lease, an absent secret, a wrong secret — is closed
-with the same `policy violation` / `unknown lease` close, so a dialer cannot
-difference the responses to enumerate live lease ids.
+The `auth:` block does **not** govern the instance dial-back. That block says how
+*clients* are verified; `WS /instance` is where a process the broker started
+proves it is that process, and it does so with the per-spawn secret the broker
+minted for the lease (injected through the child's environment at exec, never
+argv).
 
-The gate exists because of **version skew**. With no `auth:` block the secret is
-not checked at all, so a [registry entry](#binary-registry-binaries) pointing at
-a build that predates the protocol keeps working unchanged. With one configured,
-such a build is refused and the broker logs a `WARN` naming the version skew
-explicitly — otherwise the symptom (every claim returning `504 instance did not
-become ready in time` while the child process is alive and connecting fine) reads
-as a network fault. The check is per **spawn**, so one stale variant fails while
-every other entry keeps working; the fix is to upgrade the binary that entry
-points at.
+**The secret is required unconditionally** — `auth:` block or not, claimed lease
+or restored lease. The register frame must carry a known `lease_id`, a `version`
+matching the broker's own frame schema version, and the matching secret.
+
+> **Breaking change.** Enforcement used to be gated on the `auth:` block being
+> present, so an unauthenticated broker (the documented default) admitted any
+> register frame naming a live lease — including one carrying no secret at all.
+> Lease ids are not secret: they travel in `ws_url`s, client requests and logs, so
+> anything that observed one could register as that lease's instance the moment
+> the real socket dropped. A `nexus` build predating the protocol now fails to
+> register on **every** broker, and removing the `auth:` block is no longer a
+> workaround. Upgrade the binary the [registry entry](#binary-registry-binaries)
+> points at; the check is per **spawn**, so one stale variant fails while every
+> other entry keeps working.
+
+Every refusal — unknown lease, absent secret, wrong secret, skewed frame version
+— is closed with the same `policy violation` / `unknown lease` close, so a dialer
+cannot difference the responses to enumerate live lease ids. **The log is the only
+place the causes are distinguished**, and each `WARN` names its own fix: upgrade
+the binary (skewed version), upgrade the binary (absent secret), or investigate an
+impostor (wrong secret). None of them ever contains a secret value. The
+diagnostics matter because the symptom is identical and misleading — every claim
+returns `504 instance did not become ready in time` while the child process is
+alive and connecting fine, which reads as a network fault.
 
 The secret is never logged, never returned by `GET /leases`, and never passed in
 argv.

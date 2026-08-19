@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -191,12 +194,15 @@ func TestGateway_RegisterAndRoundTrip(t *testing.T) {
 		t.Fatalf("new lease: %v", err)
 	}
 
-	// Instance dials back and registers.
+	// Instance dials back and registers, presenting the secret the claim path
+	// would have recorded on the lease before exec'ing it.
+	registry.SetSpawnSecret(leaseID, testSpawnSecret)
 	instance := dial(t, wsURL+instanceWSPath)
 	defer instance.Close(websocket.StatusNormalClosure, "")
 	writeFrame(t, instance, brokerframe.Frame{
 		LeaseID: leaseID,
 		Signal:  brokerframe.SignalRegister,
+		Secret:  testSpawnSecret,
 	})
 	waitFor(t, func() bool { return registry.InstanceConn(leaseID) != nil })
 
@@ -430,20 +436,48 @@ func seedSecretLease(t *testing.T, reg *Registry, secret string) string {
 	return id
 }
 
-// registerInstance dials the instance endpoint, sends a register frame carrying
-// secret, and reports whether the gateway ACCEPTED it — observed as the socket
-// staying open and an instance connection appearing on the lease, not as the
-// absence of an immediate error (the dial itself always succeeds; the refusal is
-// a close on the established socket).
+// sendRegisterFrame writes a register frame with an EXPLICIT schema version.
+//
+// It marshals by hand rather than through brokerframe.Encode because Encode
+// always stamps the current version — there is no way to put a skewed frame on
+// the wire through it, which is the whole point of the version being a wire
+// value rather than a compile-time one. The field set matches Frame's tags,
+// including `secret,omitempty`, so an empty secret produces the same bytes an
+// instance binary predating the field would send: no `secret` key at all.
+func sendRegisterFrame(t *testing.T, conn *websocket.Conn, version int, leaseID, secret string) {
+	t.Helper()
+	data, err := json.Marshal(struct {
+		Version int    `json:"version"`
+		LeaseID string `json:"lease_id"`
+		Signal  string `json:"signal"`
+		Secret  string `json:"secret,omitempty"`
+	}{version, leaseID, string(brokerframe.SignalRegister), secret})
+	if err != nil {
+		t.Fatalf("marshal register frame: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write register frame: %v", err)
+	}
+}
+
+// registerInstance dials the instance endpoint, sends a current-version register
+// frame carrying secret, and reports whether the gateway ACCEPTED it — observed
+// as the socket staying open and an instance connection appearing on the lease,
+// not as the absence of an immediate error (the dial itself always succeeds; the
+// refusal is a close on the established socket).
 func registerInstance(t *testing.T, wsURL string, reg *Registry, leaseID, secret string) bool {
+	t.Helper()
+	return registerInstanceAtVersion(t, wsURL, reg, brokerframe.Version, leaseID, secret)
+}
+
+// registerInstanceAtVersion is registerInstance for a chosen schema version.
+func registerInstanceAtVersion(t *testing.T, wsURL string, reg *Registry, version int, leaseID, secret string) bool {
 	t.Helper()
 	conn := dial(t, wsURL+instanceWSPath)
 	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
-	writeFrame(t, conn, brokerframe.Frame{
-		LeaseID: leaseID,
-		Signal:  brokerframe.SignalRegister,
-		Secret:  secret,
-	})
+	sendRegisterFrame(t, conn, version, leaseID, secret)
 
 	// Poll for the attach rather than reading: an ACCEPTED registration sends
 	// nothing back, so a read would block until the deadline in the success case.
@@ -457,18 +491,22 @@ func registerInstance(t *testing.T, wsURL string, reg *Registry, leaseID, secret
 	return false
 }
 
-// assertRegisterRefused fails unless the gateway both declined to attach the
-// instance AND closed the socket with the policy-violation close it uses for an
-// unknown lease — the two halves of "refused indistinguishably".
-func assertRegisterRefused(t *testing.T, wsURL string, reg *Registry, leaseID, secret string) {
+// registerRefusal is the observable outcome of a refused dial-back: the close
+// code and reason the gateway hung up with. Every cause must produce the same
+// pair, so tests compare these values rather than asserting on each separately.
+type registerRefusal struct {
+	code   websocket.StatusCode
+	reason string
+}
+
+// refuseRegister sends a register frame and returns what the gateway closed
+// with. It fails the test if the gateway did NOT refuse, or if it attached the
+// instance anyway.
+func refuseRegister(t *testing.T, wsURL string, reg *Registry, version int, leaseID, secret string) registerRefusal {
 	t.Helper()
 	conn := dial(t, wsURL+instanceWSPath)
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	writeFrame(t, conn, brokerframe.Frame{
-		LeaseID: leaseID,
-		Signal:  brokerframe.SignalRegister,
-		Secret:  secret,
-	})
+	sendRegisterFrame(t, conn, version, leaseID, secret)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -476,18 +514,36 @@ func assertRegisterRefused(t *testing.T, wsURL string, reg *Registry, leaseID, s
 	if err == nil {
 		t.Fatal("the gateway kept the connection open; the registration was not refused")
 	}
-	if got := websocket.CloseStatus(err); got != websocket.StatusPolicyViolation {
-		t.Errorf("close status = %v, want %v (the same close an unknown lease gets)",
-			got, websocket.StatusPolicyViolation)
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) {
+		t.Fatalf("the socket failed without a close frame (%v); the refusal must be an explicit close", err)
 	}
-	if reg.InstanceConn(leaseID) != nil {
+	if reg != nil && leaseID != "" && reg.InstanceConn(leaseID) != nil {
 		t.Error("a refused instance was attached to the lease")
+	}
+	return registerRefusal{code: ce.Code, reason: ce.Reason}
+}
+
+// assertRegisterRefused fails unless the gateway both declined to attach the
+// instance AND closed the socket with the policy-violation close it uses for an
+// unknown lease — the two halves of "refused indistinguishably".
+func assertRegisterRefused(t *testing.T, wsURL string, reg *Registry, leaseID, secret string) {
+	t.Helper()
+	got := refuseRegister(t, wsURL, reg, brokerframe.Version, leaseID, secret)
+	if got.code != websocket.StatusPolicyViolation {
+		t.Errorf("close status = %v, want %v (the same close an unknown lease gets)",
+			got.code, websocket.StatusPolicyViolation)
 	}
 }
 
-// TestGatewayInstance_SpawnSecretEnforcedWhenAuthEnabled is the core of E5-S1:
-// with an `auth:` block configured, the register frame's secret must be the one
+// TestGatewayInstance_SpawnSecretEnforcedWhenAuthEnabled covers the register
+// frame's secret on a broker that authenticates its clients: it must be the one
 // the broker minted for that lease.
+//
+// The `auth:` block is no longer what turns the check on — see
+// TestGatewayInstance_SpawnSecretRequiredWithNoAuthBlock for the same assertions
+// without one — but an authenticated broker is the deployment an operator is
+// most likely to be reasoning about, so it keeps its own coverage.
 //
 // Each subtest gets its OWN lease because a successful attach is single-shot
 // (a lease refuses a second instance connection), which would otherwise make a
@@ -536,31 +592,196 @@ func TestGatewayInstance_SpawnSecretEnforcedWhenAuthEnabled(t *testing.T) {
 	})
 }
 
-// TestGatewayInstance_SpawnSecretIgnoredWhenAuthDisabled is the
-// backward-compatibility guarantee, and the reason enforcement is gated at all:
-// an operator running a broker with no `auth:` block can keep pointing
-// nexus_binary_path at an older nexus that sends no secret, and nothing changes.
+// TestGatewayInstance_SpawnSecretRequiredWithNoAuthBlock is the behaviour
+// change this story exists for, and the security boundary the broker used to
+// leave open.
 //
-// The wrong-secret case is included deliberately. With the gate off the field is
-// not consulted AT ALL, so a stale or garbage value must also be admitted — a
-// gate implemented as "compare, but tolerate empty" would pass the first subtest
-// and fail this one.
-func TestGatewayInstance_SpawnSecretIgnoredWhenAuthDisabled(t *testing.T) {
-	for _, tc := range []struct{ name, secret string }{
-		{"no secret at all (pre-protocol instance)", ""},
-		{"a secret this broker never minted", "deadbeefdeadbeefdeadbeefdeadbeef"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newTestGatewayEnv(t, nil, nil)
-			if env.tickets.issuing() {
-				t.Fatal("precondition: auth must be OFF for this fixture")
-			}
-			leaseID := seedSecretLease(t, env.reg, "the-brokers-real-secret")
-			if !registerInstance(t, env.wsURL, env.reg, leaseID, tc.secret) {
-				t.Fatal("an instance was refused by a broker with no auth block")
-			}
-		})
+// Enforcement used to be gated on the broker having an `auth:` block. With no
+// block — the documented default — the presented secret was not consulted at
+// all, so the dial-back socket was authenticated by the lease id alone. Lease
+// ids are not secret: they travel in ws_urls, client requests and logs, so
+// anything that saw one could register as that lease's instance the moment its
+// real socket dropped and inherit the client's session.
+//
+// Every subtest runs on a gateway with a nil auth chain. The refusal cases are
+// each followed by a correct registration ON THE SAME lease, so a gateway that
+// simply refused every dial-back could not pass them.
+func TestGatewayInstance_SpawnSecretRequiredWithNoAuthBlock(t *testing.T) {
+	const secret = "c7e2b91d40a6538f2ba1cd07e4936f15"
+
+	newEnv := func(t *testing.T) *testGatewayEnv {
+		t.Helper()
+		env := newTestGatewayEnv(t, nil, nil)
+		if env.tickets.issuing() {
+			t.Fatal("precondition: auth must be OFF for this fixture")
+		}
+		return env
 	}
+
+	t.Run("matching secret registers", func(t *testing.T) {
+		env := newEnv(t)
+		leaseID := seedSecretLease(t, env.reg, secret)
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("an instance presenting the minted secret was refused")
+		}
+	})
+
+	t.Run("absent secret refused", func(t *testing.T) {
+		env := newEnv(t)
+		leaseID := seedSecretLease(t, env.reg, secret)
+
+		// No `secret` key on the wire at all: what an instance binary predating
+		// the protocol sends, and what USED to be admitted here.
+		assertRegisterRefused(t, env.wsURL, env.reg, leaseID, "")
+
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("the correct secret was also refused; the rejection above proves nothing")
+		}
+	})
+
+	t.Run("wrong secret refused", func(t *testing.T) {
+		env := newEnv(t)
+		leaseID := seedSecretLease(t, env.reg, secret)
+
+		// A well-formed value of the same shape — what someone who learned the
+		// lease id but not the secret would present.
+		assertRegisterRefused(t, env.wsURL, env.reg, leaseID, "00000000000000000000000000000000")
+
+		if !registerInstance(t, env.wsURL, env.reg, leaseID, secret) {
+			t.Fatal("the correct secret was also refused; the rejection above proves nothing")
+		}
+	})
+
+	t.Run("skewed frame version refused even with the right secret", func(t *testing.T) {
+		env := newEnv(t)
+		leaseID := seedSecretLease(t, env.reg, secret)
+
+		// The secret is CORRECT here. Only the declared schema version is wrong,
+		// so nothing but the version check can be doing the refusing.
+		got := refuseRegister(t, env.wsURL, env.reg, brokerframe.Version+1, leaseID, secret)
+		if got.code != websocket.StatusPolicyViolation {
+			t.Errorf("close status = %v, want %v", got.code, websocket.StatusPolicyViolation)
+		}
+
+		if !registerInstanceAtVersion(t, env.wsURL, env.reg, brokerframe.Version, leaseID, secret) {
+			t.Fatal("the current version was also refused; the rejection above proves nothing")
+		}
+	})
+}
+
+// TestGatewayInstance_RefusalsAreIndistinguishableOnTheWire is the
+// non-enumeration rule, asserted across ALL FOUR causes at once.
+//
+// A dialer that could tell "no such lease" from "that lease exists and you got
+// its secret wrong" could enumerate live lease ids by differencing the two —
+// which would hand back exactly what the secret was added to take away. So every
+// refusal closes with the same code and the same reason, and the causes are
+// distinguished only in the broker's own log (asserted below).
+func TestGatewayInstance_RefusalsAreIndistinguishableOnTheWire(t *testing.T) {
+	const minted = "5a0c8e37b1d94f26a8073cbe15d2f409"
+
+	// Each cause gets its own gateway and its own log sink, so the message
+	// captured for one cannot be another's.
+	type cause struct {
+		name string
+		// seed returns the lease id to register against; "" means never minted.
+		seed    func(t *testing.T, env *testGatewayEnv) string
+		version int
+		secret  string
+	}
+	live := func(t *testing.T, env *testGatewayEnv) string {
+		t.Helper()
+		return seedSecretLease(t, env.reg, minted)
+	}
+	causes := []cause{
+		{
+			name:    "unknown lease",
+			seed:    func(*testing.T, *testGatewayEnv) string { return "no-such-lease-id" },
+			version: brokerframe.Version,
+			secret:  minted,
+		},
+		{
+			name:    "absent secret",
+			seed:    live,
+			version: brokerframe.Version,
+			secret:  "",
+		},
+		{
+			name:    "wrong secret",
+			seed:    live,
+			version: brokerframe.Version,
+			secret:  "00000000000000000000000000000000",
+		},
+		{
+			name:    "skewed frame version",
+			seed:    live,
+			version: brokerframe.Version + 1,
+			secret:  minted,
+		},
+	}
+
+	var (
+		wire = make([]registerRefusal, 0, len(causes))
+		logs = make(map[string]string, len(causes))
+	)
+	for _, c := range causes {
+		var buf syncBuffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		env := newTestGatewayEnv(t, nil, logger)
+		leaseID := c.seed(t, env)
+
+		wire = append(wire, refuseRegister(t, env.wsURL, env.reg, c.version, leaseID, c.secret))
+
+		msg := refusalLogMessage(t, buf.String())
+		if msg == "" {
+			t.Fatalf("%s: no refusal record was logged; the distinguishability check would be vacuous", c.name)
+		}
+		if prev, dup := logs[msg]; dup {
+			t.Errorf("%s and %s log the SAME message, so an operator cannot tell them apart:\n%s",
+				c.name, prev, msg)
+		}
+		logs[msg] = c.name
+	}
+
+	// The wire outcome is identical for all four.
+	for i, got := range wire {
+		if got != wire[0] {
+			t.Errorf("%s closed with %v/%q but %s closed with %v/%q; the two are distinguishable on the wire",
+				causes[i].name, got.code, got.reason,
+				causes[0].name, wire[0].code, wire[0].reason)
+		}
+	}
+	if wire[0].code != websocket.StatusPolicyViolation {
+		t.Errorf("close status = %v, want %v", wire[0].code, websocket.StatusPolicyViolation)
+	}
+	if wire[0].reason != instanceRefusedReason {
+		t.Errorf("close reason = %q, want %q", wire[0].reason, instanceRefusedReason)
+	}
+	// And all four are distinct in the log.
+	if len(logs) != len(causes) {
+		t.Errorf("%d distinct refusal messages for %d causes: %v", len(logs), len(causes), logs)
+	}
+}
+
+// refusalLogMessage extracts the `msg` of the first refusal record in JSON log
+// output. It returns "" when there is none.
+func refusalLogMessage(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Msg string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line is not JSON (%v): %s", err, line)
+		}
+		if strings.HasPrefix(rec.Msg, "rejecting instance registration") {
+			return rec.Msg
+		}
+	}
+	return ""
 }
 
 // TestGatewayInstance_SpawnSecretIsNeverLogged pins the non-disclosure rule on
@@ -586,10 +807,17 @@ func TestGatewayInstance_SpawnSecretIsNeverLogged(t *testing.T) {
 	mismatchLease := seedSecretLease(t, env.reg, minted)
 	assertRegisterRefused(t, env.wsURL, env.reg, mismatchLease, presented)
 
-	// A refusal for an ABSENT secret: the version-skew shape, whose record must
-	// name the cause.
+	// A refusal for an ABSENT secret: the pre-protocol binary's shape, whose
+	// record must name the cause.
+	oldBinaryLease := seedSecretLease(t, env.reg, minted)
+	assertRegisterRefused(t, env.wsURL, env.reg, oldBinaryLease, "")
+
+	// A refusal for a SKEWED frame version, carrying the correct secret — so the
+	// record must name the skew without disclosing the value it never checked.
 	skewLease := seedSecretLease(t, env.reg, minted)
-	assertRegisterRefused(t, env.wsURL, env.reg, skewLease, "")
+	if got := refuseRegister(t, env.wsURL, env.reg, brokerframe.Version+1, skewLease, minted); got.code != websocket.StatusPolicyViolation {
+		t.Fatalf("skewed register close status = %v, want %v", got.code, websocket.StatusPolicyViolation)
+	}
 
 	// And an admitted registration, so the expected value passes through the
 	// success path too.
@@ -620,7 +848,19 @@ func TestGatewayInstance_SpawnSecretIsNeverLogged(t *testing.T) {
 	// protocol, because an operator who cannot see that will chase a network
 	// fault instead.
 	if !strings.Contains(out, "predates the spawn-secret protocol") {
-		t.Errorf("the absent-secret refusal does not name the version-skew cause:\n%s", out)
+		t.Errorf("the absent-secret refusal does not name the pre-protocol cause:\n%s", out)
+	}
+	// The version-skew refusal names BOTH versions and the fix. Without them the
+	// symptom (a claim timing out) is indistinguishable from a network fault.
+	for _, want := range []string{
+		"schema version this broker does not speak",
+		"upgrade whichever is older",
+		`"instance_frame_version":` + strconv.Itoa(brokerframe.Version+1),
+		`"broker_frame_version":` + strconv.Itoa(brokerframe.Version),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the version-skew refusal does not carry %q:\n%s", want, out)
+		}
 	}
 }
 

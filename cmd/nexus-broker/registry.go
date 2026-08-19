@@ -232,18 +232,16 @@ type lease struct {
 	hasSlot bool
 
 	// restored marks a lease reconstructed from the journal at boot rather than
-	// minted by a claim (see RestoreLease). It carries ONE behavioural
-	// consequence, and it is a hardening one: AttachInstance enforces the spawn
-	// secret for a restored lease even when the broker has no `auth:` block.
+	// minted by a claim (see RestoreLease). It is what unattachedRestored filters
+	// on, so the reattach reaper can bound how long a lease nothing came back for
+	// keeps holding a slot.
 	//
-	// That asymmetry is deliberate. For a freshly claimed lease the broker knows
-	// it started the process, so the unauthenticated deployment can keep skipping
-	// the check exactly as it always did. For a restored one it knows only that
-	// SOME process holds the recorded pid — and a pid can be reused by an
-	// unrelated process between the broker dying and coming back. Liveness is
-	// therefore not identity, and the secret is the only thing that is. A restored
-	// lease that admitted a dialer on its lease id alone would hand a stranger's
-	// process a client's session.
+	// It no longer carries any authentication consequence. It used to: the spawn
+	// secret was enforced for a restored lease even on a broker with no `auth:`
+	// block, because a live pid is not identity — a pid can be reused by an
+	// unrelated process between the broker dying and coming back. That reasoning
+	// was always the general case rather than the restored one, and AttachInstance
+	// now applies it to every registration.
 	//
 	// It is NOT cleared on reattach: the instance plugin reconnects on every
 	// dropped socket, so a restored lease can register more than once, and each
@@ -1000,11 +998,16 @@ func (r *Registry) SetSpawnSecret(id, secret string) {
 	}
 }
 
-// Sentinel reasons an instance's register frame is refused. They exist so the
-// gateway can tell the two apart in its LOG — a missing secret is the signature
-// of an instance binary that predates the protocol, a wrong one is the signature
-// of something impersonating an instance — while answering both, and an unknown
-// lease, with the byte-identical close (see handleInstance).
+// Sentinel reasons an instance's register frame is refused by the registry. They
+// exist so the gateway can tell them apart in its LOG — a missing secret is the
+// signature of an instance binary that predates the protocol, a wrong one is the
+// signature of something impersonating an instance — while answering both, and
+// an unknown lease, with the byte-identical close (see handleInstance).
+//
+// A third cause, a register frame declaring a schema version this broker does
+// not speak, is raised by the gateway before the registry is consulted at all:
+// see errRegisterVersionSkew. All three converge on the one place causes are
+// told apart, logInstanceRegistrationRefused.
 var (
 	// errSpawnSecretAbsent means the register frame carried no secret at all
 	// while the broker requires one.
@@ -1016,40 +1019,47 @@ var (
 )
 
 // AttachInstance binds an instance's dial-back connection to a known lease.
-// It fails if the lease is unknown, already has an instance connection, or —
-// when enforce is set — presented a spawn secret that is not the one minted for
-// the lease. Those are how the gateway rejects an unrecognized register frame.
+// It fails if the lease is unknown, presented a spawn secret that is not the one
+// minted for the lease, or already has an instance connection. Those are how the
+// gateway rejects an unrecognized register frame.
 //
-// enforce is the config gate: the caller passes true only when the broker has an
-// `auth:` block. With it false the presented secret is ignored entirely, so an
-// instance binary that predates the spawn-secret protocol keeps registering
-// exactly as it did before — the backward-compatibility guarantee, expressed as
-// "do not run the check" rather than "run a check that always passes".
+// THE SECRET IS ALWAYS REQUIRED — for a claimed lease as much as a restored one,
+// on a broker with an `auth:` block as much as one without. It used to be gated
+// on that block, which meant the documented default deployment authenticated the
+// dial-back socket with the lease id alone; and a lease id is not a secret. It
+// travels in ws_urls, client requests and logs, so anything that observed one
+// could register as the instance for that lease the moment its real socket
+// dropped, and inherit the client's session. `auth:` configures how CLIENTS are
+// verified. It was never a statement about whether the broker should believe an
+// unverified dialer, and reading it as one is the hole this closes.
 //
-// A RESTORED lease overrides that gate and always requires the secret, whatever
-// the config says (see lease.restored). For a claimed lease the broker knows it
-// spawned the process; for a restored one it knows only that the recorded pid is
-// alive, and pid reuse means an unrelated process can be sitting on it. There is
-// no configuration in which admitting a dialer on a restored lease id alone is
-// the right answer, so this is not made optional.
+// There is no deployment in which requiring it makes a lease unattachable: the
+// claim path mints a value and records it BEFORE the runner can exec anything
+// (see SetSpawnSecret), and restore derives one from the broker's key (see
+// spawnKey and restoreSpec.spawnSecret), so a lease always has an expected value
+// to compare against. What the requirement costs is an instance binary older
+// than the protocol, which is refused rather than admitted — a deliberate
+// breaking change, diagnosed by name in logInstanceRegistrationRefused.
 //
 // The comparison is constant-time. The presented value never reaches a log or a
 // response, so a timing signal would be the only channel available to someone
 // guessing it, and closing it costs one function call.
-func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret string, enforce bool) error {
+func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
 		return fmt.Errorf("unknown lease: %s", id)
 	}
-	if enforce || l.restored {
-		if presentedSecret == "" {
-			return errSpawnSecretAbsent
-		}
-		if subtle.ConstantTimeCompare([]byte(presentedSecret), []byte(l.spawnSecret)) != 1 {
-			return errSpawnSecretMismatch
-		}
+	if presentedSecret == "" {
+		return errSpawnSecretAbsent
+	}
+	// An empty expectation is not a wildcard: a lease whose secret never got
+	// recorded compares unequal to every non-empty presented value and the
+	// absent-secret branch above has already caught the empty one, so there is
+	// no "" == "" hole.
+	if subtle.ConstantTimeCompare([]byte(presentedSecret), []byte(l.spawnSecret)) != 1 {
+		return errSpawnSecretMismatch
 	}
 	if l.instance != nil {
 		return fmt.Errorf("lease %s already has an instance connection", id)

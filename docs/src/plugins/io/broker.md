@@ -31,7 +31,7 @@ protocol in a custom host.
 |-----|------|---------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR` | WebSocket URL of the broker's instance dial-back endpoint, e.g. `ws://127.0.0.1:8080/instance`. Falls back to the `NEXUS_BROKER_ADDR` env var (injected by the broker at spawn). When empty the plugin stays **dormant** — it does not dial and the engine still boots cleanly. |
 | `lease_id` | string | `$NEXUS_BROKER_LEASE_ID` | Lease id the broker assigned to this instance; echoed in the `register` frame so the gateway can bind this socket to the lease. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generated for this instance and injected at exec; echoed in the `register` frame alongside `lease_id` so the gateway can prove this process is one it spawned. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generated for this instance and injected at exec; echoed in the `register` frame alongside `lease_id` so the gateway can prove this process is one it spawned. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty does **not** make the plugin dormant — it dials and is refused — because "no secret" is a diagnosable failure at the broker, not a reason to stay silent. Every broker requires it, with or without an `auth:` block. |
 
 Config keys take precedence over the environment variables. The reference table
 above is canonical; see the
@@ -141,22 +141,28 @@ plugin cannot tell the difference — it echoes whatever it was given:
   so a restarted broker can recompute the value this instance is still holding and
   let it reattach. The secret itself is still never written to disk.
 
-Enforcement is decided entirely by the broker, and is **gated on the broker
-having an `auth:` block** — with one exception:
+Enforcement is decided entirely by the broker, and it is **unconditional**: the
+secret is required on every registration — with an `auth:` block or without one,
+on a freshly claimed lease or on one restored after a broker restart. That block
+configures how *clients* are verified; it never described what the broker should
+believe about an unverified dialer.
 
-- **No `auth:` block** — the secret is not checked. A `nexus` binary predating
-  the protocol dials back and registers exactly as it always did.
-- **`auth:` configured** — the secret is required. A binary that sends none is
-  refused, and the broker logs a `WARN` naming version skew as the likely cause,
-  because the symptom otherwise looks like a network fault (claims time out with
-  `instance did not become ready in time` while the child is alive and connecting
-  fine). The fix is to upgrade the instance binary.
-- **Reattaching to a lease restored after a broker restart** — the secret is
-  **always** required, whatever the `auth:` setting. The broker only knows that
-  the recorded pid is alive, and a pid can be recycled to an unrelated process
-  while the broker is down; the secret is the only thing that distinguishes the
-  genuine instance. An instance binary too old to send one cannot reattach and its
-  lease is reaped after `reattach_window`.
+> **Breaking change.** Enforcement used to be gated on the broker having an
+> `auth:` block, so a `nexus` binary predating the protocol kept registering on an
+> unauthenticated broker. It no longer does, and dropping the `auth:` block is no
+> longer a workaround. Upgrade the instance binary.
+
+Alongside the secret, the broker validates the `register` frame's **schema
+version** against its own and refuses a mismatch. Both failures are `WARN`s that
+name their own fix, because the symptom otherwise looks like a network fault:
+claims time out with `instance did not become ready in time` while the child is
+alive and connecting fine.
+
+Reattaching to a lease restored after a broker restart is the case where this
+matters most. The broker only knows that the recorded pid is alive, and a pid can
+be recycled to an unrelated process while the broker is down; the secret is the
+only thing that distinguishes the genuine instance. An instance binary too old to
+send one cannot reattach and its lease is reaped after `reattach_window`.
 
 The plugin never logs the secret. Its init record carries a
 `spawn_secret_present` boolean instead, which is what you want when diagnosing a
@@ -179,8 +185,8 @@ nexus.io.broker:
 
 Omit `broker_addr` and `lease_id` (or leave their env vars unset) and the plugin
 stays dormant, so a config that activates the plugin outside a broker still boots
-without error. `spawn_secret` does not affect dormancy — a broker with no `auth:`
-block ignores it, except when the lease was restored after a broker restart.
+without error. `spawn_secret` does not affect dormancy, but omitting it means
+every registration is refused: no broker accepts a register frame without one.
 
 ## See also
 

@@ -217,12 +217,12 @@ func TestClaim_RecordsSpawnSecretOnLease(t *testing.T) {
 	}
 
 	// A value that is not the minted one is refused...
-	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), "not-the-minted-secret", true); err == nil {
+	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), "not-the-minted-secret"); err == nil {
 		t.Fatal("the registry accepted a secret the claim never minted")
 	}
 	// ...and the one handed to the runner is accepted, so the registry's stored
 	// expectation and the child's environment agree.
-	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), spec.spawnSecret, true); err != nil {
+	if err := reg.AttachInstance(spec.leaseID, newWSConn(nil), spec.spawnSecret); err != nil {
 		t.Fatalf("the registry refused the secret it handed the runner: %v", err)
 	}
 

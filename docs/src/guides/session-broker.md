@@ -329,10 +329,12 @@ instance-side configuration and no client action are involved. When it does, and
 it presents the right lease id **and** the right spawn secret, the lease goes
 `active` and existing clients can reconnect to the same `ws_url` and carry on.
 
-> **A restored lease always requires the spawn secret, even on a broker with no
-> `auth:` block.** A live pid is not proof of identity: the recorded pid may have
-> been recycled to an unrelated process while the broker was down, and the
-> portable liveness probe cannot tell. This one check is not configurable.
+> **A live pid is not proof of identity**, which is why a restored lease is not
+> handed to whoever dials in naming it: the recorded pid may have been recycled to
+> an unrelated process while the broker was down, and the portable liveness probe
+> cannot tell. The [spawn secret](#the-instance-dial-back-secret) is what settles
+> it — and it is required on every registration, restored or not, authenticated
+> broker or not.
 
 The secret survives the restart without ever being written down: it is **derived**
 as `HMAC-SHA256(<state_dir>/spawn-key, lease_id)` rather than randomly minted, so
@@ -375,13 +377,17 @@ Opting in means adding an `auth:` block to `broker.yaml`. A **malformed** block
 is a boot failure naming the offending key — it never falls back to disabled, and
 unknown keys are rejected at every level.
 
+"Disabled" is about **clients**. The instance dial-back on `WS /instance` is a
+separate mechanism that this block does not govern in either direction: it always
+requires the [per-spawn secret](#the-instance-dial-back-secret).
+
 ### What the block protects
 
 | Route | With `auth:` configured |
 |-------|-------------------------|
 | `POST /claim`, `POST /release/{lease_id}`, `POST /ticket/{lease_id}`, `GET /leases`, `GET /binaries` | Middleware validates the credential **before** the handler runs. A refused claim spawns nothing. |
 | `WS /lease/{lease_id}` | The same validator chain, resolved by the handler itself so it can also accept a single-use `?ticket=` (see [the ticket flow](#connecting-the-ticket-flow)). |
-| `WS /instance` (the dial-back) | Not a client route: a spawned instance proves itself with its [per-spawn secret](#the-instance-dial-back-secret), not with an operator-configured credential. |
+| `WS /instance` (the dial-back) | **Not covered by this block at all.** It is not a client route: a spawned instance proves itself with its [per-spawn secret](#the-instance-dial-back-secret), which is required whether or not `auth:` is configured. |
 | `GET /healthz` | **Never authenticated.** A load balancer or container probe has no credential to present, and liveness leaks nothing. |
 
 ### The four validators
@@ -556,27 +562,54 @@ ticket for a lease is destroyed the moment the lease goes away.
 
 ### The instance dial-back secret
 
-The `auth:` block also gates the **instance** side. With it configured, an
-instance's `register` frame on `WS /instance` must carry both a known `lease_id`
-**and** the per-spawn secret the broker injected into its environment at exec;
-anything else is closed with the same `unknown lease` policy-violation close. The
+The dial-back is **not** covered by the `auth:` block, and never was in the sense
+that matters: `auth:` says how *clients* are verified, while `WS /instance` is
+where a *process the broker started* proves it is that process.
+
+An instance's `register` frame must carry a known `lease_id` **and** the
+per-spawn secret the broker injected into its environment at exec. This is
+**unconditional** — with an `auth:` block or without one, on a freshly claimed
+lease or one [restored after a restart](#what-a-restart-actually-does). The
 secret is never logged, never returned by `GET /leases`, and never passed in
 argv. The instance side needs no configuration — the
 [`nexus.io.broker`](../plugins/io/broker.md) plugin reads
 `NEXUS_BROKER_SPAWN_SECRET` from the environment the broker set.
 
-> **In an authenticated deployment, an out-of-date registry entry is rejected.**
-> A `nexus` build that predates the spawn-secret protocol cannot
-> echo a secret, so its `register` frame is refused and the claim eventually fails
-> with `504 instance did not become ready in time` while the child process looks
-> alive and connects fine. The broker logs a `WARN` naming the version skew
-> explicitly, because that symptom otherwise reads as a network fault. The fix is
-> to upgrade the binary that registry entry points at — the check is per **spawn**,
-> so one stale variant fails while the rest of the registry keeps working. With
-> **no** `auth:` block the secret is not
-> checked at all, so an older binary keeps working — **except** on a lease
-> [restored after a restart](#what-a-restart-actually-does), which always requires
-> it.
+**Why it cannot be optional.** The only other thing the dial-back could
+authenticate with is the lease id, and a lease id is not a secret: it travels in
+the `ws_url` handed to every client, in client requests, and in logs. Anything
+that observed one could dial `/instance`, register as that lease's instance the
+moment the real socket dropped, and be handed the client's session. Making the
+check conditional on an unrelated block meant the documented default deployment
+ran with that hole open.
+
+> **Breaking change.** Enforcement used to be gated on having an `auth:` block,
+> so a broker without one admitted any register frame naming a live lease —
+> including one carrying no secret at all. It no longer does. A `nexus` build that
+> predates the spawn-secret protocol now fails to register on **every** broker,
+> and removing the `auth:` block is no longer a way to make it work. The fix is to
+> upgrade the binary the [registry entry](#serving-several-nexus-variants-the-binary-registry)
+> points at. The check is per **spawn**, so one stale variant fails while the rest
+> of the registry keeps working.
+
+**Every refusal looks the same on the wire.** An unknown lease, an absent secret,
+a wrong secret and a version-skewed frame all close with the same
+`unknown lease` policy-violation close. That is deliberate: a dialer that could
+tell "no such lease" from "that lease exists and you got its secret wrong" could
+enumerate live lease ids by differencing the two. **The log is the only place the
+causes are distinguished**, and each one names its own fix:
+
+| Log record | What happened | Fix |
+|---|---|---|
+| `…: its register frame declares a broker frame schema version this broker does not speak` | The instance binary and the broker binary are different builds of the frame protocol. | Upgrade whichever is older so both speak the same version. |
+| `…: its register frame carried NO spawn secret` | The instance binary predates the spawn-secret protocol. | Upgrade the binary that registry entry points at. |
+| `…: its register frame carried the WRONG spawn secret` | This broker did not spawn the process that dialed back. | Investigate: something is impersonating an instance, or a stale instance is dialing a broker that was restarted without its `state_dir`. |
+| `rejecting instance registration` (no specific cause) | The lease id is unknown, or the lease already has an instance attached. | Usually a late reconnect from a released lease; harmless. |
+
+All four are `WARN`, and none of them ever contains a secret value. The
+diagnostics matter because the *symptom* is identical and misleading: the claim
+sits there until it fails with `504 instance did not become ready in time` while
+the child process is alive and connecting fine.
 
 ## HTTP API
 
@@ -1468,7 +1501,9 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
     change what a spawned process can do to the host (see the last caveat below).
   - With **no** `auth:` block, none of the above is enforced at all: any client
     that can reach the broker can claim, connect to, and release any instance. The
-    broker logs one `WARN` at boot saying so.
+    broker logs one `WARN` at boot saying so. The one thing that block never
+    governed is the instance dial-back, which always requires its
+    [per-spawn secret](#the-instance-dial-back-secret).
 - **Single broker, single host.** Restart-reattach works; genuine clustering does
   not. There is **no shared lease registry**, no cross-broker `GET /leases`, and
   no routing of a request to the broker that owns the lease.

@@ -283,9 +283,10 @@ func (r *a2aFakeRunner) start(_ context.Context, spec spawnSpec) (processHandle,
 		if r.delay > 0 {
 			time.Sleep(r.delay)
 		}
-		// enforce=false mirrors an unauthenticated broker; the secret is still
-		// minted and recorded by the spine, this fake simply does not echo it.
-		if err := r.registry.AttachInstance(spec.leaseID, inst.conn, spec.spawnSecret, false); err != nil {
+		// The secret is minted and recorded by the claim spine before the runner
+		// is invoked, and handed to this fake in the spawnSpec, so echoing it is
+		// exactly what a real instance does with its environment.
+		if err := r.registry.AttachInstance(spec.leaseID, inst.conn, spec.spawnSecret); err != nil {
 			return
 		}
 		r.registry.MarkReady(spec.leaseID)
