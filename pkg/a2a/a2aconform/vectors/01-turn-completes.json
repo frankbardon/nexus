@@ -1,0 +1,36 @@
+{
+  "id": "turn-completes",
+  "title": "A message drives one turn to TASK_STATE_COMPLETED",
+  "rationale": "The baseline shape of every A2A interaction with Nexus: one client message becomes one task that moves SUBMITTED -> WORKING -> COMPLETED, and the turn's answer arrives as an ARTIFACT rather than as a message, because A2A puts task output in artifacts (specification section 3.7). The assert_active step between the model's text and the end of the turn pins the deviation that matters most here: the task completes when the AGENT TURN ends, not when the model produced its last token. Nexus publishes output and runs its output gates between those two moments, so a mapping that completed at the model response would publish the model's draft instead of what Nexus decided to say.",
+  "features": ["turn"],
+  "steps": [
+    {"kind": "message", "text": "what is the answer?", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "agent_text", "text": "the answer is 42"},
+    {
+      "kind": "assert_active",
+      "note": "the raw model response must NOT complete the task; the output gates have not run yet"
+    },
+    {"kind": "output", "text": "the answer is 42"},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "lastChunk": true,
+        "parts": [{"kind": "text", "equals": "the answer is 42"}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}

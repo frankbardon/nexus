@@ -1,0 +1,56 @@
+{
+  "id": "hitl-interrupt-resume",
+  "title": "A question interrupts the task at INPUT_REQUIRED and the answer resumes it to COMPLETED",
+  "rationale": "An agent asking a human is A2A's own interruption mechanism, not an error and not an ending: the task moves to TASK_STATE_INPUT_REQUIRED carrying the question on its status message (specification section 3.1.1), stays LIVE, and the client resumes it by sending a new message naming the same taskId and contextId (section 3.4). The answer returns the task to WORKING BEFORE it reaches the agent, so the sequence the client sees is deterministic rather than racing the agent's own completion. Multiple-choice options are flattened into the question text because A2A messages on this transport are text and the client can only echo an option id back. The originating request id rides the message metadata so a Nexus-aware client can correlate the two views; a plain A2A client needs only the taskId.",
+  "features": ["turn", "hitl"],
+  "steps": [
+    {"kind": "message", "text": "deploy the service", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {
+      "kind": "ask_user",
+      "requestId": "q-1",
+      "prompt": "Which environment should I deploy to?",
+      "choices": [
+        {"id": "staging", "label": "Staging"},
+        {"id": "production", "label": "Production"}
+      ]
+    },
+    {"kind": "assert_parked", "note": "an interruption is not a termination"},
+    {"kind": "answer", "text": "staging", "messageId": "m-2"},
+    {"kind": "agent_text", "text": "deployed to staging"},
+    {"kind": "assert_active"},
+    {"kind": "output", "text": "deployed to staging"},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "status",
+        "state": "TASK_STATE_INPUT_REQUIRED",
+        "messageRole": "ROLE_AGENT",
+        "messageContains": [
+          "Which environment should I deploy to?",
+          "staging",
+          "production"
+        ],
+        "messageMetadata": {"nexus.hitl.requestId": "q-1"}
+      },
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "lastChunk": true,
+        "parts": [{"kind": "text", "equals": "deployed to staging"}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}

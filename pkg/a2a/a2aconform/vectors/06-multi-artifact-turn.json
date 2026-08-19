@@ -1,0 +1,64 @@
+{
+  "id": "multi-artifact-turn",
+  "title": "Every tool result becomes an artifact, in order, before the turn's own answer",
+  "rationale": "A tool RESULT is work the agent did on the client's behalf and is therefore task output: it becomes an artifact unconditionally, not behind a flag, because an interop transport whose observability depends on an operator having switched it on is one a partner cannot rely on. A tool CALL is not output — it is an intention — so it produces no canonical frame at all; a mapping that emitted one would double-count every tool use. Structured tool output rides as a real application/json part alongside the text so a client decodes a document rather than re-parsing a string, and the artifacts arrive in the order the tools ran, with the turn's own answer last.",
+  "features": ["turn", "tool_artifacts"],
+  "steps": [
+    {"kind": "message", "text": "summarize the repository", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "tool_call", "callId": "call-1", "tool": "list_files", "arguments": {"dir": "."}},
+    {"kind": "tool_result", "callId": "call-1", "tool": "list_files", "output": "README.md\nMakefile"},
+    {"kind": "tool_call", "callId": "call-2", "tool": "word_count"},
+    {
+      "kind": "tool_result",
+      "callId": "call-2",
+      "tool": "word_count",
+      "output": "1284",
+      "structured": {"words": 1284}
+    },
+    {"kind": "agent_text", "text": "The repository contains 1284 words of documentation."},
+    {"kind": "assert_active"},
+    {"kind": "output", "text": "The repository contains 1284 words of documentation."},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "note": "a tool result is output; the tool CALL that preceded it produced no frame",
+        "artifactId": "{taskId}-tool-call-1",
+        "artifactName": "list_files",
+        "lastChunk": true,
+        "metadata": {"nexus.tool.name": "list_files", "nexus.tool.callId": "call-1"},
+        "metadataAbsent": ["nexus.tool.failed", "nexus.artifact.truncated"],
+        "parts": [{"kind": "text", "contains": ["README.md", "Makefile"]}]
+      },
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-tool-call-2",
+        "artifactName": "word_count",
+        "lastChunk": true,
+        "metadata": {"nexus.tool.name": "word_count", "nexus.tool.callId": "call-2"},
+        "parts": [
+          {"kind": "text", "equals": "1284"},
+          {"kind": "data", "mediaType": "application/json", "jsonEquals": {"words": 1284}}
+        ]
+      },
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "lastChunk": true,
+        "parts": [{"kind": "text", "equals": "The repository contains 1284 words of documentation."}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}

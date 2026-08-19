@@ -619,6 +619,38 @@ those dependencies stay out of `cmd/nexus` and `cmd/nexus-broker`.
 Nexus also does not adopt `a2aproject/a2a-go` for the same reason: the SDK drags
 in the same stack plus cobra.
 
+## Conformance: one corpus, two mappings
+
+Two independent mappings turn Nexus activity into A2A frames, and they share
+only the wire types in `pkg/a2a`:
+
+- `plugins/io/a2a` maps the **engine bus** (`agent.turn.start`, `tool.result`,
+  `hitl.requested`, …) onto A2A.
+- the session broker maps the **broker IO envelope** forwarded over its
+  dial-back WebSocket onto A2A.
+
+Nothing in the type system makes the two agree, so a shared conformance corpus
+does: `pkg/a2a/a2aconform` holds a set of JSON vectors describing A2A **output
+only**. A vector names an abstract step ("the agent produced final text", "the
+agent asked the human a question") and pins the exact frame sequence that step
+must produce; a mapping supplies a `Driver` that realizes those steps in its own
+vocabulary, and the runner does the comparing. Beyond a frame-by-frame
+comparison, every vector is independently replayed through `a2a.SSEWriter`, so
+each one also asserts §11.7's stream contract.
+
+`nexus.io.a2a`'s driver is `TestA2AConformance` in
+`plugins/io/a2a/conformance_test.go`; it declares every capability the
+vocabulary names and passes the whole corpus. The oracle's own honesty is tested
+in `pkg/a2a/a2aconform/check_test.go`, which feeds `Check` deliberately-wrong
+observations and asserts each is reported.
+
+**The rule: any new A2A behaviour adds a vector there before it is implemented
+in a second mapping.** Back-filling vectors from a second mapping's observed
+output encodes the drift instead of catching it. And if a mapping cannot satisfy
+a vector, the vector is not weakened: either the mapping has a bug, or the
+expectation is wrong and the fix lands in the vector *with* a rationale saying
+why the old one was.
+
 ## Securing a listener
 
 The listener binds **loopback by default** (`127.0.0.1:8091`) and with no
