@@ -111,11 +111,34 @@ func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2a
 	// this observer, and the snapshot it opens on accounts for everything before.
 	sub, opening := task.attach()
 
-	instance, err := s.leases.Acquire(ctx, s.profiles[card.profile], card.profile, a2aInstanceHooks{
-		Deliver: task.deliver,
-		Gone:    func(reason string) { task.instanceGone(reason) },
+	instance, err := s.leases.Acquire(ctx, a2aLeaseRequest{
+		profile:   s.profiles[card.profile],
+		name:      card.profile,
+		contextID: contextID,
+		owner:     caller,
+		hooks: a2aInstanceHooks{
+			Deliver: task.deliver,
+			Gone:    func(reason string) { task.instanceGone(reason) },
+		},
 	})
 	if err != nil {
+		// A failure the provider CLASSIFIED is answered as a terminal task rather
+		// than as a protocol error: the client asked an agent a question, and
+		// "REJECTED, because the agent could not be started" is an answer in the
+		// vocabulary it already speaks. It never has to learn that this broker runs
+		// agents in leased subprocesses, which is the entire premise of the ingress.
+		//
+		// The frames are emitted BEFORE the snapshot is taken, so the snapshot a
+		// blocking caller is answered with — and the opening frame a streaming
+		// caller gets — already carries the terminal state. Both bindings then close
+		// on it exactly as they would on a turn that ran and failed.
+		if state, reason, classified := a2aSpawnOutcome(err); classified {
+			s.logger.Warn("a2a task settled without ever reaching an agent instance",
+				"profile", card.profile, "task_id", task.taskID,
+				"context_id", contextID, "state", state.String(), "error", err)
+			task.endWith(state, reason)
+			return task, sub, task.snapshotTask(), nil
+		}
 		task.detach(sub)
 		return nil, nil, a2a.Task{}, errLeaseUnavailable(card.profile, err)
 	}

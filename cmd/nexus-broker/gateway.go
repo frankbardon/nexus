@@ -217,12 +217,47 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 			g.registry.MarkReady(leaseID)
 		case brokerframe.SignalSessionIDReport:
 			g.registry.MarkSessionID(leaseID, f.SessionID)
+		case brokerframe.SignalIO:
+			g.deliverIO(leaseID, f)
 		}
 	})
 
 	g.registry.DetachInstance(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")
 	g.logger.Info("instance disconnected", "lease_id", leaseID)
+}
+
+// deliverIO hands one instance IO payload to the lease's in-process observer,
+// if it has one.
+//
+// It runs INSIDE the instance read pump's observe callback, before the frame is
+// forwarded to the client conn, and it is additive: an A2A-observed lease with a
+// client attached still relays every frame to that client untouched. The A2A
+// ingress needs this hook because it has no socket to be relayed to — its caller
+// is an HTTP request, not a WebSocket peer.
+//
+// The decode happens only when a sink exists, so a lease with no observer pays
+// one map lookup per frame and nothing else. An undecodable payload is logged
+// and dropped rather than failing anything: a broker must keep relaying frames
+// it cannot itself interpret, which is what it did before it interpreted any.
+func (g *Gateway) deliverIO(leaseID string, f brokerframe.Frame) {
+	if f.LeaseID != "" && f.LeaseID != leaseID {
+		// The same refusal the forwarding path below makes, applied before the
+		// payload reaches an in-process observer. A frame naming another lease is
+		// dropped there; an observer must not be the one place it gets through.
+		return
+	}
+	sink := g.registry.ioSink(leaseID)
+	if sink == nil {
+		return
+	}
+	msg, err := decodeIOPayload(f.Payload)
+	if err != nil {
+		g.logger.Warn("dropping an instance io payload the broker could not decode",
+			"lease_id", leaseID, "error", err)
+		return
+	}
+	sink(msg)
 }
 
 // logInstanceRegistrationRefused emits the audit record for a rejected

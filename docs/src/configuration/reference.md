@@ -3334,7 +3334,7 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, the session → binary index does not exist, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`, written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
@@ -3531,8 +3531,11 @@ broker actually serves and overwrite anything a card source carried:
   **unset**: profiles do not share an endpoint URL, so the path segment already
   routes, and a second routing signal would have to be reconciled with it.
 - `capabilities` — `streaming`, `pushNotifications` and `extendedAgentCard` all
-  follow the set of operations the ingress actually implements. **All three are
-  `false` today** (see [A2A routes](#a2a-routes-http-api-not-yaml)).
+  follow the set of operations the ingress actually implements. **`streaming` is
+  `true`** (`SendStreamingMessage` is dispatched and the ingress starts a real
+  instance to stream a turn from); **`pushNotifications` and
+  `extendedAgentCard` are `false`** (see
+  [A2A routes](#a2a-routes-http-api-not-yaml)).
 - `securitySchemes` / `securityRequirements` — derived from the broker's
   [`auth:`](#authentication-auth) chain, one scheme and one requirement per
   validator, named with nexusauth's chain-order names (`static`, `jwks`,
@@ -3603,11 +3606,85 @@ JSON-RPC envelope is still told it is malformed. A path naming no configured
 profile is a **404** in the binding's own error shape, never a fallback to some
 default agent.
 
-**A broker that cannot start an instance answers `InternalError`** carrying
-`detail: INSTANCE_PROVIDER_NOT_WIRED` (or `INSTANCE_UNAVAILABLE`), and logs a
-warning at boot naming the missing piece. The translation is complete; what a
-release without the instance lifecycle is missing is the machinery that produces
-a Nexus process to run the turn on.
+**A message starts, reuses or resumes an instance, and the client is told
+none of it** — see [Conversation lifecycle](#conversation-lifecycle-contextid)
+below for the four cases, the failure states and the response latency each one
+implies.
+
+**A broker built without an instance provider answers `InternalError`** carrying
+`detail: INSTANCE_PROVIDER_NOT_WIRED`, and logs a warning at boot naming the
+missing piece. That is not a state a shipped `nexus-broker` binary can be in —
+`run()` always installs the lifecycle when `agents:` is configured — but the
+refusal exists so an embedder that assembles the ingress itself gets a specific,
+actionable answer rather than a nil-pointer panic.
+
+#### Conversation lifecycle (`contextId`)
+
+An A2A client holds a **`contextId`** and nothing else. The broker holds leases.
+The client never learns the second thing exists, because the ingress owns the
+whole mapping between them:
+
+```
+contextId ──(durable index)──▶ engine session id ──(the /claim spawn spine)──▶ lease
+```
+
+The middle term is what makes it work. A lease is mortal — it is released when a
+conversation goes quiet and it dies when its instance crashes — but an engine
+session is a directory on disk that outlives every process that opened it. A
+message on a context whose instance is gone is therefore not an error to report;
+it is a session to resume.
+
+| What the broker knows about the `contextId` | What a message does |
+|---|---|
+| Nothing (new conversation, or no `contextId` at all — one is minted) | Spawns an instance with **no** `-recall`, waits for dial-back and ready, then runs the turn. |
+| A live instance | Routes the turn to it. History is whatever the running engine holds — nothing is replayed. |
+| A live lease already running the context's session, that this process lost track of (a **restart** with a surviving instance) | **Adopts** it rather than spawning a second engine over one session directory. |
+| A session with no live lease (idle-released, crashed, or a restart) | Spawns a new instance with **`-recall <session id>`** so the engine replays the history. The client is not told the instance ever stopped. |
+
+**Continuity is keyed by `(principal, profile, contextId)`, not by `contextId`
+alone.** A2A lets a client choose its own `contextId`, so keying on it alone
+would let any caller name another caller's conversation and be handed that
+session's history. A colliding `contextId` under a different principal — or a
+different profile — resolves to the caller's **own** binding instead: no leak, no
+oracle, and no overwrite of the real owner's entry. With no `auth:` block every
+caller is the same anonymous principal, exactly as lease ownership already
+behaves.
+
+**The instance is NOT released at the end of a turn.** It is an ordinary lease
+from the moment it is created: it appears in `GET /leases`, it is owned by the
+A2A caller, it counts against `max_concurrent`, `POST /release` tears it down,
+the crash watcher covers it, and **`idle_timeout` reaps it** when the
+conversation goes quiet. Every A2A message the broker sends to it resets the idle
+timer, exactly as a WebSocket client's input does. Releasing per turn was
+rejected: it would make every message a cold boot.
+
+**A spawn that does not produce an instance settles the task, never hangs.** The
+failure is answered as a terminal A2A **task state** rather than as a protocol
+error, because a client that asked an agent a question deserves an answer in the
+vocabulary it already speaks:
+
+| Condition | Task state | Why |
+|---|---|---|
+| The profile's `binary` is not in the registry; the context's session was created by a different binary; the profile's `config` file cannot be read or is empty | `TASK_STATE_REJECTED` | The broker refused the request. Nothing was attempted, and the same message will fail the same way until an operator changes something. |
+| The instance exited while booting, never signalled ready inside the ready timeout, or the broker is at capacity | `TASK_STATE_FAILED` | The spawn was attempted and did not come up. A retry may succeed. |
+| A surviving instance is mid-reattach after a restart | `TASK_STATE_FAILED` | Spawning now would put a second engine on one session directory. Retry once the instance has reconnected. |
+
+The terminal status carries a message explaining what happened **without naming a
+lease**, because a lease is not a concept an A2A client has.
+
+**Response latency.** The two internal timeouts a `/claim` caller already waits
+on apply unchanged to the *first* message of a conversation and to the message
+that re-spawns one:
+
+| Bound | Value | Effect on an A2A response |
+|---|---|---|
+| Ready wait | 30s | A cold spawn blocks the A2A request until the instance signals ready. In the worst case the client waits 30s and then receives a `FAILED` task. |
+| Session-report grace | 5s | After ready, the broker waits up to 5s for the instance's session id. It is **not** on the answer path for the turn: a report that never arrives only costs the conversation its durable binding, so a later resume starts a fresh session rather than replaying. |
+
+Both are constants, not config keys: they bound the broker's own handshake with a
+process it started, not a policy an operator tunes. A **second** message on a
+live conversation pays neither — it goes straight to the running instance — which
+is the whole reason the instance is kept alive between turns.
 
 ### Lease durability (`state_dir`)
 

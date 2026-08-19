@@ -287,6 +287,18 @@ booting** — an index that cannot be opened at all only logs a `WARN` and turns
 mapping off. See
 [Session → binary index](../configuration/reference.md#session--binary-index-session-binariesjsonl).
 
+The durable **A2A context → session** mapping lives in a third file,
+`<state_dir>/a2a-contexts.jsonl`, written only when the broker has an
+[`agents:` block](#the-a2a-front-door-agents). It is what lets a message on a
+`contextId` whose instance has stopped resume the conversation after a restart
+rather than starting a new one, and it follows the session → binary index in
+every respect: separate from the journal for the same reason, capped at 4096
+bindings with the oldest dropped first, rewritten on open and every 256 appends,
+tolerant of a torn trailing record, and **never a boot failure** — an index that
+cannot be opened logs a `WARN` and continuity falls back to the life of the
+process. See
+[Conversation lifecycle](#one-conversation-one-instance-contextid).
+
 The journal is compacted on open and every 512 appends, so it holds roughly the
 live lease set rather than the whole history. A write that fails is logged and
 never fails the claim or release that produced it, and a record torn by a `kill
@@ -1113,13 +1125,98 @@ A few rules worth knowing before you write the block; the full key list is in th
 are registered, no card is built, and nothing new appears in the boot log.
 
 > **Current state.** `SendMessage`, `SendStreamingMessage` and `CancelTask` are
-> translated end to end (below). `GetTask`, `ListTasks` and `SubscribeToTask`
-> still answer a well-formed `UnsupportedOperationError` carrying
-> `detail: OPERATION_NOT_IMPLEMENTED`: all three read a task after it has ended,
-> which needs a durable record the ingress does not yet keep. What is also still
-> missing is the machinery that STARTS an instance for a turn — until it is
-> wired, every message is answered with `InternalError` carrying
-> `detail: INSTANCE_PROVIDER_NOT_WIRED`, and the broker says so at boot.
+> driven end to end: a message starts (or resumes) a real isolated instance and
+> the turn is translated back into A2A frames — see
+> [One conversation, one instance](#one-conversation-one-instance-contextid) and
+> [What the A2A ingress translates](#what-the-a2a-ingress-translates) below.
+> `GetTask`, `ListTasks` and `SubscribeToTask` still answer a well-formed
+> `UnsupportedOperationError` carrying `detail: OPERATION_NOT_IMPLEMENTED`: all
+> three read a task after it has ended, which needs a durable per-principal task
+> record the ingress does not yet keep — it holds live tasks only.
+
+### One conversation, one instance (`contextId`)
+
+An A2A client holds a **`contextId`**. The broker holds leases. **The client
+never learns the second thing exists.**
+
+```
+contextId ──(durable index)──▶ engine session id ──(the /claim spawn spine)──▶ lease
+```
+
+The middle term is what makes the trick work. A lease is mortal — it is released
+when a conversation goes quiet, it dies when its instance crashes — but an engine
+session is a directory on disk that outlives every process that opened it. So a
+message on a context whose instance has gone is not an error to report; it is a
+session to resume.
+
+| What the broker knows about the `contextId` | What the message does |
+|---|---|
+| Nothing — a new conversation, or a message with no `contextId` at all (one is minted) | Spawns an instance with **no** `-recall`. |
+| A live instance | Goes straight to it. History is what the running engine holds; nothing is replayed. |
+| A live lease already running that context's session, which this process lost track of (a broker **restart** with a surviving instance) | **Adopts** it, rather than putting a second engine on one session directory. |
+| A session with no live instance — idle-released, crashed, or a restart | Spawns a new instance with **`-recall <session id>`** so the engine replays the history. |
+
+**Nothing about any of that reaches the client.** It sends a message and gets an
+answer. There is no claim, no lease id, no reconnect, and no "your session
+expired".
+
+```bash
+# First message: this cold-spawns an isolated nexus instance.
+curl -s https://broker.example/agents/support/a2a \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' -d '{
+    "jsonrpc":"2.0","id":1,"method":"SendMessage",
+    "params":{"message":{"messageId":"m1","role":"ROLE_USER",
+      "contextId":"conv-42","parts":[{"text":"How do I rotate my API key?"}]}}}'
+
+# An hour later, after idle_timeout released the instance: same call, same
+# contextId. The broker re-spawns with -recall and the conversation continues.
+```
+
+**Continuity is keyed by `(principal, profile, contextId)`.** A2A lets a client
+choose its own `contextId`, so keying on it alone would let anyone name someone
+else's conversation and be handed that session's history. A colliding
+`contextId` under a different principal — or a different profile — resolves to
+the caller's **own** binding instead. With no `auth:` block every caller is the
+same anonymous principal, exactly as lease ownership already behaves.
+
+**Durability needs [`state_dir`](#surviving-a-restart-set-state_dir).** The
+binding is written to `<state_dir>/a2a-contexts.jsonl`, a separate append-only
+index beside the lease journal for the same reason the
+[session → binary index](#serving-several-nexus-variants-the-binary-registry) is
+separate: the journal is compacted down to live leases, and a resume always
+happens after the lease was released. Without `state_dir` a conversation is
+resumable only for as long as the broker process lives.
+
+**An A2A-created lease is an ordinary lease.** It is listed by `GET /leases`,
+owned by the A2A caller, counted against `max_concurrent`, torn down by
+`POST /release`, watched for crashes, and **reaped by `idle_timeout`**. Every
+message the ingress sends resets the idle timer, exactly as a WebSocket client's
+input does — so an active conversation is never reaped mid-turn, and a finished
+one is released like anything else. The instance is deliberately **not** released
+at the end of each turn: that would make every message a cold boot.
+
+**A spawn that fails settles the task; it never hangs.**
+
+| Condition | Task state |
+|---|---|
+| Unknown `binary`, a session created by a different binary, an unreadable or empty profile `config` | `TASK_STATE_REJECTED` — the broker refused; the same message will fail the same way until an operator changes something |
+| The instance died booting, never signalled ready, the broker is at capacity, or a surviving instance is still mid-reattach | `TASK_STATE_FAILED` — attempted and did not come up; a retry may succeed |
+
+The terminal status message explains what happened **without naming a lease**.
+
+**What this costs in latency.** The broker's two internal handshake bounds are
+the same ones a `POST /claim` caller already waits on, and they apply to the
+*first* message of a conversation and to a message that re-spawns one:
+
+| Bound | Value | What an A2A caller sees |
+|---|---|---|
+| Ready wait | 30s | A cold spawn blocks the request until the instance is ready. Worst case: 30s, then a `FAILED` task. |
+| Session-report grace | 5s | Waited after ready, for the instance's session id. Not on the answer path — a report that never arrives only costs the conversation its durable binding, so a later resume starts fresh instead of replaying. |
+
+Both are constants rather than config keys: they bound the broker's handshake
+with a process it started, not a policy to tune. **A second message on a live
+conversation pays neither** — it goes straight to the running instance, which is
+the entire reason the instance is kept alive between turns.
 
 ### What the A2A ingress translates
 
@@ -1200,6 +1297,13 @@ releases it through the same teardown path as `POST /release` (so the session is
 persisted). Only inbound `io` input frames (client → instance) reset the idle
 timer — output, pings, and control frames do not. Set `idle_timeout` to `0` to
 disable idle reaping.
+
+**This applies to [A2A](#the-a2a-front-door-agents) instances too**, and it is
+what makes them affordable: every message the A2A ingress sends counts as client
+input, so an active conversation is never reaped, and a conversation nobody is
+having stops costing a process. The next message on that `contextId` re-spawns
+the instance with `-recall`, so the client sees continuity rather than a
+released session.
 
 ## v1 caveats
 

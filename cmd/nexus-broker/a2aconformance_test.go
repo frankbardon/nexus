@@ -112,8 +112,8 @@ func newConformIngress(t *testing.T) (*A2AServer, *conformInstance) {
 // conformLeaseProvider hands every turn the same scripted instance.
 type conformLeaseProvider struct{ instance *conformInstance }
 
-func (p *conformLeaseProvider) Acquire(_ context.Context, _ AgentProfile, _ string, hooks a2aInstanceHooks) (a2aInstance, error) {
-	p.instance.bind(hooks)
+func (p *conformLeaseProvider) Acquire(_ context.Context, req a2aLeaseRequest) (a2aInstance, error) {
+	p.instance.bind(req.hooks)
 	return p.instance, nil
 }
 

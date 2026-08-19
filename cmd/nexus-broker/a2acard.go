@@ -64,13 +64,25 @@ func buildAgentCard(profile string, spec AgentProfile, baseURL string, validator
 		},
 	}
 
-	// Capabilities are derived from what is actually wired, never configured.
-	// Every one of them is false today because no operation is implemented yet
-	// (see brokerOperationImplemented): the routes exist and answer, but they
-	// answer UnsupportedOperationError. A card that advertised streaming before
-	// a stream could be opened would be the confident wrong answer this split
-	// exists to prevent, and it will flip on its own when the operation map
-	// gains an entry.
+	// Capabilities are derived from what is actually wired, never configured, and
+	// they track brokerImplementedOperations so the card cannot drift from the
+	// dispatch.
+	//
+	// `streaming` is TRUE, and it is now true in the full sense rather than the
+	// narrow one. SendStreamingMessage is dispatched (which is what this
+	// expression reads) AND the ingress has a lifecycle behind it that produces a
+	// real instance to stream from, so a client that acts on the advertisement
+	// gets a live SSE stream of an agent turn rather than a refusal about missing
+	// machinery. That second half is not expressible in this expression — the
+	// provider is installed after the cards are rendered, and a card that flipped
+	// a capability based on runtime wiring would change meaning between two
+	// fetches — so it is guarded instead by the loud boot WARN in
+	// A2AServer.logStartupState when no provider is wired, and by the end-to-end
+	// streaming tests.
+	//
+	// `pushNotifications` and `extendedAgentCard` remain false: neither operation
+	// is dispatched, and the matching refusal (UnsupportedOperationError) is what
+	// a client is told if it tries.
 	card.Capabilities.Streaming = brokerOperationImplemented(a2a.MethodSendStreamingMessage) ||
 		brokerOperationImplemented(a2a.MethodSubscribeToTask)
 	card.Capabilities.PushNotifications = brokerOperationImplemented(a2a.MethodCreateTaskPushNotificationConfig)

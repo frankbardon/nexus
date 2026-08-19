@@ -41,14 +41,50 @@ type a2aInstanceHooks struct {
 	Gone func(reason string)
 }
 
+// a2aLeaseRequest is everything a provider is told about the turn it must
+// produce an instance for.
+//
+// It is a struct rather than a parameter list for the reason a2aTaskConfig is:
+// three of its fields are strings, and a positional call site would let two of
+// them be transposed without the compiler noticing — a bug that would route one
+// caller's conversation to another's, silently.
+type a2aLeaseRequest struct {
+	// profile is the resolved `agents:` entry: which config to boot and which
+	// binary registry entry to boot it with.
+	profile AgentProfile
+
+	// name is the profile's name, which is also its route namespace and the
+	// label every log line carries.
+	name string
+
+	// contextID is the A2A conversation this turn belongs to. It is THE
+	// continuity key: a provider that keeps state maps it to an engine session,
+	// so a second message on the same context reaches the same history.
+	//
+	// It is never empty by the time a provider sees it — the ingress mints one
+	// for a client that named none — so a provider need not invent a fallback.
+	contextID string
+
+	// owner is the principal the A2A request authenticated as. It scopes the
+	// context mapping (see a2aContextRecord.OwnerID) and is stamped on the lease
+	// the same way a claim's principal is, so an A2A-created instance is owned,
+	// listed and released exactly like a claimed one.
+	owner nexusauth.Principal
+
+	// hooks is how the leased instance reports back.
+	hooks a2aInstanceHooks
+}
+
 // a2aLeaseProvider hands the A2A ingress an instance to run one task on.
 //
-// Acquire is the whole of the lifecycle contract: given a profile, return
-// something that speaks the IO envelope and route its replies to hooks. How
-// that instance comes to exist — cold spawn, a warm pool, resuming a persisted
-// session — is entirely the provider's business.
+// Acquire is the whole of the lifecycle contract: given a profile and a
+// conversation, return something that speaks the IO envelope and route its
+// replies to hooks. How that instance comes to exist — cold spawn, reuse of the
+// one already serving that context, resuming a persisted session — is entirely
+// the provider's business, and the translation above it never learns which
+// happened.
 type a2aLeaseProvider interface {
-	Acquire(ctx context.Context, profile AgentProfile, name string, hooks a2aInstanceHooks) (a2aInstance, error)
+	Acquire(ctx context.Context, req a2aLeaseRequest) (a2aInstance, error)
 }
 
 // errNoLeaseProvider is the refusal an A2A request gets while no provider is
@@ -68,8 +104,76 @@ var errNoLeaseProvider = errors.New("this broker has no agent instance provider 
 // shared conformance corpus against a provider supplied by the test.
 type unwiredLeaseProvider struct{}
 
-func (unwiredLeaseProvider) Acquire(context.Context, AgentProfile, string, a2aInstanceHooks) (a2aInstance, error) {
+func (unwiredLeaseProvider) Acquire(context.Context, a2aLeaseRequest) (a2aInstance, error) {
 	return nil, errNoLeaseProvider
+}
+
+// a2aSpawnError classifies a failure to produce an instance onto the A2A TASK
+// STATE the client is answered with, rather than onto a protocol error.
+//
+// The distinction is the point. A protocol error says "this request was not
+// processed"; a terminal task state says "this request was processed and here is
+// how it ended". A client that asked an agent a question and could not be given
+// one deserves the second: it gets a task id, a terminal state and a status
+// message explaining what happened, in the same shape it would have got if the
+// agent had run and failed. It never has to learn that Nexus has leases, or that
+// starting one can fail.
+//
+//   - REJECTED is for a request this broker REFUSED: the profile names a binary
+//     registry entry that is gone, or the context's session was created by a
+//     different build (see resolveSpawnBinary). Nothing was attempted, and
+//     retrying the same message will fail the same way — an operator has to
+//     change something.
+//   - FAILED is for a spawn that was ATTEMPTED and did not produce a live
+//     instance: the process died booting, it never signalled ready inside the
+//     timeout, or the broker is at capacity. A retry may well succeed.
+//
+// Anything not carrying this classification stays a protocol error (see
+// errLeaseUnavailable), because "the broker has no way to run agents at all" is
+// not a property of the task.
+type a2aSpawnError struct {
+	// state is the terminal state the task settles in. It is always one of
+	// TaskStateRejected or TaskStateFailed; the constructors are the only way to
+	// build one, so no third state can leak in.
+	state a2a.TaskState
+
+	// reason is the operator-and-client-facing prose put on the terminal status
+	// message. It names what could not be started and why, without naming leases.
+	reason string
+
+	// err is the underlying cause, kept for logs and errors.Is.
+	err error
+}
+
+func (e *a2aSpawnError) Error() string { return e.reason }
+
+func (e *a2aSpawnError) Unwrap() error { return e.err }
+
+// a2aRejectedSpawn builds the refusal for a request this broker will not act on.
+func a2aRejectedSpawn(reason string, err error) *a2aSpawnError {
+	return &a2aSpawnError{state: a2a.TaskStateRejected, reason: reason, err: err}
+}
+
+// a2aFailedSpawn builds the failure for a spawn that was attempted and did not
+// produce a live instance.
+func a2aFailedSpawn(reason string, err error) *a2aSpawnError {
+	return &a2aSpawnError{state: a2a.TaskStateFailed, reason: reason, err: err}
+}
+
+// a2aSpawnOutcome reports the terminal task state an acquisition failure should
+// settle at, and whether the failure carried a classification at all.
+//
+// ok=false means "not a spawn outcome" — the unwired provider, or any error a
+// future provider returns without classifying it — and the caller answers with a
+// protocol error instead. Defaulting an unclassified error to FAILED was
+// rejected: it would silently turn "this broker cannot run agents" into "your
+// task failed", which points an integrator at their own request.
+func a2aSpawnOutcome(err error) (a2a.TaskState, string, bool) {
+	var spawnErr *a2aSpawnError
+	if errors.As(err, &spawnErr) {
+		return spawnErr.state, spawnErr.reason, true
+	}
+	return "", "", false
 }
 
 // a2aTasks is the ingress's live-task registry.

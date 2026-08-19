@@ -162,6 +162,30 @@ func run() error {
 		defer func() { _ = sessionBinaries.Close() }()
 	}
 
+	// The durable A2A context → session index. It is what lets a message on a
+	// contextId whose instance was released (or whose broker restarted) resume the
+	// conversation instead of starting a new one, and it is opened ONLY when the
+	// broker actually fronts A2A profiles — a broker with no `agents:` block must
+	// not gain a file it will never write to.
+	//
+	// It shares state_dir's fate and the session→binary index's failure policy: an
+	// index that cannot be opened degrades continuity to the life of this process,
+	// which is exactly what a broker with no state_dir already has. Refusing to
+	// boot over it would trade a degraded feature for an outage.
+	var a2aContexts *a2aContextIndex
+	if len(cfg.Agents) > 0 {
+		a2aContexts, err = openA2AContextIndex(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a context index; a conversation whose agent instance "+
+				"has stopped will start a fresh session instead of resuming after a broker restart",
+				"state_dir", cfg.StateDir, "error", err)
+			a2aContexts = nil
+		}
+		if a2aContexts != nil {
+			defer func() { _ = a2aContexts.Close() }()
+		}
+	}
+
 	// The spawn-secret derivation key. It shares state_dir's fate: present and
 	// stable when durability is on, absent (and secrets random per spawn, as they
 	// always were) when it is off. Loaded AFTER openLeaseStore because that is
@@ -226,6 +250,19 @@ func run() error {
 	if err != nil {
 		logger.Error("failed to build the a2a agent profiles", "error", err)
 		return err
+	}
+	// The lifecycle behind the ingress. It is installed BEFORE logStartupState so
+	// the boot log tells the truth: that method warns loudly when no provider is
+	// wired, and wiring it afterwards would print a warning about a broker that is
+	// in fact fully assembled.
+	//
+	// It is given the CLAIM SERVER rather than the runner or the registry alone,
+	// because every instance it starts goes through the same spawn spine POST
+	// /claim uses — capacity slot, spawn secret, recorded-binary reconciliation,
+	// bounded ready wait, crash watcher. There is one way to boot an instance in
+	// this binary.
+	if agents.enabled() {
+		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
 	}
 	agents.logStartupState(cfg)
 

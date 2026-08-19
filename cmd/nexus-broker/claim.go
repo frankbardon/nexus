@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // defaultReadyTimeout bounds how long POST /claim waits for a freshly spawned
@@ -158,23 +160,88 @@ func (s *ClaimServer) Register(mux routeMux) {
 	mux.HandleFunc("POST /claim", s.handleClaim)
 }
 
-// handleClaim implements the new-session claim spine: validate, mint lease,
-// write temp config, spawn, wait for ready (bounded), respond. Every error
-// path cleans up the temp config, kills/reaps the process, and drops the lease
-// so nothing leaks.
-func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
-	var req claimRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBody))
-	if err := dec.Decode(&req); err != nil {
-		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
-		return
-	}
-	if req.Config == "" {
-		s.fail(w, http.StatusBadRequest, "claim requires a non-empty config", nil)
-		return
-	}
+// instanceSpawn is a successfully booted instance: the lease it runs under, the
+// engine session it is serving, and the identifying details a caller records or
+// logs.
+//
+// It exists because POST /claim is no longer the only thing that spawns an
+// instance. The broker's A2A ingress starts one too — from a profile rather than
+// from a request body — and the two MUST NOT be separate spawn paths: capacity
+// accounting, the spawn secret, the recorded-binary reconciliation, the ready
+// wait and the crash watcher are each load-bearing, and a second implementation
+// would eventually differ in one of them. So the spine below is a method, this
+// is what it returns, and handleClaim is a thin HTTP shell over it.
+type instanceSpawn struct {
+	// leaseID is the lease the instance registered against.
+	leaseID string
 
-	// Resolve the variant this claim spawns BEFORE anything is allocated.
+	// sessionID is the engine session the instance is running: the id it
+	// reported for a fresh session, or the requested id on a resume. It may be
+	// EMPTY when a fresh instance did not report one within the grace window —
+	// the spawn still succeeded, and a caller that needs an id to resume later
+	// has to treat the absence as "unknown", never as an error.
+	sessionID string
+
+	// binary is the `binaries:` registry entry name that was exec()d.
+	binary string
+
+	// pid is the spawned process id, for logging.
+	pid int
+}
+
+// claimFailure is a spawn that produced no live instance, carrying the HTTP
+// status POST /claim answers it with.
+//
+// The status is part of the value rather than re-derived by each caller because
+// classifying a failure is exactly the part that must not drift: an unknown
+// binary is a 400, a session bound to a binary this broker no longer offers is a
+// 409, capacity exhaustion is a 503, and a boot that never became ready is a
+// 504. A second caller — the A2A ingress — maps the SAME classification onto A2A
+// task states, and it can only do that faithfully if the classification is made
+// once, here.
+type claimFailure struct {
+	status int
+	msg    string
+	err    error
+}
+
+func (f *claimFailure) Error() string {
+	if f.err != nil {
+		return f.msg + ": " + f.err.Error()
+	}
+	return f.msg
+}
+
+func (f *claimFailure) Unwrap() error { return f.err }
+
+// silent reports a failure that must not be answered at all, because the caller
+// is already gone: a claim whose context was cancelled while it waited in the
+// capacity queue. It is spelled as a zero status rather than a bool so a caller
+// that forgets to check it writes an obviously-wrong response code instead of a
+// plausible one.
+func (f *claimFailure) silent() bool { return f.status == 0 }
+
+// refusedByCaller reports whether the REQUEST was at fault (a 4xx) rather than
+// the spawn. It is the distinction the A2A ingress needs: a request the broker
+// refused is a REJECTED task, and a boot that failed is a FAILED one.
+func (f *claimFailure) refusedByCaller() bool { return f.status >= 400 && f.status < 500 }
+
+// spawnInstance is THE instance spawn spine: resolve the binary, acquire a
+// capacity slot, mint the lease and its spawn secret, write the temp config,
+// exec the instance, wait (bounded) for its dial-back and ready signal, wait a
+// short grace for its session-id report, and arm the crash watcher.
+//
+// Every error path cleans up after itself — the temp config is removed, a
+// started process is killed and reaped, and the lease (with its capacity slot)
+// is dropped — so a failed spawn leaks nothing.
+//
+// It performs NO authorization and writes NO response. Ownership is decided by
+// the caller: handleClaim passes the principal the auth guard resolved, and the
+// A2A ingress passes the principal that authenticated the A2A request. Both are
+// real callers; neither is the broker acting on itself, so there is nothing here
+// that has to cope with an absent one.
+func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner nexusauth.Principal) (instanceSpawn, *claimFailure) {
+	// Resolve the variant this spawn produces BEFORE anything is allocated.
 	// Everything below this point acquires something that has to be given back —
 	// a capacity slot, a lease id, a temp config file, a child process — and
 	// neither a caller's typo nor a refused resume must be able to consume any of
@@ -189,18 +256,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	recorded, recordedKnown := s.registry.BinaryForSession(req.SessionID)
 	binaryName, entry, status, err := resolveSpawnBinary(s.cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
 	if err != nil {
-		s.fail(w, status, err.Error(), nil)
-		return
-	}
-
-	// The lease is stamped with whoever the auth guard authenticated. PrincipalFrom
-	// reports absent when the broker runs with no `auth:` block (or when /claim is
-	// registered outside the guard, as some tests do), and that is a supported
-	// state, not an error — the lease then records the anonymous owner so no code
-	// path downstream has to cope with an absent one.
-	owner, authenticated := PrincipalFrom(r.Context())
-	if !authenticated {
-		owner = anonymousOwner()
+		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error()}
 	}
 
 	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
@@ -214,21 +270,21 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	//     "no capacity" below by its message).
 	//   - errNoCapacity: the cap is full AND queue_wait_timeout <= 0 (waiting
 	//     disabled) → immediate 503 "no capacity".
-	//   - context cancelled: the client hung up while queued → no response (the
-	//     connection is gone); the waiter is already dropped from the queue.
-	leaseID, err := s.registry.NewLeaseQueued(r.Context(), s.queueWaitTimeout, owner)
+	//   - context cancelled: the caller hung up while queued → a silent failure,
+	//     because there is nobody left to answer; the waiter is already dropped
+	//     from the queue.
+	leaseID, err := s.registry.NewLeaseQueued(ctx, s.queueWaitTimeout, owner)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQueueTimeout):
-			s.fail(w, http.StatusServiceUnavailable, "capacity wait timed out", nil)
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out"}
 		case errors.Is(err, errNoCapacity):
-			s.fail(w, http.StatusServiceUnavailable, "no capacity", nil)
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity"}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			s.logger.Info("claim cancelled while queued for capacity", "error", err)
+			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err}
 		default:
-			s.fail(w, http.StatusInternalServerError, "minting lease", err)
+			return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting lease", err: err}
 		}
-		return
 	}
 
 	// Stamp the resolved entry name on the lease at once, while nothing else can
@@ -249,18 +305,17 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	//
 	// The requested id is used rather than a reported one because it is what the
 	// caller holds and what -recall was handed; a mismatching report is already
-	// treated as advisory further down this handler.
+	// treated as advisory further down.
 	s.registry.RecordSessionBinary(req.SessionID, binaryName)
 
 	configPath, err := writeTempConfig(req.Config)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		s.fail(w, http.StatusInternalServerError, "writing temp config", err)
-		return
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "writing temp config", err: err}
 	}
 	// The instance reads the config synchronously at boot (before it dials
 	// back and signals ready), so the file is safe to remove once this
-	// handler returns — on success and on every failure path alike.
+	// call returns — on success and on every failure path alike.
 	defer func() { _ = os.Remove(configPath) }()
 
 	// Mint the dial-back second factor and record it on the lease BEFORE any
@@ -280,15 +335,14 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// spawnKey for why a derivation key on disk is not the same thing as a
 	// persisted credential.
 	//
-	// A generation failure fails the claim. crypto/rand not producing 16 bytes
+	// A generation failure fails the spawn. crypto/rand not producing 16 bytes
 	// means the machine is in a state where nothing security-relevant should
 	// proceed, and spawning an instance whose dial-back cannot be authenticated
-	// is precisely the outcome this story exists to prevent.
+	// is precisely the outcome this check exists to prevent.
 	spawnSecret, err := s.spawnKey.secretFor(leaseID)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		s.fail(w, http.StatusInternalServerError, "minting spawn secret", err)
-		return
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting spawn secret", err: err}
 	}
 	s.registry.SetSpawnSecret(leaseID, spawnSecret)
 
@@ -297,7 +351,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// boot, so no claim performs a stat or a PATH lookup, and a PATH that
 	// changes under a running broker cannot make one claim spawn a different
 	// build than the next.
-	handle, err := s.runner.start(r.Context(), spawnSpec{
+	handle, err := s.runner.start(ctx, spawnSpec{
 		binaryName:      binaryName,
 		binaryPath:      entry.ResolvedPath,
 		binaryArgs:      entry.Args,
@@ -310,11 +364,10 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.registry.Remove(leaseID)
-		s.fail(w, http.StatusInternalServerError, "spawning instance", err)
-		return
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "spawning instance", err: err}
 	}
 	// SetProcess starts the single reaper that wait()s the process and closes
-	// the lease's exited channel; both this handler and a later release observe
+	// the lease's exited channel; both this path and a later release observe
 	// it, so the process is wait()ed in exactly one place.
 	s.registry.SetProcess(leaseID, handle)
 
@@ -324,22 +377,20 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	case <-s.registry.ExitedChan(leaseID):
 		exitErr := s.registry.ExitErr(leaseID)
 		s.registry.Remove(leaseID)
-		s.fail(w, http.StatusBadGateway, "instance exited before signalling ready", exitErr)
-		return
+		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr}
 	case <-time.After(s.readyTimeout):
 		_ = handle.kill()
 		<-s.registry.ExitedChan(leaseID) // reap the killed process so nothing leaks
 		s.registry.Remove(leaseID)
-		s.fail(w, http.StatusGatewayTimeout, "instance did not become ready in time", nil)
-		return
+		return instanceSpawn{}, &claimFailure{status: http.StatusGatewayTimeout, msg: "instance did not become ready in time"}
 	}
 
-	// Resolve the session id to return. The instance reports it via a
+	// Resolve the session id to report. The instance reports it via a
 	// session-id-report frame just after ready; wait a bounded grace for it.
-	// For a resume, the requested id is authoritative for the response (and
-	// is what the caller already holds); a mismatching report is logged but
-	// not fatal. For a new session, the reported id is the only way the
-	// caller learns the engine-generated id to -recall later.
+	// For a resume, the requested id is authoritative (and is what the caller
+	// already holds); a mismatching report is logged but not fatal. For a new
+	// session, the reported id is the only way the caller learns the
+	// engine-generated id to -recall later.
 	sessionID := req.SessionID
 	select {
 	case <-s.registry.SessionReportedChan(leaseID):
@@ -358,11 +409,61 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The instance is live: from here an unexpected exit is a crash, not a
-	// pre-ready spawn failure (which this handler's earlier paths own). Start
-	// the crash watcher. It latches the lease's releasing flag only if no
-	// deliberate teardown beats it, so a later POST /release is never
-	// misclassified as a crash.
+	// pre-ready spawn failure (which the paths above own). Start the crash
+	// watcher. It latches the lease's releasing flag only if no deliberate
+	// teardown beats it, so a later POST /release is never misclassified as a
+	// crash.
 	go s.registry.watchExit(leaseID)
+
+	return instanceSpawn{
+		leaseID:   leaseID,
+		sessionID: sessionID,
+		binary:    binaryName,
+		pid:       handle.pid(),
+	}, nil
+}
+
+// handleClaim implements POST /claim: validate the body, run the shared spawn
+// spine, mint the client's WebSocket ticket, respond.
+//
+// It is deliberately thin. Everything that has to be true of ANY spawn — the
+// capacity slot, the spawn secret, the recorded-binary reconciliation, the
+// bounded ready wait, the crash watcher — lives in spawnInstance, so the A2A
+// ingress boots an instance through exactly this machinery rather than beside
+// it.
+func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
+	var req claimRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBody))
+	if err := dec.Decode(&req); err != nil {
+		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
+		return
+	}
+	if req.Config == "" {
+		s.fail(w, http.StatusBadRequest, "claim requires a non-empty config", nil)
+		return
+	}
+
+	// The lease is stamped with whoever the auth guard authenticated. PrincipalFrom
+	// reports absent when the broker runs with no `auth:` block (or when /claim is
+	// registered outside the guard, as some tests do), and that is a supported
+	// state, not an error — the lease then records the anonymous owner so no code
+	// path downstream has to cope with an absent one.
+	owner, authenticated := PrincipalFrom(r.Context())
+	if !authenticated {
+		owner = anonymousOwner()
+	}
+
+	spawn, failure := s.spawnInstance(r.Context(), req, owner)
+	if failure != nil {
+		if failure.silent() {
+			// The client hung up while queued; the connection is gone and there is
+			// nothing to write to.
+			s.logger.Info("claim cancelled while queued for capacity", "error", failure.err)
+			return
+		}
+		s.fail(w, failure.status, failure.msg, failure.err)
+		return
+	}
 
 	// Mint the client's WebSocket ticket LAST, immediately before responding, so
 	// its short TTL starts when the caller receives it rather than when the
@@ -374,13 +475,13 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// credential, and any client can mint a replacement via POST
 	// /ticket/{lease_id}), so tearing down a working session over a recoverable
 	// gap would be the worse outcome. The response then omits `ticket`.
-	ticket, mintErr := s.tickets.mint(leaseID, owner.ID)
+	ticket, mintErr := s.tickets.mint(spawn.leaseID, owner.ID)
 	if mintErr != nil {
 		s.logger.Error("minting claim ticket failed; claim returns no ticket",
-			"lease_id", leaseID, "principal_id", owner.ID, "error", mintErr)
+			"lease_id", spawn.leaseID, "principal_id", owner.ID, "error", mintErr)
 	}
 
-	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(leaseID)
+	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(spawn.leaseID)
 	// principal_id ties the new lease id back to the identity that claimed it. The
 	// guard's allow record cannot carry it: /claim has no lease id in its path, so
 	// this is the only line that joins the two halves of the audit trail. Empty
@@ -394,16 +495,16 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// behind one broker, "which build is this lease running" stops being
 	// inferable from the broker's config alone, and this line is the only place
 	// the answer is joined to a lease id.
-	s.logger.Info("claim ready", "lease_id", leaseID, "pid", handle.pid(), "ws_url", wsURL,
-		"session_id", sessionID, "principal_id", owner.ID, "ticket_issued", ticket != "",
-		"binary", binaryName)
+	s.logger.Info("claim ready", "lease_id", spawn.leaseID, "pid", spawn.pid, "ws_url", wsURL,
+		"session_id", spawn.sessionID, "principal_id", owner.ID, "ticket_issued", ticket != "",
+		"binary", spawn.binary)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(claimResponse{
-		LeaseID:   leaseID,
+		LeaseID:   spawn.leaseID,
 		WSURL:     wsURL,
-		SessionID: sessionID,
+		SessionID: spawn.sessionID,
 		Ticket:    ticket,
 	})
 }

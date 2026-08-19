@@ -2061,6 +2061,13 @@ func withCommandRunner(r commandRunner) stubBrokerOption {
 	return func(w *brokerWiring) { w.runner = r }
 }
 
+// withAgents gives a stub broker an `agents:` block, which is what turns the
+// A2A ingress on. The base URL is derived from the bound listener afterwards, so
+// a fixture does not have to know the port the kernel handed out.
+func withAgents(agents map[string]AgentProfile) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.Agents = agents }
+}
+
 // withBinaries REPLACES the whole spawn registry, rather than merging into the
 // single-entry default startStubBrokerHandle builds. A multi-variant broker's
 // registry is a set, and a test that could only add to it would be unable to
@@ -2219,6 +2226,13 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	}
 	wiring.cfg.ListenAddr = ln.Addr().String()
 
+	// The A2A cards advertise ABSOLUTE URLs, and the port is only known once the
+	// listener is bound, so the base URL is derived here rather than in the
+	// option. LoadConfig does the same derivation from advertise_addr/listen_addr.
+	if len(wiring.cfg.Agents) > 0 && wiring.cfg.A2ABaseURL == "" {
+		wiring.cfg.A2ABaseURL = "http://" + wiring.cfg.ListenAddr
+	}
+
 	cfg := wiring.cfg
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
 
@@ -2261,6 +2275,24 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 	ticketsServer := NewTicketServer(logger, registry, tickets)
 
+	// The A2A ingress, wired exactly as run() does: the cards are rendered at
+	// boot, the lease manager is installed BEFORE anything is served, and the
+	// context index shares state_dir's fate. A wiring with no `agents:` block
+	// registers no routes at all, so every pre-existing test sees the mux it
+	// always saw.
+	agents, err := NewA2AServer(logger, cfg)
+	if err != nil {
+		t.Fatalf("NewA2AServer: %v", err)
+	}
+	var a2aContexts *a2aContextIndex
+	if agents.enabled() {
+		a2aContexts, err = openA2AContextIndex(logger, cfg)
+		if err != nil {
+			t.Fatalf("openA2AContextIndex: %v", err)
+		}
+		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+	}
+
 	// Mirror run()'s route topology exactly, because middleware ORDERING is the
 	// property the auth integration tests exist to catch: healthz and the
 	// WebSocket routes on the raw mux, the client-facing control plane behind the
@@ -2278,6 +2310,7 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	agents.Register(guarded)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 
@@ -2299,6 +2332,10 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 			stopSweep()
 			_ = srv.Close()
 			gateway.Shutdown()
+			agents.Shutdown()
+			if a2aContexts != nil {
+				_ = a2aContexts.Close()
+			}
 			if leaseStore != nil {
 				_ = leaseStore.Close()
 			}

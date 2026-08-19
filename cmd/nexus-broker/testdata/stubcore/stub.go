@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -57,6 +58,33 @@ const (
 // resume path deliberately does not carry the variant: there the id under test
 // is the one the broker passed in.
 func NewSessionID(variant string) string { return variant + "-new-session" }
+
+// TurnAnswer is the text a stub publishes as the answer to an `input` payload.
+//
+// It carries the three facts an A2A test needs to prove what the broker did,
+// and it carries them in the ANSWER rather than in a side channel because the
+// answer is the only thing an A2A client ever sees: the linked-in variant (which
+// binary ran), the engine session (which conversation this is), and whether the
+// process was started with -recall (whether history was replayed or a fresh
+// session begun). Two spawns of one conversation produce the same session with
+// different recall flags, which is what makes a transparent re-spawn assertable
+// from the client side alone.
+func TurnAnswer(variant, sessionID string, recalled bool) string {
+	return fmt.Sprintf("%s|%s|%t", variant, sessionID, recalled)
+}
+
+// ioPayload is the handful of instance-IO fields the stub needs to hold up its
+// end of a turn. It is deliberately NOT the broker's full brokerIOMessage: a
+// fixture that mirrored every field would have to be kept in step with a struct
+// it does not implement, and the contract test that guards that mirror already
+// exists on the broker side.
+type ioPayload struct {
+	Type    string `json:"type"`
+	TurnID  string `json:"turn_id,omitempty"`
+	Content string `json:"content,omitempty"`
+	Role    string `json:"role,omitempty"`
+	State   string `json:"state,omitempty"`
+}
 
 // EnvReportPrefix selects which environment variables a stub will disclose in
 // its report. Reporting the whole environment would be simpler and is not done
@@ -157,6 +185,7 @@ func Run(variant string) {
 	reconnect := os.Getenv("STUB_RECONNECT") == "1"
 
 	sess := session{
+		recalled:        *recall != "",
 		addr:            addr,
 		leaseID:         leaseID,
 		spawnSecret:     spawnSecret,
@@ -221,6 +250,10 @@ func reportedEnv() map[string]string {
 
 // session is one dial-back attempt's worth of state.
 type session struct {
+	// recalled records whether this process was started with -recall, which is
+	// what a turn's answer discloses so a test can tell a resumed conversation
+	// from a fresh one without reading the broker's logs.
+	recalled        bool
 	addr            string
 	leaseID         string
 	spawnSecret     string
@@ -264,6 +297,10 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 		return false, err
 	}
 
+	// turns counts the turns this connection has served, so each one is announced
+	// under its own turn id — a broker anchors a task to a turn, and two turns
+	// sharing an id would let one task adopt the other's output.
+	turns := 0
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -279,6 +316,20 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				// Simulate an unexpected crash mid-session: exit abnormally
 				// without the graceful shutdown handshake.
 				os.Exit(7)
+			}
+			// An `input` payload is a TURN, and a turn is answered with the
+			// payload sequence every shipped Nexus agent loop produces: a progress
+			// status, the published output, then `status: idle` — which is the only
+			// end-of-turn signal the instance IO envelope carries. Echoing it
+			// instead (the default below) would leave anything driving a turn
+			// waiting forever for an ending that never comes.
+			//
+			// Everything that is NOT an input still echoes verbatim, so every test
+			// written against the echo loop is untouched.
+			if isInputPayload(frame.Payload) {
+				turns++
+				s.answerTurn(ctx, conn, turns)
+				continue
 			}
 			payload := frame.Payload
 			if string(payload) == ReportRequest {
@@ -305,6 +356,44 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				continue
 			}
 			return true, nil
+		}
+	}
+}
+
+// isInputPayload reports whether an IO payload is a user turn. A payload that
+// is not an object at all — the raw echo fixtures send one — is not an input,
+// which is what keeps the default echo behaviour intact.
+func isInputPayload(payload []byte) bool {
+	var msg ioPayload
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return false
+	}
+	return msg.Type == "input"
+}
+
+// answerTurn plays one complete turn back over the dial-back socket.
+//
+// The three payloads are the minimum a broker-side A2A mapping needs to render
+// a task: any sign of life moves it to WORKING, the `output` supplies the
+// response artifact's text, and `status: idle` completes it.
+func (s session) answerTurn(ctx context.Context, conn *websocket.Conn, turn int) {
+	turnID := fmt.Sprintf("turn-%d", turn)
+	for _, msg := range []ioPayload{
+		{Type: "status", State: "thinking"},
+		{Type: "output", TurnID: turnID, Role: "assistant",
+			Content: TurnAnswer(s.report.Variant, s.sessionID, s.recalled)},
+		{Type: "status", State: "idle"},
+	} {
+		payload, err := json.Marshal(msg)
+		if err != nil {
+			return
+		}
+		if err := write(ctx, conn, brokerframe.Frame{
+			LeaseID: s.leaseID,
+			Signal:  brokerframe.SignalIO,
+			Payload: payload,
+		}); err != nil {
+			return
 		}
 	}
 }
