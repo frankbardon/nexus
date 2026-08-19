@@ -531,6 +531,105 @@ Each `agents[]` entry:
 | `bearer_token_env` | string | *(none)*                 | Name of an environment variable holding the bearer token. Read at `Init`; used only when `bearer_token` is unset. |
 | `timeout_seconds`  | int    | *(plugin default)*       | Per-agent default timeout (seconds), overriding the plugin-level `timeout_seconds`. |
 
+### `nexus.agent.a2a_remote`
+
+Source: `plugins/agents/a2aremote/`. The **outbound** half of Nexus's
+[A2A interoperability](../guides/a2a.md): where
+[`nexus.io.a2a`](#nexusioa2a) *serves* this instance as an A2A agent, this plugin
+lets a Nexus agent *call* remote A2A agents. Each configured remote registers one
+LLM-facing tool (default `delegate_a2a_<name>`); a call sends the delegated task
+over the A2A wire through `pkg/a2a/a2aclient`, and folds the remote task's final
+text and artifacts back into the tool result under XML tag boundaries.
+
+Remotes come from **configuration only** — the tool schema exposes no URL, host
+or endpoint parameter, so a model cannot point the instance at an arbitrary
+address. See [Remote A2A Agents](../plugins/agents/a2a-remote.md).
+
+Each remote's **Agent Card is fetched lazily, on first use, never at boot**: an
+unreachable remote must not be able to fail engine startup. Until the card
+resolves the tool carries the configured `description`; the first successful call
+replaces it with a description built from the card's own `skills` and
+re-registers the tool once.
+
+Every failure — unreachable card, refused binding, protocol error, dead stream,
+exhausted budget, a task that ends `FAILED`, a task parked at `INPUT_REQUIRED` —
+becomes a clean `tool.result` error, never an engine-level failure.
+
+| Key                   | Type   | Default | Description |
+|-----------------------|--------|---------|-------------|
+| `agents`              | list   | *(required)* | Non-empty list of remote A2A agents to expose. Each entry is a mapping (see below). |
+| `cache`               | bool   | `true`  | Set `false` to disable result caching entirely. |
+| `cache_size`          | int    | `128`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction. |
+| `max_depth`           | int    | `3`     | Hard cap on delegation depth across all remotes. Zero disables the cap. A posture's `max_recursion_depth` may narrow it further. |
+| `binding`             | string | `jsonrpc` | Default protocol binding. One of `jsonrpc`, `json-rpc`, `http+json`, `rest`. |
+| `validate_card`       | bool   | `true`  | Default for checking a fetched Agent Card against the specification's required fields. |
+| `stream`              | bool   | `true`  | Default for using the streaming operation. `false` forces a blocking `SendMessage`. |
+| `timeout`             | duration | `5m`  | Default whole-call deadline covering discovery, the message and the stream. |
+| `request_timeout`     | duration | `60s` | Default deadline for a control-plane call (Agent Card fetch, `GetTask`, `CancelTask`). `"0s"` disables it. |
+| `message_timeout`     | duration | `0s`  | Default deadline for a non-streaming `SendMessage`. Zero means none — a blocking send legitimately takes as long as the remote's work does. |
+| `stream_open_timeout` | duration | `30s` | Default deadline for a streaming call's response *headers*. `"0s"` disables it. |
+| `stream_idle_timeout` | duration | `5m`  | Default bound on total silence on an open stream. `"0s"` disables it. |
+| `extensions`          | list   | *(none)* | A2A protocol extension URIs to request via the `A2A-Extensions` service parameter. A server activates only what a client asked for. |
+| `retry`               | map    | *(see below)* | Default retry policy for outbound calls. |
+
+Every key from `binding` down is a **default**; each `agents[]` entry may
+override it. An agent-level `extensions` list replaces the inherited one
+wholesale rather than merging, so an empty list means "declare none".
+
+Each `agents[]` entry:
+
+| Key                   | Type   | Default | Description |
+|-----------------------|--------|---------|-------------|
+| `name`                | string | *(required)* | Human-friendly identifier; used to derive the default tool name. |
+| `base_url`            | string | *(required\*)* | Base URL the remote is served under — the origin and optional path prefix, **not** an operation endpoint. The Agent Card is fetched from `/.well-known/agent-card.json` beneath it. Required unless `jsonrpc_endpoint` or `rest_endpoint` pins an endpoint. |
+| `jsonrpc_endpoint`    | string | *(none)* | Pin the JSON-RPC endpoint URL, skipping Agent Card discovery for it. |
+| `rest_endpoint`       | string | *(none)* | Pin the HTTP+JSON base URL — the prefix operation paths hang off, not one operation URL. |
+| `tool_name`           | string | `delegate_a2a_<name>` | Override the LLM-facing tool name. The default lowercases `name` and collapses non-alphanumeric runs to `_`. |
+| `description`         | string | *(auto)* | Tool description used **until** the Agent Card resolves. Once it does, the description is rebuilt from the card's own skills. |
+| `posture`             | string | *(none)* | Registered `AgentPosture` supplying this remote's timeout and recursion-depth cap. Requires the `posture.registry` capability (`nexus.agent.postures`). |
+| `binding`             | string | *(plugin default)* | Per-agent override. |
+| `validate_card`       | bool   | *(plugin default)* | Per-agent override. |
+| `stream`              | bool   | *(plugin default)* | Per-agent override. |
+| `timeout`             | duration | *(plugin default)* | Per-agent override. |
+| `request_timeout`     | duration | *(plugin default)* | Per-agent override. |
+| `message_timeout`     | duration | *(plugin default)* | Per-agent override. |
+| `stream_open_timeout` | duration | *(plugin default)* | Per-agent override. |
+| `stream_idle_timeout` | duration | *(plugin default)* | Per-agent override. |
+| `extensions`          | list   | *(plugin default)* | Per-agent override; replaces rather than merges. |
+| `retry`               | map    | *(plugin default)* | Per-agent override. |
+
+The `retry` block, at either level:
+
+| Key            | Type     | Default  | Description |
+|----------------|----------|----------|-------------|
+| `max_attempts` | int      | `3`      | Total attempts including the first. `1` disables retrying. |
+| `base_delay`   | duration | `200ms`  | Delay before the second attempt; doubles thereafter. |
+| `max_delay`    | duration | `5s`     | Cap on the computed backoff. A longer `Retry-After` from the server is still honoured in full. |
+
+Reads are retried on transport failures and `502`/`504`; every operation is
+retried on `429`/`503`. A message send is **never** retried on a transport
+failure, because A2A defines no idempotency key and a blind retry would run the
+remote's work twice.
+
+Every duration key is a **duration string** (`"90s"`, `"5m"`, `"1h30m"`), never a
+bare number: `timeout: 600` reads as ten minutes to an operator and six hundred
+nanoseconds to Go, so a bare number is rejected rather than guessed at.
+
+**Timeout precedence** for one call, first match wins: the tool's
+`timeout_seconds` argument → the agent's `posture` budget `timeout` → the
+`timeout` key (agent-level, else plugin-level) → the `5m` built-in default.
+
+**Posture budgets.** Only two dimensions of an `AgentPosture` cross an A2A
+boundary — `default_budget.timeout` and `max_recursion_depth` — because the
+protocol gives a client no control over the remote's token or tool-call spend.
+A posture whose `default_budget` sets `max_tokens` or `max_tool_calls` is
+**refused** for a remote agent rather than half-honoured, and the call fails with
+an error naming the key.
+
+**Caching.** Successful outcomes are cached in the LRU under a content hash of
+(remote identity, posture version, task, canonicalized context). Failures are
+never cached, so a remote that was briefly down is retried rather than replayed.
+
 ### `nexus.scene`
 
 Source: `plugins/scene/plugin.go`. Owns the per-session `Scene` store and

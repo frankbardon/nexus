@@ -412,10 +412,22 @@ func NexusEventPart(e NexusEvent) (Part, error) {
 	}
 	return Part{
 		Data:      json.RawMessage(raw),
-		MediaType: ContentTypeJSON,
+		MediaType: extensionPartMediaType,
 		Metadata:  map[string]any{extensionMetadataKey: NexusExtensionURI},
 	}, nil
 }
+
+// extensionPartMediaType is the media type an extension part is labelled with.
+//
+// It is the IANA type, deliberately NOT ContentTypeJSON — that constant is
+// application/a2a+json, the media type of the PROTOCOL's own request and
+// response documents. An extension payload rides INSIDE such a document; it is
+// not one, and labelling it as one would tell a client to decode a part as a
+// protocol envelope. This is the same distinction nexus.io.a2a already draws
+// for structured output and structured tool results, and the two must agree:
+// a client cannot be expected to learn that a data part means one thing when
+// the transport produced it and another when the extension did.
+const extensionPartMediaType = "application/json"
 
 // extensionMetadataKey is the metadata key naming the extension a part belongs
 // to. It mirrors the Extensions field A2A puts on messages and artifacts, which

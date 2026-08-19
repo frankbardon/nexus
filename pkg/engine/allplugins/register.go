@@ -7,6 +7,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 
 	// Agent plugins.
+	"github.com/frankbardon/nexus/plugins/agents/a2aremote"
 	"github.com/frankbardon/nexus/plugins/agents/aguiremote"
 	delegateagent "github.com/frankbardon/nexus/plugins/agents/delegate"
 	"github.com/frankbardon/nexus/plugins/agents/orchestrator"
@@ -154,6 +155,7 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.agent.postures", postures.New)
 	r.Register("nexus.agent.subagent", subagent.New)
 	r.Register("nexus.agent.agui_remote", aguiremote.New)
+	r.Register("nexus.agent.a2a_remote", a2aremote.New)
 	r.Register("nexus.scene", sceneplugin.New)
 
 	// Control

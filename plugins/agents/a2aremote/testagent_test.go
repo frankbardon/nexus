@@ -1,0 +1,221 @@
+package a2aremote
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/frankbardon/nexus/pkg/a2a"
+)
+
+// A minimal but conformant in-process A2A agent. Every byte it writes goes
+// through pkg/a2a's own encoders and SSE writer, so these tests cannot assert
+// against a hand-rolled wire shape the codec would reject.
+
+const testJSONRPCPath = "/a2a"
+
+type testAgentConfig struct {
+	// cardStatus replaces the card response status; 0 means 200.
+	cardStatus int
+	// noStreaming makes the card declare capabilities.streaming = false.
+	noStreaming bool
+	// skills replaces the card's skill list.
+	skills []a2a.AgentSkill
+	// frames replaces the frames a streaming call answers with.
+	frames func(*a2a.SendMessageRequest) []a2a.StreamResponse
+	// sendMessage replaces the blocking SendMessage answer.
+	sendMessage func(*a2a.SendMessageRequest) (a2a.SendMessageResponse, *a2a.Error)
+	// frameDelay is applied before each streamed frame.
+	frameDelay time.Duration
+}
+
+type testAgent struct {
+	t   *testing.T
+	srv *httptest.Server
+	cfg testAgentConfig
+
+	mu       sync.Mutex
+	cardHits int
+	sendHits int
+	// bodies records every A2A request body, so a test can assert what was
+	// actually sent to the remote.
+	bodies [][]byte
+}
+
+func newTestAgent(t *testing.T, cfg testAgentConfig) *testAgent {
+	t.Helper()
+	a := &testAgent{t: t, cfg: cfg}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+a2a.AgentCardPath, a.handleCard)
+	mux.HandleFunc("POST "+testJSONRPCPath, a.handleJSONRPC)
+	a.srv = httptest.NewServer(mux)
+	t.Cleanup(a.srv.Close)
+	return a
+}
+
+func (a *testAgent) URL() string { return a.srv.URL }
+
+func (a *testAgent) counts() (cards, sends int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cardHits, a.sendHits
+}
+
+func (a *testAgent) lastBody() []byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.bodies) == 0 {
+		return nil
+	}
+	return a.bodies[len(a.bodies)-1]
+}
+
+func (a *testAgent) handleCard(w http.ResponseWriter, _ *http.Request) {
+	a.mu.Lock()
+	a.cardHits++
+	a.mu.Unlock()
+
+	if a.cfg.cardStatus != 0 && a.cfg.cardStatus != http.StatusOK {
+		http.Error(w, "card unavailable", a.cfg.cardStatus)
+		return
+	}
+
+	card := a2a.NewAgentCard("Test Remote", "an in-process A2A agent for tests", "2.1.0")
+	card.Capabilities.Streaming = !a.cfg.noStreaming
+	card.SupportedInterfaces = []a2a.AgentInterface{{
+		URL:             a.srv.URL + testJSONRPCPath,
+		ProtocolBinding: a2a.BindingJSONRPC,
+		ProtocolVersion: a2a.ProtocolVersion,
+	}}
+	skills := a.cfg.skills
+	if skills == nil {
+		skills = []a2a.AgentSkill{{
+			ID:          "research",
+			Name:        "deep research",
+			Description: "searches many sources and synthesizes an answer",
+			Tags:        []string{"research"},
+		}}
+	}
+	for _, skill := range skills {
+		card = card.WithSkill(skill)
+	}
+
+	body, err := a2a.EncodeAgentCard(&card)
+	if err != nil {
+		a.t.Errorf("encode card: %v", err)
+		return
+	}
+	w.Header().Set("Content-Type", a2a.ContentTypeAgentCard)
+	_, _ = w.Write(body)
+}
+
+func (a *testAgent) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	a.mu.Lock()
+	a.sendHits++
+	a.bodies = append(a.bodies, body)
+	a.mu.Unlock()
+
+	call, protoErr := a2a.DecodeCall(body)
+	if protoErr != nil {
+		a.writeError(w, nil, protoErr)
+		return
+	}
+
+	switch call.Method {
+	case a2a.MethodSendMessage:
+		req := call.Params.(*a2a.SendMessageRequest)
+		resp := a2a.MessageResponse(a2a.NewAgentMessage("m-reply", "blocking reply"))
+		if a.cfg.sendMessage != nil {
+			var opErr *a2a.Error
+			resp, opErr = a.cfg.sendMessage(req)
+			if opErr != nil {
+				a.writeError(w, call.ID(), opErr)
+				return
+			}
+		}
+		a.writeResult(w, call.ID(), resp)
+
+	case a2a.MethodSendStreamingMessage:
+		req := call.Params.(*a2a.SendMessageRequest)
+		frames := completedRun("task-1", "ctx-1", "the remote's answer")
+		if a.cfg.frames != nil {
+			frames = a.cfg.frames(req)
+		}
+		a.stream(w, r, call.ID(), frames)
+
+	default:
+		a.writeError(w, call.ID(), a2a.ErrUnsupportedOperation(call.Method))
+	}
+}
+
+func (a *testAgent) stream(w http.ResponseWriter, r *http.Request, id json.RawMessage, frames []a2a.StreamResponse) {
+	a2a.WriteSSEHeaders(w.Header())
+	w.WriteHeader(http.StatusOK)
+	sw := a2a.NewJSONRPCSSEWriter(w, id)
+	for _, frame := range frames {
+		if a.cfg.frameDelay > 0 {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(a.cfg.frameDelay):
+			}
+		}
+		if err := sw.Write(frame); err != nil {
+			return
+		}
+	}
+}
+
+func (a *testAgent) writeResult(w http.ResponseWriter, id json.RawMessage, result any) {
+	resp, err := a2a.NewResultResponse(id, result)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	body, _ := resp.Encode()
+	w.Header().Set("Content-Type", a2a.ContentTypeJSON)
+	_, _ = w.Write(body)
+}
+
+func (a *testAgent) writeError(w http.ResponseWriter, id json.RawMessage, protoErr *a2a.Error) {
+	body, _ := a2a.NewErrorResponse(id, protoErr).Encode()
+	w.Header().Set("Content-Type", a2a.ContentTypeJSON)
+	_, _ = w.Write(body)
+}
+
+// completedRun is the happy path: a submitted task, a working transition, one
+// text artifact, then completion.
+func completedRun(taskID, contextID, output string) []a2a.StreamResponse {
+	return []a2a.StreamResponse{
+		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateWorking))),
+		a2a.StreamArtifactUpdate(a2a.NewArtifactUpdate(taskID, contextID,
+			a2a.NewTextArtifact("art-1", "answer", output))),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, a2a.NewTaskStatus(a2a.TaskStateCompleted))),
+	}
+}
+
+// failedRun ends the task in FAILED with an explanation.
+func failedRun(taskID, contextID, why string) []a2a.StreamResponse {
+	status := a2a.NewTaskStatus(a2a.TaskStateFailed).
+		WithMessage(a2a.NewAgentMessage("m-fail", why))
+	return []a2a.StreamResponse{
+		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, status)),
+	}
+}
+
+// interruptedRun parks the task on INPUT_REQUIRED carrying a question.
+func interruptedRun(taskID, contextID, question string) []a2a.StreamResponse {
+	status := a2a.NewTaskStatus(a2a.TaskStateInputRequired).
+		WithMessage(a2a.NewAgentMessage("m-ask", question))
+	return []a2a.StreamResponse{
+		a2a.StreamTask(a2a.NewTask(taskID, contextID)),
+		a2a.StreamStatusUpdate(a2a.NewStatusUpdate(taskID, contextID, status)),
+	}
+}

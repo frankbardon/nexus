@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.a2a_remote.json",
+  "title": "nexus.agent.a2a_remote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))*$",
+      "description": "A Go duration string such as \"30s\", \"5m\" or \"1h30m\". Bare numbers are rejected."
+    },
+    "binding": {
+      "type": "string",
+      "enum": ["jsonrpc", "json-rpc", "http+json", "rest"],
+      "description": "A2A protocol binding to speak. Defaults to jsonrpc, the binding every A2A implementation is expected to expose."
+    },
+    "extensions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "A2A protocol extension URIs to request via the A2A-Extensions service parameter. A server activates only the extensions a client asked for. An empty list at agent level overrides an inherited plugin-level list."
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Retry policy for outbound A2A calls. Reads are retried on transport failures and 502/504; every operation is retried on 429/503, honouring Retry-After. Message sends are never retried on a transport failure, since A2A defines no idempotency key.",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total attempts including the first. 1 disables retrying. Defaults to 3."
+        },
+        "base_delay": {
+          "$ref": "#/$defs/duration",
+          "description": "Delay before the second attempt; doubles thereafter. Defaults to \"200ms\"."
+        },
+        "max_delay": {
+          "$ref": "#/$defs/duration",
+          "description": "Cap on the computed backoff. A longer Retry-After from the server is still honoured in full. Defaults to \"5s\"."
+        }
+      }
+    }
+  },
+  "properties": {
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Remote A2A agents to expose as delegate targets. Each entry yields one LLM-facing tool.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-friendly identifier for the remote agent; used to derive the default tool name."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Base URL the remote agent is served under — the origin (and optional path prefix), NOT an operation endpoint. The Agent Card is fetched from /.well-known/agent-card.json beneath it, lazily on first use. Required unless jsonrpc_endpoint or rest_endpoint pins an endpoint."
+          },
+          "jsonrpc_endpoint": {
+            "type": "string",
+            "description": "Pin the JSON-RPC endpoint URL, skipping Agent Card discovery for it. Use when the endpoint is known out of band."
+          },
+          "rest_endpoint": {
+            "type": "string",
+            "description": "Pin the HTTP+JSON base URL — the prefix operation paths hang off, not a single operation URL — skipping Agent Card discovery for it."
+          },
+          "tool_name": {
+            "type": "string",
+            "description": "Override the LLM-facing tool name. Defaults to 'delegate_a2a_<name>'."
+          },
+          "description": {
+            "type": "string",
+            "description": "Tool description used until the remote's Agent Card resolves. Once it does, the description is rebuilt from the card's own skills."
+          },
+          "posture": {
+            "type": "string",
+            "description": "Registered AgentPosture name supplying the call's timeout and recursion-depth cap. Requires the posture.registry capability. A posture setting max_tokens or max_tool_calls is refused: neither can be enforced across an A2A boundary."
+          },
+          "binding": { "$ref": "#/$defs/binding" },
+          "validate_card": {
+            "type": "boolean",
+            "description": "Check a fetched Agent Card against the specification's required fields. Defaults to true."
+          },
+          "stream": {
+            "type": "boolean",
+            "description": "Use the streaming operation (SendStreamingMessage + SSE). Defaults to true; false forces a blocking SendMessage."
+          },
+          "timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Whole-call deadline covering discovery, the message and the stream. Defaults to \"5m\". A posture budget overrides it; the tool's timeout_seconds argument overrides both."
+          },
+          "request_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a control-plane call (Agent Card fetch, GetTask, CancelTask). Defaults to \"60s\". \"0s\" disables it."
+          },
+          "message_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a non-streaming SendMessage. Defaults to \"0s\" (none), because a blocking send legitimately takes as long as the remote's work does."
+          },
+          "stream_open_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a streaming call's response headers. Defaults to \"30s\". \"0s\" disables it."
+          },
+          "stream_idle_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Bound on total silence on an open stream, measured in bytes read so SSE keep-alive comments count as life. Defaults to \"5m\"; raise it for a slow remote. \"0s\" disables it."
+          },
+          "extensions": { "$ref": "#/$defs/extensions" },
+          "retry": { "$ref": "#/$defs/retry" }
+        }
+      }
+    },
+    "cache": {
+      "type": "boolean",
+      "description": "Set false to disable result caching entirely. Defaults to true."
+    },
+    "cache_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Capacity of the in-process LRU result cache (entries). Defaults to 128. Zero disables eviction."
+    },
+    "max_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Hard cap on delegation depth across all remotes. Defaults to 3. Zero disables the cap. A posture's max_recursion_depth may narrow it further."
+    },
+    "binding": { "$ref": "#/$defs/binding" },
+    "validate_card": {
+      "type": "boolean",
+      "description": "Default for every agent's validate_card. Defaults to true."
+    },
+    "stream": {
+      "type": "boolean",
+      "description": "Default for every agent's stream. Defaults to true."
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default whole-call deadline for every agent. Defaults to \"5m\"."
+    },
+    "request_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default control-plane deadline for every agent. Defaults to \"60s\"."
+    },
+    "message_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default non-streaming SendMessage deadline for every agent. Defaults to \"0s\" (none)."
+    },
+    "stream_open_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default stream-open deadline for every agent. Defaults to \"30s\"."
+    },
+    "stream_idle_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default stream-idle bound for every agent. Defaults to \"5m\"."
+    },
+    "extensions": { "$ref": "#/$defs/extensions" },
+    "retry": { "$ref": "#/$defs/retry" }
+  }
+}

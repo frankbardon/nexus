@@ -77,6 +77,7 @@ plugins/
   agents/postures/       # AgentPosture registry: loads YAML from scan_dirs, fsnotify hot reload, advertises posture.registry capability
   agents/delegate/       # Sub-agent invocation primitive: 'delegate' tool, posture-driven budgets+depth+cache
   agents/aguiremote/     # Remote AG-UI agents as delegate targets: registers a delegate_agui_<name> tool per configured endpoint, runs it via pkg/agui/aguiclient, maps the SSE run onto the bus
+  agents/a2aremote/      # Remote A2A agents as delegate targets: registers a delegate_a2a_<name> tool per configured remote, lazily resolves each Agent Card on first use, folds remote artifacts + final text into an XML-tagged tool result, posture-driven budgets, successes-only LRU
   scene/                 # Scene store: scene_create/patch/get/list/delete tools, JSONL patch journal under <session>/plugins/nexus.scene/
   apps/helloworld/       # Built-in hello-world placeholder agent
   control/cancel/        # control.cancel capability + /resume slash command

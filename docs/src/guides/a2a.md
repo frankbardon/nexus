@@ -6,12 +6,14 @@ moving through a lifecycle), a **Message** (composed of **Parts**), and an
 **Artifact** (task output). An agent publishes an **Agent Card** at a well-known
 URL so a client can discover what it does and how to authenticate to it.
 
-Nexus speaks A2A through two pieces:
+Nexus speaks A2A in both directions, through four pieces:
 
 | Piece | What it is |
 |---|---|
 | `pkg/a2a` | A hand-rolled, dependency-free A2A codec: the data model, both HTTP bindings, the SSE transport, the Agent Card types, and the protocol error model. No third-party A2A SDK. |
+| `pkg/a2a/a2aclient` | The client on top of that codec: Agent Card resolution, `SendMessage`, streaming, resume, `GetTask`, `CancelTask`, with the timeout and retry policy that talking to a remote over HTTP requires. |
 | [`nexus.io.a2a`](../plugins/io/a2a.md) | The **serve** transport: one HTTP listener that exposes a running Nexus instance as an A2A agent. |
+| [`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md) | The **outbound** transport: one `delegate_a2a_<name>` tool per configured remote, letting a Nexus agent call other A2A agents. |
 
 This guide covers the mapping between the two protocols and how a client drives
 a Nexus turn end to end. For every configuration key, its type and its default,
@@ -570,13 +572,80 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- **Outbound delegation** to remote A2A agents (a `delegate_a2a_<name>` tool per
-  configured remote) and the **broker A2A front door** are separate pieces of
-  work; neither exists yet.
+- The **broker A2A front door** — one isolated instance per caller, fronted by
+  `cmd/nexus-broker` — is a separate piece of work and does not exist yet.
+- **Chaining a remote's `INPUT_REQUIRED` into the local human-in-the-loop
+  surface**, and republishing a remote run's incremental progress onto the local
+  bus, are not wired yet. Today a parked remote task is reported to the calling
+  model as a clean tool error carrying the question; see [Delegating to a remote
+  agent](#delegating-to-a-remote-agent).
 - **Workspace-wide file detection.** Files become artifacts only when a
   `tool.result` reports the path (see [What a turn
   publishes](#what-a-turn-publishes)); snapshot-diffing the session workspace is
   deliberately out of scope, so a write by an uninstrumented path is missed.
+
+## Delegating to a remote agent
+
+Everything above is the **inbound** direction: a client driving a Nexus turn.
+The outbound direction is [`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md),
+which turns each configured remote A2A agent into one LLM-facing tool:
+
+```yaml
+plugins:
+  active:
+    - nexus.agent.react
+    - nexus.agent.a2a_remote
+
+  nexus.agent.a2a_remote:
+    agents:
+      - name: researcher
+        base_url: https://research.internal
+        description: A specialist research agent reachable over A2A.
+```
+
+That registers `delegate_a2a_researcher`. Calling it sends the delegated task to
+the remote, drains the stream the remote answers with, and folds the terminal
+result back into the tool result.
+
+Four decisions in that path are worth stating here, because they are the ones a
+reader of this guide is most likely to be surprised by.
+
+**Remotes come from configuration only.** The tool schema exposes no `url`,
+`endpoint` or `host` parameter. A model-chosen address would be a server-side
+request forgery surface and an unbounded spend surface at once; which remotes an
+instance can reach is an operator decision.
+
+**Discovery is lazy.** A remote's Agent Card is fetched on *first use*, never at
+boot. A remote agent is somebody else's process, and one that is down —
+restarting, not deployed, behind a VPN — must not be able to fail this
+instance's startup. Until the card resolves the tool carries the configured
+`description`; the first successful call rebuilds it from the card's own
+`skills` and re-registers the tool once.
+
+**A2A's split answer is put back together.** A2A puts output in artifacts and
+conversation in messages, and a remote may put its whole answer in either. Both
+are folded into one XML-tagged document — `<final_response>` plus one
+`<artifact>` element each — so the calling model can tell the agent's summary
+from a tool's raw output and one artifact from the next. Remote text rides in
+`CDATA`; binary and URL parts are described rather than inlined; extension
+telemetry parts are dropped.
+
+**Nothing is an engine-level failure.** An unreachable card, a refused binding, a
+dead stream, an exhausted budget, a task that ends `FAILED`, and a task parked at
+`INPUT_REQUIRED` all become a clean tool error carrying a sentence the calling
+model can act on, alongside whatever partial output arrived. The parked case
+carries the remote's question and tells the model to re-delegate with the answer
+included; chaining it into the local `ask_user` surface is separate work.
+
+Budgets come from the [posture registry](../plugins/agents/postures.md) when a
+remote names a posture — but only `default_budget.timeout` and
+`max_recursion_depth`, since A2A gives a client no control over the remote's own
+token or tool-call spend. A posture setting either of those is refused rather
+than half-honoured.
+
+Because `nexus.io.a2a` speaks the same wire, pointing `a2a_remote` at another
+Nexus instance's serve endpoint is a complete Nexus→Nexus loopback, which is the
+cheapest faithful end-to-end proof of both directions at once.
 
 ## Deliberately unsupported
 
@@ -694,8 +763,12 @@ is right for loopback and wrong behind a proxy.
 
 - [A2A serve transport](../plugins/io/a2a.md) — the plugin page: surfaces, card
   authoring, and the decisions behind the defaults
+- [Remote A2A agents (`nexus.agent.a2a_remote`)](../plugins/agents/a2a-remote.md)
+  — the outbound plugin page: lazy discovery, budgets, result folding, failure shapes
 - [Configuration Reference — `nexus.io.a2a`](../configuration/reference.md#nexusioa2a)
   — canonical key list
+- [Configuration Reference — `nexus.agent.a2a_remote`](../configuration/reference.md#nexusagenta2a_remote)
+  — canonical key list for the outbound leg
 - [Authentication (`auth:`)](../configuration/reference.md#authentication-auth)
   — the shared `pkg/nexusauth` validator chain
 - [Session Broker](./session-broker.md) — one isolated instance per caller,
