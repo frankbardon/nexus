@@ -458,7 +458,7 @@ leg](../plugins/agents/a2a-remote.md) stands on its own:
 | Fold the terminal status message and the artifacts into one tool result | **Works** — XML-tagged, `CDATA`-wrapped, binary and URL parts described rather than inlined |
 | Credentials: `bearer`, `oauth2_client_credentials`, `mtls` | **Works** — per remote, never inherited, validated at `Init` |
 | Cancel the remote task when the local turn is cancelled | **Works** — `cancel.active` → `CancelTask`, and the same abandonment on every walk-away |
-| Chained human-in-the-loop | **Works with `stream: false`.** Against a remote that HOLDS a streaming connection open across an `INPUT_REQUIRED` park — which is what `nexus.io.a2a` does — the streaming path never surfaces the question. See [Chaining human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation) |
+| Chained human-in-the-loop | **Works**, on either binding — a remote that parks at `INPUT_REQUIRED` has its question raised locally as `hitl.requested`, and the answer resumes the same task. See [Chaining human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation) |
 | Consume the Nexus extension's telemetry from a remote Nexus | **Works** — requested by default, mapped onto `subagent.iteration` |
 | Result caching | **Works** — successes only, never one a human answered for |
 | Posture budgets | **Partial by design** — only `default_budget.timeout` and `max_recursion_depth` cross the boundary; a posture setting the token or tool-call budget is refused |
@@ -625,31 +625,20 @@ question went unanswered *and told not to answer it itself*.
 `AUTH_REQUIRED` is deliberately not chained: it asks for a credential, and no
 answer a person types is one.
 
-#### Nexus→Nexus chaining needs `stream: false` today
+#### Nexus→Nexus chaining works on either binding
 
 A2A leaves it to the server whether an `INPUT_REQUIRED` park closes the SSE
 stream, and both readings are legal. `nexus.io.a2a` **holds it open** (keep-alive
-comments, no terminal frame) so a client can keep following the task;
-`nexus.agent.a2a_remote` **drains a stream to its end** before acting on what it
-read. Composed, those two choices deadlock: the question sits on a stream nobody
-is going to close, and the delegation ends when the caller's own budget or
-`stream_idle_timeout` fires — without ever putting the question in front of a
-person.
+comments, no terminal frame) so a client can keep following the task. The
+question is therefore carried by the interruption **frame**, not by the stream
+ending, and `nexus.agent.a2a_remote` acts on that frame: it stops reading there,
+puts the question to a human, and resumes the task on a fresh connection with a
+message naming the same `taskId` (§3.2.2, §3.4). No configuration is needed —
+chaining works at the shipped default `stream: true`, and equally over the
+blocking binding, which returns the parked Task the moment it parks.
 
-The blocking binding has no such problem: `SendMessage` returns the parked Task
-the moment it parks (§3.2.2), which is the signal the chaining path needs. So
-set `stream: false` on a remote Nexus agent you expect to ask questions:
-
-```yaml
-  nexus.agent.a2a_remote:
-    agents:
-      - name: peer
-        base_url: http://127.0.0.1:8091
-        stream: false          # required for chained questions against nexus.io.a2a
-```
-
-This is a recorded defect on the outbound leg, not a design decision.
-`tests/integration/a2a_loopback_test.go` pins the working shape.
+`tests/integration/a2a_loopback_test.go` pins the Nexus→Nexus shape end to end,
+streaming included.
 
 ### Planned, not available today
 
@@ -721,9 +710,9 @@ partial output arrived.
 resumes the remote task with the **same `taskId` and `contextId`**, which is A2A's
 own resume mechanism (§3.4). The delegating model never sees the question and is
 never given the chance to answer it, because a model handed a question only a
-person can settle will invent an answer and then act on it. Against a remote that
-holds its stream open across the park — `nexus.io.a2a` does — this needs
-`stream: false`; see [Chaining human-in-the-loop across a
+person can settle will invent an answer and then act on it. It works on either
+binding, including against a remote that holds its stream open across the park —
+`nexus.io.a2a` does; see [Chaining human-in-the-loop across a
 delegation](#chaining-human-in-the-loop-across-a-delegation).
 
 **A long delegation is not a black box.** The remote's narration becomes

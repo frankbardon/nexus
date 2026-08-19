@@ -461,24 +461,8 @@ func wrapDecodeError(operation string, err error) error {
 // *HTTPError when the body is not an A2A error at all — which is what an
 // intermediary's 502 page looks like.
 func interpretHTTPError(callURL string, resp *http.Response, body []byte) error {
-	if len(body) > 0 && json.Valid(body) {
-		// JSON-RPC framing: {"jsonrpc":"2.0","error":{...}}. A conforming
-		// JSON-RPC endpoint answers 200 even for errors, but an auth layer in
-		// front of one may not.
-		var rpc struct {
-			JSONRPC string        `json:"jsonrpc"`
-			Error   *a2a.RPCError `json:"error"`
-		}
-		if err := json.Unmarshal(body, &rpc); err == nil && rpc.JSONRPC != "" && rpc.Error != nil {
-			return rpc.Error.AsError()
-		}
-		// REST framing: the google.rpc.Status body of section 11.6.
-		var rest a2a.RESTError
-		if err := json.Unmarshal(body, &rest); err == nil {
-			if rest.Error.Code != 0 || rest.Error.Status != "" || rest.Error.Message != "" {
-				return rest.AsError()
-			}
-		}
+	if protoErr := decodeProtocolError(body); protoErr != nil {
+		return protoErr
 	}
 	return &HTTPError{
 		StatusCode:  resp.StatusCode,
@@ -487,6 +471,34 @@ func interpretHTTPError(callURL string, resp *http.Response, body []byte) error 
 		ContentType: resp.Header.Get("Content-Type"),
 		Body:        snippet(body),
 	}
+}
+
+// decodeProtocolError recovers the *a2a.Error a response body encodes in either
+// binding's framing, or nil when the body is not an A2A error at all.
+//
+// It is deliberately independent of the HTTP status: the JSON-RPC binding
+// answers 200 even for an error, so a refusal is just as likely to arrive on a
+// success status as on a failure one.
+func decodeProtocolError(body []byte) error {
+	if len(body) == 0 || !json.Valid(body) {
+		return nil
+	}
+	// JSON-RPC framing: {"jsonrpc":"2.0","error":{...}}.
+	var rpc struct {
+		JSONRPC string        `json:"jsonrpc"`
+		Error   *a2a.RPCError `json:"error"`
+	}
+	if err := json.Unmarshal(body, &rpc); err == nil && rpc.JSONRPC != "" && rpc.Error != nil {
+		return rpc.Error.AsError()
+	}
+	// REST framing: the google.rpc.Status body of section 11.6.
+	var rest a2a.RESTError
+	if err := json.Unmarshal(body, &rest); err == nil {
+		if rest.Error.Code != 0 || rest.Error.Status != "" || rest.Error.Message != "" {
+			return rest.AsError()
+		}
+	}
+	return nil
 }
 
 // drain reads and closes a response body so its connection can be reused.

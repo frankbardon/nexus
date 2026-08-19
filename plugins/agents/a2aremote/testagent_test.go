@@ -32,6 +32,15 @@ type testAgentConfig struct {
 	sendMessage func(*a2a.SendMessageRequest) (a2a.SendMessageResponse, *a2a.Error)
 	// frameDelay is applied before each streamed frame.
 	frameDelay time.Duration
+	// parkOpen HOLDS a non-terminal stream open after the last frame, writing
+	// SSE keep-alive comments until the client goes away, instead of hanging up.
+	//
+	// That is what nexus.io.a2a does at an INPUT_REQUIRED park, deliberately (see
+	// the "Streams parked on INPUT_REQUIRED" section of pkg/a2a/doc.go), and it is
+	// the behaviour the ordinary test agent does NOT reproduce: it writes its
+	// frames and returns, which closes the connection and hands the client an end
+	// of stream it never has to ask for.
+	parkOpen bool
 	// securitySchemes are added to the card, so a test can drive the
 	// credential/scheme mismatch check.
 	securitySchemes map[string]a2a.SecurityScheme
@@ -60,6 +69,10 @@ type testAgent struct {
 	// cancelled records every task id CancelTask was called for, which is how a
 	// test proves a local cancellation reached the remote.
 	cancelled []string
+	// released counts the parked streams whose client hung up on them. It is
+	// how a test proves the client ABANDONED a held-open stream rather than
+	// sitting on it until a deadline fired.
+	released int
 }
 
 func newTestAgent(t *testing.T, cfg testAgentConfig) *testAgent {
@@ -110,6 +123,13 @@ func (a *testAgent) counts() (cards, sends int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.cardHits, a.sendHits
+}
+
+// releasedParks returns how many held-open streams the client hung up on.
+func (a *testAgent) releasedParks() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.released
 }
 
 // cancelledTasks returns every task id the agent was asked to cancel.
@@ -235,6 +255,30 @@ func (a *testAgent) stream(w http.ResponseWriter, r *http.Request, id json.RawMe
 			return
 		}
 	}
+	if a.cfg.parkOpen && !sw.Closed() {
+		a.hold(r, sw)
+	}
+}
+
+// hold keeps a non-terminal stream alive with SSE comment records until the
+// client hangs up, which is the parked-stream behaviour a conforming server is
+// free to choose and nexus.io.a2a does choose.
+func (a *testAgent) hold(r *http.Request, sw *a2a.SSEWriter) {
+	keepalive := time.NewTicker(20 * time.Millisecond)
+	defer keepalive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			a.mu.Lock()
+			a.released++
+			a.mu.Unlock()
+			return
+		case <-keepalive.C:
+			if err := sw.Ping(); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (a *testAgent) writeResult(w http.ResponseWriter, id json.RawMessage, result any) {
@@ -345,6 +389,32 @@ func (r *resumeRecorder) all() []resumption {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]resumption(nil), r.seen...)
+}
+
+// askThenAnswerFromSnapshot is askThenAnswer as nexus.io.a2a actually answers a
+// resuming message: the continuation stream OPENS on a snapshot of the task as
+// it stands, which is the INPUT_REQUIRED being answered, and only then carries
+// the transitions the answer caused.
+//
+// A client that treats every interrupted frame as a fresh question would re-ask
+// the human the question they just answered, round after round, so this shape is
+// the regression guard for the opening frame of a continuation.
+func askThenAnswerFromSnapshot(taskID, contextID, question string, rec *resumeRecorder) func(*a2a.SendMessageRequest) []a2a.StreamResponse {
+	return func(req *a2a.SendMessageRequest) []a2a.StreamResponse {
+		if req.Message.TaskID == "" {
+			return interruptedRun(taskID, contextID, question)
+		}
+		rec.record(resumption{
+			taskID:    req.Message.TaskID,
+			contextID: req.Message.ContextID,
+			text:      messageText(&req.Message),
+		})
+		parked := a2a.NewTask(taskID, contextID)
+		parked.Status = a2a.NewTaskStatus(a2a.TaskStateInputRequired).
+			WithMessage(a2a.NewAgentMessage("m-ask", question))
+		return append([]a2a.StreamResponse{a2a.StreamTask(parked)},
+			completedRun(taskID, contextID, "the answer was "+messageText(&req.Message))[1:]...)
+	}
 }
 
 // askThenAnswer parks on a question, then completes once the resuming message

@@ -216,6 +216,30 @@ func humanBase(ra *remote, r remoteResult, humanInput bool) outcome {
 // which drains them internally: every frame is handed to the session on its way
 // past so a long delegation reports progress on the local bus instead of going
 // silent for minutes. The accumulated result is otherwise identical to Run's.
+//
+// # Why it stops on an interruption instead of draining
+//
+// A2A leaves it to the server whether an INPUT_REQUIRED park closes the SSE
+// stream, and both readings are legal. A server that HOLDS the stream open —
+// which is exactly what nexus.io.a2a does, deliberately, with keep-alive
+// comments and no terminal frame — will send nothing more until the task is
+// resumed, and a task is resumed by a NEW message carrying the same taskId
+// (specification section 3.4), never on the connection the question arrived on.
+// So a reader that waits for the stream to end is waiting for a remote that is
+// waiting for it: the question never reaches a human and the delegation dies on
+// the call budget or the idle timeout.
+//
+// The interruption frame IS the end of this exchange. Once it is seen the
+// stream is abandoned — the caller-initiated close is a clean stop here, not a
+// cancellation, so stream.Err() is deliberately not consulted on this path —
+// and the accumulated result carries everything the remote sent before parking,
+// which is what the human-in-the-loop round in call needs.
+//
+// The one frame that does NOT mean "just parked" is the OPENING frame of a
+// resumption: a server answers a resuming message with a snapshot of the task
+// as it stands, which is the very interruption being answered. Acting on that
+// would re-ask the human the question they have just answered, so it is skipped
+// and only a LATER interruption — a genuine second question — stops the read.
 func (p *Plugin) exchange(ctx context.Context, ra *remote, s *session, req a2a.SendMessageRequest, streaming bool) (remoteResult, error) {
 	if !streaming {
 		resp, err := ra.client.SendMessage(ctx, req)
@@ -234,15 +258,27 @@ func (p *Plugin) exchange(ctx context.Context, ra *remote, s *session, req a2a.S
 	}
 	defer stream.Close()
 
+	// A message naming a task is a continuation, so its opening snapshot is the
+	// interruption it continues rather than a new one.
+	resuming := strings.TrimSpace(req.Message.TaskID) != ""
+	opening := true
+
 	for frame := range stream.Frames() {
-		s.observe(frame)
+		parked := s.observe(frame)
+		first := opening
+		opening = false
+
+		if !parked || (first && resuming) {
+			continue
+		}
+		return fromStream(stream.Result()), nil
 	}
 	return fromStream(stream.Result()), stream.Err()
 }
 
 // classify turns a successfully-transported answer into an outcome. A clean
 // transport does not mean a successful task: FAILED, REJECTED, CANCELED and
-// INPUT_REQUIRED all arrive over a stream that ran to its end.
+// INPUT_REQUIRED are all answers a stream delivers without failing.
 func classify(ra *remote, r remoteResult) outcome {
 	out := rawOutcome(ra, r)
 

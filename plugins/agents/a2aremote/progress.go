@@ -160,11 +160,17 @@ func (s *session) nextIteration() int {
 // The recording half runs even when progress republishing is switched off: a
 // task id is what CancelTask and the resume path address, and losing it because
 // an operator did not want a chatty TUI would break both.
-func (s *session) observe(frame a2a.StreamResponse) {
+//
+// It reports whether this frame PARKED the task on an interruption. That is the
+// signal the streaming read loop stops on: a task at INPUT_REQUIRED or
+// AUTH_REQUIRED is waiting for its caller, and a caller that keeps reading is
+// waiting for it. See exchange.
+func (s *session) observe(frame a2a.StreamResponse) (parked bool) {
 	switch frame.Kind() {
 	case a2a.StreamPayloadTask:
 		s.noteTask(frame.Task.ID, frame.Task.ContextID)
 		s.noteState(frame.Task.Status.State)
+		return frame.Task.Status.State.IsInterrupted()
 
 	case a2a.StreamPayloadMessage:
 		s.noteTask(frame.Message.TaskID, frame.Message.ContextID)
@@ -176,12 +182,13 @@ func (s *session) observe(frame a2a.StreamResponse) {
 		update := frame.StatusUpdate
 		s.noteTask(update.TaskID, update.ContextID)
 		s.noteState(update.Status.State)
-		if !s.progress {
-			return
+		if s.progress {
+			s.republishTelemetry(update.Metadata)
+			s.republishNarration(update.Status)
 		}
-		s.republishTelemetry(update.Metadata)
-		s.republishNarration(update.Status)
+		return update.Status.State.IsInterrupted()
 	}
+	return false
 }
 
 // republishNarration emits a remote's own progress commentary as local output.

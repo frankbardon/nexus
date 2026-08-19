@@ -318,7 +318,22 @@ func checkSSEResponse(call httpCall, resp *http.Response) error {
 	contentType := resp.Header.Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil || !strings.EqualFold(mediaType, a2a.ContentTypeSSE) {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySnippet))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySnippet*4))
+		// A 2xx that is not a stream may still be a REFUSAL rather than a
+		// malformed answer: the JSON-RPC binding reports an error at HTTP 200,
+		// so a streaming call the remote would not accept — a task already
+		// terminal, an unsupported operation, an expired credential — arrives
+		// exactly here. Reporting that as "a response this client cannot read"
+		// would blame the remote for a message it framed correctly and bury the
+		// reason it gave, so the protocol error speaks for itself.
+		if protoErr := decodeProtocolError(body); protoErr != nil {
+			return &StreamError{
+				Reason:    StreamReasonRemoteError,
+				Operation: call.operation,
+				Detail:    "the remote refused the streaming call",
+				Err:       protoErr,
+			}
+		}
 		return &StreamError{
 			Reason:    StreamReasonNotSSE,
 			Operation: call.operation,

@@ -2,6 +2,7 @@ package a2aclient_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -444,6 +445,42 @@ func TestStreamHTTPErrorWhereSSEWasPromised(t *testing.T) {
 	var protoErr *a2a.Error
 	if !errors.As(err, &protoErr) || protoErr.Type != a2a.ErrorTypeTaskNotFound {
 		t.Fatalf("cause = %v, want TaskNotFoundError", streamErr.Err)
+	}
+}
+
+// TestStreamRefusalAtHTTP200 covers the shape a JSON-RPC remote actually
+// refuses a streaming call in: HTTP 200, an ordinary JSON body, and a protocol
+// error inside it. The binding reports errors at 200 by design, so this is not
+// an exotic case — it is how "that task is already terminal" comes back to a
+// client resuming an interrupted task a moment too late.
+//
+// It must be reported as the remote's REFUSAL, with the *a2a.Error recoverable,
+// rather than as an unreadable response: the two call for opposite next moves
+// from a caller.
+func TestStreamRefusalAtHTTP200(t *testing.T) {
+	srv := rawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		body, _ := a2a.NewErrorResponse(json.RawMessage(`"1"`),
+			a2a.ErrUnsupportedOperation("the task is in terminal state FAILED")).Encode()
+		w.Header().Set("Content-Type", a2a.ContentTypeJSON)
+		_, _ = w.Write(body)
+	})
+	client := restStreamClient(t, srv.URL)
+
+	_, err := streamOnce(t, client)
+	var streamErr *a2aclient.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("error = %v (%T), want *StreamError", err, err)
+	}
+	if streamErr.Reason != a2aclient.StreamReasonRemoteError {
+		t.Fatalf("reason = %s, want %s", streamErr.Reason, a2aclient.StreamReasonRemoteError)
+	}
+	var protoErr *a2a.Error
+	if !errors.As(err, &protoErr) {
+		t.Fatalf("cause = %v, want the remote's *a2a.Error", streamErr.Err)
+	}
+	if !strings.Contains(protoErr.Message, "terminal state FAILED") {
+		t.Errorf("cause message = %q, want the remote's own explanation", protoErr.Message)
 	}
 }
 

@@ -287,28 +287,25 @@ Whichever fires:
 `hitl.max_rounds` (default `4`) bounds a remote that answers every answer with
 another question; `0` removes the cap and leaves the call budget as the only one.
 
-### Chaining needs `stream: false` against a remote that holds the stream open
-
-**Known limitation, and it bites the Nexus→Nexus case at the default settings.**
+### Chaining works on both bindings
 
 A2A leaves it to the server whether an `INPUT_REQUIRED` park closes the SSE
-stream or holds it open, and both readings are legal. This plugin reads a stream
-to its **end** before it acts on what it read, so:
+stream or holds it open, and both readings are legal — [`nexus.io.a2a`](../io/a2a.md)
+holds it open, with keep-alive comments and no terminal frame. Either way the
+question is carried by the **interruption frame**, never by the stream ending,
+so this plugin stops reading the moment it sees one and resumes on a fresh
+connection (§3.4). Chaining therefore works at the shipped default,
+`stream: true`, and there is no reason to drop to `stream: false` for a remote
+that asks questions — doing so only costs you [live progress](#live-progress),
+since a blocking call has no frames to republish.
 
-| Remote's behaviour at `INPUT_REQUIRED` | `stream: true` (default) | `stream: false` |
-|---|---|---|
-| Closes the stream (§11.7 permits it) | Chaining works | Chaining works |
-| Holds the stream open — **which is what [`nexus.io.a2a`](../io/a2a.md) does**, with keep-alive comments | The question never reaches a human; the delegation ends when the call budget or `stream_idle_timeout` fires | Chaining works |
+The one interrupted frame that is *not* a new question is the opening snapshot
+of a continuation: a server answering a resuming message opens on the task as it
+stands, which is the very park being answered. That frame is skipped, so a human
+is never re-asked the question they just answered.
 
-So a Nexus instance delegating to another Nexus instance that may ask questions
-must set `stream: false` for that remote today. The blocking `SendMessage`
-binding returns the parked Task as soon as it parks (§3.2.2), which is exactly
-the signal the chaining path needs. The cost is losing [live
-progress](#live-progress) for that remote, since there are no frames to
-republish.
-
-`tests/integration/a2a_loopback_test.go` pins the working shape; the streaming
-shape is a recorded defect, not a design decision.
+`tests/integration/a2a_loopback_test.go` pins the Nexus→Nexus shape end to end,
+streaming included.
 
 `AUTH_REQUIRED` is **not** routed to a human. The remote is asking for a
 credential, and no answer a person types is one — the fix is a `credentials`

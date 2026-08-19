@@ -305,20 +305,19 @@ func TestA2ALoopback_BearerRejected(t *testing.T) {
 // a callee that answered its own question would have run to COMPLETED during
 // the wait, and the delegation would be a coincidence rather than a chain.
 //
-// It runs over the BLOCKING binding (stream: false). That is not incidental:
+// It runs at the shipped defaults, streaming included. That is not incidental:
 // nexus.io.a2a holds a streaming connection open across an INPUT_REQUIRED park
-// (keep-alive comments, no terminal frame), while nexus.agent.a2a_remote drains
-// a stream to its end before it acts on what it read — so over SSE the two
-// deadlock until a deadline fires and the question never reaches a human. Both
-// behaviours are individually specification-legal; composed they are not. See
-// the caveat in docs/src/plugins/agents/a2a-remote.md.
+// (keep-alive comments, no terminal frame), so the question is carried by the
+// interruption FRAME and never by the stream ending. nexus.agent.a2a_remote
+// stops reading on that frame and resumes on a fresh connection, which is what
+// makes the two compose over SSE as well as over the blocking binding.
 func TestA2ALoopback_ChainedHITL(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-loopback-hitl-server.yaml")
 	waitForListener(t, a2aLoopbackAddr)
 
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		"nexus.io.test":          a2aLoopbackCallerIO(nil),
-		"nexus.agent.a2a_remote": a2aLoopbackRemote(map[string]any{"stream": false}),
+		"nexus.agent.a2a_remote": a2aLoopbackRemote(nil),
 	})
 	h := testharness.New(t, cfg, testharness.WithTimeout(60*time.Second))
 
@@ -443,8 +442,7 @@ func TestA2ALoopback_ChainedHITLInputTimeout(t *testing.T) {
 		// The caller's own question deadline is far looser than the callee's, so
 		// the callee is unambiguously the one that gives up first.
 		"nexus.agent.a2a_remote": a2aLoopbackRemote(map[string]any{
-			"stream": false,
-			"hitl":   map[string]any{"input_timeout": "20s"},
+			"hitl": map[string]any{"input_timeout": "20s"},
 		}),
 	})
 
@@ -511,7 +509,7 @@ func TestA2ALoopback_Cancellation(t *testing.T) {
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		// Nobody answers: the turn is cancelled with the question still up.
 		"nexus.io.test":          a2aLoopbackCallerIO(nil),
-		"nexus.agent.a2a_remote": a2aLoopbackRemote(map[string]any{"stream": false}),
+		"nexus.agent.a2a_remote": a2aLoopbackRemote(nil),
 	})
 
 	h := testharness.New(t, cfg, testharness.WithTimeout(60*time.Second))
