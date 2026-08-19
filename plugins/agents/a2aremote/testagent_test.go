@@ -1,6 +1,7 @@
 package a2aremote
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -31,6 +32,15 @@ type testAgentConfig struct {
 	sendMessage func(*a2a.SendMessageRequest) (a2a.SendMessageResponse, *a2a.Error)
 	// frameDelay is applied before each streamed frame.
 	frameDelay time.Duration
+	// securitySchemes are added to the card, so a test can drive the
+	// credential/scheme mismatch check.
+	securitySchemes map[string]a2a.SecurityScheme
+	// authorize, when set, gates every request. Returning false answers 401,
+	// which is how a test proves a credential actually reached the wire.
+	authorize func(*http.Request) bool
+	// tlsConf, when set, starts the agent over TLS with it — the mutual-TLS
+	// path needs a real handshake, not a stub.
+	tlsConf *tls.Config
 }
 
 type testAgent struct {
@@ -41,6 +51,9 @@ type testAgent struct {
 	mu       sync.Mutex
 	cardHits int
 	sendHits int
+	// headers records every request's headers, so a test can assert what was
+	// presented without the agent having to interpret it.
+	headers []http.Header
 	// bodies records every A2A request body, so a test can assert what was
 	// actually sent to the remote.
 	bodies [][]byte
@@ -52,9 +65,40 @@ func newTestAgent(t *testing.T, cfg testAgentConfig) *testAgent {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+a2a.AgentCardPath, a.handleCard)
 	mux.HandleFunc("POST "+testJSONRPCPath, a.handleJSONRPC)
-	a.srv = httptest.NewServer(mux)
+
+	handler := a.record(mux)
+
+	if cfg.tlsConf != nil {
+		a.srv = httptest.NewUnstartedServer(handler)
+		a.srv.TLS = cfg.tlsConf
+		a.srv.StartTLS()
+	} else {
+		a.srv = httptest.NewServer(handler)
+	}
 	t.Cleanup(a.srv.Close)
 	return a
+}
+
+// record captures every request's headers and applies the authorize gate.
+func (a *testAgent) record(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.headers = append(a.headers, r.Header.Clone())
+		a.mu.Unlock()
+		if a.cfg.authorize != nil && !a.cfg.authorize(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// seenHeaders returns every request header set the agent has observed.
+func (a *testAgent) seenHeaders() []http.Header {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]http.Header(nil), a.headers...)
 }
 
 func (a *testAgent) URL() string { return a.srv.URL }
@@ -102,6 +146,9 @@ func (a *testAgent) handleCard(w http.ResponseWriter, _ *http.Request) {
 	}
 	for _, skill := range skills {
 		card = card.WithSkill(skill)
+	}
+	for name, scheme := range a.cfg.securitySchemes {
+		card = card.WithSecurityScheme(name, scheme)
 	}
 
 	body, err := a2a.EncodeAgentCard(&card)

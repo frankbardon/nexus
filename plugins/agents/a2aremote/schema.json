@@ -21,6 +21,89 @@
       "items": { "type": "string" },
       "description": "A2A protocol extension URIs to request via the A2A-Extensions service parameter. A server activates only the extensions a client asked for. An empty list at agent level overrides an inherited plugin-level list."
     },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Credential this instance presents to THIS remote. Per agent only — there is no plugin-level default, so a credential can never reach a remote it was not written for. Validated at boot: an unset environment variable, an unreadable client certificate or a key naming the wrong type fails Init rather than the first delegation. No credential value is ever logged.",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["none", "bearer", "oauth2_client_credentials", "mtls"],
+          "description": "Which credential to present. Keys belonging to a different type are rejected at boot."
+        },
+        "token": {
+          "type": "string",
+          "description": "bearer: the token, inline. Prefer token_env; an inline secret lives in the config file. Takes precedence over token_env when both are set."
+        },
+        "token_env": {
+          "type": "string",
+          "description": "bearer: name of an environment variable holding the token. Read once at Init; a variable that is unset or empty fails boot."
+        },
+        "header": {
+          "type": "string",
+          "description": "bearer: header the token rides in. Defaults to \"Authorization\"."
+        },
+        "scheme": {
+          "type": "string",
+          "description": "bearer: the scheme word before the token. Defaults to \"Bearer\"; set it to an empty string to send the bare token, which is what an X-Api-Key style header wants."
+        },
+        "client_id": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the client id, inline. Prefer client_id_env."
+        },
+        "client_id_env": {
+          "type": "string",
+          "description": "oauth2_client_credentials: name of an environment variable holding the client id."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the client secret, inline. Prefer client_secret_env."
+        },
+        "client_secret_env": {
+          "type": "string",
+          "description": "oauth2_client_credentials: name of an environment variable holding the client secret."
+        },
+        "token_url": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the token endpoint. Optional when the agent has a base_url — the endpoint is then discovered from the card's oauth2 clientCredentials flow on first use. Required for an agent that pins an endpoint instead, since there is no card to discover it from."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "oauth2_client_credentials: scopes requested in the token request. Not defaulted from the card: requesting every scope a remote advertises is broader than any deployment needs."
+        },
+        "audience": {
+          "type": "string",
+          "description": "oauth2_client_credentials: value of the non-standard but widely supported audience parameter, sent only when set."
+        },
+        "auth_style": {
+          "type": "string",
+          "enum": ["basic", "body"],
+          "description": "oauth2_client_credentials: how the client authenticates to the token endpoint. \"basic\" (default) is HTTP Basic per RFC 6749 section 2.3.1; \"body\" puts client_id and client_secret in the form body, for a server that only accepts that."
+        },
+        "refresh_leeway": {
+          "$ref": "#/$defs/duration",
+          "description": "oauth2_client_credentials: how far ahead of the stated expiry a token is replaced. Defaults to \"30s\". Clamped to half the token lifetime when the lifetime is shorter than the leeway."
+        },
+        "cert_file": {
+          "type": "string",
+          "description": "mtls: path to the PEM client certificate. Required for mtls. Supports ~ expansion. Read at Init."
+        },
+        "key_file": {
+          "type": "string",
+          "description": "mtls: path to the PEM private key matching cert_file. Required for mtls. Supports ~ expansion. Read at Init."
+        },
+        "ca_file": {
+          "type": "string",
+          "description": "mtls: path to a PEM bundle used to verify the REMOTE's certificate, for a private CA. Supports ~ expansion. Defaults to the system roots."
+        },
+        "server_name": {
+          "type": "string",
+          "description": "mtls: override the TLS server name used for SNI and certificate verification, for a remote reached by an address its certificate does not name."
+        }
+      }
+    },
     "retry": {
       "type": "object",
       "additionalProperties": false,
@@ -110,7 +193,8 @@
             "description": "Bound on total silence on an open stream, measured in bytes read so SSE keep-alive comments count as life. Defaults to \"5m\"; raise it for a slow remote. \"0s\" disables it."
           },
           "extensions": { "$ref": "#/$defs/extensions" },
-          "retry": { "$ref": "#/$defs/retry" }
+          "retry": { "$ref": "#/$defs/retry" },
+          "credentials": { "$ref": "#/$defs/credentials" }
         }
       }
     },

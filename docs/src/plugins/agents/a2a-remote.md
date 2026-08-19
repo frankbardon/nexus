@@ -230,15 +230,105 @@ eviction.
 
 ## Credentials
 
-The A2A client takes credentials through a `CredentialSource` seam, applied per
-HTTP attempt so a source that refreshes an expired token does so on the retry
-rather than replaying a stale one. The seam is wired
-(`plugins/agents/a2aremote/credentials.go`) and every remote currently gets the
-no-credential source, which is correct for a loopback or open endpoint.
-Concrete bearer, OAuth2 and mTLS sources — and the config block that selects
-between them — are separate work; the plugin page and the
-[configuration reference](../../configuration/reference.md#nexusagenta2a_remote)
-will grow a `credentials:` key when they land.
+Each remote names the credential this instance presents to it in its own
+`credentials:` block. Four types are supported — `none`, `bearer`,
+`oauth2_client_credentials` and `mtls` — and the full key list is in the
+[configuration reference](../../configuration/reference.md#nexusagenta2a_remote).
+
+```yaml
+  nexus.agent.a2a_remote:
+    agents:
+      # An open endpoint: a loopback peer, a development agent.
+      - name: local_peer
+        base_url: http://127.0.0.1:8091
+
+      # A static token, the same api_key / api_key_env shape the LLM
+      # providers use.
+      - name: researcher
+        base_url: https://research.internal
+        credentials:
+          type: bearer
+          token_env: RESEARCH_AGENT_TOKEN
+
+      # Machine-to-machine OAuth2. token_url is optional: it is discovered
+      # from the remote's own card on first use.
+      - name: legal
+        base_url: https://legal.internal
+        credentials:
+          type: oauth2_client_credentials
+          client_id_env: LEGAL_CLIENT_ID
+          client_secret_env: LEGAL_CLIENT_SECRET
+          scopes: [a2a.invoke]
+
+      # Client-certificate authentication. Paths take ~.
+      - name: finance
+        base_url: https://finance.internal
+        credentials:
+          type: mtls
+          cert_file: ~/.nexus/certs/finance-client.pem
+          key_file: ~/.nexus/certs/finance-client-key.pem
+          ca_file: ~/.nexus/certs/internal-ca.pem
+```
+
+### Per remote, never inherited
+
+Unlike every transport key, `credentials:` exists **only** inside an `agents[]`
+entry. There is no plugin-level default and there must not be one: a default
+credential silently applied to a remote an operator added later is how a token
+reaches a host it was never issued for.
+
+### Validated at boot, not on first delegation
+
+An unset environment variable, a key belonging to a different `type`, an
+unreadable client certificate, a key that does not match its certificate, an
+OAuth2 remote with neither a `token_url` nor a `base_url` to discover one from —
+each stops the engine at `Init` with a message naming the agent and the key.
+None of them waits to become a `401` the first time a model happens to delegate.
+
+What is *not* checked at boot is anything only the remote can answer: whether
+the token is accepted, whether the certificate is trusted, whether the token
+endpoint exists. Those need the network, and this plugin
+[does not touch the network at boot](#discovery-is-lazy).
+
+### No credential value is ever logged
+
+On any path, including failures. Failure messages name the agent, the key and
+the kind of failure and stop there. A token endpoint's free-text
+`error_description` is dropped wholesale rather than scrubbed — a server is free
+to echo the client secret into it — and only the fixed RFC 6749 `error` code is
+reported, which is what an operator actually needs.
+
+### OAuth2: one token per burst
+
+The access token is cached and replaced `refresh_leeway` (default `30s`) ahead
+of its stated expiry. A fetch is **single-flight**: a model that fans out
+produces a burst of tool calls that all reach the credential source within
+microseconds, and an authorization server answers a burst of identical grants
+with a `429`. The first caller fetches; the rest wait on it and share the
+result, including a failure, so a token endpoint that is down is hit once per
+burst rather than once per call.
+
+When `token_url` is discovered from the card rather than configured, exactly one
+request necessarily precedes the token: the well-known Agent Card fetch, which
+goes out unauthenticated. Specification §8.2 makes that document public. A
+remote that protects its card wants `token_url` set explicitly, and the `401` it
+answers with says so.
+
+### Card mismatch is a warning, not a refusal
+
+On the **first** call to a remote — never at boot, since
+[the card is fetched lazily](#discovery-is-lazy) — the configured credential is
+compared against the card's `securitySchemes`. An obvious mismatch, such as a
+bearer token against a card declaring only `mutualTls`, logs one warning naming
+the schemes the card declares; a remote that declares schemes while this
+instance sends nothing logs one too.
+
+It warns rather than refuses because a card's `securitySchemes` block is
+optional and routinely incomplete — a remote behind a gateway that terminates
+mTLS may declare nothing at all — and refusing on that evidence would break
+working deployments over a documentation defect. What the warning buys is that
+the far more common case, a credential configured against the wrong remote, is
+diagnosed in a log line instead of an opaque `401`.
 
 ## Loopback (serve ↔ consume)
 

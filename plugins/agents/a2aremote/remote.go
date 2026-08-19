@@ -59,7 +59,7 @@ type remote struct {
 // newRemote builds the client for one configured agent. It performs no I/O:
 // a2aclient.New validates the URL and the binding and nothing else, so a
 // misconfigured remote fails at boot and an unreachable one does not.
-func newRemote(cfg agentConfig, creds a2aclient.CredentialSource) (*remote, error) {
+func newRemote(cfg agentConfig, cred credential) (*remote, error) {
 	opts := cfg.transport.options()
 	if cfg.jsonrpcEndpoint != "" {
 		opts = append(opts, a2aclient.WithJSONRPCEndpoint(cfg.jsonrpcEndpoint))
@@ -67,8 +67,14 @@ func newRemote(cfg agentConfig, creds a2aclient.CredentialSource) (*remote, erro
 	if cfg.restEndpoint != "" {
 		opts = append(opts, a2aclient.WithRESTEndpoint(cfg.restEndpoint))
 	}
-	if creds != nil {
-		opts = append(opts, a2aclient.WithCredentials(creds))
+	if cred.source != nil {
+		opts = append(opts, a2aclient.WithCredentials(cred.source))
+	}
+	// A transport-level credential (mutual TLS) arrives as a pre-built client
+	// rather than a request mutation; a2aclient documents WithHTTPClient as the
+	// way to supply one.
+	if cred.httpClient != nil {
+		opts = append(opts, a2aclient.WithHTTPClient(cred.httpClient))
 	}
 
 	client, err := a2aclient.New(cfg.baseURL, opts...)

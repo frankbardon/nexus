@@ -102,8 +102,16 @@ func TestConfigSchemaCoversEveryParsedKey(t *testing.T) {
 		cfgKeyToolName, cfgKeyDescription, cfgKeyPosture,
 	}
 	retryKeys := []string{cfgKeyRetryMaxAttempts, cfgKeyRetryBaseDelay, cfgKeyRetryMaxDelay}
+	credentialKeys := []string{
+		cfgKeyCredentials, cfgKeyCredType,
+		cfgKeyToken, cfgKeyTokenEnv, cfgKeyCredHeader, cfgKeyBearerSchem,
+		cfgKeyClientID, cfgKeyClientIDEnv, cfgKeyClientSecret, cfgKeyClientSecretEnv,
+		cfgKeyTokenURL, cfgKeyScopes, cfgKeyAudience, cfgKeyAuthStyle, cfgKeyRefreshLeeway,
+		cfgKeyCertFile, cfgKeyKeyFile, cfgKeyCAFile, cfgKeyServerName,
+	}
 
-	for _, key := range append(append(pluginKeys, agentKeys...), retryKeys...) {
+	all := append(append(append(pluginKeys, agentKeys...), retryKeys...), credentialKeys...)
+	for _, key := range all {
 		if !strings.Contains(schema, `"`+key+`"`) {
 			t.Errorf("schema.json does not declare the %q key that parseConfig reads", key)
 		}
@@ -120,5 +128,17 @@ func TestConfigSchemaCoversEveryParsedKey(t *testing.T) {
 	}
 	if bindingNames["jsonrpc"] != a2a.BindingJSONRPC {
 		t.Error("the jsonrpc spelling must map to the JSONRPC binding")
+	}
+	// Every credential type the parser accepts must be in the schema's enum,
+	// or a valid credentials block is rejected before Init ever sees it.
+	for _, kind := range credentialKinds() {
+		if !strings.Contains(schema, `"`+kind+`"`) {
+			t.Errorf("schema.json does not accept the credential type %q", kind)
+		}
+	}
+	for _, style := range []string{authStyleBasic, authStyleBody} {
+		if !strings.Contains(schema, `"`+style+`"`) {
+			t.Errorf("schema.json does not accept the auth style %q", style)
+		}
 	}
 }

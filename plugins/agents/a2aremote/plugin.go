@@ -124,7 +124,7 @@ type Plugin struct {
 func New() engine.Plugin {
 	return &Plugin{
 		remotes:     map[string]*remote{},
-		credentials: noCredentials,
+		credentials: buildCredential,
 	}
 }
 
@@ -165,14 +165,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if p.credentials == nil {
-		p.credentials = noCredentials
+		p.credentials = buildCredential
 	}
 	for _, ac := range cfg.agents {
-		creds, err := p.credentials(ac)
+		cred, err := p.credentials(ac, p.logger)
 		if err != nil {
-			return fmt.Errorf("%s: agent %q: build credentials: %w", pluginID, ac.name, err)
+			return fmt.Errorf("%s: agent %q: %w", pluginID, ac.name, err)
 		}
-		ra, err := newRemote(ac, creds)
+		ra, err := newRemote(ac, cred)
 		if err != nil {
 			return err
 		}

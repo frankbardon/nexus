@@ -182,6 +182,10 @@ type agentConfig struct {
 	description string
 	posture     string
 
+	// credentials is the resolved `credentials:` block. It is per agent and
+	// never inherited from the plugin level; see credentials.go.
+	credentials credentialConfig
+
 	baseURL         string
 	jsonrpcEndpoint string
 	restEndpoint    string
@@ -200,9 +204,11 @@ type config struct {
 	defaults transport
 }
 
-// parseConfig resolves the plugin's YAML configuration. It performs no I/O:
-// every remote is validated for shape only, so an unreachable agent is a
-// runtime tool error rather than a boot failure.
+// parseConfig resolves the plugin's YAML configuration. It contacts no remote:
+// every agent is validated for shape only, so an unreachable agent is a runtime
+// tool error rather than a boot failure. The one thing it reaches outside the
+// config map for is a credential named by an `_env` key, which is resolved here
+// so an unset variable fails boot rather than the first delegation.
 func parseConfig(raw map[string]any) (*config, error) {
 	c := &config{
 		cacheEnabled: true,
@@ -297,6 +303,12 @@ func parseAgent(m map[string]any, index int, defaults transport) (agentConfig, e
 		}
 		ac.toolName = toolNamePrefix + suffix
 	}
+
+	creds, err := parseCredentials(m, where)
+	if err != nil {
+		return agentConfig{}, err
+	}
+	ac.credentials = creds
 
 	t, err := parseTransport(m, where)
 	if err != nil {

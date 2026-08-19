@@ -101,6 +101,98 @@ func TestSchemaAcceptsEveryKey(t *testing.T) {
 `)
 }
 
+func TestSchemaAcceptsEveryCredentialBlock(t *testing.T) {
+	mustValidate(t, `    agents:
+      - name: open
+        base_url: https://open.internal
+        credentials:
+          type: none
+      - name: bearer
+        base_url: https://bearer.internal
+        credentials:
+          type: bearer
+          token_env: A2A_BEARER_TOKEN
+          header: Authorization
+          scheme: Bearer
+      - name: oauth
+        base_url: https://oauth.internal
+        credentials:
+          type: oauth2_client_credentials
+          client_id_env: A2A_CLIENT_ID
+          client_secret_env: A2A_CLIENT_SECRET
+          token_url: https://issuer.internal/oauth2/token
+          scopes:
+            - a2a.invoke
+          audience: https://oauth.internal
+          auth_style: body
+          refresh_leeway: 45s
+      - name: mtls
+        base_url: https://mtls.internal
+        credentials:
+          type: mtls
+          cert_file: ~/.nexus/certs/client.pem
+          key_file: ~/.nexus/certs/client-key.pem
+          ca_file: ~/.nexus/certs/ca.pem
+          server_name: mtls.internal
+`)
+}
+
+func TestSchemaRejectsABadCredentialsBlock(t *testing.T) {
+	mustReject(t, `    agents:
+      - name: x
+        base_url: https://a.internal
+        credentials:
+          type: kerberos
+`, "credentials")
+
+	mustReject(t, `    agents:
+      - name: x
+        base_url: https://a.internal
+        credentials:
+          token: hunter2
+`, "type")
+
+	mustReject(t, `    agents:
+      - name: x
+        base_url: https://a.internal
+        credentials:
+          type: bearer
+          bearer_token: hunter2
+`, "bearer_token")
+
+	mustReject(t, `    agents:
+      - name: x
+        base_url: https://a.internal
+        credentials:
+          type: oauth2_client_credentials
+          client_id: c
+          client_secret: s
+          auth_style: post
+`, "auth_style")
+
+	mustReject(t, `    agents:
+      - name: x
+        base_url: https://a.internal
+        credentials:
+          type: oauth2_client_credentials
+          client_id: c
+          client_secret: s
+          refresh_leeway: 45
+`, "refresh_leeway")
+}
+
+// Credentials are per remote. A plugin-level block would be a default silently
+// applied to a remote it was never issued for, so the schema refuses one.
+func TestSchemaRejectsPluginLevelCredentials(t *testing.T) {
+	mustReject(t, `    credentials:
+      type: bearer
+      token: hunter2
+    agents:
+      - name: x
+        base_url: https://a.internal
+`, "credentials")
+}
+
 func TestSchemaRejectsUnknownKeys(t *testing.T) {
 	mustReject(t, `    timeout_seconds: 90
     agents:

@@ -597,6 +597,75 @@ Each `agents[]` entry:
 | `stream_idle_timeout` | duration | *(plugin default)* | Per-agent override. |
 | `extensions`          | list   | *(plugin default)* | Per-agent override; replaces rather than merges. |
 | `retry`               | map    | *(plugin default)* | Per-agent override. |
+| `credentials`         | map    | *(none)* | Credential this instance presents to **this** remote. Per agent only — see below. |
+
+The `credentials` block exists **only** inside an `agents[]` entry. There is
+deliberately no plugin-level default: a default credential silently applied to a
+remote added later is how a token reaches a host it was never issued for.
+
+Everything a credentials block can be wrong about is checked at **`Init`**: an
+unset environment variable, a key belonging to a different `type`, an unreadable
+or mismatched client certificate, or an OAuth2 remote with no way to reach a
+token endpoint each fail boot with a message naming the agent and the key — not
+a `401` on the first delegation. **No credential value is ever logged**, on any
+path, including failures.
+
+| Key    | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| `type` | string | *(required)* | One of `none`, `bearer`, `oauth2_client_credentials`, `mtls`. The types are mutually exclusive; a key belonging to another type is rejected at boot. |
+
+`type: bearer` — a static token, following the same `api_key` / `api_key_env`
+convention the LLM providers use:
+
+| Key         | Type   | Default | Description |
+|-------------|--------|---------|-------------|
+| `token`     | string | *(none)* | The token, inline. Takes precedence over `token_env` when both are set. Prefer `token_env`; an inline secret lives in the config file. |
+| `token_env` | string | *(none)* | Name of an environment variable holding the token. Read once at `Init`; a variable that is unset or empty **fails boot**. |
+| `header`    | string | `Authorization` | Header the token rides in. |
+| `scheme`    | string | `Bearer` | The scheme word before the token. Set it to `""` to send the bare token, which is what an `X-Api-Key` style header wants. |
+
+`type: oauth2_client_credentials` — the RFC 6749 §4.4 machine-to-machine grant,
+implemented over `net/http` (no `golang.org/x/oauth2` dependency). The token is
+cached and refreshed ahead of expiry, and a burst of concurrent calls triggers
+**one** token request, not one per caller:
+
+| Key                 | Type     | Default | Description |
+|---------------------|----------|---------|-------------|
+| `client_id`         | string   | *(none)* | The client id, inline. Prefer `client_id_env`. |
+| `client_id_env`     | string   | *(none)* | Name of an environment variable holding the client id. |
+| `client_secret`     | string   | *(none)* | The client secret, inline. Prefer `client_secret_env`. |
+| `client_secret_env` | string   | *(none)* | Name of an environment variable holding the client secret. |
+| `token_url`         | string   | *(discovered)* | The token endpoint. Optional when the agent has a `base_url`: it is then discovered from the card's `oauth2` `clientCredentials` flow on first use. **Required** for an agent that pins `jsonrpc_endpoint`/`rest_endpoint` instead, since there is no card to discover it from. |
+| `scopes`            | list     | *(none)* | Scopes requested in the token request, joined with spaces. Not defaulted from the card: requesting every scope a remote advertises is broader than any deployment needs. |
+| `audience`          | string   | *(none)* | Value of the widely-supported (non-standard) `audience` parameter. Sent only when set. |
+| `auth_style`        | string   | `basic`  | How the client authenticates to the token endpoint. `basic` is HTTP Basic per RFC 6749 §2.3.1; `body` puts `client_id`/`client_secret` in the form body, for a server that only accepts that. |
+| `refresh_leeway`    | duration | `30s`    | How far ahead of the stated expiry a token is replaced. Clamped to half the token lifetime when the lifetime is shorter than the leeway. A server that omits `expires_in` is assumed to have issued a 60-second token. |
+
+One id/secret pair is required: set `client_id` or `client_id_env`, and
+`client_secret` or `client_secret_env`. When `token_url` is being discovered
+from the card, the well-known Agent Card fetch — and only that fetch — goes out
+unauthenticated, because the token cannot be obtained before the endpoint that
+issues it is known. Specification §8.2 makes the well-known card a public
+document; a remote that protects its card wants `token_url` set explicitly.
+
+`type: mtls` — client-certificate authentication, wired into the
+`http.Transport`. Every path is resolved through the engine's `~` expansion and
+read at `Init`:
+
+| Key           | Type   | Default | Description |
+|---------------|--------|---------|-------------|
+| `cert_file`   | string | *(required)* | Path to the PEM client certificate. |
+| `key_file`    | string | *(required)* | Path to the PEM private key matching `cert_file`. |
+| `ca_file`     | string | *(system roots)* | Path to a PEM bundle used to verify the **remote's** certificate, for a private CA. |
+| `server_name` | string | *(from the URL)* | Override the TLS server name used for SNI and certificate verification, for a remote reached by an address its certificate does not name. |
+
+On the **first** call to a remote — never at boot, since the card is fetched
+lazily — the configured credential is compared against the card's
+`securitySchemes`, and an obvious mismatch (a bearer token against a card
+declaring only `mutualTls`, say) logs one **warning**. It warns rather than
+refuses: a card's `securitySchemes` block is optional and routinely incomplete,
+and refusing on that evidence would break working deployments over a
+documentation defect.
 
 The `retry` block, at either level:
 

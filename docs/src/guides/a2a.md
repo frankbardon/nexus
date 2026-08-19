@@ -607,7 +607,7 @@ That registers `delegate_a2a_researcher`. Calling it sends the delegated task to
 the remote, drains the stream the remote answers with, and folds the terminal
 result back into the tool result.
 
-Four decisions in that path are worth stating here, because they are the ones a
+Five decisions in that path are worth stating here, because they are the ones a
 reader of this guide is most likely to be surprised by.
 
 **Remotes come from configuration only.** The tool schema exposes no `url`,
@@ -636,6 +636,18 @@ dead stream, an exhausted budget, a task that ends `FAILED`, and a task parked a
 model can act on, alongside whatever partial output arrived. The parked case
 carries the remote's question and tells the model to re-delegate with the answer
 included; chaining it into the local `ask_user` surface is separate work.
+
+**Credentials are per remote and checked at boot.** Each `agents[]` entry carries
+its own `credentials:` block — `bearer`, `oauth2_client_credentials` or `mtls` —
+and there is deliberately no plugin-level default, so a token can never reach a
+remote it was not issued for. Everything checkable without the network is
+checked at `Init`: an unset environment variable, an unreadable client
+certificate, a key belonging to the wrong type. **No credential value is ever
+logged.** On the first call the credential is compared against the card's
+`securitySchemes` and an obvious mismatch *warns* — a card's scheme block is
+optional and routinely incomplete, so refusing on that evidence would break
+working deployments. See
+[Remote A2A Agents → Credentials](../plugins/agents/a2a-remote.md#credentials).
 
 Budgets come from the [posture registry](../plugins/agents/postures.md) when a
 remote names a posture — but only `default_budget.timeout` and
