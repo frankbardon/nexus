@@ -2206,6 +2206,17 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 			ReleaseGrace:   defaultReleaseGrace,
 			ReattachWindow: defaultReattachWindow,
 			AdminScope:     defaultAdminScope,
+			// The A2A settings LoadConfigFromBytes would have derived. They are
+			// stated here rather than left zero because zero is not "default" for
+			// any of them — it is DISABLED: no retention, no per-context cap, no
+			// input deadline. A harness that left them zero would exercise a
+			// policy no shipped broker runs under, and would silently make the
+			// queue's deadlock escape hatch untestable.
+			A2ATaskRetention: a2aTaskRetention{
+				ttl:           defaultA2ATaskTTL,
+				maxPerContext: defaultA2ATasksPerContext,
+			},
+			A2AInputTimeout: defaultA2AInputTimeout,
 		},
 		runner: execRunner{},
 	}
@@ -2285,12 +2296,29 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 		t.Fatalf("NewA2AServer: %v", err)
 	}
 	var a2aContexts *a2aContextIndex
+	var a2aTasks *a2aTaskStore
 	if agents.enabled() {
 		a2aContexts, err = openA2AContextIndex(logger, cfg)
 		if err != nil {
 			t.Fatalf("openA2AContextIndex: %v", err)
 		}
 		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+
+		// The durable task store, wired exactly as run() wires it. Without this
+		// the ingress would run on the memory-only store NewA2AServer installs,
+		// so every task read a test performs would be answered by a different
+		// store than a shipped broker uses — and a state_dir test would prove
+		// nothing about durability at all.
+		//
+		// A failure IS fatal here, unlike in run(): run() degrades to memory-only
+		// because refusing to boot would be worse for an operator, but a test
+		// that silently lost durability would report a green run for a store that
+		// never opened.
+		a2aTasks, err = openA2ATaskStore(logger, cfg)
+		if err != nil {
+			t.Fatalf("openA2ATaskStore: %v", err)
+		}
+		agents.useTaskStore(a2aTasks)
 	}
 
 	// Mirror run()'s route topology exactly, because middleware ORDERING is the
@@ -2335,6 +2363,9 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 			agents.Shutdown()
 			if a2aContexts != nil {
 				_ = a2aContexts.Close()
+			}
+			if a2aTasks != nil {
+				_ = a2aTasks.Close()
 			}
 			if leaseStore != nil {
 				_ = leaseStore.Close()

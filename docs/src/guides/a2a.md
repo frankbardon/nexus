@@ -6,14 +6,24 @@ moving through a lifecycle), a **Message** (composed of **Parts**), and an
 **Artifact** (task output). An agent publishes an **Agent Card** at a well-known
 URL so a client can discover what it does and how to authenticate to it.
 
-Nexus speaks A2A in both directions, through four pieces:
+Nexus speaks A2A in both directions, through five pieces:
 
 | Piece | What it is |
 |---|---|
 | `pkg/a2a` | A hand-rolled, dependency-free A2A codec: the data model, both HTTP bindings, the SSE transport, the Agent Card types, and the protocol error model. No third-party A2A SDK. |
 | `pkg/a2a/a2aclient` | The client on top of that codec: Agent Card resolution, `SendMessage`, streaming, resume, `GetTask`, `CancelTask`, with the timeout and retry policy that talking to a remote over HTTP requires. |
-| [`nexus.io.a2a`](../plugins/io/a2a.md) | The **serve** transport: one HTTP listener that exposes a running Nexus instance as an A2A agent. |
+| [`nexus.io.a2a`](../plugins/io/a2a.md) | **Standalone serve**: one HTTP listener that exposes a running Nexus instance as an A2A agent. One process, one conversation. |
+| [`cmd/nexus-broker`](./session-broker.md#the-a2a-front-door-agents) | **Broker-fronted serve**: one ingress publishing several agents, each spawning an OS-isolated instance per conversation. Many conversations, one URL. |
 | [`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md) | The **outbound** transport: one `delegate_a2a_<name>` tool per configured remote, letting a Nexus agent call other A2A agents. |
+
+**Two ways to serve, and the choice is the first one to make.** Standalone serve
+is one process bound to one conversation for its lifetime — right for an agent
+embedded in something else, or for a single long-running assistant. Broker-fronted
+serve is a gateway that starts and stops instances on demand, keyed by
+`contextId` — right for serving many callers behind one address. They speak the
+same protocol and publish the same shape of card; where they differ is set out in
+[What works today](#what-works-today) and, in operational detail, in the
+[session broker guide](./session-broker.md#the-a2a-front-door-agents).
 
 This guide covers the mapping between the two protocols and how a client drives
 a Nexus turn end to end. For every configuration key, its type and its default,
@@ -135,13 +145,17 @@ one is in flight is refused with `UnsupportedOperationError`
 (`detail: TASK_ALREADY_IN_FLIGHT`): the listener fronts one agent loop, and two
 turns would interleave on the same bus and corrupt both conversations.
 
-**Multi-context A2A is the session broker's job.** One process per context is
-exactly the shape the [session broker](./session-broker.md) already automates —
-it cold-spawns an OS-isolated `nexus` instance per caller and releases it when
-idle. Fronting the broker with A2A, so that an unknown `contextId` spawns an
-instance and a known one resumes it, is planned and does **not** work today.
-Until it does, a deployment that must serve many concurrent contexts runs many
-instances and routes to them itself.
+**Multi-context A2A is the session broker's job, and it works today.** One
+process per context is exactly the shape the
+[session broker](./session-broker.md#the-a2a-front-door-agents) automates: an
+unknown `contextId` cold-spawns an OS-isolated `nexus` instance, a known one is
+routed to the instance already serving it, and one whose instance has been
+released re-spawns it with `-recall` so the conversation carries on. The client
+sends nothing but A2A and is never told a lease exists.
+
+So the single-context rule above is a property of **this plugin**, not of Nexus:
+a deployment serving many concurrent conversations puts the broker in front
+rather than running one listener per context and routing to them itself.
 
 ## Worked example
 
@@ -418,9 +432,13 @@ Reference](../configuration/reference.md#error-envelopes).
 
 ## What works today
 
-The plugin keeps one map — `implementedOperations` — that gates both what
-dispatches and what the Agent Card advertises, so the card and the behaviour
-cannot disagree.
+There are two serving surfaces and they do not implement identical sets, so the
+tables below are **per surface**. Both keep one map — `implementedOperations` in
+the plugin, `brokerImplementedOperations` in the broker — that gates what
+dispatches *and* what the Agent Card advertises, so on either surface the card
+and the behaviour cannot disagree.
+
+### Standalone serve (`nexus.io.a2a`)
 
 | Operation | JSON-RPC method | REST path | Status |
 |---|---|---|---|
@@ -443,6 +461,35 @@ operations are scoped to the calling principal — another principal's task is
 indistinguishable from one that does not exist — and so are `CancelTask` and
 continuation, which resolve the task through the same scoped lookup before they
 reveal anything about its state.
+
+### Broker-fronted serve (`cmd/nexus-broker`, the `agents:` block)
+
+The broker publishes the same operations per profile, at
+`/agents/<profile>/…`, and drives them by starting an isolated instance rather
+than by watching this process's bus. What differs is set out below; everything
+not mentioned behaves as the table above describes.
+
+| Capability | Standalone | Broker-fronted |
+|---|---|---|
+| Conversations per deployment | **One.** The process is bound to one `contextId` for its life; a second is refused with `CONTEXT_NOT_SERVED` | **Unbounded.** Each `contextId` gets its own OS-isolated instance, spawned on the first message and re-spawned with `-recall` after it is released |
+| Agents per listener | One | One per `agents:` profile, each with its own card, config and path namespace |
+| Agent Card | Served **unauthenticated** by default — the listener binds loopback; `card_requires_auth: true` gates it | **Behind the auth guard**, always, like every other broker route; an ingress does not publish its agent list to anyone who can reach the port |
+| Concurrent tasks on one conversation | Refused (`TASK_ALREADY_IN_FLIGHT`) | **Queued.** The second task sits in `SUBMITTED` — readable, streamable, cancellable — until the first is terminal |
+| Answer artifact | Yes | Yes |
+| Tool-result artifacts | **Yes**, one per `tool.result` | **No.** The instance IO envelope carries no tool results |
+| Written-file artifacts | **Yes**, inline base64 | **No**, for the same reason |
+| Nexus extension telemetry | **Yes**, opt-in per request | **No.** The envelope carries no thinking steps or per-call token usage |
+| `GetTask` / `ListTasks` / `SubscribeToTask` | From the plugin's task store, principal-scoped | From the broker's task store, scoped to principal **and profile**; answers after the instance is gone and across a broker restart |
+| `CancelTask`, HITL park and resume, `returnImmediately` | Yes | Yes |
+| Push notifications, `GetExtendedAgentCard` | Refused, capability `false` | Refused, capability `false` |
+| Retention | `tasks.ttl` `24h`, `tasks.max_per_context` `200` | `a2a.tasks.ttl` `24h`, `a2a.tasks.max_per_context` `50`, plus a lossy 4096-binding cap on conversation continuity |
+
+**The artifact rows are the honest headline.** Behind the broker an agent returns
+its answer and nothing else, because `nexus.io.broker`'s payload has no field for
+a tool result or a written file. That is a property of the transport between the
+broker and the instance, not a gap that a later story closes cheaply, and it is
+measured rather than asserted — see
+[Conformance](#conformance-one-corpus-two-mappings).
 
 ### Outbound: what `nexus.agent.a2a_remote` does today
 
@@ -646,8 +693,11 @@ Do not build against these. Everything below is either refused outright or
 simply absent right now; it is listed so the shape of the finished transport is
 visible, not so it can be relied on.
 
-- The **broker A2A front door** — one isolated instance per caller, fronted by
-  `cmd/nexus-broker` — is a separate piece of work and does not exist yet.
+- **Tool, file and telemetry artifacts behind the broker.** The
+  [broker-fronted surface](#broker-fronted-serve-cmdnexus-broker-the-agents-block)
+  publishes only a turn's answer, because the instance IO envelope carries
+  nothing else. Widening it means widening that envelope, which is a change to
+  every broker client and not to this transport.
 - **Workspace-wide file detection.** Files become artifacts only when a
   `tool.result` reports the path (see [What a turn
   publishes](#what-a-turn-publishes)); snapshot-diffing the session workspace is
@@ -815,9 +865,25 @@ each one also asserts §11.7's stream contract.
 
 `nexus.io.a2a`'s driver is `TestA2AConformance` in
 `plugins/io/a2a/conformance_test.go`; it declares every capability the
-vocabulary names and passes the whole corpus. The oracle's own honesty is tested
-in `pkg/a2a/a2aconform/check_test.go`, which feeds `Check` deliberately-wrong
-observations and asserts each is reported.
+vocabulary names and passes **9 of 9**. The broker's driver is the same test
+name in `cmd/nexus-broker/a2aconformance_test.go`, and it passes **5 of 9 with 4
+skipped**:
+
+| Vector | Broker | Why |
+|---|---|---|
+| `turn-completes`, `turn-fails`, `turn-canceled`, `hitl-interrupt-resume`, `hitl-parks-stream-open` | **Pass** | The IO envelope expresses all of it: an `input` payload starts a turn, `status: idle` ends it, an instance going away fails it, `cancel` settles it, `hitl.request` parks it |
+| `multi-artifact-turn`, `streaming-order-interleaves` | **Skipped** — needs `tool_artifacts` | `nexus.io.broker` subscribes to neither `tool.invoke` nor `tool.result`, and its payload has no field for either, so there is nothing to publish a tool artifact from — and nothing to interleave with |
+| `oversized-file-degrades` | **Skipped** — needs `tool_artifacts`, `file_artifacts` | Files a turn wrote are reported on a tool result, which is the same absence |
+| `artifact-budget-suppression` | **Skipped** — needs `tool_artifacts`, `artifact_budget` | The only artifact this mapping mints is the turn's own answer, which is never charged against a budget, so there is no budget to have |
+
+The skips are **declared**, not silent: a `Feature` gate makes a mapping state
+once, visibly, what it cannot express, the runner names every skipped vector on
+every run, and a mapping that declared a feature it cannot produce would pass a
+vector by lying about its transport. Weakening the four vectors so the broker
+could claim them would erase the one honest difference between the two surfaces.
+
+The oracle's own honesty is tested in `pkg/a2a/a2aconform/check_test.go`, which
+feeds `Check` deliberately-wrong observations and asserts each is reported.
 
 **The rule: any new A2A behaviour adds a vector there before it is implemented
 in a second mapping.** Back-filling vectors from a second mapping's observed
@@ -906,7 +972,8 @@ is right for loopback and wrong behind a proxy.
   — canonical key list for the outbound leg
 - [Authentication (`auth:`)](../configuration/reference.md#authentication-auth)
   — the shared `pkg/nexusauth` validator chain
-- [Session Broker](./session-broker.md) — one isolated instance per caller,
-  which is the shape multi-context A2A will take
+- [Session Broker](./session-broker.md#the-a2a-front-door-agents) — the
+  broker-fronted surface: the `agents:` block, per-profile card URLs, the
+  spawn/resume lifecycle and the retention knobs
 - [AG-UI serve transport](../plugins/io-agui.md) — the structural sibling this
   transport was modelled on

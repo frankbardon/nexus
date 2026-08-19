@@ -1059,6 +1059,7 @@ means.
 ```yaml
 # broker.yaml
 advertise_addr: "https://broker.example"    # the origin the agent cards advertise
+state_dir: "~/.nexus/broker"                # needed for continuity across a restart
 
 agents:
   support:
@@ -1072,7 +1073,22 @@ agents:
         - id: "answer"
           name: "Answer questions"
           description: "Answers a customer question and cites its sources."
+
+a2a:                                        # optional; every value below is the default
+  tasks:
+    ttl: "24h"                              # how long a finished task stays readable
+    max_per_context: 50                     # tasks kept per (caller, conversation)
+    input_timeout: "15m"                    # how long a question may wait on a human
 ```
+
+The `a2a:` block is **not** per profile, deliberately: the task store is one
+file with one retention policy for the whole broker, so hanging its knobs off
+each profile would invite four different retentions for one file. Its keys and
+their meanings are `nexus.io.a2a`'s, so an operator who has configured the
+standalone listener already knows them — see
+[Reading tasks back](#reading-tasks-back-gettask-listtasks-subscribetotask) and
+[Two messages on one conversation queue](#two-messages-on-one-conversation-queue)
+for what each one actually governs.
 
 That publishes three routes, namespaced under the profile name so profiles
 cannot collide:
@@ -1189,6 +1205,18 @@ separate: the journal is compacted down to live leases, and a resume always
 happens after the lease was released. Without `state_dir` a conversation is
 resumable only for as long as the broker process lives.
 
+**And the index is capped at 4096 bindings, oldest dropped first — which is
+lossy, deliberately, and silent.** Nothing ever retires a binding, because being
+resumable later is the entire point of one, so the key space has no natural
+bound and a cap is the only thing keeping the file finite. A conversation whose
+binding is evicted reads back as *unknown*, and unknown means *new*: the next
+message on that `contextId` starts a **fresh session** and the client is told
+nothing — the agent has simply forgotten. The degradation is always to
+forgetting, never to answering with the wrong session, and 4096 is generous for
+exactly that reason. If a conversation must survive indefinitely, keep the
+engine session id rather than relying on this file. See
+[A2A context → session index](../configuration/reference.md#a2a-context--session-index-a2a-contextsjsonl).
+
 **An A2A-created lease is an ordinary lease.** It is listed by `GET /leases`,
 owned by the A2A caller, counted against `max_concurrent`, torn down by
 `POST /release`, watched for crashes, and **reaped by `idle_timeout`**. Every
@@ -1277,9 +1305,18 @@ second reader would otherwise get wrong:
 Because the frames a client sees must not depend on which Nexus deployment
 answered, this mapping and the standalone [`nexus.io.a2a`](../plugins/io/a2a.md)
 plugin are both judged by the same conformance corpus (`pkg/a2a/a2aconform`).
-The broker satisfies the five vectors its transport can express and **declares
-the rest absent rather than faking them**: the IO envelope carries no tool
-results, so it publishes no tool, file or budget artifacts. See
+
+**The broker satisfies 5 of the corpus's 9 vectors and skips 4, and the four are
+skipped rather than faked.** The IO envelope carries **no tool results** —
+`nexus.io.broker` subscribes to neither `tool.invoke` nor `tool.result`, and its
+payload has no field for either — so there is nothing broker-side to publish a
+tool, file or artifact-budget vector from. That is a property of the transport,
+not a gap in this effort, and it is the one place a broker-fronted agent is
+genuinely less expressive than a standalone one: **the same agent behind
+`nexus.io.a2a` returns tool results and written files as artifacts; behind the
+broker it returns only the turn's answer.** The corpus reports the skips by name
+on every run, and a mapping that declared a feature it cannot produce would pass
+a vector by lying about its transport. See
 [Plugin contracts](plugin-contracts.md) for the wider pattern.
 
 ### Reading tasks back (`GetTask`, `ListTasks`, `SubscribeToTask`)
@@ -1455,6 +1492,14 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   sessions created before the feature (or by another broker) have none. An
   unrecorded session resumes unchecked, so
   [do not treat the `409` as a guarantee](#a-resume-re-uses-the-binary-that-created-the-session).
+- **A2A conversation continuity is bounded, and the bound is lossy by design.**
+  The `contextId` → session index holds at most **4096** bindings and drops the
+  oldest first; a broker with no `state_dir` keeps none across a restart. An
+  evicted binding reads back as *unknown*, so the next message on that
+  conversation starts a **fresh session** with no history and **nothing tells the
+  client** — see
+  [One conversation, one instance](#one-conversation-one-instance-contextid). The
+  failure is always forgetting, never answering from the wrong session.
 - **A2A task history is bounded, and the bound is lossy by design.** The task
   store keeps 24 hours of finished tasks, 50 per conversation, 2048 in total, and
   16 KiB of text per artifact or message — see
@@ -1464,6 +1509,13 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   truncated (marked as such). Nothing warns a client that this happened. If you
   need a durable transcript, take one from the engine session rather than from
   the broker's task record, which is a read-back convenience and not an archive.
+- **A broker-fronted agent publishes fewer artifacts than a standalone one.** The
+  instance IO envelope carries no tool results, so a turn's tool output and the
+  files it wrote do **not** become A2A artifacts here — only the turn's answer
+  does. The same agent served directly by
+  [`nexus.io.a2a`](../plugins/io/a2a.md) returns all three. This is measured
+  rather than asserted: the shared conformance corpus records the broker mapping
+  at **5 of 9 vectors, 4 skipped**, and names the skips on every run.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
   engine boot latency before the instance signals ready.
 - **No OS-level per-tenant sandboxing.** Instances are separate processes but

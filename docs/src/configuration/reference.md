@@ -3342,7 +3342,7 @@ auth:
 | `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
 | `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir), [A2A context → session index](#a2a-context--session-index-a2a-contextsjsonl) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
 | `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
@@ -3678,6 +3678,14 @@ oracle, and no overwrite of the real owner's entry. With no `auth:` block every
 caller is the same anonymous principal, exactly as lease ownership already
 behaves.
 
+**The binding is durable but not permanent.** It lives in
+[`<state_dir>/a2a-contexts.jsonl`](#a2a-context--session-index-a2a-contextsjsonl),
+which is capped at 4096 bindings with the oldest dropped first. A conversation
+whose binding was evicted — or any conversation at all, on a broker with no
+`state_dir`, once the process restarts — reads back as *unknown*, so the next
+message on it starts a **fresh session** and nothing tells the client its history
+was left behind.
+
 **The instance is NOT released at the end of a turn.** It is an ordinary lease
 from the moment it is created: it appears in `GET /leases`, it is owned by the
 A2A caller, it counts against `max_concurrent`, `POST /release` tears it down,
@@ -3750,7 +3758,8 @@ hangs up while queued has not withdrawn its message, and can read the result wit
 
 Every A2A task the broker runs is recorded in `<state_dir>/a2a-tasks.jsonl`, in
 the same append-and-compact shape as the [lease journal](#lease-durability-state_dir)
-and the A2A context index (`a2a-contexts.jsonl`). One
+and the [A2A context index](#a2a-context--session-index-a2a-contextsjsonl)
+(`a2a-contexts.jsonl`). One
 mechanism, one failure policy, one thing for an operator to know about a
 `state_dir` — a database for this one file was rejected on those grounds.
 
@@ -3916,6 +3925,65 @@ booting**. Unlike the lease journal, an index that cannot be opened at all is
 **not** a boot failure either — it logs a `WARN` and the broker runs with the
 index off, because refusing to serve would trade an advisory check for an outage.
 A write that fails is logged and otherwise ignored: it never fails a claim.
+
+### A2A context → session index (`a2a-contexts.jsonl`)
+
+`<state_dir>/a2a-contexts.jsonl` records which engine session serves each
+[A2A conversation](#conversation-lifecycle-contextid), so a message on a
+`contextId` whose instance is gone re-spawns onto the **same** session with
+`-recall` instead of starting a new one. It is written **only when `agents:` is
+configured**, and it is a third file rather than part of either of the two above:
+the lease journal is compacted down to live leases, and the session → binary
+index is keyed by session id — precisely the thing an A2A client does not know.
+
+**Format.** Append-only JSONL, one object per line: `owner_id` (the principal;
+omitted for the anonymous owner every caller is when no `auth:` block is
+configured), `profile`, `context_id`, `session_id` and `at`. A later line for the
+same `(owner_id, profile, context_id)` triple supersedes an earlier one. **No
+secret is ever written**, for the same reasons as the lease journal.
+
+**The key is the triple, not the `contextId`.** A2A lets a client choose its own
+`contextId` ([§3.4](https://a2a-protocol.org)), so keying on it alone would let
+any caller name another caller's conversation and be handed that session's
+history. A colliding `contextId` under a different principal — or a different
+profile — resolves to the caller's **own** binding: no leak, no oracle, and no
+overwrite of the real owner's entry.
+
+**When a line is written.** On the instance's **session-id report**, which is the
+earliest moment the session id exists. An empty `session_id` is never written:
+empty means *not recorded*. Re-recording an unchanged pairing does not append, so
+a conversation resumed many times costs one line.
+
+**Growth is bounded** by an entry cap of **4096 bindings**, applied when the file
+is rewritten — on open and every 256 appends — via a temp file and an atomic
+rename. The number matches the session → binary index deliberately: the two are
+populated by the same events at the same rate (one A2A conversation is one engine
+session), so a broker that outgrows one has outgrown both. When the cap is
+exceeded the **oldest** bindings are dropped, ordered by when each was last
+recorded.
+
+> **Eviction is lossy, by design, and nothing warns anybody.** A pruned binding
+> reads back as *unknown*, and unknown means "new conversation": the next message
+> on that `contextId` spawns a **fresh session** and the client is told nothing —
+> it simply finds the agent has forgotten the conversation. That is the accepted
+> cost of a key space with no retirement event; nothing ever marks a conversation
+> as finished, because being resumable later is the whole point of one. The cap is
+> generous for that reason, and the degradation is always to *forgetting*, never
+> to answering with the **wrong** session. A deployment that needs a conversation
+> to survive indefinitely should not rely on this file: keep the engine session id
+> the broker reported and address it directly.
+
+**Failure handling.** Malformed, torn or partially-written lines are **skipped
+with a warning** and every good line before them is kept; the rewrite-on-open
+truncates the damage away. An index that cannot be opened at all is **not** a boot
+failure — it logs a `WARN` and continuity falls back to the life of the process,
+because refusing to serve would trade resumability for an outage. A write that
+fails is logged and never fails the message that produced it; the cost is that a
+later resume starts fresh.
+
+**With no `state_dir` there is no index at all.** A conversation is then resumable
+only for as long as its lease lives — the same bargain such a broker has already
+made for its leases.
 
 ### Restart recovery (`reattach_window`)
 

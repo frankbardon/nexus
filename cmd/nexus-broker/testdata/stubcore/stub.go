@@ -177,6 +177,30 @@ func Run(variant string) {
 	// sibling instances stay untouched.
 	crashAfterReady := os.Getenv("STUB_CRASH_AFTER_READY") == "1"
 
+	// When STUB_TURN_DELAY is a parseable duration the stub waits that long
+	// mid-turn — after announcing `status: thinking`, before publishing its
+	// answer. It is what makes a turn's WORKING window long enough to observe
+	// from outside the process: the default stub answers in microseconds, so a
+	// test about what happens WHILE a turn is running would otherwise be racing
+	// a turn that is already over.
+	//
+	// An unparseable value is treated as no delay rather than an exit: the stub's
+	// job is to be a nexus instance, and refusing to boot over a malformed test
+	// knob would report the failure as a spawn failure, which is a different
+	// thing entirely.
+	turnDelay, _ := time.ParseDuration(os.Getenv("STUB_TURN_DELAY"))
+
+	// When STUB_CRASH_MID_TURN=1 the stub dies AFTER a turn has visibly started:
+	// it publishes `status: thinking`, so anything watching has seen the turn
+	// move off its opening state, and then exits abnormally without answering.
+	//
+	// It is deliberately distinct from STUB_CRASH_AFTER_READY, which dies on the
+	// first inbound frame and therefore never lets a turn start at all. The two
+	// exercise different halves of the same guarantee — a crash before a turn
+	// begins, and a crash with a turn in flight — and collapsing them into one
+	// switch would leave the second untested.
+	crashMidTurn := os.Getenv("STUB_CRASH_MID_TURN") == "1"
+
 	// When STUB_RECONNECT=1 the stub mirrors the real nexus.io.broker plugin's
 	// reconnect loop (plugins/io/broker/server.go): a dropped connection is
 	// retried with backoff until a shutdown frame arrives. It is what makes the
@@ -192,6 +216,8 @@ func Run(variant string) {
 		sessionID:       sessionID,
 		ignoreShutdown:  ignoreShutdown,
 		crashAfterReady: crashAfterReady,
+		crashMidTurn:    crashMidTurn,
+		turnDelay:       turnDelay,
 		report: Report{
 			Variant: variant,
 			Args:    rawArgs,
@@ -260,7 +286,12 @@ type session struct {
 	sessionID       string
 	ignoreShutdown  bool
 	crashAfterReady bool
-	report          Report
+	// crashMidTurn kills the process once a turn is visibly under way; see the
+	// STUB_CRASH_MID_TURN comment in Run.
+	crashMidTurn bool
+	// turnDelay stretches a turn's WORKING window; see STUB_TURN_DELAY in Run.
+	turnDelay time.Duration
+	report    Report
 }
 
 // run dials the broker, performs the register/ready/session-id handshake, and
@@ -378,24 +409,46 @@ func isInputPayload(payload []byte) bool {
 // response artifact's text, and `status: idle` completes it.
 func (s session) answerTurn(ctx context.Context, conn *websocket.Conn, turn int) {
 	turnID := fmt.Sprintf("turn-%d", turn)
+
+	// The opening status goes out on its own, before any delay or crash, because
+	// it is what moves a watching task off its opening state. A crash or a pause
+	// that happened before it would be indistinguishable from a spawn that never
+	// produced a turn.
+	if !s.emit(ctx, conn, ioPayload{Type: "status", State: "thinking"}) {
+		return
+	}
+	if s.crashMidTurn {
+		// No graceful shutdown handshake and no answer: this is what a nexus
+		// instance killed by the OOM killer mid-turn looks like from the broker.
+		os.Exit(9)
+	}
+	if s.turnDelay > 0 {
+		time.Sleep(s.turnDelay)
+	}
+
 	for _, msg := range []ioPayload{
-		{Type: "status", State: "thinking"},
 		{Type: "output", TurnID: turnID, Role: "assistant",
 			Content: TurnAnswer(s.report.Variant, s.sessionID, s.recalled)},
 		{Type: "status", State: "idle"},
 	} {
-		payload, err := json.Marshal(msg)
-		if err != nil {
-			return
-		}
-		if err := write(ctx, conn, brokerframe.Frame{
-			LeaseID: s.leaseID,
-			Signal:  brokerframe.SignalIO,
-			Payload: payload,
-		}); err != nil {
+		if !s.emit(ctx, conn, msg) {
 			return
 		}
 	}
+}
+
+// emit writes one IO payload, reporting whether the write succeeded so a caller
+// can stop playing a turn into a socket that is already gone.
+func (s session) emit(ctx context.Context, conn *websocket.Conn, msg ioPayload) bool {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+	return write(ctx, conn, brokerframe.Frame{
+		LeaseID: s.leaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: payload,
+	}) == nil
 }
 
 func write(ctx context.Context, conn *websocket.Conn, f brokerframe.Frame) error {

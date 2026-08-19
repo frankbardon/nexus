@@ -334,7 +334,8 @@ func TestA2ARespawnSurvivesBrokerRestart(t *testing.T) {
 	}
 
 	first := startStubBrokerHandle(t, stubBin, opts...)
-	answerOf(t, sendA2AMessage(t, first.base, contextID, "hello"))
+	firstTask := sendA2AMessage(t, first.base, contextID, "hello")
+	answerOf(t, firstTask)
 	leases := first.registry.Snapshot().Leases
 	if len(leases) != 1 {
 		t.Fatalf("leases = %d, want 1", len(leases))
@@ -353,6 +354,26 @@ func TestA2ARespawnSurvivesBrokerRestart(t *testing.T) {
 	if answer != want {
 		t.Errorf("answer after a broker restart = %q, want %q: the contextId → session binding must be durable",
 			answer, want)
+	}
+
+	// The TASK the first broker ran is still readable from the second one. This
+	// is the second durable index earning its keep, and it is the case a client
+	// actually hits: it holds a task id from before the restart and has no way to
+	// know a restart happened.
+	restored := getA2ATask(t, second.base, a2aStubProfileName, "", firstTask.ID)
+	if restored.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("the pre-restart task reads back as %s, want COMPLETED: the task store must be durable",
+			restored.Status.State)
+	}
+	if restored.ContextID != contextID {
+		t.Errorf("the pre-restart task's context = %q, want %q", restored.ContextID, contextID)
+	}
+	if len(restored.Artifacts) != 1 {
+		t.Fatalf("the pre-restart task reads back with %d artifacts, want its answer", len(restored.Artifacts))
+	}
+	wantAnswer := stubcore.TurnAnswer(stubcore.VariantBase, stubcore.NewSessionID(stubcore.VariantBase), false)
+	if text, _ := restored.Artifacts[0].Parts[0].TextValue(); text != wantAnswer {
+		t.Errorf("the pre-restart answer reads back as %q, want %q", text, wantAnswer)
 	}
 }
 
