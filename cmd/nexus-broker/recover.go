@@ -263,6 +263,10 @@ func recoverLeases(logger *slog.Logger, reg *Registry, store LeaseStore, brokerI
 	}
 	logger.Info("lease journal replayed",
 		"records", len(recs), "restored", len(restored), "dropped", len(recs)-len(restored))
+	// The denominator the reattach/reap series are read against: "3 restored, 3
+	// reattached" and "3 restored, 3 reaped" are the same two counters and
+	// opposite operator situations.
+	reg.Metrics().leasesRestored(len(restored))
 	return restored
 }
 
@@ -341,6 +345,10 @@ func reapUnreattached(ctx context.Context, logger *slog.Logger, reg *Registry, i
 	}
 
 	stale := reg.unattachedRestored(ids)
+	// Settled in ONE call for both arms, so the two series are always written
+	// from the same observation of the same window rather than from two walks
+	// that could disagree.
+	reg.Metrics().restoredSettled(len(ids)-len(stale), len(stale))
 	if len(stale) == 0 {
 		logger.Info("every restored lease reattached within the window", "leases", len(ids))
 		return

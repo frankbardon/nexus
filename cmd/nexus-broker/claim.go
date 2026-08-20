@@ -260,6 +260,18 @@ type claimFailure struct {
 	status int
 	msg    string
 	err    error
+
+	// outcome is the metric label this failure counts under
+	// (nexus_broker_claims_total{outcome=...}). It rides on the value for the
+	// same reason the status does: the classification must be made ONCE, at the
+	// site that knows what went wrong, rather than re-derived downstream by
+	// matching a status or a message. Three distinct refusals share status 503,
+	// so a metric derived from the status alone would fold the three capacity
+	// problems an operator has to tell apart into one series.
+	//
+	// Empty reads as claimOutcomeInternal, so a failure constructed without one
+	// is counted as a broker fault rather than silently dropped.
+	outcome string
 }
 
 func (f *claimFailure) Error() string {
@@ -270,6 +282,19 @@ func (f *claimFailure) Error() string {
 }
 
 func (f *claimFailure) Unwrap() error { return f.err }
+
+// metricOutcome is the claim-outcome label this failure counts under. A nil
+// failure is an accepted claim; an unlabelled one is a broker fault.
+func (f *claimFailure) metricOutcome() string {
+	switch {
+	case f == nil:
+		return claimOutcomeAccepted
+	case f.outcome == "":
+		return claimOutcomeInternal
+	default:
+		return f.outcome
+	}
+}
 
 // silent reports a failure that must not be answered at all, because the caller
 // is already gone: a claim whose context was cancelled while it waited in the
@@ -298,6 +323,25 @@ func (f *claimFailure) refusedByCaller() bool { return f.status >= 400 && f.stat
 // real callers; neither is the broker acting on itself, so there is nothing here
 // that has to cope with an absent one.
 func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner nexusauth.Principal) (instanceSpawn, *claimFailure) {
+	started := time.Now()
+	spawn, failure := s.spawn(ctx, req, owner)
+	// ONE counting site for the whole spine, so a return path added later is
+	// counted by construction rather than by someone remembering to instrument
+	// it. The duration is observed only for an accepted claim: a refusal's
+	// latency measures how fast the broker said no, and mixing it into the same
+	// histogram would drag every quantile toward zero exactly when the broker is
+	// refusing the most.
+	if failure == nil {
+		s.registry.Metrics().claimAccepted(time.Since(started))
+	} else {
+		s.registry.Metrics().claimOutcome(failure.metricOutcome())
+	}
+	return spawn, failure
+}
+
+// spawn is spawnInstance's body. It is split out purely so the instrumentation
+// above has a single return to observe; nothing calls it directly.
+func (s *ClaimServer) spawn(ctx context.Context, req claimRequest, owner nexusauth.Principal) (instanceSpawn, *claimFailure) {
 	// Resolve the variant this spawn produces BEFORE anything is allocated.
 	// Everything below this point acquires something that has to be given back —
 	// a capacity slot, a lease id, a temp config file, a child process — and
@@ -322,7 +366,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	recorded, recordedKnown := s.registry.BinaryForSession(req.SessionID)
 	binaryName, entry, status, err := resolveSpawnBinary(cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
 	if err != nil {
-		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error()}
+		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error(), outcome: claimOutcomeRejected}
 	}
 
 	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
@@ -353,19 +397,19 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	if err != nil {
 		switch {
 		case errors.Is(err, errQueueTimeout):
-			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out", outcome: claimOutcomeQueueTimeout}
 		case errors.Is(err, errNoCapacity):
-			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity", outcome: claimOutcomeNoCapacity}
 		case errors.Is(err, errQueueFull):
-			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity queue full"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity queue full", outcome: claimOutcomeQueueFull}
 		case errors.Is(err, errPrincipalLeaseLimit):
-			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "lease limit reached for this principal"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "lease limit reached for this principal", outcome: claimOutcomeLeaseLimit}
 		case errors.Is(err, errPrincipalQueueLimit):
-			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "queued claim limit reached for this principal"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "queued claim limit reached for this principal", outcome: claimOutcomeQueueLimit}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err}
+			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err, outcome: claimOutcomeCancelled}
 		default:
-			return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting lease", err: err}
+			return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting lease", err: err, outcome: claimOutcomeInternal}
 		}
 	}
 
@@ -393,7 +437,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	configPath, err := writeTempConfig(req.Config)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "writing temp config", err: err}
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "writing temp config", err: err, outcome: claimOutcomeInternal}
 	}
 	// The instance reads the config synchronously at boot (before it dials
 	// back and signals ready), so the file is safe to remove once this
@@ -424,7 +468,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	spawnSecret, err := s.spawnKey.secretFor(leaseID)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting spawn secret", err: err}
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting spawn secret", err: err, outcome: claimOutcomeInternal}
 	}
 	s.registry.SetSpawnSecret(leaseID, spawnSecret)
 
@@ -451,7 +495,8 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	})
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "spawning instance", err: err}
+		s.registry.Metrics().spawnFailed(spawnFailureExec)
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "spawning instance", err: err, outcome: claimOutcomeSpawnFailed}
 	}
 	// SetProcess starts the single reaper that wait()s the process and closes
 	// the lease's exited channel; both this path and a later release observe
@@ -464,12 +509,14 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	case <-s.registry.ExitedChan(leaseID):
 		exitErr := s.registry.ExitErr(leaseID)
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr}
+		s.registry.Metrics().spawnFailed(spawnFailureExitedEarly)
+		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr, outcome: claimOutcomeSpawnFailed}
 	case <-time.After(cfg.ReadyTimeout):
 		_ = handle.kill()
 		<-s.registry.ExitedChan(leaseID) // reap the killed process so nothing leaks
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusGatewayTimeout, msg: "instance did not become ready in time"}
+		s.registry.Metrics().spawnFailed(spawnFailureReadyTimeout)
+		return instanceSpawn{}, &claimFailure{status: http.StatusGatewayTimeout, msg: "instance did not become ready in time", outcome: claimOutcomeReadyTimeout}
 	}
 
 	// Resolve the session id to report. The instance reports it via a
@@ -522,10 +569,15 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req claimRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.config().MaxClaimBody))
 	if err := dec.Decode(&req); err != nil {
+		// Counted here rather than in the spine: a body that does not parse never
+		// reaches spawnInstance, and a claim the broker refused outright is still
+		// a claim an operator wants in the outcome breakdown.
+		s.registry.Metrics().claimOutcome(claimOutcomeRejected)
 		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
 		return
 	}
 	if req.Config == "" {
+		s.registry.Metrics().claimOutcome(claimOutcomeRejected)
 		s.fail(w, http.StatusBadRequest, "claim requires a non-empty config", nil)
 		return
 	}

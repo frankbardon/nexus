@@ -4318,11 +4318,15 @@ at all is still fatal — that is a misconfiguration, not lost data.) With
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Five routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`, and
-`GET /binaries`.
+(`pkg/nexusauth`). Six routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`,
+`GET /binaries` and `GET /metrics`.
 `GET /healthz` is registered **outside** the guard and always answers `200` with
 no credential, because a load balancer or container probe has none to present.
+
+`GET /metrics` is the one route that layers a second check on top of the
+middleware: it additionally requires `auth.admin_scope`. See
+[`GET /metrics`](#get-metrics-http-api-not-yaml).
 
 `WS /lease/{lease_id}`, the per-lease client socket, is not behind that
 middleware but **does** use the same validator chain: it resolves the caller's
@@ -4362,7 +4366,7 @@ auth:
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
-| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
+| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates, and it is required to scrape `GET /metrics` — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody and refuses `GET /metrics` to everybody. Irrelevant while auth is disabled — both endpoints are then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
 | `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint), or `proxy_headers` (an identity a fronting authenticating proxy already established, honoured only for peers inside a CIDR allowlist). |
 | `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static` and `proxy_headers` (neither has a claim set — `proxy_headers` uses `principal_header` instead). |
@@ -5156,12 +5160,14 @@ capacity and queue aggregates. It performs no mutation.
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
   "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "max_queue_depth": 32,   // configured ceiling on that queue (0 = unlimited)
   "leases": [
     {
       "lease_id": "…",
       "session_id": "…",                       // omitted until reported by the instance
       "pid": 41234,
       "state": "active",                        // "spawning" | "active" | "draining"
+      "binary": "vision",                       // registry entry NAME; "" = not recorded
       "reason": "manual release",               // teardown reason once draining; omitted otherwise
       "last_activity": "2026-06-25T12:00:00Z",  // RFC3339
       "created_at": "2026-06-25T11:59:30Z"      // RFC3339
@@ -5182,6 +5188,7 @@ caller's own leases and **no aggregate keys at all**:
       "session_id": "…",
       "pid": 41234,
       "state": "active",
+      "binary": "vision",
       "last_activity": "2026-06-25T12:00:00Z",
       "created_at": "2026-06-25T11:59:30Z"
     }
@@ -5189,11 +5196,26 @@ caller's own leases and **no aggregate keys at all**:
 }
 ```
 
-The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use` and
-`queue_depth` let one tenant infer another's load, and a zero would read as a
-factual claim about an idle broker to a client that does not know it is
-unprivileged. Clients must therefore treat a missing key as "not disclosed"
-rather than as `0`.
+The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use`,
+`queue_depth` and `max_queue_depth` let one tenant infer another's load, and a
+zero would read as a factual claim about an idle broker to a client that does not
+know it is unprivileged. Clients must therefore treat a missing key as "not
+disclosed" rather than as `0`.
+
+`max_queue_depth` is reported **beside** `queue_depth` because the observed depth
+is unreadable without its bound: a depth of 12 is either a busy broker or one
+about to start refusing claims with `capacity queue full`, and only the ceiling
+tells them apart. It follows `max_concurrent`'s convention — `0` means unlimited.
+
+`binary` is the [binary registry](#binary-registry-binaries) entry **name** this
+lease's instance was spawned from — a name, never a path, so it discloses nothing
+[`GET /binaries`](#get-binaries-http-api-not-yaml) does not already list. It
+appears in **both** response shapes. It is always present, and an **empty string
+means "not recorded"** — a lease restored from a lease journal written before the
+field existed, for instance. It never means "the entry named empty string", which
+cannot exist. Unlike `session_id` and `reason` it is *not* omitted when empty,
+precisely so a client can tell "not recorded" from "this broker is too old to
+report it".
 
 A caller that owns no live lease gets `200` with `{"leases": []}` — never a `404`
 and never an error. Filtering happens inside the registry snapshot, under the same
@@ -5263,6 +5285,79 @@ same middleware, so with an `auth:` block a missing or invalid credential is
 refused (**401**) and a valid one gets the list; with no `auth:` block the route
 serves an unauthenticated caller, which is a supported deployment rather than a
 degraded one.
+
+### `GET /metrics` (HTTP API, not YAML)
+
+`GET /metrics` is the broker's Prometheus scrape surface. It is read-only,
+mutates nothing, and takes no parameters. The response is the Prometheus **text
+exposition format** with `Content-Type: text/plain; version=0.0.4; charset=utf-8`.
+
+The exposition is hand-rolled: the broker is stdlib plus `github.com/coder/websocket`,
+and no client library is pulled in for it. There is **no configuration key** — the
+route is always mounted.
+
+**Authorization is stricter than every other route.** It sits behind the same
+`auth:` middleware as `POST /claim`, *and* additionally requires
+`auth.admin_scope`:
+
+| Broker configuration                          | Caller                              | Result |
+|-----------------------------------------------|-------------------------------------|--------|
+| No `auth:` block                              | anyone                              | `200` + exposition |
+| `auth:` configured                            | no / invalid credential             | `401` (from the guard) |
+| `auth:` configured                            | valid credential, no `admin_scope`  | `403` `{"error":"insufficient scope"}` |
+| `auth:` configured                            | valid credential **with** `admin_scope` | `200` + exposition |
+| `auth:` configured, `admin_scope` set to `""` | anyone                              | `403` — nobody is an operator |
+
+The rule matches [`GET /leases`](#get-leases-http-api-not-yaml): every number here
+is a **whole-registry aggregate**, which is exactly the disclosure the leases
+listing already reserves for an operator. With no `auth:` block it serves anyone,
+exactly as every other route on this binary does.
+
+**Metric names are a stable surface.** All are namespaced `nexus_broker_`, and
+their cardinality is bounded by construction — no metric is ever labelled by lease
+id, principal, session id or binary path, and every label value comes from a
+compile-time set, so each declared series is present (at `0`) from the very first
+scrape and an alert can be written against it before it ever fires.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `nexus_broker_claims_total`           | counter   | `outcome` | Instance claims handled by the shared spawn spine — `POST /claim` **and** the A2A ingress — by outcome. |
+| `nexus_broker_claim_duration_seconds` | histogram | —         | Wall time of an **accepted** claim, request to ready instance. A refusal is not observed here. |
+| `nexus_broker_spawn_failures_total`   | counter   | `reason`  | Spawns that produced no ready instance. |
+| `nexus_broker_frames_dropped_total`   | counter   | `reason`  | Broker frames discarded rather than relayed. |
+| `nexus_broker_replay_gaps_total`      | counter   | `reason`  | Stream-gap notices served to a resuming client. |
+| `nexus_broker_client_evictions_total` | counter   | —         | Client WebSockets displaced by a newer connection on the same lease. |
+| `nexus_broker_config_reloads_total`   | counter   | `outcome` | SIGHUP reloads, `applied` or `rejected`. |
+| `nexus_broker_restored_leases_total`  | counter   | `outcome` | Leases adopted from the journal at boot, and what became of them. |
+| `nexus_broker_slots_in_use`           | gauge     | —         | Capacity slots currently held: one per live lease. |
+| `nexus_broker_max_concurrent`         | gauge     | —         | Configured `max_concurrent`. `0` = unlimited. |
+| `nexus_broker_queue_depth`            | gauge     | —         | Claims parked in the FIFO capacity queue. |
+| `nexus_broker_max_queue_depth`        | gauge     | —         | Configured `max_queue_depth`. `0` = unlimited. |
+| `nexus_broker_leases`                 | gauge     | `state`   | Live leases by the `GET /leases` surface state: `spawning`, `active`, `draining`. |
+| `nexus_broker_tickets_outstanding`    | gauge     | —         | Issued, unredeemed WebSocket tickets still held. |
+
+Label values:
+
+| Label | Metric | Values |
+|---|---|---|
+| `outcome` | `nexus_broker_claims_total` | `accepted`, `rejected`, `no_capacity`, `queue_timeout`, `queue_full`, `principal_lease_limit`, `principal_queue_limit`, `cancelled`, `spawn_failed`, `ready_timeout`, `internal` |
+| `reason`  | `nexus_broker_spawn_failures_total` | `exec`, `exited_before_ready`, `ready_timeout` |
+| `reason`  | `nexus_broker_frames_dropped_total` | `undecodable`, `lease_mismatch`, `no_instance`, `instance_buffer_full`, `client_buffer_full`, `lease_gone` |
+| `reason`  | `nexus_broker_replay_gaps_total` | `evicted`, `restarted` |
+| `outcome` | `nexus_broker_config_reloads_total` | `applied`, `rejected` |
+| `outcome` | `nexus_broker_restored_leases_total` | `restored`, `reattached`, `reaped` |
+| `state`   | `nexus_broker_leases` | `spawning`, `active`, `draining` |
+
+The three capacity refusals — `no_capacity`, `queue_timeout`, `queue_full` — all
+answer HTTP `503`, and they are separate label values precisely because they call
+for three different fixes (raise `max_concurrent`, raise `queue_wait_timeout`,
+raise `max_queue_depth`). Grouping a dashboard by status code loses that.
+
+The counters are **process-lifetime and monotonic**; they reset on restart, as
+Prometheus counters are expected to. The gauges are read from live state at scrape
+time — from the same `slots_in_use` / waiter-queue counters the capacity
+accounting and `GET /leases` already use — so they cannot drift from what the
+registry actually holds.
 
 Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
 deployment caveats live in the

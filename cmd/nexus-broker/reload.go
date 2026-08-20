@@ -364,6 +364,7 @@ func (rl *reloader) reload() error {
 	if err != nil {
 		rl.logger.Error("config reload rejected; the configuration already in force is unchanged",
 			"path", rl.path, "error", err)
+		rl.registry.Metrics().reloadOutcome(reloadOutcomeRejected)
 		return err
 	}
 
@@ -377,6 +378,7 @@ func (rl *reloader) reload() error {
 	if err != nil {
 		rl.logger.Error("config reload rejected; the configuration already in force is unchanged",
 			"path", rl.path, "error", err)
+		rl.registry.Metrics().reloadOutcome(reloadOutcomeRejected)
 		return err
 	}
 
@@ -392,6 +394,13 @@ func (rl *reloader) reload() error {
 	// THE SWAP. One store publishes the configuration, the GET /binaries
 	// projection and every Agent Card together, so no request can see a mixture.
 	rl.live.store(lc)
+
+	// Counted immediately after the swap, which is the moment the reload became
+	// real. A rejected reload is counted at each refusal site above, so the two
+	// series together are an exhaustive account of every SIGHUP this process
+	// handled — an operator can alert on the rejected rate without having to
+	// scrape logs to know a reload happened at all.
+	rl.registry.Metrics().reloadOutcome(reloadOutcomeApplied)
 
 	// The capacity ceiling is the one value that cannot ride along in the
 	// snapshot: it is consulted under the registry's lock in the same step that

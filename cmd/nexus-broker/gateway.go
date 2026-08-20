@@ -774,6 +774,7 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forw
 		frame, err := brokerframe.Decode(data)
 		if err != nil {
 			g.logger.Warn("dropping undecodable frame", "lease_id", leaseID, "error", err)
+			g.registry.Metrics().frameDropped(frameDropUndecodable)
 			continue
 		}
 		if observe != nil {
@@ -782,6 +783,7 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forw
 		if frame.LeaseID != "" && frame.LeaseID != leaseID {
 			g.logger.Warn("dropping frame with mismatched lease",
 				"bound_lease", leaseID, "frame_lease", frame.LeaseID)
+			g.registry.Metrics().frameDropped(frameDropLeaseMismatch)
 			continue
 		}
 
@@ -802,11 +804,13 @@ func (g *Gateway) forwardToInstance(leaseID string, frame brokerframe.Frame, dat
 	if peer == nil {
 		g.logger.Debug("no peer attached, dropping frame",
 			"lease_id", leaseID, "signal", frame.Signal)
+		g.registry.Metrics().frameDropped(frameDropNoInstance)
 		return
 	}
 	if !peer.queue(data) {
 		g.logger.Warn("peer send buffer full, dropping frame",
 			"lease_id", leaseID, "signal", frame.Signal)
+		g.registry.Metrics().frameDropped(frameDropInstanceBufferFull)
 	}
 }
 
@@ -827,6 +831,7 @@ func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []b
 	if err != nil {
 		g.logger.Debug("dropping client-bound frame for a lease that is gone",
 			"lease_id", leaseID, "signal", frame.Signal, "error", err)
+		g.registry.Metrics().frameDropped(frameDropLeaseGone)
 		return
 	}
 	switch outcome {
@@ -836,6 +841,7 @@ func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []b
 	case clientFrameDropped:
 		g.logger.Warn("peer send buffer full, dropping frame",
 			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
+		g.registry.Metrics().frameDropped(frameDropClientBufferFull)
 	}
 }
 

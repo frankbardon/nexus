@@ -459,6 +459,19 @@ type Registry struct {
 	// NOT guarded by mu: it owns its own lock and is only assigned at wiring time.
 	sessionBinaries *sessionBinaryIndex
 
+	// metrics is the process-wide counter set every reporting subsystem reaches
+	// through this registry — the gateway (frame drops), the claim server (claim
+	// outcomes and spawn failures), restart recovery (restored leases) and the
+	// SIGHUP reloader all already hold a *Registry, so hanging the counters here
+	// avoids threading a second dependency through four constructors.
+	//
+	// It is nil until wired via useMetrics, and nil is fully supported: every
+	// brokerMetrics method is nil-receiver safe, so a registry built without
+	// wiring (every unit test) simply counts nothing. Like tickets and store it is
+	// NOT guarded by mu — the counters are atomics and the field is only assigned
+	// at wiring time, before anything is served.
+	metrics *brokerMetrics
+
 	// clientReplayLimit is the byte bound every new lease's clientStream is
 	// created with, from `client_replay_buffer_bytes`. It is read only while
 	// minting a lease, so the worst-case retention across the broker is this
@@ -516,6 +529,20 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 // Call it once at wiring time, before the broker serves: it is not safe to call
 // concurrently with Remove.
 func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
+
+// useMetrics binds the process-wide counter set (see Registry.metrics). Like the
+// other use* setters it is called once at wiring time, before the broker serves.
+func (r *Registry) useMetrics(m *brokerMetrics) { r.metrics = m }
+
+// Metrics returns the counter set bound to this registry, or nil. It is
+// nil-receiver safe so a caller holding a possibly-nil *Registry (the reloader
+// in a unit test) can report without a branch.
+func (r *Registry) Metrics() *brokerMetrics {
+	if r == nil {
+		return nil
+	}
+	return r.metrics
+}
 
 // useClientReplayBuffer sets the per-lease client-bound replay bound in bytes.
 // A non-positive limit disables retention: frames are still sequenced, so a
@@ -1472,6 +1499,12 @@ func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientA
 		if res.gap == nil {
 			return res.frames
 		}
+		// Counted HERE — where the gap is rendered for a specific client —
+		// rather than where it is computed, so the metric counts gaps SERVED
+		// and not gaps merely calculated. The reason is the wire value the
+		// client is about to receive, so the counter and the frame cannot
+		// disagree about why the stream broke.
+		r.metrics.replayGap(res.gap.Reason)
 		// The notice goes FIRST. A client that is told what it lost only after
 		// being handed the survivors has already rendered them as a continuous
 		// stream, which is the failure this whole path exists to remove.
@@ -1498,6 +1531,8 @@ func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientA
 	if evicted == nil {
 		return clientAttach{resume: resume}, nil
 	}
+
+	r.metrics.clientEvicted()
 
 	// The displaced socket is closed with a CODED close, not an abort, because
 	// the code is the whole point: a client has to be able to tell "you were

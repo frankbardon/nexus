@@ -213,7 +213,14 @@ func run() error {
 		return err
 	}
 
+	// The process-wide counter set. It is created before the registry because the
+	// registry is where every reporting subsystem reaches it from: the gateway,
+	// the claim spine, restart recovery and the SIGHUP reloader all already hold a
+	// *Registry, so there is one wiring point rather than four.
+	metrics := newBrokerMetrics()
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
+	registry.useMetrics(metrics)
 	// The registry invalidates a lease's tickets when the lease goes away, through
 	// the single teardown convergence point (Remove) so manual release, the idle
 	// sweeper and crash detection all invalidate.
@@ -274,6 +281,13 @@ func run() error {
 	// the life of the process.
 	binaries := NewBinariesServer(logger, cfg.Binaries)
 	binaries.useConfigHolder(live)
+	// The scrape surface. It reads the counters above plus one live sample of the
+	// registry (slots, queue, leases by state) and the ticket store; it mutates
+	// nothing. Like the leases listing it needs both the guard — to know whether
+	// authentication is configured at all — and the operator scope, because a
+	// broker-wide aggregate is exactly the disclosure GET /leases reserves for an
+	// operator.
+	metricsServer := NewMetricsServer(logger, registry, metrics, tickets, guard, cfg.AdminScope)
 
 	// The A2A ingress. Each `agents:` profile publishes an Agent Card and the two
 	// HTTP bindings under its own path namespace, so a third-party A2A client can
@@ -367,6 +381,12 @@ func run() error {
 	// a control-plane read, and a caller that cannot claim has no business
 	// learning which variants an operator deploys.
 	binaries.Register(guarded)
+	// Behind the SAME guard as /claim, and then behind `auth.admin_scope` on top
+	// of it (see MetricsServer.authorized): the whole endpoint is broker-wide
+	// aggregates, which is the disclosure GET /leases already reserves for an
+	// operator. With no `auth:` block it serves anyone, exactly as every other
+	// route on this binary does.
+	metricsServer.Register(guarded)
 	// Behind the SAME guard again, card included. An A2A caller is refused by
 	// exactly the middleware that refuses a /claim caller, so there is one
 	// authentication policy on this binary rather than two — see the auth-posture

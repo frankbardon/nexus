@@ -720,6 +720,7 @@ requires the [per-spawn secret](#the-instance-dial-back-secret).
 | Route | With `auth:` configured |
 |-------|-------------------------|
 | `POST /claim`, `POST /release/{lease_id}`, `POST /ticket/{lease_id}`, `GET /leases`, `GET /binaries` | Middleware validates the credential **before** the handler runs. A refused claim spawns nothing. |
+| `GET /metrics` | The same middleware, **plus** `auth.admin_scope` on top of it. A valid credential without that scope gets `403`. See [`GET /metrics`](#get-metrics--scrape-the-broker). |
 | `WS /lease/{lease_id}` | The same validator chain, resolved by the handler itself so it can also accept a single-use `?ticket=` (see [the ticket flow](#connecting-the-ticket-flow)). |
 | `WS /instance` (the dial-back) | **Not covered by this block at all.** It is not a client route: a spawned instance proves itself with its [per-spawn secret](#the-instance-dial-back-secret), which is required whether or not `auth:` is configured. |
 | `GET /healthz` | **Never authenticated.** A load balancer or container probe has no credential to present, and liveness leaks nothing. |
@@ -1009,6 +1010,8 @@ unparseable value fails the boot naming the key.
 All control-plane calls are plain HTTP/JSON. Whether they need a credential
 depends on the [`auth:` block](#authentication): with one configured, every route
 below requires one (`GET /healthz` does not); with it absent, none of them do.
+`GET /metrics` is the one route that asks for more than a valid credential — it
+also requires `auth.admin_scope`.
 
 ### `POST /claim` — claim an instance
 
@@ -1293,12 +1296,14 @@ Operator shape:
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
   "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "max_queue_depth": 32,   // configured ceiling on that queue (0 = unlimited)
   "leases": [
     {
       "lease_id": "lease-abc123",
       "session_id": "…",
       "pid": 41234,
       "state": "active",           // "spawning" | "active" | "draining"
+      "binary": "vision",           // binary registry entry NAME; "" = not recorded
       "reason": "",                 // teardown reason once draining (e.g. "manual release", "idle")
       "last_activity": "2026-06-25T12:00:00Z",
       "created_at": "2026-06-25T11:59:30Z"
@@ -1318,6 +1323,7 @@ all**:
       "session_id": "…",
       "pid": 41234,
       "state": "active",
+      "binary": "vision",
       "last_activity": "2026-06-25T12:00:00Z",
       "created_at": "2026-06-25T11:59:30Z"
     }
@@ -1326,8 +1332,27 @@ all**:
 ```
 
 The aggregates are **absent, not zeroed** — read a missing `max_concurrent`,
-`slots_in_use` or `queue_depth` as "not disclosed to you", never as `0`. A caller
-that owns no live lease gets `200` with `{"leases": []}`, never a `404`.
+`slots_in_use`, `queue_depth` or `max_queue_depth` as "not disclosed to you",
+never as `0`. A caller that owns no live lease gets `200` with `{"leases": []}`,
+never a `404`.
+
+`max_queue_depth` sits beside `queue_depth` because the depth alone cannot be
+read: a queue 12 deep is either a busy broker or one about to start refusing
+claims with `capacity queue full`, and only the configured bound tells them apart.
+
+**`binary` answers "which build is this lease running".** With
+[several variants behind one broker](#serving-several-nexus-variants-the-binary-registry)
+that question used to be answerable only by grepping the claim log. It is the
+registry entry **name**, never a path, so it discloses nothing
+[`GET /binaries`](#get-binaries--list-the-spawnable-binaries) does not already
+list, and it appears in **both** shapes above.
+
+An **empty `binary` means "not recorded"** — typically a lease
+[restored from the journal](#surviving-a-restart-set-state_dir) of a broker that
+predates the field. It never means "the entry named empty string", which cannot
+exist. Unlike `session_id` and `reason`, the key is emitted even when empty,
+precisely so a client can tell "not recorded" from "this broker is too old to
+report it".
 
 Lease states:
 
@@ -1454,6 +1479,96 @@ Prefer discovering per run over caching the names. The registry is read **once a
 broker startup** and can only change across a restart, so a client holding names
 from an earlier session may be holding entries this broker no longer offers —
 which surfaces as a `400` on the claim, after the user has already chosen.
+
+### `GET /metrics` — scrape the broker
+
+The broker's Prometheus scrape surface, in the standard **text exposition
+format**. It mutates nothing and takes no parameters, and there is no config key
+for it — the route is always mounted.
+
+```bash
+curl -s http://localhost:8080/metrics -H 'Authorization: Bearer <operator-token>'
+```
+
+```
+# HELP nexus_broker_claims_total Instance claims handled by the shared spawn spine, by outcome. …
+# TYPE nexus_broker_claims_total counter
+nexus_broker_claims_total{outcome="accepted"} 148
+nexus_broker_claims_total{outcome="no_capacity"} 3
+…
+# HELP nexus_broker_slots_in_use Capacity slots currently held: one per live lease.
+# TYPE nexus_broker_slots_in_use gauge
+nexus_broker_slots_in_use 2
+```
+
+**It needs `auth.admin_scope`, not merely a valid credential.** The route sits
+behind the same middleware as `POST /claim` — so with an `auth:` block a missing
+or invalid credential is a `401` — and then requires the operator scope on top,
+answering `403 {"error":"insufficient scope"}` to an authenticated caller without
+it. Every number here is a whole-registry aggregate, which is exactly the
+disclosure [`GET /leases`](#get-leases--list-live-instances) already reserves for
+an operator. Setting `admin_scope: ""` therefore refuses everyone.
+
+**With no `auth:` block it serves anyone**, exactly as every other route on this
+binary does — the same caller can already read the whole registry from
+`GET /leases`.
+
+#### The metric names are a stable surface
+
+Treat them as API. All are namespaced `nexus_broker_`:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `nexus_broker_claims_total`           | counter   | `outcome` |
+| `nexus_broker_claim_duration_seconds` | histogram | — |
+| `nexus_broker_spawn_failures_total`   | counter   | `reason` |
+| `nexus_broker_frames_dropped_total`   | counter   | `reason` |
+| `nexus_broker_replay_gaps_total`      | counter   | `reason` |
+| `nexus_broker_client_evictions_total` | counter   | — |
+| `nexus_broker_config_reloads_total`   | counter   | `outcome` |
+| `nexus_broker_restored_leases_total`  | counter   | `outcome` |
+| `nexus_broker_slots_in_use`           | gauge     | — |
+| `nexus_broker_max_concurrent`         | gauge     | — |
+| `nexus_broker_queue_depth`            | gauge     | — |
+| `nexus_broker_max_queue_depth`        | gauge     | — |
+| `nexus_broker_leases`                 | gauge     | `state` |
+| `nexus_broker_tickets_outstanding`    | gauge     | — |
+
+Every label value comes from a fixed set — the full lists are in the
+[`GET /metrics` reference](../configuration/reference.md#get-metrics-http-api-not-yaml).
+**Nothing is ever labelled by lease id, principal, session id or binary path.**
+That bound is deliberate and structural: one unbounded label would turn a scrape
+into an unbounded series set, which is a memory leak in the monitoring system
+rather than in the broker.
+
+Because the label sets are fixed, **every declared series is present at `0` from
+the first scrape**. An alert on `rate(nexus_broker_spawn_failures_total[5m])` can
+therefore be written before the broker has ever failed a spawn, rather than
+waiting for the series to appear.
+
+#### What to watch
+
+| Question | Query |
+|---|---|
+| Are we about to start refusing claims? | `nexus_broker_slots_in_use / nexus_broker_max_concurrent`, and `nexus_broker_queue_depth / nexus_broker_max_queue_depth` |
+| Is a deploy broken? | `rate(nexus_broker_spawn_failures_total[5m])`, broken out by `reason` |
+| Are clients losing output? | `rate(nexus_broker_frames_dropped_total[5m])` and `rate(nexus_broker_replay_gaps_total[5m])` — a `replay_gaps` `reason="evicted"` means [`client_replay_buffer_bytes`](#frame-sequencing-and-the-replay-buffer) is too small for the reconnect windows in practice |
+| Did the last `SIGHUP` take? | `nexus_broker_config_reloads_total{outcome="rejected"}` |
+| Did a restart cost any sessions? | `nexus_broker_restored_leases_total{outcome="reaped"}` against `{outcome="reattached"}` |
+| How long is a claim taking? | `histogram_quantile(0.95, rate(nexus_broker_claim_duration_seconds_bucket[5m]))`, against the configured `ready_timeout` |
+
+The three capacity refusals all answer HTTP `503` and are three different label
+values on purpose: `no_capacity` says raise `max_concurrent`, `queue_timeout` says
+raise `queue_wait_timeout`, `queue_full` says raise `max_queue_depth`. A dashboard
+grouping by status code cannot tell them apart.
+
+Counters are process-lifetime and reset on restart, as Prometheus counters are
+expected to. Gauges are read from live registry state at scrape time — the same
+counters capacity accounting and `GET /leases` already use — so they cannot drift
+from what the broker actually holds.
+
+The exposition is hand-rolled from the stdlib. The broker takes no client library
+for it, in line with the rest of the codebase.
 
 ### Connecting over WebSocket
 

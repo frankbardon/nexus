@@ -45,10 +45,26 @@ func (l *lease) surfaceState() string {
 // the read-only GET /leases surface. It carries values only — no pointers into
 // registry-guarded state — so a caller may read it freely without the lock.
 type LeaseSnapshot struct {
-	ID           string    `json:"lease_id"`
-	SessionID    string    `json:"session_id,omitempty"`
-	PID          int       `json:"pid"`
-	State        string    `json:"state"`
+	ID        string `json:"lease_id"`
+	SessionID string `json:"session_id,omitempty"`
+	PID       int    `json:"pid"`
+	State     string `json:"state"`
+
+	// Binary is the `binaries:` registry entry NAME this lease's instance was
+	// spawned from. It is a name and never a path, so it discloses nothing GET
+	// /binaries does not already list, and it is the answer to the one question
+	// a multi-variant broker could previously only be asked by grepping the
+	// claim log: which build is this lease running.
+	//
+	// It is emitted ALWAYS, including as the empty string, and the empty string
+	// means NOT RECORDED — a lease restored from a journal written before the
+	// field existed, or one minted by a path that never stamped one. It never
+	// means "the entry named empty string", which cannot exist: config
+	// validation refuses an unnamed registry entry. Rendering it with omitempty
+	// would collapse "not recorded" into "absent for some reason", which is the
+	// distinction lease.binary exists to preserve.
+	Binary string `json:"binary"`
+
 	Reason       string    `json:"reason,omitempty"`
 	LastActivity time.Time `json:"last_activity"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -61,10 +77,18 @@ type LeaseSnapshot struct {
 // the narrower ownLeasesBody instead, so the aggregate keys are absent rather
 // than present-and-zero.
 type RegistrySnapshot struct {
-	MaxConcurrent int             `json:"max_concurrent"`
-	SlotsInUse    int             `json:"slots_in_use"`
-	QueueDepth    int             `json:"queue_depth"`
-	Leases        []LeaseSnapshot `json:"leases"`
+	MaxConcurrent int `json:"max_concurrent"`
+	SlotsInUse    int `json:"slots_in_use"`
+	QueueDepth    int `json:"queue_depth"`
+
+	// MaxQueueDepth is the configured `max_queue_depth` ceiling, reported BESIDE
+	// the observed QueueDepth. On its own a depth of 12 says nothing: an operator
+	// cannot tell a busy broker from one about to start refusing claims with
+	// "capacity queue full" without the bound in the same response. 0 means
+	// unlimited, matching MaxConcurrent's reading of the same shape.
+	MaxQueueDepth int `json:"max_queue_depth"`
+
+	Leases []LeaseSnapshot `json:"leases"`
 }
 
 // ownLeasesBody is the caller-scoped projection of a RegistrySnapshot: the
@@ -153,6 +177,7 @@ func (r *Registry) SnapshotFor(audience leaseAudience) RegistrySnapshot {
 		snap.MaxConcurrent = r.maxConcurrent
 		snap.SlotsInUse = r.slotsInUse
 		snap.QueueDepth = r.waiters.Len()
+		snap.MaxQueueDepth = r.maxQueueDepth
 	}
 	for _, l := range r.leases {
 		if !audience.admits(l) {
@@ -163,6 +188,7 @@ func (r *Registry) SnapshotFor(audience leaseAudience) RegistrySnapshot {
 			SessionID:    l.sessionID,
 			PID:          l.pid,
 			State:        l.surfaceState(),
+			Binary:       l.binary,
 			Reason:       l.reason,
 			LastActivity: l.lastActivity,
 			CreatedAt:    l.createdAt,
