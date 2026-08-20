@@ -156,7 +156,7 @@ func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWrite
 
 	live := s.cfg.bridge.liveRun(req.ID)
 	if live == nil || rec.Status.State.IsTerminal() {
-		s.pumpStream(ctx, w, b, nil, opening, nil)
+		s.pumpStream(ctx, w, b, nil, nil, opening, nil)
 		return
 	}
 
@@ -166,7 +166,7 @@ func (s *Server) handleSubscribeToTask(ctx context.Context, w http.ResponseWrite
 	// subscription, whereas the record was read a moment earlier and may already
 	// be one frame behind the channel.
 	snapshot.History = opening.History
-	s.pumpStream(ctx, w, b, sub, snapshot, nil)
+	s.pumpStream(ctx, w, b, live, sub, snapshot, nil)
 }
 
 // ---- CancelTask ----
