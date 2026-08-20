@@ -122,16 +122,86 @@ func (r *Registry) tryAcquireSlotLocked() bool {
 //
 // Caller MUST hold r.mu.
 func (r *Registry) releaseSlotLocked() {
-	if front := r.waiters.Front(); front != nil {
-		w := front.Value.(*waiter)
-		r.waiters.Remove(front)
-		w.elem = nil
-		w.granted = true
-		close(w.ch)
+	if r.grantOldestWaiterLocked() {
 		return
 	}
 	if r.slotsInUse > 0 {
 		r.slotsInUse--
+	}
+}
+
+// grantOldestWaiterLocked hands the slot the caller is holding to the oldest
+// parked waiter, reporting whether there was one. It does NOT touch slotsInUse:
+// the count is unchanged because ownership of an already-counted slot moves from
+// the caller to the waiter.
+//
+// It is extracted from releaseSlotLocked because setMaxConcurrent needs the same
+// handoff for a different reason — it has just created slots rather than freed
+// one — and two copies of "wake the front waiter" would be two places for FIFO
+// fairness to be got subtly wrong.
+//
+// Caller MUST hold r.mu.
+func (r *Registry) grantOldestWaiterLocked() bool {
+	front := r.waiters.Front()
+	if front == nil {
+		return false
+	}
+	w := front.Value.(*waiter)
+	r.waiters.Remove(front)
+	w.elem = nil
+	w.granted = true
+	close(w.ch)
+	return true
+}
+
+// setMaxConcurrent replaces the capacity ceiling, and admits whatever the
+// capacity queue is already holding if the new ceiling has room for it.
+//
+// It is the one reloadable value that does NOT ride in the configuration
+// snapshot every other reader dereferences, and it cannot: the ceiling is
+// consulted in the same locked step that takes a slot (tryAcquireSlotLocked), so
+// reading it from anywhere but under r.mu would reintroduce exactly the
+// check-then-act race the single counter exists to prevent.
+//
+// RAISING the ceiling grants parked waiters immediately rather than leaving them
+// to wait for a lease to end. Without that, "I raised max_concurrent" would do
+// nothing an operator could observe until the next release — the queue would sit
+// full behind a cap that was no longer full — which is indistinguishable from the
+// reload not having worked.
+//
+// LOWERING it never evicts anything. A lease is a running process, and pushing
+// the broker under its new cap by tearing one down would make a configuration
+// edit destroy live work; the count simply drains as leases are released, and no
+// new claim is admitted until it is back under. That is the same policy
+// RestoreLease already applies to an over-cap restart, deliberately.
+func (r *Registry) setMaxConcurrent(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.maxConcurrent == n {
+		return
+	}
+	prev := r.maxConcurrent
+	r.maxConcurrent = n
+
+	// Only a raise (or a switch to unlimited) can free room. tryAcquireSlotLocked
+	// is the single acquire primitive, so the loop cannot admit past the new
+	// ceiling however many waiters are parked.
+	if n <= 0 || n > prev {
+		for r.waiters.Len() > 0 && r.tryAcquireSlotLocked() {
+			if !r.grantOldestWaiterLocked() {
+				// Unreachable: the loop condition already saw a waiter and r.mu has
+				// not been released. Give the slot back rather than leak it.
+				r.slotsInUse--
+				break
+			}
+		}
+	}
+
+	if n > 0 && r.slotsInUse > n {
+		r.logger.Warn("max_concurrent was lowered below the number of leases already live; "+
+			"the broker is over its cap until enough leases are released, and will admit no "+
+			"new claims until then",
+			"slots_in_use", r.slotsInUse, "max_concurrent", n)
 	}
 }
 

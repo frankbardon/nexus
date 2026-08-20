@@ -169,6 +169,11 @@ one you meant is visible in the boot log rather than inferred later.
 > run it" check, so a binary executable only by another user still passes boot and
 > fails at exec.
 
+**Adding a variant does not need a restart.** Edit `binaries:` and send the
+broker a `SIGHUP`: the next claim can select the new entry, `GET /binaries`
+advertises it, and every live lease is untouched. See
+[Changing config without a restart](#changing-config-without-a-restart-sighup).
+
 **A variant can extend a spawn, never redirect it.** `args` are appended *after*
 the broker's own `-config` / `-recall` arguments, so an entry can add flags but
 cannot displace the contract the instance protocol depends on. `env` is merged
@@ -608,6 +613,88 @@ trade-off discussion around the derivation key, see
 curl -s http://localhost:8080/healthz
 # {"status":"ok"}
 ```
+
+### Changing config without a restart: `SIGHUP`
+
+A restart is the single event that costs every lease whose instance fails to
+reattach within `reattach_window`. So the two things an operator most often needs
+to change — the `binaries:` registry and the `agents:` profiles — do not need
+one. Send the running broker a **`SIGHUP`** and it re-reads its config file:
+
+```bash
+# add a variant to broker.yaml, then:
+kill -HUP "$(pgrep -f nexus-broker)"
+```
+
+```
+level=INFO msg="SIGHUP received, reloading config" path=broker.yaml
+level=INFO msg="config reload applied" path=broker.yaml changed=binaries binaries=3 agents=1 ...
+```
+
+**The reload is validate-then-swap, and it is atomic.** The file goes through
+exactly the loader the boot path uses, so anything that would have failed startup
+fails the reload — a binary that is missing or not executable, a profile whose
+config file does not resolve, an Agent Card missing a required field. Every Agent
+Card is re-rendered *before* anything is published, and then the whole
+configuration — the binary registry, the `GET /binaries` listing and every card —
+is swapped in **one step**. A reload that fails at any point leaves the previous
+configuration entirely in force and says why:
+
+```
+level=ERROR msg="config reload rejected; the configuration already in force is unchanged" path=broker.yaml error="broker config: binaries: vision: path ... is not executable"
+```
+
+There is no half-applied state, and no request can ever see one profile's
+identity under another's name.
+
+**`SIGHUP` is the only trigger.** There is no `POST /reload`: `admin_scope` is a
+visibility-only capability, and a mutating admin route would be the first
+exception to that rule.
+
+#### What a reload does *not* touch
+
+**Live leases.** A reload changes what the *next* claim can spawn. It never
+signals, kills or re-binds a running instance — including one whose `binaries:`
+entry was just removed. The lease records the entry *name*, the process is
+already running, and a later resume against a name this broker no longer offers
+is refused by the existing `409`.
+
+**Boot-only keys.** `listen_addr`, `advertise_addr`, `state_dir`, `broker_id`,
+`reattach_window`, `client_replay_buffer_bytes`, the queue and per-principal
+admission caps, `a2a.tasks:` and the whole `auth:` block are read at boot and only
+at boot. A reloaded file that changes one of them is **reported and ignored**:
+
+```
+level=WARN msg="config reload: these keys changed in the file but are only read at boot, so the values in force are unchanged; restart the broker to apply them" keys=listen_addr,auth
+```
+
+The reloadable keys in the same file still apply — a boot-only change is not a
+reason to refuse everything around it.
+
+`auth:` is the one worth understanding rather than just obeying. The `jwks`
+validator holds a live `kid` cache with rate-limited fetches, and two of this
+broker's documented guarantees rest on that cache surviving: **key rotation needs
+no restart**, and **an unreachable issuer never turns into an allow**. Rebuilding
+the validator chain would discard it, so a reload performed during an IdP outage
+would turn a working broker into one that denies every JWT — an outage caused by
+the very mechanism meant to avoid one. Credential changes are a restart.
+
+**Turning the A2A ingress on.** A broker that booted with **no** `agents:` block
+registered no A2A routes at all, and opened neither the context index nor the
+durable task store. A reload therefore cannot switch the ingress on; that change
+is reported and ignored like any other boot-only one. Adding, changing and
+removing profiles on a broker that already serves at least one all work, and
+removing the last profile is allowed — the routes then answer
+`404 unknown agent profile`.
+
+**Capacity, in one direction.** Raising `max_concurrent` immediately admits
+claims already parked in the capacity queue. Lowering it never evicts anything: a
+lease is a running process, and a config edit must not destroy live work. The
+broker sits over its cap and admits nothing new until it drains back under, which
+is the same policy restart recovery already applies.
+
+The per-key table is in
+[Reloadable keys (`SIGHUP`)](../configuration/reference.md#reloadable-keys-sighup).
 
 ## Authentication
 
@@ -1288,6 +1375,9 @@ curl -s http://localhost:8080/binaries -H 'Authorization: Bearer <token>'
   always holds at least the reserved `nexus` entry, which every broker can spawn.
 - Ordering is by `name`, ascending. It does not change between requests and does
   not differ between callers, so a picker built from it never reshuffles.
+- The listing follows a
+  [`SIGHUP` reload](#changing-config-without-a-restart-sighup): an entry an
+  operator adds or removes appears or disappears here without a restart.
 
 **The response is an object, not a bare array.** Decode it into a struct with a
 `binaries` field rather than into a list: the envelope leaves room for a
@@ -1686,6 +1776,14 @@ curl -s https://broker.example/agents/support/.well-known/agent-card.json \
 **Profiles are the unit of public identity: one card, one persona, one config.**
 Two agents that should look different to the outside world are two profiles, not
 one profile with a switch.
+
+**Publishing a new agent does not need a restart.** Add the profile and send a
+`SIGHUP`: every card is re-rendered and the whole set is swapped in one step, so
+no request can see one profile's identity under another's name. The one thing a
+reload cannot do is switch the ingress **on** — a broker that booted with no
+`agents:` block registered no A2A routes at all, so its first profile is a
+restart. See
+[Changing config without a restart](#changing-config-without-a-restart-sighup).
 
 A few rules worth knowing before you write the block; the full key list is in the
 [configuration reference](../configuration/reference.md#agent-profiles-agents).

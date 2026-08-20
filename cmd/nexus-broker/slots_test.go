@@ -370,7 +370,7 @@ func TestClaim_QueuedClaimProceedsAfterRelease(t *testing.T) {
 	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus"), QueueWaitTimeout: 5 * time.Second}
 	reg := NewRegistry(testLogger(), 1)
 	cs := NewClaimServer(testLogger(), reg, cfg, runner, nil)
-	cs.sessionReportGrace = 20 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 20 * time.Millisecond })
 	mux := http.NewServeMux()
 	cs.Register(mux)
 	ts := httptest.NewServer(mux)

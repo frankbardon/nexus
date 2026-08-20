@@ -236,8 +236,8 @@ func TestIdleSweeper_DisabledByNonPositiveTimeout(t *testing.T) {
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(405))
 
 	sweeper := newIdleSweeper(testLogger(), reg, 0, 0, time.Second)
-	if sweeper.interval != 0 {
-		t.Fatalf("disabled sweeper interval = %v, want 0", sweeper.interval)
+	if sweeper.interval() != 0 {
+		t.Fatalf("disabled sweeper interval = %v, want 0", sweeper.interval())
 	}
 
 	// Run must return immediately (no ticker); a long-stale lease stays put.

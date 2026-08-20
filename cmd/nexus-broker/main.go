@@ -104,6 +104,20 @@ func run() error {
 	// and only the operator knows which — so it warns rather than refusing to boot.
 	warnIfAdvertiseSchemeUnserved(logger, cfg)
 
+	// THE LIVE CONFIGURATION. From here on nothing reads `cfg` to decide what a
+	// request does: every request path dereferences this holder instead, and a
+	// SIGHUP replaces what it points at with a single atomic store. See reload.go
+	// for what is reloadable and, more importantly, what is not.
+	//
+	// Building it here also moves one boot failure earlier: the Agent Cards are
+	// rendered inside it, so a profile whose card is not servable now fails
+	// before the lease journal, the spawn key or any index is opened.
+	live, err := newConfigHolder(cfg)
+	if err != nil {
+		logger.Error("failed to build the a2a agent profiles", "error", err)
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -241,7 +255,12 @@ func run() error {
 	// Spawn secrets are derived from the broker's key when there is one, so a
 	// restart can recompute what a surviving instance is holding.
 	claims.useSpawnKey(spawnSecretKey)
+	// Every server that decides something from config reads the SAME snapshot, so
+	// one SIGHUP moves all of them together rather than leaving the claim path on
+	// one registry and the /binaries listing on another.
+	claims.useConfigHolder(live)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
+	releases.useConfigHolder(live)
 	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
 	// ticket and re-claiming (which would spawn a new instance) is not an answer.
 	ticketsServer := NewTicketServer(logger, registry, tickets)
@@ -249,25 +268,25 @@ func run() error {
 	// so it needs both the guard (to know whether auth is on at all) and the
 	// configured operator scope.
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
-	// The binary listing is projected from the config ONCE, here, because the
-	// registry is immutable after load — there is no reload path — so the handler
-	// holds a finished response rather than the Config it came from.
+	// The binary listing reads the shared snapshot, which carries the response
+	// envelope already projected. It used to cache that envelope at construction,
+	// which would have kept GET /binaries advertising the pre-reload registry for
+	// the life of the process.
 	binaries := NewBinariesServer(logger, cfg.Binaries)
+	binaries.useConfigHolder(live)
 
 	// The A2A ingress. Each `agents:` profile publishes an Agent Card and the two
 	// HTTP bindings under its own path namespace, so a third-party A2A client can
 	// address an agent by URL instead of supplying a full nexus config the way
 	// POST /claim demands.
 	//
-	// Cards are rendered HERE, at boot, so a card that is not servable — a
-	// missing skill, a security scheme that cannot be derived — fails the start
-	// rather than the first client that fetches it. With no `agents:` block this
-	// builds an empty server that registers no routes at all.
-	agents, err := NewA2AServer(logger, cfg)
-	if err != nil {
-		logger.Error("failed to build the a2a agent profiles", "error", err)
-		return err
-	}
+	// Cards were rendered into the shared snapshot above, so a card that is not
+	// servable — a missing skill, a security scheme that cannot be derived — has
+	// already failed the start rather than the first client that fetches it. With
+	// no `agents:` block this builds an empty server that registers no routes at
+	// all, which is also why a reload cannot switch the ingress on: see
+	// mergeReloadable.
+	agents := newA2AServer(logger, live)
 	// The lifecycle behind the ingress. It is installed BEFORE logStartupState so
 	// the boot log tells the truth: that method warns loudly when no provider is
 	// wired, and wiring it afterwards would print a warning about a broker that is
@@ -308,6 +327,7 @@ func run() error {
 	// (reasonTurnTimeout). Both reuse the shared release teardown. idle_timeout
 	// <= 0 disables it. It runs until sweepCtx is cancelled on shutdown.
 	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
+	sweeper.useConfigHolder(live)
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
@@ -359,6 +379,21 @@ func run() error {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	// SIGHUP re-reads the config file and republishes the reloadable half of it,
+	// so adding a `binaries:` variant or publishing a new `agents:` profile no
+	// longer costs a restart — and a restart is the single event that costs every
+	// lease whose instance fails to reattach within reattach_window.
+	//
+	// It gets its OWN channel and goroutine rather than riding on the
+	// signal.NotifyContext above, and it has to: that context is CANCELLED by the
+	// first signal it carries, which would turn every reload into a shutdown.
+	// Installed before the listener accepts anything. SIGHUP's default
+	// disposition is to terminate the process, and nothing can be done about a
+	// signal that lands before signal.Notify runs — so the window in which a
+	// reload would stop this broker instead of reloading it is confined to boot,
+	// while it is serving nothing.
+	go watchReloadSignals(ctx, newReloader(logger, *configPath, live, registry))
 
 	serveErr := make(chan error, 1)
 	go func() {

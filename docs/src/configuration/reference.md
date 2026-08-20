@@ -3371,6 +3371,63 @@ auth:
 | `a2a.tasks.input_timeout` | duration | `15m` | How long a task may sit at `TASK_STATE_INPUT_REQUIRED` before the broker abandons it: the task is driven to `TASK_STATE_FAILED` and the instance is told to cancel the turn. `"0s"` disables the deadline. This is also the **queue deadlock policy** — a parked task holds its conversation's serial queue and its leased instance, so without a deadline one unanswered question would strand every message behind it. Must be a duration string; a negative value is a boot failure. See [Serial task queueing](#serial-task-queueing). |
 | `agents`             | map      | *(absent)* | The named **A2A agent profiles** this broker publishes, keyed by the name their routes are namespaced under. Each profile binds a Nexus config, a `binaries:` entry and an Agent Card, so a third-party A2A client can address an agent by URL instead of supplying the full nexus config `POST /claim` demands. Entry fields are listed under [Agent profiles](#agent-profiles-agents) below. **Absent (the default) means this broker has no A2A ingress at all** — no routes are registered and nothing new appears in the boot log, so a `broker.yaml` written before profiles existed behaves exactly as it did. Validated at boot: an empty or non-URL-safe profile name, a name that collides with another after trimming, a missing `config`, a `binary` that is not in the registry, a card missing a required field, or a config file that does not resolve to a readable file **fails startup**.
 
+### Reloadable keys (`SIGHUP`)
+
+The broker re-reads its config file on **`SIGHUP`** and applies the reloadable
+half of it in place, so adding a `binaries:` variant or publishing an `agents:`
+profile no longer costs a restart — and a restart is the single event that costs
+every lease whose instance fails to reattach within
+[`reattach_window`](#session-broker-nexus-broker).
+
+```bash
+kill -HUP "$(pgrep -f nexus-broker)"
+```
+
+**`SIGHUP` is the only trigger.** There is deliberately no `POST /reload`:
+`admin_scope` is a read-only capability ("visibility only — there is no admin
+bypass on release or connect"), and a mutating admin route would be the first
+exception to that.
+
+A reload is **validate-then-swap and atomic**. The file goes through exactly the
+boot loader, so a value that would have failed startup fails the reload; the
+Agent Cards are re-rendered before anything is published; and only when every
+step has succeeded is the new configuration swapped in, in one step. A reload
+that fails at any point leaves the previous configuration **entirely** in force
+and logs the reason — there is no half-applied state. Outcomes are logged as
+`config reload applied` (naming the keys that changed) or
+`config reload rejected` (naming the reason).
+
+**Live leases are never disturbed.** A reload changes what the *next* claim can
+spawn; it never signals, kills or re-binds a running instance. That includes
+removing a `binaries:` entry a live lease was spawned from: the lease records the
+entry *name*, the process is already running, and a later resume against a name
+this broker no longer offers is refused with the existing `409`.
+
+| Key | Reloadable? | Notes |
+|---|---|---|
+| `binaries` (and its folded inputs `nexus_binary_path`, `run_as`) | **Yes** | The next claim resolves its entry from the new registry. Paths are re-resolved, so a reload naming a missing or non-executable binary is **refused** exactly as a boot would be. |
+| `inherit_env` | **Yes** | Applies to the next spawn. |
+| `agents` | **Yes**, with one exception | Profiles may be added, changed or removed and the Agent Cards are re-rendered and swapped **as a unit**. The exception: a broker that booted with **no** `agents:` block registered no A2A routes and opened neither the context index nor the durable task store, so a reload cannot switch the ingress on — that change is reported and ignored. Removing the last profile is allowed; the routes then answer `404 unknown agent profile`. |
+| `max_concurrent` | **Yes** | Raising it immediately admits claims already parked in the capacity queue. Lowering it **never evicts** a live lease: the broker sits over its cap and admits nothing new until it drains back under. |
+| `idle_timeout`, `max_turn_duration` | **Yes** | The sweeper re-reads both each pass, and re-derives its tick interval, so switching reaping on or off takes effect within one poll. |
+| `queue_wait_timeout` | **Yes** | Applies to the next claim; a claim already parked keeps the bound it parked under. |
+| `release_grace` | **Yes** | Applies to the next release, manual or swept. |
+| `ready_timeout`, `session_report_grace`, `max_claim_body` | **Yes** | Applies to the next claim. |
+| `listen_addr` | **No** | Changing it means a new listener, which is a restart. |
+| `advertise_addr` | **No** | Stamped into each lease record at registration; changing it live would make this process's own records disagree. |
+| `state_dir` | **No** | The lease journal, spawn key and both indexes are already open against the old directory, and restart recovery has already run. |
+| `broker_id` | **No** | Already stamped on every record this broker has written; changing it live would orphan its own leases at the next boot. |
+| `auth` (including `auth.admin_scope`) | **No** | The `jwks` validator holds a live `kid` cache with rate-limited fetches, and two documented guarantees rest on it surviving: key rotation needs no restart, and an unreachable issuer never turns into an allow. Rebuilding the chain would discard that cache, so a reload performed during an IdP outage would turn a working broker into one that denies every JWT. |
+| `reattach_window` | **No** | Consumed once, at boot, by the restored-lease reaper. |
+| `client_replay_buffer_bytes` | **No** | Stamped on a lease's stream when the lease is created. |
+| `max_queue_depth`, `max_leases_per_principal`, `max_queued_per_principal` | **No** | Admission state held by the registry rather than read per request. |
+| `a2a.tasks.*` | **No** | Sizes a durable store that is already open, on the same footing as `state_dir`. |
+
+A boot-only key whose value **changed** in the reloaded file is reported in a
+startup-style `WARN` naming every such key and is **ignored** — the value in
+force is unchanged. The reloadable keys in the same document still apply: a
+boot-only change is not a reason to refuse everything around it.
+
 ### Values that stay constants
 
 Not every number in the broker is a key. These are fixed on purpose, and the

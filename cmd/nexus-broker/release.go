@@ -142,20 +142,38 @@ const termGrace = 2 * time.Second
 type ReleaseServer struct {
 	logger   *slog.Logger
 	registry *Registry
-	grace    time.Duration
+
+	// live is the configuration snapshot the teardown bound is read from, at the
+	// moment a release is handled rather than at construction, so a SIGHUP that
+	// changes release_grace changes what the next release waits.
+	live *configHolder
 }
 
-// NewReleaseServer constructs a release handler. A non-positive grace falls
-// back to defaultReleaseGrace.
+// NewReleaseServer constructs a release handler over a private configuration
+// snapshot carrying just this bound. A non-positive grace falls back to
+// defaultReleaseGrace (see settleConfig).
+//
+// run() calls useConfigHolder afterwards to point it at the process-wide
+// snapshot instead.
 func NewReleaseServer(logger *slog.Logger, registry *Registry, grace time.Duration) *ReleaseServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if grace <= 0 {
-		grace = defaultReleaseGrace
-	}
-	return &ReleaseServer{logger: logger, registry: registry, grace: grace}
+	return &ReleaseServer{logger: logger, registry: registry, live: newLocalConfigHolder(Config{ReleaseGrace: grace})}
 }
+
+// useConfigHolder points the handler at the process-wide configuration snapshot.
+// A nil holder is ignored, leaving the private one the constructor built.
+func (s *ReleaseServer) useConfigHolder(h *configHolder) {
+	if h == nil {
+		return
+	}
+	s.live = h
+}
+
+// grace is the bounded wait a release gives an instance to exit on its own
+// before signals escalate, from `release_grace`.
+func (s *ReleaseServer) grace() time.Duration { return s.live.config().ReleaseGrace }
 
 // Register wires the release endpoint onto a mux. It takes a routeMux so main
 // can register it behind the auth guard.
@@ -196,7 +214,7 @@ func (s *ReleaseServer) handleRelease(w http.ResponseWriter, r *http.Request) {
 	// Still mapped, and still reachable: the lease can be torn down by the idle
 	// sweeper or a crash between the ownership check and here. Both answers are the
 	// same 404, so the race is invisible to the caller.
-	err := s.registry.releaseLease(leaseID, "manual release", s.grace)
+	err := s.registry.releaseLease(leaseID, "manual release", s.grace())
 	if errors.Is(err, errUnknownLease) {
 		writeUnknownLease(w)
 		return

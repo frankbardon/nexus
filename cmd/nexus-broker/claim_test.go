@@ -249,7 +249,7 @@ func TestClaim_RecordsSpawnSecretOnLease(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(8801)}
 	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
 	ts, reg, cs := newClaimTestServer(t, runner, cfg)
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine:\n  name: test\n"}`) }()
@@ -400,7 +400,7 @@ func TestClaim_ReadyTimeout_KillsProcessAndCleansUp(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: proc}
 	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
 	ts, reg, cs := newClaimTestServer(t, runner, cfg)
-	cs.readyTimeout = 50 * time.Millisecond // never marked ready
+	setClaimBounds(cs, func(c *Config) { c.ReadyTimeout = 50 * time.Millisecond }) // never marked ready
 
 	respCh := make(chan *http.Response, 1)
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n"}`) }()
@@ -563,7 +563,7 @@ func awaitSpawn(t *testing.T, runner *fakeRunner) spawnSpec {
 func TestClaim_NamedBinarySpawnsThatEntry(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9101)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","binary":"vision"}`) }()
@@ -598,7 +598,7 @@ func TestClaim_NamedBinarySpawnsThatEntry(t *testing.T) {
 func TestClaim_OmittedBinaryResolvesToReservedNexus(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9102)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n"}`) }()
@@ -636,7 +636,7 @@ func TestClaim_OmittedBinaryResolvesToReservedNexus(t *testing.T) {
 func TestClaim_StampsBinaryOnLeaseForSessionLookup(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9311)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 2 * time.Second
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 2 * time.Second })
 
 	respCh := make(chan *http.Response, 1)
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n","binary":"vision"}`) }()
@@ -754,7 +754,7 @@ func seedSessionBinding(t *testing.T, reg *Registry, sessionID, binary string) {
 func TestClaim_ResumeWithOmittedBinaryInheritsRecordedEntry(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9401)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 	seedSessionBinding(t, reg, "sess-vision-1", "vision")
 
 	respCh := make(chan *http.Response, 1)
@@ -792,7 +792,7 @@ func TestClaim_ResumeWithOmittedBinaryInheritsRecordedEntry(t *testing.T) {
 func TestClaim_ResumeWithMatchingBinaryProceeds(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9402)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 	seedSessionBinding(t, reg, "sess-vision-2", "vision")
 
 	respCh := make(chan *http.Response, 1)
@@ -876,7 +876,7 @@ func TestClaim_ResumeWithDifferentBinaryConflicts(t *testing.T) {
 func TestClaim_ResumeWithUnknownBindingSpawnsRequestedBinary(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9404)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() {
@@ -903,7 +903,7 @@ func TestClaim_ResumeWithUnknownBindingSpawnsRequestedBinary(t *testing.T) {
 func TestClaim_ResumeWithUnknownBindingAndNoBinaryFallsBackToNexus(t *testing.T) {
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(9405)}
 	ts, reg, cs := newClaimTestServer(t, runner, variantRegistryConfig())
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() {
@@ -2003,7 +2003,7 @@ func TestClaim_HandsTheRunnerTheEntrysRunAs(t *testing.T) {
 
 	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(4242)}
 	ts, reg, cs := newClaimTestServer(t, runner, cfg)
-	cs.sessionReportGrace = 50 * time.Millisecond
+	setClaimBounds(cs, func(c *Config) { c.SessionReportGrace = 50 * time.Millisecond })
 
 	respCh := make(chan *http.Response, 1)
 	go func() {
@@ -2314,14 +2314,14 @@ func TestNewClaimServer_SourcesLimitsFromConfig(t *testing.T) {
 	}
 	cs := NewClaimServer(testLogger(), NewRegistry(testLogger(), 0), cfg, &fakeRunner{}, nil)
 
-	if cs.readyTimeout != 4*time.Minute {
-		t.Errorf("readyTimeout = %v, want 4m (from config)", cs.readyTimeout)
+	if cs.config().ReadyTimeout != 4*time.Minute {
+		t.Errorf("readyTimeout = %v, want 4m (from config)", cs.config().ReadyTimeout)
 	}
-	if cs.sessionReportGrace != 750*time.Millisecond {
-		t.Errorf("sessionReportGrace = %v, want 750ms (from config)", cs.sessionReportGrace)
+	if cs.config().SessionReportGrace != 750*time.Millisecond {
+		t.Errorf("sessionReportGrace = %v, want 750ms (from config)", cs.config().SessionReportGrace)
 	}
-	if cs.maxBody != 4<<20 {
-		t.Errorf("maxBody = %d, want %d (from config)", cs.maxBody, 4<<20)
+	if cs.config().MaxClaimBody != 4<<20 {
+		t.Errorf("maxBody = %d, want %d (from config)", cs.config().MaxClaimBody, 4<<20)
 	}
 }
 
@@ -2334,14 +2334,14 @@ func TestNewClaimServer_UnsetLimitsTakeDefaults(t *testing.T) {
 	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
 	cs := NewClaimServer(testLogger(), NewRegistry(testLogger(), 0), cfg, &fakeRunner{}, nil)
 
-	if cs.readyTimeout != defaultReadyTimeout {
-		t.Errorf("readyTimeout = %v, want %v", cs.readyTimeout, defaultReadyTimeout)
+	if cs.config().ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("readyTimeout = %v, want %v", cs.config().ReadyTimeout, defaultReadyTimeout)
 	}
-	if cs.sessionReportGrace != defaultSessionReportGrace {
-		t.Errorf("sessionReportGrace = %v, want %v", cs.sessionReportGrace, defaultSessionReportGrace)
+	if cs.config().SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("sessionReportGrace = %v, want %v", cs.config().SessionReportGrace, defaultSessionReportGrace)
 	}
-	if cs.maxBody != defaultMaxClaimBody {
-		t.Errorf("maxBody = %d, want %d", cs.maxBody, defaultMaxClaimBody)
+	if cs.config().MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("maxBody = %d, want %d", cs.config().MaxClaimBody, defaultMaxClaimBody)
 	}
 }
 

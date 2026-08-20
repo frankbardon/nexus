@@ -43,8 +43,8 @@ func queueTestIngress(t *testing.T, dir string, inputTimeout time.Duration) (*A2
 // startQueuedTask starts one task on a named context, as a named caller.
 func startQueuedTask(t *testing.T, server *A2AServer, contextID, text string) (*a2aTask, *a2aStream) {
 	t.Helper()
-	card, ok := server.cards["support"]
-	if !ok {
+	card := server.card("support")
+	if card == nil {
 		t.Fatal("the test ingress has no support profile")
 	}
 	task, sub, _, protoErr := server.startTask(context.Background(), card, a2aTurnInput{
@@ -282,7 +282,7 @@ func TestTheQueueDoesNotDeadlockOnAnUnansweredQuestion(t *testing.T) {
 // for it after the fact.
 func TestAnAnsweredQuestionDisarmsTheDeadline(t *testing.T) {
 	server, instance := queueTestIngress(t, t.TempDir(), 40*time.Millisecond)
-	card := server.cards["support"]
+	card := server.card("support")
 
 	task, _ := startQueuedTask(t, server, "ctx-1", "first")
 	instance.deliver(brokerIOMessage{
@@ -327,7 +327,7 @@ func TestAnAnsweredQuestionDisarmsTheDeadline(t *testing.T) {
 // turn may reach the instance.
 func TestConcurrentStartsOnOneContextAreSerialized(t *testing.T) {
 	server, instance := queueTestIngress(t, t.TempDir(), 0)
-	card := server.cards["support"]
+	card := server.card("support")
 
 	const callers = 8
 	var (

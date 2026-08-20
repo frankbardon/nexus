@@ -285,7 +285,7 @@ func TestBinaries_ListingIsUnfiltered(t *testing.T) {
 // unconditionally.
 func TestNewBinariesServer_EmptyRegistryEncodesAsArray(t *testing.T) {
 	s := NewBinariesServer(testLogger(), nil)
-	body, err := json.Marshal(s.body)
+	body, err := json.Marshal(s.live.get().binaries)
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}

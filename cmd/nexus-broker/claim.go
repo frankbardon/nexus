@@ -113,27 +113,29 @@ type claimResponse struct {
 // with the per-claim config, waits for the instance to dial back and signal
 // ready, then returns the lease id and the broker's client WebSocket URL.
 type ClaimServer struct {
-	logger             *slog.Logger
-	registry           *Registry
-	cfg                Config
-	runner             commandRunner
-	readyTimeout       time.Duration
-	sessionReportGrace time.Duration
+	logger   *slog.Logger
+	registry *Registry
+	runner   commandRunner
 
-	// maxBody caps the claim request body, sourced from the broker config's
-	// max_claim_body.
-	maxBody int64
+	// live is the atomic configuration snapshot every claim reads.
+	//
+	// It replaces the by-value Config copy and the four bounds this server used
+	// to latch at construction (ready_timeout, session_report_grace,
+	// max_claim_body, queue_wait_timeout). Latching them meant a SIGHUP could
+	// never reach a live claim server: swapping a Config behind it would have
+	// changed nothing an in-flight or future claim actually read. Reading them
+	// through the holder at USE time is what makes them reloadable, and it is one
+	// seam rather than four setters.
+	//
+	// A claim reads the snapshot ONCE, at the top of the request, so one claim
+	// cannot straddle a reload — it either spawns entirely under the old
+	// configuration or entirely under the new one.
+	live *configHolder
 
 	// tickets mints the single-use client WebSocket ticket returned with a
 	// successful claim. A nil store (or one built inert because auth is disabled)
 	// simply issues nothing, and the response omits the `ticket` field.
 	tickets *ticketStore
-
-	// queueWaitTimeout bounds how long an over-capacity claim parks in the FIFO
-	// capacity queue before returning a timeout error. It is sourced from the
-	// broker config's queue_wait_timeout. A non-positive value disables waiting:
-	// an at-capacity claim is rejected immediately with "no capacity".
-	queueWaitTimeout time.Duration
 
 	// spawnKey derives each lease's spawn secret from a broker-held key instead of
 	// minting a random one, so a restarted broker can recompute the value a
@@ -157,15 +159,19 @@ func (s *ClaimServer) useSpawnKey(k spawnKey) { s.spawnKey = k }
 // nil tickets store means no `ticket` is returned with a claim, which is also
 // what an auth-disabled broker produces.
 //
-// The three claim-path bounds come from the config, and a NON-POSITIVE value in
-// the Config falls back to the corresponding default — the same shape
-// NewReleaseServer uses for release_grace. That is not a second, silent
-// validation path: LoadConfigFromBytes already refuses a non-positive
-// ready_timeout, session_report_grace or max_claim_body naming the key, so the
-// only way to reach this fallback is a Config built as a struct literal rather
-// than loaded (every caller in the test suite, and any future in-process
-// embedder), where "unset" must keep meaning "the default" rather than "reject
-// every claim instantly".
+// The Config is held as a PRIVATE configuration snapshot (see
+// newLocalConfigHolder). run() calls useConfigHolder afterwards to replace it
+// with the process-wide one, which is what makes the claim path follow a SIGHUP.
+//
+// A non-positive ready_timeout, session_report_grace, max_claim_body or
+// release_grace in that Config falls back to the corresponding default — see
+// settleConfig, which is where that fold now lives so every reader of a snapshot
+// sees one settled number. That is not a second, silent validation path:
+// LoadConfigFromBytes already refuses a non-positive value for each of them,
+// naming the key, so the only way to reach the fallback is a Config built as a
+// struct literal rather than loaded (every caller in the test suite, and any
+// future in-process embedder), where "unset" must keep meaning "the default"
+// rather than "reject every claim instantly".
 func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner commandRunner, tickets *ticketStore) *ClaimServer {
 	if logger == nil {
 		logger = slog.Default()
@@ -173,30 +179,37 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 	if runner == nil {
 		runner = execRunner{}
 	}
-	readyTimeout := cfg.ReadyTimeout
-	if readyTimeout <= 0 {
-		readyTimeout = defaultReadyTimeout
-	}
-	sessionReportGrace := cfg.SessionReportGrace
-	if sessionReportGrace <= 0 {
-		sessionReportGrace = defaultSessionReportGrace
-	}
-	maxBody := cfg.MaxClaimBody
-	if maxBody <= 0 {
-		maxBody = defaultMaxClaimBody
-	}
 	return &ClaimServer{
-		logger:             logger,
-		registry:           registry,
-		cfg:                cfg,
-		runner:             runner,
-		readyTimeout:       readyTimeout,
-		sessionReportGrace: sessionReportGrace,
-		maxBody:            maxBody,
-		tickets:            tickets,
-		queueWaitTimeout:   cfg.QueueWaitTimeout,
+		logger:   logger,
+		registry: registry,
+		runner:   runner,
+		live:     newLocalConfigHolder(cfg),
+		tickets:  tickets,
 	}
 }
+
+// useConfigHolder points this server at the process-wide configuration snapshot,
+// so a SIGHUP changes what the next claim spawns and how long it will wait.
+//
+// It is a setter rather than a constructor parameter for the same reason
+// useSpawnKey is: every existing caller hands the constructor a bare Config, and
+// only run() has a shared holder to give. A nil holder is ignored, leaving the
+// private snapshot the constructor built — which is exactly a broker that never
+// reloads.
+func (s *ClaimServer) useConfigHolder(h *configHolder) {
+	if h == nil {
+		return
+	}
+	s.live = h
+}
+
+// config returns the configuration snapshot in force. The returned pointer aims
+// into an immutable value: read it, never write through it.
+//
+// A caller that needs more than one field from it must take the snapshot ONCE
+// into a local and read every field from that local, so its answers cannot
+// straddle a reload — spawnInstance is the worked example.
+func (s *ClaimServer) config() *Config { return s.live.config() }
 
 // Register wires the claim endpoint onto a mux. It takes a routeMux so main can
 // register it behind the auth guard.
@@ -297,8 +310,17 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	// not handed to a build that never created it. BinaryForSession is
 	// best-effort and reports unknown for a fresh claim, so this one call covers
 	// both shapes without a branch here — see resolveSpawnBinary.
+	//
+	// The configuration snapshot is taken ONCE, here, and every value this spawn
+	// needs is read from it — the registry entry, the environment it inherits,
+	// the address it dials back on and all three of its bounds. A SIGHUP that
+	// lands mid-spawn therefore cannot pair a new registry entry with an old
+	// inherit_env, or a new ready_timeout with an entry that is no longer
+	// offered: this spawn runs entirely under the configuration it started with,
+	// and the next one runs entirely under the reloaded one.
+	cfg := s.config()
 	recorded, recordedKnown := s.registry.BinaryForSession(req.SessionID)
-	binaryName, entry, status, err := resolveSpawnBinary(s.cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
+	binaryName, entry, status, err := resolveSpawnBinary(cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
 	if err != nil {
 		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error()}
 	}
@@ -327,7 +349,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	//   - context cancelled: the caller hung up while queued → a silent failure,
 	//     because there is nobody left to answer; the waiter is already dropped
 	//     from the queue.
-	leaseID, err := s.registry.NewLeaseQueued(ctx, s.queueWaitTimeout, owner)
+	leaseID, err := s.registry.NewLeaseQueued(ctx, cfg.QueueWaitTimeout, owner)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQueueTimeout):
@@ -406,7 +428,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	}
 	s.registry.SetSpawnSecret(leaseID, spawnSecret)
 
-	brokerAddr := "ws://" + instanceDialHost(s.cfg.ListenAddr) + instanceWSPath
+	brokerAddr := "ws://" + instanceDialHost(cfg.ListenAddr) + instanceWSPath
 	// The entry's RESOLVED path is what is exec()d — LoadConfig verified it at
 	// boot, so no claim performs a stat or a PATH lookup, and a PATH that
 	// changes under a running broker cannot make one claim spawn a different
@@ -416,7 +438,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 		binaryPath: entry.ResolvedPath,
 		binaryArgs: entry.Args,
 		binaryEnv:  entry.Env,
-		inheritEnv: s.cfg.InheritEnv,
+		inheritEnv: cfg.InheritEnv,
 		// The entry's EFFECTIVE credential: its own `run_as`, or the broker-level
 		// default folded onto it at boot. Nil for every entry that declared
 		// neither, which is the spawn this broker has always performed.
@@ -443,7 +465,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 		exitErr := s.registry.ExitErr(leaseID)
 		s.registry.Remove(leaseID)
 		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr}
-	case <-time.After(s.readyTimeout):
+	case <-time.After(cfg.ReadyTimeout):
 		_ = handle.kill()
 		<-s.registry.ExitedChan(leaseID) // reap the killed process so nothing leaks
 		s.registry.Remove(leaseID)
@@ -466,7 +488,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 			s.logger.Warn("instance reported a different session id than requested",
 				"lease_id", leaseID, "requested", req.SessionID, "reported", reported)
 		}
-	case <-time.After(s.sessionReportGrace):
+	case <-time.After(cfg.SessionReportGrace):
 		if req.SessionID == "" {
 			s.logger.Warn("instance did not report a session id within grace window",
 				"lease_id", leaseID)
@@ -498,7 +520,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 // it.
 func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req claimRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBody))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.config().MaxClaimBody))
 	if err := dec.Decode(&req); err != nil {
 		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
 		return
@@ -547,7 +569,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 			"lease_id", spawn.leaseID, "principal_id", owner.ID, "error", mintErr)
 	}
 
-	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(spawn.leaseID)
+	wsURL := clientWSBaseURL(*s.config(), r.Host) + ClientWSPath(spawn.leaseID)
 	// principal_id ties the new lease id back to the identity that claimed it. The
 	// guard's allow record cannot carry it: /claim has no lease id in its path, so
 	// this is the only line that joins the two halves of the audit trail. Empty

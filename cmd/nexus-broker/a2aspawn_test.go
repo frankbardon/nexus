@@ -110,8 +110,8 @@ func newA2ASpawnHarness(t *testing.T, opts ...a2aSpawnOption) *a2aSpawnHarness {
 	}
 	cfg := Config{Binaries: settings.binaries, ListenAddr: "127.0.0.1:8080", StateDir: settings.stateDir}
 	claims := NewClaimServer(testLogger(), registry, cfg, runner, nil)
-	claims.readyTimeout = settings.readyTimeout
-	claims.sessionReportGrace = 2 * time.Second
+	setClaimBounds(claims, func(c *Config) { c.ReadyTimeout = settings.readyTimeout })
+	setClaimBounds(claims, func(c *Config) { c.SessionReportGrace = 2 * time.Second })
 
 	var contexts *a2aContextIndex
 	if settings.stateDir != "" {

@@ -2331,7 +2331,7 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	// configured, so a restarted broker can recompute what a surviving instance
 	// still holds. Nil key = random per spawn, the pre-existing behaviour.
 	claims.useSpawnKey(spawnSecretKey)
-	claims.readyTimeout = 15 * time.Second
+	setClaimBounds(claims, func(c *Config) { c.ReadyTimeout = 15 * time.Second })
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 	ticketsServer := NewTicketServer(logger, registry, tickets)
