@@ -74,7 +74,7 @@ func TestReleaseLease_GracefulSendsShutdownAndRemoves(t *testing.T) {
 
 	// The instance exits cleanly on its own (as a real engine would after the
 	// shutdown frame), so the grace path never force-kills.
-	close(proc.exited)
+	proc.exit()
 
 	if err := reg.releaseLease(id, "test", 2*time.Second); err != nil {
 		t.Fatalf("releaseLease: %v", err)
@@ -112,7 +112,11 @@ func TestReleaseLease_GracefulSendsShutdownAndRemoves(t *testing.T) {
 
 func TestReleaseLease_ForceKillsOnGraceTimeout(t *testing.T) {
 	reg := NewRegistry(testLogger(), 0)
-	proc := newFakeProcess(101) // never exits on its own
+	// Compressed so the SIGTERM→SIGKILL window costs the suite milliseconds
+	// rather than the production two seconds.
+	reg.termGrace = 40 * time.Millisecond
+	proc := newFakeProcess(101)
+	proc.exitOnTerm = false // wedged: it exits on nothing short of SIGKILL
 	id, _ := seedLease(t, reg, proc)
 
 	start := time.Now()
@@ -138,6 +142,106 @@ func TestReleaseLease_ForceKillsOnGraceTimeout(t *testing.T) {
 	}
 }
 
+// seedWedgedLease mints a lease with a process but NO instance connection: the
+// dial-back socket is gone (the instance is wedged, or mid reconnect-backoff)
+// while the process itself is still very much alive.
+//
+// That is the case the shutdown frame cannot address, and the whole reason
+// teardown may not depend on it: releaseLease has nothing to send the frame on,
+// so anything graceful has to come from a signal.
+func seedWedgedLease(t *testing.T, reg *Registry, proc processHandle) string {
+	t.Helper()
+	id, err := reg.NewLease(anonymousOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.SetProcess(id, proc)
+	return id
+}
+
+// TestReleaseLease_WedgedInstanceGetsSIGTERMBeforeSIGKILL is the regression test
+// for a release that used to be a straight SIGKILL.
+//
+// With no socket the instance never sees the shutdown frame, so before this the
+// grace period was spent waiting for something that had never been asked and the
+// engine's first and only notice of teardown was SIGKILL — no flush, no session
+// persisted. SIGTERM is what the engine handles as a clean shutdown, so an
+// instance that takes it must never be killed at all.
+func TestReleaseLease_WedgedInstanceGetsSIGTERMBeforeSIGKILL(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+	reg.termGrace = 2 * time.Second // never expected to elapse here
+	proc := newFakeProcess(102)     // a real engine shuts down cleanly on SIGTERM
+	id := seedWedgedLease(t, reg, proc)
+
+	start := time.Now()
+	if err := reg.releaseLease(id, "test", 40*time.Millisecond); err != nil {
+		t.Fatalf("releaseLease: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	select {
+	case <-proc.termed:
+	default:
+		t.Fatal("a wedged instance was never sent SIGTERM; with no socket it received no teardown request at all")
+	}
+	select {
+	case <-proc.killed:
+		t.Error("the instance was SIGKILLed even though it exited on SIGTERM")
+	default:
+	}
+	if got := proc.signalOrder(); len(got) != 1 || got[0] != "terminate" {
+		t.Errorf("signals = %v, want exactly [terminate]", got)
+	}
+	// The escalation must not start before release_grace has actually elapsed —
+	// SIGTERM is the fallback for a missing socket, not a replacement for the
+	// operator's shutdown budget.
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("release returned in %v, want >= grace (40ms)", elapsed)
+	}
+	if reg.Has(id) {
+		t.Error("lease still present after release")
+	}
+}
+
+// TestReleaseLease_EscalatesTermThenKill pins the ORDER, which is the property
+// that matters: an instance that ignores SIGTERM is still killed, but only after
+// it has had its chance to flush.
+func TestReleaseLease_EscalatesTermThenKill(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+	reg.termGrace = 40 * time.Millisecond
+	proc := newFakeProcess(103)
+	proc.exitOnTerm = false // ignores SIGTERM and never exits
+	id := seedWedgedLease(t, reg, proc)
+
+	start := time.Now()
+	if err := reg.releaseLease(id, "test", 40*time.Millisecond); err != nil {
+		t.Fatalf("releaseLease: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	got := proc.signalOrder()
+	if len(got) != 2 || got[0] != "terminate" || got[1] != "kill" {
+		t.Fatalf("signals = %v, want [terminate kill]", got)
+	}
+	// grace + termGrace, both of which must actually have been waited out.
+	if elapsed < 80*time.Millisecond {
+		t.Errorf("release returned in %v, want >= grace + term_grace (80ms)", elapsed)
+	}
+	if reg.Has(id) {
+		t.Error("lease still present after forced release")
+	}
+}
+
+// TestReleaseLease_TermGraceDefaultsToTheSharedConstant guards against the two
+// teardown paths drifting apart again: the spawned path's second window and the
+// adopted path's escalation are one value.
+func TestReleaseLease_TermGraceDefaultsToTheSharedConstant(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+	if reg.termGrace != termGrace {
+		t.Errorf("registry termGrace = %v, want the shared constant %v", reg.termGrace, termGrace)
+	}
+}
+
 func TestReleaseLease_UnknownLeaseErrors(t *testing.T) {
 	reg := NewRegistry(testLogger(), 0)
 	err := reg.releaseLease("does-not-exist", "test", time.Second)
@@ -150,7 +254,7 @@ func TestReleaseLease_IdempotentDoubleRelease(t *testing.T) {
 	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(102)
 	id, _ := seedLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	if err := reg.releaseLease(id, "test", time.Second); err != nil {
 		t.Fatalf("first releaseLease: %v", err)
@@ -166,7 +270,7 @@ func TestReleaseHTTP_KnownLeaseReturns200(t *testing.T) {
 	ts, reg := newReleaseTestServer(t, 2*time.Second)
 	proc := newFakeProcess(200)
 	id, _ := seedLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	resp, err := http.Post(ts.URL+"/release/"+id, "application/json", nil)
 	if err != nil {
@@ -239,7 +343,7 @@ func TestReleaseHTTP_NonOwnerIsRefusedAndInstanceSurvives(t *testing.T) {
 	// The rightful owner still gets the FULL shared teardown: shutdown frame,
 	// bounded grace, slot freed. Without this the 404 above could just mean
 	// "release is broken".
-	close(proc.exited) // the instance exits cleanly on the shutdown frame
+	proc.exit() // the instance exits cleanly on the shutdown frame
 	owned := doAuthed(t, http.MethodPost, ts.URL+"/release/"+id, ownerToken, "")
 	if owned.StatusCode != http.StatusOK {
 		t.Fatalf("owner release status = %d, want 200", owned.StatusCode)
@@ -278,7 +382,9 @@ func TestReleaseHTTP_NonOwnerIsRefusedAndInstanceSurvives(t *testing.T) {
 func TestReleaseHTTP_OwnerReleaseKeepsForceKillBackstop(t *testing.T) {
 	const grace = 60 * time.Millisecond
 	ts, reg := newOwnedReleaseTestServer(t, grace)
-	proc := newFakeProcess(215) // never exits on its own
+	reg.termGrace = 40 * time.Millisecond
+	proc := newFakeProcess(215)
+	proc.exitOnTerm = false // wedged: neither the frame nor SIGTERM moves it
 	id, _ := seedLeaseOwned(t, reg, proc, nexusauth.Principal{ID: ownerPrincipal})
 
 	start := time.Now()
@@ -322,7 +428,7 @@ func TestReleaseHTTP_OwnerDoubleReleaseIsIdempotent404(t *testing.T) {
 	ts, reg := newOwnedReleaseTestServer(t, time.Second)
 	proc := newFakeProcess(212)
 	id, _ := seedLeaseOwned(t, reg, proc, nexusauth.Principal{ID: ownerPrincipal})
-	close(proc.exited)
+	proc.exit()
 
 	first := doAuthed(t, http.MethodPost, ts.URL+"/release/"+id, ownerToken, "")
 	if first.StatusCode != http.StatusOK {
@@ -348,7 +454,7 @@ func TestReleaseHTTP_AuthDisabledReleasesAnonymousLease(t *testing.T) {
 	ts, reg := newReleaseTestServer(t, time.Second) // registered on a RAW mux: no guard
 	proc := newFakeProcess(213)
 	id, _ := seedLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	resp, err := http.Post(ts.URL+"/release/"+id, "application/json", nil)
 	if err != nil {
@@ -381,7 +487,7 @@ func TestReleaseHTTP_DoubleReleaseIsClean(t *testing.T) {
 	ts, reg := newReleaseTestServer(t, time.Second)
 	proc := newFakeProcess(201)
 	id, _ := seedLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	first, err := http.Post(ts.URL+"/release/"+id, "application/json", nil)
 	if err != nil {

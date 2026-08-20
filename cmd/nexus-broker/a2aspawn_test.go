@@ -222,7 +222,7 @@ type a2aFakeInstance struct {
 
 // exit makes the process report as exited, which is the signal every teardown
 // path in the broker converges on.
-func (i *a2aFakeInstance) exit() { close(i.proc.exited) }
+func (i *a2aFakeInstance) exit() { i.proc.exit() }
 
 // sent decodes every frame the broker queued for this instance.
 func (i *a2aFakeInstance) sent(t *testing.T) []brokerIOMessage {

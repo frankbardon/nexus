@@ -163,7 +163,7 @@ func TestIdleSweeper_LiveTurnSurvivesIdleTimeout(t *testing.T) {
 
 	proc := newFakeProcess(425)
 	id, l, _ := seedLiveLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	// idle_timeout 1m, turn bound 1h: the turn is long but well inside the bound.
 	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, time.Hour, time.Second)
@@ -201,7 +201,7 @@ func TestIdleSweeper_ReapsOverrunTurnWithTurnTimeoutReason(t *testing.T) {
 
 	proc := newFakeProcess(426)
 	id, l, client := seedLiveLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	// idle_timeout 1m, turn bound 5m: the turn is exempt from the first and
 	// caught by the second.

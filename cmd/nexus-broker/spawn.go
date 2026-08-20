@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
@@ -93,7 +94,17 @@ type spawnSpec struct {
 type processHandle interface {
 	// pid returns the OS process id, or 0 if the process has not started.
 	pid() int
-	// kill forcibly terminates the process.
+	// terminate asks the process — and everything it started — to stop cleanly:
+	// SIGTERM to its process group, which the engine handles as a clean shutdown
+	// that flushes and persists the session. It does NOT wait; the caller decides
+	// how long to give it before escalating to kill.
+	//
+	// It exists because the shutdown frame is delivered over the dial-back socket,
+	// and the case teardown most needs to handle is the one where that socket is
+	// gone but the process is not. A signal needs nothing from the instance to
+	// arrive.
+	terminate() error
+	// kill forcibly terminates the process and everything it started.
 	kill() error
 	// wait blocks until the process exits and returns its exit error.
 	wait() error
@@ -205,6 +216,10 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	)
 	cmd.Env = env
 
+	// Order between these two does not matter — both EXTEND SysProcAttr rather
+	// than assigning it — but that is a property worth keeping true; see the
+	// comment on applyRunAs.
+	applyProcessGroup(cmd)
 	applyRunAs(cmd, spec.runAs)
 
 	// Surface the child's logs through the broker's stderr for observability.
@@ -213,15 +228,40 @@ func buildCommand(spec spawnSpec) *exec.Cmd {
 	return cmd
 }
 
+// applyProcessGroup makes the instance the leader of a process group of its own,
+// so teardown can signal the whole tree the instance created rather than only the
+// instance itself.
+//
+// Without it, an instance's descendants — shell-tool commands, MCP stdio servers,
+// code interpreters — are in the BROKER's process group and simply survive their
+// instance's death, re-parented to init. A released lease then leaves running
+// processes behind holding the session's files, ports and API budget, and nothing
+// in the broker knows they exist. It is also what makes signalling a negative pid
+// safe at all: groupSignalTarget only ever targets a group whose leader IS the
+// instance, and that is only true because of this call.
+//
+// Like applyRunAs it EXTENDS SysProcAttr rather than assigning it — the two
+// stories set different fields on the same struct, and either one replacing it
+// would silently undo the other. Setpgid is set unconditionally, including when
+// no run_as is configured, because an orphaned subprocess is not a
+// credential-specific problem.
+func applyProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
 // applyRunAs sets the OS credential the child is exec()d under, or does nothing
 // at all when no run_as is configured — which is what keeps an unconfigured
-// broker's spawn byte-identical to what it was before this existed (SysProcAttr
-// stays nil, so os/exec takes exactly the path it always did).
+// broker's spawn carrying the credential it always did (no Credential is
+// attached, so os/exec performs no setgroups/setgid/setuid at all).
 //
-// SysProcAttr is EXTENDED here, never assigned wholesale: E4-S2 sets Setpgid on
-// the same struct, and either story replacing it would silently drop whichever
-// field the other set. Any later story that needs a process attribute adds a
-// field the same way.
+// SysProcAttr is EXTENDED here, never assigned wholesale: applyProcessGroup sets
+// Setpgid on the same struct, and either one replacing it would silently drop
+// whichever field the other set — turning a privilege drop into a no-op, or
+// leaving every instance in the broker's process group. Any later story that
+// needs a process attribute adds a field the same way.
 //
 // Groups is left nil with NoSetGroups false on purpose. That makes the child call
 // setgroups(0, NULL), dropping every supplementary group the broker held — a
@@ -550,9 +590,96 @@ func warnIfSpawnKeyModeTooWide(logger *slog.Logger, path string) {
 	}
 }
 
+// errUnsafeSignalTarget is returned by groupSignalTarget for a pid that must
+// never be turned into a group signal. It is a sentinel so a caller can log the
+// refusal distinctly from an ordinary signal failure, and so a test can assert
+// the refusal without matching on message text.
+var errUnsafeSignalTarget = errors.New("unsafe process-group signal target")
+
+// groupSignalTarget resolves the pid argument to pass to kill(2) in order to
+// terminate an instance AND everything it started.
+//
+// The mechanism is a negative pid, which kill(2) reads as "every process in that
+// group". That makes the arithmetic load-bearing, and its failure mode
+// catastrophic rather than merely wrong:
+//
+//   - kill(-1, sig) signals EVERY process the caller may signal. On a broker
+//     running as root that is the machine.
+//   - kill(0, sig) signals the CALLER's own process group — the broker, and on a
+//     typical systemd unit or shell session everything beside it.
+//
+// Both are reachable by accident from a pid the broker merely believes in: 0 is
+// what processHandle.pid() returns before a process starts and what a truncated
+// journal record decodes to, and negating 1 gets to -1. So pid <= 1 is REFUSED
+// outright rather than clamped — there is no instance whose teardown legitimately
+// wants that signal, and a refusal that returns an error is recoverable where a
+// mis-aimed SIGKILL is not.
+//
+// The second guard is subtler and matters just as much. A negative pid is only
+// the right target when the process actually LEADS its own group; the broker sets
+// that up with Setpgid (applyProcessGroup), but a process adopted from an older
+// broker that did not, or one whose setpgid the kernel refused, is still sitting
+// in the BROKER's group — and negating that pid would signal a group the broker
+// belongs to. So the leader check is not an optimisation: it is what stops a
+// missing process group from becoming a broker suicide. A non-leader falls back
+// to signalling the single process, which is exactly the behaviour that existed
+// before process groups did.
+func groupSignalTarget(pid int) (int, error) {
+	if pid <= 1 {
+		return 0, fmt.Errorf("refusing to signal pid %d: %w", pid, errUnsafeSignalTarget)
+	}
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		// The process is gone, or is not ours to ask about. Signal it directly and
+		// let kill(2) report ESRCH/EPERM for itself; guessing a group here would be
+		// guessing with a negative pid.
+		return pid, nil
+	}
+	if pgid != pid {
+		// Not a group leader — the group is somebody else's, quite possibly the
+		// broker's own. Signal only the process.
+		return pid, nil
+	}
+	return -pgid, nil
+}
+
+// signalProcessGroup delivers sig to the process group led by pid, falling back
+// to the single process when pid does not lead one. See groupSignalTarget for why
+// the target is computed rather than assumed.
+//
+// The underlying errno is wrapped, not swallowed, so callers can test for
+// syscall.ESRCH ("already gone", which every caller here treats as success).
+func signalProcessGroup(pid int, sig syscall.Signal) error {
+	target, err := groupSignalTarget(pid)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Kill(target, sig); err != nil {
+		return fmt.Errorf("signalling %v to %d: %w", sig, target, err)
+	}
+	return nil
+}
+
+// signalDone reports whether err means the target had already exited. Every
+// signal caller in the broker treats that as success: the point of the signal was
+// to have the process gone, and it is.
+func signalDone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
 // execProcess adapts an *exec.Cmd to the processHandle interface.
 type execProcess struct {
 	cmd *exec.Cmd
+
+	// mu guards reaped, which wait sets once cmd.Wait has returned.
+	//
+	// It exists because signalling goes through the raw pid (a group signal has
+	// to — os.Process can only signal the one process it owns), and a raw pid is
+	// exactly what the kernel is free to reuse the moment the child is reaped. The
+	// flag is what keeps a late kill from landing on whatever inherited the number.
+	// os.Process guards its own signals the same way.
+	mu     sync.Mutex
+	reaped bool
 }
 
 func (p *execProcess) pid() int {
@@ -562,16 +689,45 @@ func (p *execProcess) pid() int {
 	return p.cmd.Process.Pid
 }
 
-func (p *execProcess) kill() error {
-	if p.cmd.Process == nil {
-		return nil
+// terminate sends SIGTERM to the instance's process group. The engine installs a
+// SIGTERM handler and treats it as a clean shutdown — flushing and persisting the
+// session — so this is a graceful request, not a kill.
+func (p *execProcess) terminate() error {
+	if err := p.signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("terminating instance process: %w", err)
 	}
-	if err := p.cmd.Process.Kill(); err != nil {
+	return nil
+}
+
+// kill sends SIGKILL to the instance's process group. Unlike the adopted path it
+// does NOT escalate from SIGTERM itself: releaseLease owns the escalation for a
+// spawned instance and has already sent both the shutdown frame and SIGTERM by
+// the time it calls here.
+func (p *execProcess) kill() error {
+	if err := p.signal(syscall.SIGKILL); err != nil {
 		return fmt.Errorf("killing instance process: %w", err)
 	}
 	return nil
 }
 
+// signal delivers sig to the instance's process group, treating "not started"
+// and "already reaped" as no-ops and "already gone" as success.
+func (p *execProcess) signal(sig syscall.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd.Process == nil || p.reaped {
+		return nil
+	}
+	if err := signalProcessGroup(p.cmd.Process.Pid, sig); err != nil && !signalDone(err) {
+		return err
+	}
+	return nil
+}
+
 func (p *execProcess) wait() error {
-	return p.cmd.Wait()
+	err := p.cmd.Wait()
+	p.mu.Lock()
+	p.reaped = true
+	p.mu.Unlock()
+	return err
 }

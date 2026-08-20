@@ -360,7 +360,7 @@ func TestTicketInvalidation_EveryTeardownPath(t *testing.T) {
 			name: "manual release",
 			teardown: func(t *testing.T, env teardownEnv) {
 				t.Helper()
-				close(env.proc.exited) // the instance obeys the shutdown frame
+				env.proc.exit() // the instance obeys the shutdown frame
 				if err := env.reg.releaseLease(env.id, "manual release", 2*time.Second); err != nil {
 					t.Fatalf("releaseLease: %v", err)
 				}
@@ -370,7 +370,7 @@ func TestTicketInvalidation_EveryTeardownPath(t *testing.T) {
 			name: "idle sweep",
 			teardown: func(t *testing.T, env teardownEnv) {
 				t.Helper()
-				close(env.proc.exited)
+				env.proc.exit()
 				// Age BOTH leases past the idle window, then give the bystander fresh
 				// client activity so the sweeper's own selection picks exactly one. The
 				// sweeper is driven rather than releaseLease called directly, so the
@@ -395,7 +395,7 @@ func TestTicketInvalidation_EveryTeardownPath(t *testing.T) {
 				// The instance dies with NOBODY having asked it to: watchExit
 				// classifies it as a crash and removes the lease itself, WITHOUT
 				// going through releaseLease.
-				close(env.proc.exited)
+				env.proc.exit()
 				env.reg.watchExit(env.id)
 			},
 		},
@@ -531,7 +531,7 @@ func TestTicketRoute_OwnerRefusedAfterRelease(t *testing.T) {
 	ts, reg, _ := newTicketTestServer(t)
 	proc := newFakeProcess(912)
 	id, _ := seedLeaseOwned(t, reg, proc, ownerPrincipalIdentity())
-	close(proc.exited)
+	proc.exit()
 	if err := reg.releaseLease(id, "manual release", 2*time.Second); err != nil {
 		t.Fatalf("releaseLease: %v", err)
 	}

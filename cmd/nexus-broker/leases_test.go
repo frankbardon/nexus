@@ -169,7 +169,7 @@ func TestLeasesHTTP_ListsClaimedLeaseThenGoneAfterRelease(t *testing.T) {
 	proc := newFakeProcess(4242)
 	id, _ := seedLease(t, reg, proc) // NewLease + AttachInstance + SetProcess
 	reg.MarkSessionID(id, "sess-abc")
-	close(proc.exited) // let release's graceful path complete without a kill
+	proc.exit() // let release's graceful path complete without a kill
 
 	snap := getLeases(t, ts.URL)
 	if snap.MaxConcurrent != 4 {

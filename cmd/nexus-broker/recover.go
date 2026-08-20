@@ -41,11 +41,6 @@ const (
 	// detection for a restored lease is polling by construction; a quarter second
 	// is far below any human-visible teardown latency and costs one signal.
 	adoptedPollInterval = 250 * time.Millisecond
-
-	// adoptedTermGrace is how long a reaped adopted process is given after SIGTERM
-	// before SIGKILL. See adoptedProcess.kill for why an adopted process gets a
-	// signal escalation where a spawned one gets a straight kill.
-	adoptedTermGrace = 2 * time.Second
 )
 
 // processAlive reports whether pid names a live process.
@@ -91,34 +86,49 @@ type adoptedProcess struct{ id int }
 
 func (p *adoptedProcess) pid() int { return p.id }
 
-// kill terminates an adopted process, escalating SIGTERM → SIGKILL.
+// terminate sends SIGTERM to the adopted instance's process group. The engine
+// treats SIGTERM as a clean shutdown that flushes and persists the session, so
+// for an adopted process — which by definition has no dial-back socket to receive
+// a shutdown frame on — this is the graceful request, and the only one available.
 //
-// A spawned instance gets a straight SIGKILL because releaseLease has already
-// asked it to stop politely, over the dial-back socket, and waited out
-// release_grace. An adopted one being reaped is by definition one with NO socket
-// to have asked on — that is why it is being reaped — so SIGTERM is the only
-// graceful signal available, and the engine treats it as a clean shutdown that
-// flushes and persists the session. SIGKILL follows within a bounded window so
-// this stays a force-kill and not a request.
-func (p *adoptedProcess) kill() error {
-	proc, err := os.FindProcess(p.id)
-	if err != nil {
-		return fmt.Errorf("finding adopted instance process %d: %w", p.id, err)
+// It signals the GROUP so the instance's own subprocesses go with it. A process
+// adopted from a broker that predates process groups is not a group leader and is
+// signalled alone; see groupSignalTarget.
+func (p *adoptedProcess) terminate() error {
+	if err := signalProcessGroup(p.id, syscall.SIGTERM); err != nil && !signalDone(err) {
+		return fmt.Errorf("terminating adopted instance process %d: %w", p.id, err)
 	}
+	return nil
+}
+
+// kill terminates an adopted process and its group, escalating SIGTERM → SIGKILL.
+//
+// It keeps its own escalation, rather than leaning on releaseLease's, because it
+// is also called directly (killAdopted, on the recovery path that refuses to
+// restore a lease at all) with no teardown sequence around it. An adopted process
+// is by definition one with NO socket to have asked politely on, so SIGTERM is the
+// only graceful signal available; SIGKILL follows within a bounded window so this
+// stays a force-kill and not a request.
+//
+// Reached through releaseLease the SIGTERM here is the second one that instance
+// receives. That is harmless — a process that took the first one is already gone
+// and the signal returns ESRCH — and it is worth the redundancy to keep the direct
+// caller from needing its own escalation.
+func (p *adoptedProcess) kill() error {
 	// Already gone is success: the caller wanted it dead. Any OTHER SIGTERM error
 	// falls through to the escalation below — a refused polite signal is not a
 	// reason to leave the process running.
-	if err := proc.Signal(syscall.SIGTERM); errors.Is(err, os.ErrProcessDone) {
+	if err := signalProcessGroup(p.id, syscall.SIGTERM); signalDone(err) {
 		return nil
 	}
-	deadline := time.Now().Add(adoptedTermGrace)
+	deadline := time.Now().Add(termGrace)
 	for time.Now().Before(deadline) {
 		if !processAlive(p.id) {
 			return nil
 		}
 		time.Sleep(adoptedPollInterval)
 	}
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := signalProcessGroup(p.id, syscall.SIGKILL); err != nil && !signalDone(err) {
 		return fmt.Errorf("killing adopted instance process %d: %w", p.id, err)
 	}
 	return nil

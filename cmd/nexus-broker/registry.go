@@ -440,6 +440,14 @@ type Registry struct {
 	brokerID      string
 	advertiseAddr string
 
+	// termGrace is the SIGTERM→SIGKILL window releaseLease uses, seeded from the
+	// package constant of the same name. It is a field rather than a direct use of
+	// that constant for exactly one reason: a test that wants to observe the
+	// escalation should not have to spend two real seconds per case. It is NOT
+	// configurable and is never written after construction — set it before the
+	// registry is shared with any goroutine.
+	termGrace time.Duration
+
 	mu     sync.Mutex
 	leases map[string]*lease
 }
@@ -455,6 +463,7 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 		logger:            logger,
 		now:               time.Now,
 		maxConcurrent:     maxConcurrent,
+		termGrace:         termGrace,
 		clientReplayLimit: defaultClientReplayBufferBytes,
 		waiters:           list.New(),
 		leases:            make(map[string]*lease),

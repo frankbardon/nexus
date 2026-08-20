@@ -206,8 +206,12 @@ handling) it sends a `shutdown` frame. The plugin then:
   persists the session before the process exits.
 
 The plugin never hard-exits mid-write; the engine owns teardown ordering. The
-broker bounds how long it waits for the process and force-kills it if the
-graceful path overruns (`release_grace`).
+broker bounds how long it waits for the process (`release_grace`) and then
+escalates: `SIGTERM` to the instance's process group — which the engine also
+handles as a clean shutdown, and which is the only teardown request an instance
+whose socket has died ever receives — and `SIGKILL` to the same group a fixed 2s
+later. Signalling the group is what takes the instance's own subprocesses with
+it; see [the guide](../../guides/session-broker.md#post-releaselease_id--release-an-instance).
 
 Anything still in the outbound buffer is flushed on a bound rather than waited
 out — see [Output is buffered across a reconnect](#output-is-buffered-across-a-reconnect).

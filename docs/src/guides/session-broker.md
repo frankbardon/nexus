@@ -64,7 +64,7 @@ max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a QUIET lease after this much inactivity; <=0 disables
 max_turn_duration: 30m        # bound on an in-flight turn, which is otherwise exempt from idle_timeout
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting
-release_grace: 10s            # graceful-shutdown grace before force-kill
+release_grace: 10s            # graceful-shutdown grace before SIGTERM, then SIGKILL
 state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
 broker_id: ""                 # stamped on every lease record; generated + persisted when empty
 reattach_window: 60s          # how long a lease restored after a restart waits for its instance
@@ -519,6 +519,13 @@ about **lease** bookkeeping, not sessions: an instance's session under
 
 #### What a restart actually does
 
+Instances survive the broker's own exit because each one leads its **own process
+group**: a `Ctrl-C` in the broker's terminal signals the broker's group, not the
+instances', so the processes recovery expects to adopt are still there when it
+comes back. (That process group is also what makes a *release* take the
+instance's subprocesses with it — see
+[`POST /release/{lease_id}`](#post-releaselease_id--release-an-instance).)
+
 At boot — before any route is served — the broker replays the journal and, for
 each lease that was live when it stopped:
 
@@ -554,8 +561,9 @@ affected leases are reaped rather than reattached.
 
 **Nothing waits forever.** A restored lease that no instance reconnects to within
 `reattach_window` (default 60s) is reaped through the ordinary release path: the
-process is signalled (`SIGTERM`, escalating to `SIGKILL`), the slot is freed, and
-the record is closed out. Setting `reattach_window` to `0` does **not** disable
+process group is signalled (`SIGTERM`, escalating to `SIGKILL`), so the instance
+and everything it started go together, the slot is freed, and the record is
+closed out. Setting `reattach_window` to `0` does **not** disable
 this — it falls back to the default, because an unbounded wait is the orphan the
 feature exists to remove.
 
@@ -1067,9 +1075,28 @@ correct when the broker does not.
 Gracefully tears a live instance down: the broker sends a `shutdown` frame, the
 instance's `nexus.io.broker` plugin emits `io.session.end`, and the engine
 performs a clean `Stop` that flushes and **persists the session before exit**.
-The broker waits up to `release_grace` and force-kills the process if that
-window elapses (orphan prevention). The session directory under
-`~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
+The session directory under `~/.nexus/sessions/<id>/` is left intact and remains
+resumable via `-recall`.
+
+The frame is only the first step, because it travels over the dial-back socket
+and teardown has to be correct when that socket is gone. If the process has not
+exited within `release_grace`, the broker escalates:
+
+| Step | What | Why |
+|---|---|---|
+| 1 | `shutdown` frame over the instance WS | The instance shuts its own engine down and reports back. Requires a live socket. |
+| 2 | `SIGTERM` to the instance's **process group**, at the `release_grace` boundary | The engine treats `SIGTERM` as a clean shutdown, so this still flushes and persists. It needs nothing from the instance — a wedged instance, or one mid reconnect-backoff, never saw step 1. |
+| 3 | `SIGKILL` to the same group, a fixed **2s** later | Orphan prevention. Not configurable: `release_grace` is the shutdown budget and has already elapsed. |
+
+Both signals target the **process group**, not just the instance process. Every
+instance is made the leader of its own process group at spawn, so everything it
+started — shell-tool commands, MCP stdio servers, code interpreters — is torn
+down with it rather than surviving, re-parented to init, holding the session's
+files and the operator's API budget with nothing tracking it.
+
+The same escalation is what reaps an **adopted** instance after a restart (it has
+no socket by construction, so it starts at step 2), which is why the two paths
+share one `SIGTERM`→`SIGKILL` window.
 
 ```bash
 curl -s -X POST http://localhost:8080/release/lease-abc123

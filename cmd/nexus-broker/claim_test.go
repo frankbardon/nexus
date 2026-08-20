@@ -27,24 +27,72 @@ import (
 // fakeProcess is a controllable processHandle that never boots a real engine.
 type fakeProcess struct {
 	pidVal   int
+	termOnce sync.Once
 	killOnce sync.Once
+	exitOnce sync.Once
+	termed   chan struct{} // closed by terminate()
 	killed   chan struct{} // closed by kill()
 	exited   chan struct{} // close to make an unkilled process exit on its own
+
+	// exitOnTerm makes the fake exit when it is SIGTERMed, which is what a real
+	// engine does: it installs a SIGTERM handler and shuts down cleanly. It is ON
+	// by default so a fake instance behaves like a real one; a test that wants the
+	// SIGKILL backstop turns it off to model an instance that ignores SIGTERM.
+	exitOnTerm bool
+
+	mu    sync.Mutex
+	calls []string // "terminate"/"kill", in the order they arrived
 }
 
 func newFakeProcess(pid int) *fakeProcess {
 	return &fakeProcess{
-		pidVal: pid,
-		killed: make(chan struct{}),
-		exited: make(chan struct{}),
+		pidVal:     pid,
+		exitOnTerm: true,
+		termed:     make(chan struct{}),
+		killed:     make(chan struct{}),
+		exited:     make(chan struct{}),
 	}
+}
+
+// exit makes the fake process exit on its own, as an engine that obeyed the
+// shutdown frame does. It is idempotent because a fake may ALSO exit in response
+// to SIGTERM, and a test that closed the channel by hand must not race a
+// teardown into a double close.
+func (p *fakeProcess) exit() {
+	p.exitOnce.Do(func() { close(p.exited) })
 }
 
 func (p *fakeProcess) pid() int { return p.pidVal }
 
+func (p *fakeProcess) terminate() error {
+	p.record("terminate")
+	p.termOnce.Do(func() { close(p.termed) })
+	if p.exitOnTerm {
+		p.exit()
+	}
+	return nil
+}
+
 func (p *fakeProcess) kill() error {
+	p.record("kill")
 	p.killOnce.Do(func() { close(p.killed) })
 	return nil
+}
+
+// record appends a signal name to the observed order. Teardown escalation is an
+// ORDERING property — SIGTERM has to arrive before SIGKILL or the engine never
+// gets its chance to flush — and "both channels are closed" cannot express that.
+func (p *fakeProcess) record(call string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, call)
+}
+
+// signalOrder returns the signals this fake received, in order.
+func (p *fakeProcess) signalOrder() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
 }
 
 func (p *fakeProcess) wait() error {
@@ -391,7 +439,7 @@ func TestClaim_InstanceExitsBeforeReady(t *testing.T) {
 	go func() { respCh <- postClaim(t, ts.URL, `{"config":"engine: {}\n"}`) }()
 
 	spec := <-runner.started
-	close(proc.exited) // process dies before ready
+	proc.exit() // process dies before ready
 
 	resp := <-respCh
 	defer resp.Body.Close()
@@ -1787,14 +1835,16 @@ func TestLogBinaryRegistry_NamesTheSpawnEnvironment(t *testing.T) {
 	}
 }
 
-// TestBuildCommand_NoRunAsLeavesTheSpawnUnchanged is the compatibility half of
-// run_as: a broker that does not configure it must build the same *exec.Cmd it
-// built before the key existed.
+// TestBuildCommand_NoRunAsLeavesTheCredentialUnset is the compatibility half of
+// run_as: a broker that does not configure it must not change the credential its
+// spawns run under.
 //
-// SysProcAttr is asserted to be nil rather than "has no Credential" on purpose.
-// A non-nil SysProcAttr changes which path os/exec takes for every spawn, so
-// leaving one behind would be a behaviour change even with every field zero.
-func TestBuildCommand_NoRunAsLeavesTheSpawnUnchanged(t *testing.T) {
+// It used to assert SysProcAttr was nil outright. That stopped being the right
+// statement when every spawn started leading its own process group (E4-S2):
+// SysProcAttr is now always set, and the property that actually belongs to run_as
+// is that no Credential is attached. Process-group setup is asserted separately,
+// in TestBuildCommand_PutsTheInstanceInItsOwnProcessGroup.
+func TestBuildCommand_NoRunAsLeavesTheCredentialUnset(t *testing.T) {
 	cmd := buildCommand(spawnSpec{
 		binaryPath: "/opt/nexus/bin/nexus",
 		configPath: "/tmp/claim-123.yaml",
@@ -1802,8 +1852,11 @@ func TestBuildCommand_NoRunAsLeavesTheSpawnUnchanged(t *testing.T) {
 		brokerAddr: "ws://127.0.0.1:8080/instance",
 	})
 
-	if cmd.SysProcAttr != nil {
-		t.Fatalf("SysProcAttr = %+v, want nil when no run_as is configured", cmd.SysProcAttr)
+	if cmd.SysProcAttr == nil {
+		t.Fatal("SysProcAttr is nil; every spawn leads its own process group")
+	}
+	if cmd.SysProcAttr.Credential != nil {
+		t.Fatalf("Credential = %+v, want none when no run_as is configured", cmd.SysProcAttr.Credential)
 	}
 }
 

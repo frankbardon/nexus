@@ -141,7 +141,7 @@ func TestIdleSweeper_ReleasesIdleLease(t *testing.T) {
 	proc := newFakeProcess(403)
 	id, l, client := seedLiveLease(t, reg, proc)
 	// The instance exits cleanly on the shutdown frame (graceful release path).
-	close(proc.exited)
+	proc.exit()
 
 	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, 0, time.Second)
 	clk.advance(2 * time.Minute)
@@ -182,7 +182,7 @@ func TestIdleSweeper_ReleasesOwnedLeaseWithNoPrincipal(t *testing.T) {
 
 	proc := newFakeProcess(406)
 	id, l, client := seedLiveLeaseOwned(t, reg, proc, testOwner())
-	close(proc.exited)
+	proc.exit()
 
 	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, 0, time.Second)
 	clk.advance(2 * time.Minute)

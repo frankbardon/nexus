@@ -166,7 +166,7 @@ func TestLeaseStore_ReleaseRecordedOnEveryTeardownPath(t *testing.T) {
 			teardown: func(t *testing.T, reg *Registry, id string) {
 				p := newFakeProcess(99)
 				reg.SetProcess(id, p)
-				close(p.exited)
+				p.exit()
 				// watchExit is the crash path and it calls Remove directly.
 				reg.watchExit(id)
 			},

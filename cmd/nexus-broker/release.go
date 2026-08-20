@@ -23,11 +23,20 @@ var errUnknownLease = errors.New("unknown lease")
 //  1. Sends a shutdown frame to the instance so it shuts its engine down
 //     cleanly, flushing and persisting the session (the session directory under
 //     ~/.nexus/sessions/<id>/ is left intact and resumable).
-//  2. Waits a BOUNDED grace period for the process to exit on its own; if the
-//     grace elapses it force-kills the process so nothing is orphaned. Either
-//     way the process is reaped by the registry's single reaper goroutine.
+//  2. Waits a BOUNDED grace period for the process to exit on its own, then
+//     ESCALATES: SIGTERM to the instance's process group, and SIGKILL to the same
+//     group after a second, shorter window. Either way the process is reaped by
+//     the registry's single reaper goroutine.
 //  3. Removes the lease from the registry, freeing its slot and closing both
 //     connections.
+//
+// The SIGTERM step exists because step 1 is delivered over the dial-back socket
+// and step 3's accounting has to be correct even when that socket is not there.
+// An instance that is wedged, or mid reconnect-backoff, receives no shutdown
+// frame at all: without the signal the grace period is spent waiting for
+// something that was never asked, and the engine's first notice of teardown is
+// SIGKILL — no flush, no session persisted. SIGTERM is what the engine handles
+// as a clean shutdown, and it needs nothing from the instance to arrive.
 //
 // It returns errUnknownLease for an unknown lease and is safe to call
 // concurrently: only the first caller performs the teardown; a second
@@ -72,20 +81,31 @@ func (r *Registry) releaseLease(id, reason string, grace time.Duration) error {
 		}
 	}
 
-	// 2. Wait out a bounded grace period for the process to exit, force-killing
-	//    it if it overruns. The reaper closes exited after wait() returns, so we
-	//    always reap — graceful exit or forced kill alike.
+	// 2. Wait out a bounded grace period for the process to exit, then escalate
+	//    SIGTERM → SIGKILL, both to the instance's whole process group so its
+	//    subprocesses go with it. The reaper closes exited after wait() returns,
+	//    so we always reap — graceful exit, signalled exit or forced kill alike.
 	if process != nil {
 		select {
 		case <-exited:
 			r.logger.Info("instance exited gracefully", "lease_id", id, "reason", reason)
 		case <-time.After(grace):
-			r.logger.Warn("instance did not exit within grace; force-killing",
+			r.logger.Warn("instance did not exit within grace; sending SIGTERM to its process group",
 				"lease_id", id, "grace", grace, "reason", reason)
-			if err := process.kill(); err != nil {
-				r.logger.Warn("force-kill failed", "lease_id", id, "error", err)
+			if err := process.terminate(); err != nil {
+				r.logger.Warn("terminating the instance failed", "lease_id", id, "error", err)
 			}
-			<-exited // reap the killed process so nothing leaks
+			select {
+			case <-exited:
+				r.logger.Info("instance exited after SIGTERM", "lease_id", id, "reason", reason)
+			case <-time.After(r.termGrace):
+				r.logger.Warn("instance did not exit after SIGTERM; force-killing its process group",
+					"lease_id", id, "term_grace", r.termGrace, "reason", reason)
+				if err := process.kill(); err != nil {
+					r.logger.Warn("force-kill failed", "lease_id", id, "error", err)
+				}
+				<-exited // reap the killed process so nothing leaks
+			}
 		}
 	}
 
@@ -96,9 +116,26 @@ func (r *Registry) releaseLease(id, reason string, grace time.Duration) error {
 }
 
 // defaultReleaseGrace bounds how long releaseLease waits for an instance to
-// exit gracefully before force-killing it. It is used when the broker config
-// does not specify release_grace.
+// exit gracefully — on its own, after the shutdown frame — before it escalates
+// to signals. It is used when the broker config does not specify release_grace.
 const defaultReleaseGrace = 10 * time.Second
+
+// termGrace bounds the SECOND teardown window: how long a process is given after
+// SIGTERM before SIGKILL, on both the spawned path (releaseLease) and the adopted
+// one (adoptedProcess.kill).
+//
+// It is ONE constant for both deliberately. The two paths were written apart —
+// the adopted one had a SIGTERM escalation from the start, the spawned one went
+// straight to SIGKILL — and the cost of that divergence was that a spawned
+// instance whose socket had gone got no graceful signal at all. Sharing the value
+// is the cheap half of keeping them from drifting again.
+//
+// It is not configurable, and is short on purpose. It is not the operator's
+// shutdown budget — `release_grace` is, and it has already elapsed by the time
+// this window opens. This is only the interval between "we have now actually
+// asked the OS" and "we stop asking", and an engine that has not exited two
+// seconds after SIGTERM is not going to.
+const termGrace = 2 * time.Second
 
 // ReleaseServer handles POST /release/{lease_id}: it tears the lease down
 // through the shared releaseLease path and reports the outcome.
