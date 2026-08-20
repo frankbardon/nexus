@@ -382,7 +382,7 @@ func TestTicketInvalidation_EveryTeardownPath(t *testing.T) {
 				// reason (or fail for one).
 				env.clk.advance(10 * time.Second)
 				env.reg.markActivity(env.bystander)
-				sweeper := newIdleSweeper(testLogger(), env.reg, 5*time.Second, 2*time.Second)
+				sweeper := newIdleSweeper(testLogger(), env.reg, 5*time.Second, 0, 2*time.Second)
 				sweeper.sweep()
 				// The sweeper releases in a goroutine per lease.
 				waitFor(t, func() bool { return !env.reg.Has(env.id) })

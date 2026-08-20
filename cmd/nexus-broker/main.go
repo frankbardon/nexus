@@ -71,6 +71,10 @@ func run() error {
 		"state_dir", cfg.StateDir,
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
+		// Logged beside idle_timeout because the pair is what an operator has to
+		// reason about together: idle_timeout bounds the human pause, this bounds
+		// the turn that is exempt from it.
+		"max_turn_duration", cfg.MaxTurnDuration,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
 		// Logged because it decides how long a restored lease holds a capacity slot
@@ -283,10 +287,12 @@ func run() error {
 	}
 	agents.logStartupState(cfg)
 
-	// The idle sweeper releases leases with no real client input for
-	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
-	// disables it. It runs until sweepCtx is cancelled on shutdown.
-	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	// The idle sweeper releases leases nothing is waiting on: no turn in flight
+	// and no client activity for idle_timeout (reasonIdle), plus the backstop for
+	// a turn that has been in flight longer than max_turn_duration
+	// (reasonTurnTimeout). Both reuse the shared release teardown. idle_timeout
+	// <= 0 disables it. It runs until sweepCtx is cancelled on shutdown.
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)

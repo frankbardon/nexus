@@ -218,6 +218,24 @@ type lease struct {
 	// stamped via markActivity from the gateway's client read pump.
 	lastActivity time.Time
 
+	// turnStartedAt is when the instance last reported that it STARTED working
+	// — the first io.status frame naming a work state after a settled period —
+	// and the zero value means no turn is in flight. It is what makes "idle"
+	// mean "nobody is waiting on this" rather than "nobody has typed lately":
+	// a lease with a live turn is skipped by the idle sweeper however long ago
+	// its last client input was, so a ten-minute autonomous turn is no longer
+	// indistinguishable from an abandoned session.
+	//
+	// It is stamped ONCE per turn rather than refreshed on every work state, so
+	// it measures the whole turn. That is deliberate and is what max_turn_duration
+	// needs: a wedged instance that keeps emitting "thinking" forever would reset
+	// a refreshed stamp on every frame and hold its lease indefinitely, which is
+	// the exact failure the bound exists to catch.
+	//
+	// Guarded by Registry.mu; stamped via markTurnLive / markTurnSettled from the
+	// gateway's INSTANCE read pump.
+	turnStartedAt time.Time
+
 	// ready is closed exactly once (via MarkReady) when the spawned instance
 	// signals it has booted and can accept IO. POST /claim blocks on this
 	// channel before responding so callers never connect before the engine
@@ -822,9 +840,67 @@ func (r *Registry) markActivity(id string) {
 	}
 }
 
+// markTurnLive records that this lease's instance has STARTED working, if it was
+// not already known to be working. The gateway calls it from the instance read
+// pump for every io.status frame naming a work state (see turnStateIsWork).
+//
+// It is idempotent within a turn: the stamp is taken on the FIRST work state
+// after a settled period and left alone thereafter, so turnStartedAt measures
+// the turn rather than the gap since its most recent status frame. It is a no-op
+// for an unknown lease.
+func (r *Registry) markTurnLive(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok || !l.turnStartedAt.IsZero() {
+		return
+	}
+	l.turnStartedAt = r.now()
+}
+
+// markTurnSettled records that this lease's instance has finished working — the
+// instance reported the idle state, the only end-of-turn signal the IO envelope
+// carries (see ioStateIdle).
+//
+// It ALSO stamps last-activity, and that is the load-bearing half. Without it a
+// turn that ran longer than idle_timeout would be reapable the instant it
+// finished: the client's input is by then older than the window, so the answer
+// the user is about to read would be torn down before they could reply to it.
+// Stamping here makes idle_timeout measure the human pause AFTER the turn, which
+// is the thing it was always meant to measure.
+//
+// It is a no-op for an unknown lease, and harmless for a lease with no turn in
+// flight (a second idle status, or an instance that reports idle at boot).
+func (r *Registry) markTurnSettled(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return
+	}
+	l.turnStartedAt = time.Time{}
+	l.lastActivity = r.now()
+}
+
+// turnLive reports whether the lease currently has a turn in flight. It exists
+// for tests and logging; the sweeper uses idleLeases/overrunTurnLeases, which
+// make the same judgement under one lock acquisition.
+func (r *Registry) turnLive(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	return ok && !l.turnStartedAt.IsZero()
+}
+
 // idleLeases returns the ids of every live lease whose last client activity is
-// strictly before cutoff and which is not already being torn down. The idle
-// sweeper computes cutoff as now-idle_timeout and releases the returned ids.
+// strictly before cutoff, which is not already being torn down, and which has NO
+// turn in flight. The idle sweeper computes cutoff as now-idle_timeout and
+// releases the returned ids.
+//
+// The live-turn skip is unbounded on purpose: idleness is "nobody is waiting on
+// this", and an instance that is thinking or running a tool is being waited on
+// however long ago the client last typed. What stops that skip from being
+// forever is max_turn_duration, enforced separately by overrunTurnLeases.
 func (r *Registry) idleLeases(cutoff time.Time) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -833,7 +909,34 @@ func (r *Registry) idleLeases(cutoff time.Time) []string {
 		if l.releasing {
 			continue
 		}
+		if !l.turnStartedAt.IsZero() {
+			continue
+		}
 		if l.lastActivity.Before(cutoff) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// overrunTurnLeases returns the ids of every live lease whose in-flight turn
+// started strictly before cutoff and which is not already being torn down. The
+// idle sweeper computes cutoff as now-max_turn_duration and releases the
+// returned ids with reasonTurnTimeout.
+//
+// It is the bound on the live-turn skip above: a turn that never reports idle —
+// a wedged engine, a tool that never returns, a crashed agent loop that left its
+// status at "thinking" — would otherwise hold its lease, and its capacity slot,
+// for the lifetime of the broker.
+func (r *Registry) overrunTurnLeases(cutoff time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for id, l := range r.leases {
+		if l.releasing || l.turnStartedAt.IsZero() {
+			continue
+		}
+		if l.turnStartedAt.Before(cutoff) {
 			ids = append(ids, id)
 		}
 	}

@@ -61,7 +61,8 @@ binaries:                     # named nexus variants this broker may spawn (see 
     path: "nexus"
 # nexus_binary_path: "nexus"  # DEPRECATED alias for binaries.nexus.path; still honoured
 max_concurrent: 8             # max live instances; <=0 = unlimited
-idle_timeout: 5m              # release a lease after this much inactivity; <=0 disables
+idle_timeout: 5m              # release a QUIET lease after this much inactivity; <=0 disables
+max_turn_duration: 30m        # bound on an in-flight turn, which is otherwise exempt from idle_timeout
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting
 release_grace: 10s            # graceful-shutdown grace before force-kill
 state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
@@ -1535,8 +1536,10 @@ Two things follow that are easy to get wrong:
   is a human at the far end. A session sitting untouched overnight with no user
   input answers every one of them and survives indefinitely. Releasing genuinely
   idle leases is a separate policy, owned by
-  [`idle_timeout`](#idle-reaping) — which is stamped only by real client →
-  instance input, never by a ping.
+  [`idle_timeout`](#idle-reaping) — which is driven by real client → instance
+  input and by the instance's own turn boundaries, never by a ping. A ping
+  detects a **dead socket**; turn liveness detects a **live turn**; reading
+  either as the other reaps healthy sessions.
 - **It is not part of the frame protocol.** Ping and pong are RFC 6455 control
   frames, not `brokerframe` signals, so there is no new signal, no version bump,
   and nothing a client has to implement: any conformant WebSocket client already
@@ -1930,16 +1933,64 @@ handed to the oldest waiter. Set `queue_wait_timeout` to `0` to disable waiting
 
 ## Idle reaping
 
-If an instance receives no real client input for `idle_timeout`, the broker
-releases it through the same teardown path as `POST /release` (so the session is
-persisted). Only inbound `io` input frames (client → instance) reset the idle
-timer — output, pings, and control frames do not. Set `idle_timeout` to `0` to
-disable idle reaping.
+If a lease sits for `idle_timeout` with **no turn in flight** and no client
+activity, the broker releases it through the same teardown path as
+`POST /release` (so the session is persisted), recording the terminal reason
+`idle`. Set `idle_timeout` to `0` to disable reaping.
 
-This is the **only** policy that releases a lease for inactivity. The liveness
-probe described under [Detecting a dead socket](#detecting-a-dead-socket) does
-not: it detaches sockets that have stopped answering at the transport level and
-never touches a peer that is merely quiet.
+Two things reset the idle timer: an inbound `io` input frame (client →
+instance), and the moment the instance reports its **turn finished**. Output
+produced mid-turn, pings and control frames do not.
+
+### A turn in flight is never reaped
+
+`idle_timeout` measures the **human pause**, not the turn. A lease whose
+instance is working is exempt from it however long ago its client last typed, so
+a ten-minute autonomous turn is no longer indistinguishable from an abandoned
+session.
+
+The broker learns this from the instance's own `io.status` frames, which it
+already relays to the client and now also reads on the way past:
+
+| `io.status` state | Meaning for the lease |
+|---|---|
+| `thinking`, `tool_running`, `streaming`, `waiting`, `cancelling` | a turn is **live** — exempt from `idle_timeout` |
+| `idle` | the turn has **settled** — the idle clock restarts from here |
+| anything else | **ignored** — liveness is left exactly as it was |
+
+Unknown states (and any payload the broker cannot decode) are ignored rather
+than treated as either signal, so an instance newer than the broker in front of
+it keeps working and its frames still reach the client untouched.
+
+Settling a turn restarts the idle clock rather than leaving it where the user's
+input left it. Without that, a turn that ran longer than `idle_timeout` would be
+reapable the instant it finished — the answer torn down before the user could
+read it.
+
+### `max_turn_duration` bounds the exemption
+
+The exemption above is unbounded on its own: an instance that wedges mid-turn,
+or whose tool never returns, never reports `idle` and would hold its lease — and
+its `max_concurrent` slot — forever. `max_turn_duration` (default `30m`) is the
+backstop. A turn that outlives it is torn down through the ordinary release
+path, with the terminal reason **`turn timeout`** rather than `idle`, so an
+operator reading the journal can tell "nobody was here" from "killed mid-work".
+
+The clock starts at the first work state after a settled period and is not
+refreshed by later status frames, so it measures the whole turn. Set it to `0`
+to disable the bound. It is enforced by the same sweeper as `idle_timeout`, so
+`idle_timeout: 0` switches both off.
+
+Size `max_turn_duration` above the longest turn this deployment legitimately
+runs: a lease reaped as `turn timeout` had work in progress. Note that a turn
+parked on a human — a plan awaiting approval, an `ask_user` question — counts as
+live, so it is bounded by this key rather than by `idle_timeout`.
+
+Between them these are the **only** policies that release a lease for
+inactivity. The liveness probe described under
+[Detecting a dead socket](#detecting-a-dead-socket) does not: it detaches
+sockets that have stopped answering at the transport level and never touches a
+peer that is merely quiet, and conflating the two would reap healthy sessions.
 
 **This applies to [A2A](#the-a2a-front-door-agents) instances too**, and it is
 what makes them affordable: every message the A2A ingress sends counts as client

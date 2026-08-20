@@ -2394,7 +2394,7 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 
 	// Arm the idle sweeper exactly as main.go does when an idle timeout is set.
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
-	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
 	go sweeper.Run(sweepCtx)
 	// And the reattach reaper, which bounds how long the leases recovery just
 	// restored may wait for their instances.

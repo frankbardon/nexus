@@ -36,6 +36,7 @@ listen_addr: "127.0.0.1:9000"
 nexus_binary_path: "/opt/nexus/bin/nexus"
 max_concurrent: 32
 idle_timeout: 2m
+max_turn_duration: 45m
 queue_wait_timeout: 10s
 release_grace: 20s
 reattach_window: 90s
@@ -56,6 +57,9 @@ reattach_window: 90s
 	if cfg.IdleTimeout != 2*time.Minute {
 		t.Errorf("IdleTimeout = %v", cfg.IdleTimeout)
 	}
+	if cfg.MaxTurnDuration != 45*time.Minute {
+		t.Errorf("MaxTurnDuration = %v", cfg.MaxTurnDuration)
+	}
 	if cfg.QueueWaitTimeout != 10*time.Second {
 		t.Errorf("QueueWaitTimeout = %v", cfg.QueueWaitTimeout)
 	}
@@ -64,6 +68,31 @@ reattach_window: 90s
 	}
 	if cfg.ReattachWindow != 90*time.Second {
 		t.Errorf("ReattachWindow = %v", cfg.ReattachWindow)
+	}
+}
+
+// TestLoadConfigMaxTurnDuration pins the turn bound's two edges: absent it takes
+// the default, and a non-positive value is honoured as "disabled" rather than
+// coerced back to the default. The two keys differ deliberately —
+// reattach_window is not disableable because "wait forever" is the orphan it
+// exists to remove, whereas an operator running turns longer than any sane bound
+// has a legitimate reason to switch this one off.
+func TestLoadConfigMaxTurnDuration(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(``))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.MaxTurnDuration != defaultMaxTurnDuration {
+		t.Errorf("MaxTurnDuration = %v, want %v", cfg.MaxTurnDuration, defaultMaxTurnDuration)
+	}
+
+	cfg, err = LoadConfigFromBytes([]byte("max_turn_duration: 0s\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.MaxTurnDuration != 0 {
+		t.Errorf("MaxTurnDuration = %v for an explicit 0s, want 0 (the bound is disableable)",
+			cfg.MaxTurnDuration)
 	}
 }
 

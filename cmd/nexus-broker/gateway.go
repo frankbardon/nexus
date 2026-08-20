@@ -54,7 +54,10 @@ const (
 	// WebSocket stack itself, so a session sitting untouched for an hour with
 	// no user input answers every one of them and survives indefinitely.
 	// Releasing genuinely idle leases is a separate policy owned by
-	// `idle_timeout`, which is stamped only by real client → instance IO.
+	// `idle_timeout`, driven by real client → instance IO and by the instance's
+	// own turn boundaries (see observeTurnState). The two must not be conflated:
+	// a ping detects a DEAD SOCKET, turn liveness detects a LIVE TURN, and
+	// reading either as the other reaps healthy sessions.
 	defaultPingInterval = 15 * time.Second
 
 	// defaultPeerReadDeadline is documented with defaultPingInterval above:
@@ -306,7 +309,7 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 		case brokerframe.SignalSessionIDReport:
 			g.registry.MarkSessionID(leaseID, f.SessionID)
 		case brokerframe.SignalIO:
-			g.deliverIO(leaseID, f)
+			g.observeInstanceIO(leaseID, f)
 		}
 	})
 
@@ -315,37 +318,74 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	g.logger.Info("instance disconnected", "lease_id", leaseID)
 }
 
-// deliverIO hands one instance IO payload to the lease's in-process observer,
-// if it has one.
+// observeInstanceIO reads one instance IO payload for the two things the broker
+// itself needs from it — turn liveness, and the in-process observer an A2A
+// caller is served by — and does nothing else with it.
 //
-// It runs INSIDE the instance read pump's observe callback, before the frame is
-// forwarded to the client conn, and it is additive: an A2A-observed lease with a
-// client attached still relays every frame to that client untouched. The A2A
-// ingress needs this hook because it has no socket to be relayed to — its caller
-// is an HTTP request, not a WebSocket peer.
+// It runs INSIDE the instance read pump's observe callback, BEFORE the frame is
+// forwarded to the client conn, and it is purely additive: whatever it makes of
+// the payload, readPump still relays the frame to the client untouched. Nothing
+// here can drop, delay or rewrite a forwarded frame.
 //
-// The decode happens only when a sink exists, so a lease with no observer pays
-// one map lookup per frame and nothing else. An undecodable payload is logged
-// and dropped rather than failing anything: a broker must keep relaying frames
-// it cannot itself interpret, which is what it did before it interpreted any.
-func (g *Gateway) deliverIO(leaseID string, f brokerframe.Frame) {
+// THE LAYERING. The gateway used to treat this payload as opaque, decoding it
+// only when a lease had an A2A sink attached. It no longer can: idle reaping has
+// to know whether a turn is in flight, and the only signal the IO envelope
+// carries for that is the io.status state (see turnWorkStates). So every
+// instance-originated IO frame is now decoded — one json.Unmarshal of a payload
+// the enclosing envelope was already being decoded from, on frames that are
+// already crossing a WebSocket. The alternative, a substring pre-filter on the
+// raw bytes to skip the decode for stream deltas, would make correctness depend
+// on how the far side happens to encode its JSON; this does not.
+//
+// An UNDECODABLE payload is ignored, exactly as the A2A ingress ignores one: it
+// is logged, no turn state changes, no sink is called, and the frame still
+// reaches the client. A broker must keep relaying frames it cannot itself
+// interpret, which is what it did before it interpreted any.
+func (g *Gateway) observeInstanceIO(leaseID string, f brokerframe.Frame) {
 	if f.LeaseID != "" && f.LeaseID != leaseID {
 		// The same refusal the forwarding path below makes, applied before the
 		// payload reaches an in-process observer. A frame naming another lease is
 		// dropped there; an observer must not be the one place it gets through.
 		return
 	}
-	sink := g.registry.ioSink(leaseID)
-	if sink == nil {
-		return
-	}
 	msg, err := decodeIOPayload(f.Payload)
 	if err != nil {
-		g.logger.Warn("dropping an instance io payload the broker could not decode",
+		g.logger.Warn("ignoring an instance io payload the broker could not decode; "+
+			"the frame is still forwarded to the client, but it cannot count towards "+
+			"turn liveness",
 			"lease_id", leaseID, "error", err)
 		return
 	}
-	sink(msg)
+
+	g.observeTurnState(leaseID, msg)
+
+	if sink := g.registry.ioSink(leaseID); sink != nil {
+		sink(msg)
+	}
+}
+
+// observeTurnState folds one decoded instance payload onto the lease's turn
+// liveness, which is what keeps the idle sweeper from reaping a session that is
+// mid-turn.
+//
+// Only io.status frames say anything about it: output, stream deltas, approval
+// and HITL frames are all things that happen DURING a turn whose status already
+// announced itself, and treating them as turn starts would make liveness depend
+// on how chatty a particular agent loop is. Everything else is a no-op.
+//
+// A status naming a work state starts a turn (idempotently — see markTurnLive);
+// ioStateIdle settles it; any other state is left alone, so an instance newer
+// than this broker cannot have a state it invented read as "abandoned".
+func (g *Gateway) observeTurnState(leaseID string, msg brokerIOMessage) {
+	if msg.Type != ioTypeStatus {
+		return
+	}
+	switch {
+	case msg.State == ioStateIdle:
+		g.registry.markTurnSettled(leaseID)
+	case turnStateIsWork(msg.State):
+		g.registry.markTurnLive(leaseID)
+	}
 }
 
 // instanceRefusedReason is the WebSocket close reason every refused dial-back

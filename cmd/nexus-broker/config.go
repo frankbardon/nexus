@@ -29,7 +29,8 @@ import (
 // nexus_binary_path), advertise_addr (client-reachable address),
 // max_concurrent (capacity cap),
 // client_replay_buffer_bytes (per-lease client-bound replay retention),
-// idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
+// idle_timeout (idle reaping), max_turn_duration (in-flight turn bound),
+// release_grace (graceful-shutdown grace),
 // queue_wait_timeout (FIFO capacity wait), auth (client authentication), and
 // agents (the named A2A profiles this broker publishes).
 type Config struct {
@@ -194,9 +195,30 @@ type Config struct {
 	// Worst-case broker-wide retention is this value times MaxConcurrent.
 	ClientReplayBufferBytes int `yaml:"-"`
 
-	// IdleTimeout is how long an idle instance survives before teardown.
-	// Placeholder for the lifecycle story.
+	// IdleTimeout is how long a lease with NO turn in flight survives with no
+	// client activity before the idle sweeper tears it down. A non-positive value
+	// disables reaping entirely.
+	//
+	// It measures the HUMAN PAUSE, not the turn: a lease whose instance has
+	// reported that it is working is exempt until its turn settles (see
+	// MaxTurnDuration), so this can be set to the longest pause a session should
+	// survive rather than to the longest turn an agent might take.
 	IdleTimeout time.Duration `yaml:"idle_timeout"`
+
+	// MaxTurnDuration bounds how long a single in-flight turn may exempt its
+	// lease from IdleTimeout before the sweeper tears the lease down anyway, with
+	// reasonTurnTimeout rather than reasonIdle.
+	//
+	// It exists because the idle exemption is otherwise unbounded: an instance
+	// that wedges mid-turn, or whose tool never returns, never reports the idle
+	// state that settles the turn, and would hold its lease and its capacity slot
+	// for the lifetime of the broker.
+	//
+	// A non-positive value DISABLES the bound, restoring that unbounded
+	// exemption; the default is defaultMaxTurnDuration. It is enforced by the
+	// idle sweeper, so it is inert when IdleTimeout <= 0 has switched reaping off
+	// altogether.
+	MaxTurnDuration time.Duration `yaml:"max_turn_duration"`
 
 	// QueueWaitTimeout is how long an over-capacity claim parks in the FIFO
 	// capacity wait queue before returning a timeout error. A non-positive value
@@ -978,6 +1000,7 @@ func DefaultConfig() Config {
 		MaxConcurrent:           8,
 		ClientReplayBufferBytes: defaultClientReplayBufferBytes,
 		IdleTimeout:             5 * time.Minute,
+		MaxTurnDuration:         defaultMaxTurnDuration,
 		QueueWaitTimeout:        30 * time.Second,
 		ReleaseGrace:            defaultReleaseGrace,
 		ReattachWindow:          defaultReattachWindow,

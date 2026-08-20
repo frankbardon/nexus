@@ -110,6 +110,40 @@ const (
 // rather than at a stream end — see a2aTask.onStatus.
 const ioStateIdle = "idle"
 
+// turnWorkStates are the io.status states that mean the instance is WORKING:
+// something is in flight and a client is waiting on it. They are the vocabulary
+// the shipped agent loops emit (plugins/agents/react, planexec, orchestrator,
+// plugins/planners/dynamic, plugins/control/cancel) alongside ioStateIdle.
+//
+// The idle sweeper reads them through turnStateIsWork: a lease whose turn is
+// live is never reaped for inactivity, however long ago its client last typed.
+//
+// "waiting" is in the set even though it means "blocked on a human" (a plan
+// awaiting approval), because a turn is still in flight and the engine is still
+// holding its state. Reaping there would discard partially executed work at the
+// exact moment a human is about to act on it. What bounds the case where the
+// human never comes back is max_turn_duration, not idle_timeout.
+//
+// A state NOT listed here and not ioStateIdle is IGNORED — it neither starts a
+// turn nor settles one, leaving whatever the lease already believed intact. That
+// is the same leniency decodeIOPayload applies to unknown fields and unknown
+// types: an instance is free to be newer than the broker in front of it, and a
+// state this broker has never heard of must not silently reclassify a live turn
+// as an abandoned session (or the reverse).
+var turnWorkStates = map[string]struct{}{
+	"thinking":     {},
+	"tool_running": {},
+	"streaming":    {},
+	"waiting":      {},
+	"cancelling":   {},
+}
+
+// turnStateIsWork reports whether an io.status state means a turn is in flight.
+func turnStateIsWork(state string) bool {
+	_, ok := turnWorkStates[state]
+	return ok
+}
+
 // ioCancelSource labels a cancellation this broker originates, alongside the
 // "tui" / "browser" / "a2a" sources the other transports use.
 const ioCancelSource = "broker.a2a"

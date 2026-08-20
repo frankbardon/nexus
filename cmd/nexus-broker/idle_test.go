@@ -143,7 +143,7 @@ func TestIdleSweeper_ReleasesIdleLease(t *testing.T) {
 	// The instance exits cleanly on the shutdown frame (graceful release path).
 	close(proc.exited)
 
-	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, time.Second)
+	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, 0, time.Second)
 	clk.advance(2 * time.Minute)
 	sweeper.sweep()
 
@@ -184,7 +184,7 @@ func TestIdleSweeper_ReleasesOwnedLeaseWithNoPrincipal(t *testing.T) {
 	id, l, client := seedLiveLeaseOwned(t, reg, proc, testOwner())
 	close(proc.exited)
 
-	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, time.Second)
+	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, 0, time.Second)
 	clk.advance(2 * time.Minute)
 	sweeper.sweep()
 
@@ -214,7 +214,7 @@ func TestIdleSweeper_ActivityKeepsLeaseAlive(t *testing.T) {
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(404))
 
-	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, time.Second)
+	sweeper := newIdleSweeper(testLogger(), reg, time.Minute, 0, time.Second)
 
 	clk.advance(40 * time.Second)
 	reg.markActivity(id) // real client input resets the timer
@@ -235,7 +235,7 @@ func TestIdleSweeper_DisabledByNonPositiveTimeout(t *testing.T) {
 
 	id, _, _ := seedLiveLease(t, reg, newFakeProcess(405))
 
-	sweeper := newIdleSweeper(testLogger(), reg, 0, time.Second)
+	sweeper := newIdleSweeper(testLogger(), reg, 0, 0, time.Second)
 	if sweeper.interval != 0 {
 		t.Fatalf("disabled sweeper interval = %v, want 0", sweeper.interval)
 	}
