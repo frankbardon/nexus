@@ -64,6 +64,9 @@ max_concurrent: 8             # max live instances; <=0 = unlimited
 idle_timeout: 5m              # release a QUIET lease after this much inactivity; <=0 disables
 max_turn_duration: 30m        # bound on an in-flight turn, which is otherwise exempt from idle_timeout
 queue_wait_timeout: 30s       # how long an over-cap claim waits in the FIFO queue; <=0 = no waiting
+max_queue_depth: 64           # how many claims may be PARKED in that queue at once; <=0 = unlimited
+max_leases_per_principal: 0   # live leases one authenticated principal may hold; 0 = off
+max_queued_per_principal: 0   # queued claims one authenticated principal may hold; 0 = off
 release_grace: 10s            # graceful-shutdown grace before SIGTERM, then SIGKILL
 state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
 broker_id: ""                 # stamped on every lease record; generated + persisted when empty
@@ -955,6 +958,9 @@ Error responses:
 | Resume whose recorded binary is no longer in `binaries:` | `409` | `{"error":"session \"…\" was created by binary \"…\", which this broker no longer offers; …"}` |
 | Over capacity, queue wait elapsed | `503` | `{"error":"capacity wait timed out"}` |
 | At capacity, queueing disabled (`queue_wait_timeout <= 0`) | `503` | `{"error":"no capacity"}` |
+| At capacity and the wait queue is already `max_queue_depth` deep | `503` | `{"error":"capacity queue full"}` |
+| This principal already holds `max_leases_per_principal` live leases | `429` | `{"error":"lease limit reached for this principal"}` |
+| This principal already has `max_queued_per_principal` claims queued | `429` | `{"error":"queued claim limit reached for this principal"}` |
 | Instance exited before ready (e.g. resume of a missing/invalid session) | `502` | `{"error":"instance exited before signalling ready"}` |
 | Instance did not become ready within the boot window | `504` | `{"error":"instance did not become ready in time"}` |
 
@@ -1791,7 +1797,7 @@ at the end of each turn: that would make every message a cold boot.
 
 | Condition | Task state |
 |---|---|
-| Unknown `binary`, a session created by a different binary, an unreadable or empty profile `config` | `TASK_STATE_REJECTED` — the broker refused; the same message will fail the same way until an operator changes something |
+| Unknown `binary`, a session created by a different binary, an unreadable or empty profile `config`, or the caller over one of its [per-principal caps](#per-principal-caps-needs-auth) | `TASK_STATE_REJECTED` — the broker refused; the same message will fail the same way until an operator changes something (or, for a quota, until the caller releases a lease) |
 | The instance died booting, never signalled ready, the broker is at capacity, or a surviving instance is still mid-reattach | `TASK_STATE_FAILED` — attempted and did not come up; a retry may succeed |
 
 The terminal status message explains what happened **without naming a lease**.
@@ -1983,6 +1989,63 @@ handed to the oldest waiter. Set `queue_wait_timeout` to `0` to disable waiting
 (at-capacity claims are rejected immediately with `503 no capacity`); set
 `max_concurrent` to `0` for unlimited instances.
 
+### The queue itself is bounded
+
+`max_concurrent` bounds live instances; **`max_queue_depth` (default `64`) bounds
+the claims waiting behind them**. Every parked waiter costs a goroutine, a timer
+and an open HTTP connection for up to `queue_wait_timeout`, so an unbounded queue
+is an unbounded resource commitment. A claim that arrives when the queue is
+already this deep is refused **immediately** — never parked, so it costs none of
+the three — with `503 {"error":"capacity queue full"}`.
+
+That is a **third distinct message**, and the distinction is the point: reading
+`claim failed` log lines, an operator can tell the three apart without
+correlating timings.
+
+| Message | What actually happened |
+|---------|------------------------|
+| `no capacity` | The cap is full and waiting is switched off (`queue_wait_timeout <= 0`). |
+| `capacity wait timed out` | This claim waited its full `queue_wait_timeout` and gave up. |
+| `capacity queue full` | This claim was never allowed to wait — the queue was at `max_queue_depth`. |
+
+Set `max_queue_depth` to `0` for an unlimited queue.
+
+### Per-principal caps (needs `auth:`)
+
+Two optional keys bound what **one authenticated principal** may hold:
+
+- **`max_leases_per_principal`** — live leases. Over quota answers
+  `429 {"error":"lease limit reached for this principal"}`.
+- **`max_queued_per_principal`** — claims parked in the capacity queue. Over
+  quota answers `429 {"error":"queued claim limit reached for this principal"}`.
+
+`429`, not `503`: these are **quota** answers about the caller, not statements
+about the broker, which may have slots to spare. Both are checked **before** a
+capacity slot is taken and before the claim is queued, so an over-quota caller is
+refused instantly rather than parked only to be refused later, and neither can
+leak a slot. Both default to `0`, meaning off — a per-tenant quota is a policy
+only the operator can size.
+
+`max_queued_per_principal` is what stops one caller looping on `POST /claim` from
+occupying the whole queue and timing every other tenant's single claim out behind
+it. It does **not** reorder anything: the queue stays strictly FIFO across all
+principals, and per-principal fair queueing is out of scope. It bounds how much
+of the queue one caller may hold.
+
+> **Both keys are inert unless `auth:` is configured, and never apply to the
+> anonymous principal.** With no `auth:` block every lease is owned by the same
+> anonymous identity, so a per-principal cap applied there would count the whole
+> broker against one principal and silently become a second, lower
+> `max_concurrent`. A broker with no `auth:` block therefore behaves exactly as it
+> did before these keys existed, whatever they are set to. The same exemption
+> covers a claim that reaches the broker with no principal on a broker that *does*
+> configure auth.
+
+Leases restored by [restart recovery](#restart-recovery) bypass the per-principal
+caps for the same reason they bypass `max_concurrent`: the process is already
+running, and refusing it would hide it rather than stop it. A principal over its
+cap after a restart is simply admitted no new leases until it drains back under.
+
 ## Idle reaping
 
 If a lease sits for `idle_timeout` with **no turn in flight** and no client
@@ -2066,16 +2129,23 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
     from your own identity provider, or from a proxy you already trust. The one
     credential the broker mints is a WebSocket [ticket](#connecting-the-ticket-flow),
     which is a lease-scoped capability, not an identity.
-  - **Authorization is lease ownership plus one read-only admin scope.** No roles,
-    no policy engine, no per-tenant quotas. `tenant` is carried on the principal
-    and recorded, but nothing enforces it.
+  - **Authorization is lease ownership plus one read-only admin scope.** No roles
+    and no policy engine. The only per-tenant enforcement is the pair of
+    admission caps described under
+    [Per-principal caps](#per-principal-caps-needs-auth), which key off the
+    principal **id**; `tenant` is carried on the principal and recorded, but
+    nothing enforces it.
   - **No mTLS, and no TLS at all.** The broker speaks plain HTTP on
     `listen_addr`; terminate TLS at a proxy and set
     [`advertise_addr`](#behind-a-proxy-set-advertise_addr) to the `wss://` address
     clients use. Client certificates are not a supported credential.
-  - **No per-tenant rate limiting.** `max_concurrent` is a global cap — not a
-    per-principal one and not a per-binary one — so one caller, or one variant,
-    can fill the queue for everybody. Nor is the
+  - **No per-tenant rate limiting.** `max_concurrent` is a global cap and not a
+    per-binary one, so one variant can still fill it for everybody. There ARE
+    optional per-principal caps on live leases and queued claims
+    ([`max_leases_per_principal`, `max_queued_per_principal`](#per-principal-caps-needs-auth)),
+    but they are off by default, they need `auth:` to have any effect, and they
+    are admission caps rather than a rate limit — nothing bounds how *often* a
+    caller may claim and release. Nor is the
     [binary registry](#serving-several-nexus-variants-the-binary-registry) part
     of the access-control surface: any caller allowed to claim may name any
     registered entry.

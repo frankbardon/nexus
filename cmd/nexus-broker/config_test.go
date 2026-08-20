@@ -1300,3 +1300,61 @@ func TestResolveRunAsHomes_ResolvesFromPasswd(t *testing.T) {
 		t.Errorf("ResolvedHome = %q, want %q", got, want)
 	}
 }
+
+// TestLoadConfigAdmissionBounds pins the three E4-S4 keys: they parse, they
+// carry the documented defaults when absent, and a non-positive value reads as
+// "no bound" (the same reading max_concurrent gives the same shape) rather than
+// being coerced back to a default.
+//
+// The defaults differ on purpose. max_queue_depth has one because an unbounded
+// waiter queue is a resource fact every broker wants closed; the two
+// per-principal caps have none because a per-tenant quota is a policy only the
+// operator can size, and a broker that was never told about tenants must not
+// acquire one.
+func TestLoadConfigAdmissionBounds(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes(nil)
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != defaultMaxQueueDepth {
+			t.Errorf("MaxQueueDepth = %d, want %d", cfg.MaxQueueDepth, defaultMaxQueueDepth)
+		}
+		if cfg.MaxLeasesPerPrincipal != 0 {
+			t.Errorf("MaxLeasesPerPrincipal = %d, want 0 (off unless configured)", cfg.MaxLeasesPerPrincipal)
+		}
+		if cfg.MaxQueuedPerPrincipal != 0 {
+			t.Errorf("MaxQueuedPerPrincipal = %d, want 0 (off unless configured)", cfg.MaxQueuedPerPrincipal)
+		}
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte(`
+max_queue_depth: 12
+max_leases_per_principal: 3
+max_queued_per_principal: 2
+`))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != 12 {
+			t.Errorf("MaxQueueDepth = %d, want 12", cfg.MaxQueueDepth)
+		}
+		if cfg.MaxLeasesPerPrincipal != 3 {
+			t.Errorf("MaxLeasesPerPrincipal = %d, want 3", cfg.MaxLeasesPerPrincipal)
+		}
+		if cfg.MaxQueuedPerPrincipal != 2 {
+			t.Errorf("MaxQueuedPerPrincipal = %d, want 2", cfg.MaxQueuedPerPrincipal)
+		}
+	})
+
+	t.Run("non-positive means unbounded", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte("max_queue_depth: 0\n"))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != 0 {
+			t.Errorf("MaxQueueDepth = %d, want 0 (an explicit 0 disables the bound)", cfg.MaxQueueDepth)
+		}
+	})
+}

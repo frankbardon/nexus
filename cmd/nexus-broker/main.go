@@ -210,6 +210,16 @@ func run() error {
 	// stream at creation. Worst-case retention across the broker is this value
 	// times max_concurrent.
 	registry.useClientReplayBuffer(cfg.ClientReplayBufferBytes)
+	// The capacity-queue ceiling: over-capacity claims past this are refused
+	// immediately rather than parked, so the broker stops accumulating goroutines,
+	// timers and held-open connections behind a full cap.
+	registry.useQueueDepth(cfg.MaxQueueDepth)
+	// The per-principal admission caps, gated on authentication being CONFIGURED.
+	// AuthChain.Enabled() is the whole gate: with no `auth:` block every lease is
+	// owned by the same anonymous identity, and applying a per-principal cap to it
+	// would turn either key into a second, lower max_concurrent. Wired before
+	// recovery and before anything is served.
+	registry.usePrincipalLimits(cfg.AuthChain.Enabled(), cfg.MaxLeasesPerPrincipal, cfg.MaxQueuedPerPrincipal)
 
 	// Restart recovery. It runs BEFORE anything is served, because a surviving
 	// instance is already dialing /instance on its reconnect backoff and every

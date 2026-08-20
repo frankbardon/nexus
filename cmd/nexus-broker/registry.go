@@ -393,6 +393,43 @@ type Registry struct {
 	// barged past. Guarded by mu.
 	waiters *list.List
 
+	// maxQueueDepth is the ceiling on how many claims may be parked in waiters at
+	// once, from `max_queue_depth`. A claim arriving past it is refused
+	// immediately with errQueueFull rather than parked, so an over-capacity broker
+	// stops accumulating goroutines, timers and held-open connections without
+	// bound. A non-positive value means UNLIMITED, matching maxConcurrent.
+	//
+	// It is ZERO for a registry built by NewRegistry and only takes a value at
+	// wiring time (useQueueDepth) — deliberately, so an unwired registry queues
+	// exactly as it did before this bound existed. The broker's DefaultConfig
+	// supplies the real default. Read under mu.
+	maxQueueDepth int
+
+	// maxLeasesPerPrincipal and maxQueuedPerPrincipal are the per-principal
+	// admission caps, from `max_leases_per_principal` and
+	// `max_queued_per_principal`. Non-positive means that cap is off, which is
+	// the default: they are an opt-in multi-tenant policy, not a behaviour every
+	// broker acquires.
+	//
+	// Neither is a counter. Both are answered by walking state the registry
+	// already holds — see admitPrincipalLeaseLocked / admitPrincipalQueueLocked —
+	// so the single slot counter stays the only accounting path. Read under mu.
+	maxLeasesPerPrincipal int
+	maxQueuedPerPrincipal int
+
+	// principalCaps gates the two caps above on authentication being CONFIGURED.
+	// It is false unless the broker loaded an `auth:` block with at least one
+	// validator.
+	//
+	// It exists because with auth off every lease is owned by anonymousOwner() —
+	// a zero Principal with an empty id — so a per-principal cap applied to that
+	// single shared identity would count the whole broker against one principal
+	// and become a second, lower global cap. Gating on it (together with the
+	// empty-id test in principalCapsApply) is what keeps an unauthenticated
+	// deployment behaving exactly as it did before these keys existed. Written
+	// once at wiring time, read under mu.
+	principalCaps bool
+
 	// tickets is the client-WebSocket ticket store whose lease-scoped
 	// capabilities must die with the lease (see Remove). It is nil until wired
 	// via useTicketStore, and every ticketStore method is nil-receiver safe, so
@@ -489,6 +526,34 @@ func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
 // exercise. Call it once at wiring time, before the broker serves: it affects
 // leases minted after it and is not safe to call concurrently with NewLease.
 func (r *Registry) useClientReplayBuffer(limit int) { r.clientReplayLimit = limit }
+
+// useQueueDepth sets the ceiling on parked capacity waiters, from
+// `max_queue_depth`. A non-positive limit means unlimited — the pre-E4-S4
+// behaviour, and what an unwired registry keeps.
+//
+// A setter rather than a NewRegistry parameter for the same reason as its
+// neighbours: dozens of existing registry tests would otherwise have to name a
+// knob none of them exercise, and every one of them must go on proving the
+// unbounded behaviour they were written against. Call it once at wiring time,
+// before the broker serves.
+func (r *Registry) useQueueDepth(limit int) { r.maxQueueDepth = limit }
+
+// usePrincipalLimits binds the two per-principal admission caps and, crucially,
+// whether they are in force at all.
+//
+// authConfigured MUST be "the broker loaded an `auth:` block with at least one
+// validator" (Config.AuthChain.Enabled()). Passing true with auth off would make
+// both caps apply to the single anonymous identity every unauthenticated lease
+// shares, turning either one into a second global cap — see principalCaps.
+//
+// Non-positive limits leave the corresponding cap off, which is the default for
+// both: they are an opt-in multi-tenant policy. Call it once at wiring time,
+// before the broker serves.
+func (r *Registry) usePrincipalLimits(authConfigured bool, maxLeases, maxQueued int) {
+	r.principalCaps = authConfigured
+	r.maxLeasesPerPrincipal = maxLeases
+	r.maxQueuedPerPrincipal = maxQueued
+}
 
 // useLeaseStore binds the durability store every lease transition is journaled
 // to, along with the broker identity stamped on each record.
@@ -635,6 +700,19 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 		return "", err
 	}
 	r.mu.Lock()
+	// Per-principal lease quota BEFORE the slot: an admission check, so a refused
+	// claim never took a slot and has nothing to hand back. It is inert unless
+	// authentication is configured and owner is a real principal (see
+	// principalCapsApply), so an unauthenticated broker reaches the acquire below
+	// exactly as it always did.
+	//
+	// One check suffices here, unlike in NewLeaseQueued: this whole function
+	// holds r.mu from the check through insertLeaseLocked, so no concurrent claim
+	// can slip a lease in between the two.
+	if err := r.admitPrincipalLeaseLocked(owner); err != nil {
+		r.mu.Unlock()
+		return "", err
+	}
 	// Acquire a capacity slot BEFORE the lease exists, so a claim can never
 	// spawn an instance past max_concurrent. The slot is bound to the lease
 	// (hasSlot) and freed exactly once when the lease is Removed, so every
@@ -669,18 +747,39 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 // accounting or the order of the errNoCapacity / errQueueTimeout / cancelled
 // branches. Pass anonymousOwner() when there is no authenticated principal.
 //
+// owner IS consulted for the per-principal admission caps (max_leases_per_-
+// principal, max_queued_per_principal), which are checked BEFORE any slot is
+// taken and are inert unless authentication is configured — see
+// principalCapsApply. They do not touch the slot counter.
+//
 // Returns errNoCapacity if the cap is full and timeout <= 0 (no waiting),
-// errQueueTimeout if the wait exceeds timeout, or the wrapped ctx error if the
-// request context is cancelled while queued. On any error no slot is held.
+// errQueueFull if the wait queue is at max_queue_depth, errPrincipalLeaseLimit
+// or errPrincipalQueueLimit if owner is over one of its caps, errQueueTimeout if
+// the wait exceeds timeout, or the wrapped ctx error if the request context is
+// cancelled while queued. On any error no slot is held.
 func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration, owner nexusauth.Principal) (string, error) {
 	id, err := newLeaseID()
 	if err != nil {
 		return "", err
 	}
-	if err := r.acquireSlot(ctx, timeout); err != nil {
+	if err := r.acquireSlot(ctx, timeout, owner); err != nil {
 		return "", err
 	}
 	r.mu.Lock()
+	// Re-check the per-principal lease quota in the SAME critical section as the
+	// insert. acquireSlot's copy of this check is the fast rejection — it refuses
+	// an over-quota caller before it parks — but it drops r.mu before the lease
+	// exists, so two concurrent claims from one principal could both pass it and
+	// both insert. Since the abuse this cap exists to stop is precisely a caller
+	// looping /claim in parallel, the check that decides the outcome has to be
+	// this one, where the count and the insert cannot be interleaved.
+	if err := r.admitPrincipalLeaseLocked(owner); err != nil {
+		r.mu.Unlock()
+		// We hold a slot we are not going to bind; hand it back to the queue (or
+		// decrement) exactly as the insert-failure path below does.
+		r.releaseSlot()
+		return "", err
+	}
 	insertErr := r.insertLeaseLocked(id, owner)
 	r.mu.Unlock()
 	if insertErr != nil {
@@ -762,6 +861,11 @@ type restoreSpec struct {
 // claims on top of it — the exact over-admission the cap exists to prevent. Going
 // briefly over the cap is honest; the count drains as leases are released, and
 // the queue holds new claims back until it does.
+//
+// The per-principal caps are skipped for the same reason: a restored lease is a
+// process that is already running under an identity that already owned it, and
+// refusing it would hide it rather than stop it. A principal over its cap after
+// a restart is simply admitted no new leases until it drains back under.
 func (r *Registry) RestoreLease(spec restoreSpec) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

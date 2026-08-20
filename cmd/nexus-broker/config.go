@@ -31,7 +31,9 @@ import (
 // client_replay_buffer_bytes (per-lease client-bound replay retention),
 // idle_timeout (idle reaping), max_turn_duration (in-flight turn bound),
 // release_grace (graceful-shutdown grace),
-// queue_wait_timeout (FIFO capacity wait), auth (client authentication), and
+// queue_wait_timeout (FIFO capacity wait), max_queue_depth (queue ceiling),
+// max_leases_per_principal / max_queued_per_principal (per-tenant admission
+// caps), auth (client authentication), and
 // agents (the named A2A profiles this broker publishes).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
@@ -224,6 +226,41 @@ type Config struct {
 	// capacity wait queue before returning a timeout error. A non-positive value
 	// disables waiting: an at-capacity claim is rejected immediately.
 	QueueWaitTimeout time.Duration `yaml:"queue_wait_timeout"`
+
+	// MaxQueueDepth caps how many over-capacity claims may be parked in the FIFO
+	// wait queue at once. A claim arriving past it is refused IMMEDIATELY, with a
+	// message distinct from both other capacity refusals.
+	//
+	// It exists because MaxConcurrent bounds live instances and nothing bounded
+	// the waiters behind them: every parked claim costs a goroutine, a timer and
+	// an open connection for up to QueueWaitTimeout, so an over-capacity broker
+	// otherwise accumulates all three without limit.
+	//
+	// A non-positive value means UNLIMITED, the same reading MaxConcurrent gives
+	// the same shape.
+	MaxQueueDepth int `yaml:"max_queue_depth"`
+
+	// MaxLeasesPerPrincipal caps how many live leases ONE authenticated principal
+	// may hold at once. Non-positive (the default) means no per-principal cap.
+	//
+	// It is enforced ONLY when authentication is configured, and never for the
+	// anonymous principal. With no `auth:` block every lease is owned by the same
+	// anonymous identity, so applying it there would count the whole broker
+	// against one principal and silently become a second, lower MaxConcurrent —
+	// see Registry.principalCaps.
+	MaxLeasesPerPrincipal int `yaml:"max_leases_per_principal"`
+
+	// MaxQueuedPerPrincipal caps how many claims ONE authenticated principal may
+	// have parked in the FIFO capacity queue at once. Non-positive (the default)
+	// means no per-principal cap.
+	//
+	// It is what stops a single caller looping on POST /claim from occupying the
+	// whole queue and timing every other tenant's claim out behind it. Queue
+	// ordering itself stays strictly FIFO — this bounds how much of the queue one
+	// caller may hold, it does not reorder it.
+	//
+	// Gated on authentication exactly as MaxLeasesPerPrincipal is.
+	MaxQueuedPerPrincipal int `yaml:"max_queued_per_principal"`
 
 	// ReleaseGrace bounds how long a release (manual, idle, or crash teardown)
 	// waits for an instance to shut its engine down cleanly before the broker
@@ -986,6 +1023,17 @@ const keyAdminScope = "admin_scope"
 // overrides it with `auth.admin_scope`.
 const defaultAdminScope = "nexus.broker.admin"
 
+// defaultMaxQueueDepth is the ceiling on parked capacity waiters a broker takes
+// when `max_queue_depth` is not written. It is 8x the default max_concurrent:
+// generous enough that a burst of legitimate claims still queues rather than
+// being refused, small enough that an over-capacity broker cannot accumulate
+// goroutines, timers and held-open connections without limit.
+//
+// The per-principal caps have no default — they are off unless configured — for
+// a different reason: a queue bound is a resource fact every broker wants, while
+// a per-tenant quota is a policy only the operator can size.
+const defaultMaxQueueDepth = 64
+
 // DefaultConfig returns a Config populated with sane defaults. LoadConfig and
 // LoadConfigFromBytes merge YAML on top of these.
 //
@@ -1002,6 +1050,7 @@ func DefaultConfig() Config {
 		IdleTimeout:             5 * time.Minute,
 		MaxTurnDuration:         defaultMaxTurnDuration,
 		QueueWaitTimeout:        30 * time.Second,
+		MaxQueueDepth:           defaultMaxQueueDepth,
 		ReleaseGrace:            defaultReleaseGrace,
 		ReattachWindow:          defaultReattachWindow,
 		AdminScope:              defaultAdminScope,

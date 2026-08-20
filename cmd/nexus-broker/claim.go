@@ -270,6 +270,16 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	//     "no capacity" below by its message).
 	//   - errNoCapacity: the cap is full AND queue_wait_timeout <= 0 (waiting
 	//     disabled) → immediate 503 "no capacity".
+	//   - errQueueFull: the cap is full and the queue already holds
+	//     max_queue_depth waiters → immediate 503 "capacity queue full". A THIRD
+	//     distinct message, so the three capacity refusals are told apart in the
+	//     claim-failure log without correlating timings.
+	//   - errPrincipalLeaseLimit / errPrincipalQueueLimit: this PRINCIPAL is over
+	//     one of its per-principal caps → 429, not 503: the broker may be
+	//     entirely idle, and the refusal is about the caller's quota rather than
+	//     about capacity. Both are inert unless `auth:` is configured (see
+	//     Registry.principalCaps), so an unauthenticated broker can never reach
+	//     these arms.
 	//   - context cancelled: the caller hung up while queued → a silent failure,
 	//     because there is nobody left to answer; the waiter is already dropped
 	//     from the queue.
@@ -280,6 +290,12 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out"}
 		case errors.Is(err, errNoCapacity):
 			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity"}
+		case errors.Is(err, errQueueFull):
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity queue full"}
+		case errors.Is(err, errPrincipalLeaseLimit):
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "lease limit reached for this principal"}
+		case errors.Is(err, errPrincipalQueueLimit):
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "queued claim limit reached for this principal"}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err}
 		default:

@@ -2053,3 +2053,246 @@ func TestLogBinaryRegistry_NamesTheRunAsCredential(t *testing.T) {
 		t.Errorf("run_as_home = %v, want the resolved home", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// E4-S4: the admission refusals as a client sees them.
+//
+// The registry-level tests in slots_test.go prove WHICH claim is refused; these
+// prove what the refusal looks like on the wire — the status an operator's
+// dashboard groups by, and the message the claim-failure log line carries.
+// ---------------------------------------------------------------------------
+
+// newAdmissionClaimServer wires POST /claim exactly as run() does — through the
+// auth guard, over a registry whose capacity ceiling comes from maxConcurrent
+// and whose admission bounds come from cfg — so a refusal is asserted on the
+// same topology a deployment serves.
+//
+// The runner is a fakeRunner that is never expected to be reached: every claim
+// here is refused before anything is spawned, and a runner that DID get called
+// would hang the claim waiting for a ready signal, failing the test loudly.
+func newAdmissionClaimServer(t *testing.T, cfg Config, maxConcurrent int) (*httptest.Server, *Registry, *fakeRunner) {
+	t.Helper()
+	logger := testLogger()
+	reg := NewRegistry(logger, maxConcurrent)
+	reg.useQueueDepth(cfg.MaxQueueDepth)
+	reg.usePrincipalLimits(cfg.AuthChain.Enabled(), cfg.MaxLeasesPerPrincipal, cfg.MaxQueuedPerPrincipal)
+	guard := newAuthGuard(logger, cfg.AuthChain)
+	tickets := newTicketStore(logger, guard.enabled())
+	reg.useTicketStore(tickets)
+	runner := &fakeRunner{started: make(chan spawnSpec, 4), handle: newFakeProcess(9100)}
+	cs := NewClaimServer(logger, reg, cfg, runner, tickets)
+	mux := http.NewServeMux()
+	cs.Register(guard.Guard(mux))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts, reg, runner
+}
+
+// admissionConfig loads a broker config from authYAML and applies the admission
+// knobs a test wants, plus the binary registry every claim needs to get as far
+// as capacity at all.
+func admissionConfig(t *testing.T, authYAML string, apply func(*Config)) Config {
+	t.Helper()
+	cfg := mustLoadConfig(t, authYAML)
+	cfg.ListenAddr = "127.0.0.1:8080"
+	cfg.Binaries = testBinaryRegistry("/bin/nexus")
+	if apply != nil {
+		apply(&cfg)
+	}
+	return cfg
+}
+
+// claimRefusal posts a claim with an optional bearer token and returns the
+// status and the `error` message from the JSON envelope.
+func claimRefusal(t *testing.T, ts *httptest.Server, token string) (int, string) {
+	t.Helper()
+	resp := doAuthed(t, http.MethodPost, ts.URL+"/claim", token, `{"config":"engine: {}\n"}`)
+	defer func() { _ = resp.Body.Close() }()
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode refusal body: %v", err)
+	}
+	return resp.StatusCode, body["error"]
+}
+
+// TestClaim_CapacityRefusalsCarryThreeDistinctMessages proves an operator can
+// tell the three over-capacity outcomes apart from the response (and therefore
+// from the claim-failure log line, which carries the same reason string):
+//
+//	waiting disabled  → 503 "no capacity"
+//	waited and gave up → 503 "capacity wait timed out"
+//	queue already full → 503 "capacity queue full"
+//
+// They are asserted together, in one test, precisely because the property under
+// test is that they DIFFER — three separate tests could each pass while two of
+// the messages had silently converged.
+func TestClaim_CapacityRefusalsCarryThreeDistinctMessages(t *testing.T) {
+	cases := []struct {
+		name    string
+		apply   func(*Config)
+		park    int // waiters to park before claiming
+		wantMsg string
+	}{
+		{
+			name:    "waiting disabled",
+			apply:   func(c *Config) { c.QueueWaitTimeout = 0; c.MaxQueueDepth = 4 },
+			wantMsg: "no capacity",
+		},
+		{
+			name:    "waited and gave up",
+			apply:   func(c *Config) { c.QueueWaitTimeout = 50 * time.Millisecond; c.MaxQueueDepth = 4 },
+			wantMsg: "capacity wait timed out",
+		},
+		{
+			name:    "queue already full",
+			apply:   func(c *Config) { c.QueueWaitTimeout = 5 * time.Second; c.MaxQueueDepth = 1 },
+			park:    1,
+			wantMsg: "capacity queue full",
+		},
+	}
+
+	seen := make(map[string]string, len(cases))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := admissionConfig(t, "", tc.apply)
+			ts, reg, _ := newAdmissionClaimServer(t, cfg, 1)
+			if _, err := reg.NewLease(anonymousOwner()); err != nil {
+				t.Fatalf("fill capacity: %v", err)
+			}
+			parked := make([]chan error, 0, tc.park)
+			for i := 0; i < tc.park; i++ {
+				parked = append(parked, parkWaiter(t, reg, anonymousOwner(), i+1))
+			}
+
+			status, msg := claimRefusal(t, ts, "")
+			if status != http.StatusServiceUnavailable {
+				t.Errorf("status = %d, want 503", status)
+			}
+			if msg != tc.wantMsg {
+				t.Errorf("error = %q, want %q", msg, tc.wantMsg)
+			}
+			if prior, dup := seen[msg]; dup {
+				t.Errorf("refusal message %q is shared with the %q case; the three must be distinguishable", msg, prior)
+			}
+			seen[msg] = tc.name
+
+			// The refusal allocated nothing: the parked waiters are exactly the
+			// ones this test parked, and the only slot is the one it filled.
+			if got := reg.QueueLen(); got != tc.park {
+				t.Errorf("queue len after refusal = %d, want %d", got, tc.park)
+			}
+			if got := reg.SlotsInUse(); got != 1 {
+				t.Errorf("slots in use after refusal = %d, want 1", got)
+			}
+			for _, ch := range parked {
+				reg.Remove(oneLiveLeaseID(t, reg))
+				<-ch
+			}
+			drainRegistry(t, reg)
+			if got := reg.SlotsInUse(); got != 0 || reg.QueueLen() != 0 {
+				t.Errorf("after drain: slots=%d queue=%d, want 0/0", got, reg.QueueLen())
+			}
+		})
+	}
+}
+
+// TestClaim_PerPrincipalCapsRefuseTheRightCaller proves both per-principal caps
+// over HTTP with authentication configured: the over-quota principal is refused
+// with 429 (a QUOTA answer, not one of the 503 capacity answers — the broker has
+// slots to spare) while a second, valid principal on the same broker is not.
+func TestClaim_PerPrincipalCapsRefuseTheRightCaller(t *testing.T) {
+	t.Run("live lease cap", func(t *testing.T) {
+		cfg := admissionConfig(t, twoPrincipalAuthYAML, func(c *Config) {
+			c.MaxLeasesPerPrincipal = 1
+		})
+		ts, reg, runner := newAdmissionClaimServer(t, cfg, 4)
+		if _, err := reg.NewLease(namedOwner(ownerPrincipal)); err != nil {
+			t.Fatalf("seed owner lease: %v", err)
+		}
+
+		status, msg := claimRefusal(t, ts, ownerToken)
+		if status != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want 429", status)
+		}
+		if want := "lease limit reached for this principal"; msg != want {
+			t.Errorf("error = %q, want %q", msg, want)
+		}
+		if got := reg.SlotsInUse(); got != 1 {
+			t.Errorf("slots in use after refusal = %d, want 1", got)
+		}
+		if got := reg.QueueLen(); got != 0 {
+			t.Errorf("queue len after refusal = %d, want 0", got)
+		}
+
+		// The OTHER tenant claims normally on the very same broker — which is
+		// what makes this a per-caller quota rather than a lower global cap.
+		runClaimToReady(t, ts, reg, runner, otherToken)
+		if got := reg.SlotsInUse(); got != 2 {
+			t.Errorf("slots in use after the other tenant claimed = %d, want 2", got)
+		}
+	})
+
+	t.Run("queued claim cap", func(t *testing.T) {
+		cfg := admissionConfig(t, twoPrincipalAuthYAML, func(c *Config) {
+			c.QueueWaitTimeout = 5 * time.Second
+			c.MaxQueueDepth = 8
+			c.MaxQueuedPerPrincipal = 1
+		})
+		ts, reg, _ := newAdmissionClaimServer(t, cfg, 1)
+		if _, err := reg.NewLease(namedOwner(otherPrincipal)); err != nil {
+			t.Fatalf("fill capacity: %v", err)
+		}
+		parked := parkWaiter(t, reg, namedOwner(ownerPrincipal), 1)
+
+		status, msg := claimRefusal(t, ts, ownerToken)
+		if status != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want 429", status)
+		}
+		if want := "queued claim limit reached for this principal"; msg != want {
+			t.Errorf("error = %q, want %q", msg, want)
+		}
+		if got := reg.QueueLen(); got != 1 {
+			t.Errorf("queue len after refusal = %d, want 1 (the refused claim never parked)", got)
+		}
+
+		reg.Remove(oneLiveLeaseID(t, reg))
+		if err := <-parked; err != nil {
+			t.Fatalf("the queued claim that WAS admitted must still be served: %v", err)
+		}
+		drainRegistry(t, reg)
+		if got := reg.SlotsInUse(); got != 0 || reg.QueueLen() != 0 {
+			t.Errorf("after drain: slots=%d queue=%d, want 0/0", got, reg.QueueLen())
+		}
+	})
+}
+
+// TestClaim_PerPrincipalCapsInertWithoutAuth is the HTTP half of this story's
+// trap regression.
+//
+// With no `auth:` block every lease is owned by the anonymous principal, so caps
+// of 1 must not refuse the second claim — otherwise both keys would degrade into
+// a second, lower max_concurrent for every unauthenticated deployment. The
+// broker's answer here has to be byte-identical to what it was before the keys
+// existed: a 200, with the same shape as any other successful claim.
+func TestClaim_PerPrincipalCapsInertWithoutAuth(t *testing.T) {
+	cfg := admissionConfig(t, "", func(c *Config) {
+		c.MaxLeasesPerPrincipal = 1
+		c.MaxQueuedPerPrincipal = 1
+	})
+	if cfg.AuthChain.Enabled() {
+		t.Fatal("precondition: auth must be OFF for this test to mean anything")
+	}
+	ts, reg, runner := newAdmissionClaimServer(t, cfg, 4)
+	// One anonymous lease already exists — the caps say "1 per principal", and
+	// with auth off this lease is owned by the same anonymous principal the next
+	// claim will be.
+	if _, err := reg.NewLease(anonymousOwner()); err != nil {
+		t.Fatalf("seed anonymous lease: %v", err)
+	}
+
+	runClaimToReady(t, ts, reg, runner, "")
+
+	if got := reg.SlotsInUse(); got != 2 {
+		t.Errorf("slots in use = %d, want 2 — a per-principal cap engaged with auth off", got)
+	}
+}

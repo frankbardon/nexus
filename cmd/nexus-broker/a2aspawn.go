@@ -306,6 +306,11 @@ func (m *a2aLeaseManager) spawn(ctx context.Context, req a2aLeaseRequest, sessio
 // and did not come up (capacity, a boot that died, a ready timeout) is a FAILED
 // one. Re-deriving it here would be a second opinion that could disagree with
 // the status /claim returns for the identical condition.
+//
+// The per-principal admission caps land on the REJECTED side, because they are
+// 429s: the broker had capacity and refused THIS caller, which is a statement
+// about the request rather than about the spawn. The broker-wide capacity
+// refusals stay 503s and therefore FAILED.
 func classifyA2ASpawnFailure(profile string, f *claimFailure) error {
 	if f.refusedByCaller() {
 		return a2aRejectedSpawn(fmt.Sprintf(
