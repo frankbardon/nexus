@@ -140,10 +140,13 @@ context that *is* served:
     "metadata":{"contextId":"demo","detail":"CONTEXT_NOT_SERVED"}}]}}
 ```
 
-For the same reason, **one task runs at a time**. A second `SendMessage` while
-one is in flight is refused with `UnsupportedOperationError`
-(`detail: TASK_ALREADY_IN_FLIGHT`): the listener fronts one agent loop, and two
-turns would interleave on the same bus and corrupt both conversations.
+For the same reason, **one task runs at a time**. A `SendMessage` arriving while
+another task is *genuinely* in flight is refused with
+`UnsupportedOperationError` (`detail: TASK_ALREADY_IN_FLIGHT`): the listener
+fronts one agent loop, and two turns would interleave on the same bus and
+corrupt both conversations. A **sequential** send is a different thing entirely
+and is never refused — see [A terminal response means the slot is already
+back](#a-terminal-response-means-the-slot-is-already-back) below.
 
 **Multi-context A2A is the session broker's job, and it works today.** One
 process per context is exactly the shape the
@@ -156,6 +159,70 @@ sends nothing but A2A and is never told a lease exists.
 So the single-context rule above is a property of **this plugin**, not of Nexus:
 a deployment serving many concurrent conversations puts the broker in front
 rather than running one listener per context and routing to them itself.
+
+### A terminal response means the slot is already back
+
+"In flight" means **concurrent**, never merely *recent*. **A client that has
+received a terminal response may immediately send again on the same
+`contextId`.** The in-flight slot is released *before* the response reporting the
+terminal state is written, on both response paths:
+
+- a blocking `SendMessage` does not write the finished Task until the turn that
+  produced it has returned the slot;
+- a `SendStreamingMessage` does not end its response on §11.7's terminal-frame
+  stream close until the same is true.
+
+That is a **documented contract**, not an incidental ordering. It is worth
+naming because the failure it prevents is invisible from the client side. The
+terminal frame reaches the response writer over a buffered channel, so a
+listener can be answering `COMPLETED` on one goroutine while another is still a
+step short of returning the slot. While that window existed, the most obvious
+client loop there is — send, await the terminal Task, send again — was refused
+against the slot of the turn it had just watched finish. The refusal named no
+wait and carried no retry guidance, and it only appeared on a loaded machine, so
+it read as flakiness rather than as a rule (issue #153).
+`plugins/io/a2a/slot_test.go` now pins the ordering deterministically, so a
+refactor that reintroduces the window fails a test instead of a client.
+
+Which is also why **`TASK_ALREADY_IN_FLIGHT` is not a retry-with-backoff
+condition**. There is no settling window to wait out. A client sending
+sequentially that sees this refusal has found a bug in the listener, not a state
+it should absorb; treating it as transient noise would hide exactly the defect
+the guarantee exists to make visible.
+
+**The one exception is a parked task.** `INPUT_REQUIRED` is not a terminal state
+— §11.7's stream-close rule keys off terminal states and this is not one — and a
+task parked there deliberately keeps holding the slot, because the human's answer
+resumes *that* turn rather than starting a second one. So a blocking
+`SendMessage` that returns a parked Task looks like an ending but has not freed
+the listener, and the next thing to send is the answer — carrying the same
+`taskId` — not a new request. Waiting for such a task to settle before
+reporting it would be worse than useless: it would withhold the question until
+`tasks.input_timeout` killed it. See [Human-in-the-loop: `INPUT_REQUIRED` and
+back](#human-in-the-loop-input_required-and-back).
+
+### Which refusal you get, and why the difference matters
+
+The two refusals above share one error type and one JSON-RPC code, so what a
+client branches on is the token in `metadata.detail`. They say opposite things
+about whether trying again could ever work:
+
+| `detail` | What it means | What a client should do |
+|---|---|---|
+| `CONTEXT_NOT_SERVED` | This process is bound to a *different* conversation, for the life of its Nexus session | **Permanent.** Dial a different instance — no amount of waiting makes this one serve a second context, and the [session broker](./session-broker.md#the-a2a-front-door-agents) automates the dialling |
+| `TASK_ALREADY_IN_FLIGHT` | Your context is the right one; a turn on it has not finished | **Transient.** The turn will end. If you were sending sequentially you should never see this at all |
+
+Because those two demand different responses, the `contextId` is resolved
+**before** the in-flight slot is checked, so a refusal always names the client's
+own mistake rather than whichever condition happened to be tested first.
+Checking the slot first told a client presenting a genuinely foreign context
+that a task was already in flight — a transient-sounding reason for a permanent
+problem, which points the caller at a retry loop that can never succeed.
+
+A refused request also leaves **no binding behind**: an unbound listener is
+claimed by the first turn that is *accepted*, not by the first that asks. A
+request refused for concurrency cannot capture this process's only conversation
+on its way out.
 
 ## Worked example
 
@@ -474,7 +541,7 @@ not mentioned behaves as the table above describes.
 | Conversations per deployment | **One.** The process is bound to one `contextId` for its life; a second is refused with `CONTEXT_NOT_SERVED` | **Unbounded.** Each `contextId` gets its own OS-isolated instance, spawned on the first message and re-spawned with `-recall` after it is released |
 | Agents per listener | One | One per `agents:` profile, each with its own card, config and path namespace |
 | Agent Card | Served **unauthenticated** by default — the listener binds loopback; `card_requires_auth: true` gates it | **Behind the auth guard**, always, like every other broker route; an ingress does not publish its agent list to anyone who can reach the port |
-| Concurrent tasks on one conversation | Refused (`TASK_ALREADY_IN_FLIGHT`) | **Queued.** The second task sits in `SUBMITTED` — readable, streamable, cancellable — until the first is terminal |
+| Concurrent tasks on one conversation | **Refused** (`TASK_ALREADY_IN_FLIGHT`) — and only a genuinely concurrent one: the slot is released before a terminal response is written, so a *sequential* send is never refused | **Queued.** The second task sits in `SUBMITTED` — readable, streamable, cancellable — until the first is terminal. The broker has no per-conversation refusal to issue at all, so the one-task-at-a-time rule is a property of the standalone listener, not of A2A on Nexus |
 | Answer artifact | Yes | Yes |
 | Tool-result artifacts | **Yes**, one per `tool.result` | **No.** The instance IO envelope carries no tool results |
 | Written-file artifacts | **Yes**, inline base64 | **No**, for the same reason |
