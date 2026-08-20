@@ -77,6 +77,11 @@ func run() error {
 		"max_turn_duration", cfg.MaxTurnDuration,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
+		// Logged because it is the value an operator most often comes back to
+		// change: a claim that 504s with "instance did not become ready in time"
+		// gives no clue what the ceiling was, so the ceiling in effect is stated
+		// once at boot.
+		"ready_timeout", cfg.ReadyTimeout,
 		// Logged because it decides how long a restored lease holds a capacity slot
 		// waiting for an instance that may never come back.
 		"reattach_window", cfg.ReattachWindow,

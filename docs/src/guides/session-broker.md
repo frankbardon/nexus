@@ -68,6 +68,9 @@ max_queue_depth: 64           # how many claims may be PARKED in that queue at o
 max_leases_per_principal: 0   # live leases one authenticated principal may hold; 0 = off
 max_queued_per_principal: 0   # queued claims one authenticated principal may hold; 0 = off
 release_grace: 10s            # graceful-shutdown grace before SIGTERM, then SIGKILL
+ready_timeout: 30s            # ceiling on instance BOOT; raise it for a slow-starting config
+session_report_grace: 5s      # post-ready wait for the instance's session id; claim still succeeds if it elapses
+max_claim_body: 1048576       # ceiling on the claim request body (1 MiB); it carries the whole config
 state_dir: ""                 # per-broker dir for the lease journal; empty = in-memory only
 broker_id: ""                 # stamped on every lease record; generated + persisted when empty
 reattach_window: 60s          # how long a lease restored after a restart waits for its instance
@@ -905,6 +908,14 @@ All four are `WARN`, and none of them ever contains a secret value. The
 diagnostics matter because the *symptom* is identical and misleading: the claim
 sits there until it fails with `504 instance did not become ready in time` while
 the child process is alive and connecting fine.
+
+A `504` with **none** of those records is the other shape of the same symptom:
+the instance is simply still booting. Engine construction runs every plugin's
+`Init` and `Ready`, so a config that pulls a long model list, warms a vector
+store or dials several MCP servers can legitimately outlast the 30s default.
+Raise [`ready_timeout`](../configuration/reference.md#session-broker-nexus-broker)
+rather than trimming the profile; it must be positive, and a non-positive or
+unparseable value fails the boot naming the key.
 
 ## HTTP API
 

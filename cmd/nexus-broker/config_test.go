@@ -1358,3 +1358,131 @@ max_queued_per_principal: 2
 		}
 	})
 }
+
+// TestClaimLimitDefaultsMatchHistoricalConstants is the compatibility pin for
+// E5-S1: promoting ready_timeout, session_report_grace and max_claim_body to
+// config keys must leave an UNCHANGED broker.yaml behaving byte-identically.
+//
+// It asserts the literals as well as the wiring on purpose. Asserting only
+// `DefaultConfig().ReadyTimeout == defaultReadyTimeout` would pass happily if
+// somebody edited the constant, which is exactly the change this test exists to
+// catch: these three numbers are what every deployment that never writes the key
+// gets, and they were 30s, 5s and 1 MiB before the keys existed.
+func TestClaimLimitDefaultsMatchHistoricalConstants(t *testing.T) {
+	if defaultReadyTimeout != 30*time.Second {
+		t.Errorf("defaultReadyTimeout = %v, want 30s (the pre-config-key value)", defaultReadyTimeout)
+	}
+	if defaultSessionReportGrace != 5*time.Second {
+		t.Errorf("defaultSessionReportGrace = %v, want 5s (the pre-config-key value)", defaultSessionReportGrace)
+	}
+	if defaultMaxClaimBody != 1<<20 {
+		t.Errorf("defaultMaxClaimBody = %d, want %d (1 MiB, the pre-config-key value)", defaultMaxClaimBody, 1<<20)
+	}
+
+	def := DefaultConfig()
+	if def.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("DefaultConfig().ReadyTimeout = %v, want %v", def.ReadyTimeout, defaultReadyTimeout)
+	}
+	if def.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("DefaultConfig().SessionReportGrace = %v, want %v", def.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if def.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("DefaultConfig().MaxClaimBody = %d, want %d", def.MaxClaimBody, defaultMaxClaimBody)
+	}
+
+	// A config that mentions none of the three — the shape every existing
+	// broker.yaml has — must resolve to exactly those defaults.
+	cfg, err := LoadConfigFromBytes([]byte("listen_addr: \":8080\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("unwritten ready_timeout = %v, want %v", cfg.ReadyTimeout, defaultReadyTimeout)
+	}
+	if cfg.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("unwritten session_report_grace = %v, want %v", cfg.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if cfg.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("unwritten max_claim_body = %d, want %d", cfg.MaxClaimBody, defaultMaxClaimBody)
+	}
+}
+
+// TestLoadConfigClaimLimitOverrides pins that written values reach the resolved
+// fields — the whole point of the keys, since ready_timeout is the ceiling on
+// engine boot and the only way a slow-booting profile stops 504ing.
+func TestLoadConfigClaimLimitOverrides(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+ready_timeout: 3m
+session_report_grace: 250ms
+max_claim_body: 8388608
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != 3*time.Minute {
+		t.Errorf("ReadyTimeout = %v, want 3m", cfg.ReadyTimeout)
+	}
+	if cfg.SessionReportGrace != 250*time.Millisecond {
+		t.Errorf("SessionReportGrace = %v, want 250ms", cfg.SessionReportGrace)
+	}
+	if cfg.MaxClaimBody != 8<<20 {
+		t.Errorf("MaxClaimBody = %d, want %d", cfg.MaxClaimBody, 8<<20)
+	}
+}
+
+// TestLoadConfigRejectsClaimLimits pins the validation discipline: a value with
+// no sane reading fails the BOOT, and the message NAMES THE KEY.
+//
+// Naming the key is the assertion that matters. yaml.v3's own complaint for a
+// malformed scalar identifies the Go type and the line ("cannot unmarshal !!str
+// `banana` into time.Duration") and never the key, which is useless to an
+// operator holding a broker.yaml; resolveClaimLimits decodes each node itself so
+// both the malformed and the out-of-range case say which key is wrong.
+func TestLoadConfigRejectsClaimLimits(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		key  string
+	}{
+		{"ready_timeout zero", "ready_timeout: 0s\n", "ready_timeout"},
+		{"ready_timeout negative", "ready_timeout: -5s\n", "ready_timeout"},
+		{"ready_timeout malformed", "ready_timeout: banana\n", "ready_timeout"},
+		{"session_report_grace zero", "session_report_grace: 0s\n", "session_report_grace"},
+		{"session_report_grace negative", "session_report_grace: -1s\n", "session_report_grace"},
+		{"session_report_grace malformed", "session_report_grace: soon\n", "session_report_grace"},
+		{"max_claim_body zero", "max_claim_body: 0\n", "max_claim_body"},
+		{"max_claim_body negative", "max_claim_body: -1\n", "max_claim_body"},
+		{"max_claim_body malformed", "max_claim_body: plenty\n", "max_claim_body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatalf("LoadConfigFromBytes(%q) succeeded; want a boot failure", tc.yaml)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error %q does not name the key %q", err, tc.key)
+			}
+		})
+	}
+}
+
+// TestLoadConfigClaimLimitsEmptyValueTakesDefault pins that `ready_timeout:`
+// with nothing after it reads as "not written" rather than as a malformed zero.
+// An empty value is a null, and a null must mean the same thing as an absent
+// key — otherwise commenting a value out would fail the boot.
+func TestLoadConfigClaimLimitsEmptyValueTakesDefault(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("ready_timeout:\nsession_report_grace:\nmax_claim_body:\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("ReadyTimeout = %v, want %v", cfg.ReadyTimeout, defaultReadyTimeout)
+	}
+	if cfg.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("SessionReportGrace = %v, want %v", cfg.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if cfg.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("MaxClaimBody = %d, want %d", cfg.MaxClaimBody, defaultMaxClaimBody)
+	}
+}

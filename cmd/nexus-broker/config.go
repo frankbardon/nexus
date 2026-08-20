@@ -33,7 +33,10 @@ import (
 // release_grace (graceful-shutdown grace),
 // queue_wait_timeout (FIFO capacity wait), max_queue_depth (queue ceiling),
 // max_leases_per_principal / max_queued_per_principal (per-tenant admission
-// caps), auth (client authentication), and
+// caps), ready_timeout (instance boot ceiling),
+// session_report_grace (post-ready session-id wait),
+// max_claim_body (claim request body ceiling),
+// auth (client authentication), and
 // agents (the named A2A profiles this broker publishes).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
@@ -283,6 +286,43 @@ type Config struct {
 	// exists to bound. Irrelevant while state_dir is unset, since nothing is then
 	// restored.
 	ReattachWindow time.Duration `yaml:"reattach_window"`
+
+	// ReadyTimeout, SessionReportGrace and MaxClaimBody are the three bounds
+	// POST /claim enforces on its own path, resolved from the raw nodes below.
+	// They are not YAML keys themselves: the raw form is a yaml.Node so that a
+	// value which cannot be decoded is reported against the KEY an operator
+	// wrote rather than against the Go type it failed to become — see
+	// resolveClaimLimits.
+	//
+	// ReadyTimeout is the ceiling on instance boot: how long a claim waits for a
+	// freshly spawned instance to dial back and signal ready before giving up,
+	// killing it and answering 504. It is the value most likely to need tuning,
+	// because it has to cover every plugin's Init and Ready.
+	//
+	// SessionReportGrace is how long the claim then waits for the instance's
+	// session-id report. Exceeding it is not an error: the claim still succeeds,
+	// just without a session id in the response.
+	//
+	// MaxClaimBody caps the claim request body in bytes. A claim carries the
+	// whole nexus config inline, so it is the config size an operator is
+	// bounding, not a protocol constant.
+	//
+	// All three are POSITIVE-ONLY. There is no disabled reading for any of them —
+	// a zero ready timeout fails every claim, a zero body cap rejects every claim,
+	// and a zero grace makes a fresh session's id unreportable — so a
+	// non-positive value fails the boot naming the key rather than being taken
+	// literally. See resolveClaimLimits.
+	ReadyTimeout       time.Duration `yaml:"-"`
+	SessionReportGrace time.Duration `yaml:"-"`
+	MaxClaimBody       int64         `yaml:"-"`
+
+	// RawReadyTimeout, RawSessionReportGrace and RawMaxClaimBody are the
+	// undecoded `ready_timeout`, `session_report_grace` and `max_claim_body`
+	// nodes. A zero Node means the key was absent, which is how the default
+	// survives; see resolveClaimLimits, which is the only reader.
+	RawReadyTimeout       yaml.Node `yaml:"ready_timeout"`
+	RawSessionReportGrace yaml.Node `yaml:"session_report_grace"`
+	RawMaxClaimBody       yaml.Node `yaml:"max_claim_body"`
 
 	// Auth is the raw `auth:` block, handed to pkg/nexusauth verbatim. It is
 	// kept as a map rather than a typed struct because nexusauth owns the
@@ -1053,6 +1093,9 @@ func DefaultConfig() Config {
 		MaxQueueDepth:           defaultMaxQueueDepth,
 		ReleaseGrace:            defaultReleaseGrace,
 		ReattachWindow:          defaultReattachWindow,
+		ReadyTimeout:            defaultReadyTimeout,
+		SessionReportGrace:      defaultSessionReportGrace,
+		MaxClaimBody:            defaultMaxClaimBody,
 		AdminScope:              defaultAdminScope,
 		AuthChain:               nexusauth.NewChain(),
 		A2ATaskRetention: a2aTaskRetention{
@@ -1164,6 +1207,13 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 		cfg.ClientReplayBufferBytes = *cfg.ClientReplayBuffer
 	}
 
+	// Resolved in the same breath and for the same reason: these bound the claim
+	// path, and a value with no sane reading must fail the BOOT rather than turn
+	// every claim into a 504 or a 400 for the life of the process.
+	if err := resolveClaimLimits(&cfg); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+
 	// Trimmed before expansion so a whitespace-only value reads as "unset"
 	// (persistence disabled) rather than as a directory literally named " ".
 	cfg.StateDir = engine.ExpandPath(strings.TrimSpace(cfg.StateDir))
@@ -1237,6 +1287,80 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	cfg.A2AInputTimeout = inputTimeout
 
 	return cfg, nil
+}
+
+// resolveClaimLimits folds `ready_timeout`, `session_report_grace` and
+// `max_claim_body` onto their defaults and validates them.
+//
+// Each is resolved from the undecoded node rather than from a typed field so
+// that BOTH failure modes name the key. yaml.v3 decodes a duration or an int
+// itself, but its complaint identifies the Go type and the line ("cannot
+// unmarshal !!str `banana` into time.Duration") and never the key — and the key
+// name is the whole actionable part of the message for a value an operator was
+// told to tune. Decoding here, with the name in hand, puts it in front.
+//
+// There is deliberately no disabled reading and no upper bound. Zero is refused
+// because none of the three has a coherent zero (see the field docs), and no
+// ceiling is imposed because a long boot is exactly the deployment this key
+// exists for.
+func resolveClaimLimits(cfg *Config) error {
+	readyTimeout, err := resolvePositiveDuration("ready_timeout", cfg.RawReadyTimeout, cfg.ReadyTimeout)
+	if err != nil {
+		return err
+	}
+	cfg.ReadyTimeout = readyTimeout
+
+	grace, err := resolvePositiveDuration("session_report_grace", cfg.RawSessionReportGrace, cfg.SessionReportGrace)
+	if err != nil {
+		return err
+	}
+	cfg.SessionReportGrace = grace
+
+	maxBody, err := resolvePositiveInt64("max_claim_body", cfg.RawMaxClaimBody, cfg.MaxClaimBody)
+	if err != nil {
+		return err
+	}
+	cfg.MaxClaimBody = maxBody
+	return nil
+}
+
+// unsetNode reports whether a raw config node carries no operator-written value:
+// either the key was absent (a zero Node) or it was written with an empty value
+// (`ready_timeout:`), which is a null and means the same thing.
+func unsetNode(node yaml.Node) bool {
+	return node.IsZero() || node.Tag == "!!null"
+}
+
+// resolvePositiveDuration decodes one duration key, defaulting when unwritten
+// and refusing a non-positive value. Both errors name the key.
+func resolvePositiveDuration(key string, node yaml.Node, def time.Duration) (time.Duration, error) {
+	if unsetNode(node) {
+		return def, nil
+	}
+	var d time.Duration
+	if err := node.Decode(&d); err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s: must be positive, got %s; remove the key to take the %s default", key, d, def)
+	}
+	return d, nil
+}
+
+// resolvePositiveInt64 decodes one integer key, defaulting when unwritten and
+// refusing a non-positive value. Both errors name the key.
+func resolvePositiveInt64(key string, node yaml.Node, def int64) (int64, error) {
+	if unsetNode(node) {
+		return def, nil
+	}
+	var n int64
+	if err := node.Decode(&n); err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s: must be positive, got %d; remove the key to take the %d default", key, n, def)
+	}
+	return n, nil
 }
 
 // resolveA2ATaskSettings folds the `a2a.tasks:` block onto the defaults and

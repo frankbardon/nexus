@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2294,5 +2295,95 @@ func TestClaim_PerPrincipalCapsInertWithoutAuth(t *testing.T) {
 
 	if got := reg.SlotsInUse(); got != 2 {
 		t.Errorf("slots in use = %d, want 2 — a per-principal cap engaged with auth off", got)
+	}
+}
+
+// TestNewClaimServer_SourcesLimitsFromConfig pins the plumbing E5-S1 exists for:
+// the three claim-path bounds come from the Config, not from the constants.
+//
+// Without this the keys would parse, validate and document perfectly and still
+// have no effect — which is precisely the failure the story is closing, where an
+// operator has nothing to turn against a slow boot.
+func TestNewClaimServer_SourcesLimitsFromConfig(t *testing.T) {
+	cfg := Config{
+		ListenAddr:         "127.0.0.1:8080",
+		Binaries:           testBinaryRegistry("/bin/nexus"),
+		ReadyTimeout:       4 * time.Minute,
+		SessionReportGrace: 750 * time.Millisecond,
+		MaxClaimBody:       4 << 20,
+	}
+	cs := NewClaimServer(testLogger(), NewRegistry(testLogger(), 0), cfg, &fakeRunner{}, nil)
+
+	if cs.readyTimeout != 4*time.Minute {
+		t.Errorf("readyTimeout = %v, want 4m (from config)", cs.readyTimeout)
+	}
+	if cs.sessionReportGrace != 750*time.Millisecond {
+		t.Errorf("sessionReportGrace = %v, want 750ms (from config)", cs.sessionReportGrace)
+	}
+	if cs.maxBody != 4<<20 {
+		t.Errorf("maxBody = %d, want %d (from config)", cs.maxBody, 4<<20)
+	}
+}
+
+// TestNewClaimServer_UnsetLimitsTakeDefaults covers the Config built as a struct
+// literal rather than loaded — every caller in this test suite, and any future
+// in-process embedder. LoadConfigFromBytes refuses a non-positive value outright,
+// so "unset" can only arrive this way, and it must keep meaning "the historical
+// default" rather than "reject every claim instantly".
+func TestNewClaimServer_UnsetLimitsTakeDefaults(t *testing.T) {
+	cfg := Config{ListenAddr: "127.0.0.1:8080", Binaries: testBinaryRegistry("/bin/nexus")}
+	cs := NewClaimServer(testLogger(), NewRegistry(testLogger(), 0), cfg, &fakeRunner{}, nil)
+
+	if cs.readyTimeout != defaultReadyTimeout {
+		t.Errorf("readyTimeout = %v, want %v", cs.readyTimeout, defaultReadyTimeout)
+	}
+	if cs.sessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("sessionReportGrace = %v, want %v", cs.sessionReportGrace, defaultSessionReportGrace)
+	}
+	if cs.maxBody != defaultMaxClaimBody {
+		t.Errorf("maxBody = %d, want %d", cs.maxBody, defaultMaxClaimBody)
+	}
+}
+
+// TestClaim_MaxClaimBodyBoundsTheRequest proves max_claim_body reaches the wire:
+// a body past the configured ceiling is refused with 400 and nothing is spawned.
+//
+// The under-the-ceiling half runs too, so the test cannot pass by rejecting
+// everything — which is the way a mis-wired ceiling (a zero maxBody) would look.
+func TestClaim_MaxClaimBodyBoundsTheRequest(t *testing.T) {
+	runner := &fakeRunner{started: make(chan spawnSpec, 1), handle: newFakeProcess(8899)}
+	cfg := Config{
+		ListenAddr:   "127.0.0.1:8080",
+		Binaries:     testBinaryRegistry("/bin/nexus"),
+		MaxClaimBody: 128,
+	}
+	ts, _, _ := newClaimTestServer(t, runner, cfg)
+
+	oversize := fmt.Sprintf(`{"config":%q}`, strings.Repeat("x", 512))
+	resp := postClaim(t, ts.URL, oversize)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversize claim status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	select {
+	case spec := <-runner.started:
+		t.Fatalf("oversize claim spawned an instance: %+v", spec)
+	default:
+	}
+
+	// A body inside the ceiling gets past the reader. It fails later (the config
+	// is empty), but on a DIFFERENT error, which is what proves the ceiling is
+	// not simply refusing everything.
+	resp2 := postClaim(t, ts.URL, `{"config":""}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("under-ceiling claim status = %d, want %d", resp2.StatusCode, http.StatusBadRequest)
+	}
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	if !strings.Contains(string(body), "non-empty config") {
+		t.Fatalf("under-ceiling claim was refused by the body cap, not by validation: %s", body)
 	}
 }

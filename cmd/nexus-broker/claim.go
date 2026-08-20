@@ -17,18 +17,35 @@ import (
 
 // defaultReadyTimeout bounds how long POST /claim waits for a freshly spawned
 // instance to dial back and signal ready before giving up, killing it, and
-// returning an error. Kept as a constant (not a config key) for this story.
+// returning an error. It is the value the `ready_timeout` config key takes when
+// an operator does not write it.
+//
+// Thirty seconds is a boot budget, and it is the one most likely to be wrong for
+// a given deployment: it has to cover process start, engine construction and
+// every plugin's Init/Ready, so a config that pulls a large model list, warms a
+// vector store or dials several MCP servers can legitimately exceed it. Before
+// the key existed that surfaced as `504 instance did not become ready in time`
+// with nothing an operator could turn.
 const defaultReadyTimeout = 30 * time.Second
 
 // defaultSessionReportGrace bounds how long POST /claim waits, after the
 // instance signals ready, for its session-id-report frame to arrive. The
 // plugin sends the report immediately after ready, so this is a short grace
 // window: if it elapses the claim still succeeds, just without a session id in
-// the response. Kept as a constant (not a config key) for this story.
+// the response. It is the value the `session_report_grace` config key takes when
+// an operator does not write it.
 const defaultSessionReportGrace = 5 * time.Second
 
-// maxClaimBody caps the size of a claim request body to avoid unbounded reads.
-const maxClaimBody = 1 << 20 // 1 MiB
+// defaultMaxClaimBody caps the size of a claim request body to avoid unbounded
+// reads. It is the value the `max_claim_body` config key takes when an operator
+// does not write it.
+//
+// A claim body carries the WHOLE nexus config inline, so the ceiling scales with
+// how large an operator's profiles are: a deployment shipping a long skills
+// block, many MCP servers or an inlined system prompt can outgrow a megabyte,
+// and the refusal (a 400 from http.MaxBytesReader) says nothing about which
+// bound was hit.
+const defaultMaxClaimBody int64 = 1 << 20 // 1 MiB
 
 // claimRequest is the JSON body of POST /claim. The caller supplies the full
 // nexus config inline (YAML text) for the instance to boot with.
@@ -103,6 +120,10 @@ type ClaimServer struct {
 	readyTimeout       time.Duration
 	sessionReportGrace time.Duration
 
+	// maxBody caps the claim request body, sourced from the broker config's
+	// max_claim_body.
+	maxBody int64
+
 	// tickets mints the single-use client WebSocket ticket returned with a
 	// successful claim. A nil store (or one built inert because auth is disabled)
 	// simply issues nothing, and the response omits the `ticket` field.
@@ -135,6 +156,16 @@ func (s *ClaimServer) useSpawnKey(k spawnKey) { s.spawnKey = k }
 // production execRunner; tests inject a fake to avoid booting a real engine. A
 // nil tickets store means no `ticket` is returned with a claim, which is also
 // what an auth-disabled broker produces.
+//
+// The three claim-path bounds come from the config, and a NON-POSITIVE value in
+// the Config falls back to the corresponding default — the same shape
+// NewReleaseServer uses for release_grace. That is not a second, silent
+// validation path: LoadConfigFromBytes already refuses a non-positive
+// ready_timeout, session_report_grace or max_claim_body naming the key, so the
+// only way to reach this fallback is a Config built as a struct literal rather
+// than loaded (every caller in the test suite, and any future in-process
+// embedder), where "unset" must keep meaning "the default" rather than "reject
+// every claim instantly".
 func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner commandRunner, tickets *ticketStore) *ClaimServer {
 	if logger == nil {
 		logger = slog.Default()
@@ -142,13 +173,26 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 	if runner == nil {
 		runner = execRunner{}
 	}
+	readyTimeout := cfg.ReadyTimeout
+	if readyTimeout <= 0 {
+		readyTimeout = defaultReadyTimeout
+	}
+	sessionReportGrace := cfg.SessionReportGrace
+	if sessionReportGrace <= 0 {
+		sessionReportGrace = defaultSessionReportGrace
+	}
+	maxBody := cfg.MaxClaimBody
+	if maxBody <= 0 {
+		maxBody = defaultMaxClaimBody
+	}
 	return &ClaimServer{
 		logger:             logger,
 		registry:           registry,
 		cfg:                cfg,
 		runner:             runner,
-		readyTimeout:       defaultReadyTimeout,
-		sessionReportGrace: defaultSessionReportGrace,
+		readyTimeout:       readyTimeout,
+		sessionReportGrace: sessionReportGrace,
+		maxBody:            maxBody,
 		tickets:            tickets,
 		queueWaitTimeout:   cfg.QueueWaitTimeout,
 	}
@@ -454,7 +498,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 // it.
 func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req claimRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBody))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBody))
 	if err := dec.Decode(&req); err != nil {
 		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
 		return
@@ -488,7 +532,8 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 
 	// Mint the client's WebSocket ticket LAST, immediately before responding, so
 	// its short TTL starts when the caller receives it rather than when the
-	// instance began booting — a boot may take up to readyTimeout (30s), which
+	// instance began booting — a boot may take up to ready_timeout (30s by
+	// default), which
 	// would otherwise hand back an already-expired ticket.
 	//
 	// A mint failure does NOT fail the claim. The instance is live and the lease is

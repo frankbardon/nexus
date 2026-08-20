@@ -50,9 +50,11 @@ const (
 	agentRESTPattern    = agentRoutePrefix + agentProfileWildEnc + agentRESTSuffix + "/{rest...}"
 )
 
-// maxA2ABody caps an A2A request body, matching maxClaimBody. A JSON-RPC
-// envelope carrying a message is far smaller than a claim's inline config, so
-// this is a backstop against an unbounded read rather than a working limit.
+// maxA2ABody caps an A2A request body, matching the `max_claim_body` default. A
+// JSON-RPC envelope carrying a message is far smaller than a claim's inline
+// config, so this is a backstop against an unbounded read rather than a working
+// limit — which is why it stays a constant while max_claim_body, the bound on a
+// body that carries a whole nexus config, became a config key.
 const maxA2ABody = 1 << 20 // 1 MiB
 
 // a2aErrorDomain is the google.rpc.ErrorInfo domain for refusals the broker's
