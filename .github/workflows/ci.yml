@@ -98,7 +98,7 @@ jobs:
         # started failing the moment v0.8.0 was published -- on every commit,
         # including ones that had already passed. v0.7.0 declares go 1.25.0.
         # Bump this together with the go-version matrix, never separately.
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0  # keep in step with STATICCHECK_VERSION in the Makefile
 
       - name: Lint
         run: make lint
