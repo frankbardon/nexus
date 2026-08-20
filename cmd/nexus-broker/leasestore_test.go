@@ -885,3 +885,276 @@ func TestLeaseStore_AppendAfterCloseErrorsWithoutPanicking(t *testing.T) {
 		t.Error("Append after Close returned no error")
 	}
 }
+
+// syncRecorder is the observation seam for the fsync path. Host-crash
+// durability cannot be simulated in-process — no test can yank the power out
+// from under a page cache — so the honest assertion is that the barrier is
+// REACHED, on the right file, once per append.
+type syncRecorder struct {
+	mu    sync.Mutex
+	names []string
+	err   error
+}
+
+// sync is installed as fileLeaseStore.syncFile. It records the file it was
+// handed and returns the configured error, so one type covers both the "was the
+// barrier reached" and the "does a failing barrier refuse service" cases.
+func (r *syncRecorder) sync(f *os.File) error {
+	r.mu.Lock()
+	r.names = append(r.names, f.Name())
+	r.mu.Unlock()
+	return r.err
+}
+
+func (r *syncRecorder) synced() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.names))
+	copy(out, r.names)
+	return out
+}
+
+func (r *syncRecorder) countOf(name string) int {
+	n := 0
+	for _, got := range r.synced() {
+		if got == name {
+			n++
+		}
+	}
+	return n
+}
+
+// TestLeaseStore_AppendFsyncsJournal: every append reaches the durability
+// barrier on the journal itself, exactly once. This is the whole of G9 — an
+// unsynced tail is where the pid-bearing lease-updated record lives, and losing
+// it is the one case restart recovery cannot repair.
+func TestLeaseStore_AppendFsyncsJournal(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("openFileLeaseStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	rec := &syncRecorder{}
+	store.syncFile = rec.sync
+
+	journal := filepath.Join(dir, leaseJournalName)
+	for i, kind := range []leaseRecordKind{leaseRecordCreated, leaseRecordUpdated, leaseRecordReleased} {
+		if err := store.Append(LeaseRecord{Kind: kind, LeaseID: "lease-1", PID: 4242}); err != nil {
+			t.Fatalf("Append %d (%s): %v", i, kind, err)
+		}
+		if got, want := rec.countOf(journal), i+1; got != want {
+			t.Fatalf("after %d appends the journal was synced %d times, want %d", i+1, got, want)
+		}
+	}
+	if got := rec.synced(); len(got) != 3 {
+		t.Errorf("synced files = %v, want exactly the three journal appends", got)
+	}
+}
+
+// TestLeaseStore_AppendFsyncsThroughTheRegistry proves the barrier is reached on
+// the wiring main.go actually uses, not just on a hand-driven store: a full
+// lease lifecycle is the ~3 records per lease the unconditional-fsync decision
+// was costed against.
+func TestLeaseStore_AppendFsyncsThroughTheRegistry(t *testing.T) {
+	dir := t.TempDir()
+	reg, store, journal := newPersistentRegistry(t, dir, "b1", "")
+
+	rec := &syncRecorder{}
+	store.syncFile = rec.sync
+
+	id, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	if got := rec.countOf(journal); got != 1 {
+		t.Fatalf("minting a lease synced the journal %d times, want 1", got)
+	}
+
+	// The pid-bearing record is the one G9 is about: it must be on stable storage
+	// before the instance it names can outlive the broker.
+	reg.SetProcess(id, newFakeProcess(4242))
+	if got := rec.countOf(journal); got != 2 {
+		t.Fatalf("recording the pid synced the journal %d times in total, want 2", got)
+	}
+
+	if err := reg.releaseLease(id, "manual release", 10*time.Millisecond); err != nil {
+		t.Fatalf("releaseLease: %v", err)
+	}
+	if got := rec.countOf(journal); got != 3 {
+		t.Fatalf("a full lease lifetime synced the journal %d times, want 3", got)
+	}
+}
+
+// TestLeaseStore_SyncFailureIsNotFatal: an fsync that fails follows the SAME
+// policy as a write that fails — reported to the caller, logged there, and never
+// allowed to fail the claim or the release that produced it.
+func TestLeaseStore_SyncFailureIsNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	reg, store, journal := newPersistentRegistry(t, dir, "b1", "")
+
+	rec := &syncRecorder{err: errors.New("disk on fire")}
+	store.syncFile = rec.sync
+
+	id, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease failed on a failing fsync: %v", err)
+	}
+	if !reg.Has(id) {
+		t.Fatal("lease was not minted despite the fsync failure being non-fatal")
+	}
+	reg.SetProcess(id, newFakeProcess(7))
+	if err := reg.releaseLease(id, "manual release", 10*time.Millisecond); err != nil {
+		t.Fatalf("releaseLease failed on a failing fsync: %v", err)
+	}
+	if reg.Has(id) {
+		t.Fatal("lease survived teardown despite the fsync failure being non-fatal")
+	}
+	if rec.countOf(journal) == 0 {
+		t.Fatal("no sync was attempted; the test proves nothing")
+	}
+
+	// The record is in the file either way: a failed barrier means "this may not
+	// survive the host dying", not "this was never written".
+	recs, skipped := readJournalOrFail(t, journal)
+	if skipped != 0 {
+		t.Errorf("skipped = %d, want 0", skipped)
+	}
+	if len(recs) == 0 {
+		t.Fatal("a failing fsync swallowed the records; they were written and must still be there")
+	}
+
+	// And Append still SURFACES it, so Registry.appendRecord has something to log.
+	if err := store.Append(LeaseRecord{Kind: leaseRecordCreated, LeaseID: "lease-x"}); err == nil {
+		t.Error("Append returned no error on a failing fsync")
+	}
+}
+
+// TestLeaseStore_RewriteSyncsTempFileAndDirectory: compaction's rewrite is
+// durable too. Rename is atomic but not durable — a host that dies just after it
+// can come back to a directory entry pointing at contents that never left the
+// page cache, which would lose the entire live set.
+func TestLeaseStore_RewriteSyncsTempFileAndDirectory(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("openFileLeaseStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	rec := &syncRecorder{}
+	store.syncFile = rec.sync
+
+	if err := store.Append(LeaseRecord{Kind: leaseRecordCreated, LeaseID: "keep-me"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	store.mu.Lock()
+	err = store.rewriteLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("rewriteLocked: %v", err)
+	}
+
+	journal := filepath.Join(dir, leaseJournalName)
+	if got := rec.countOf(journal + ".tmp"); got != 1 {
+		t.Errorf("temp file synced %d times, want 1 (before the rename)", got)
+	}
+	if got := rec.countOf(dir); got != 1 {
+		t.Errorf("journal directory synced %d times, want 1 (after the rename); synced = %v",
+			got, rec.synced())
+	}
+
+	// The live set survived the durable rewrite.
+	live, err := store.Live()
+	if err != nil {
+		t.Fatalf("Live: %v", err)
+	}
+	if len(live) != 1 || live[0].LeaseID != "keep-me" {
+		t.Fatalf("Live() = %+v, want the one live lease", live)
+	}
+}
+
+// TestLeaseStore_RewriteAbortsWhenTempSyncFails: a temp file that will not sync
+// must NOT be renamed over the journal. Aborting leaves the previous journal in
+// place, which is the safe state; renaming an unsynced file would trade a
+// too-large journal for a possibly-empty one.
+func TestLeaseStore_RewriteAbortsWhenTempSyncFails(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("openFileLeaseStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.Append(LeaseRecord{Kind: leaseRecordCreated, LeaseID: "keep-me"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	journal := filepath.Join(dir, leaseJournalName)
+	before, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatalf("reading journal: %v", err)
+	}
+
+	store.syncFile = (&syncRecorder{err: errors.New("disk on fire")}).sync
+	store.mu.Lock()
+	err = store.rewriteLocked()
+	store.mu.Unlock()
+	if err == nil {
+		t.Fatal("rewriteLocked succeeded despite the temp file failing to sync")
+	}
+	if !strings.Contains(err.Error(), "syncing lease journal temp file") {
+		t.Errorf("error = %v, want it to name the temp file sync", err)
+	}
+
+	after, err := os.ReadFile(journal)
+	if err != nil {
+		t.Fatalf("reading journal after the aborted rewrite: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("journal changed across an aborted rewrite:\nbefore %q\nafter  %q", before, after)
+	}
+	if _, err := os.Stat(journal + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temp file left behind after an aborted rewrite: stat err = %v", err)
+	}
+}
+
+// TestLeaseStore_DirSyncFailureIsLoggedNotReturned: the directory fsync happens
+// AFTER the rename, so the new journal is already in place. Failing the rewrite
+// over it would report a durability hint as either a boot failure or a
+// "the journal keeps growing" warning, neither of which is true.
+func TestLeaseStore_DirSyncFailureIsLoggedNotReturned(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openFileLeaseStore(testLogger(), dir)
+	if err != nil {
+		t.Fatalf("openFileLeaseStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.Append(LeaseRecord{Kind: leaseRecordCreated, LeaseID: "keep-me"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Fail only the directory; the temp file syncs fine, so the rename happens.
+	store.syncFile = func(f *os.File) error {
+		if f.Name() == dir {
+			return errors.New("directory on fire")
+		}
+		return f.Sync()
+	}
+	store.mu.Lock()
+	err = store.rewriteLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("rewriteLocked returned an error for a failed directory sync: %v", err)
+	}
+
+	live, err := store.Live()
+	if err != nil {
+		t.Fatalf("Live: %v", err)
+	}
+	if len(live) != 1 || live[0].LeaseID != "keep-me" {
+		t.Fatalf("Live() = %+v, want the one live lease", live)
+	}
+}

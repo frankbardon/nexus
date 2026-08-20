@@ -198,6 +198,16 @@ type fileLeaseStore struct {
 	// Append reports an error rather than panicking in either case.
 	f *os.File
 
+	// syncFile is the fsync seam: every durability barrier in this file goes
+	// through it, and it is (*os.File).Sync in production.
+	//
+	// It exists because host-crash durability cannot be proven in-process — no
+	// test can pull the power out from under a page cache — so the only honest
+	// assertion is that the barrier is REACHED. Tests swap this for a recorder
+	// and check which files were synced, and for a failing stub to prove the
+	// failure policy. Never nil: openFileLeaseStore always seeds it.
+	syncFile func(*os.File) error
+
 	// live is the folded state: lease id → most recent record, for leases that
 	// have not been released.
 	live map[string]LeaseRecord
@@ -312,6 +322,7 @@ func openFileLeaseStore(logger *slog.Logger, stateDir string) (*fileLeaseStore, 
 	s := &fileLeaseStore{
 		logger:     logger,
 		path:       filepath.Join(stateDir, leaseJournalName),
+		syncFile:   (*os.File).Sync,
 		live:       make(map[string]LeaseRecord),
 		tombstones: make(map[string]struct{}),
 	}
@@ -339,7 +350,22 @@ func openFileLeaseStore(logger *slog.Logger, stateDir string) (*fileLeaseStore, 
 	return s, nil
 }
 
-// Append writes one record and folds it into the live view.
+// Append writes one record, fsyncs it, and folds it into the live view.
+//
+// THE FSYNC IS UNCONDITIONAL, and that is a decision rather than an oversight.
+// A record left in the page cache survives `kill -9` — the process dies, the
+// kernel still owns the bytes — but it does not survive a power loss or a hard
+// reset, and the tail of the journal is exactly where the `lease-updated` record
+// carrying the pid lives. Losing that one record is the single case recovery
+// cannot repair: the next boot sees a lease with no pid, closes it out (see
+// recover.go's rec.PID <= 0 branch), and the still-running instance becomes the
+// orphan this journal exists to prevent.
+//
+// Syncing only the pid-bearing record was rejected. The volume is roughly three
+// records per lease lifetime — created, updated, released — so the saving would
+// be about two fsyncs per lease, while "which record matters" is a subtle
+// invariant sitting in a struct field, waiting for a future contributor to add a
+// fourth record kind and not know it belongs on the list.
 func (s *fileLeaseStore) Append(rec LeaseRecord) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -359,6 +385,13 @@ func (s *fileLeaseStore) Append(rec LeaseRecord) error {
 	if _, err := s.f.Write(line); err != nil {
 		return fmt.Errorf("appending lease record: %w", err)
 	}
+	// The record is in the file either way, so it is folded and counted even when
+	// the barrier fails: an fsync error means "this may not survive the host
+	// dying", not "this was never written". The error is carried to the end and
+	// returned so the caller logs it — Registry.appendRecord has no error return
+	// precisely so no claim or release can ever fail on it.
+	syncErr := s.syncFile(s.f)
+
 	s.foldLocked(rec)
 
 	s.sinceCompact++
@@ -370,6 +403,9 @@ func (s *fileLeaseStore) Append(rec LeaseRecord) error {
 			s.logger.Error("compacting lease journal failed; the journal will keep growing",
 				"path", s.path, "error", err)
 		}
+	}
+	if syncErr != nil {
+		return fmt.Errorf("syncing lease journal: %w", syncErr)
 	}
 	return nil
 }
@@ -452,6 +488,17 @@ func (s *fileLeaseStore) liveSortedLocked() []LeaseRecord {
 // leaves the previous journal intact rather than a half-written one: rename is
 // atomic within a directory, and the temp file is in the same directory for
 // exactly that reason.
+//
+// ATOMIC IS NOT THE SAME AS DURABLE, which is why there are two barriers here
+// and not none. Without them a host that dies just after the rename can come
+// back to a directory entry pointing at a file whose contents never left the
+// page cache — an EMPTY journal where the whole live set used to be, which is
+// strictly worse than the pre-rewrite file the atomicity was protecting. So:
+//
+//   - the temp file is fsynced BEFORE the rename, and a failure there aborts the
+//     rewrite with the old journal still in place — the safe state;
+//   - the DIRECTORY is fsynced after the rename, so the rename itself is on
+//     stable storage and cannot be replayed away.
 func (s *fileLeaseStore) rewriteLocked() error {
 	tmp := s.path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
@@ -474,6 +521,11 @@ func (s *fileLeaseStore) rewriteLocked() error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("writing lease journal temp file: %w", err)
 	}
+	if err := s.syncFile(f); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("syncing lease journal temp file: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("closing lease journal temp file: %w", err)
@@ -492,6 +544,15 @@ func (s *fileLeaseStore) rewriteLocked() error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replacing lease journal: %w", err)
 	}
+	// The rename has already happened and the new journal is on disk, so a
+	// directory that will not sync is LOGGED, not returned: the only thing at risk
+	// is the rename surviving a power loss, and the caller's two handlers for a
+	// rewrite error are "fail the boot" and "warn that the journal keeps growing",
+	// neither of which describes this.
+	if err := s.syncDirLocked(); err != nil {
+		s.logger.Warn("syncing the lease journal directory failed; the rewrite may not survive a host crash",
+			"path", s.path, "error", err)
+	}
 	if err := s.reopenLocked(); err != nil {
 		return err
 	}
@@ -499,6 +560,26 @@ func (s *fileLeaseStore) rewriteLocked() error {
 	// by a late record for one — the tombstones have done their job.
 	s.tombstones = make(map[string]struct{})
 	s.sinceCompact = 0
+	return nil
+}
+
+// syncDirLocked fsyncs the directory holding the journal. Caller MUST hold s.mu.
+//
+// Renaming a file changes the DIRECTORY, and a directory's own metadata is
+// cached like everything else — fsyncing the renamed file would not persist the
+// entry that points at it. This is the standard POSIX write-temp/rename/sync-dir
+// sequence, and the last step is the one that is easiest to leave out and
+// hardest to notice missing.
+func (s *fileLeaseStore) syncDirLocked() error {
+	dir, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return fmt.Errorf("opening lease journal directory: %w", err)
+	}
+	syncErr := s.syncFile(dir)
+	_ = dir.Close()
+	if syncErr != nil {
+		return fmt.Errorf("syncing lease journal directory: %w", syncErr)
+	}
 	return nil
 }
 

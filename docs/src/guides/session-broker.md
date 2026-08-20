@@ -512,6 +512,31 @@ live lease set rather than the whole history. A write that fails is logged and
 never fails the claim or release that produced it, and a record torn by a `kill
 -9` is skipped with a warning instead of failing the file.
 
+**The journal survives host death, not just process death.** Every append is
+`fsync`ed before it returns, and compaction's rewrite fsyncs the temp file before
+the rename and the directory after it, so a power loss or a hard reset cannot
+lose the tail of the journal or swap a full live set for an empty one. This
+matters because the tail is where the record carrying an instance's **pid**
+lives: lose it and the next boot sees a lease with no pid, closes it out, and the
+still-running instance becomes exactly the orphan the journal exists to prevent.
+
+The cost is negligible and was measured against the record volume, not guessed at:
+a lease writes roughly **three journal records over its whole lifetime** — minted,
+pid-and-session recorded, released — so a busy broker is paying single-digit
+fsyncs per lease, not per message or per turn. The barrier is unconditional
+rather than applied only to the pid-bearing record: the saving would be about two
+fsyncs per lease, and "which record matters" is a rule a later change can quietly
+break. An `fsync` that fails follows the same policy as a write that fails — it
+is logged, and it never fails the claim or the release that produced it.
+
+**The two auxiliary indexes are deliberately not fsynced.** `session-binaries.jsonl`
+and `a2a-contexts.jsonl` are best-effort by design: an unknown session or context
+means *no opinion, proceed*, so losing their tail to a host crash degrades to the
+behaviour those files were introduced to improve on, never to a wrong answer. The
+lease journal is the only one of the three whose worst case — an unaccounted-for
+running process — cannot be repaired after the fact, so it is the only one that
+pays for a barrier.
+
 Leave `state_dir` empty and the broker behaves exactly as it always has,
 logging one `WARN` at startup to say lease state is in-memory only. This is
 about **lease** bookkeeping, not sessions: an instance's session under

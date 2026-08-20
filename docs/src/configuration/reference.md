@@ -4048,9 +4048,23 @@ record each, via a temp file and an atomic rename — so a crash mid-compaction
 leaves the previous journal intact. At any moment the file holds at most
 (live leases + 512) records, however many leases have come and gone.
 
-**Failure handling.** A journal write that fails is **logged and otherwise
-ignored**: it never fails a claim or a release, because durability must not
-become a new way for the broker to refuse service. A record that was being
+**Durability.** Every append is `fsync`ed before it returns, and a compaction
+fsyncs the temp file **before** the rename and the containing **directory**
+after it. The journal therefore survives a power loss or a hard reset, not only
+`kill -9`: rename is atomic but not durable, and an unsynced tail is exactly
+where the record carrying an instance's `pid` lives — losing it would leave the
+next boot closing out a lease whose process is still running. The barrier is
+unconditional rather than restricted to the pid-bearing record; the cost is
+roughly **three fsyncs per lease lifetime** (minted, pid/session recorded,
+released), which is why singling out one record kind was not worth the invariant.
+The `session-binaries.jsonl` and `a2a-contexts.jsonl` indexes are **not** fsynced:
+both are best-effort, an unknown key means *no opinion, proceed*, and losing
+their tail degrades to the behaviour that predates them rather than to a wrong
+answer.
+
+**Failure handling.** A journal write **or fsync** that fails is **logged and
+otherwise ignored**: it never fails a claim or a release, because durability must
+not become a new way for the broker to refuse service. A record that was being
 written when the broker was killed leaves a torn final line; the reader **skips
 it with a warning** and keeps every complete record before it, and the
 rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
