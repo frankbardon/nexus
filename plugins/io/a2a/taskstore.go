@@ -31,7 +31,7 @@ import (
 // <session>/plugins/nexus.io.a2a/store.db — reached through
 // PluginContext.Storage(storage.ScopeSession). Session scope is the honest one:
 // a standalone listener serves exactly one Nexus session and binds exactly one
-// A2A context to it (see bindContextLocked), so the task set and the session
+// A2A context to it (see resolveContextLocked), so the task set and the session
 // have identical lifetimes, and archiving the session disposes of its tasks
 // without a second retention policy to keep in step. It is emphatically NOT a
 // bespoke file format: the engine already owns connection pooling, WAL mode,

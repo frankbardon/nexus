@@ -73,14 +73,34 @@ type turnInput struct {
 // write-only sink.
 func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts streamOptions) (*run, *stream, a2a.Task, *a2a.Error) {
 	p.mu.Lock()
-	if p.active != nil {
-		p.mu.Unlock()
-		return nil, nil, a2a.Task{}, errConcurrentTask()
-	}
-	contextID, protoErr := p.bindContextLocked(in.contextID)
+	// The two refusals below are checked in this order on purpose. Do not swap
+	// them.
+	//
+	// A request can be wrong in two independent ways: it can name a context this
+	// process does not serve, or it can arrive while a task is in flight. The
+	// context is resolved FIRST because that refusal describes the request
+	// itself, while the in-flight refusal describes the listener's momentary
+	// state. Checking the slot first told a client presenting a genuinely
+	// foreign contextId that a task was already in flight — a transient-sounding
+	// reason that invites a retry, for a mistake that is permanent: no amount of
+	// waiting makes this instance serve a second context, and the client has to
+	// dial a different instance (which is what the session broker automates).
+	// Resolving first means a refusal always names the client's actual mistake,
+	// and the in-flight refusal keeps the one meaning worth having: your context
+	// is right, come back when this turn is over.
+	//
+	// The binding is NOT committed here, only resolved — see
+	// resolveContextLocked. Committing it before the slot check would let a
+	// request that is about to be refused claim this process's context on its
+	// way out, which is the one outcome worse than the wrong error message.
+	contextID, protoErr := p.resolveContextLocked(in.contextID)
 	if protoErr != nil {
 		p.mu.Unlock()
 		return nil, nil, a2a.Task{}, protoErr
+	}
+	if p.active != nil {
+		p.mu.Unlock()
+		return nil, nil, a2a.Task{}, errConcurrentTask()
 	}
 	owner := p.tasks.For(caller)
 	var r *run
@@ -94,6 +114,12 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 		onTerminal: func() { p.endTurn(r) },
 	})
 	sub, opening := r.attach(opts)
+	// Both claims are committed together, at the one point where the turn is
+	// certain to start: this process takes the context and the slot in the same
+	// lock hold, so "bound to a context" and "has run at least one turn" cannot
+	// disagree. That keeps the invariant resolveContextLocked relies on — an
+	// unbound listener has no active run — true by construction.
+	p.contextID = contextID
 	p.active = r
 	p.mu.Unlock()
 
@@ -387,8 +413,16 @@ func canceledStatus(taskID, contextID, reason string) a2a.TaskStatus {
 		a2a.NewAgentMessage(newMessageID(), reason).InContext(contextID).ForTask(taskID))
 }
 
-// bindContextLocked resolves an A2A contextId to this listener's Nexus session.
-// The caller holds p.mu.
+// resolveContextLocked resolves an A2A contextId to this listener's Nexus
+// session, WITHOUT binding it. The caller holds p.mu.
+//
+// It is a pure read of p.contextID: it reports the context the turn would run
+// in, or the refusal that request has earned. startTurn commits the result by
+// assigning p.contextID at the same instant it takes the active-task slot, so a
+// request refused for any other reason — a task already in flight, most
+// obviously — leaves no binding behind. A refused request that had claimed the
+// context would have captured this process's only conversation for the life of
+// its session while getting an error for its trouble.
 //
 // THE MAPPING, and the constraint that shapes it:
 //
@@ -412,14 +446,16 @@ func canceledStatus(taskID, contextID, reason string) a2a.TaskStatus {
 //     bound context so the fix is obvious: dial a second instance (one process
 //     per context), which is exactly what the session broker exists to
 //     automate.
-func (p *Plugin) bindContextLocked(requested string) (string, *a2a.Error) {
+func (p *Plugin) resolveContextLocked(requested string) (string, *a2a.Error) {
 	requested = strings.TrimSpace(requested)
 	if p.contextID == "" {
+		// Nothing is bound yet, so whatever this request names is servable. A
+		// client that named none is assigned one; the assignment only becomes
+		// this process's context if the caller commits it.
 		if requested == "" {
-			requested = p.defaultContextID()
+			return p.defaultContextID(), nil
 		}
-		p.contextID = requested
-		return p.contextID, nil
+		return requested, nil
 	}
 	if requested == "" || requested == p.contextID {
 		return p.contextID, nil
@@ -852,7 +888,7 @@ func errConcurrentTask() *a2a.Error {
 }
 
 // errForeignContext refuses a contextId other than the one this process serves.
-// See bindContextLocked for the reasoning.
+// See resolveContextLocked for the reasoning.
 func errForeignContext(requested, bound string) *a2a.Error {
 	return a2a.Errorf(a2a.ErrorTypeUnsupportedOperation,
 		"context %q is not served by this agent: it is bound to context %q for the life of its Nexus session, so run one instance per context",

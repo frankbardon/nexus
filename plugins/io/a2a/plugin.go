@@ -19,10 +19,10 @@
 //
 // Inbound: a SendMessage or SendStreamingMessage becomes a Nexus io.input. The
 // message's text parts are the turn's prompt and its contextId selects the
-// session (see bindContextLocked). Each call creates exactly one Task, which is
-// one Nexus agent turn: created SUBMITTED, moved to WORKING when the agent turn
-// starts, and ended COMPLETED at agent.turn.end — or FAILED when the turn dies
-// with an error nobody will retry.
+// session (see resolveContextLocked). Each call creates exactly one Task, which
+// is one Nexus agent turn: created SUBMITTED, moved to WORKING when the agent
+// turn starts, and ended COMPLETED at agent.turn.end — or FAILED when the turn
+// dies with an error nobody will retry.
 //
 // Outbound: the plugin subscribes to the bus events that describe a turn and
 // translates them into A2A stream frames. SendStreamingMessage writes them as
@@ -209,8 +209,9 @@ type Plugin struct {
 	// active is the single in-flight task. At most one runs at a time: the
 	// listener fronts one agent loop, and two turns would interleave on the bus.
 	active *run
-	// contextID is the A2A context this process is bound to, claimed by the
-	// first turn. See bindContextLocked.
+	// contextID is the A2A context this process is bound to. The first turn to
+	// be ACCEPTED claims it, in the same lock hold that takes active — a
+	// refused request never binds. See resolveContextLocked and startTurn.
 	contextID string
 
 	unsubs []func()
