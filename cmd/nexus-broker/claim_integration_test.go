@@ -159,7 +159,8 @@ func TestReleaseGracefulShutdown(t *testing.T) {
 func TestReleaseForceKillsStubbornInstance(t *testing.T) {
 	t.Setenv("STUB_IGNORE_SHUTDOWN", "1")
 	stubBin := buildStubInstance(t)
-	base, reg := startStubBrokerWithRegistry(t, stubBin, withReleaseGrace(150*time.Millisecond))
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withReleaseGrace(150*time.Millisecond), withInheritEnv("STUB_IGNORE_SHUTDOWN"))
 
 	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
 	if cr.LeaseID == "" {
@@ -197,7 +198,7 @@ func TestCrashDetectionFreesSlotAndClosesClient(t *testing.T) {
 	// frame crashes — so the sibling lease stays alive.
 	t.Setenv("STUB_CRASH_AFTER_READY", "1")
 	stubBin := buildStubInstance(t)
-	base, reg := startStubBrokerWithRegistry(t, stubBin)
+	base, reg := startStubBrokerWithRegistry(t, stubBin, withInheritEnv("STUB_CRASH_AFTER_READY"))
 
 	crashCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
 	keepCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
@@ -1584,7 +1585,7 @@ func TestBrokerRestartReattachesLiveInstance(t *testing.T) {
 
 	// --- broker #1: claim an instance -------------------------------------
 	first := startStubBrokerHandle(t, stubBin,
-		withStateDir(stateDir), withListenAddr(addr))
+		withStateDir(stateDir), withListenAddr(addr), withInheritEnv("STUB_RECONNECT"))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
 	if cr.LeaseID == "" {
 		t.Fatalf("incomplete claim response: %+v", cr)
@@ -1699,6 +1700,9 @@ func TestBrokerRestartReapsUnreattachedLease(t *testing.T) {
 	stateDir := t.TempDir()
 	addr := freeAddr(t)
 
+	// No withInheritEnv here on purpose: this test's stub must NOT reconnect, so
+	// it must not carry STUB_RECONNECT even if some other test's environment is
+	// still around.
 	first := startStubBrokerHandle(t, stubBin,
 		withStateDir(stateDir), withListenAddr(addr))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
@@ -1743,13 +1747,15 @@ func TestRestoredLeaseRefusesAWrongSecretEndToEnd(t *testing.T) {
 	stateDir := t.TempDir()
 	addr := freeAddr(t)
 
-	first := startStubBrokerHandle(t, stubBin, withStateDir(stateDir), withListenAddr(addr))
+	first := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr), withInheritEnv("STUB_RECONNECT"))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
 	killInstanceOnCleanup(t, first.registry.PID(cr.LeaseID))
 	first.stop()
 
 	second := startStubBrokerHandle(t, stubBin,
-		withStateDir(stateDir), withListenAddr(addr), withReattachWindow(30*time.Second))
+		withStateDir(stateDir), withListenAddr(addr), withReattachWindow(30*time.Second),
+		withInheritEnv("STUB_RECONNECT"))
 	if len(second.restored) != 1 {
 		t.Fatalf("restored = %v, want the claimed lease", second.restored)
 	}
@@ -1889,6 +1895,37 @@ func TestClaimEntryArgsAndEnvReachTheSpawnedInstance(t *testing.T) {
 		if got := report.Env[key]; got != want {
 			t.Errorf("instance env[%s] = %q, want %q; reported env: %v", key, got, want, report.Env)
 		}
+	}
+}
+
+// TestClaimInstanceCarriesOnlyDeclaredEnv is the end-to-end form of the
+// boundary this broker enforces: a variable the broker process holds but no
+// operator declared must not be in a claimed instance's environment.
+//
+// It asks the RUNNING child what it was handed rather than inspecting an
+// *exec.Cmd, because the leak this closes is only interesting at the far end: a
+// claim supplies the whole engine config, every provider resolves its credential
+// from an env var that config NAMES, and the same config chooses base_url — so
+// anything the child holds is both readable and postable by whoever claimed the
+// lease.
+func TestClaimInstanceCarriesOnlyDeclaredEnv(t *testing.T) {
+	// Both are set in the BROKER's environment. Only one is declared.
+	t.Setenv(stubcore.EnvReportPrefix+"DECLARED", "reaches-the-instance")
+	t.Setenv(stubcore.EnvReportPrefix+"UNDECLARED", "must-not-reach-the-instance")
+
+	stubBin := buildStubInstance(t)
+	base, _ := startStubBrokerWithRegistry(t, stubBin,
+		withInheritEnv(stubcore.EnvReportPrefix+"DECLARED"))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	report := stubReport(t, cr)
+
+	if got, want := report.Env[stubcore.EnvReportPrefix+"DECLARED"], "reaches-the-instance"; got != want {
+		t.Errorf("declared variable = %q, want %q; inherit_env did not forward it", got, want)
+	}
+	if got, ok := report.Env[stubcore.EnvReportPrefix+"UNDECLARED"]; ok {
+		t.Errorf("the instance carries undeclared %sUNDECLARED=%q; the broker's environment leaked into a claimed instance",
+			stubcore.EnvReportPrefix, got)
 	}
 }
 
@@ -2075,6 +2112,19 @@ func withAgents(agents map[string]AgentProfile) stubBrokerOption {
 // case the deprecated-alias test needs.
 func withBinaries(binaries map[string]BinaryEntry) stubBrokerOption {
 	return func(w *brokerWiring) { w.cfg.Binaries = binaries }
+}
+
+// withInheritEnv declares which of the TEST PROCESS's own variables a stub
+// broker's spawns may inherit. A spawned instance no longer takes os.Environ()
+// wholesale, so a test that flips a stub behaviour switch with t.Setenv has to
+// say so here or the child will never see it.
+//
+// It is the one option that exists because of a production behaviour rather than
+// a test convenience: forgetting it reproduces exactly the failure an operator
+// gets after this change — a variable that is plainly set in the parent and
+// plainly absent in the child.
+func withInheritEnv(names ...string) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.InheritEnv = names }
 }
 
 // resolvedBinaryEntry builds a registry entry that is ready to spawn.
@@ -2281,7 +2331,7 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	// configured, so a restarted broker can recompute what a surviving instance
 	// still holds. Nil key = random per spawn, the pre-existing behaviour.
 	claims.useSpawnKey(spawnSecretKey)
-	claims.readyTimeout = 15 * time.Second
+	setClaimBounds(claims, func(c *Config) { c.ReadyTimeout = 15 * time.Second })
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 	ticketsServer := NewTicketServer(logger, registry, tickets)
@@ -2344,7 +2394,7 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 
 	// Arm the idle sweeper exactly as main.go does when an idle timeout is set.
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
-	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
 	go sweeper.Run(sweepCtx)
 	// And the reattach reaper, which bounds how long the leases recovery just
 	// restored may wait for their instances.

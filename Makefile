@@ -1,4 +1,4 @@
-.PHONY: build build-broker run clean test test-broker-integration fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
+.PHONY: build build-broker run clean test test-race test-broker-integration fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events
 
 BINARY_NAME=nexus
 BROKER_BINARY_NAME=nexus-broker
@@ -36,6 +36,17 @@ clean:
 
 test:
 	$(GO) test ./...
+
+# Repo-wide race-detector sweep. Run by the `race` job in
+# .github/workflows/ci.yml via this exact target, so local and CI cannot drift —
+# change the command here and CI changes with it.
+#
+# CGO_ENABLED=1 is a deliberate, target-local override of the file-level
+# CGO_ENABLED=0 above: on linux/amd64 (the CI runner) `go build -race` fails
+# outright with "-race requires cgo". Nothing in the build graph needs more than
+# libc headers under cgo, so no extra runner packages are required.
+test-race:
+	CGO_ENABLED=1 $(GO) test -race ./...
 
 # Broker integration suite. cmd/nexus-broker/claim_integration_test.go is
 # //go:build integration, so `make test` (plain `go test ./...`, no tags) never

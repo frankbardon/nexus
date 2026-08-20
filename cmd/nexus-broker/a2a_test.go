@@ -210,7 +210,7 @@ func TestA2AImplementedOperationsAndCardAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2AServer: %v", err)
 	}
-	card := agents.cards["support"].card
+	card := agents.card("support").card
 
 	// streaming is true because BOTH streaming operations are dispatched: a turn
 	// can be streamed as it runs, and an existing task can be subscribed to.

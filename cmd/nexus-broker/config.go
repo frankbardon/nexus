@@ -8,8 +8,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,8 +28,15 @@ import (
 // of nexus variants this broker may spawn, superseding the deprecated
 // nexus_binary_path), advertise_addr (client-reachable address),
 // max_concurrent (capacity cap),
-// idle_timeout (idle reaping), release_grace (graceful-shutdown grace),
-// queue_wait_timeout (FIFO capacity wait), auth (client authentication), and
+// client_replay_buffer_bytes (per-lease client-bound replay retention),
+// idle_timeout (idle reaping), max_turn_duration (in-flight turn bound),
+// release_grace (graceful-shutdown grace),
+// queue_wait_timeout (FIFO capacity wait), max_queue_depth (queue ceiling),
+// max_leases_per_principal / max_queued_per_principal (per-tenant admission
+// caps), ready_timeout (instance boot ceiling),
+// session_report_grace (post-ready session-id wait),
+// max_claim_body (claim request body ceiling),
+// auth (client authentication), and
 // agents (the named A2A profiles this broker publishes).
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
@@ -89,6 +99,41 @@ type Config struct {
 	// existing client ends up spawning.
 	Binaries map[string]BinaryEntry `yaml:"binaries"`
 
+	// InheritEnv names the variables a spawned instance inherits from the
+	// BROKER'S OWN environment, on top of the always-pass set (HOME, LANG, PATH,
+	// TZ — see alwaysInheritedEnv) and the three broker-owned NEXUS_BROKER_*
+	// variables. Names only: a value is whatever the broker process holds, so
+	// this key declares what may cross the boundary, never what it is.
+	//
+	// Empty (the default) means an instance carries the always-pass set, its
+	// entry's `env:`, and nothing else. That is a DELIBERATE BREAK with the
+	// behaviour that preceded it, where a spawn simply took os.Environ(): a claim
+	// supplies the whole engine config, every provider resolves its credential
+	// from an env var that config NAMES (`api_key_env` and equivalents) and the
+	// same config sets `base_url` — so wholesale inheritance let any caller read
+	// any variable the broker held and post it wherever it liked. An allowlist of
+	// known provider key names could not have closed that, because the caller
+	// chooses the name; only reducing the environment to what the operator
+	// declared bounds it.
+	//
+	// It is broker-level rather than per-entry because it answers a question
+	// about the BROKER'S environment ("which of the things I was started with may
+	// leave this process"), which does not vary by which variant is spawned. A
+	// value that IS per-variant belongs in that entry's `env:`, which sets it
+	// outright instead of forwarding it.
+	InheritEnv []string `yaml:"inherit_env"`
+
+	// RunAs is the DEFAULT OS credential spawned instances run under, for every
+	// registry entry that does not declare its own. Absent (the default) means
+	// instances run as the broker's own uid and gid, exactly as they always have.
+	//
+	// It is the fallback rather than the whole answer because the interesting
+	// separation is between VARIANTS: a broker fronting a vision build and a
+	// support agent wants those two apart from each other, not merely apart from
+	// the host. An entry that declares `run_as` replaces this outright; see
+	// BinaryEntry.RunAs and foldRunAs.
+	RunAs *RunAsSpec `yaml:"run_as"`
+
 	// Warnings are non-fatal configuration complaints collected during the load
 	// — deprecated keys, folded aliases — for the caller to log.
 	//
@@ -131,14 +176,94 @@ type Config struct {
 	// capacity story.
 	MaxConcurrent int `yaml:"max_concurrent"`
 
-	// IdleTimeout is how long an idle instance survives before teardown.
-	// Placeholder for the lifecycle story.
+	// ClientReplayBuffer is the raw `client_replay_buffer_bytes` key: how many
+	// bytes of already-sent, client-bound frames each lease retains so a client
+	// that missed them can be replayed.
+	//
+	// It is a POINTER so "not written" and "written as 0" stay distinguishable.
+	// Absent takes defaultClientReplayBufferBytes; an explicit 0 DISABLES
+	// retention while leaving sequencing intact, which is the supported way to
+	// say "I want loss to be detectable but I will not pay memory for it"; a
+	// negative value is a boot failure rather than a silent clamp, because it has
+	// no reading a broker could act on.
+	//
+	// The bound is in BYTES rather than frames deliberately: client-bound
+	// payloads run from a few-byte token delta to a hundred-kilobyte tool result,
+	// so a frame count says nothing about how much memory a lease can pin. Use
+	// ClientReplayBufferBytes, not this field — this one is the unresolved input.
+	ClientReplayBuffer *int `yaml:"client_replay_buffer_bytes"`
+
+	// ClientReplayBufferBytes is the RESOLVED per-lease replay bound. It is not a
+	// YAML key: LoadConfigFromBytes folds ClientReplayBuffer onto the default so
+	// every reader sees one settled number.
+	//
+	// Worst-case broker-wide retention is this value times MaxConcurrent.
+	ClientReplayBufferBytes int `yaml:"-"`
+
+	// IdleTimeout is how long a lease with NO turn in flight survives with no
+	// client activity before the idle sweeper tears it down. A non-positive value
+	// disables reaping entirely.
+	//
+	// It measures the HUMAN PAUSE, not the turn: a lease whose instance has
+	// reported that it is working is exempt until its turn settles (see
+	// MaxTurnDuration), so this can be set to the longest pause a session should
+	// survive rather than to the longest turn an agent might take.
 	IdleTimeout time.Duration `yaml:"idle_timeout"`
+
+	// MaxTurnDuration bounds how long a single in-flight turn may exempt its
+	// lease from IdleTimeout before the sweeper tears the lease down anyway, with
+	// reasonTurnTimeout rather than reasonIdle.
+	//
+	// It exists because the idle exemption is otherwise unbounded: an instance
+	// that wedges mid-turn, or whose tool never returns, never reports the idle
+	// state that settles the turn, and would hold its lease and its capacity slot
+	// for the lifetime of the broker.
+	//
+	// A non-positive value DISABLES the bound, restoring that unbounded
+	// exemption; the default is defaultMaxTurnDuration. It is enforced by the
+	// idle sweeper, so it is inert when IdleTimeout <= 0 has switched reaping off
+	// altogether.
+	MaxTurnDuration time.Duration `yaml:"max_turn_duration"`
 
 	// QueueWaitTimeout is how long an over-capacity claim parks in the FIFO
 	// capacity wait queue before returning a timeout error. A non-positive value
 	// disables waiting: an at-capacity claim is rejected immediately.
 	QueueWaitTimeout time.Duration `yaml:"queue_wait_timeout"`
+
+	// MaxQueueDepth caps how many over-capacity claims may be parked in the FIFO
+	// wait queue at once. A claim arriving past it is refused IMMEDIATELY, with a
+	// message distinct from both other capacity refusals.
+	//
+	// It exists because MaxConcurrent bounds live instances and nothing bounded
+	// the waiters behind them: every parked claim costs a goroutine, a timer and
+	// an open connection for up to QueueWaitTimeout, so an over-capacity broker
+	// otherwise accumulates all three without limit.
+	//
+	// A non-positive value means UNLIMITED, the same reading MaxConcurrent gives
+	// the same shape.
+	MaxQueueDepth int `yaml:"max_queue_depth"`
+
+	// MaxLeasesPerPrincipal caps how many live leases ONE authenticated principal
+	// may hold at once. Non-positive (the default) means no per-principal cap.
+	//
+	// It is enforced ONLY when authentication is configured, and never for the
+	// anonymous principal. With no `auth:` block every lease is owned by the same
+	// anonymous identity, so applying it there would count the whole broker
+	// against one principal and silently become a second, lower MaxConcurrent —
+	// see Registry.principalCaps.
+	MaxLeasesPerPrincipal int `yaml:"max_leases_per_principal"`
+
+	// MaxQueuedPerPrincipal caps how many claims ONE authenticated principal may
+	// have parked in the FIFO capacity queue at once. Non-positive (the default)
+	// means no per-principal cap.
+	//
+	// It is what stops a single caller looping on POST /claim from occupying the
+	// whole queue and timing every other tenant's claim out behind it. Queue
+	// ordering itself stays strictly FIFO — this bounds how much of the queue one
+	// caller may hold, it does not reorder it.
+	//
+	// Gated on authentication exactly as MaxLeasesPerPrincipal is.
+	MaxQueuedPerPrincipal int `yaml:"max_queued_per_principal"`
 
 	// ReleaseGrace bounds how long a release (manual, idle, or crash teardown)
 	// waits for an instance to shut its engine down cleanly before the broker
@@ -161,6 +286,43 @@ type Config struct {
 	// exists to bound. Irrelevant while state_dir is unset, since nothing is then
 	// restored.
 	ReattachWindow time.Duration `yaml:"reattach_window"`
+
+	// ReadyTimeout, SessionReportGrace and MaxClaimBody are the three bounds
+	// POST /claim enforces on its own path, resolved from the raw nodes below.
+	// They are not YAML keys themselves: the raw form is a yaml.Node so that a
+	// value which cannot be decoded is reported against the KEY an operator
+	// wrote rather than against the Go type it failed to become — see
+	// resolveClaimLimits.
+	//
+	// ReadyTimeout is the ceiling on instance boot: how long a claim waits for a
+	// freshly spawned instance to dial back and signal ready before giving up,
+	// killing it and answering 504. It is the value most likely to need tuning,
+	// because it has to cover every plugin's Init and Ready.
+	//
+	// SessionReportGrace is how long the claim then waits for the instance's
+	// session-id report. Exceeding it is not an error: the claim still succeeds,
+	// just without a session id in the response.
+	//
+	// MaxClaimBody caps the claim request body in bytes. A claim carries the
+	// whole nexus config inline, so it is the config size an operator is
+	// bounding, not a protocol constant.
+	//
+	// All three are POSITIVE-ONLY. There is no disabled reading for any of them —
+	// a zero ready timeout fails every claim, a zero body cap rejects every claim,
+	// and a zero grace makes a fresh session's id unreportable — so a
+	// non-positive value fails the boot naming the key rather than being taken
+	// literally. See resolveClaimLimits.
+	ReadyTimeout       time.Duration `yaml:"-"`
+	SessionReportGrace time.Duration `yaml:"-"`
+	MaxClaimBody       int64         `yaml:"-"`
+
+	// RawReadyTimeout, RawSessionReportGrace and RawMaxClaimBody are the
+	// undecoded `ready_timeout`, `session_report_grace` and `max_claim_body`
+	// nodes. A zero Node means the key was absent, which is how the default
+	// survives; see resolveClaimLimits, which is the only reader.
+	RawReadyTimeout       yaml.Node `yaml:"ready_timeout"`
+	RawSessionReportGrace yaml.Node `yaml:"session_report_grace"`
+	RawMaxClaimBody       yaml.Node `yaml:"max_claim_body"`
 
 	// Auth is the raw `auth:` block, handed to pkg/nexusauth verbatim. It is
 	// kept as a map rather than a typed struct because nexusauth owns the
@@ -348,6 +510,22 @@ type BinaryEntry struct {
 	// or hand it the wrong lease, so the broker's values always win.
 	Env map[string]string `yaml:"env"`
 
+	// RunAs is the OS credential this entry's instances are exec()d under. Absent
+	// (the default) means the broker's own uid and gid, which is what every spawn
+	// has always used.
+	//
+	// It is per ENTRY, with the broker-level `run_as` as the fallback, for the
+	// same reason `env` is per entry: an operator who fronts a vision build and a
+	// support agent from one broker wants them separated from EACH OTHER, not
+	// merely from the host. An entry that declares the key REPLACES the broker
+	// default outright rather than merging field by field — a uid taken from one
+	// place and a gid from another is a credential nobody wrote down.
+	//
+	// After LoadConfigFromBytes this holds the EFFECTIVE credential (the entry's
+	// own, or the folded broker default), so nothing downstream has to know which
+	// of the two it came from — see foldRunAs.
+	RunAs *RunAsSpec `yaml:"run_as"`
+
 	// ResolvedPath is the ABSOLUTE, verified executable this entry spawns: Path
 	// after tilde expansion, after a PATH lookup if Path was a bare name, and
 	// after a stat that confirmed a regular file with an execute bit.
@@ -362,6 +540,226 @@ type BinaryEntry struct {
 	// Empty after LoadConfigFromBytes alone, which parses but deliberately does
 	// not touch the filesystem — see LoadConfig.
 	ResolvedPath string `yaml:"-"`
+}
+
+// RunAsSpec is the OS credential a spawned instance runs under: the uid and gid
+// the broker sets on the child before exec.
+//
+// # Why the broker offers this at all
+//
+// Without it every instance runs as the BROKER'S uid with the broker's HOME, so
+// the process boundary between two claims is not a privilege boundary: one
+// tenant's instance can read every other tenant's session directory under
+// ~/.nexus/sessions, and it can read <state_dir>/spawn-key — which is enough to
+// derive any live lease's dial-back secret and impersonate its instance. Dropping
+// to a different uid is what turns "a separate process" into "a separate
+// principal".
+//
+// Both fields are pointers so "not written" is distinguishable from "written as
+// 0": uid 0 is root, and defaulting an unwritten uid to it would be the worst
+// possible reading of a half-filled block.
+type RunAsSpec struct {
+	// UID is the numeric user id the instance runs as. Numeric rather than a
+	// name: resolving a name needs the passwd database, which is exactly the
+	// thing a hardened deployment may not have inside the container the broker
+	// runs in, and a name that resolves differently on two hosts is a silent
+	// privilege change.
+	UID *int `yaml:"uid"`
+
+	// GID is the numeric group id the instance runs as. Required whenever UID is
+	// set — see validateRunAs.
+	GID *int `yaml:"gid"`
+
+	// ResolvedHome is the HOME a spawn under this credential is given, and it is
+	// not a YAML key: LoadConfig derives it from the run_as user's passwd entry,
+	// following the ResolvedPath precedent.
+	//
+	// It exists because run_as without a HOME story is broken on arrival. HOME is
+	// what resolves ~/.nexus (pkg/engine/paths.go), so an instance dropped to
+	// another uid while still pointed at the BROKER'S home directory cannot write
+	// its own session directory, and every claim fails at the first write. HOME
+	// therefore follows the credential.
+	//
+	// Empty means the entry's `env` already sets HOME — the operator-set data dir
+	// — in which case nothing is looked up and that value stands. It is also empty
+	// after LoadConfigFromBytes alone, which touches no filesystem and reads no
+	// passwd database.
+	ResolvedHome string `yaml:"-"`
+}
+
+// keyRunAs is the config key, named in every error validateRunAs produces so an
+// operator can grep for it.
+const keyRunAs = "run_as"
+
+// maxUnixID is the largest value a uid or gid can carry over to
+// syscall.Credential, whose fields are uint32. Rejecting out-of-range values at
+// load rather than truncating them in the spawn path is the difference between a
+// boot failure naming the entry and an instance quietly running as a uid the
+// operator never wrote.
+// Typed as int64 so the bound is the same on a 32-bit build, where a plain int
+// cannot hold it.
+const maxUnixID int64 = 1<<32 - 1
+
+// validateRunAs checks one declared `run_as` block. scope is the key path the
+// errors are reported under ("run_as", or "binaries: vision: run_as"), so a
+// broker-level mistake and a per-entry one each name the place they were written.
+//
+// A nil spec is the key being absent, which is always valid: run_as is opt-in and
+// its absence must leave a spawn byte-identical to what it was before the key
+// existed.
+//
+// Requiring BOTH fields whenever either is written is deliberate. A uid without a
+// gid leaves the instance in the broker's primary group, so its files stay
+// group-accessible to the broker's other instances — a boundary that looks
+// complete in the config and is not. There is no reading of a half-written block
+// that is safer than refusing it.
+func validateRunAs(scope string, spec *RunAsSpec) error {
+	if spec == nil {
+		return nil
+	}
+	switch {
+	case spec.UID == nil && spec.GID == nil:
+		return fmt.Errorf("%s: declares neither uid nor gid; remove the block to run instances as the broker's own user, or set both", scope)
+	case spec.UID == nil:
+		return fmt.Errorf("%s: gid is set but uid is not; set both, because a group change alone leaves instances running as the broker's user", scope)
+	case spec.GID == nil:
+		return fmt.Errorf("%s: uid is set but gid is not; set both, because a uid change alone leaves instances in the broker's primary group and their session files reachable from it", scope)
+	}
+	if err := validateUnixID(scope, "uid", *spec.UID); err != nil {
+		return err
+	}
+	return validateUnixID(scope, "gid", *spec.GID)
+}
+
+// validateUnixID rejects an id the kernel cannot represent. Negative is the
+// realistic mistake (a YAML `-1`, or a placeholder nobody filled in); the upper
+// bound exists because the value is carried in a uint32 and a silent wrap would
+// spawn instances as an arbitrary user.
+func validateUnixID(scope, field string, id int) error {
+	if id < 0 || int64(id) > maxUnixID {
+		return fmt.Errorf("%s.%s: %d is not a valid unix id; it must be between 0 and %d", scope, field, id, maxUnixID)
+	}
+	return nil
+}
+
+// foldRunAs validates the broker-level `run_as` default and every entry's own,
+// then folds the default into the entries that declared none — so after this
+// every entry carries the EFFECTIVE credential and the spawn path never has to
+// consult two places.
+//
+// The default is folded rather than consulted at spawn time for the reason
+// foldBinaryRegistry folds the deprecated alias: one resolved answer per entry,
+// decided once at boot, is what makes the boot log able to state what each entry
+// will actually do.
+//
+// Each entry gets a COPY of the default, not a pointer to it, because
+// resolveRunAsHomes writes a per-entry answer onto it — an entry whose `env`
+// already sets HOME resolves nothing, and sharing one struct would let that
+// entry's outcome depend on which other entry was walked first.
+func foldRunAs(binaries map[string]BinaryEntry, brokerDefault *RunAsSpec) error {
+	if err := validateRunAs(keyRunAs, brokerDefault); err != nil {
+		return err
+	}
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		if err := validateRunAs(fmt.Sprintf("binaries: %s: %s", name, keyRunAs), entry.RunAs); err != nil {
+			return err
+		}
+		effective := entry.RunAs
+		if effective == nil {
+			effective = brokerDefault
+		}
+		if effective == nil {
+			continue
+		}
+		spec := *effective
+		entry.RunAs = &spec
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// envHomeKey is the environment variable HOME, spelled once so the passwd lookup
+// and the spawn path agree on what an entry's `env` has to name to opt out of it.
+const envHomeKey = "HOME"
+
+// resolveRunAsHomes fills in ResolvedHome for every entry that runs under a
+// run_as credential, from the passwd database, and refuses the boot when it
+// cannot.
+//
+// This is the environmental half of the key and therefore lives in LoadConfig
+// beside resolveBinaryRegistry, not in the pure parser: the same bytes
+// legitimately resolve differently on two hosts.
+//
+// # Why HOME follows the credential
+//
+// HOME is what resolves ~/.nexus (pkg/engine/paths.go). An instance dropped to
+// another uid while still holding the BROKER'S HOME cannot create
+// ~/.nexus/sessions/<id>, so the claim fails at the first write — and if it
+// could write there, the isolation the key was configured for would be undone
+// by every instance sharing one session tree anyway.
+//
+// Sessions are therefore consistent PER REGISTRY ENTRY, which is the granularity
+// the rest of the broker already binds them at: a session records the entry that
+// created it and a resume under a different entry is refused with a 409 (see
+// resolveSpawnBinary), so a session can never be replayed under an entry whose
+// HOME would not contain it.
+//
+// An entry whose `env` already sets HOME is left alone. That is the escape hatch
+// for a deployment that keeps instance state somewhere other than a home
+// directory — a data dir under /var/lib, say — and it is why a uid with no passwd
+// entry is a boot failure that names the alternative rather than a fatal dead end.
+func resolveRunAsHomes(binaries map[string]BinaryEntry) error {
+	for _, name := range sortedBinaryNames(binaries) {
+		entry := binaries[name]
+		if entry.RunAs == nil || entry.RunAs.UID == nil {
+			continue
+		}
+		if _, ok := entry.Env[envHomeKey]; ok {
+			continue
+		}
+		uid := *entry.RunAs.UID
+		home, err := runAsHomeDir(uid)
+		if err != nil {
+			return fmt.Errorf("binaries: %s: %s.uid %d: %w; set binaries.%s.env.%s to the directory that user's instances should keep their sessions in",
+				name, keyRunAs, uid, err, name, envHomeKey)
+		}
+		entry.RunAs.ResolvedHome = home
+		binaries[name] = entry
+	}
+	return nil
+}
+
+// runAsHomeDir returns the home directory recorded for a uid.
+//
+// A relative home is refused rather than used: HOME is resolved by the INSTANCE,
+// whose working directory the broker does not control, so a relative value would
+// place one entry's sessions in different directories depending on how the broker
+// happened to be started.
+func runAsHomeDir(uid int) (string, error) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return "", fmt.Errorf("no home directory could be resolved for that user: %w", err)
+	}
+	home := strings.TrimSpace(u.HomeDir)
+	if home == "" {
+		return "", fmt.Errorf("that user has no home directory recorded")
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("that user's home directory %q is not absolute", home)
+	}
+	return home, nil
+}
+
+// registryUsesRunAs reports whether any entry spawns under a credential other
+// than the broker's own. It exists for the boot WARN — see logBinaryRegistry.
+func registryUsesRunAs(binaries map[string]BinaryEntry) bool {
+	for _, entry := range binaries {
+		if entry.RunAs != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedBinaryName is the registry entry that must exist after every load. It
@@ -451,6 +849,58 @@ func foldBinaryRegistry(declared map[string]BinaryEntry, alias *string) (map[str
 	}
 
 	return out, warnings, nil
+}
+
+// keyInheritEnv is the broker-level pass-through key, named in the errors
+// resolveInheritEnv produces so an operator can grep for it.
+const keyInheritEnv = "inherit_env"
+
+// resolveInheritEnv validates the declared `inherit_env` list and returns it
+// trimmed, de-duplicated and sorted.
+//
+// Sorted rather than as-written because the list decides a spawned process's
+// environment, and that environment is already built in sorted order so a boot is
+// reproducible (see sortedEnvKeys); an order-sensitive list would be the only
+// thing in the spawn path that was not.
+//
+// The three rejections are all "this entry can never do what it looks like it
+// does", which is exactly what a boot failure is for:
+//
+//   - An empty entry names no variable. It is almost always a stray `-` or a
+//     trailing comma in the YAML, and silently dropping it would hide the typo
+//     next to it.
+//   - A name containing `=` is not a variable name; an operator who wrote
+//     `FOO=bar` here meant an entry's `env:` map, which SETS a value, and saying
+//     so is more useful than exporting a variable literally called "FOO=bar".
+//   - A NEXUS_BROKER_* name is meaningless: buildCommand injects those three
+//     last, so declaring one changes nothing at all. Accepting it would leave an
+//     operator believing they had configured the dial-back.
+func resolveInheritEnv(declared []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(declared))
+	// nil, not an empty slice: an undeclared list must stay indistinguishable from
+	// DefaultConfig's zero value, which the defaults test compares structurally.
+	var out []string
+	for _, raw := range declared {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("%s: an entry is empty; every entry must name a variable to inherit from the broker's own environment", keyInheritEnv)
+		}
+		if strings.Contains(name, "=") {
+			return nil, fmt.Errorf("%s: %q is a name=value pair, not a variable name; %s forwards a variable the broker already holds, and binaries.<name>.env is where a value is set",
+				keyInheritEnv, name, keyInheritEnv)
+		}
+		if slices.Contains(brokerOwnedEnv, name) {
+			return nil, fmt.Errorf("%s: %s is set by the broker on every spawn and cannot be inherited; remove it",
+				keyInheritEnv, name)
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // sortedBinaryNames returns a registry map's keys in a stable order.
@@ -613,6 +1063,17 @@ const keyAdminScope = "admin_scope"
 // overrides it with `auth.admin_scope`.
 const defaultAdminScope = "nexus.broker.admin"
 
+// defaultMaxQueueDepth is the ceiling on parked capacity waiters a broker takes
+// when `max_queue_depth` is not written. It is 8x the default max_concurrent:
+// generous enough that a burst of legitimate claims still queues rather than
+// being refused, small enough that an over-capacity broker cannot accumulate
+// goroutines, timers and held-open connections without limit.
+//
+// The per-principal caps have no default — they are off unless configured — for
+// a different reason: a queue bound is a resource fact every broker wants, while
+// a per-tenant quota is a policy only the operator can size.
+const defaultMaxQueueDepth = 64
+
 // DefaultConfig returns a Config populated with sane defaults. LoadConfig and
 // LoadConfigFromBytes merge YAML on top of these.
 //
@@ -622,15 +1083,21 @@ const defaultAdminScope = "nexus.broker.admin"
 // only ever takes effect once auth IS configured.
 func DefaultConfig() Config {
 	return Config{
-		ListenAddr:       ":8080",
-		NexusBinaryPath:  defaultNexusBinaryPath,
-		MaxConcurrent:    8,
-		IdleTimeout:      5 * time.Minute,
-		QueueWaitTimeout: 30 * time.Second,
-		ReleaseGrace:     defaultReleaseGrace,
-		ReattachWindow:   defaultReattachWindow,
-		AdminScope:       defaultAdminScope,
-		AuthChain:        nexusauth.NewChain(),
+		ListenAddr:              ":8080",
+		NexusBinaryPath:         defaultNexusBinaryPath,
+		MaxConcurrent:           8,
+		ClientReplayBufferBytes: defaultClientReplayBufferBytes,
+		IdleTimeout:             5 * time.Minute,
+		MaxTurnDuration:         defaultMaxTurnDuration,
+		QueueWaitTimeout:        30 * time.Second,
+		MaxQueueDepth:           defaultMaxQueueDepth,
+		ReleaseGrace:            defaultReleaseGrace,
+		ReattachWindow:          defaultReattachWindow,
+		ReadyTimeout:            defaultReadyTimeout,
+		SessionReportGrace:      defaultSessionReportGrace,
+		MaxClaimBody:            defaultMaxClaimBody,
+		AdminScope:              defaultAdminScope,
+		AuthChain:               nexusauth.NewChain(),
 		A2ATaskRetention: a2aTaskRetention{
 			ttl:           defaultA2ATaskTTL,
 			maxPerContext: defaultA2ATasksPerContext,
@@ -665,6 +1132,13 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	// Same split, one step later: which directory a uid calls home is a property
+	// of the machine, not of the document, so it is answered here rather than in
+	// the pure parser. It runs for run_as entries only, so a broker that does not
+	// use the key reads no passwd database at all.
+	if err := resolveRunAsHomes(cfg.Binaries); err != nil {
 		return Config{}, fmt.Errorf("broker config: %w", err)
 	}
 	// Same split, same reasoning, one step later: a profile's config path is
@@ -704,6 +1178,41 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	}
 	cfg.Binaries = binaries
 	cfg.Warnings = append(cfg.Warnings, warnings...)
+
+	// Validated here, with the registry, because the two together decide the
+	// whole environment a spawn will hold — and a mistake in either is a mistake
+	// about what leaves this process, which must fail the boot rather than one
+	// claim.
+	inheritEnv, err := resolveInheritEnv(cfg.InheritEnv)
+	if err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+	cfg.InheritEnv = inheritEnv
+
+	// Folded after the registry exists, because the broker-level default only
+	// means anything relative to the entries it applies to — and validated in the
+	// same breath, so a uid nobody can represent fails the boot naming the entry
+	// rather than truncating into some other user at the first claim.
+	if err := foldRunAs(cfg.Binaries, cfg.RunAs); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
+
+	// Folded onto the default here so every reader of the config sees one settled
+	// number, and so a value with no sane reading fails the BOOT rather than
+	// quietly sizing every lease's buffer wrong for the life of the process.
+	if cfg.ClientReplayBuffer != nil {
+		if *cfg.ClientReplayBuffer < 0 {
+			return Config{}, fmt.Errorf("broker config: client_replay_buffer_bytes: must not be negative; use 0 to disable replay retention")
+		}
+		cfg.ClientReplayBufferBytes = *cfg.ClientReplayBuffer
+	}
+
+	// Resolved in the same breath and for the same reason: these bound the claim
+	// path, and a value with no sane reading must fail the BOOT rather than turn
+	// every claim into a 504 or a 400 for the life of the process.
+	if err := resolveClaimLimits(&cfg); err != nil {
+		return Config{}, fmt.Errorf("broker config: %w", err)
+	}
 
 	// Trimmed before expansion so a whitespace-only value reads as "unset"
 	// (persistence disabled) rather than as a directory literally named " ".
@@ -778,6 +1287,80 @@ func LoadConfigFromBytes(data []byte) (Config, error) {
 	cfg.A2AInputTimeout = inputTimeout
 
 	return cfg, nil
+}
+
+// resolveClaimLimits folds `ready_timeout`, `session_report_grace` and
+// `max_claim_body` onto their defaults and validates them.
+//
+// Each is resolved from the undecoded node rather than from a typed field so
+// that BOTH failure modes name the key. yaml.v3 decodes a duration or an int
+// itself, but its complaint identifies the Go type and the line ("cannot
+// unmarshal !!str `banana` into time.Duration") and never the key — and the key
+// name is the whole actionable part of the message for a value an operator was
+// told to tune. Decoding here, with the name in hand, puts it in front.
+//
+// There is deliberately no disabled reading and no upper bound. Zero is refused
+// because none of the three has a coherent zero (see the field docs), and no
+// ceiling is imposed because a long boot is exactly the deployment this key
+// exists for.
+func resolveClaimLimits(cfg *Config) error {
+	readyTimeout, err := resolvePositiveDuration("ready_timeout", cfg.RawReadyTimeout, cfg.ReadyTimeout)
+	if err != nil {
+		return err
+	}
+	cfg.ReadyTimeout = readyTimeout
+
+	grace, err := resolvePositiveDuration("session_report_grace", cfg.RawSessionReportGrace, cfg.SessionReportGrace)
+	if err != nil {
+		return err
+	}
+	cfg.SessionReportGrace = grace
+
+	maxBody, err := resolvePositiveInt64("max_claim_body", cfg.RawMaxClaimBody, cfg.MaxClaimBody)
+	if err != nil {
+		return err
+	}
+	cfg.MaxClaimBody = maxBody
+	return nil
+}
+
+// unsetNode reports whether a raw config node carries no operator-written value:
+// either the key was absent (a zero Node) or it was written with an empty value
+// (`ready_timeout:`), which is a null and means the same thing.
+func unsetNode(node yaml.Node) bool {
+	return node.IsZero() || node.Tag == "!!null"
+}
+
+// resolvePositiveDuration decodes one duration key, defaulting when unwritten
+// and refusing a non-positive value. Both errors name the key.
+func resolvePositiveDuration(key string, node yaml.Node, def time.Duration) (time.Duration, error) {
+	if unsetNode(node) {
+		return def, nil
+	}
+	var d time.Duration
+	if err := node.Decode(&d); err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s: must be positive, got %s; remove the key to take the %s default", key, d, def)
+	}
+	return d, nil
+}
+
+// resolvePositiveInt64 decodes one integer key, defaulting when unwritten and
+// refusing a non-positive value. Both errors name the key.
+func resolvePositiveInt64(key string, node yaml.Node, def int64) (int64, error) {
+	if unsetNode(node) {
+		return def, nil
+	}
+	var n int64
+	if err := node.Decode(&n); err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s: must be positive, got %d; remove the key to take the %d default", key, n, def)
+	}
+	return n, nil
 }
 
 // resolveA2ATaskSettings folds the `a2a.tasks:` block onto the defaults and

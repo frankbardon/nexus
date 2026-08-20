@@ -110,8 +110,8 @@ func newA2ASpawnHarness(t *testing.T, opts ...a2aSpawnOption) *a2aSpawnHarness {
 	}
 	cfg := Config{Binaries: settings.binaries, ListenAddr: "127.0.0.1:8080", StateDir: settings.stateDir}
 	claims := NewClaimServer(testLogger(), registry, cfg, runner, nil)
-	claims.readyTimeout = settings.readyTimeout
-	claims.sessionReportGrace = 2 * time.Second
+	setClaimBounds(claims, func(c *Config) { c.ReadyTimeout = settings.readyTimeout })
+	setClaimBounds(claims, func(c *Config) { c.SessionReportGrace = 2 * time.Second })
 
 	var contexts *a2aContextIndex
 	if settings.stateDir != "" {
@@ -222,7 +222,7 @@ type a2aFakeInstance struct {
 
 // exit makes the process report as exited, which is the signal every teardown
 // path in the broker converges on.
-func (i *a2aFakeInstance) exit() { close(i.proc.exited) }
+func (i *a2aFakeInstance) exit() { i.proc.exit() }
 
 // sent decodes every frame the broker queued for this instance.
 func (i *a2aFakeInstance) sent(t *testing.T) []brokerIOMessage {
@@ -283,9 +283,10 @@ func (r *a2aFakeRunner) start(_ context.Context, spec spawnSpec) (processHandle,
 		if r.delay > 0 {
 			time.Sleep(r.delay)
 		}
-		// enforce=false mirrors an unauthenticated broker; the secret is still
-		// minted and recorded by the spine, this fake simply does not echo it.
-		if err := r.registry.AttachInstance(spec.leaseID, inst.conn, spec.spawnSecret, false); err != nil {
+		// The secret is minted and recorded by the claim spine before the runner
+		// is invoked, and handed to this fake in the spawnSpec, so echoing it is
+		// exactly what a real instance does with its environment.
+		if err := r.registry.AttachInstance(spec.leaseID, inst.conn, spec.spawnSecret); err != nil {
 			return
 		}
 		r.registry.MarkReady(spec.leaseID)

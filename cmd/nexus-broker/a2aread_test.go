@@ -568,7 +568,7 @@ func TestSubscribeReattachesToALiveTask(t *testing.T) {
 	// Started directly rather than over HTTP so the turn stays live while the
 	// subscriber attaches. With no auth block both callers are the anonymous
 	// principal, which is what makes the read scoped to the same partition.
-	card := server.cards["support"]
+	card := server.card("support")
 	task, sub, _, protoErr := server.startTask(context.Background(), card,
 		a2aTurnInput{contextID: "ctx-live", text: "a long question", messageID: "m-1"},
 		nexusauth.Principal{})
@@ -610,7 +610,7 @@ func TestSubscribeReattachesToALiveTask(t *testing.T) {
 func TestSubscribeToAQueuedTaskWaitsRatherThanClosing(t *testing.T) {
 	cfg := a2aTestConfig(t, "")
 	ts, server, instance := newA2AReadServer(t, cfg, t.TempDir())
-	card := server.cards["support"]
+	card := server.card("support")
 
 	first, firstSub, _, protoErr := server.startTask(context.Background(), card,
 		a2aTurnInput{contextID: "ctx-q", text: "first", messageID: "m-1"}, nexusauth.Principal{})

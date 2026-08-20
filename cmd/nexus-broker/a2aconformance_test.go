@@ -324,8 +324,8 @@ func (s *brokerConformSession) start(step a2aconform.Step) error {
 	if s.task != nil {
 		return errors.New("the vector started a second task")
 	}
-	card, ok := s.server.cards["support"]
-	if !ok {
+	card := s.server.card("support")
+	if card == nil {
 		return errors.New("the test ingress has no support profile")
 	}
 	task, sub, opening, protoErr := s.server.startTask(context.Background(), card, a2aTurnInput{
@@ -354,7 +354,7 @@ func (s *brokerConformSession) answer(step a2aconform.Step) error {
 	if s.task == nil {
 		return errors.New("the vector answered a question before any task existed")
 	}
-	card := s.server.cards["support"]
+	card := s.server.card("support")
 	_, sub, _, protoErr := s.server.resumeTask(card, a2aTurnInput{
 		taskID:    s.task.taskID,
 		contextID: s.task.contextID,

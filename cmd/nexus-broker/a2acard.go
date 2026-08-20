@@ -13,16 +13,33 @@ import (
 // servedAgentCard is one profile's rendered Agent Card: the validated document
 // plus the bytes and ETag the handler serves.
 //
-// It is built once, at boot, because nothing that feeds it changes at runtime —
-// the profile map is immutable after LoadConfig, exactly as the binary registry
-// is — and because a card that fails validation must fail the BOOT rather than
-// the first client that fetches it.
+// It is built once PER CONFIGURATION — at boot, and again on each accepted
+// SIGHUP reload — and published inside the liveConfig snapshot alongside the
+// configuration it was rendered from, so the whole card map is replaced in one
+// atomic store rather than card by card.
+//
+// A card that fails validation fails the step that builds it: the BOOT, rather
+// than the first client that fetches it, and on a reload the whole reload,
+// rather than leaving the broker serving a half-replaced map.
 type servedAgentCard struct {
 	// profile is the name the card's routes are namespaced under.
 	profile string
-	card    a2a.AgentCard
-	body    []byte
-	etag    string
+
+	// spec is the resolved `agents:` entry this card was rendered from — the
+	// config path and binary a turn addressed to this profile will boot.
+	//
+	// It rides ON THE CARD rather than being looked up by name when a turn
+	// starts, and that is what makes profiles reloadable safely: a request
+	// resolves its card with one atomic load, and everything the turn needs
+	// comes from that same resolved value. A SIGHUP that removes or repoints the
+	// profile between the lookup and the spawn cannot leave the turn running the
+	// wrong agent — or, worse, an empty AgentProfile a map miss would have
+	// yielded.
+	spec AgentProfile
+
+	card a2a.AgentCard
+	body []byte
+	etag string
 }
 
 // buildAgentCard assembles one profile's Agent Card from the hand-authored half
@@ -108,6 +125,7 @@ func buildAgentCard(profile string, spec AgentProfile, baseURL string, validator
 	sum := sha256.Sum256(body)
 	return &servedAgentCard{
 		profile: profile,
+		spec:    spec,
 		card:    card,
 		body:    body,
 		etag:    `"` + hex.EncodeToString(sum[:16]) + `"`,

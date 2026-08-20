@@ -31,7 +31,7 @@ protocol in a custom host.
 |-----|------|---------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR` | WebSocket URL of the broker's instance dial-back endpoint, e.g. `ws://127.0.0.1:8080/instance`. Falls back to the `NEXUS_BROKER_ADDR` env var (injected by the broker at spawn). When empty the plugin stays **dormant** — it does not dial and the engine still boots cleanly. |
 | `lease_id` | string | `$NEXUS_BROKER_LEASE_ID` | Lease id the broker assigned to this instance; echoed in the `register` frame so the gateway can bind this socket to the lease. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generated for this instance and injected at exec; echoed in the `register` frame alongside `lease_id` so the gateway can prove this process is one it spawned. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generated for this instance and injected at exec; echoed in the `register` frame alongside `lease_id` so the gateway can prove this process is one it spawned. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty does **not** make the plugin dormant — it dials and is refused — because "no secret" is a diagnosable failure at the broker, not a reason to stay silent. Every broker requires it, with or without an `auth:` block. |
 
 Config keys take precedence over the environment variables. The reference table
 above is canonical; see the
@@ -58,6 +58,98 @@ recovery** work: a broker configured with a `state_dir` restores this instance's
 lease at boot and accepts the re-registration, so a surviving instance rejoins
 with no plugin configuration and no client involvement. See
 [Surviving a restart](../../guides/session-broker.md#surviving-a-restart-set-state_dir).
+
+### Output is buffered across a reconnect
+
+Everything the instance emits while that socket is down is **held, not dropped**.
+
+The reason is the backoff above. A broker restart puts the instance into the
+reconnect loop for anywhere from 250 ms to several seconds, and the agent keeps
+running throughout — so the window in which reattach is supposed to be seamless
+is exactly the window in which output is produced with nowhere to go. Outbound
+frames used to be written inline and discarded when the write failed, which lost
+them **on the instance side**, before the broker had ever seen them and therefore
+out of reach of the broker's own
+[client replay buffer](../../guides/session-broker.md#frame-sequencing-and-the-replay-buffer).
+
+How it behaves:
+
+| | |
+|---|---|
+| **Bound** | 1 MiB per instance, fixed (not configurable) |
+| **Measured in** | bytes, not frames |
+| **Eviction** | oldest first |
+| **On overflow** | a `WARN` naming `dropped_frames`, `dropped_bytes` and `limit_bytes`, rate-limited to one per second with cumulative counts |
+| **Flushed** | after the `register` / `ready` / `session-id-report` handshake of the next session |
+
+The bound is in **bytes** because outbound payloads span orders of magnitude — a
+token delta is a few bytes, a tool result is tens of kilobytes — so a frame count
+says nothing about how much memory a disconnected instance can pin. 1 MiB holds
+many seconds of streaming for a chatty agent and still holds several whole tool
+results for one that only emits large frames; it is the same figure as the
+broker's per-lease `client_replay_buffer_bytes` default, so the two halves of one
+stream pin comparable memory. Oldest-first eviction keeps the most recent tail,
+which is the part a client reattaching after a gap actually needs. A single frame
+larger than the whole bound is not retained at all — the alternative is a bound
+one big tool result can breach.
+
+The flush happens **after** the handshake, never before it: a buffered frame that
+overtook the `register` frame would reach a broker that has not yet bound the
+socket to the lease. A single write pump drains the buffer oldest-first, which is
+also what makes emission order the wire order however many bus handlers are
+producing at once, and a frame is removed from the buffer only once it has been
+written — a write that fails on a dying socket leaves it at the head for the next
+session.
+
+`SendIO` never touches the socket. Bus dispatch is synchronous, so it runs on the
+goroutine producing the agent's output; enqueuing under a short-lived lock keeps
+a slow or dead link from stalling the agent.
+
+Two cases deliberately do **not** buffer:
+
+- A **dormant** plugin (no `broker_addr` or no `lease_id`) never dials, so its
+  output is dropped at `DEBUG` exactly as before rather than pinning a megabyte
+  for a link that is not coming up.
+- **Shutdown** flushes on a bound, not on a promise. `Shutdown` gives the write
+  pump up to 2 seconds to drain a live socket — so the last output before a
+  locally initiated shutdown still reaches the broker — and skips the wait
+  entirely when nothing is connected. A non-empty buffer can never turn a
+  graceful shutdown into a hang. (On the broker-initiated path the `shutdown`
+  frame has already ended the session, so there is no socket left to flush to.)
+
+### The dial-back socket is probed, not assumed live
+
+The reconnect loop above only helps once the instance *knows* the link is gone,
+and a half-open TCP connection does not announce itself: a host that slept, moved
+network, or had its flow dropped by a NAT leaves a socket that is still open, still
+accepts writes, and never delivers another byte. Left undetected, an instance in
+that state fills its 1 MiB outbound buffer against a socket nobody will ever
+drain — evicting its own oldest frames — while the write pump sits happily in a
+`Write` the kernel accepts.
+
+So the plugin **pings the broker every 15 seconds** and drops the dial-back
+socket once the broker has answered nothing for **45 seconds** (three consecutive
+probes), which unwinds the session and redials through the usual backoff. The
+outbound buffer is untouched by the teardown, so whatever was pending goes out
+after the next handshake. The broker probes in the other direction on the same
+cadence — see
+[Detecting a dead socket](../../guides/session-broker.md#detecting-a-dead-socket).
+
+Three properties are worth stating:
+
+- **The deadline is three intervals, not one.** A single unanswered ping proves
+  very little (a GC pause, a saturated uplink, a broker mid-compaction), and on
+  this side a needless reconnect is not free — it replays the handshake and
+  re-flushes the buffer. Sustained silence is the trigger, not a hiccup.
+- **An idle link is never dropped.** A ping is answered by the broker's WebSocket
+  stack whether or not anyone is typing, so an instance parked in a long tool
+  call, or one whose user stepped away, survives indefinitely. A timeout on
+  `Read` would tear such links down at exactly the moments they are most
+  expensive to lose, which is why the probe is a ping.
+- **No wire change.** Ping and pong are RFC 6455 control frames, not
+  `brokerframe` signals: no new signal, no version bump, and nothing that can
+  skew against an older broker. There is no configuration key — the interval and
+  deadline are constants.
 
 ### Outbound (engine bus → broker → client)
 
@@ -114,8 +206,15 @@ handling) it sends a `shutdown` frame. The plugin then:
   persists the session before the process exits.
 
 The plugin never hard-exits mid-write; the engine owns teardown ordering. The
-broker bounds how long it waits for the process and force-kills it if the
-graceful path overruns (`release_grace`).
+broker bounds how long it waits for the process (`release_grace`) and then
+escalates: `SIGTERM` to the instance's process group — which the engine also
+handles as a clean shutdown, and which is the only teardown request an instance
+whose socket has died ever receives — and `SIGKILL` to the same group a fixed 2s
+later. Signalling the group is what takes the instance's own subprocesses with
+it; see [the guide](../../guides/session-broker.md#post-releaselease_id--release-an-instance).
+
+Anything still in the outbound buffer is flushed on a bound rather than waited
+out — see [Output is buffered across a reconnect](#output-is-buffered-across-a-reconnect).
 
 ## Security
 
@@ -141,22 +240,28 @@ plugin cannot tell the difference — it echoes whatever it was given:
   so a restarted broker can recompute the value this instance is still holding and
   let it reattach. The secret itself is still never written to disk.
 
-Enforcement is decided entirely by the broker, and is **gated on the broker
-having an `auth:` block** — with one exception:
+Enforcement is decided entirely by the broker, and it is **unconditional**: the
+secret is required on every registration — with an `auth:` block or without one,
+on a freshly claimed lease or on one restored after a broker restart. That block
+configures how *clients* are verified; it never described what the broker should
+believe about an unverified dialer.
 
-- **No `auth:` block** — the secret is not checked. A `nexus` binary predating
-  the protocol dials back and registers exactly as it always did.
-- **`auth:` configured** — the secret is required. A binary that sends none is
-  refused, and the broker logs a `WARN` naming version skew as the likely cause,
-  because the symptom otherwise looks like a network fault (claims time out with
-  `instance did not become ready in time` while the child is alive and connecting
-  fine). The fix is to upgrade the instance binary.
-- **Reattaching to a lease restored after a broker restart** — the secret is
-  **always** required, whatever the `auth:` setting. The broker only knows that
-  the recorded pid is alive, and a pid can be recycled to an unrelated process
-  while the broker is down; the secret is the only thing that distinguishes the
-  genuine instance. An instance binary too old to send one cannot reattach and its
-  lease is reaped after `reattach_window`.
+> **Breaking change.** Enforcement used to be gated on the broker having an
+> `auth:` block, so a `nexus` binary predating the protocol kept registering on an
+> unauthenticated broker. It no longer does, and dropping the `auth:` block is no
+> longer a workaround. Upgrade the instance binary.
+
+Alongside the secret, the broker validates the `register` frame's **schema
+version** against its own and refuses a mismatch. Both failures are `WARN`s that
+name their own fix, because the symptom otherwise looks like a network fault:
+claims time out with `instance did not become ready in time` while the child is
+alive and connecting fine.
+
+Reattaching to a lease restored after a broker restart is the case where this
+matters most. The broker only knows that the recorded pid is alive, and a pid can
+be recycled to an unrelated process while the broker is down; the secret is the
+only thing that distinguishes the genuine instance. An instance binary too old to
+send one cannot reattach and its lease is reaped after `reattach_window`.
 
 The plugin never logs the secret. Its init record carries a
 `spawn_secret_present` boolean instead, which is what you want when diagnosing a
@@ -179,8 +284,8 @@ nexus.io.broker:
 
 Omit `broker_addr` and `lease_id` (or leave their env vars unset) and the plugin
 stays dormant, so a config that activates the plugin outside a broker still boots
-without error. `spawn_secret` does not affect dormancy — a broker with no `auth:`
-block ignores it, except when the lease was restored after a broker restart.
+without error. `spawn_secret` does not affect dormancy, but omitting it means
+every registration is refused: no broker accepts a register frame without one.
 
 ## See also
 

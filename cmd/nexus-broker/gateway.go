@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -25,6 +28,59 @@ const (
 	// first (register) frame before rejecting the dial-back.
 	registerTimeout = 10 * time.Second
 
+	// defaultPingInterval is how often each frame pump asks its peer for a
+	// pong, and defaultPeerReadDeadline is how long a peer may answer NOTHING
+	// before the gateway declares its socket dead and closes it.
+	//
+	// THE RELATIONSHIP IS THE POINT: the deadline is three whole intervals, so
+	// a peer has to miss three consecutive pings before it is detached. A
+	// single unanswered ping proves very little — a stop-the-world GC pause, a
+	// saturated uplink, a laptop that slept for four seconds, a process the
+	// scheduler starved — and a deadline set at or just above one interval
+	// would turn every one of those into a dropped session. A deadline that
+	// comfortably exceeds the interval buys the redundancy that makes the
+	// signal trustworthy: silence sustained across 45 seconds and three
+	// independent probes is a dead socket, not a hiccup.
+	//
+	// The absolute numbers are chosen against the failure they exist to catch.
+	// A half-open TCP connection — a slept laptop, a moved network, a NAT
+	// table that dropped the flow — is invisible to both ends until something
+	// writes, and the OS keepalive that would eventually notice runs on a
+	// two-hour default. 45 seconds is fast enough that a client reconnects
+	// while its replay buffer still holds the stream (E3-S1/S2) and slow
+	// enough to cost one control frame per peer per 15 seconds.
+	//
+	// This is emphatically NOT idle reaping. A ping is answered by the
+	// WebSocket stack itself, so a session sitting untouched for an hour with
+	// no user input answers every one of them and survives indefinitely.
+	// Releasing genuinely idle leases is a separate policy owned by
+	// `idle_timeout`, driven by real client → instance IO and by the instance's
+	// own turn boundaries (see observeTurnState). The two must not be conflated:
+	// a ping detects a DEAD SOCKET, turn liveness detects a LIVE TURN, and
+	// reading either as the other reaps healthy sessions.
+	defaultPingInterval = 15 * time.Second
+
+	// defaultPeerReadDeadline is documented with defaultPingInterval above:
+	// three intervals of total silence, not one.
+	defaultPeerReadDeadline = 3 * defaultPingInterval
+
+	// peerUnresponsiveReason is the close reason a socket detached for
+	// unanswered pings carries. The peer that earned it is by definition not
+	// reading, so this is for the log and for a slow-but-alive peer that does
+	// eventually drain its socket.
+	peerUnresponsiveReason = "peer unresponsive"
+)
+
+// peerRole names which end of a lease a frame pump is pumping, for log records
+// only. It never reaches the wire.
+type peerRole string
+
+const (
+	peerInstance peerRole = "instance"
+	peerClient   peerRole = "client"
+)
+
+const (
 	// ticketQueryParam is the query parameter a client presents its single-use
 	// lease ticket in on the client WebSocket handshake.
 	//
@@ -34,6 +90,18 @@ const (
 	// never-log-the-value rule — exists to contain the exposure this carrier
 	// implies (URLs reach proxy access logs, browser history and referrers).
 	ticketQueryParam = "ticket"
+
+	// fromSeqQueryParam is the query parameter a reconnecting client states the
+	// highest sequence it received on in, so the broker can replay what it
+	// still holds beyond that point before resuming the live stream.
+	//
+	// A query parameter for exactly the reason `?ticket=` is one: a browser
+	// cannot set headers on a WebSocket upgrade, and there is no client →
+	// broker control frame to carry it in — the first frame a client sends is
+	// already routed straight through to the instance. Unlike a ticket it is
+	// not a credential and carries no secret, so putting it in a URL costs
+	// nothing.
+	fromSeqQueryParam = "from_seq"
 )
 
 // errTicketRejected is THE refusal for every way a presented ticket can fail:
@@ -109,6 +177,14 @@ type Gateway struct {
 	// it could present was ever minted here.
 	tickets *ticketStore
 
+	// pingInterval and peerReadDeadline configure the liveness pump — see
+	// defaultPingInterval for what they mean and why the second is three times
+	// the first. They are fields rather than bare constants so tests can shrink
+	// them to milliseconds; nothing else writes them, and a non-positive
+	// pingInterval disables liveness checking entirely.
+	pingInterval     time.Duration
+	peerReadDeadline time.Duration
+
 	// rootCtx is cancelled on Shutdown so all read/write pumps exit.
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -124,12 +200,14 @@ func NewGateway(logger *slog.Logger, registry *Registry, auth *authGuard, ticket
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	return &Gateway{
-		logger:     logger,
-		registry:   registry,
-		auth:       auth,
-		tickets:    tickets,
-		rootCtx:    rootCtx,
-		rootCancel: rootCancel,
+		logger:           logger,
+		registry:         registry,
+		auth:             auth,
+		tickets:          tickets,
+		pingInterval:     defaultPingInterval,
+		peerReadDeadline: defaultPeerReadDeadline,
+		rootCtx:          rootCtx,
+		rootCancel:       rootCancel,
 	}
 }
 
@@ -183,20 +261,34 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	leaseID := frame.LeaseID
+
+	// Every refusal from here down — skewed frame version, unknown lease, absent
+	// secret, wrong secret — gets the SAME policy-violation close and the SAME
+	// reason text. The distinctions live in the log and nowhere else: a dialer
+	// that could tell "no such lease" from "wrong secret" could enumerate live
+	// lease ids by differencing the two, and lease ids are the thing the secret
+	// exists to stop being sufficient.
+
+	// The register frame must declare the schema version this broker speaks.
+	// brokerframe.Encode stamps it on every frame and Decode deliberately
+	// tolerates any value "so callers can decide how to react"; this is the
+	// caller deciding. It is checked BEFORE the secret so a mismatched build is
+	// diagnosed as skew rather than as whatever its frame happened to omit.
+	if frame.Version != brokerframe.Version {
+		g.logInstanceRegistrationRefused(leaseID, versionSkewError{presented: frame.Version})
+		_ = conn.Close(websocket.StatusPolicyViolation, instanceRefusedReason)
+		return
+	}
+
 	wc := newWSConn(conn)
 	// The register frame must carry BOTH the lease id and the per-spawn secret
-	// the broker handed this child through its environment. Enforcement is gated
-	// on authentication being configured at all: with no `auth:` block the
-	// secret is ignored, so an older nexus binary at nexus_binary_path keeps
-	// working in an unauthenticated deployment exactly as it did.
-	//
-	// Every refusal — unknown lease, absent secret, wrong secret — gets the SAME
-	// policy-violation close and the same reason text. The distinctions live in
-	// the log below and nowhere else: a dialer that could tell "no such lease"
-	// from "wrong secret" could enumerate live lease ids by differencing the two.
-	if err := g.registry.AttachInstance(leaseID, wc, frame.Secret, g.auth.enabled()); err != nil {
+	// the broker handed this child through its environment. The secret is
+	// required unconditionally — see Registry.AttachInstance for why gating it on
+	// `auth:` was authenticating the dial-back socket with a value that travels
+	// in ws_urls and logs.
+	if err := g.registry.AttachInstance(leaseID, wc, frame.Secret); err != nil {
 		g.logInstanceRegistrationRefused(leaseID, err)
-		_ = conn.Close(websocket.StatusPolicyViolation, "unknown lease")
+		_ = conn.Close(websocket.StatusPolicyViolation, instanceRefusedReason)
 		return
 	}
 
@@ -206,19 +298,18 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	defer cancelPumps()
 
 	go g.writePump(ctx, wc)
+	go g.livenessPump(ctx, leaseID, peerInstance, wc)
 	// Instance read pump: forward decoded frames to the lease's client conn.
 	// Lifecycle signals from the instance are observed here so the gateway can
 	// unblock POST /claim when the engine reports ready.
-	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
-		return g.registry.ClientConn(id)
-	}, func(f brokerframe.Frame) {
+	g.readPump(ctx, leaseID, wc, g.forwardToClient, func(f brokerframe.Frame) {
 		switch f.Signal {
 		case brokerframe.SignalReady:
 			g.registry.MarkReady(leaseID)
 		case brokerframe.SignalSessionIDReport:
 			g.registry.MarkSessionID(leaseID, f.SessionID)
 		case brokerframe.SignalIO:
-			g.deliverIO(leaseID, f)
+			g.observeInstanceIO(leaseID, f)
 		}
 	})
 
@@ -227,62 +318,136 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	g.logger.Info("instance disconnected", "lease_id", leaseID)
 }
 
-// deliverIO hands one instance IO payload to the lease's in-process observer,
-// if it has one.
+// observeInstanceIO reads one instance IO payload for the two things the broker
+// itself needs from it — turn liveness, and the in-process observer an A2A
+// caller is served by — and does nothing else with it.
 //
-// It runs INSIDE the instance read pump's observe callback, before the frame is
-// forwarded to the client conn, and it is additive: an A2A-observed lease with a
-// client attached still relays every frame to that client untouched. The A2A
-// ingress needs this hook because it has no socket to be relayed to — its caller
-// is an HTTP request, not a WebSocket peer.
+// It runs INSIDE the instance read pump's observe callback, BEFORE the frame is
+// forwarded to the client conn, and it is purely additive: whatever it makes of
+// the payload, readPump still relays the frame to the client untouched. Nothing
+// here can drop, delay or rewrite a forwarded frame.
 //
-// The decode happens only when a sink exists, so a lease with no observer pays
-// one map lookup per frame and nothing else. An undecodable payload is logged
-// and dropped rather than failing anything: a broker must keep relaying frames
-// it cannot itself interpret, which is what it did before it interpreted any.
-func (g *Gateway) deliverIO(leaseID string, f brokerframe.Frame) {
+// THE LAYERING. The gateway used to treat this payload as opaque, decoding it
+// only when a lease had an A2A sink attached. It no longer can: idle reaping has
+// to know whether a turn is in flight, and the only signal the IO envelope
+// carries for that is the io.status state (see turnWorkStates). So every
+// instance-originated IO frame is now decoded — one json.Unmarshal of a payload
+// the enclosing envelope was already being decoded from, on frames that are
+// already crossing a WebSocket. The alternative, a substring pre-filter on the
+// raw bytes to skip the decode for stream deltas, would make correctness depend
+// on how the far side happens to encode its JSON; this does not.
+//
+// An UNDECODABLE payload is ignored, exactly as the A2A ingress ignores one: it
+// is logged, no turn state changes, no sink is called, and the frame still
+// reaches the client. A broker must keep relaying frames it cannot itself
+// interpret, which is what it did before it interpreted any.
+func (g *Gateway) observeInstanceIO(leaseID string, f brokerframe.Frame) {
 	if f.LeaseID != "" && f.LeaseID != leaseID {
 		// The same refusal the forwarding path below makes, applied before the
 		// payload reaches an in-process observer. A frame naming another lease is
 		// dropped there; an observer must not be the one place it gets through.
 		return
 	}
-	sink := g.registry.ioSink(leaseID)
-	if sink == nil {
-		return
-	}
 	msg, err := decodeIOPayload(f.Payload)
 	if err != nil {
-		g.logger.Warn("dropping an instance io payload the broker could not decode",
+		g.logger.Warn("ignoring an instance io payload the broker could not decode; "+
+			"the frame is still forwarded to the client, but it cannot count towards "+
+			"turn liveness",
 			"lease_id", leaseID, "error", err)
 		return
 	}
-	sink(msg)
+
+	g.observeTurnState(leaseID, msg)
+
+	if sink := g.registry.ioSink(leaseID); sink != nil {
+		sink(msg)
+	}
 }
+
+// observeTurnState folds one decoded instance payload onto the lease's turn
+// liveness, which is what keeps the idle sweeper from reaping a session that is
+// mid-turn.
+//
+// Only io.status frames say anything about it: output, stream deltas, approval
+// and HITL frames are all things that happen DURING a turn whose status already
+// announced itself, and treating them as turn starts would make liveness depend
+// on how chatty a particular agent loop is. Everything else is a no-op.
+//
+// A status naming a work state starts a turn (idempotently — see markTurnLive);
+// ioStateIdle settles it; any other state is left alone, so an instance newer
+// than this broker cannot have a state it invented read as "abandoned".
+func (g *Gateway) observeTurnState(leaseID string, msg brokerIOMessage) {
+	if msg.Type != ioTypeStatus {
+		return
+	}
+	switch {
+	case msg.State == ioStateIdle:
+		g.registry.markTurnSettled(leaseID)
+	case turnStateIsWork(msg.State):
+		g.registry.markTurnLive(leaseID)
+	}
+}
+
+// instanceRefusedReason is the WebSocket close reason every refused dial-back
+// gets, whatever the cause. It deliberately reads as the unknown-lease case, so
+// a dialer holding a guessed lease id learns nothing from the difference between
+// "there is no such lease" and "there is, and you failed its secret".
+const instanceRefusedReason = "unknown lease"
+
+// errRegisterVersionSkew means the register frame declared a brokerframe schema
+// version this broker does not speak. It is a distinct sentinel, alongside
+// errSpawnSecretAbsent and errSpawnSecretMismatch, purely so
+// logInstanceRegistrationRefused can name the cause; on the wire it is the same
+// refusal as all the others.
+var errRegisterVersionSkew = errors.New("register frame schema version does not match this broker")
+
+// versionSkewError carries the version the instance declared, so the audit
+// record can state the actual skew rather than "a mismatch". It unwraps to
+// errRegisterVersionSkew so errors.Is keeps working for anything that only cares
+// about the class.
+type versionSkewError struct{ presented int }
+
+func (e versionSkewError) Error() string {
+	return fmt.Sprintf("%s: instance sent version %d, this broker speaks version %d",
+		errRegisterVersionSkew, e.presented, brokerframe.Version)
+}
+
+func (e versionSkewError) Unwrap() error { return errRegisterVersionSkew }
 
 // logInstanceRegistrationRefused emits the audit record for a rejected
 // dial-back. The wire response is identical for every cause; this is the ONLY
 // place they are told apart.
 //
-// The absent-secret case gets its own message, and says out loud that the
-// instance binary may predate the protocol, because that is the failure an
-// operator will otherwise misdiagnose. The symptom of a version-skewed
+// The version-skew and absent-secret cases get their own messages because they
+// are the failures an operator will otherwise misdiagnose. A mismatched
 // nexus_binary_path is indistinguishable from a network fault at the claim
 // layer: every claim times out with "instance did not become ready in time"
 // while the child process is alive, connecting fine, and being silently hung up
-// on. Naming the cause here is what turns a day of packet captures into a
-// binary upgrade.
+// on. Naming the cause here is what turns a day of packet captures into a binary
+// upgrade — and since the spawn secret became mandatory, "upgrade the binary" is
+// the answer to both of them rather than "drop the auth block".
 //
 // No record carries the presented secret. Refusing to log a credential is not
 // optional just because this one was rejected — a near-miss value is exactly
 // what makes a log worth stealing.
 func (g *Gateway) logInstanceRegistrationRefused(leaseID string, err error) {
+	var skew versionSkewError
 	switch {
+	case errors.As(err, &skew):
+		g.logger.Warn("rejecting instance registration: its register frame declares a broker frame "+
+			"schema version this broker does not speak. The binary the binaries registry entry for "+
+			"this lease points at is a different build from this broker: upgrade whichever is older "+
+			"so both speak the same version",
+			"lease_id", leaseID,
+			"instance_frame_version", skew.presented,
+			"broker_frame_version", brokerframe.Version,
+			"error", err)
 	case errors.Is(err, errSpawnSecretAbsent):
 		g.logger.Warn("rejecting instance registration: its register frame carried NO spawn secret, "+
-			"but this broker has an auth block and therefore requires one. "+
-			"The most likely cause is that the instance binary at nexus_binary_path predates the "+
-			"spawn-secret protocol: upgrade it, or remove the auth block to run this broker unauthenticated",
+			"and this broker requires one for every registration — with or without an auth block. "+
+			"The most likely cause is that the instance binary the binaries registry entry points at "+
+			"predates the spawn-secret protocol: upgrade it. Removing the auth block no longer makes "+
+			"this work",
 			"lease_id", leaseID, "error", err)
 	case errors.Is(err, errSpawnSecretMismatch):
 		g.logger.Warn("rejecting instance registration: its register frame carried the WRONG spawn secret. "+
@@ -347,8 +512,29 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wc := newWSConn(conn)
-	if err := g.registry.AttachClient(leaseID, wc); err != nil {
-		g.logger.Warn("rejecting client connection", "lease_id", leaseID, "error", err)
+	// A resuming client stages its replay INSIDE the attach, under the lease's
+	// stream lock, so no live frame can be queued in front of it. Without
+	// `?from_seq=` the attach is the one that predates resumption, byte for byte.
+	//
+	// The attach also DISPLACES any connection already on the lease, which is
+	// safe only because ownership was checked above, before the upgrade: the
+	// principal doing the displacing is by then known to own the lease. A
+	// stranger is refused with the indistinguishable 404 and evicts nothing.
+	var (
+		attach    clientAttach
+		attachErr error
+	)
+	if fromSeq, resuming := parseFromSeq(r.URL.Query()); resuming {
+		attach, attachErr = g.registry.AttachClientFrom(leaseID, wc, fromSeq)
+	} else {
+		attach, attachErr = g.registry.AttachClient(leaseID, wc)
+	}
+	if attachErr != nil {
+		// Reachable now only for a lease that vanished between the ownership
+		// check and the attach — a release or a crash landing in that window. The
+		// close reason is unchanged, because from the client's side the outcome
+		// is unchanged: the lease it asked for is not available to stream.
+		g.logger.Warn("rejecting client connection", "lease_id", leaseID, "error", attachErr)
 		_ = conn.Close(websocket.StatusPolicyViolation, "lease unavailable")
 		return
 	}
@@ -357,19 +543,31 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// the credential itself — a ticket value must not reach the log, which is the
 	// one exposure the broker actually controls.
 	g.logger.Info("client connected", "lease_id", leaseID,
-		"principal_id", caller.ID, "credential", string(credential))
+		"principal_id", caller.ID, "credential", string(credential),
+		"evicted_previous_client", attach.evicted)
+	if attach.evicted {
+		// Logged separately, and at Warn, because it is the one connect outcome
+		// that took something away from somebody: whichever socket was streaming
+		// this lease has just been closed on this principal's authority.
+		g.logger.Warn("this connection displaced the lease's previous client, which has been "+
+			"closed. A client must not keep two connections open to one lease — they will "+
+			"evict each other",
+			"lease_id", leaseID, "principal_id", caller.ID,
+			"credential", string(credential), "reason", evictedCloseReason,
+			"close_status", int(evictedCloseStatus))
+	}
+	g.logResume(leaseID, attach.resume)
 
 	ctx, cancelPumps := context.WithCancel(g.rootCtx)
 	defer cancelPumps()
 
 	go g.writePump(ctx, wc)
+	go g.livenessPump(ctx, leaseID, peerClient, wc)
 	// Client read pump: forward decoded frames to the lease's instance conn.
 	// Stamp last-activity ONLY for real user input (io frames flowing client →
 	// instance) so the idle sweeper resets on genuine activity and not on
 	// instance output, pings, or control frames.
-	g.readPump(ctx, leaseID, wc, func(id string) *wsConn {
-		return g.registry.InstanceConn(id)
-	}, func(f brokerframe.Frame) {
+	g.readPump(ctx, leaseID, wc, g.forwardToInstance, func(f brokerframe.Frame) {
 		if f.Signal == brokerframe.SignalIO {
 			g.registry.markActivity(leaseID)
 		}
@@ -378,6 +576,53 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	g.registry.DetachClient(leaseID, wc)
 	wc.shutdown(websocket.StatusNormalClosure, "")
 	g.logger.Info("client disconnected", "lease_id", leaseID)
+}
+
+// parseFromSeq reads the resume point off a client handshake's query string.
+// It reports whether the client asked to resume at all, which is NOT the same
+// as a zero sequence: `?from_seq=0` is a client saying it has seen nothing and
+// wants everything the buffer still holds, while an absent parameter is a
+// client asking for the live stream only.
+//
+// A MALFORMED value — not a number, negative, out of range, or repeated with a
+// bad first value — is treated as ABSENT rather than refused. A resume is an
+// optimisation on top of a connection that works without it, so a client bug
+// in building the URL should cost the resume, not the session: refusing the
+// handshake would turn a cosmetic defect into an outage. The value is not a
+// credential, so nothing is being authorised leniently here.
+func parseFromSeq(query url.Values) (uint64, bool) {
+	raw := query.Get(fromSeqQueryParam)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+// logResume records what a resuming client was handed. A resume with nothing
+// to replay and no gap is silent: it is the steady state of a client that
+// reconnects promptly, and logging it would drown the record that matters.
+func (g *Gateway) logResume(leaseID string, resume clientResume) {
+	if resume.gap == nil {
+		if len(resume.frames) > 0 {
+			g.logger.Info("replaying buffered frames to a resuming client",
+				"lease_id", leaseID, "frames", len(resume.frames), "last_seq", resume.lastSeq)
+		}
+		return
+	}
+	g.logger.Warn("a resuming client could not be fully replayed; it has been told which "+
+		"frames are gone. Raise client_replay_buffer_bytes if this is routine rather than "+
+		"the tail of a long disconnection",
+		"lease_id", leaseID,
+		"reason", resume.gap.Reason,
+		"requested_from_seq", resume.gap.RequestedFromSeq,
+		"missing_from_seq", resume.gap.MissingFromSeq,
+		"missing_through_seq", resume.gap.MissingThroughSeq,
+		"replayed_frames", len(resume.frames),
+		"last_seq", resume.lastSeq)
 }
 
 // resolveClientPrincipal resolves the identity behind a client WebSocket
@@ -433,12 +678,90 @@ func (g *Gateway) resolveClientPrincipal(r *http.Request, leaseID string) (nexus
 	return p, credentialBearer, nil
 }
 
-// readPump reads frames from wc, decodes them (protocol-aware), and forwards
-// each to the peer connection resolved by peerFor. The optional observe
-// callback is invoked for every decoded frame before forwarding, letting the
-// caller react to lifecycle signals (e.g. ready) without disturbing routing.
-// It returns when the connection closes or its context is cancelled.
-func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peerFor func(string) *wsConn, observe func(brokerframe.Frame)) {
+// livenessPump probes one peer with a WebSocket ping every pingInterval and
+// closes its socket once the peer has failed to answer for peerReadDeadline.
+// Closing is what enforces the deadline: it makes the blocked read in readPump
+// return an error, which runs the ordinary detach path — the same one a peer
+// that hung up cleanly takes.
+//
+// WHY A PING RATHER THAN A READ TIMEOUT. The obvious implementation — wrap each
+// conn.Read in a context.WithTimeout — is wrong here, and dangerously so. Read
+// returns on a DATA message and on nothing else; the library answers pings and
+// consumes pongs inside that blocked call without ever surfacing them. So a
+// timeout on Read measures how long since the peer last said something, which is
+// exactly what a healthy idle session does not do. It would reap every session
+// whose user stepped away, which is precisely the bug idle_timeout's own policy
+// (and E4-S1) exists to get right. A ping, by contrast, is answered by the
+// peer's WebSocket stack whether or not there is a human at the far end, so
+// silence in the face of one means the socket is gone and nothing else.
+//
+// conn.Ping is used rather than a hand-rolled brokerframe signal deliberately.
+// It waits for the matching pong, so one call is both halves of the probe; it
+// works against a peer that speaks no Nexus protocol at all; and a ping is a
+// transport concern that has no business in the IO envelope. It requires a
+// concurrent reader to collect the pong — see its doc comment — which both
+// pumps satisfy, since each is started alongside a readPump that immediately
+// blocks in Read.
+//
+// A ping failure alone does NOT detach. Only the accumulated silence since the
+// last successful pong is compared against the deadline, so the three-interval
+// redundancy described on defaultPingInterval is real rather than nominal.
+func (g *Gateway) livenessPump(ctx context.Context, leaseID string, role peerRole, wc *wsConn) {
+	if g.pingInterval <= 0 || wc == nil || wc.conn == nil {
+		return
+	}
+	ticker := time.NewTicker(g.pingInterval)
+	defer ticker.Stop()
+
+	lastPong := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wc.closed:
+			return
+		case <-ticker.C:
+		}
+
+		// The probe is bounded by one interval so a wedged socket cannot park
+		// this goroutine indefinitely and so probes never overlap; the deadline
+		// is enforced by the accumulated silence below, not by this timeout.
+		pingCtx, cancel := context.WithTimeout(ctx, g.pingInterval)
+		err := wc.conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			lastPong = time.Now()
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		silent := time.Since(lastPong)
+		if silent < g.peerReadDeadline {
+			g.logger.Debug("peer did not answer a ping",
+				"lease_id", leaseID, "peer", string(role),
+				"silent_for", silent, "error", err)
+			continue
+		}
+		g.logger.Warn("peer stopped answering pings; closing its socket so the lease detaches. "+
+			"The connection is half-open — the peer's host slept, moved network, or had its flow "+
+			"dropped by a NAT — and would otherwise have looked healthy until the OS keepalive noticed",
+			"lease_id", leaseID, "peer", string(role),
+			"silent_for", silent, "deadline", g.peerReadDeadline, "error", err)
+		wc.abort(websocket.StatusGoingAway, peerUnresponsiveReason)
+		return
+	}
+}
+
+// readPump reads frames from wc, decodes them (protocol-aware), and hands each
+// to forward, which is direction-specific: forwardToInstance pipes the raw
+// bytes through untouched, forwardToClient sequences and buffers them first.
+// The optional observe callback is invoked for every decoded frame before
+// forwarding, letting the caller react to lifecycle signals (e.g. ready)
+// without disturbing routing. It returns when the connection closes or its
+// context is cancelled.
+func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forward func(string, brokerframe.Frame, []byte), observe func(brokerframe.Frame)) {
 	for {
 		_, data, err := wc.conn.Read(ctx)
 		if err != nil {
@@ -451,6 +774,7 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peer
 		frame, err := brokerframe.Decode(data)
 		if err != nil {
 			g.logger.Warn("dropping undecodable frame", "lease_id", leaseID, "error", err)
+			g.registry.Metrics().frameDropped(frameDropUndecodable)
 			continue
 		}
 		if observe != nil {
@@ -459,25 +783,88 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, peer
 		if frame.LeaseID != "" && frame.LeaseID != leaseID {
 			g.logger.Warn("dropping frame with mismatched lease",
 				"bound_lease", leaseID, "frame_lease", frame.LeaseID)
+			g.registry.Metrics().frameDropped(frameDropLeaseMismatch)
 			continue
 		}
 
-		peer := peerFor(leaseID)
-		if peer == nil {
-			g.logger.Debug("no peer attached, dropping frame",
-				"lease_id", leaseID, "signal", frame.Signal)
-			continue
-		}
-		if !peer.queue(data) {
-			g.logger.Warn("peer send buffer full, dropping frame",
-				"lease_id", leaseID, "signal", frame.Signal)
-		}
+		forward(leaseID, frame, data)
 	}
 }
 
-// writePump drains wc.send and writes each frame to the WebSocket until the
-// context is cancelled or the connection is closed.
+// forwardToInstance relays one client-originated frame to the lease's instance
+// connection, verbatim.
+//
+// Instance-bound frames are deliberately NOT sequenced and NOT buffered: the
+// broker assigns sequences on the client-bound side only, so an instance needs
+// no protocol awareness and nothing on the dial-back side changed. Both loss
+// paths here — no instance attached, and an instance whose send queue is full —
+// still log and continue, exactly as they always did.
+func (g *Gateway) forwardToInstance(leaseID string, frame brokerframe.Frame, data []byte) {
+	peer := g.registry.InstanceConn(leaseID)
+	if peer == nil {
+		g.logger.Debug("no peer attached, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal)
+		g.registry.Metrics().frameDropped(frameDropNoInstance)
+		return
+	}
+	if !peer.queue(data) {
+		g.logger.Warn("peer send buffer full, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal)
+		g.registry.Metrics().frameDropped(frameDropInstanceBufferFull)
+	}
+}
+
+// forwardToClient relays one instance-originated frame to the lease's client,
+// through the lease's sequencer and replay buffer.
+//
+// The raw bytes are deliberately discarded: SendClientFrame re-encodes the
+// decoded frame so it can stamp the sequence, which is also what strips any
+// Secret an instance might have set on a frame headed for a client.
+//
+// Neither loss path is fatal any more. With no client attached the frame is
+// retained rather than dropped, so a client that attaches later can be caught
+// up; with a full send queue it is retained too, and the existing warning still
+// fires because a client that is not draining its socket is still an operator
+// problem worth naming.
+func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []byte) {
+	seq, outcome, err := g.registry.SendClientFrame(leaseID, frame)
+	if err != nil {
+		g.logger.Debug("dropping client-bound frame for a lease that is gone",
+			"lease_id", leaseID, "signal", frame.Signal, "error", err)
+		g.registry.Metrics().frameDropped(frameDropLeaseGone)
+		return
+	}
+	switch outcome {
+	case clientFrameBuffered:
+		g.logger.Debug("no client attached; frame retained for replay",
+			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
+	case clientFrameDropped:
+		g.logger.Warn("peer send buffer full, dropping frame",
+			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
+		g.registry.Metrics().frameDropped(frameDropClientBufferFull)
+	}
+}
+
+// writePump writes wc's staged replay, then drains wc.send and writes each
+// frame to the WebSocket until the context is cancelled or the connection is
+// closed.
+//
+// The staged replay goes first and goes out UNCONDITIONALLY — it is not
+// select-ed against the send channel — which is what makes "replayed frames
+// precede live ones" a property of the pump rather than a race between two
+// producers. It is also why a replay is staged rather than queued: the send
+// channel holds 256 frames and a replay is bounded in bytes, so a megabyte of
+// token deltas would otherwise be truncated on its way out of the very buffer
+// that exists to stop frames being lost.
 func (g *Gateway) writePump(ctx context.Context, wc *wsConn) {
+	for _, data := range wc.takeReplay() {
+		if err := wc.conn.Write(ctx, websocket.MessageText, data); err != nil {
+			if ctx.Err() == nil {
+				g.logger.Debug("write pump ended during replay", "error", err)
+			}
+			return
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():

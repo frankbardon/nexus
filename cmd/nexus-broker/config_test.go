@@ -36,6 +36,7 @@ listen_addr: "127.0.0.1:9000"
 nexus_binary_path: "/opt/nexus/bin/nexus"
 max_concurrent: 32
 idle_timeout: 2m
+max_turn_duration: 45m
 queue_wait_timeout: 10s
 release_grace: 20s
 reattach_window: 90s
@@ -56,6 +57,9 @@ reattach_window: 90s
 	if cfg.IdleTimeout != 2*time.Minute {
 		t.Errorf("IdleTimeout = %v", cfg.IdleTimeout)
 	}
+	if cfg.MaxTurnDuration != 45*time.Minute {
+		t.Errorf("MaxTurnDuration = %v", cfg.MaxTurnDuration)
+	}
 	if cfg.QueueWaitTimeout != 10*time.Second {
 		t.Errorf("QueueWaitTimeout = %v", cfg.QueueWaitTimeout)
 	}
@@ -64,6 +68,31 @@ reattach_window: 90s
 	}
 	if cfg.ReattachWindow != 90*time.Second {
 		t.Errorf("ReattachWindow = %v", cfg.ReattachWindow)
+	}
+}
+
+// TestLoadConfigMaxTurnDuration pins the turn bound's two edges: absent it takes
+// the default, and a non-positive value is honoured as "disabled" rather than
+// coerced back to the default. The two keys differ deliberately —
+// reattach_window is not disableable because "wait forever" is the orphan it
+// exists to remove, whereas an operator running turns longer than any sane bound
+// has a legitimate reason to switch this one off.
+func TestLoadConfigMaxTurnDuration(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(``))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.MaxTurnDuration != defaultMaxTurnDuration {
+		t.Errorf("MaxTurnDuration = %v, want %v", cfg.MaxTurnDuration, defaultMaxTurnDuration)
+	}
+
+	cfg, err = LoadConfigFromBytes([]byte("max_turn_duration: 0s\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.MaxTurnDuration != 0 {
+		t.Errorf("MaxTurnDuration = %v for an explicit 0s, want 0 (the bound is disableable)",
+			cfg.MaxTurnDuration)
 	}
 }
 
@@ -995,5 +1024,465 @@ func TestA2ATaskSettingsResolve(t *testing.T) {
 				t.Errorf("input_timeout = %v, want %v", cfg.A2AInputTimeout, c.wantInput)
 			}
 		})
+	}
+}
+
+// TestLoadConfigInheritEnv covers the broker-level pass-through list: what a
+// valid document yields, and the three shapes that fail the boot.
+//
+// The list is returned trimmed, de-duplicated and SORTED because it decides a
+// spawned process's environment, and that environment is already assembled in
+// sorted order so a boot is reproducible.
+func TestLoadConfigInheritEnv(t *testing.T) {
+	t.Run("trims, dedupes and sorts", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte(`
+inherit_env:
+  - OPENAI_API_KEY
+  - "  ANTHROPIC_API_KEY  "
+  - OPENAI_API_KEY
+`))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		want := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+		if !reflect.DeepEqual(cfg.InheritEnv, want) {
+			t.Errorf("InheritEnv = %v, want %v", cfg.InheritEnv, want)
+		}
+	})
+
+	t.Run("defaults to empty", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte("listen_addr: \":9090\"\n"))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if len(cfg.InheritEnv) != 0 {
+			t.Errorf("InheritEnv = %v, want empty: an undeclared broker must forward nothing beyond the always-pass set", cfg.InheritEnv)
+		}
+	})
+
+	for name, tc := range map[string]struct{ yaml, wants string }{
+		"empty entry": {
+			yaml:  "inherit_env:\n  - \"\"\n",
+			wants: "is empty",
+		},
+		"name=value pair": {
+			yaml:  "inherit_env:\n  - \"FOO=bar\"\n",
+			wants: "not a variable name",
+		},
+		"broker-owned name": {
+			yaml:  "inherit_env:\n  - NEXUS_BROKER_SPAWN_SECRET\n",
+			wants: "cannot be inherited",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatalf("LoadConfigFromBytes accepted %q", tc.yaml)
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.wants)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_RunAsEntryOverridesBrokerDefault pins the placement decision:
+// the broker-level key is a DEFAULT, and an entry that declares its own replaces
+// it outright rather than merging field by field.
+//
+// Wholesale replacement matters because a merged credential — a uid from the
+// entry and a gid from the broker block — is one nobody wrote down, and it would
+// be the credential a whole variant's files end up owned by.
+func TestLoadConfig_RunAsEntryOverridesBrokerDefault(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+run_as:
+  uid: 1000
+  gid: 1000
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:
+      uid: 1002
+      gid: 1003
+  support:
+    path: /opt/builds/nexus-support
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+
+	want := map[string][2]int{
+		// The entry's own.
+		"vision": {1002, 1003},
+		// The broker default, folded in.
+		"support":          {1000, 1000},
+		reservedBinaryName: {1000, 1000},
+	}
+	for name, ids := range want {
+		entry, ok := cfg.Binaries[name]
+		if !ok {
+			t.Fatalf("registry has no %q entry", name)
+		}
+		if entry.RunAs == nil || entry.RunAs.UID == nil || entry.RunAs.GID == nil {
+			t.Fatalf("%s: run_as = %+v, want uid %d gid %d", name, entry.RunAs, ids[0], ids[1])
+		}
+		if *entry.RunAs.UID != ids[0] || *entry.RunAs.GID != ids[1] {
+			t.Errorf("%s: run_as = %d:%d, want %d:%d", name, *entry.RunAs.UID, *entry.RunAs.GID, ids[0], ids[1])
+		}
+	}
+
+	// Folded as a COPY: resolveRunAsHomes writes a per-entry answer onto the spec,
+	// so two entries sharing the broker default must not share one struct.
+	if cfg.Binaries["support"].RunAs == cfg.Binaries[reservedBinaryName].RunAs {
+		t.Error("two entries share one RunAsSpec; a per-entry resolution would leak between them")
+	}
+}
+
+// TestLoadConfig_RunAsWithoutRunAsIsUnchanged is the compatibility assertion: a
+// config that never mentions the key leaves every entry with no credential at
+// all, which is what makes the spawn path byte-identical to what it was.
+func TestLoadConfig_RunAsWithoutRunAsIsUnchanged(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.RunAs != nil {
+		t.Errorf("cfg.RunAs = %+v, want nil", cfg.RunAs)
+	}
+	for name, entry := range cfg.Binaries {
+		if entry.RunAs != nil {
+			t.Errorf("%s: run_as = %+v, want nil when the key is never written", name, entry.RunAs)
+		}
+	}
+}
+
+// TestLoadConfig_RunAsInvalidValueFailsBoot checks that every malformed
+// credential is a BOOT failure naming where it was written — the same precedent
+// the registry already sets for a missing or non-executable path.
+//
+// A half-written block is refused rather than completed: a uid with no gid leaves
+// instances in the broker's primary group, which looks like a boundary in the
+// config and is not one on disk.
+func TestLoadConfig_RunAsInvalidValueFailsBoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantParts []string
+	}{
+		{
+			name: "negative uid on an entry",
+			yaml: "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: -1\n      gid: 20\n",
+			// Names the entry, the field, and the offending value.
+			wantParts: []string{"binaries: vision: run_as.uid", "-1"},
+		},
+		{
+			name:      "uid without gid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: 1002\n",
+			wantParts: []string{"binaries: vision: run_as", "gid"},
+		},
+		{
+			name:      "gid without uid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      gid: 1002\n",
+			wantParts: []string{"binaries: vision: run_as", "uid"},
+		},
+		{
+			name:      "empty block on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as: {}\n",
+			wantParts: []string{"binaries: vision: run_as", "neither uid nor gid"},
+		},
+		{
+			name:      "out-of-range gid on an entry",
+			yaml:      "binaries:\n  vision:\n    path: /opt/nexus-vision\n    run_as:\n      uid: 1002\n      gid: 4294967296\n",
+			wantParts: []string{"binaries: vision: run_as.gid", "4294967296"},
+		},
+		{
+			name:      "negative uid at broker level",
+			yaml:      "run_as:\n  uid: -5\n  gid: 20\n",
+			wantParts: []string{"run_as.uid", "-5"},
+		},
+		{
+			name:      "half-written block at broker level",
+			yaml:      "run_as:\n  gid: 20\n",
+			wantParts: []string{"run_as", "uid"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatal("LoadConfigFromBytes accepted an invalid run_as")
+			}
+			for _, part := range tc.wantParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error = %v, want it to mention %q", err, part)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveRunAsHomes_UsesTheEntrysDeclaredHome checks the escape hatch and,
+// with it, the property that makes the boot survivable in a container with no
+// passwd entry for the uid: an entry whose `env` sets HOME is never looked up.
+func TestResolveRunAsHomes_UsesTheEntrysDeclaredHome(t *testing.T) {
+	// A uid no passwd database is going to hold, so a lookup would certainly fail.
+	uid, gid := 4294967290, 4294967290
+	binaries := map[string]BinaryEntry{
+		"vision": {
+			Path:         "/opt/builds/nexus-vision",
+			ResolvedPath: "/opt/builds/nexus-vision",
+			Env:          map[string]string{"HOME": "/var/lib/nexus/vision"},
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	if err := resolveRunAsHomes(binaries); err != nil {
+		t.Fatalf("resolveRunAsHomes: %v", err)
+	}
+	if got := binaries["vision"].RunAs.ResolvedHome; got != "" {
+		t.Errorf("ResolvedHome = %q, want empty: the entry's env sets HOME and that value stands", got)
+	}
+}
+
+// TestResolveRunAsHomes_UnresolvableUIDFailsBoot pins the other side: run_as
+// without a HOME story is broken on arrival, so a uid the broker cannot resolve
+// a home for refuses the boot and names the key that fixes it, rather than
+// spawning instances that fail at their first write.
+func TestResolveRunAsHomes_UnresolvableUIDFailsBoot(t *testing.T) {
+	uid, gid := 4294967290, 4294967290
+	if _, err := runAsHomeDir(uid); err == nil {
+		t.Skipf("uid %d resolves on this host, so there is no failure to observe", uid)
+	}
+
+	binaries := map[string]BinaryEntry{
+		"vision": {
+			Path:         "/opt/builds/nexus-vision",
+			ResolvedPath: "/opt/builds/nexus-vision",
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	err := resolveRunAsHomes(binaries)
+	if err == nil {
+		t.Fatal("resolveRunAsHomes accepted a uid with no resolvable home")
+	}
+	for _, part := range []string{"binaries: vision", "run_as.uid", "binaries.vision.env.HOME"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error = %v, want it to mention %q", err, part)
+		}
+	}
+}
+
+// TestResolveRunAsHomes_ResolvesFromPasswd exercises the real lookup against the
+// one uid every host is guaranteed to be able to answer for: the broker's own.
+func TestResolveRunAsHomes_ResolvesFromPasswd(t *testing.T) {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	want, err := runAsHomeDir(uid)
+	if err != nil {
+		t.Skipf("this host cannot resolve its own uid %d in the passwd database: %v", uid, err)
+	}
+
+	binaries := map[string]BinaryEntry{
+		reservedBinaryName: {
+			Path:         "nexus",
+			ResolvedPath: "/usr/local/bin/nexus",
+			RunAs:        &RunAsSpec{UID: &uid, GID: &gid},
+		},
+	}
+	if err := resolveRunAsHomes(binaries); err != nil {
+		t.Fatalf("resolveRunAsHomes: %v", err)
+	}
+	if got := binaries[reservedBinaryName].RunAs.ResolvedHome; got != want {
+		t.Errorf("ResolvedHome = %q, want %q", got, want)
+	}
+}
+
+// TestLoadConfigAdmissionBounds pins the three E4-S4 keys: they parse, they
+// carry the documented defaults when absent, and a non-positive value reads as
+// "no bound" (the same reading max_concurrent gives the same shape) rather than
+// being coerced back to a default.
+//
+// The defaults differ on purpose. max_queue_depth has one because an unbounded
+// waiter queue is a resource fact every broker wants closed; the two
+// per-principal caps have none because a per-tenant quota is a policy only the
+// operator can size, and a broker that was never told about tenants must not
+// acquire one.
+func TestLoadConfigAdmissionBounds(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes(nil)
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != defaultMaxQueueDepth {
+			t.Errorf("MaxQueueDepth = %d, want %d", cfg.MaxQueueDepth, defaultMaxQueueDepth)
+		}
+		if cfg.MaxLeasesPerPrincipal != 0 {
+			t.Errorf("MaxLeasesPerPrincipal = %d, want 0 (off unless configured)", cfg.MaxLeasesPerPrincipal)
+		}
+		if cfg.MaxQueuedPerPrincipal != 0 {
+			t.Errorf("MaxQueuedPerPrincipal = %d, want 0 (off unless configured)", cfg.MaxQueuedPerPrincipal)
+		}
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte(`
+max_queue_depth: 12
+max_leases_per_principal: 3
+max_queued_per_principal: 2
+`))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != 12 {
+			t.Errorf("MaxQueueDepth = %d, want 12", cfg.MaxQueueDepth)
+		}
+		if cfg.MaxLeasesPerPrincipal != 3 {
+			t.Errorf("MaxLeasesPerPrincipal = %d, want 3", cfg.MaxLeasesPerPrincipal)
+		}
+		if cfg.MaxQueuedPerPrincipal != 2 {
+			t.Errorf("MaxQueuedPerPrincipal = %d, want 2", cfg.MaxQueuedPerPrincipal)
+		}
+	})
+
+	t.Run("non-positive means unbounded", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes([]byte("max_queue_depth: 0\n"))
+		if err != nil {
+			t.Fatalf("LoadConfigFromBytes: %v", err)
+		}
+		if cfg.MaxQueueDepth != 0 {
+			t.Errorf("MaxQueueDepth = %d, want 0 (an explicit 0 disables the bound)", cfg.MaxQueueDepth)
+		}
+	})
+}
+
+// TestClaimLimitDefaultsMatchHistoricalConstants is the compatibility pin for
+// E5-S1: promoting ready_timeout, session_report_grace and max_claim_body to
+// config keys must leave an UNCHANGED broker.yaml behaving byte-identically.
+//
+// It asserts the literals as well as the wiring on purpose. Asserting only
+// `DefaultConfig().ReadyTimeout == defaultReadyTimeout` would pass happily if
+// somebody edited the constant, which is exactly the change this test exists to
+// catch: these three numbers are what every deployment that never writes the key
+// gets, and they were 30s, 5s and 1 MiB before the keys existed.
+func TestClaimLimitDefaultsMatchHistoricalConstants(t *testing.T) {
+	if defaultReadyTimeout != 30*time.Second {
+		t.Errorf("defaultReadyTimeout = %v, want 30s (the pre-config-key value)", defaultReadyTimeout)
+	}
+	if defaultSessionReportGrace != 5*time.Second {
+		t.Errorf("defaultSessionReportGrace = %v, want 5s (the pre-config-key value)", defaultSessionReportGrace)
+	}
+	if defaultMaxClaimBody != 1<<20 {
+		t.Errorf("defaultMaxClaimBody = %d, want %d (1 MiB, the pre-config-key value)", defaultMaxClaimBody, 1<<20)
+	}
+
+	def := DefaultConfig()
+	if def.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("DefaultConfig().ReadyTimeout = %v, want %v", def.ReadyTimeout, defaultReadyTimeout)
+	}
+	if def.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("DefaultConfig().SessionReportGrace = %v, want %v", def.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if def.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("DefaultConfig().MaxClaimBody = %d, want %d", def.MaxClaimBody, defaultMaxClaimBody)
+	}
+
+	// A config that mentions none of the three — the shape every existing
+	// broker.yaml has — must resolve to exactly those defaults.
+	cfg, err := LoadConfigFromBytes([]byte("listen_addr: \":8080\"\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("unwritten ready_timeout = %v, want %v", cfg.ReadyTimeout, defaultReadyTimeout)
+	}
+	if cfg.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("unwritten session_report_grace = %v, want %v", cfg.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if cfg.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("unwritten max_claim_body = %d, want %d", cfg.MaxClaimBody, defaultMaxClaimBody)
+	}
+}
+
+// TestLoadConfigClaimLimitOverrides pins that written values reach the resolved
+// fields — the whole point of the keys, since ready_timeout is the ceiling on
+// engine boot and the only way a slow-booting profile stops 504ing.
+func TestLoadConfigClaimLimitOverrides(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte(`
+ready_timeout: 3m
+session_report_grace: 250ms
+max_claim_body: 8388608
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != 3*time.Minute {
+		t.Errorf("ReadyTimeout = %v, want 3m", cfg.ReadyTimeout)
+	}
+	if cfg.SessionReportGrace != 250*time.Millisecond {
+		t.Errorf("SessionReportGrace = %v, want 250ms", cfg.SessionReportGrace)
+	}
+	if cfg.MaxClaimBody != 8<<20 {
+		t.Errorf("MaxClaimBody = %d, want %d", cfg.MaxClaimBody, 8<<20)
+	}
+}
+
+// TestLoadConfigRejectsClaimLimits pins the validation discipline: a value with
+// no sane reading fails the BOOT, and the message NAMES THE KEY.
+//
+// Naming the key is the assertion that matters. yaml.v3's own complaint for a
+// malformed scalar identifies the Go type and the line ("cannot unmarshal !!str
+// `banana` into time.Duration") and never the key, which is useless to an
+// operator holding a broker.yaml; resolveClaimLimits decodes each node itself so
+// both the malformed and the out-of-range case say which key is wrong.
+func TestLoadConfigRejectsClaimLimits(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		key  string
+	}{
+		{"ready_timeout zero", "ready_timeout: 0s\n", "ready_timeout"},
+		{"ready_timeout negative", "ready_timeout: -5s\n", "ready_timeout"},
+		{"ready_timeout malformed", "ready_timeout: banana\n", "ready_timeout"},
+		{"session_report_grace zero", "session_report_grace: 0s\n", "session_report_grace"},
+		{"session_report_grace negative", "session_report_grace: -1s\n", "session_report_grace"},
+		{"session_report_grace malformed", "session_report_grace: soon\n", "session_report_grace"},
+		{"max_claim_body zero", "max_claim_body: 0\n", "max_claim_body"},
+		{"max_claim_body negative", "max_claim_body: -1\n", "max_claim_body"},
+		{"max_claim_body malformed", "max_claim_body: plenty\n", "max_claim_body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes([]byte(tc.yaml))
+			if err == nil {
+				t.Fatalf("LoadConfigFromBytes(%q) succeeded; want a boot failure", tc.yaml)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error %q does not name the key %q", err, tc.key)
+			}
+		})
+	}
+}
+
+// TestLoadConfigClaimLimitsEmptyValueTakesDefault pins that `ready_timeout:`
+// with nothing after it reads as "not written" rather than as a malformed zero.
+// An empty value is a null, and a null must mean the same thing as an absent
+// key — otherwise commenting a value out would fail the boot.
+func TestLoadConfigClaimLimitsEmptyValueTakesDefault(t *testing.T) {
+	cfg, err := LoadConfigFromBytes([]byte("ready_timeout:\nsession_report_grace:\nmax_claim_body:\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	if cfg.ReadyTimeout != defaultReadyTimeout {
+		t.Errorf("ReadyTimeout = %v, want %v", cfg.ReadyTimeout, defaultReadyTimeout)
+	}
+	if cfg.SessionReportGrace != defaultSessionReportGrace {
+		t.Errorf("SessionReportGrace = %v, want %v", cfg.SessionReportGrace, defaultSessionReportGrace)
+	}
+	if cfg.MaxClaimBody != defaultMaxClaimBody {
+		t.Errorf("MaxClaimBody = %d, want %d", cfg.MaxClaimBody, defaultMaxClaimBody)
 	}
 }

@@ -195,6 +195,18 @@ func openSessionBinaryIndex(logger *slog.Logger, cfg Config) (*sessionBinaryInde
 // of "not recorded" — writing either would put a binding that answers nothing into
 // a capped store.
 //
+// THIS INDEX IS DELIBERATELY NOT FSYNCED, unlike the lease journal, and the
+// asymmetry is the point rather than an omission. Losing the tail of
+// leases.jsonl to a host crash loses the pid of a running instance, and a lease
+// with no pid is closed out at the next boot while its process keeps running —
+// an orphan, the one failure recovery cannot repair. Losing the tail of THIS
+// file loses a binding, and a missing binding is the documented "unknown session
+// means no opinion, proceed" answer that every caller already handles: the
+// resume goes ahead exactly as it did before this index existed. A barrier
+// cannot buy correctness for a store whose worst case is already correct, so it
+// would be pure cost. Do not add one without first changing what a missing
+// binding means.
+//
 // A pairing that is already recorded with the same binary refreshes its recency
 // in memory but does NOT append: re-reporting the same session on every resume
 // would otherwise write a line per resume for a value that has not changed. The

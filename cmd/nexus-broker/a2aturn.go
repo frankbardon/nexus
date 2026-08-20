@@ -183,7 +183,7 @@ func (s *A2AServer) startTask(ctx context.Context, card *servedAgentCard, in a2a
 // which is not a property of the task.
 func (s *A2AServer) beginTurn(ctx context.Context, card *servedAgentCard, in a2aTurnInput, caller nexusauth.Principal, task *a2aTask) *a2a.Error {
 	instance, err := s.leases.Acquire(ctx, a2aLeaseRequest{
-		profile:   s.profiles[card.profile],
+		profile:   card.spec,
 		name:      card.profile,
 		contextID: task.contextID,
 		owner:     caller,

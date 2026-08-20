@@ -282,8 +282,9 @@ func TestRecoverWithNoStoreIsNoop(t *testing.T) {
 
 // TestRestoredLeaseRequiresSpawnSecret is the identity gate: a live pid is not
 // proof of identity (it may have been reused), so a restored lease stays inactive
-// until something presents the derived secret — and it does so EVEN WITH
-// AUTHENTICATION DISABLED, where a freshly claimed lease would skip the check.
+// until something presents the secret this broker DERIVES for it, rather than
+// merely naming its lease id. Every registration clears that bar now, but a
+// restored lease is where the reasoning is sharpest, so it keeps its own test.
 func TestRestoredLeaseRequiresSpawnSecret(t *testing.T) {
 	pid := startSleeper(t)
 	dir := seedJournal(t, liveRecord("lease-live", "broker-a", pid))
@@ -292,13 +293,11 @@ func TestRestoredLeaseRequiresSpawnSecret(t *testing.T) {
 		t.Fatal("setup: the lease was not restored")
 	}
 
-	// enforce=false throughout: this broker has no `auth:` block.
-	const enforce = false
-
-	if err := reg.AttachInstance("lease-live", newWSConn(nil), "", enforce); err == nil {
+	// This broker has no `auth:` block; the secret is required regardless.
+	if err := reg.AttachInstance("lease-live", newWSConn(nil), ""); err == nil {
 		t.Fatal("a register frame with NO secret attached to a restored lease")
 	}
-	if err := reg.AttachInstance("lease-live", newWSConn(nil), "not-the-secret", enforce); err == nil {
+	if err := reg.AttachInstance("lease-live", newWSConn(nil), "not-the-secret"); err == nil {
 		t.Fatal("a register frame with the WRONG secret attached to a restored lease")
 	}
 	// Still inactive after both refusals.
@@ -316,7 +315,7 @@ func TestRestoredLeaseRequiresSpawnSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive secret: %v", err)
 	}
-	if err := reg.AttachInstance("lease-live", newWSConn(nil), secret, enforce); err != nil {
+	if err := reg.AttachInstance("lease-live", newWSConn(nil), secret); err != nil {
 		t.Fatalf("the correct secret was refused: %v", err)
 	}
 	if reg.InstanceConn("lease-live") == nil {
@@ -375,7 +374,7 @@ func TestReapSkipsReattachedLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive secret: %v", err)
 	}
-	if err := reg.AttachInstance("lease-back", newWSConn(nil), secret, false); err != nil {
+	if err := reg.AttachInstance("lease-back", newWSConn(nil), secret); err != nil {
 		t.Fatalf("reattach: %v", err)
 	}
 

@@ -50,9 +50,11 @@ const (
 	agentRESTPattern    = agentRoutePrefix + agentProfileWildEnc + agentRESTSuffix + "/{rest...}"
 )
 
-// maxA2ABody caps an A2A request body, matching maxClaimBody. A JSON-RPC
-// envelope carrying a message is far smaller than a claim's inline config, so
-// this is a backstop against an unbounded read rather than a working limit.
+// maxA2ABody caps an A2A request body, matching the `max_claim_body` default. A
+// JSON-RPC envelope carrying a message is far smaller than a claim's inline
+// config, so this is a backstop against an unbounded read rather than a working
+// limit — which is why it stays a constant while max_claim_body, the bound on a
+// body that carries a whole nexus config, became a config key.
 const maxA2ABody = 1 << 20 // 1 MiB
 
 // a2aErrorDomain is the google.rpc.ErrorInfo domain for refusals the broker's
@@ -122,8 +124,11 @@ func agentRESTPrefix(profile string) string { return agentBasePath(profile) + ag
 // endpoint and one REST binding per configured `agents:` profile.
 //
 // It holds no per-request state and is safe for concurrent use. The cards are
-// rendered once at construction, because the profile map is immutable after
-// LoadConfig — there is no reload path — so there is nothing to recompute.
+// rendered once PER CONFIGURATION and published with it, in liveConfig, so a
+// request resolves a profile with one atomic load and there is nothing to
+// recompute per request. A SIGHUP publishes a wholly new card map in a single
+// store: no request can ever observe one profile's identity under another's
+// name, because there is no moment at which the map is half-replaced.
 //
 // It does NOT authenticate. Every route is registered through the broker's
 // existing guard (see run()), which means an A2A caller is refused by exactly
@@ -134,16 +139,14 @@ func agentRESTPrefix(profile string) string { return agentBasePath(profile) + ag
 type A2AServer struct {
 	logger *slog.Logger
 
-	// cards is the rendered card per profile name, and doubles as the routing
-	// table: a path whose {profile} is not a key here names no agent.
-	cards map[string]*servedAgentCard
-
-	// names is the profile list in a stable order, for the boot log.
-	names []string
-
-	// profiles is the resolved `agents:` block, so a dispatched turn can hand
-	// the lease provider the config and binary its profile names.
-	profiles map[string]AgentProfile
+	// live is the configuration snapshot the rendered cards — and therefore the
+	// routing table — are read from. A path whose {profile} is not a key in the
+	// snapshot's card map names no agent.
+	//
+	// The profile a dispatched turn runs under is NOT looked up here a second
+	// time: it rides on the card (servedAgentCard.spec), so a turn cannot pair a
+	// card resolved before a reload with a profile read after one.
+	live *configHolder
 
 	// tasks is the live-task registry: the tasks this process is driving right
 	// now. A task is forgotten the moment it settles, because everything a client
@@ -179,13 +182,30 @@ type A2AServer struct {
 // than branching in run()) keeps the wiring in main uniform; the emptiness is
 // handled once, here.
 func NewA2AServer(logger *slog.Logger, cfg Config) (*A2AServer, error) {
+	live, err := newConfigHolder(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return newA2AServer(logger, live), nil
+}
+
+// newA2AServer builds the ingress over an ALREADY BUILT configuration snapshot.
+//
+// run() uses this form rather than NewA2AServer because it needs the same
+// snapshot for the claim handler, the binaries listing, the release handler and
+// the idle sweeper: building it once and handing it round is what makes one
+// SIGHUP change all of them together. Rendering the cards is therefore the
+// holder's job, and the error a bad card produces surfaces where the holder is
+// built.
+func newA2AServer(logger *slog.Logger, live *configHolder) *A2AServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &A2AServer{
-		logger:   logger,
-		profiles: cfg.Agents,
-		tasks:    newA2ATasks(),
+	cfg := live.config()
+	return &A2AServer{
+		logger: logger,
+		live:   live,
+		tasks:  newA2ATasks(),
 		// A memory-only store by default. run() replaces it with the durable one
 		// when a state_dir is configured; building one here unconditionally means
 		// the read operations never have to branch on whether a store exists.
@@ -194,26 +214,22 @@ func NewA2AServer(logger *slog.Logger, cfg Config) (*A2AServer, error) {
 		inputTimeout: cfg.A2AInputTimeout,
 		leases:       unwiredLeaseProvider{},
 	}
-	if len(cfg.Agents) == 0 {
-		return s, nil
-	}
-
-	s.cards = make(map[string]*servedAgentCard, len(cfg.Agents))
-	// Sorted rather than a map walk so a config with two unservable cards fails
-	// on the same one every boot.
-	s.names = sortedAgentNames(cfg.Agents)
-	for _, name := range s.names {
-		card, err := buildAgentCard(name, cfg.Agents[name], cfg.A2ABaseURL, cfg.AuthValidators)
-		if err != nil {
-			return nil, err
-		}
-		s.cards[name] = card
-	}
-	return s, nil
 }
 
-// enabled reports whether any profile is configured.
-func (s *A2AServer) enabled() bool { return s != nil && len(s.cards) > 0 }
+// enabled reports whether any profile is configured RIGHT NOW.
+//
+// Register consults it once, at boot, and that asymmetry is deliberate: a broker
+// that booted with no `agents:` block registers no routes at all, and a reload
+// cannot conjure them (see mergeReloadable, which refuses to enable the ingress
+// for exactly this reason). A broker that booted WITH profiles keeps its routes
+// however the profile set is later reloaded, including down to none — at which
+// point every A2A path answers "unknown agent profile", which is the honest
+// reading of a configured route with no agent behind it.
+func (s *A2AServer) enabled() bool { return s != nil && len(s.live.get().cards) > 0 }
+
+// card returns the rendered Agent Card for a profile name, or nil when the
+// snapshot in force has no such profile.
+func (s *A2AServer) card(name string) *servedAgentCard { return s.live.get().cards[name] }
 
 // useLeaseProvider installs the machinery that produces an agent instance for a
 // turn.
@@ -300,7 +316,7 @@ func (s *A2AServer) logStartupState(cfg Config) {
 		// line saying it has no A2A ingress, because it never had one.
 		return
 	}
-	s.logger.Info("a2a ingress enabled", "profiles", len(s.cards), "base_url", cfg.A2ABaseURL)
+	s.logger.Info("a2a ingress enabled", "profiles", len(s.live.get().cards), "base_url", cfg.A2ABaseURL)
 	// The retention policy is stated at boot rather than left to be discovered:
 	// it decides how long a client can read a task back for, and an operator who
 	// tuned it needs to see the value this process actually resolved. A state_dir
@@ -322,7 +338,7 @@ func (s *A2AServer) logStartupState(cfg Config) {
 			"the routes answer and the cards are served, but every message will be refused " +
 			"until the broker can start a Nexus instance to run a turn on")
 	}
-	for _, name := range s.names {
+	for _, name := range s.live.get().names {
 		profile := cfg.Agents[name]
 		s.logger.Info("a2a agent profile",
 			"name", name,
@@ -745,7 +761,7 @@ func a2aNotImplemented(operation string) *a2a.Error {
 // serving a different agent than the one addressed produces a conversation that
 // merely behaves oddly, which is far harder to diagnose than a refusal.
 func (s *A2AServer) cardFor(r *http.Request) (*servedAgentCard, bool) {
-	card, ok := s.cards[r.PathValue("profile")]
+	card, ok := s.live.get().cards[r.PathValue("profile")]
 	return card, ok
 }
 

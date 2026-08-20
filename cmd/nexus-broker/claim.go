@@ -17,18 +17,35 @@ import (
 
 // defaultReadyTimeout bounds how long POST /claim waits for a freshly spawned
 // instance to dial back and signal ready before giving up, killing it, and
-// returning an error. Kept as a constant (not a config key) for this story.
+// returning an error. It is the value the `ready_timeout` config key takes when
+// an operator does not write it.
+//
+// Thirty seconds is a boot budget, and it is the one most likely to be wrong for
+// a given deployment: it has to cover process start, engine construction and
+// every plugin's Init/Ready, so a config that pulls a large model list, warms a
+// vector store or dials several MCP servers can legitimately exceed it. Before
+// the key existed that surfaced as `504 instance did not become ready in time`
+// with nothing an operator could turn.
 const defaultReadyTimeout = 30 * time.Second
 
 // defaultSessionReportGrace bounds how long POST /claim waits, after the
 // instance signals ready, for its session-id-report frame to arrive. The
 // plugin sends the report immediately after ready, so this is a short grace
 // window: if it elapses the claim still succeeds, just without a session id in
-// the response. Kept as a constant (not a config key) for this story.
+// the response. It is the value the `session_report_grace` config key takes when
+// an operator does not write it.
 const defaultSessionReportGrace = 5 * time.Second
 
-// maxClaimBody caps the size of a claim request body to avoid unbounded reads.
-const maxClaimBody = 1 << 20 // 1 MiB
+// defaultMaxClaimBody caps the size of a claim request body to avoid unbounded
+// reads. It is the value the `max_claim_body` config key takes when an operator
+// does not write it.
+//
+// A claim body carries the WHOLE nexus config inline, so the ceiling scales with
+// how large an operator's profiles are: a deployment shipping a long skills
+// block, many MCP servers or an inlined system prompt can outgrow a megabyte,
+// and the refusal (a 400 from http.MaxBytesReader) says nothing about which
+// bound was hit.
+const defaultMaxClaimBody int64 = 1 << 20 // 1 MiB
 
 // claimRequest is the JSON body of POST /claim. The caller supplies the full
 // nexus config inline (YAML text) for the instance to boot with.
@@ -96,23 +113,29 @@ type claimResponse struct {
 // with the per-claim config, waits for the instance to dial back and signal
 // ready, then returns the lease id and the broker's client WebSocket URL.
 type ClaimServer struct {
-	logger             *slog.Logger
-	registry           *Registry
-	cfg                Config
-	runner             commandRunner
-	readyTimeout       time.Duration
-	sessionReportGrace time.Duration
+	logger   *slog.Logger
+	registry *Registry
+	runner   commandRunner
+
+	// live is the atomic configuration snapshot every claim reads.
+	//
+	// It replaces the by-value Config copy and the four bounds this server used
+	// to latch at construction (ready_timeout, session_report_grace,
+	// max_claim_body, queue_wait_timeout). Latching them meant a SIGHUP could
+	// never reach a live claim server: swapping a Config behind it would have
+	// changed nothing an in-flight or future claim actually read. Reading them
+	// through the holder at USE time is what makes them reloadable, and it is one
+	// seam rather than four setters.
+	//
+	// A claim reads the snapshot ONCE, at the top of the request, so one claim
+	// cannot straddle a reload — it either spawns entirely under the old
+	// configuration or entirely under the new one.
+	live *configHolder
 
 	// tickets mints the single-use client WebSocket ticket returned with a
 	// successful claim. A nil store (or one built inert because auth is disabled)
 	// simply issues nothing, and the response omits the `ticket` field.
 	tickets *ticketStore
-
-	// queueWaitTimeout bounds how long an over-capacity claim parks in the FIFO
-	// capacity queue before returning a timeout error. It is sourced from the
-	// broker config's queue_wait_timeout. A non-positive value disables waiting:
-	// an at-capacity claim is rejected immediately with "no capacity".
-	queueWaitTimeout time.Duration
 
 	// spawnKey derives each lease's spawn secret from a broker-held key instead of
 	// minting a random one, so a restarted broker can recompute the value a
@@ -135,6 +158,20 @@ func (s *ClaimServer) useSpawnKey(k spawnKey) { s.spawnKey = k }
 // production execRunner; tests inject a fake to avoid booting a real engine. A
 // nil tickets store means no `ticket` is returned with a claim, which is also
 // what an auth-disabled broker produces.
+//
+// The Config is held as a PRIVATE configuration snapshot (see
+// newLocalConfigHolder). run() calls useConfigHolder afterwards to replace it
+// with the process-wide one, which is what makes the claim path follow a SIGHUP.
+//
+// A non-positive ready_timeout, session_report_grace, max_claim_body or
+// release_grace in that Config falls back to the corresponding default — see
+// settleConfig, which is where that fold now lives so every reader of a snapshot
+// sees one settled number. That is not a second, silent validation path:
+// LoadConfigFromBytes already refuses a non-positive value for each of them,
+// naming the key, so the only way to reach the fallback is a Config built as a
+// struct literal rather than loaded (every caller in the test suite, and any
+// future in-process embedder), where "unset" must keep meaning "the default"
+// rather than "reject every claim instantly".
 func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner commandRunner, tickets *ticketStore) *ClaimServer {
 	if logger == nil {
 		logger = slog.Default()
@@ -143,16 +180,36 @@ func NewClaimServer(logger *slog.Logger, registry *Registry, cfg Config, runner 
 		runner = execRunner{}
 	}
 	return &ClaimServer{
-		logger:             logger,
-		registry:           registry,
-		cfg:                cfg,
-		runner:             runner,
-		readyTimeout:       defaultReadyTimeout,
-		sessionReportGrace: defaultSessionReportGrace,
-		tickets:            tickets,
-		queueWaitTimeout:   cfg.QueueWaitTimeout,
+		logger:   logger,
+		registry: registry,
+		runner:   runner,
+		live:     newLocalConfigHolder(cfg),
+		tickets:  tickets,
 	}
 }
+
+// useConfigHolder points this server at the process-wide configuration snapshot,
+// so a SIGHUP changes what the next claim spawns and how long it will wait.
+//
+// It is a setter rather than a constructor parameter for the same reason
+// useSpawnKey is: every existing caller hands the constructor a bare Config, and
+// only run() has a shared holder to give. A nil holder is ignored, leaving the
+// private snapshot the constructor built — which is exactly a broker that never
+// reloads.
+func (s *ClaimServer) useConfigHolder(h *configHolder) {
+	if h == nil {
+		return
+	}
+	s.live = h
+}
+
+// config returns the configuration snapshot in force. The returned pointer aims
+// into an immutable value: read it, never write through it.
+//
+// A caller that needs more than one field from it must take the snapshot ONCE
+// into a local and read every field from that local, so its answers cannot
+// straddle a reload — spawnInstance is the worked example.
+func (s *ClaimServer) config() *Config { return s.live.config() }
 
 // Register wires the claim endpoint onto a mux. It takes a routeMux so main can
 // register it behind the auth guard.
@@ -203,6 +260,18 @@ type claimFailure struct {
 	status int
 	msg    string
 	err    error
+
+	// outcome is the metric label this failure counts under
+	// (nexus_broker_claims_total{outcome=...}). It rides on the value for the
+	// same reason the status does: the classification must be made ONCE, at the
+	// site that knows what went wrong, rather than re-derived downstream by
+	// matching a status or a message. Three distinct refusals share status 503,
+	// so a metric derived from the status alone would fold the three capacity
+	// problems an operator has to tell apart into one series.
+	//
+	// Empty reads as claimOutcomeInternal, so a failure constructed without one
+	// is counted as a broker fault rather than silently dropped.
+	outcome string
 }
 
 func (f *claimFailure) Error() string {
@@ -213,6 +282,19 @@ func (f *claimFailure) Error() string {
 }
 
 func (f *claimFailure) Unwrap() error { return f.err }
+
+// metricOutcome is the claim-outcome label this failure counts under. A nil
+// failure is an accepted claim; an unlabelled one is a broker fault.
+func (f *claimFailure) metricOutcome() string {
+	switch {
+	case f == nil:
+		return claimOutcomeAccepted
+	case f.outcome == "":
+		return claimOutcomeInternal
+	default:
+		return f.outcome
+	}
+}
 
 // silent reports a failure that must not be answered at all, because the caller
 // is already gone: a claim whose context was cancelled while it waited in the
@@ -241,6 +323,25 @@ func (f *claimFailure) refusedByCaller() bool { return f.status >= 400 && f.stat
 // real callers; neither is the broker acting on itself, so there is nothing here
 // that has to cope with an absent one.
 func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner nexusauth.Principal) (instanceSpawn, *claimFailure) {
+	started := time.Now()
+	spawn, failure := s.spawn(ctx, req, owner)
+	// ONE counting site for the whole spine, so a return path added later is
+	// counted by construction rather than by someone remembering to instrument
+	// it. The duration is observed only for an accepted claim: a refusal's
+	// latency measures how fast the broker said no, and mixing it into the same
+	// histogram would drag every quantile toward zero exactly when the broker is
+	// refusing the most.
+	if failure == nil {
+		s.registry.Metrics().claimAccepted(time.Since(started))
+	} else {
+		s.registry.Metrics().claimOutcome(failure.metricOutcome())
+	}
+	return spawn, failure
+}
+
+// spawn is spawnInstance's body. It is split out purely so the instrumentation
+// above has a single return to observe; nothing calls it directly.
+func (s *ClaimServer) spawn(ctx context.Context, req claimRequest, owner nexusauth.Principal) (instanceSpawn, *claimFailure) {
 	// Resolve the variant this spawn produces BEFORE anything is allocated.
 	// Everything below this point acquires something that has to be given back —
 	// a capacity slot, a lease id, a temp config file, a child process — and
@@ -253,10 +354,19 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	// not handed to a build that never created it. BinaryForSession is
 	// best-effort and reports unknown for a fresh claim, so this one call covers
 	// both shapes without a branch here — see resolveSpawnBinary.
+	//
+	// The configuration snapshot is taken ONCE, here, and every value this spawn
+	// needs is read from it — the registry entry, the environment it inherits,
+	// the address it dials back on and all three of its bounds. A SIGHUP that
+	// lands mid-spawn therefore cannot pair a new registry entry with an old
+	// inherit_env, or a new ready_timeout with an entry that is no longer
+	// offered: this spawn runs entirely under the configuration it started with,
+	// and the next one runs entirely under the reloaded one.
+	cfg := s.config()
 	recorded, recordedKnown := s.registry.BinaryForSession(req.SessionID)
-	binaryName, entry, status, err := resolveSpawnBinary(s.cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
+	binaryName, entry, status, err := resolveSpawnBinary(cfg.Binaries, req.SessionID, req.Binary, recorded, recordedKnown)
 	if err != nil {
-		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error()}
+		return instanceSpawn{}, &claimFailure{status: status, msg: err.Error(), outcome: claimOutcomeRejected}
 	}
 
 	// NewLeaseQueued acquires a capacity slot before the lease exists, so a
@@ -270,20 +380,36 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	//     "no capacity" below by its message).
 	//   - errNoCapacity: the cap is full AND queue_wait_timeout <= 0 (waiting
 	//     disabled) → immediate 503 "no capacity".
+	//   - errQueueFull: the cap is full and the queue already holds
+	//     max_queue_depth waiters → immediate 503 "capacity queue full". A THIRD
+	//     distinct message, so the three capacity refusals are told apart in the
+	//     claim-failure log without correlating timings.
+	//   - errPrincipalLeaseLimit / errPrincipalQueueLimit: this PRINCIPAL is over
+	//     one of its per-principal caps → 429, not 503: the broker may be
+	//     entirely idle, and the refusal is about the caller's quota rather than
+	//     about capacity. Both are inert unless `auth:` is configured (see
+	//     Registry.principalCaps), so an unauthenticated broker can never reach
+	//     these arms.
 	//   - context cancelled: the caller hung up while queued → a silent failure,
 	//     because there is nobody left to answer; the waiter is already dropped
 	//     from the queue.
-	leaseID, err := s.registry.NewLeaseQueued(ctx, s.queueWaitTimeout, owner)
+	leaseID, err := s.registry.NewLeaseQueued(ctx, cfg.QueueWaitTimeout, owner)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQueueTimeout):
-			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity wait timed out", outcome: claimOutcomeQueueTimeout}
 		case errors.Is(err, errNoCapacity):
-			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity"}
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "no capacity", outcome: claimOutcomeNoCapacity}
+		case errors.Is(err, errQueueFull):
+			return instanceSpawn{}, &claimFailure{status: http.StatusServiceUnavailable, msg: "capacity queue full", outcome: claimOutcomeQueueFull}
+		case errors.Is(err, errPrincipalLeaseLimit):
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "lease limit reached for this principal", outcome: claimOutcomeLeaseLimit}
+		case errors.Is(err, errPrincipalQueueLimit):
+			return instanceSpawn{}, &claimFailure{status: http.StatusTooManyRequests, msg: "queued claim limit reached for this principal", outcome: claimOutcomeQueueLimit}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err}
+			return instanceSpawn{}, &claimFailure{status: 0, msg: "claim cancelled while queued for capacity", err: err, outcome: claimOutcomeCancelled}
 		default:
-			return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting lease", err: err}
+			return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting lease", err: err, outcome: claimOutcomeInternal}
 		}
 	}
 
@@ -311,7 +437,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	configPath, err := writeTempConfig(req.Config)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "writing temp config", err: err}
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "writing temp config", err: err, outcome: claimOutcomeInternal}
 	}
 	// The instance reads the config synchronously at boot (before it dials
 	// back and signals ready), so the file is safe to remove once this
@@ -342,20 +468,25 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	spawnSecret, err := s.spawnKey.secretFor(leaseID)
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting spawn secret", err: err}
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "minting spawn secret", err: err, outcome: claimOutcomeInternal}
 	}
 	s.registry.SetSpawnSecret(leaseID, spawnSecret)
 
-	brokerAddr := "ws://" + instanceDialHost(s.cfg.ListenAddr) + instanceWSPath
+	brokerAddr := "ws://" + instanceDialHost(cfg.ListenAddr) + instanceWSPath
 	// The entry's RESOLVED path is what is exec()d — LoadConfig verified it at
 	// boot, so no claim performs a stat or a PATH lookup, and a PATH that
 	// changes under a running broker cannot make one claim spawn a different
 	// build than the next.
 	handle, err := s.runner.start(ctx, spawnSpec{
-		binaryName:      binaryName,
-		binaryPath:      entry.ResolvedPath,
-		binaryArgs:      entry.Args,
-		binaryEnv:       entry.Env,
+		binaryName: binaryName,
+		binaryPath: entry.ResolvedPath,
+		binaryArgs: entry.Args,
+		binaryEnv:  entry.Env,
+		inheritEnv: cfg.InheritEnv,
+		// The entry's EFFECTIVE credential: its own `run_as`, or the broker-level
+		// default folded onto it at boot. Nil for every entry that declared
+		// neither, which is the spawn this broker has always performed.
+		runAs:           entry.RunAs,
 		configPath:      configPath,
 		leaseID:         leaseID,
 		brokerAddr:      brokerAddr,
@@ -364,7 +495,8 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	})
 	if err != nil {
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "spawning instance", err: err}
+		s.registry.Metrics().spawnFailed(spawnFailureExec)
+		return instanceSpawn{}, &claimFailure{status: http.StatusInternalServerError, msg: "spawning instance", err: err, outcome: claimOutcomeSpawnFailed}
 	}
 	// SetProcess starts the single reaper that wait()s the process and closes
 	// the lease's exited channel; both this path and a later release observe
@@ -377,12 +509,14 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 	case <-s.registry.ExitedChan(leaseID):
 		exitErr := s.registry.ExitErr(leaseID)
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr}
-	case <-time.After(s.readyTimeout):
+		s.registry.Metrics().spawnFailed(spawnFailureExitedEarly)
+		return instanceSpawn{}, &claimFailure{status: http.StatusBadGateway, msg: "instance exited before signalling ready", err: exitErr, outcome: claimOutcomeSpawnFailed}
+	case <-time.After(cfg.ReadyTimeout):
 		_ = handle.kill()
 		<-s.registry.ExitedChan(leaseID) // reap the killed process so nothing leaks
 		s.registry.Remove(leaseID)
-		return instanceSpawn{}, &claimFailure{status: http.StatusGatewayTimeout, msg: "instance did not become ready in time"}
+		s.registry.Metrics().spawnFailed(spawnFailureReadyTimeout)
+		return instanceSpawn{}, &claimFailure{status: http.StatusGatewayTimeout, msg: "instance did not become ready in time", outcome: claimOutcomeReadyTimeout}
 	}
 
 	// Resolve the session id to report. The instance reports it via a
@@ -401,7 +535,7 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 			s.logger.Warn("instance reported a different session id than requested",
 				"lease_id", leaseID, "requested", req.SessionID, "reported", reported)
 		}
-	case <-time.After(s.sessionReportGrace):
+	case <-time.After(cfg.SessionReportGrace):
 		if req.SessionID == "" {
 			s.logger.Warn("instance did not report a session id within grace window",
 				"lease_id", leaseID)
@@ -433,12 +567,17 @@ func (s *ClaimServer) spawnInstance(ctx context.Context, req claimRequest, owner
 // it.
 func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req claimRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBody))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.config().MaxClaimBody))
 	if err := dec.Decode(&req); err != nil {
+		// Counted here rather than in the spine: a body that does not parse never
+		// reaches spawnInstance, and a claim the broker refused outright is still
+		// a claim an operator wants in the outcome breakdown.
+		s.registry.Metrics().claimOutcome(claimOutcomeRejected)
 		s.fail(w, http.StatusBadRequest, "invalid claim body", err)
 		return
 	}
 	if req.Config == "" {
+		s.registry.Metrics().claimOutcome(claimOutcomeRejected)
 		s.fail(w, http.StatusBadRequest, "claim requires a non-empty config", nil)
 		return
 	}
@@ -467,7 +606,8 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 
 	// Mint the client's WebSocket ticket LAST, immediately before responding, so
 	// its short TTL starts when the caller receives it rather than when the
-	// instance began booting — a boot may take up to readyTimeout (30s), which
+	// instance began booting — a boot may take up to ready_timeout (30s by
+	// default), which
 	// would otherwise hand back an already-expired ticket.
 	//
 	// A mint failure does NOT fail the claim. The instance is live and the lease is
@@ -481,7 +621,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 			"lease_id", spawn.leaseID, "principal_id", owner.ID, "error", mintErr)
 	}
 
-	wsURL := clientWSBaseURL(s.cfg, r.Host) + ClientWSPath(spawn.leaseID)
+	wsURL := clientWSBaseURL(*s.config(), r.Host) + ClientWSPath(spawn.leaseID)
 	// principal_id ties the new lease id back to the identity that claimed it. The
 	// guard's allow record cannot carry it: /claim has no lease id in its path, so
 	// this is the only line that joins the two halves of the audit trail. Empty
@@ -739,5 +879,32 @@ func warnIfAdvertiseAddrMissing(logger *slog.Logger, cfg Config) {
 		"which behind a reverse proxy or load balancer names the proxy rather than this broker "+
 		"and can send a client to a broker that does not hold its lease; "+
 		"set advertise_addr to the address clients use to reach this broker",
+		"listen_addr", cfg.ListenAddr)
+}
+
+// warnIfAdvertiseSchemeUnserved logs one WARN at boot when advertise_addr names
+// a TLS scheme (wss:// or https://, both of which normalize to "wss") while this
+// broker serves cleartext — which it always does, since it has no TLS listener
+// and terminates nothing itself.
+//
+// It is a WARNING and deliberately not a boot refusal: a wss:// advertise_addr
+// in front of a TLS-terminating proxy is the documented, supported deployment
+// (see "Behind a proxy" in docs/src/guides/session-broker.md), and this process
+// cannot tell whether such a proxy exists. Refusing to boot would break the
+// intended configuration; saying nothing leaves an operator who forgot the proxy
+// with no signal at all beyond clients failing to connect.
+//
+// It sits beside warnIfAdvertiseAddrMissing because it is the same kind of
+// statement: a claim about how clients reach this broker that only the operator
+// can confirm, and that nothing later in the process gets a chance to check.
+func warnIfAdvertiseSchemeUnserved(logger *slog.Logger, cfg Config) {
+	if cfg.AdvertiseScheme != "wss" {
+		return
+	}
+	logger.Warn("advertise_addr names a TLS scheme but this broker serves cleartext: "+
+		"it has no TLS listener, so the wss:// ws_url returned by POST /claim is correct "+
+		"ONLY if a TLS-terminating proxy fronts this broker; "+
+		"expected behind such a proxy, and a misconfiguration otherwise",
+		"advertise_addr", cfg.AdvertiseAddr,
 		"listen_addr", cfg.ListenAddr)
 }

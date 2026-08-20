@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/frankbardon/nexus/pkg/brokerframe"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
@@ -49,6 +50,21 @@ type wsConn struct {
 	closed chan struct{}
 	once   sync.Once
 
+	// replayMu guards replay.
+	replayMu sync.Mutex
+
+	// replay holds frames the write pump must write BEFORE anything queued on
+	// send. It is how a resuming client's buffered tail reaches the socket
+	// ahead of the live stream.
+	//
+	// It is a separate staging slice rather than a pre-fill of send because
+	// send is bounded at 256 frames while a replay is bounded in BYTES — a
+	// megabyte of token deltas is thousands of frames, so priming the queue
+	// would silently drop most of a replay against the very buffer that exists
+	// to prevent silent loss. Staging it costs nothing: the frames are already
+	// encoded and already retained by the lease's replay buffer.
+	replay [][]byte
+
 	// closeStatus and closeReason record the status code and reason the conn
 	// was shut down with. They are written exactly once inside shutdown's
 	// once.Do, so reading them after observing closed is race-free. They let a
@@ -80,6 +96,29 @@ func (c *wsConn) queue(data []byte) bool {
 	}
 }
 
+// primeReplay stages frames to be written ahead of everything queued on send.
+// It is called once, while the registry still holds its lock and before the
+// conn is published as a lease's client, so nothing can be queued in front of
+// the staged frames.
+func (c *wsConn) primeReplay(frames [][]byte) {
+	if len(frames) == 0 {
+		return
+	}
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	c.replay = append(c.replay, frames...)
+}
+
+// takeReplay returns the staged frames and clears the staging slice, so the
+// bytes are released as soon as the write pump has drained them.
+func (c *wsConn) takeReplay() [][]byte {
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	frames := c.replay
+	c.replay = nil
+	return frames
+}
+
 // shutdown closes the underlying WebSocket exactly once with the given status.
 // A nil conn is tolerated so leases can be torn down in tests without a live
 // socket.
@@ -94,6 +133,32 @@ func (c *wsConn) shutdown(status websocket.StatusCode, reason string) {
 	})
 }
 
+// abort is shutdown for a peer that has already stopped answering: it records
+// the same status and reason, but skips the WebSocket close handshake.
+//
+// The distinction is load-bearing rather than cosmetic. Conn.Close writes a
+// close frame and then waits up to FIVE SECONDS for the peer to echo one, and it
+// takes the connection's read lock to do so — a lock the read pump is holding
+// while blocked in Read. So a graceful close against a socket whose peer is
+// gone leaves the conn attached, and the lease believing it has a peer, for
+// those five seconds. That is the whole bounded-detection property the liveness
+// pump exists to provide, spent waiting for a reply that is not coming.
+//
+// CloseNow tears the underlying connection down at once, which unblocks the read
+// pump immediately and runs the ordinary detach path. The peer sees an abnormal
+// closure instead of a coded one, which is the honest description of what
+// happened to it.
+func (c *wsConn) abort(status websocket.StatusCode, reason string) {
+	c.once.Do(func() {
+		c.closeStatus = status
+		c.closeReason = reason
+		close(c.closed)
+		if c.conn != nil {
+			_ = c.conn.CloseNow()
+		}
+	})
+}
+
 // lease holds the paired connections plus bookkeeping for a single claimed
 // instance. Fields are guarded by Registry.mu — never read or mutate them
 // outside a Registry method (with the documented exception of ready/readyOnce,
@@ -104,7 +169,11 @@ type lease struct {
 	state     leaseState
 	createdAt time.Time
 	instance  *wsConn
-	client    *wsConn
+
+	// The CLIENT connection is deliberately not a field here: it lives on
+	// clientStream, which owns it under the same lock that assigns sequence
+	// numbers. Read it through lease.clientConn. See the clientStream type
+	// comment for why splitting the two was a race.
 
 	// owner is the verified identity that claimed this lease, stamped once at
 	// creation from the authenticated Principal on the POST /claim request. It is
@@ -148,6 +217,24 @@ type lease struct {
 	// the idle sweeper measures genuine inactivity. Guarded by Registry.mu;
 	// stamped via markActivity from the gateway's client read pump.
 	lastActivity time.Time
+
+	// turnStartedAt is when the instance last reported that it STARTED working
+	// — the first io.status frame naming a work state after a settled period —
+	// and the zero value means no turn is in flight. It is what makes "idle"
+	// mean "nobody is waiting on this" rather than "nobody has typed lately":
+	// a lease with a live turn is skipped by the idle sweeper however long ago
+	// its last client input was, so a ten-minute autonomous turn is no longer
+	// indistinguishable from an abandoned session.
+	//
+	// It is stamped ONCE per turn rather than refreshed on every work state, so
+	// it measures the whole turn. That is deliberate and is what max_turn_duration
+	// needs: a wedged instance that keeps emitting "thinking" forever would reset
+	// a refreshed stamp on every frame and hold its lease indefinitely, which is
+	// the exact failure the bound exists to catch.
+	//
+	// Guarded by Registry.mu; stamped via markTurnLive / markTurnSettled from the
+	// gateway's INSTANCE read pump.
+	turnStartedAt time.Time
 
 	// ready is closed exactly once (via MarkReady) when the spawned instance
 	// signals it has booted and can accept IO. POST /claim blocks on this
@@ -232,23 +319,32 @@ type lease struct {
 	hasSlot bool
 
 	// restored marks a lease reconstructed from the journal at boot rather than
-	// minted by a claim (see RestoreLease). It carries ONE behavioural
-	// consequence, and it is a hardening one: AttachInstance enforces the spawn
-	// secret for a restored lease even when the broker has no `auth:` block.
+	// minted by a claim (see RestoreLease). It is what unattachedRestored filters
+	// on, so the reattach reaper can bound how long a lease nothing came back for
+	// keeps holding a slot.
 	//
-	// That asymmetry is deliberate. For a freshly claimed lease the broker knows
-	// it started the process, so the unauthenticated deployment can keep skipping
-	// the check exactly as it always did. For a restored one it knows only that
-	// SOME process holds the recorded pid — and a pid can be reused by an
-	// unrelated process between the broker dying and coming back. Liveness is
-	// therefore not identity, and the secret is the only thing that is. A restored
-	// lease that admitted a dialer on its lease id alone would hand a stranger's
-	// process a client's session.
+	// It no longer carries any authentication consequence. It used to: the spawn
+	// secret was enforced for a restored lease even on a broker with no `auth:`
+	// block, because a live pid is not identity — a pid can be reused by an
+	// unrelated process between the broker dying and coming back. That reasoning
+	// was always the general case rather than the restored one, and AttachInstance
+	// now applies it to every registration.
 	//
 	// It is NOT cleared on reattach: the instance plugin reconnects on every
 	// dropped socket, so a restored lease can register more than once, and each
 	// registration must clear the same bar. Guarded by Registry.mu.
 	restored bool
+
+	// clientStream is this lease's client-bound frame sequencer and replay
+	// buffer (see clientstream.go). It is created with the lease and released by
+	// Remove, and is the reason a client can tell a truncated stream from a
+	// finished one.
+	//
+	// It is NOT guarded by Registry.mu: it owns its own mutex, and holding
+	// Registry.mu across a frame send would put the whole registry behind every
+	// forwarded token. The POINTER is set once at lease creation and never
+	// reassigned, so reading it under mu and using it outside is race-free.
+	clientStream *clientStream
 
 	// reason records why the lease is being (or was) torn down: "" while live,
 	// then the teardown cause ("manual release", "idle", reasonCrash, …). It is
@@ -257,6 +353,16 @@ type lease struct {
 	// release. Remove uses it to pick the client's close status, and a future
 	// /leases endpoint (E4-S1) can surface it.
 	reason string
+}
+
+// clientConn returns the lease's attached client connection, or nil when no
+// client is attached (or the lease somehow has no stream, which only a
+// hand-built test lease can be).
+func (l *lease) clientConn() *wsConn {
+	if l.clientStream == nil {
+		return nil
+	}
+	return l.clientStream.attached()
 }
 
 // Registry is the gateway's shared, mutex-guarded map of lease id → lease.
@@ -287,6 +393,43 @@ type Registry struct {
 	// barged past. Guarded by mu.
 	waiters *list.List
 
+	// maxQueueDepth is the ceiling on how many claims may be parked in waiters at
+	// once, from `max_queue_depth`. A claim arriving past it is refused
+	// immediately with errQueueFull rather than parked, so an over-capacity broker
+	// stops accumulating goroutines, timers and held-open connections without
+	// bound. A non-positive value means UNLIMITED, matching maxConcurrent.
+	//
+	// It is ZERO for a registry built by NewRegistry and only takes a value at
+	// wiring time (useQueueDepth) — deliberately, so an unwired registry queues
+	// exactly as it did before this bound existed. The broker's DefaultConfig
+	// supplies the real default. Read under mu.
+	maxQueueDepth int
+
+	// maxLeasesPerPrincipal and maxQueuedPerPrincipal are the per-principal
+	// admission caps, from `max_leases_per_principal` and
+	// `max_queued_per_principal`. Non-positive means that cap is off, which is
+	// the default: they are an opt-in multi-tenant policy, not a behaviour every
+	// broker acquires.
+	//
+	// Neither is a counter. Both are answered by walking state the registry
+	// already holds — see admitPrincipalLeaseLocked / admitPrincipalQueueLocked —
+	// so the single slot counter stays the only accounting path. Read under mu.
+	maxLeasesPerPrincipal int
+	maxQueuedPerPrincipal int
+
+	// principalCaps gates the two caps above on authentication being CONFIGURED.
+	// It is false unless the broker loaded an `auth:` block with at least one
+	// validator.
+	//
+	// It exists because with auth off every lease is owned by anonymousOwner() —
+	// a zero Principal with an empty id — so a per-principal cap applied to that
+	// single shared identity would count the whole broker against one principal
+	// and become a second, lower global cap. Gating on it (together with the
+	// empty-id test in principalCapsApply) is what keeps an unauthenticated
+	// deployment behaving exactly as it did before these keys existed. Written
+	// once at wiring time, read under mu.
+	principalCaps bool
+
 	// tickets is the client-WebSocket ticket store whose lease-scoped
 	// capabilities must die with the lease (see Remove). It is nil until wired
 	// via useTicketStore, and every ticketStore method is nil-receiver safe, so
@@ -316,12 +459,44 @@ type Registry struct {
 	// NOT guarded by mu: it owns its own lock and is only assigned at wiring time.
 	sessionBinaries *sessionBinaryIndex
 
+	// metrics is the process-wide counter set every reporting subsystem reaches
+	// through this registry — the gateway (frame drops), the claim server (claim
+	// outcomes and spawn failures), restart recovery (restored leases) and the
+	// SIGHUP reloader all already hold a *Registry, so hanging the counters here
+	// avoids threading a second dependency through four constructors.
+	//
+	// It is nil until wired via useMetrics, and nil is fully supported: every
+	// brokerMetrics method is nil-receiver safe, so a registry built without
+	// wiring (every unit test) simply counts nothing. Like tickets and store it is
+	// NOT guarded by mu — the counters are atomics and the field is only assigned
+	// at wiring time, before anything is served.
+	metrics *brokerMetrics
+
+	// clientReplayLimit is the byte bound every new lease's clientStream is
+	// created with, from `client_replay_buffer_bytes`. It is read only while
+	// minting a lease, so the worst-case retention across the broker is this
+	// value times max_concurrent.
+	//
+	// NewRegistry seeds it with defaultClientReplayBufferBytes so a registry
+	// built without wiring (every unit test, and the paths that predate this)
+	// buffers exactly as a configured one does; useClientReplayBuffer overrides
+	// it at wiring time.
+	clientReplayLimit int
+
 	// brokerID and advertiseAddr are stamped on every record so a future shared
 	// store can tell whose lease is whose without a data migration. advertiseAddr
 	// is the RAW config value, verbatim as the operator wrote it, not the parsed
 	// scheme/host pair — a record should round-trip what is in broker.yaml.
 	brokerID      string
 	advertiseAddr string
+
+	// termGrace is the SIGTERM→SIGKILL window releaseLease uses, seeded from the
+	// package constant of the same name. It is a field rather than a direct use of
+	// that constant for exactly one reason: a test that wants to observe the
+	// escalation should not have to spend two real seconds per case. It is NOT
+	// configurable and is never written after construction — set it before the
+	// registry is shared with any goroutine.
+	termGrace time.Duration
 
 	mu     sync.Mutex
 	leases map[string]*lease
@@ -335,11 +510,13 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 		logger = slog.Default()
 	}
 	return &Registry{
-		logger:        logger,
-		now:           time.Now,
-		maxConcurrent: maxConcurrent,
-		waiters:       list.New(),
-		leases:        make(map[string]*lease),
+		logger:            logger,
+		now:               time.Now,
+		maxConcurrent:     maxConcurrent,
+		termGrace:         termGrace,
+		clientReplayLimit: defaultClientReplayBufferBytes,
+		waiters:           list.New(),
+		leases:            make(map[string]*lease),
 	}
 }
 
@@ -352,6 +529,58 @@ func NewRegistry(logger *slog.Logger, maxConcurrent int) *Registry {
 // Call it once at wiring time, before the broker serves: it is not safe to call
 // concurrently with Remove.
 func (r *Registry) useTicketStore(s *ticketStore) { r.tickets = s }
+
+// useMetrics binds the process-wide counter set (see Registry.metrics). Like the
+// other use* setters it is called once at wiring time, before the broker serves.
+func (r *Registry) useMetrics(m *brokerMetrics) { r.metrics = m }
+
+// Metrics returns the counter set bound to this registry, or nil. It is
+// nil-receiver safe so a caller holding a possibly-nil *Registry (the reloader
+// in a unit test) can report without a branch.
+func (r *Registry) Metrics() *brokerMetrics {
+	if r == nil {
+		return nil
+	}
+	return r.metrics
+}
+
+// useClientReplayBuffer sets the per-lease client-bound replay bound in bytes.
+// A non-positive limit disables retention: frames are still sequenced, so a
+// client can still DETECT loss, but the broker keeps nothing to replay.
+//
+// Like useTicketStore it is a setter rather than a NewRegistry parameter, so the
+// dozens of existing registry tests do not have to name a knob they do not
+// exercise. Call it once at wiring time, before the broker serves: it affects
+// leases minted after it and is not safe to call concurrently with NewLease.
+func (r *Registry) useClientReplayBuffer(limit int) { r.clientReplayLimit = limit }
+
+// useQueueDepth sets the ceiling on parked capacity waiters, from
+// `max_queue_depth`. A non-positive limit means unlimited — the pre-E4-S4
+// behaviour, and what an unwired registry keeps.
+//
+// A setter rather than a NewRegistry parameter for the same reason as its
+// neighbours: dozens of existing registry tests would otherwise have to name a
+// knob none of them exercise, and every one of them must go on proving the
+// unbounded behaviour they were written against. Call it once at wiring time,
+// before the broker serves.
+func (r *Registry) useQueueDepth(limit int) { r.maxQueueDepth = limit }
+
+// usePrincipalLimits binds the two per-principal admission caps and, crucially,
+// whether they are in force at all.
+//
+// authConfigured MUST be "the broker loaded an `auth:` block with at least one
+// validator" (Config.AuthChain.Enabled()). Passing true with auth off would make
+// both caps apply to the single anonymous identity every unauthenticated lease
+// shares, turning either one into a second global cap — see principalCaps.
+//
+// Non-positive limits leave the corresponding cap off, which is the default for
+// both: they are an opt-in multi-tenant policy. Call it once at wiring time,
+// before the broker serves.
+func (r *Registry) usePrincipalLimits(authConfigured bool, maxLeases, maxQueued int) {
+	r.principalCaps = authConfigured
+	r.maxLeasesPerPrincipal = maxLeases
+	r.maxQueuedPerPrincipal = maxQueued
+}
 
 // useLeaseStore binds the durability store every lease transition is journaled
 // to, along with the broker identity stamped on each record.
@@ -498,6 +727,19 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 		return "", err
 	}
 	r.mu.Lock()
+	// Per-principal lease quota BEFORE the slot: an admission check, so a refused
+	// claim never took a slot and has nothing to hand back. It is inert unless
+	// authentication is configured and owner is a real principal (see
+	// principalCapsApply), so an unauthenticated broker reaches the acquire below
+	// exactly as it always did.
+	//
+	// One check suffices here, unlike in NewLeaseQueued: this whole function
+	// holds r.mu from the check through insertLeaseLocked, so no concurrent claim
+	// can slip a lease in between the two.
+	if err := r.admitPrincipalLeaseLocked(owner); err != nil {
+		r.mu.Unlock()
+		return "", err
+	}
 	// Acquire a capacity slot BEFORE the lease exists, so a claim can never
 	// spawn an instance past max_concurrent. The slot is bound to the lease
 	// (hasSlot) and freed exactly once when the lease is Removed, so every
@@ -532,18 +774,39 @@ func (r *Registry) NewLease(owner nexusauth.Principal) (string, error) {
 // accounting or the order of the errNoCapacity / errQueueTimeout / cancelled
 // branches. Pass anonymousOwner() when there is no authenticated principal.
 //
+// owner IS consulted for the per-principal admission caps (max_leases_per_-
+// principal, max_queued_per_principal), which are checked BEFORE any slot is
+// taken and are inert unless authentication is configured — see
+// principalCapsApply. They do not touch the slot counter.
+//
 // Returns errNoCapacity if the cap is full and timeout <= 0 (no waiting),
-// errQueueTimeout if the wait exceeds timeout, or the wrapped ctx error if the
-// request context is cancelled while queued. On any error no slot is held.
+// errQueueFull if the wait queue is at max_queue_depth, errPrincipalLeaseLimit
+// or errPrincipalQueueLimit if owner is over one of its caps, errQueueTimeout if
+// the wait exceeds timeout, or the wrapped ctx error if the request context is
+// cancelled while queued. On any error no slot is held.
 func (r *Registry) NewLeaseQueued(ctx context.Context, timeout time.Duration, owner nexusauth.Principal) (string, error) {
 	id, err := newLeaseID()
 	if err != nil {
 		return "", err
 	}
-	if err := r.acquireSlot(ctx, timeout); err != nil {
+	if err := r.acquireSlot(ctx, timeout, owner); err != nil {
 		return "", err
 	}
 	r.mu.Lock()
+	// Re-check the per-principal lease quota in the SAME critical section as the
+	// insert. acquireSlot's copy of this check is the fast rejection — it refuses
+	// an over-quota caller before it parks — but it drops r.mu before the lease
+	// exists, so two concurrent claims from one principal could both pass it and
+	// both insert. Since the abuse this cap exists to stop is precisely a caller
+	// looping /claim in parallel, the check that decides the outcome has to be
+	// this one, where the count and the insert cannot be interleaved.
+	if err := r.admitPrincipalLeaseLocked(owner); err != nil {
+		r.mu.Unlock()
+		// We hold a slot we are not going to bind; hand it back to the queue (or
+		// decrement) exactly as the insert-failure path below does.
+		r.releaseSlot()
+		return "", err
+	}
 	insertErr := r.insertLeaseLocked(id, owner)
 	r.mu.Unlock()
 	if insertErr != nil {
@@ -580,6 +843,7 @@ func (r *Registry) insertLeaseLocked(id string, owner nexusauth.Principal) error
 		sessionReported: make(chan struct{}),
 		exited:          make(chan struct{}),
 		hasSlot:         true,
+		clientStream:    newClientStream(r.clientReplayLimit),
 	}
 	return nil
 }
@@ -624,6 +888,11 @@ type restoreSpec struct {
 // claims on top of it — the exact over-admission the cap exists to prevent. Going
 // briefly over the cap is honest; the count drains as leases are released, and
 // the queue holds new claims back until it does.
+//
+// The per-principal caps are skipped for the same reason: a restored lease is a
+// process that is already running under an identity that already owned it, and
+// refusing it would hide it rather than stop it. A principal over its cap after
+// a restart is simply admitted no new leases until it drains back under.
 func (r *Registry) RestoreLease(spec restoreSpec) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -656,6 +925,13 @@ func (r *Registry) RestoreLease(spec restoreSpec) error {
 		sessionID:       spec.sessionID,
 		binary:          spec.binary,
 		pid:             spec.pid,
+		// A restored lease starts a FRESH stream at sequence 1 with an empty
+		// buffer. The buffer is in-memory and died with the old process, and
+		// nothing on disk records where the sequence had got to — so restarting
+		// the count is the only honest option. A client that reconnects across a
+		// broker restart sees the sequence go backwards, which is the signal that
+		// its stream did not survive.
+		clientStream: newClientStream(r.clientReplayLimit),
 	}
 	r.leases[spec.id] = l
 	if spec.sessionID != "" {
@@ -704,9 +980,67 @@ func (r *Registry) markActivity(id string) {
 	}
 }
 
+// markTurnLive records that this lease's instance has STARTED working, if it was
+// not already known to be working. The gateway calls it from the instance read
+// pump for every io.status frame naming a work state (see turnStateIsWork).
+//
+// It is idempotent within a turn: the stamp is taken on the FIRST work state
+// after a settled period and left alone thereafter, so turnStartedAt measures
+// the turn rather than the gap since its most recent status frame. It is a no-op
+// for an unknown lease.
+func (r *Registry) markTurnLive(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok || !l.turnStartedAt.IsZero() {
+		return
+	}
+	l.turnStartedAt = r.now()
+}
+
+// markTurnSettled records that this lease's instance has finished working — the
+// instance reported the idle state, the only end-of-turn signal the IO envelope
+// carries (see ioStateIdle).
+//
+// It ALSO stamps last-activity, and that is the load-bearing half. Without it a
+// turn that ran longer than idle_timeout would be reapable the instant it
+// finished: the client's input is by then older than the window, so the answer
+// the user is about to read would be torn down before they could reply to it.
+// Stamping here makes idle_timeout measure the human pause AFTER the turn, which
+// is the thing it was always meant to measure.
+//
+// It is a no-op for an unknown lease, and harmless for a lease with no turn in
+// flight (a second idle status, or an instance that reports idle at boot).
+func (r *Registry) markTurnSettled(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok {
+		return
+	}
+	l.turnStartedAt = time.Time{}
+	l.lastActivity = r.now()
+}
+
+// turnLive reports whether the lease currently has a turn in flight. It exists
+// for tests and logging; the sweeper uses idleLeases/overrunTurnLeases, which
+// make the same judgement under one lock acquisition.
+func (r *Registry) turnLive(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	return ok && !l.turnStartedAt.IsZero()
+}
+
 // idleLeases returns the ids of every live lease whose last client activity is
-// strictly before cutoff and which is not already being torn down. The idle
-// sweeper computes cutoff as now-idle_timeout and releases the returned ids.
+// strictly before cutoff, which is not already being torn down, and which has NO
+// turn in flight. The idle sweeper computes cutoff as now-idle_timeout and
+// releases the returned ids.
+//
+// The live-turn skip is unbounded on purpose: idleness is "nobody is waiting on
+// this", and an instance that is thinking or running a tool is being waited on
+// however long ago the client last typed. What stops that skip from being
+// forever is max_turn_duration, enforced separately by overrunTurnLeases.
 func (r *Registry) idleLeases(cutoff time.Time) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -715,7 +1049,34 @@ func (r *Registry) idleLeases(cutoff time.Time) []string {
 		if l.releasing {
 			continue
 		}
+		if !l.turnStartedAt.IsZero() {
+			continue
+		}
 		if l.lastActivity.Before(cutoff) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// overrunTurnLeases returns the ids of every live lease whose in-flight turn
+// started strictly before cutoff and which is not already being torn down. The
+// idle sweeper computes cutoff as now-max_turn_duration and releases the
+// returned ids with reasonTurnTimeout.
+//
+// It is the bound on the live-turn skip above: a turn that never reports idle —
+// a wedged engine, a tool that never returns, a crashed agent loop that left its
+// status at "thinking" — would otherwise hold its lease, and its capacity slot,
+// for the lifetime of the broker.
+func (r *Registry) overrunTurnLeases(cutoff time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var ids []string
+	for id, l := range r.leases {
+		if l.releasing || l.turnStartedAt.IsZero() {
+			continue
+		}
+		if l.turnStartedAt.Before(cutoff) {
 			ids = append(ids, id)
 		}
 	}
@@ -1000,11 +1361,16 @@ func (r *Registry) SetSpawnSecret(id, secret string) {
 	}
 }
 
-// Sentinel reasons an instance's register frame is refused. They exist so the
-// gateway can tell the two apart in its LOG — a missing secret is the signature
-// of an instance binary that predates the protocol, a wrong one is the signature
-// of something impersonating an instance — while answering both, and an unknown
-// lease, with the byte-identical close (see handleInstance).
+// Sentinel reasons an instance's register frame is refused by the registry. They
+// exist so the gateway can tell them apart in its LOG — a missing secret is the
+// signature of an instance binary that predates the protocol, a wrong one is the
+// signature of something impersonating an instance — while answering both, and
+// an unknown lease, with the byte-identical close (see handleInstance).
+//
+// A third cause, a register frame declaring a schema version this broker does
+// not speak, is raised by the gateway before the registry is consulted at all:
+// see errRegisterVersionSkew. All three converge on the one place causes are
+// told apart, logInstanceRegistrationRefused.
 var (
 	// errSpawnSecretAbsent means the register frame carried no secret at all
 	// while the broker requires one.
@@ -1016,46 +1382,53 @@ var (
 )
 
 // AttachInstance binds an instance's dial-back connection to a known lease.
-// It fails if the lease is unknown, already has an instance connection, or —
-// when enforce is set — presented a spawn secret that is not the one minted for
-// the lease. Those are how the gateway rejects an unrecognized register frame.
+// It fails if the lease is unknown, presented a spawn secret that is not the one
+// minted for the lease, or already has an instance connection. Those are how the
+// gateway rejects an unrecognized register frame.
 //
-// enforce is the config gate: the caller passes true only when the broker has an
-// `auth:` block. With it false the presented secret is ignored entirely, so an
-// instance binary that predates the spawn-secret protocol keeps registering
-// exactly as it did before — the backward-compatibility guarantee, expressed as
-// "do not run the check" rather than "run a check that always passes".
+// THE SECRET IS ALWAYS REQUIRED — for a claimed lease as much as a restored one,
+// on a broker with an `auth:` block as much as one without. It used to be gated
+// on that block, which meant the documented default deployment authenticated the
+// dial-back socket with the lease id alone; and a lease id is not a secret. It
+// travels in ws_urls, client requests and logs, so anything that observed one
+// could register as the instance for that lease the moment its real socket
+// dropped, and inherit the client's session. `auth:` configures how CLIENTS are
+// verified. It was never a statement about whether the broker should believe an
+// unverified dialer, and reading it as one is the hole this closes.
 //
-// A RESTORED lease overrides that gate and always requires the secret, whatever
-// the config says (see lease.restored). For a claimed lease the broker knows it
-// spawned the process; for a restored one it knows only that the recorded pid is
-// alive, and pid reuse means an unrelated process can be sitting on it. There is
-// no configuration in which admitting a dialer on a restored lease id alone is
-// the right answer, so this is not made optional.
+// There is no deployment in which requiring it makes a lease unattachable: the
+// claim path mints a value and records it BEFORE the runner can exec anything
+// (see SetSpawnSecret), and restore derives one from the broker's key (see
+// spawnKey and restoreSpec.spawnSecret), so a lease always has an expected value
+// to compare against. What the requirement costs is an instance binary older
+// than the protocol, which is refused rather than admitted — a deliberate
+// breaking change, diagnosed by name in logInstanceRegistrationRefused.
 //
 // The comparison is constant-time. The presented value never reaches a log or a
 // response, so a timing signal would be the only channel available to someone
 // guessing it, and closing it costs one function call.
-func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret string, enforce bool) error {
+func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
 		return fmt.Errorf("unknown lease: %s", id)
 	}
-	if enforce || l.restored {
-		if presentedSecret == "" {
-			return errSpawnSecretAbsent
-		}
-		if subtle.ConstantTimeCompare([]byte(presentedSecret), []byte(l.spawnSecret)) != 1 {
-			return errSpawnSecretMismatch
-		}
+	if presentedSecret == "" {
+		return errSpawnSecretAbsent
+	}
+	// An empty expectation is not a wildcard: a lease whose secret never got
+	// recorded compares unequal to every non-empty presented value and the
+	// absent-secret branch above has already caught the empty one, so there is
+	// no "" == "" hole.
+	if subtle.ConstantTimeCompare([]byte(presentedSecret), []byte(l.spawnSecret)) != 1 {
+		return errSpawnSecretMismatch
 	}
 	if l.instance != nil {
 		return fmt.Errorf("lease %s already has an instance connection", id)
 	}
 	l.instance = conn
-	if l.client != nil {
+	if l.clientConn() != nil {
 		l.state = leaseStateActive
 	} else {
 		l.state = leaseStateRegistered
@@ -1063,24 +1436,128 @@ func (r *Registry) AttachInstance(id string, conn *wsConn, presentedSecret strin
 	return nil
 }
 
-// AttachClient binds a client connection to a known lease. It fails if the
-// lease is unknown or already has a client connection (single client per
-// lease for now).
-func (r *Registry) AttachClient(id string, conn *wsConn) error {
+// AttachClient binds a client connection to a known lease. It fails only if the
+// lease is unknown.
+//
+// It attaches with NO replay: the connection sees the live stream from
+// whatever the lease sends next, which is what a first connect wants and what
+// every connect did before resumption existed. A reconnecting client that
+// wants the tail it missed calls AttachClientFrom instead.
+func (r *Registry) AttachClient(id string, conn *wsConn) (clientAttach, error) {
+	return r.attachClient(id, conn, nil)
+}
+
+// AttachClientFrom binds a client connection to a known lease AND stages
+// whatever the lease's replay buffer still holds after sequence `after`, plus
+// an explicit gap notice when the buffer cannot reach back that far.
+//
+// The returned clientAttach is for the audit record; the frames themselves are
+// already staged on conn by the time it returns, so the caller only has to
+// start the write pump.
+func (r *Registry) AttachClientFrom(id string, conn *wsConn, after uint64) (clientAttach, error) {
+	return r.attachClient(id, conn, &after)
+}
+
+// attachClient is the single attach path. A nil `after` attaches with no
+// replay; a non-nil one resumes from that sequence.
+//
+// A LEASE CARRIES ONE CLIENT, AND THE NEWEST ATTACH WINS. It used to be the
+// oldest: a second connection was refused and the gateway closed it. That made
+// the lease unreachable in exactly the situation the reconnect flow exists for —
+// a half-open socket looks attached from the broker's side for as long as
+// nothing writes to it, so the genuine client's fresh, correctly authenticated
+// reconnect was refused on behalf of a socket that no longer had a peer. Liveness
+// probing bounds that window but cannot remove it, because the client always
+// notices its own dead connection before the broker's next probe does.
+//
+// Displacing is safe HERE and only here because the caller has already proved
+// ownership: the gateway checks it before the upgrade, so the only principal that
+// can evict a lease's client is the one that owns the lease. An eviction
+// primitive a stranger could reach would be a denial of service on another
+// tenant's session, which is why nothing on this path may be reordered to run
+// before that check.
+//
+// The swap itself is atomic against sending — the stream owns the conn — so no
+// frame can be numbered into a window between the outgoing conn leaving and the
+// incoming one arriving. The displaced socket is closed by the caller, outside
+// the lock.
+func (r *Registry) attachClient(id string, conn *wsConn, after *uint64) (clientAttach, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	l, ok := r.leases[id]
 	if !ok {
-		return fmt.Errorf("unknown lease: %s", id)
+		r.mu.Unlock()
+		return clientAttach{}, fmt.Errorf("unknown lease: %s", id)
 	}
-	if l.client != nil {
-		return fmt.Errorf("lease %s already has a client connection", id)
+	if l.clientStream == nil {
+		// Defensive: every lease is minted with a stream. Attaching without one
+		// would leave a client that is never sent anything.
+		r.mu.Unlock()
+		return clientAttach{}, fmt.Errorf("lease %s has no client stream", id)
 	}
-	l.client = conn
+
+	resume, evicted := l.clientStream.attach(conn, after, func(res clientResume) [][]byte {
+		if res.gap == nil {
+			return res.frames
+		}
+		// Counted HERE — where the gap is rendered for a specific client —
+		// rather than where it is computed, so the metric counts gaps SERVED
+		// and not gaps merely calculated. The reason is the wire value the
+		// client is about to receive, so the counter and the frame cannot
+		// disagree about why the stream broke.
+		r.metrics.replayGap(res.gap.Reason)
+		// The notice goes FIRST. A client that is told what it lost only after
+		// being handed the survivors has already rendered them as a continuous
+		// stream, which is the failure this whole path exists to remove.
+		data, err := res.gap.encode(id)
+		if err != nil {
+			// Encoding a gap notice cannot fail with a well-formed payload, but
+			// refusing the connection on a broker-side marshalling bug would be
+			// worse than the gap: attach live and let the client notice the
+			// sequence jump, which is exactly the pre-resume behaviour.
+			r.logger.Error("could not encode a stream gap notice; attaching the client "+
+				"without one, so the gap is detectable from the sequence only",
+				"lease_id", id, "error", err)
+			return res.frames
+		}
+		return append([][]byte{data}, res.frames...)
+	})
+
 	if l.instance != nil {
 		l.state = leaseStateActive
 	}
-	return nil
+	owner := l.owner
+	r.mu.Unlock()
+
+	if evicted == nil {
+		return clientAttach{resume: resume}, nil
+	}
+
+	r.metrics.clientEvicted()
+
+	// The displaced socket is closed with a CODED close, not an abort, because
+	// the code is the whole point: a client has to be able to tell "you were
+	// superseded" from "the instance crashed" and from "the lease was released",
+	// and an abort's abnormal closure says none of those things.
+	//
+	// It runs in its own goroutine because a coded close writes a close frame and
+	// then waits up to five seconds for the peer to echo one — and the peer being
+	// gone is the single most likely reason this eviction is happening at all.
+	// Waiting for it would make the new client's connect hostage to the dead one.
+	// Nothing waits on the result: the stream has already stopped referring to
+	// this conn, so it is out of the data path from the moment attach returned.
+	go evicted.shutdown(evictedCloseStatus, evictedCloseReason)
+
+	// The AUDIT record for an eviction is the gateway's, because the gateway is
+	// where the credential that admitted the displacing connection is known. This
+	// one is the mechanical half — the socket teardown — and is kept at Debug so
+	// an eviction produces exactly one operator-facing record. The owner is
+	// stated because by construction it IS the principal that displaced: the
+	// gateway refuses anyone else before the upgrade.
+	r.logger.Debug("closing the client socket displaced by a newer connection",
+		"lease_id", id, "principal_id", owner.ID, "reason", evictedCloseReason,
+		"close_status", int(evictedCloseStatus))
+
+	return clientAttach{resume: resume, evicted: true}, nil
 }
 
 // DetachInstance clears the instance connection from a lease (e.g. on the
@@ -1100,18 +1577,20 @@ func (r *Registry) DetachInstance(id string, conn *wsConn) {
 }
 
 // DetachClient clears the client connection from a lease.
+//
+// It detaches conn only if conn is STILL the attached one. A displaced socket
+// runs this path too — its read pump ends the moment eviction closes it — and
+// must not unattach the connection that superseded it, nor walk the lease back
+// out of `active` while a live client is streaming.
 func (r *Registry) DetachClient(id string, conn *wsConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[id]
-	if !ok {
+	if !ok || l.clientStream == nil {
 		return
 	}
-	if l.client == conn {
-		l.client = nil
-		if l.instance != nil {
-			l.state = leaseStateRegistered
-		}
+	if l.clientStream.detach(conn) && l.instance != nil {
+		l.state = leaseStateRegistered
 	}
 }
 
@@ -1124,7 +1603,63 @@ func (r *Registry) ClientConn(id string) *wsConn {
 	if !ok {
 		return nil
 	}
-	return l.client
+	return l.clientConn()
+}
+
+// SendClientFrame is the ONE way a frame reaches a lease's client. It assigns
+// the next per-lease sequence, retains the encoded bytes in the lease's replay
+// buffer, and queues them on the attached client connection — all under the
+// stream's own lock, so the wire order can never disagree with the numbering and
+// an attach happening at the same instant either precedes the frame (and
+// replays it) or follows it (and receives it live).
+//
+// It sequences and retains the frame EVEN WHEN NO CLIENT IS ATTACHED, and even
+// when an attached client's send queue is full. Those are precisely the two
+// paths that used to log and continue, leaving the client believing it had
+// heard everything the agent said; retaining the frame is what makes them
+// recoverable and the sequence is what makes them visible.
+//
+// It returns errUnknownLease for a lease that no longer exists — a frame in
+// flight when a lease is torn down has nowhere to go and nothing to be replayed
+// to, so it is dropped, not buffered.
+func (r *Registry) SendClientFrame(id string, f brokerframe.Frame) (uint64, clientFrameOutcome, error) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	if !ok {
+		r.mu.Unlock()
+		return 0, clientFrameDropped, errUnknownLease
+	}
+	stream := l.clientStream
+	r.mu.Unlock()
+
+	if stream == nil {
+		// Defensive: every lease is minted with a stream. A nil one would mean an
+		// unsequenced client, which is the failure this story exists to remove, so
+		// say so rather than silently forwarding.
+		return 0, clientFrameDropped, fmt.Errorf("lease %s has no client stream", id)
+	}
+	seq, outcome, err := stream.send(f)
+	if err != nil {
+		return 0, clientFrameDropped, fmt.Errorf("encoding client-bound frame for lease %s: %w", id, err)
+	}
+	return seq, outcome, nil
+}
+
+// ClientReplayFrom returns the retained client-bound frames for a lease with a
+// sequence greater than after, oldest first, and reports whether the buffer
+// still accounts for every frame in that range (see clientStream.replayFrom).
+//
+// It is the read seam for the resume handshake: nothing in the broker calls it
+// yet beyond its tests.
+func (r *Registry) ClientReplayFrom(id string, after uint64) ([][]byte, bool, error) {
+	r.mu.Lock()
+	l, ok := r.leases[id]
+	r.mu.Unlock()
+	if !ok || l.clientStream == nil {
+		return nil, false, errUnknownLease
+	}
+	frames, complete := l.clientStream.replayFrom(after)
+	return frames, complete, nil
 }
 
 // InstanceConn returns the instance connection bound to a lease, or nil if
@@ -1246,7 +1781,10 @@ func (r *Registry) Has(id string) bool {
 func (r *Registry) Remove(id string) {
 	r.mu.Lock()
 	l, ok := r.leases[id]
-	var released LeaseRecord
+	var (
+		released   LeaseRecord
+		clientConn *wsConn
+	)
 	if ok {
 		// Projected while the lease still exists and under the same lock that
 		// deletes it, so the record cannot observe a half-torn-down lease.
@@ -1258,6 +1796,19 @@ func (r *Registry) Remove(id string) {
 		if l.hasSlot {
 			l.hasSlot = false
 			r.releaseSlotLocked()
+		}
+		// Free the replay buffer here rather than leaving it to the garbage
+		// collector. Remove is the single teardown sink, and a projected record,
+		// an A2A binding or a test can outlive the map entry while still holding
+		// the lease pointer — so "the map forgot it" is not the same as "the
+		// memory is gone". This makes it the same thing.
+		if l.clientStream != nil {
+			// Take the client conn under the same lock that deletes the lease, so
+			// an attach racing this teardown either published before the take (and
+			// is closed below) or finds a lease that is already gone. Closing it
+			// happens outside the lock, where every other socket teardown does.
+			clientConn = l.clientStream.detachAny()
+			l.clientStream.release()
 		}
 		delete(r.leases, id)
 	}
@@ -1278,13 +1829,13 @@ func (r *Registry) Remove(id string) {
 	if l.instance != nil {
 		l.instance.shutdown(websocket.StatusGoingAway, "lease closed")
 	}
-	if l.client != nil {
+	if clientConn != nil {
 		// The client's close status is derived from the teardown reason so a
 		// connected client can tell a crash apart from a normal release. The
 		// reason was set under mu before Remove was called; the lock/unlock
 		// above is the barrier that publishes it.
 		status, reason := clientCloseForReason(l.reason)
-		l.client.shutdown(status, reason)
+		clientConn.shutdown(status, reason)
 	}
 
 	// Journal the teardown LAST, outside the lock and after the peers have been

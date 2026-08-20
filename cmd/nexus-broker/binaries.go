@@ -68,27 +68,61 @@ type binariesBody struct {
 type BinariesServer struct {
 	logger *slog.Logger
 
-	// body is the whole response envelope, projected and sorted ONCE at
-	// construction.
+	// live is the atomic configuration snapshot this handler reads. It carries
+	// the whole response envelope already projected and sorted — see
+	// projectBinaries — so the listing is still computed ONCE per configuration
+	// rather than per request.
 	//
-	// The registry is immutable after LoadConfig — there is no reload path — so
-	// there is nothing to recompute per request, and precomputing has a second
-	// benefit worth more than the saved allocations: the served value simply does
-	// not contain a path, an arg or an env var, so no future edit to the handler
-	// can accidentally encode one. The envelope (not just its slice) is held, so
-	// a broker-wide field added to binariesBody later is likewise computed here,
-	// once, rather than assembled per request.
-	body binariesBody
+	// It is a holder rather than a stored envelope because SIGHUP can replace the
+	// registry: caching the finished JSON at construction, which is what this
+	// server used to do, would have kept GET /binaries advertising the
+	// pre-reload registry for the life of the process. Reading through the holder
+	// keeps the precomputation and loses the staleness.
+	//
+	// Precomputing is not only about the saved allocations. The served value
+	// simply does not contain a path, an arg or an env var, so no future edit to
+	// the handler can accidentally encode one. The envelope (not just its slice)
+	// is held, so a broker-wide field added to binariesBody later is likewise
+	// computed once, in projectBinaries, rather than assembled per request.
+	live *configHolder
 }
 
-// NewBinariesServer projects a loaded binary registry into the client-facing
-// listing. binaries is the fully folded map from Config.Binaries, so the
-// reserved `nexus` entry is included like any other — it is spawnable from every
-// broker and a picker that omitted it would be lying.
+// NewBinariesServer builds the listing over a private snapshot of one binary
+// registry. binaries is the fully folded map from Config.Binaries.
+//
+// run() calls useConfigHolder afterwards to point it at the process-wide
+// snapshot instead, which is what makes the listing follow a reload.
 func NewBinariesServer(logger *slog.Logger, binaries map[string]BinaryEntry) *BinariesServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	return &BinariesServer{logger: logger, live: newLocalConfigHolder(Config{Binaries: binaries})}
+}
+
+// useConfigHolder points the listing at the process-wide configuration snapshot,
+// so a SIGHUP that changes `binaries:` changes what GET /binaries advertises.
+//
+// It is a setter rather than a constructor parameter for the same reason
+// ClaimServer.useSpawnKey is: every existing caller hands this server a bare
+// registry map, and threading the shared holder through the constructor would
+// churn them all for a dependency only run() has. A nil holder is ignored, so a
+// caller that never shares one keeps the private snapshot the constructor built.
+func (s *BinariesServer) useConfigHolder(h *configHolder) {
+	if h == nil {
+		return
+	}
+	s.live = h
+}
+
+// projectBinaries renders the client-facing listing envelope from a folded
+// binary registry. binaries is the fully folded map from Config.Binaries, so the
+// reserved `nexus` entry is included like any other — it is spawnable from every
+// broker and a picker that omitted it would be lying.
+//
+// It lives beside BinaryInfo rather than in reload.go because it IS the
+// projection this file exists to define: the one place a registry entry becomes
+// something a client may see. liveConfig calls it, once per configuration.
+func projectBinaries(binaries map[string]BinaryEntry) binariesBody {
 	// sortedBinaryNames, not a map walk: Go randomizes map iteration, and a
 	// listing whose order changed per request would reshuffle every client's
 	// picker and make any assertion on the response order flaky.
@@ -105,7 +139,7 @@ func NewBinariesServer(logger *slog.Logger, binaries map[string]BinaryEntry) *Bi
 			Description: entry.Description,
 		})
 	}
-	return &BinariesServer{logger: logger, body: binariesBody{Binaries: entries}}
+	return binariesBody{Binaries: entries}
 }
 
 // Register wires the binaries endpoint onto a mux. It takes a routeMux so main
@@ -126,7 +160,7 @@ func (s *BinariesServer) Register(mux routeMux) {
 func (s *BinariesServer) handleBinaries(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(s.body); err != nil {
+	if err := json.NewEncoder(w).Encode(s.live.get().binaries); err != nil {
 		// The status and part of the body are already on the wire, so there is no
 		// error response left to send. Log it and move on — the client sees a
 		// truncated body and its own decode failure.

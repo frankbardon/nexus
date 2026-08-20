@@ -74,6 +74,11 @@ type Plugin struct {
 	cfg    config
 	unsubs []func()
 
+	// newTimer builds the user-choice deadline timer. It is a field rather than
+	// a package-level variable so tests can inject a fake without mutating
+	// shared state. Set once at construction; never reassigned at runtime.
+	newTimer func(time.Duration) timerHandle
+
 	mu             sync.Mutex
 	inflight       map[string]*fanoutState // keyed by fanout ID
 	pendingChoices map[string]chan int     // user strategy: fanoutID -> chosen index
@@ -84,6 +89,7 @@ func New() engine.Plugin {
 	return &Plugin{
 		inflight:       make(map[string]*fanoutState),
 		pendingChoices: make(map[string]chan int),
+		newTimer:       newRealTimer,
 	}
 }
 

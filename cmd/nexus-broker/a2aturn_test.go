@@ -28,8 +28,8 @@ import (
 // leniency test in a2aio_contract_test.go.
 func startConformTask(t *testing.T, server *A2AServer, _ *conformInstance, text string) (*a2aTask, *a2aStream) {
 	t.Helper()
-	card, ok := server.cards["support"]
-	if !ok {
+	card := server.card("support")
+	if card == nil {
 		t.Fatal("the test ingress has no support profile")
 	}
 	task, sub, _, protoErr := server.startTask(context.Background(), card, a2aTurnInput{
@@ -136,7 +136,7 @@ func TestAnswerBecomesAHITLResponsePayload(t *testing.T) {
 				t.Fatalf("state = %s, want INPUT_REQUIRED", state)
 			}
 
-			card := server.cards["support"]
+			card := server.card("support")
 			_, resumeSub, _, protoErr := server.resumeTask(card, a2aTurnInput{
 				taskID:    task.taskID,
 				contextID: task.contextID,
@@ -343,7 +343,7 @@ func TestUndeliverableMessageIsRefusedBeforeAnyFrame(t *testing.T) {
 	server, instance := newConformIngress(t)
 	instance.sendErr = errors.New("the instance send buffer is full")
 
-	card := server.cards["support"]
+	card := server.card("support")
 	_, _, _, protoErr := server.startTask(context.Background(), card, a2aTurnInput{text: "hi"}, nexusauth.Principal{})
 	if protoErr == nil {
 		t.Fatal("an undeliverable message was accepted")
@@ -365,7 +365,7 @@ func TestUnwiredLeaseProviderRefusesClearly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2AServer: %v", err)
 	}
-	_, _, _, protoErr := server.startTask(context.Background(), server.cards["support"],
+	_, _, _, protoErr := server.startTask(context.Background(), server.card("support"),
 		a2aTurnInput{text: "hi"}, nexusauth.Principal{})
 	if protoErr == nil {
 		t.Fatal("an ingress with no lease provider accepted a message")
@@ -383,7 +383,7 @@ func TestUnwiredLeaseProviderRefusesClearly(t *testing.T) {
 // task ids in flight on a shared broker.
 func TestTasksAreScopedToTheirOwner(t *testing.T) {
 	server, instance := newConformIngress(t)
-	card := server.cards["support"]
+	card := server.card("support")
 	owner := nexusauth.Principal{ID: "alice"}
 	task, sub, _, protoErr := server.startTask(context.Background(), card, a2aTurnInput{text: "hi"}, owner)
 	if protoErr != nil {

@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,13 +40,27 @@ type hitlAgent struct {
 	choices   []events.HITLChoice
 	// answered receives the response that unblocked the turn.
 	answered chan events.HITLResponse
-	// asked closes once the question has been put on the bus.
-	asked chan struct{}
+	// asked closes once the FIRST question has been put on the bus. The fixture
+	// serves more than one turn, so the close is one-shot: a second turn asking
+	// its own question must not close an already-closed channel.
+	asked     chan struct{}
+	askedOnce sync.Once
 
 	mu       sync.Mutex
 	cancels  []events.HITLCancel
 	requests []events.CancelRequest
 	turns    int
+}
+
+// nextTurnID assigns the turn now starting its own id. The first turn keeps the
+// literal "turn-1" that single-turn tests name, and every turn after it gets a
+// distinct id — without which a test could not tell a stale turn end apart from
+// the current turn's, because both would carry the same id.
+func (h *hitlAgent) nextTurnID() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.turns++
+	return fmt.Sprintf("turn-%d", h.turns)
 }
 
 // newHITLAgent wires the fake onto the bus and returns it. reply is the text the
@@ -109,22 +124,20 @@ func newHITLAgent(t *testing.T, bus engine.EventBus, reply string, choices ...ev
 	}, engine.WithSource("test.cancel"))
 
 	playAgent(t, bus, func(b engine.EventBus, in events.UserInput) {
-		h.mu.Lock()
-		h.turns++
-		h.mu.Unlock()
+		turnID := h.nextTurnID()
 
 		_ = b.Emit("agent.turn.start", events.TurnInfo{
-			SchemaVersion: events.TurnInfoVersion, TurnID: "turn-1", SessionID: in.SessionID,
+			SchemaVersion: events.TurnInfoVersion, TurnID: turnID, SessionID: in.SessionID,
 		})
 		_ = b.Emit("hitl.requested", events.HITLRequest{
 			SchemaVersion:   events.HITLRequestVersion,
 			ID:              h.requestID,
-			TurnID:          "turn-1",
+			TurnID:          turnID,
 			RequesterPlugin: "nexus.control.hitl",
 			Prompt:          h.question,
 			Choices:         h.choices,
 		})
-		close(h.asked)
+		h.askedOnce.Do(func() { close(h.asked) })
 
 		// Blocked exactly as ask_user blocks, and for as long.
 		resp := <-h.answered
@@ -137,10 +150,10 @@ func newHITLAgent(t *testing.T, bus engine.EventBus, reply string, choices ...ev
 		}
 		_ = b.Emit("io.output", events.AgentOutput{
 			SchemaVersion: events.AgentOutputVersion,
-			Content:       reply + answer, Role: "assistant", TurnID: "turn-1",
+			Content:       reply + answer, Role: "assistant", TurnID: turnID,
 		})
 		_ = b.Emit("agent.turn.end", events.TurnInfo{
-			SchemaVersion: events.TurnInfoVersion, TurnID: "turn-1",
+			SchemaVersion: events.TurnInfoVersion, TurnID: turnID,
 		})
 	})
 	return h
@@ -1202,7 +1215,16 @@ func awaitFirstTaskState(ctx context.Context, t *testing.T, base string, want a2
 // task lifetime detached from the request: a cancellation releases the slot and
 // THEN asks the agent loop to stop, so the agent.turn.end that follows arrives
 // after the next task may already have started. It must not complete it.
+//
+// The next task is driven to the point where it has BOUND its own turn before
+// the stale end is emitted. That is deliberate: the guard has two branches — a
+// different id, and an id on a run that has bound none — and only the first is
+// the window described above. Asserting against an unbound run would pass for
+// the weaker reason and would say nothing about a stale end racing a live turn.
 func TestStaleTurnEndCannotCompleteTheNextTask(t *testing.T) {
+	// The id the fixture gives its first turn: the one the cancellation kills.
+	const staleTurn = "turn-1"
+
 	p, bus := newTestPlugin(t, nil)
 	newHITLAgent(t, bus, "never ")
 
@@ -1219,9 +1241,16 @@ func TestStaleTurnEndCannotCompleteTheNextTask(t *testing.T) {
 	// A new task, started before the cancelled turn's teardown is heard from.
 	next := p.startTurnForTest(t, "ctx-stale")
 
+	// The second turn is live and bound to a turn of its OWN before the stale
+	// end arrives, so what follows tests the different-id branch of the guard.
+	bound := awaitBoundTurn(t, next)
+	if bound == staleTurn {
+		t.Fatalf("the second run bound %q, the cancelled turn's id — each turn must carry its own", bound)
+	}
+
 	// The dead turn finally ends.
 	_ = bus.Emit("agent.turn.end", events.TurnInfo{
-		SchemaVersion: events.TurnInfoVersion, TurnID: "turn-1",
+		SchemaVersion: events.TurnInfoVersion, TurnID: staleTurn,
 	})
 
 	if next.terminated() {
@@ -1230,9 +1259,26 @@ func TestStaleTurnEndCannotCompleteTheNextTask(t *testing.T) {
 	next.fail("test teardown")
 }
 
-// startTurnForTest registers a run the way an inbound message would, without an
-// agent behind it, so a test can observe what happens to a task nothing is
-// driving.
+// awaitBoundTurn blocks until r has bound a turn and returns its id. A run
+// binds on the agent.turn.start its own io.input provokes, which the transport
+// emits from a goroutine, so the binding is not observable synchronously.
+func awaitBoundTurn(t *testing.T, r *run) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if id := r.boundTurn(); id != "" {
+			return id
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the run never bound a turn")
+	return ""
+}
+
+// startTurnForTest registers a run the way an inbound message would, without
+// requiring an agent behind it, so a test can observe what happens to a task
+// nothing is driving — or, where one is wired onto the bus, drive a second turn
+// without going back through the HTTP surface.
 func (p *Plugin) startTurnForTest(t *testing.T, contextID string) *run {
 	t.Helper()
 	r, sub, _, protoErr := p.startTurn(turnInput{
