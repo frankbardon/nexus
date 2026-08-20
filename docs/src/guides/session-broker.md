@@ -4,7 +4,9 @@ The **session broker** (`cmd/nexus-broker`) is a standalone service that fronts
 many OS-isolated `nexus` instances behind a single HTTP/WebSocket ingress.
 Callers *claim* an instance, talk to it over a WebSocket, and *release* it when
 done. Each instance is a separate `nexus` process, so tenant isolation is
-**process isolation**.
+**process isolation** — which is weaker than it sounds. Read
+[Trust boundaries](#trust-boundaries) before putting two callers that do not
+trust each other in front of one broker.
 
 It is a protocol-aware gateway, not a blind TCP proxy: it decodes every frame
 and routes by lease and signal, which is how it tracks readiness, idleness, and
@@ -46,6 +48,71 @@ crashes.
    WebSocket and IO frames flow client ↔ broker ↔ instance.
 5. The instance is released on demand (`POST /release`), on idle
    (`idle_timeout`), or on crash. The session persists on disk and is resumable.
+
+## Trust boundaries
+
+The broker gives every claimant its **own process**. That is not the same as
+giving it its own **security domain**, and the difference decides whether one
+broker may front two callers that do not trust each other. By default it may
+not.
+
+### Scrubbing the environment did not make the broker a security boundary
+
+Reducing the spawn environment to
+[what the operator declared](#what-environment-an-instance-is-given) closed one
+specific hole: a claimant could previously name any variable the broker process
+held and have a provider post its value to a `base_url` of the claimant's
+choosing. That hole is closed. **The broker is still not a boundary between
+mutually untrusting callers**, because the part that matters is not the
+environment.
+
+Without [`run_as`](#running-instances-as-another-user-run_as), a claimed instance
+runs as the **broker's own uid** with the **broker's `HOME`**. Whoever claimed it
+drives that instance's shell and file tools, and so can:
+
+- read `~/.nexus/sessions/` — **every other tenant's transcripts**, session files
+  and per-plugin state, including sessions created by other claimants and by the
+  [A2A ingress](#the-a2a-front-door-agents);
+- read `<state_dir>/spawn-key`. That file is the derivation key for **every**
+  per-spawn dial-back secret, so holding it is enough to forge any live lease's
+  [instance identity](#the-instance-dial-back-secret): dial `/instance`, register
+  as somebody else's instance, and be handed their client's stream. The directory
+  is mode `0700`, which keeps out other *users*; it does not keep out a process
+  already running as its owner.
+
+Neither of those depends on a bug. Both follow from the instance and the broker
+sharing a uid, which is the default. An [`auth:` block](#authentication) does not
+change it either: authentication decides **who may claim**, not what a claimed
+instance can reach once it is running.
+
+**So: one broker per trust domain, or set `run_as`.** If every caller of a broker
+is already entitled to everything that broker's other callers can see — one
+team's CI, one product's backend — the default is fine, and always was. If they
+are not, the separation has to come from the OS.
+
+### What `run_as` buys, exactly
+
+`run_as` separates instances **by OS user**, and that is the whole of it. It does
+**not** sandbox the filesystem, restrict the network, or cap CPU or memory; it
+does **not** separate two instances of the **same** entry from each other, since
+they share a credential and a session tree; and it does **not** protect an
+instance from the caller who claimed it, who chose its config and drives its
+tools. It also requires a **privileged broker** — root, or `CAP_SETUID` **and**
+`CAP_SETGID` on Linux, needed even when `run_as` names the broker's *own* uid,
+because dropping the broker's supplementary groups calls `setgroups`, which is
+itself privileged.
+
+The full configuration, the `HOME` rule and the boot-time failure modes are under
+[Running instances as another user](#running-instances-as-another-user-run_as).
+
+### The bounds the broker does not enforce
+
+| Boundary | Where it actually lives |
+|---|---|
+| Per-lease memory, CPU and disk | The deployment — a systemd slice, a cgroup, or a container per instance. `max_concurrent` is a **headcount**, not a resource budget; see [What `max_concurrent` does not bound](#what-max_concurrent-does-not-bound). |
+| What an instance may read and write on the host | The OS user it runs as ([`run_as`](#running-instances-as-another-user-run_as)) plus whatever that user is granted. The broker adds nothing. |
+| Transport confidentiality | A TLS-terminating proxy in front of `listen_addr`; see [Behind a proxy](#behind-a-proxy-set-advertise_addr). The broker itself speaks plain HTTP and only *warns* when `advertise_addr` promises `wss://`/`https://` that it does not serve. |
+| How **often** a caller may claim | Nothing. The per-principal keys under [Per-principal caps](#per-principal-caps-needs-auth) bound how much a caller may **hold**, not the rate at which it may churn. |
 
 ## Running the broker
 
@@ -281,7 +348,9 @@ the broker does not actually hold is called out in its own startup `WARN`.
 There is no opt-out and no compatibility flag. `inherit_env: ["*"]` is not
 supported — a wildcard would restore exactly the exfiltration primitive above,
 and the caller's ability to name any variable is what makes "just the risky ones"
-an impossible line to draw.
+an impossible line to draw. The symptom, the diagnosis and this edit are also
+listed beside the other breaking change under
+[Upgrading an existing broker](#upgrading-an-existing-broker).
 
 **Which entry ran a session is remembered**, so a resume re-uses it instead of
 falling back to `nexus`, and a resume that names a *different* variant is refused
@@ -333,8 +402,14 @@ binaries:
 - **No broker-side default configs.** A claim still supplies the whole engine
   config as YAML text. An entry contributes `args` and `env`, never config
   content.
-- **No hot reload.** The registry is read, folded and resolved once at startup.
-  Adding, changing or removing an entry means **restarting the broker**.
+- **No per-entry environment pass-through.** `inherit_env` is broker-level: it
+  answers "which of the things this broker was started with may leave the
+  process", which does not vary by variant. A value that *is* per-variant belongs
+  in that entry's `env`.
+
+The registry **is** hot-reloadable — adding, changing or removing an entry takes
+a `SIGHUP`, not a restart. See
+[Changing config without a restart](#changing-config-without-a-restart-sighup).
 
 ### Running instances as another user: `run_as`
 
@@ -976,7 +1051,8 @@ ran with that hole open.
 > and removing the `auth:` block is no longer a way to make it work. The fix is to
 > upgrade the binary the [registry entry](#serving-several-nexus-variants-the-binary-registry)
 > points at. The check is per **spawn**, so one stale variant fails while the rest
-> of the registry keeps working.
+> of the registry keeps working. See
+> [Upgrading an existing broker](#upgrading-an-existing-broker) for the edit.
 
 **Every refusal looks the same on the wire.** An unknown lease, an absent secret,
 a wrong secret and a version-skewed frame all close with the same
@@ -1930,7 +2006,12 @@ A few rules worth knowing before you write the block; the full key list is in th
   "Direct Configuration" discovery path explicitly sanctions.
 
 **A broker with no `agents:` block is unchanged in every respect** — no routes
-are registered, no card is built, and nothing new appears in the boot log.
+are registered, no card is built, and nothing new appears in the boot log. That
+also means the ingress **cannot be switched on by a `SIGHUP`**: adding `agents:`
+to the file of a broker that booted without it is
+[reported and ignored](#what-a-reload-does-not-touch) like any other boot-only
+change. Adding, changing and removing profiles on a broker that already serves at
+least one all reload normally.
 
 > **Current state.** `SendMessage`, `SendStreamingMessage`, `CancelTask`,
 > `GetTask`, `ListTasks` and `SubscribeToTask` are all driven end to end: a
@@ -2213,6 +2294,28 @@ handed to the oldest waiter. Set `queue_wait_timeout` to `0` to disable waiting
 (at-capacity claims are rejected immediately with `503 no capacity`); set
 `max_concurrent` to `0` for unlimited instances.
 
+### What `max_concurrent` does not bound
+
+`max_concurrent` is a **headcount, not a resource budget**. It counts live
+instances; it says nothing about what those instances hold. An instance parked on
+a 200k-token context, with a vector store warmed and half a dozen MCP servers
+dialled, counts exactly **one** — the same as an instance that booted a second
+ago and has done nothing. So `max_concurrent: 8` bounds the number of `nexus`
+processes and not the memory, CPU or disk those eight can consume between them.
+
+There is deliberately **no per-lease memory limit in the broker**. Adding one
+would mean the broker policing a process it has already handed a shell and a full
+engine config to, which is advisory at best. **Per-lease resource limits belong to
+the deployment**: a systemd slice or `MemoryMax=` per instance, a cgroup, or one
+container per instance. Size `max_concurrent` so that `max_concurrent` × the
+per-instance limit fits the host, and let the OS enforce the second factor.
+
+The other bound worth naming: `max_concurrent` is **global**, not per
+[registry entry](#serving-several-nexus-variants-the-binary-registry). One
+variant can fill it for every other. The only per-caller ceilings are the
+optional [per-principal caps](#per-principal-caps-needs-auth), and they need
+`auth:` to have any effect.
+
 ### The queue itself is bounded
 
 `max_concurrent` bounds live instances; **`max_queue_depth` (default `64`) bounds
@@ -2338,6 +2441,111 @@ having stops costing a process. The next message on that `contextId` re-spawns
 the instance with `-recall`, so the client sees continuity rather than a
 released session.
 
+## Upgrading an existing broker
+
+Two changes are **breaking** for a deployment that predates them. Both are
+deliberate, neither has a compatibility flag, and each has one concrete
+`broker.yaml` edit.
+
+### 1. Instance binaries predating the spawn-secret protocol no longer register
+
+Enforcement of the [instance dial-back secret](#the-instance-dial-back-secret)
+used to be gated on having an `auth:` block. It is now **unconditional**: every
+`register` frame must carry the per-spawn secret, on **every** broker, restored
+lease or fresh, authenticated or not. **Removing `auth:` is no longer a
+workaround** — it never made anything safer, it only switched this check off, and
+that was the hole.
+
+**Symptom.** The claim hangs and then fails with
+`504 {"error":"instance did not become ready in time"}`, while the child process
+is alive and connecting fine. The refusal is byte-identical on the wire to the
+other three (unknown lease, wrong secret, version skew), on purpose — telling
+them apart would let a dialer enumerate live lease ids.
+
+**Diagnosis.** The broker's `WARN`. A pre-protocol binary produces
+`its register frame carried NO spawn secret`; the
+[table of causes](#the-instance-dial-back-secret) names the rest. A `504` with
+**no** such record means the instance is simply still booting — raise
+[`ready_timeout`](../configuration/reference.md#session-broker-nexus-broker)
+instead.
+
+**The edit.** Point the registry entry at an upgraded `nexus` build. The check is
+per **spawn**, so one stale variant fails while the rest of the registry keeps
+working:
+
+```yaml
+binaries:
+  nexus:
+    path: /usr/local/bin/nexus          # rebuilt from this release — fine
+  archive:
+    path: /opt/nexus-0.9/bin/nexus      # pre-protocol — every claim naming it 504s
+```
+
+`binaries:` is [reloadable](#changing-config-without-a-restart-sighup), so once
+the new binary is on disk a `SIGHUP` is enough: no restart, and no lease lost to
+one.
+
+### 2. Instances no longer inherit the broker's environment
+
+A spawn used to take the broker's whole environment. It now carries only the
+always-pass set (`HOME`, `LANG`, `PATH`, `TZ`), the three broker-owned
+`NEXUS_BROKER_*` variables, whatever `inherit_env` names, and its entry's `env` —
+see [What environment an instance is given](#what-environment-an-instance-is-given)
+for why.
+
+**Symptom.** An instance whose config expects to read a credential from the
+environment fails to reach its provider on the first turn. The claim itself
+succeeds.
+
+**Diagnosis.** The per-entry `binary registry entry` boot line lists
+`spawn_env=…` — every name that entry's spawns will carry, values never included.
+A name you expected and do not see was never passed; a name you *declared* in
+`inherit_env` that the broker does not itself hold gets its own startup `WARN`.
+
+**The edit.** Put each variable your instances rely on in one of two places —
+`inherit_env` when the value lives in the **broker's** environment (injected by
+systemd, Kubernetes or a secrets agent), or the entry's `env` when the value is a
+property of that **variant**:
+
+```yaml
+# before — worked only because the broker's whole environment was inherited
+binaries:
+  nexus:
+    path: /usr/local/bin/nexus
+
+# after
+inherit_env:                     # names only; the values come from the broker's env
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+binaries:
+  nexus:
+    path: /usr/local/bin/nexus
+  vision:
+    path: /opt/builds/nexus-vision
+    env:                         # set outright — a property of this variant
+      NEXUS_VISION: "1"
+```
+
+A claim's `config` can still carry a credential inline, in which case neither key
+is involved.
+
+**`inherit_env: ["*"]` is not supported.** A wildcard would restore exactly the
+exfiltration primitive the change closes, and because the caller picks the
+variable name in its own config, "allow just the harmless ones" is not a line
+anybody can draw.
+
+`inherit_env` is also [reloadable](#changing-config-without-a-restart-sighup); it
+applies to the next spawn.
+
+### One thing that is not breaking, but is a behaviour change
+
+Every instance now leads **its own process group**, so a `Ctrl-C` in the broker's
+terminal signals the broker's group and no longer kills the instances with it.
+That is intentional — it is what lets a restarted broker
+[adopt the survivors](#what-a-restart-actually-does) — but a foreground broker in
+a development shell will now leave instances running behind it. Release them, or
+let `idle_timeout` do it.
+
 ## v1 caveats
 
 The session broker is a **v1**. Understand these boundaries before deploying it:
@@ -2362,7 +2570,11 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   - **No mTLS, and no TLS at all.** The broker speaks plain HTTP on
     `listen_addr`; terminate TLS at a proxy and set
     [`advertise_addr`](#behind-a-proxy-set-advertise_addr) to the `wss://` address
-    clients use. Client certificates are not a supported credential.
+    clients use. Client certificates are not a supported credential. An
+    `advertise_addr` promising `wss://` or `https://` while the broker serves
+    cleartext is a boot **`WARN`**, not a refusal — the TLS-terminating-proxy
+    deployment is exactly that shape, and the broker cannot tell it from a
+    mistake.
   - **No per-tenant rate limiting.** `max_concurrent` is a global cap and not a
     per-binary one, so one variant can still fill it for everybody. There ARE
     optional per-principal caps on live leases and queued claims
@@ -2373,8 +2585,9 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
     [binary registry](#serving-several-nexus-variants-the-binary-registry) part
     of the access-control surface: any caller allowed to claim may name any
     registered entry.
-  - **No OS-level sandboxing of instances**, either — access control does not
-    change what a spawned process can do to the host (see the last caveat below).
+  - **No OS-level sandboxing of instances**, either — access control decides who
+    may claim, never what a claimed process can do to the host (see
+    [Trust boundaries](#trust-boundaries) and the last caveat below).
   - With **no** `auth:` block, none of the above is enforced at all: any client
     that can reach the broker can claim, connect to, and release any instance. The
     broker logs one `WARN` at boot saying so. The one thing that block never
@@ -2428,10 +2641,28 @@ The session broker is a **v1**. Understand these boundaries before deploying it:
   rather than asserted: the shared conformance corpus records the broker mapping
   at **5 of 9 vectors, 4 skipped**, and names the skips on every run.
 - **Cold-spawn per claim.** There is no pre-warm pool, so each claim pays full
-  engine boot latency before the instance signals ready.
-- **No OS-level per-tenant sandboxing.** Instances are separate processes but
-  are not otherwise sandboxed from each other or the host beyond what the OS
-  user provides.
+  engine boot latency before the instance signals ready. `ready_timeout` (default
+  `30s`) is the ceiling on that boot, and a config that pulls a long model list,
+  warms a vector store or dials several MCP servers can legitimately need more.
+- **`max_concurrent` is a headcount, not a resource budget.** It counts live
+  instances and bounds nothing about what they hold — an instance pinning a
+  200k-token context counts the same as an idle one — and it is global rather than
+  per registry entry. Per-lease memory and CPU limits are the **deployment's** job
+  (systemd slice, cgroup, container). This was left out of the broker
+  deliberately; see
+  [What `max_concurrent` does not bound](#what-max_concurrent-does-not-bound).
+- **A broker is not a security boundary between mutually untrusting callers.**
+  Instances are separate processes, but by default they run as the **broker's own
+  uid** with the broker's `HOME`, so any claimant can read every other tenant's
+  `~/.nexus/sessions/` and the `<state_dir>/spawn-key` that derives every live
+  lease's dial-back secret. Scrubbing the spawn environment closed a real
+  exfiltration hole; it did not close this one. `run_as` separates instances **by
+  OS user** and nothing more — no filesystem sandbox, no network restriction, no
+  CPU or memory cap, no separation between two instances of the same entry, no
+  protection from the caller who claimed it — and it needs a privileged broker
+  (root, or `CAP_SETUID` **and** `CAP_SETGID`, even when it names the broker's own
+  uid). **Deploy one broker per trust domain, or set `run_as`**; see
+  [Trust boundaries](#trust-boundaries).
 
 ## See also
 
