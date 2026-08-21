@@ -1,0 +1,28 @@
+{
+  "id": "hitl-parks-stream-open",
+  "title": "An unanswered question parks the stream open rather than closing it",
+  "rationale": "THE TERMINAL-CLOSE RULE IS KEYED ON TERMINAL STATES ONLY. TASK_STATE_INPUT_REQUIRED is not one, so the stream must stay OPEN and must report itself as interrupted. This vector exists to stop a second implementer from 'tidying up' by closing the stream on a non-terminal state: a close there is indistinguishable client-side from a dropped connection, and the client cannot tell whether to answer the question, retry, or re-subscribe. Keeping it open also means the answer's effects arrive on the connection the client is already reading. A serving layer bounds the wait with its own deadline and, on expiry, drives the task to a REAL terminal state so the ordinary close rule ends the stream — it never hangs up silently.",
+  "features": ["turn", "hitl"],
+  "steps": [
+    {"kind": "message", "text": "apply the migration", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "ask_user", "requestId": "q-1", "prompt": "Approve the destructive migration?"},
+    {"kind": "assert_parked"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "status",
+        "state": "TASK_STATE_INPUT_REQUIRED",
+        "messageRole": "ROLE_AGENT",
+        "messageContains": ["Approve the destructive migration?"],
+        "messageMetadata": {"nexus.hitl.requestId": "q-1"}
+      }
+    ],
+    "finalState": "TASK_STATE_INPUT_REQUIRED",
+    "streamClosed": false,
+    "streamInterrupted": true
+  }
+}

@@ -12,10 +12,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -40,20 +42,46 @@ func run() error {
 		return err
 	}
 
+	// Non-fatal config complaints (deprecated keys, folded aliases) are collected
+	// during the load rather than logged there, because config is parsed before
+	// anything else exists and the parser has no logger. Drained here so they
+	// land in the same boot output as everything else, before the startup line
+	// that reports the values they affected.
+	for _, warning := range cfg.Warnings {
+		logger.Warn(warning)
+	}
+
 	logger.Info("nexus-broker starting",
 		"listen_addr", cfg.ListenAddr,
 		// Logged because it decides what clients are told to connect back to; an
 		// operator debugging a bad ws_url needs to see the value in effect.
 		"advertise_addr", cfg.AdvertiseAddr,
-		"nexus_binary_path", cfg.NexusBinaryPath,
+		// nexus_binary_path is deliberately NOT logged here any more. It is a
+		// deprecated INPUT that is folded into the registry at load and read
+		// nowhere afterwards, so printing it would name a value that no longer
+		// decides anything — the per-entry lines below are the truth.
+		// Logged because the registry decides what a claim can spawn at all, and
+		// the count is the cheapest way for an operator to confirm the `binaries:`
+		// block they wrote was actually picked up (it is never below 1 — the
+		// reserved `nexus` entry always exists).
+		"binaries", len(cfg.Binaries),
 		// Logged because an empty state_dir means lease state is lost on restart,
 		// and that is a decision an operator should be able to confirm from the
 		// boot line rather than infer from a missing directory.
 		"state_dir", cfg.StateDir,
 		"max_concurrent", cfg.MaxConcurrent,
 		"idle_timeout", cfg.IdleTimeout,
+		// Logged beside idle_timeout because the pair is what an operator has to
+		// reason about together: idle_timeout bounds the human pause, this bounds
+		// the turn that is exempt from it.
+		"max_turn_duration", cfg.MaxTurnDuration,
 		"queue_wait_timeout", cfg.QueueWaitTimeout,
 		"release_grace", cfg.ReleaseGrace,
+		// Logged because it is the value an operator most often comes back to
+		// change: a claim that 504s with "instance did not become ready in time"
+		// gives no clue what the ceiling was, so the ceiling in effect is stated
+		// once at boot.
+		"ready_timeout", cfg.ReadyTimeout,
 		// Logged because it decides how long a restored lease holds a capacity slot
 		// waiting for an instance that may never come back.
 		"reattach_window", cfg.ReattachWindow,
@@ -63,11 +91,32 @@ func run() error {
 		"admin_scope", cfg.AdminScope,
 	)
 
+	logBinaryRegistry(logger, cfg)
+
 	// A wildcard bind with no advertise_addr makes every returned ws_url depend on
 	// the claim request's Host header. That is fine for a directly-reachable
 	// broker and wrong behind a proxy, and nothing later in the process can tell
 	// the two apart — so the only place to say so is here, at boot.
 	warnIfAdvertiseAddrMissing(logger, cfg)
+
+	// The mirror image: a wss:// advertise_addr promises TLS this process does not
+	// serve. That is correct behind a TLS-terminating proxy and wrong without one,
+	// and only the operator knows which — so it warns rather than refusing to boot.
+	warnIfAdvertiseSchemeUnserved(logger, cfg)
+
+	// THE LIVE CONFIGURATION. From here on nothing reads `cfg` to decide what a
+	// request does: every request path dereferences this holder instead, and a
+	// SIGHUP replaces what it points at with a single atomic store. See reload.go
+	// for what is reloadable and, more importantly, what is not.
+	//
+	// Building it here also moves one boot failure earlier: the Agent Cards are
+	// rendered inside it, so a profile whose card is not servable now fails
+	// before the lease journal, the spawn key or any index is opened.
+	live, err := newConfigHolder(cfg)
+	if err != nil {
+		logger.Error("failed to build the a2a agent profiles", "error", err)
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -108,6 +157,52 @@ func run() error {
 			"will lose track of every instance this broker spawned")
 	}
 
+	// The durable session → binary index. It is separate from the lease journal on
+	// purpose: the journal is compacted down to live leases, and a resume always
+	// arrives after the original lease was released, so a binding kept only there
+	// would be gone exactly when it is wanted.
+	//
+	// It shares state_dir's fate — unset means no index and no file — but NOT the
+	// journal's boot-failure policy. The index backs an advisory check whose answer
+	// for an unknown session is "no opinion, proceed", so a broker that cannot open
+	// it degrades to the behaviour it had before the index existed. Refusing to boot
+	// over that would trade a weaker resume check for a total outage. Loud WARN,
+	// nil index, carry on.
+	sessionBinaries, err := openSessionBinaryIndex(logger, cfg)
+	if err != nil {
+		logger.Warn("failed to open the session binary index; resume will not know which binary "+
+			"served a session whose lease has already been released",
+			"state_dir", cfg.StateDir, "error", err)
+		sessionBinaries = nil
+	}
+	if sessionBinaries != nil {
+		defer func() { _ = sessionBinaries.Close() }()
+	}
+
+	// The durable A2A context → session index. It is what lets a message on a
+	// contextId whose instance was released (or whose broker restarted) resume the
+	// conversation instead of starting a new one, and it is opened ONLY when the
+	// broker actually fronts A2A profiles — a broker with no `agents:` block must
+	// not gain a file it will never write to.
+	//
+	// It shares state_dir's fate and the session→binary index's failure policy: an
+	// index that cannot be opened degrades continuity to the life of this process,
+	// which is exactly what a broker with no state_dir already has. Refusing to
+	// boot over it would trade a degraded feature for an outage.
+	var a2aContexts *a2aContextIndex
+	if len(cfg.Agents) > 0 {
+		a2aContexts, err = openA2AContextIndex(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a context index; a conversation whose agent instance "+
+				"has stopped will start a fresh session instead of resuming after a broker restart",
+				"state_dir", cfg.StateDir, "error", err)
+			a2aContexts = nil
+		}
+		if a2aContexts != nil {
+			defer func() { _ = a2aContexts.Close() }()
+		}
+	}
+
 	// The spawn-secret derivation key. It shares state_dir's fate: present and
 	// stable when durability is on, absent (and secrets random per spawn, as they
 	// always were) when it is off. Loaded AFTER openLeaseStore because that is
@@ -118,7 +213,14 @@ func run() error {
 		return err
 	}
 
+	// The process-wide counter set. It is created before the registry because the
+	// registry is where every reporting subsystem reaches it from: the gateway,
+	// the claim spine, restart recovery and the SIGHUP reloader all already hold a
+	// *Registry, so there is one wiring point rather than four.
+	metrics := newBrokerMetrics()
+
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
+	registry.useMetrics(metrics)
 	// The registry invalidates a lease's tickets when the lease goes away, through
 	// the single teardown convergence point (Remove) so manual release, the idle
 	// sweeper and crash detection all invalidate.
@@ -126,6 +228,24 @@ func run() error {
 	// Records carry the RAW advertise_addr, verbatim as configured, so a record
 	// round-trips what is in broker.yaml rather than a derived host.
 	registry.useLeaseStore(leaseStore, brokerID, cfg.AdvertiseAddr)
+	// Wired BEFORE recovery, so a lease restored from the journal can still have its
+	// pairing consulted, and before anything is served, since the setter is not safe
+	// to call alongside a live lease transition.
+	registry.useSessionBinaryIndex(sessionBinaries)
+	// Wired before any lease exists, because the bound is stamped on each lease's
+	// stream at creation. Worst-case retention across the broker is this value
+	// times max_concurrent.
+	registry.useClientReplayBuffer(cfg.ClientReplayBufferBytes)
+	// The capacity-queue ceiling: over-capacity claims past this are refused
+	// immediately rather than parked, so the broker stops accumulating goroutines,
+	// timers and held-open connections behind a full cap.
+	registry.useQueueDepth(cfg.MaxQueueDepth)
+	// The per-principal admission caps, gated on authentication being CONFIGURED.
+	// AuthChain.Enabled() is the whole gate: with no `auth:` block every lease is
+	// owned by the same anonymous identity, and applying a per-principal cap to it
+	// would turn either key into a second, lower max_concurrent. Wired before
+	// recovery and before anything is served.
+	registry.usePrincipalLimits(cfg.AuthChain.Enabled(), cfg.MaxLeasesPerPrincipal, cfg.MaxQueuedPerPrincipal)
 
 	// Restart recovery. It runs BEFORE anything is served, because a surviving
 	// instance is already dialing /instance on its reconnect backoff and every
@@ -142,7 +262,12 @@ func run() error {
 	// Spawn secrets are derived from the broker's key when there is one, so a
 	// restart can recompute what a surviving instance is holding.
 	claims.useSpawnKey(spawnSecretKey)
+	// Every server that decides something from config reads the SAME snapshot, so
+	// one SIGHUP moves all of them together rather than leaving the claim path on
+	// one registry and the /binaries listing on another.
+	claims.useConfigHolder(live)
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
+	releases.useConfigHolder(live)
 	// Ticket refresh: ticketTTL is deliberately tight, so a reconnect needs a fresh
 	// ticket and re-claiming (which would spawn a new instance) is not an answer.
 	ticketsServer := NewTicketServer(logger, registry, tickets)
@@ -150,11 +275,73 @@ func run() error {
 	// so it needs both the guard (to know whether auth is on at all) and the
 	// configured operator scope.
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
+	// The binary listing reads the shared snapshot, which carries the response
+	// envelope already projected. It used to cache that envelope at construction,
+	// which would have kept GET /binaries advertising the pre-reload registry for
+	// the life of the process.
+	binaries := NewBinariesServer(logger, cfg.Binaries)
+	binaries.useConfigHolder(live)
+	// The scrape surface. It reads the counters above plus one live sample of the
+	// registry (slots, queue, leases by state) and the ticket store; it mutates
+	// nothing. Like the leases listing it needs both the guard — to know whether
+	// authentication is configured at all — and the operator scope, because a
+	// broker-wide aggregate is exactly the disclosure GET /leases reserves for an
+	// operator.
+	metricsServer := NewMetricsServer(logger, registry, metrics, tickets, guard, cfg.AdminScope)
 
-	// The idle sweeper releases leases with no real client input for
-	// idle_timeout, reusing the shared release teardown. idle_timeout <= 0
-	// disables it. It runs until sweepCtx is cancelled on shutdown.
-	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	// The A2A ingress. Each `agents:` profile publishes an Agent Card and the two
+	// HTTP bindings under its own path namespace, so a third-party A2A client can
+	// address an agent by URL instead of supplying a full nexus config the way
+	// POST /claim demands.
+	//
+	// Cards were rendered into the shared snapshot above, so a card that is not
+	// servable — a missing skill, a security scheme that cannot be derived — has
+	// already failed the start rather than the first client that fetches it. With
+	// no `agents:` block this builds an empty server that registers no routes at
+	// all, which is also why a reload cannot switch the ingress on: see
+	// mergeReloadable.
+	agents := newA2AServer(logger, live)
+	// The lifecycle behind the ingress. It is installed BEFORE logStartupState so
+	// the boot log tells the truth: that method warns loudly when no provider is
+	// wired, and wiring it afterwards would print a warning about a broker that is
+	// in fact fully assembled.
+	//
+	// It is given the CLAIM SERVER rather than the runner or the registry alone,
+	// because every instance it starts goes through the same spawn spine POST
+	// /claim uses — capacity slot, spawn secret, recorded-binary reconciliation,
+	// bounded ready wait, crash watcher. There is one way to boot an instance in
+	// this binary.
+	if agents.enabled() {
+		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+
+		// The durable A2A task store. It is what lets GetTask, ListTasks and
+		// SubscribeToTask answer for a task whose instance was released hours ago
+		// or whose broker process has since restarted — which is precisely when a
+		// client asks.
+		//
+		// It shares the two indexes' failure policy: an unusable file degrades the
+		// store to memory-only, which still answers every read for the life of
+		// this process, rather than refusing to boot. NewA2AServer already
+		// installed a memory-only store, so a failure here simply leaves it in
+		// place.
+		taskStore, err := openA2ATaskStore(logger, cfg)
+		if err != nil {
+			logger.Warn("failed to open the a2a task store; tasks will be readable for the life of "+
+				"this process but not after a restart",
+				"state_dir", cfg.StateDir, "error", err)
+		}
+		agents.useTaskStore(taskStore)
+		defer func() { _ = taskStore.Close() }()
+	}
+	agents.logStartupState(cfg)
+
+	// The idle sweeper releases leases nothing is waiting on: no turn in flight
+	// and no client activity for idle_timeout (reasonIdle), plus the backstop for
+	// a turn that has been in flight longer than max_turn_duration
+	// (reasonTurnTimeout). Both reuse the shared release teardown. idle_timeout
+	// <= 0 disables it. It runs until sweepCtx is cancelled on shutdown.
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
+	sweeper.useConfigHolder(live)
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go sweeper.Run(sweepCtx)
@@ -190,12 +377,43 @@ func run() error {
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	// Behind the SAME guard as /claim: enumerating what this broker can spawn is
+	// a control-plane read, and a caller that cannot claim has no business
+	// learning which variants an operator deploys.
+	binaries.Register(guarded)
+	// Behind the SAME guard as /claim, and then behind `auth.admin_scope` on top
+	// of it (see MetricsServer.authorized): the whole endpoint is broker-wide
+	// aggregates, which is the disclosure GET /leases already reserves for an
+	// operator. With no `auth:` block it serves anyone, exactly as every other
+	// route on this binary does.
+	metricsServer.Register(guarded)
+	// Behind the SAME guard again, card included. An A2A caller is refused by
+	// exactly the middleware that refuses a /claim caller, so there is one
+	// authentication policy on this binary rather than two — see the auth-posture
+	// comment on handleAgentCard for why the discovery document is inside it
+	// here and outside it in nexus.io.a2a.
+	agents.Register(guarded)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	// SIGHUP re-reads the config file and republishes the reloadable half of it,
+	// so adding a `binaries:` variant or publishing a new `agents:` profile no
+	// longer costs a restart — and a restart is the single event that costs every
+	// lease whose instance fails to reattach within reattach_window.
+	//
+	// It gets its OWN channel and goroutine rather than riding on the
+	// signal.NotifyContext above, and it has to: that context is CANCELLED by the
+	// first signal it carries, which would turn every reload into a shutdown.
+	// Installed before the listener accepts anything. SIGHUP's default
+	// disposition is to terminate the process, and nothing can be done about a
+	// signal that lands before signal.Notify runs — so the window in which a
+	// reload would stop this broker instead of reloading it is confined to boot,
+	// while it is serving nothing.
+	go watchReloadSignals(ctx, newReloader(logger, *configPath, live, registry))
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -220,6 +438,10 @@ func run() error {
 
 	stopSweep()
 	gateway.Shutdown()
+	// Settle any A2A task still in flight before the listener goes away, so a
+	// streaming client is told the turn ended rather than being left on a socket
+	// nothing will ever write to again.
+	agents.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -229,4 +451,79 @@ func run() error {
 	}
 	logger.Info("nexus-broker stopped")
 	return nil
+}
+
+// logBinaryRegistry writes the boot lines describing what each registry entry
+// will spawn AND what environment those spawns will hold.
+//
+// Split out of run() so it can be asserted against a log sink: the environment a
+// spawn carries is now a security boundary, and "the operator can see what crosses
+// it" is a property worth a test rather than a hope.
+func logBinaryRegistry(logger *slog.Logger, cfg Config) {
+	// One line per registry entry, carrying the RESOLVED path and not just the
+	// configured one. A bare `path` goes through the broker process's own PATH, so
+	// `nexus` can silently be a different build than the operator has in mind —
+	// a stale copy in ~/go/bin ahead of /usr/local/bin, say. That surprise has to
+	// be visible in the boot log, where it can be compared against a deploy, rather
+	// than inferred later from an instance behaving oddly.
+	//
+	// The line also names the ENTIRE environment those spawns will carry, because
+	// an instance no longer inherits the broker's own environment wholesale and
+	// the operator has to be able to see what it does get. Names only, never
+	// values — several of them are credentials by construction, and the whole
+	// point of the key is that they do not leak.
+	//
+	// A name declared under `inherit_env` that this broker does not actually hold
+	// is absent from the line rather than listed as empty, so "I exported the key
+	// and it still is not there" is answerable from the boot log; missing declared
+	// names are called out once, below, rather than once per entry.
+	//
+	// run_as is appended only when the entry actually declares one (or inherits
+	// the broker default), so a broker that does not use the key logs exactly the
+	// line it logged before the key existed.
+	for _, name := range sortedBinaryNames(cfg.Binaries) {
+		entry := cfg.Binaries[name]
+		attrs := []any{
+			"name", name,
+			"path", entry.Path,
+			"resolved_path", entry.ResolvedPath,
+			"spawn_env", strings.Join(spawnEnvNames(cfg.InheritEnv, entry.Env), ","),
+		}
+		if cred := entry.RunAs; cred != nil && cred.UID != nil && cred.GID != nil {
+			attrs = append(attrs, "run_as", fmt.Sprintf("%d:%d", *cred.UID, *cred.GID))
+			// The home this entry's sessions will live under, when the broker
+			// resolved one. Absent means the entry's own `env` sets HOME, which the
+			// spawn_env list above already names.
+			if cred.ResolvedHome != "" {
+				attrs = append(attrs, "run_as_home", cred.ResolvedHome)
+			}
+		}
+		logger.Info("binary registry entry", attrs...)
+	}
+
+	// run_as configured on a broker that cannot use it. It is a WARN rather than a
+	// boot failure because the privilege can legitimately arrive later (a
+	// capability granted by the supervisor, a container started differently), and
+	// because the failure it predicts is already loud: the spawn fails at Start
+	// and the claim reports it. Saying so at boot turns "every claim 500s" into
+	// one line an operator can act on.
+	if registryUsesRunAs(cfg.Binaries) && os.Geteuid() != 0 {
+		logger.Warn("run_as is configured but this broker does not run as root, so it cannot set a spawned "+
+			"instance's credentials at all — every claim selecting such an entry will fail to spawn. "+
+			"Run the broker as root (or grant it CAP_SETUID and CAP_SETGID) or remove run_as",
+			"euid", os.Geteuid())
+	}
+
+	// Declared but not held. It is a WARN and not a boot failure on purpose: one
+	// broker.yaml is legitimately deployed across machines where only some of the
+	// names are exported, and refusing to start would make the safe configuration
+	// (declare everything any instance might want) the fragile one. The cost of
+	// getting it wrong is an instance that cannot reach a provider, so it is said
+	// out loud here rather than discovered at the first turn.
+	if missing := missingInheritEnv(cfg.InheritEnv); len(missing) > 0 {
+		logger.Warn("inherit_env names variables this broker's own environment does not hold, "+
+			"so no spawned instance will carry them; export them into the broker's environment "+
+			"or set them under binaries.<name>.env",
+			"missing", strings.Join(missing, ","))
+	}
 }

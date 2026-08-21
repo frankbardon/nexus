@@ -1,0 +1,98 @@
+# Test: the CALLEE half of the Nexus->Nexus A2A loopback, asking a question.
+#
+# Same listener as configs/test-a2a-loopback-server.yaml, but the mocked agent
+# calls ask_user on its first step. nexus.control.hitl emits hitl.requested and
+# blocks; nexus.io.a2a maps that onto TASK_STATE_INPUT_REQUIRED with the
+# question on the status message (specification section 3.1.1) and the task
+# stays live. The caller's nexus.agent.a2a_remote turns that into a
+# hitl.requested of its OWN, in front of the human driving the CALLING session,
+# and resumes this task with the answer under the same taskId and contextId.
+#
+# nexus.io.test.hitl_auto_respond is false, and it is load-bearing: the test IO
+# plugin answers every hitl.requested by default, which would settle the
+# question inside this process before the A2A client ever saw it and would make
+# the chained round trip untestable. Switching it off is what leaves the
+# question genuinely unanswered here so it has to travel.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestA2ALoopback_ChainedHITL
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.a2a
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.control.hitl
+    - nexus.control.cancel
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 30s
+    # The question must NOT be answered inside this process. See the header.
+    hitl_auto_respond: false
+    mock_responses:
+      # 1. Ask the caller's human which environment to use. This is what parks
+      #    the A2A task at INPUT_REQUIRED.
+      - tool_calls:
+          - name: ask_user
+            arguments: '{"prompt":"Which environment should I deploy to?","mode":"free_text"}'
+      # 2. The closing answer, produced once the resumed turn unblocks. The last
+      #    mock response repeats, so a turn that needs a third step still ends.
+      - content: "The remote Nexus agent deployed to the environment you named."
+
+  nexus.io.a2a:
+    bind: 127.0.0.1:18192
+    public_url: http://127.0.0.1:18192
+    bearer_token: test-a2a-loopback-token
+    tasks:
+      # Generous by default so the chained round trip is bounded by the caller,
+      # not by this listener. The expiry test narrows it with copyConfig.
+      input_timeout: 30s
+    card:
+      name: nexus-loopback-agent
+      description: A Nexus instance serving itself over A2A for loopback interop testing.
+      version: 0.1.0
+      provider:
+        organization: Nexus
+        url: https://github.com/frankbardon/nexus
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: chat
+          name: Conversational turn
+          description: Run a single conversational turn against the configured agent loop.
+          tags: ["chat", "react"]
+          examples:
+            - "Summarize the release notes."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are the remote test agent. Use ask_user before acting."
+
+  nexus.control.hitl:
+    registry:
+      enabled: false
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

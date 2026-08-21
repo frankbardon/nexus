@@ -20,6 +20,23 @@ func testOwner() nexusauth.Principal {
 	}
 }
 
+// testSpawnSecret is the value the seed helpers record on a lease and then echo
+// back through AttachInstance. It is a real secret rather than "" because the
+// registry requires one on EVERY registration — a seed helper that could attach
+// without one would be exercising a path the broker no longer has.
+const testSpawnSecret = "3f8c1a06d54b27e9b0af7c31d629e845"
+
+// attachTestInstance mints the lease's spawn secret and attaches an instance
+// with it, in the order the claim path does: record before anything could dial
+// back, then present the recorded value.
+func attachTestInstance(t *testing.T, reg *Registry, id string, conn *wsConn) {
+	t.Helper()
+	reg.SetSpawnSecret(id, testSpawnSecret)
+	if err := reg.AttachInstance(id, conn, testSpawnSecret); err != nil {
+		t.Fatalf("AttachInstance: %v", err)
+	}
+}
+
 // TestLeaseOwner_StampedAtCreation covers the base case for both constructors:
 // the owner handed to NewLease is the owner LeaseOwner reports back, in full.
 func TestLeaseOwner_StampedAtCreation(t *testing.T) {
@@ -143,13 +160,11 @@ func TestLeaseOwner_SurvivesLifecycleTransitions(t *testing.T) {
 	assertOwner("pending", leaseStatePending)
 
 	instance := newWSConn(nil)
-	if err := reg.AttachInstance(id, instance, "", false); err != nil {
-		t.Fatalf("AttachInstance: %v", err)
-	}
+	attachTestInstance(t, reg, id, instance)
 	assertOwner("registered", leaseStateRegistered)
 
 	client := newWSConn(nil)
-	if err := reg.AttachClient(id, client); err != nil {
+	if _, err := reg.AttachClient(id, client); err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
 	assertOwner("active", leaseStateActive)
@@ -210,6 +225,82 @@ func TestLeaseOwner_NoInternalStateEscapes(t *testing.T) {
 	}
 	if again.Claims["iss"] != "https://idp.example" {
 		t.Errorf("owner Claims[iss] = %v after mutating a returned copy, want the stamped value", again.Claims["iss"])
+	}
+}
+
+// TestBinaryForSession_UnknownSessionReportsUnknown pins the three shapes that
+// must all read as "the broker has no opinion" rather than as "the binary named
+// empty string".
+//
+// The distinction is the whole safety of the lookup: a resume check turns a
+// KNOWN mismatch into a rejected claim and an absent mapping into a fallthrough,
+// so a shape that wrongly reported ok=true would reject resumes the broker has no
+// business rejecting.
+func TestBinaryForSession_UnknownSessionReportsUnknown(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+
+	// A session no live lease is running — the ordinary case, because a released
+	// lease is dropped from the registry and from the journal fold alike.
+	if got, ok := reg.BinaryForSession("sess-never-seen"); ok {
+		t.Errorf("BinaryForSession on an unrecorded session = (%q, true), want unknown", got)
+	}
+
+	// The empty session id, with a stamped lease that has not reported one yet.
+	// EVERY lease looks like this between its mint and its session report, so a
+	// scan without the empty-id guard would answer with an unrelated lease's
+	// binary.
+	pending, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.SetBinary(pending, "vision")
+	if got, ok := reg.BinaryForSession(""); ok {
+		t.Errorf("BinaryForSession(\"\") = (%q, true), want unknown", got)
+	}
+
+	// A lease whose session id IS known but whose binary was never recorded —
+	// what a lease restored from a journal written before the field existed looks
+	// like. It must fall through to unknown, not report an empty binary that a
+	// caller would then compare against and reject.
+	legacy, err := reg.NewLease(testOwner())
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	reg.MarkSessionID(legacy, "sess-legacy")
+	if got, ok := reg.BinaryForSession("sess-legacy"); ok {
+		t.Errorf("BinaryForSession on a lease with no recorded binary = (%q, true), want unknown", got)
+	}
+}
+
+// TestBinaryForSession_SurvivesRestore covers the restart half of the mapping: a
+// lease rebuilt from a journal record answers the lookup exactly as the lease
+// that wrote the record did.
+//
+// RestoreLease is exercised directly rather than through recoverLeases so the
+// assertion does not hang on a live pid — recovery's liveness and reattach rules
+// are pinned by their own tests, and what matters here is only that the recorded
+// name is carried through rather than re-derived from the current config.
+func TestBinaryForSession_SurvivesRestore(t *testing.T) {
+	reg := NewRegistry(testLogger(), 0)
+
+	if err := reg.RestoreLease(restoreSpec{
+		id:          "lease-restored",
+		owner:       testOwner(),
+		sessionID:   "sess-restored",
+		binary:      "vision",
+		pid:         4242,
+		createdAt:   time.Now(),
+		spawnSecret: "0123456789abcdef0123456789abcdef",
+	}); err != nil {
+		t.Fatalf("RestoreLease: %v", err)
+	}
+
+	got, ok := reg.BinaryForSession("sess-restored")
+	if !ok {
+		t.Fatal("BinaryForSession reported a restored lease's session unknown")
+	}
+	if got != "vision" {
+		t.Errorf("BinaryForSession = %q, want vision (the name the record carried)", got)
 	}
 }
 

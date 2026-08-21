@@ -41,6 +41,10 @@
         ]
       }
     },
+    "hitl_auto_respond": {
+      "type": "boolean",
+      "description": "Whether hitl.requested is answered automatically (scripted hitl_responses, else the request's default_choice_id, else an empty answer). Default true. Set false to leave a question genuinely unanswered so another transport — or another engine, as in the A2A loopback — owns the answer."
+    },
     "mock_responses": {
       "type": "array",
       "description": "Scripted LLM responses; when present the plugin runs in offline mock mode.",

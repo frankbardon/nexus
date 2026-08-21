@@ -3,6 +3,7 @@ package fanout
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -91,6 +92,7 @@ func newTestPlugin() (*Plugin, *mockBus) {
 		cfg:            config{deadline: 5 * time.Second},
 		inflight:       make(map[string]*fanoutState),
 		pendingChoices: make(map[string]chan int),
+		newTimer:       newRealTimer,
 	}
 	return p, bus
 }
@@ -110,9 +112,7 @@ func TestPresentToUser_BuildsCorrectOptions(t *testing.T) {
 
 	// Use a very short deadline so the goroutine cleans up quickly.
 	p.cfg.deadline = 50 * time.Millisecond
-	origNewTimer := newTimer
-	newTimer = func(d time.Duration) *time.Timer { return time.NewTimer(10 * time.Millisecond) }
-	defer func() { newTimer = origNewTimer }()
+	p.newTimer = func(time.Duration) timerHandle { return newRealTimer(10 * time.Millisecond) }
 
 	p.presentToUser("test-fanout", state, responses)
 
@@ -182,9 +182,6 @@ func TestUserChoice_ValidIndex(t *testing.T) {
 
 	// Use a long deadline so it doesn't fire during the test.
 	p.cfg.deadline = 10 * time.Second
-	origNewTimer := newTimer
-	newTimer = func(d time.Duration) *time.Timer { return time.NewTimer(d) }
-	defer func() { newTimer = origNewTimer }()
 
 	p.presentToUser("test-fanout", state, responses)
 
@@ -261,9 +258,6 @@ func TestUserChoice_NegativeIndex_FallsBack(t *testing.T) {
 	}
 
 	p.cfg.deadline = 10 * time.Second
-	origNewTimer := newTimer
-	newTimer = func(d time.Duration) *time.Timer { return time.NewTimer(d) }
-	defer func() { newTimer = origNewTimer }()
 
 	p.presentToUser("test-fanout", state, responses)
 
@@ -321,9 +315,7 @@ func TestUserChoice_Timeout_FallsBack(t *testing.T) {
 
 	// Use a very short deadline to trigger timeout quickly.
 	p.cfg.deadline = 20 * time.Millisecond
-	origNewTimer := newTimer
-	newTimer = func(_ time.Duration) *time.Timer { return time.NewTimer(10 * time.Millisecond) }
-	defer func() { newTimer = origNewTimer }()
+	p.newTimer = func(time.Duration) timerHandle { return newRealTimer(10 * time.Millisecond) }
 
 	p.presentToUser("test-fanout", state, responses)
 
@@ -401,4 +393,144 @@ func TestHandleUserChoice_UnknownFanoutID(t *testing.T) {
 			ChosenIndex: 0,
 		},
 	})
+}
+
+// recordingTimer is a timerHandle that never fires on its own and records how
+// many times Stop was called, so a test can prove the deadline goroutine was
+// retired rather than left running until the deadline elapsed.
+type recordingTimer struct {
+	ch chan time.Time
+
+	mu      sync.Mutex
+	stops   int
+	stopped chan struct{}
+}
+
+func newRecordingTimer() *recordingTimer {
+	return &recordingTimer{ch: make(chan time.Time), stopped: make(chan struct{})}
+}
+
+func (r *recordingTimer) C() <-chan time.Time { return r.ch }
+
+func (r *recordingTimer) Stop() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stops++
+	if r.stops == 1 {
+		close(r.stopped)
+	}
+	return true
+}
+
+func (r *recordingTimer) stopCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stops
+}
+
+// fire releases the deadline as if the configured duration had elapsed.
+func (r *recordingTimer) fire() { r.ch <- time.Now() }
+
+func TestUserChoice_PromptChoiceStopsDeadlineTimer(t *testing.T) {
+	p, _ := newTestPlugin()
+
+	responses := []events.LLMResponse{
+		makeResponse("nexus.llm.anthropic", "claude-3", "Hello from Claude", 0.01),
+		makeResponse("nexus.llm.openai", "gpt-4", "Hello from GPT", 0.02),
+	}
+	state := &fanoutState{role: "compare", strategy: StrategyUser}
+
+	// The injected timer never fires, so the only way Stop is reached — and the
+	// only way the watching goroutine exits — is the cancellation path.
+	timer := newRecordingTimer()
+	p.cfg.deadline = time.Hour
+	p.newTimer = func(time.Duration) timerHandle { return timer }
+
+	before := runtime.NumGoroutine()
+
+	p.presentToUser("test-fanout", state, responses)
+
+	p.mu.Lock()
+	ch, exists := p.pendingChoices["test-fanout"]
+	p.mu.Unlock()
+	if !exists {
+		t.Fatal("expected pending choice channel to exist")
+	}
+	ch <- 1
+
+	select {
+	case <-timer.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline timer was not stopped after a prompt user choice — it outlives the choice")
+	}
+
+	if got := timer.stopCount(); got != 1 {
+		t.Errorf("expected timer stopped exactly once, got %d", got)
+	}
+
+	// Both the awaitUserChoice goroutine and the deadline goroutine must be
+	// gone; neither may linger for the remaining deadline.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if runtime.NumGoroutine() <= before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines outlived the user choice: %d before, %d after", before, runtime.NumGoroutine())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestUserChoice_DeadlineFires_StopsTimerAndFallsBack(t *testing.T) {
+	p, bus := newTestPlugin()
+
+	responses := []events.LLMResponse{
+		makeResponse("nexus.llm.anthropic", "claude-3", "Hello from Claude", 0.01),
+		makeResponse("nexus.llm.openai", "gpt-4", "Hello from GPT", 0.02),
+	}
+	state := &fanoutState{role: "compare", strategy: StrategyUser}
+
+	timer := newRecordingTimer()
+	p.cfg.deadline = time.Hour
+	p.newTimer = func(time.Duration) timerHandle { return timer }
+
+	p.presentToUser("test-fanout", state, responses)
+
+	// Wait until the deadline goroutine is selecting on the timer, then fire it.
+	timer.fire()
+
+	var finalResp *events.LLMResponse
+	deadline := time.Now().Add(2 * time.Second)
+	for finalResp == nil && time.Now().Before(deadline) {
+		for _, e := range bus.emitted() {
+			if e.Type != "llm.response" {
+				continue
+			}
+			if r, ok := e.Payload.(events.LLMResponse); ok {
+				finalResp = &r
+				break
+			}
+		}
+		if finalResp == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	if finalResp == nil {
+		t.Fatal("expected llm.response event after the deadline fired")
+	}
+	// A genuine timeout still falls back to the "all" strategy.
+	if finalResp.Model != "claude-3" {
+		t.Errorf("expected primary model %q (fallback), got %q", "claude-3", finalResp.Model)
+	}
+	if len(finalResp.Alternatives) != 1 {
+		t.Fatalf("expected 1 alternative, got %d", len(finalResp.Alternatives))
+	}
+
+	select {
+	case <-timer.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline timer was not stopped after firing")
+	}
 }
