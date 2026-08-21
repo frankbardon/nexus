@@ -1663,15 +1663,39 @@ func TestBrokerRestartReattachesLiveInstance(t *testing.T) {
 	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
 		t.Fatalf("client write: %v", err)
 	}
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
+	// Read until the echo arrives rather than asserting it is the NEXT frame.
+	//
+	// A reattaching instance is not silent: it re-reports its engine session id
+	// once the socket is back, and that session-id-report is client-bound, so it
+	// can legitimately land on this connection ahead of the echo. Asserting on a
+	// single Read made this test a race between the stub's reconnect bookkeeping
+	// and its echo — it failed roughly 1 in 40 runs on an idle machine and hit
+	// two of the first two dependency PRs to run in CI after v0.18.1, in the
+	// REQUIRED test job.
+	//
+	// This still requires the echo to arrive, and still refuses a wrong one: only
+	// frames that are not the echo we are waiting for are skipped, ctx bounds the
+	// wait, and a mismatched SignalIO payload fails immediately rather than being
+	// skipped as noise. See #155.
+	var echo brokerframe.Frame
+	for {
+		_, data, err := client.Read(ctx)
+		if err != nil {
+			t.Fatalf("client read while waiting for the echo: %v", err)
+		}
+		frame, err := brokerframe.Decode(data)
+		if err != nil {
+			t.Fatalf("decode frame: %v", err)
+		}
+		if frame.Signal != brokerframe.SignalIO {
+			// Reconnect bookkeeping, not our echo. Keep reading.
+			t.Logf("skipping %q frame ahead of the echo", frame.Signal)
+			continue
+		}
+		echo = frame
+		break
 	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"after":"restart"}` {
+	if string(echo.Payload) != `{"after":"restart"}` {
 		t.Fatalf("unexpected echo through the restored lease: %+v", echo)
 	}
 
