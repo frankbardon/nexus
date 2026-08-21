@@ -169,7 +169,7 @@ func TestLeasesHTTP_ListsClaimedLeaseThenGoneAfterRelease(t *testing.T) {
 	proc := newFakeProcess(4242)
 	id, _ := seedLease(t, reg, proc) // NewLease + AttachInstance + SetProcess
 	reg.MarkSessionID(id, "sess-abc")
-	close(proc.exited) // let release's graceful path complete without a kill
+	proc.exit() // let release's graceful path complete without a kill
 
 	snap := getLeases(t, ts.URL)
 	if snap.MaxConcurrent != 4 {
@@ -544,5 +544,114 @@ func TestLeasesHTTP_SortedByCreation(t *testing.T) {
 		if snap.Leases[i].ID != want {
 			t.Fatalf("lease[%d] = %q, want %q (creation order)", i, snap.Leases[i].ID, want)
 		}
+	}
+}
+
+// TestLeasesHTTP_BinaryInBothShapes closes G13: "which build is this lease
+// running" must be answerable from GET /leases rather than only by grepping the
+// claim log.
+//
+// It asserts the field on BOTH projections. The caller-scoped shape encodes a
+// different struct (ownLeasesBody) from the operator one, and the two have drifted
+// apart before — a field added to the snapshot and not to the listing a normal
+// client actually receives would leave the gap exactly where it was.
+//
+// It also pins the empty case, which is a DISTINCTION and not an accident: a
+// lease restored from a journal written before the field existed carries no
+// binary, and the response must say so with an empty string rather than by
+// omitting the key, which a client cannot tell from "this broker is too old to
+// report it".
+func TestLeasesHTTP_BinaryInBothShapes(t *testing.T) {
+	ts, reg := newLeasesTestServerWithAuth(t, 8, scopedLeasesAuthYAML)
+	_, ownerIDs, _ := seedTwoTenantLeases(t, reg)
+
+	// The first of this caller's leases records a variant; the second records
+	// none, standing in for a lease restored from an older journal.
+	reg.SetBinary(ownerIDs[0], "nexus-canary")
+
+	t.Run("operator", func(t *testing.T) {
+		snap := getLeasesAs(t, ts.URL, adminToken)
+		assertBinaries(t, snap.Leases, map[string]string{
+			ownerIDs[0]: "nexus-canary",
+			ownerIDs[1]: "",
+		})
+	})
+
+	t.Run("caller-scoped", func(t *testing.T) {
+		body := getLeasesBody(t, ts.URL, ownerToken)
+		var scoped struct {
+			Leases []LeaseSnapshot `json:"leases"`
+		}
+		if err := json.Unmarshal(body, &scoped); err != nil {
+			t.Fatalf("decode caller-scoped body %q: %v", body, err)
+		}
+		if len(scoped.Leases) != len(ownerIDs) {
+			t.Fatalf("caller-scoped listing has %d leases, want %d", len(scoped.Leases), len(ownerIDs))
+		}
+		assertBinaries(t, scoped.Leases, map[string]string{
+			ownerIDs[0]: "nexus-canary",
+			ownerIDs[1]: "",
+		})
+
+		// The KEY has to be present even when the value is empty, so "not
+		// recorded" is reported rather than merely absent. Asserted on the raw
+		// bytes, because a decode into LeaseSnapshot turns an omitted key into
+		// the same empty string an emitted one produces.
+		var raw struct {
+			Leases []map[string]json.RawMessage `json:"leases"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("decode raw caller-scoped body: %v", err)
+		}
+		for i, lease := range raw.Leases {
+			if _, present := lease["binary"]; !present {
+				t.Errorf("caller-scoped lease %d omits the \"binary\" key entirely: %s", i, body)
+			}
+		}
+	})
+}
+
+// assertBinaries checks the binary reported for each named lease.
+func assertBinaries(t *testing.T, leases []LeaseSnapshot, want map[string]string) {
+	t.Helper()
+	got := make(map[string]string, len(leases))
+	for _, l := range leases {
+		got[l.ID] = l.Binary
+	}
+	for id, wantBinary := range want {
+		binary, listed := got[id]
+		if !listed {
+			t.Errorf("lease %s is not in the listing at all", id)
+			continue
+		}
+		if binary != wantBinary {
+			t.Errorf("lease %s binary = %q, want %q", id, binary, wantBinary)
+		}
+	}
+}
+
+// TestLeasesHTTP_OperatorSeesTheConfiguredQueueBound folds in E4-S4's handoff:
+// an operator watching queue_depth climb cannot act on it without the configured
+// max_queue_depth beside it, so the bound is reported in the same response.
+//
+// The suppression rule still holds: like every other aggregate it is OMITTED for
+// a caller-scoped listing rather than zeroed.
+func TestLeasesHTTP_OperatorSeesTheConfiguredQueueBound(t *testing.T) {
+	ts, reg := newLeasesTestServerWithAuth(t, 4, scopedLeasesAuthYAML)
+	reg.useQueueDepth(9)
+	seedTwoTenantLeases(t, reg)
+
+	snap := getLeasesAs(t, ts.URL, adminToken)
+	if snap.MaxQueueDepth != 9 {
+		t.Errorf("operator max_queue_depth = %d, want 9", snap.MaxQueueDepth)
+	}
+
+	body := getLeasesBody(t, ts.URL, ownerToken)
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(body, &keys); err != nil {
+		t.Fatalf("decode caller-scoped body %q: %v", body, err)
+	}
+	if raw, present := keys["max_queue_depth"]; present {
+		t.Errorf("caller-scoped response discloses max_queue_depth = %s", raw)
 	}
 }

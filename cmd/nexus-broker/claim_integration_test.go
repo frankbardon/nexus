@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/frankbardon/nexus/cmd/nexus-broker/testdata/stubcore"
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
@@ -155,7 +159,8 @@ func TestReleaseGracefulShutdown(t *testing.T) {
 func TestReleaseForceKillsStubbornInstance(t *testing.T) {
 	t.Setenv("STUB_IGNORE_SHUTDOWN", "1")
 	stubBin := buildStubInstance(t)
-	base, reg := startStubBrokerWithRegistry(t, stubBin, withReleaseGrace(150*time.Millisecond))
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withReleaseGrace(150*time.Millisecond), withInheritEnv("STUB_IGNORE_SHUTDOWN"))
 
 	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
 	if cr.LeaseID == "" {
@@ -193,7 +198,7 @@ func TestCrashDetectionFreesSlotAndClosesClient(t *testing.T) {
 	// frame crashes — so the sibling lease stays alive.
 	t.Setenv("STUB_CRASH_AFTER_READY", "1")
 	stubBin := buildStubInstance(t)
-	base, reg := startStubBrokerWithRegistry(t, stubBin)
+	base, reg := startStubBrokerWithRegistry(t, stubBin, withInheritEnv("STUB_CRASH_AFTER_READY"))
 
 	crashCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
 	keepCR := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
@@ -1580,7 +1585,7 @@ func TestBrokerRestartReattachesLiveInstance(t *testing.T) {
 
 	// --- broker #1: claim an instance -------------------------------------
 	first := startStubBrokerHandle(t, stubBin,
-		withStateDir(stateDir), withListenAddr(addr))
+		withStateDir(stateDir), withListenAddr(addr), withInheritEnv("STUB_RECONNECT"))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
 	if cr.LeaseID == "" {
 		t.Fatalf("incomplete claim response: %+v", cr)
@@ -1695,6 +1700,9 @@ func TestBrokerRestartReapsUnreattachedLease(t *testing.T) {
 	stateDir := t.TempDir()
 	addr := freeAddr(t)
 
+	// No withInheritEnv here on purpose: this test's stub must NOT reconnect, so
+	// it must not carry STUB_RECONNECT even if some other test's environment is
+	// still around.
 	first := startStubBrokerHandle(t, stubBin,
 		withStateDir(stateDir), withListenAddr(addr))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
@@ -1739,13 +1747,15 @@ func TestRestoredLeaseRefusesAWrongSecretEndToEnd(t *testing.T) {
 	stateDir := t.TempDir()
 	addr := freeAddr(t)
 
-	first := startStubBrokerHandle(t, stubBin, withStateDir(stateDir), withListenAddr(addr))
+	first := startStubBrokerHandle(t, stubBin,
+		withStateDir(stateDir), withListenAddr(addr), withInheritEnv("STUB_RECONNECT"))
 	cr := postClaimJSON(t, first.base, `{"config":"engine:\n  name: stub\n"}`)
 	killInstanceOnCleanup(t, first.registry.PID(cr.LeaseID))
 	first.stop()
 
 	second := startStubBrokerHandle(t, stubBin,
-		withStateDir(stateDir), withListenAddr(addr), withReattachWindow(30*time.Second))
+		withStateDir(stateDir), withListenAddr(addr), withReattachWindow(30*time.Second),
+		withInheritEnv("STUB_RECONNECT"))
 	if len(second.restored) != 1 {
 		t.Fatalf("restored = %v, want the claimed lease", second.restored)
 	}
@@ -1774,6 +1784,232 @@ func TestRestoredLeaseRefusesAWrongSecretEndToEnd(t *testing.T) {
 	}
 	if _, _, err := conn.Read(ctx); err == nil {
 		t.Fatal("a register frame with the wrong secret was accepted for a restored lease")
+	}
+}
+
+// TestClaimSpawnsTheBinaryTheClaimNamed is the point of the binary registry,
+// proven with processes rather than with a captured spawnSpec.
+//
+// The unit tests already show that handleClaim resolves the right entry, but a
+// fake commandRunner never exec()s anything, so nothing there rules out a
+// broker that resolves one path and runs another (a stale field on the spec, a
+// runner that ignores binaryPath, a variant that never survives boot). Here two
+// separately linked executables are registered under two names, each claim
+// selects one by name, and the answer comes back over the wire from whichever
+// process actually came up — the session id is variant-scoped and linked in, so
+// it cannot be faked by config.
+func TestClaimSpawnsTheBinaryTheClaimNamed(t *testing.T) {
+	baseBin := buildStubInstance(t)
+	altBin := buildStubVariant(t)
+	base, _ := startStubBrokerWithRegistry(t, baseBin, withBinaries(map[string]BinaryEntry{
+		reservedBinaryName: resolvedBinaryEntry(baseBin),
+		"vision":           resolvedBinaryEntry(altBin),
+	}))
+
+	// The non-reserved entry first: if the broker ignored `binary` entirely it
+	// would answer with the base variant's id here, which is exactly the bug a
+	// spec-only assertion cannot see.
+	if got, want := postClaimJSON(t, base, claimBodyForBinary("vision")).SessionID,
+		stubcore.NewSessionID(stubcore.VariantAlt); got != want {
+		t.Errorf(`claim binary="vision" answered session_id %q, want %q — a different executable served the lease`, got, want)
+	}
+
+	// And the reserved one, named explicitly, over the same broker: two entries
+	// coexisting is the state a multi-variant broker is actually in.
+	if got, want := postClaimJSON(t, base, claimBodyForBinary("nexus")).SessionID,
+		stubcore.NewSessionID(stubcore.VariantBase); got != want {
+		t.Errorf(`claim binary="nexus" answered session_id %q, want %q — a different executable served the lease`, got, want)
+	}
+}
+
+// TestClaimWithoutBinaryRunsTheReservedEntry pins the compatibility promise: a
+// claim body written before the registry existed keeps spawning the base
+// binary. The broker under test has a second entry registered, so "it happened
+// to work because there was only one choice" is not an available explanation.
+func TestClaimWithoutBinaryRunsTheReservedEntry(t *testing.T) {
+	baseBin := buildStubInstance(t)
+	altBin := buildStubVariant(t)
+	base, _ := startStubBrokerWithRegistry(t, baseBin, withBinaries(map[string]BinaryEntry{
+		reservedBinaryName: resolvedBinaryEntry(baseBin),
+		"vision":           resolvedBinaryEntry(altBin),
+	}))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if got, want := cr.SessionID, stubcore.NewSessionID(stubcore.VariantBase); got != want {
+		t.Errorf("claim with no binary answered session_id %q, want %q (the reserved %q entry)",
+			got, want, reservedBinaryName)
+	}
+}
+
+// TestClaimEntryArgsAndEnvReachTheSpawnedInstance closes the loop on the two
+// per-entry knobs. buildCommand's unit tests assert on an *exec.Cmd that is
+// never started; this one asks the running child what it was actually handed,
+// which is the only way to catch an env or argv that is assembled correctly and
+// then dropped somewhere between the spec and exec().
+//
+// The ORDER assertion is the load-bearing half: entry args have to land after
+// -config, because Go's flag package stops at the first non-flag argument and an
+// entry that jumped the queue would leave the instance booting a config the
+// broker never wrote.
+func TestClaimEntryArgsAndEnvReachTheSpawnedInstance(t *testing.T) {
+	baseBin := buildStubInstance(t)
+	altBin := buildStubVariant(t)
+
+	// A flag-shaped pair plus a bare token: an operator's real entry args look
+	// like the former, and the latter proves nothing is being swallowed by flag
+	// parsing on the way in.
+	entryArgs := []string{"-stub-tag", "vision-build", "trailing-marker"}
+	entryEnv := map[string]string{
+		stubcore.EnvReportPrefix + "FLAVOR": "vision",
+		stubcore.EnvReportPrefix + "REGION": "eu-west-1",
+	}
+
+	entry := resolvedBinaryEntry(altBin)
+	entry.Args = entryArgs
+	entry.Env = entryEnv
+	base, _ := startStubBrokerWithRegistry(t, baseBin, withBinaries(map[string]BinaryEntry{
+		reservedBinaryName: resolvedBinaryEntry(baseBin),
+		"vision":           entry,
+	}))
+
+	cr := postClaimJSON(t, base, claimBodyForBinary("vision"))
+	report := stubReport(t, cr)
+
+	if report.Variant != stubcore.VariantAlt {
+		t.Fatalf("the entry's args/env were reported by variant %q, want %q — the wrong executable answered",
+			report.Variant, stubcore.VariantAlt)
+	}
+
+	// Broker-owned argv first, entry argv last, nothing in between and nothing
+	// dropped. Comparing the whole slice (rather than probing for membership)
+	// is what makes the order claim real; the config path is the one element
+	// the test cannot predict.
+	if len(report.Args) < 2 || report.Args[0] != "-config" {
+		t.Fatalf("instance argv = %v, want it to start with -config <path>", report.Args)
+	}
+	if got := report.Args[2:]; !slices.Equal(got, entryArgs) {
+		t.Errorf("argv after the broker's own flags = %v, want %v (entry args must come last, in order)", got, entryArgs)
+	}
+
+	for key, want := range entryEnv {
+		if got := report.Env[key]; got != want {
+			t.Errorf("instance env[%s] = %q, want %q; reported env: %v", key, got, want, report.Env)
+		}
+	}
+}
+
+// TestClaimInstanceCarriesOnlyDeclaredEnv is the end-to-end form of the
+// boundary this broker enforces: a variable the broker process holds but no
+// operator declared must not be in a claimed instance's environment.
+//
+// It asks the RUNNING child what it was handed rather than inspecting an
+// *exec.Cmd, because the leak this closes is only interesting at the far end: a
+// claim supplies the whole engine config, every provider resolves its credential
+// from an env var that config NAMES, and the same config chooses base_url — so
+// anything the child holds is both readable and postable by whoever claimed the
+// lease.
+func TestClaimInstanceCarriesOnlyDeclaredEnv(t *testing.T) {
+	// Both are set in the BROKER's environment. Only one is declared.
+	t.Setenv(stubcore.EnvReportPrefix+"DECLARED", "reaches-the-instance")
+	t.Setenv(stubcore.EnvReportPrefix+"UNDECLARED", "must-not-reach-the-instance")
+
+	stubBin := buildStubInstance(t)
+	base, _ := startStubBrokerWithRegistry(t, stubBin,
+		withInheritEnv(stubcore.EnvReportPrefix+"DECLARED"))
+
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	report := stubReport(t, cr)
+
+	if got, want := report.Env[stubcore.EnvReportPrefix+"DECLARED"], "reaches-the-instance"; got != want {
+		t.Errorf("declared variable = %q, want %q; inherit_env did not forward it", got, want)
+	}
+	if got, ok := report.Env[stubcore.EnvReportPrefix+"UNDECLARED"]; ok {
+		t.Errorf("the instance carries undeclared %sUNDECLARED=%q; the broker's environment leaked into a claimed instance",
+			stubcore.EnvReportPrefix, got)
+	}
+}
+
+// TestClaimUnknownBinaryIs400AndSpawnsNothing proves the rejection is total, not
+// merely a status code. The handler resolves the entry before it touches the
+// registry, the temp config, or the runner, and a regression that moved the
+// check even one step later would still answer 400 while having spawned a
+// process and consumed a capacity slot — so the spawn count and the registry
+// state are asserted alongside the status.
+func TestClaimUnknownBinaryIs400AndSpawnsNothing(t *testing.T) {
+	baseBin := buildStubInstance(t)
+	altBin := buildStubVariant(t)
+	runner := &countingRunner{inner: execRunner{}}
+	base, reg := startStubBrokerWithRegistry(t, baseBin,
+		withCommandRunner(runner),
+		withBinaries(map[string]BinaryEntry{
+			reservedBinaryName: resolvedBinaryEntry(baseBin),
+			"vision":           resolvedBinaryEntry(altBin),
+		}))
+
+	resp, err := http.Post("http://"+base+"/claim", "application/json",
+		strings.NewReader(claimBodyForBinary("nocturne")))
+	if err != nil {
+		t.Fatalf("POST /claim: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("claim for an unregistered binary status = %d, want 400", resp.StatusCode)
+	}
+
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	// The message has to name the offending value and the alternatives, because
+	// the caller cannot list the registry any other way at this point.
+	for _, want := range []string{"nocturne", reservedBinaryName, "vision"} {
+		if !strings.Contains(body.Error, want) {
+			t.Errorf("error %q does not mention %q", body.Error, want)
+		}
+	}
+
+	if n := runner.count(); n != 0 {
+		t.Errorf("an unregistered binary name spawned %d process(es), want 0", n)
+	}
+	if snap := reg.Snapshot(); len(snap.Leases) != 0 {
+		t.Errorf("registry holds %d leases after a rejected claim, want 0", len(snap.Leases))
+	}
+	if used := reg.SlotsInUse(); used != 0 {
+		t.Errorf("SlotsInUse = %d after a rejected claim, want 0", used)
+	}
+}
+
+// TestDeprecatedNexusBinaryPathStillSpawns walks the alias the whole way: YAML
+// an operator wrote before `binaries:` existed, through the real loader and the
+// real resolver, into a live spawn.
+//
+// The config-level folding is already unit-tested; what is not provable there is
+// that the folded entry is a working spawn target. This is the upgrade path for
+// every existing deployment, so it is asserted end to end rather than inferred
+// from a map comparison.
+func TestDeprecatedNexusBinaryPathStillSpawns(t *testing.T) {
+	baseBin := buildStubInstance(t)
+
+	// The REAL loader, not a Config literal: the alias only folds during a load,
+	// and hand-building the map would test the test.
+	cfg := mustLoadConfig(t, "nexus_binary_path: "+baseBin+"\n")
+	if err := resolveBinaryRegistry(cfg.Binaries); err != nil {
+		t.Fatalf("resolve registry folded from %s: %v", keyNexusBinaryPath, err)
+	}
+	if got := cfg.Binaries[reservedBinaryName].ResolvedPath; got != baseBin {
+		t.Fatalf("%s folded to ResolvedPath %q, want %q", keyNexusBinaryPath, got, baseBin)
+	}
+	// An operator who wrote the deprecated key should be told so at boot.
+	if len(cfg.Warnings) == 0 {
+		t.Errorf("loading %s produced no deprecation warning", keyNexusBinaryPath)
+	}
+
+	base, _ := startStubBrokerWithRegistry(t, baseBin, withBinaries(cfg.Binaries))
+	cr := postClaimJSON(t, base, `{"config":"engine:\n  name: stub\n"}`)
+	if got, want := cr.SessionID, stubcore.NewSessionID(stubcore.VariantBase); got != want {
+		t.Errorf("claim against an aliased registry answered session_id %q, want %q", got, want)
 	}
 }
 
@@ -1862,6 +2098,96 @@ func withCommandRunner(r commandRunner) stubBrokerOption {
 	return func(w *brokerWiring) { w.runner = r }
 }
 
+// withAgents gives a stub broker an `agents:` block, which is what turns the
+// A2A ingress on. The base URL is derived from the bound listener afterwards, so
+// a fixture does not have to know the port the kernel handed out.
+func withAgents(agents map[string]AgentProfile) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.Agents = agents }
+}
+
+// withBinaries REPLACES the whole spawn registry, rather than merging into the
+// single-entry default startStubBrokerHandle builds. A multi-variant broker's
+// registry is a set, and a test that could only add to it would be unable to
+// express "the reserved entry points somewhere else" — which is precisely the
+// case the deprecated-alias test needs.
+func withBinaries(binaries map[string]BinaryEntry) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.Binaries = binaries }
+}
+
+// withInheritEnv declares which of the TEST PROCESS's own variables a stub
+// broker's spawns may inherit. A spawned instance no longer takes os.Environ()
+// wholesale, so a test that flips a stub behaviour switch with t.Setenv has to
+// say so here or the child will never see it.
+//
+// It is the one option that exists because of a production behaviour rather than
+// a test convenience: forgetting it reproduces exactly the failure an operator
+// gets after this change — a variable that is plainly set in the parent and
+// plainly absent in the child.
+func withInheritEnv(names ...string) stubBrokerOption {
+	return func(w *brokerWiring) { w.cfg.InheritEnv = names }
+}
+
+// resolvedBinaryEntry builds a registry entry that is ready to spawn.
+//
+// ResolvedPath is set explicitly for the same reason testBinaryRegistry does it:
+// resolution lives in LoadConfig, not in LoadConfigFromBytes, so an entry built
+// in Go carries an empty ResolvedPath and would exec() nothing at all.
+func resolvedBinaryEntry(path string) BinaryEntry {
+	return BinaryEntry{Path: path, ResolvedPath: path}
+}
+
+// claimBodyForBinary is the minimal claim body that selects one registry entry.
+func claimBodyForBinary(name string) string {
+	return `{"config":"engine:\n  name: stub\n","binary":"` + name + `"}`
+}
+
+// stubReport asks the instance behind a lease to describe itself, and returns
+// what it said.
+//
+// The question travels the ordinary client path — ws_url, through the gateway,
+// to the instance — instead of some side channel like a file the stub writes.
+// That is deliberate: a report obtained out of band would prove what the process
+// received but not that the lease it is attached to is the one the claim
+// returned, and mixing those two up is exactly how a multi-variant broker would
+// fail.
+func stubReport(t *testing.T, cr claimResponse) stubcore.Report {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, cr.WSURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws_url %s: %v", cr.WSURL, err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	out, err := brokerframe.Encode(brokerframe.Frame{
+		LeaseID: cr.LeaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(stubcore.ReportRequest),
+	})
+	if err != nil {
+		t.Fatalf("encode report request: %v", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
+		t.Fatalf("write report request: %v", err)
+	}
+
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	frame, err := brokerframe.Decode(data)
+	if err != nil {
+		t.Fatalf("decode report frame: %v", err)
+	}
+	var report stubcore.Report
+	if err := json.Unmarshal(frame.Payload, &report); err != nil {
+		t.Fatalf("decode report payload %q: %v", frame.Payload, err)
+	}
+	return report
+}
+
 // countingRunner wraps a commandRunner and counts every start() call.
 //
 // It is the seam that makes "no instance was spawned" an assertion rather than
@@ -1922,14 +2248,42 @@ type brokerHandle struct {
 // topology, and returns a handle that can stop it independently of t.Cleanup.
 func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOption) *brokerHandle {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Discarded by default — a passing suite has no use for a broker's log, and
+	// several tests here run dozens of brokers.
+	//
+	// BROKER_TEST_LOG=1 sends it to stderr at DEBUG instead. That switch is not a
+	// convenience: every ordering defect this suite has caught was diagnosed from
+	// the broker's own log rather than from the assertion that failed, because the
+	// assertion says a state sequence was wrong and only the log says WHICH
+	// goroutine got there first. The frame-loss race fixed in
+	// ci-stabilization/E2-S4 was found by reading "dropping client-bound frame for
+	// a lease that is gone" landing between two io frames. Without a way to turn
+	// the log on, that is a rebuild-and-hope loop.
+	logw := io.Writer(io.Discard)
+	logLevel := slog.LevelInfo
+	if os.Getenv("BROKER_TEST_LOG") != "" {
+		logw = os.Stderr
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(logw, &slog.HandlerOptions{Level: logLevel}))
 
 	wiring := brokerWiring{
 		cfg: Config{
-			NexusBinaryPath: stubBin,
-			ReleaseGrace:    defaultReleaseGrace,
-			ReattachWindow:  defaultReattachWindow,
-			AdminScope:      defaultAdminScope,
+			Binaries:       map[string]BinaryEntry{reservedBinaryName: {Path: stubBin, ResolvedPath: stubBin}},
+			ReleaseGrace:   defaultReleaseGrace,
+			ReattachWindow: defaultReattachWindow,
+			AdminScope:     defaultAdminScope,
+			// The A2A settings LoadConfigFromBytes would have derived. They are
+			// stated here rather than left zero because zero is not "default" for
+			// any of them — it is DISABLED: no retention, no per-context cap, no
+			// input deadline. A harness that left them zero would exercise a
+			// policy no shipped broker runs under, and would silently make the
+			// queue's deadlock escape hatch untestable.
+			A2ATaskRetention: a2aTaskRetention{
+				ttl:           defaultA2ATaskTTL,
+				maxPerContext: defaultA2ATasksPerContext,
+			},
+			A2AInputTimeout: defaultA2AInputTimeout,
 		},
 		runner: execRunner{},
 	}
@@ -1949,6 +2303,13 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 		t.Fatalf("listen on %s: %v", bindAddr, err)
 	}
 	wiring.cfg.ListenAddr = ln.Addr().String()
+
+	// The A2A cards advertise ABSOLUTE URLs, and the port is only known once the
+	// listener is bound, so the base URL is derived here rather than in the
+	// option. LoadConfig does the same derivation from advertise_addr/listen_addr.
+	if len(wiring.cfg.Agents) > 0 && wiring.cfg.A2ABaseURL == "" {
+		wiring.cfg.A2ABaseURL = "http://" + wiring.cfg.ListenAddr
+	}
 
 	cfg := wiring.cfg
 	registry := NewRegistry(logger, cfg.MaxConcurrent)
@@ -1987,10 +2348,45 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	// configured, so a restarted broker can recompute what a surviving instance
 	// still holds. Nil key = random per spawn, the pre-existing behaviour.
 	claims.useSpawnKey(spawnSecretKey)
-	claims.readyTimeout = 15 * time.Second
+	setClaimBounds(claims, func(c *Config) { c.ReadyTimeout = 15 * time.Second })
 	releases := NewReleaseServer(logger, registry, cfg.ReleaseGrace)
 	leases := NewLeasesServer(logger, registry, guard, cfg.AdminScope)
 	ticketsServer := NewTicketServer(logger, registry, tickets)
+
+	// The A2A ingress, wired exactly as run() does: the cards are rendered at
+	// boot, the lease manager is installed BEFORE anything is served, and the
+	// context index shares state_dir's fate. A wiring with no `agents:` block
+	// registers no routes at all, so every pre-existing test sees the mux it
+	// always saw.
+	agents, err := NewA2AServer(logger, cfg)
+	if err != nil {
+		t.Fatalf("NewA2AServer: %v", err)
+	}
+	var a2aContexts *a2aContextIndex
+	var a2aTasks *a2aTaskStore
+	if agents.enabled() {
+		a2aContexts, err = openA2AContextIndex(logger, cfg)
+		if err != nil {
+			t.Fatalf("openA2AContextIndex: %v", err)
+		}
+		agents.useLeaseProvider(newA2ALeaseManager(logger, registry, claims, a2aContexts))
+
+		// The durable task store, wired exactly as run() wires it. Without this
+		// the ingress would run on the memory-only store NewA2AServer installs,
+		// so every task read a test performs would be answered by a different
+		// store than a shipped broker uses — and a state_dir test would prove
+		// nothing about durability at all.
+		//
+		// A failure IS fatal here, unlike in run(): run() degrades to memory-only
+		// because refusing to boot would be worse for an operator, but a test
+		// that silently lost durability would report a green run for a store that
+		// never opened.
+		a2aTasks, err = openA2ATaskStore(logger, cfg)
+		if err != nil {
+			t.Fatalf("openA2ATaskStore: %v", err)
+		}
+		agents.useTaskStore(a2aTasks)
+	}
 
 	// Mirror run()'s route topology exactly, because middleware ORDERING is the
 	// property the auth integration tests exist to catch: healthz and the
@@ -2009,12 +2405,13 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 	releases.Register(guarded)
 	leases.Register(guarded)
 	ticketsServer.Register(guarded)
+	agents.Register(guarded)
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 
 	// Arm the idle sweeper exactly as main.go does when an idle timeout is set.
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
-	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.ReleaseGrace)
+	sweeper := newIdleSweeper(logger, registry, cfg.IdleTimeout, cfg.MaxTurnDuration, cfg.ReleaseGrace)
 	go sweeper.Run(sweepCtx)
 	// And the reattach reaper, which bounds how long the leases recovery just
 	// restored may wait for their instances.
@@ -2030,6 +2427,13 @@ func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOptio
 			stopSweep()
 			_ = srv.Close()
 			gateway.Shutdown()
+			agents.Shutdown()
+			if a2aContexts != nil {
+				_ = a2aContexts.Close()
+			}
+			if a2aTasks != nil {
+				_ = a2aTasks.Close()
+			}
 			if leaseStore != nil {
 				_ = leaseStore.Close()
 			}
@@ -2096,14 +2500,75 @@ func postClaimJSON(t *testing.T, base, body string) claimResponse {
 	return cr
 }
 
-// buildStubInstance compiles the testdata stub instance to a temp binary and
-// returns its path.
+// stubBins holds the stub executables the whole suite spawns, linked once by
+// TestMain.
+//
+// They used to be built per test, into t.TempDir(). That was fine with one stub
+// and ~25 tests; with two stubs it is ~50 links per run, and the second binary
+// is only ever needed so that the FIRST one can be told apart from it — paying
+// for that repeatedly buys nothing. The paths are process-wide state rather than
+// per-test state because the binaries are immutable inputs: nothing a test does
+// can alter them, so sharing them cannot couple two tests together.
+var stubBins struct {
+	dir     string
+	base    string
+	variant string
+	err     error
+}
+
+// TestMain links both stubs once, runs the suite, then removes them.
+//
+// Building here rather than in a sync.Once is what makes the cleanup possible: a
+// once-per-process temp directory has no natural owner among the tests, and the
+// alternative — leaving it behind — litters the machine's temp space on every
+// run. A build failure is not fatal here; it is stored and reported by whichever
+// test asks for a binary, so the failure names the test rather than killing the
+// process before any test has run.
+func TestMain(m *testing.M) {
+	stubBins.dir, stubBins.err = os.MkdirTemp("", "nexus-broker-stubs-")
+	if stubBins.err == nil {
+		stubBins.base, stubBins.err = buildStub(stubBins.dir, "stubinstance")
+	}
+	if stubBins.err == nil {
+		stubBins.variant, stubBins.err = buildStub(stubBins.dir, "stubvariant")
+	}
+
+	code := m.Run()
+
+	if stubBins.dir != "" {
+		_ = os.RemoveAll(stubBins.dir)
+	}
+	os.Exit(code)
+}
+
+// buildStub compiles one testdata stub main into dir and returns its path.
+func buildStub(dir, name string) (string, error) {
+	bin := filepath.Join(dir, name)
+	cmd := exec.Command("go", "build", "-o", bin, "./testdata/"+name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build %s: %w\n%s", name, err, out)
+	}
+	return bin, nil
+}
+
+// buildStubInstance returns the BASE stub executable — the one every test that
+// does not care about variants spawns. The name is kept from when it did the
+// building, so the call sites read the same.
 func buildStubInstance(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "stubinstance")
-	cmd := exec.Command("go", "build", "-o", bin, "./testdata/stubinstance")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build stub instance: %v\n%s", err, out)
+	if stubBins.err != nil {
+		t.Fatalf("stub instances were not built: %v", stubBins.err)
 	}
-	return bin
+	return stubBins.base
+}
+
+// buildStubVariant returns the SECOND stub executable, linked from the same
+// protocol code with a different compile-time identity. A test that spawns it
+// alongside the base stub can prove which of the two the broker exec()d.
+func buildStubVariant(t *testing.T) string {
+	t.Helper()
+	if stubBins.err != nil {
+		t.Fatalf("stub instances were not built: %v", stubBins.err)
+	}
+	return stubBins.variant
 }

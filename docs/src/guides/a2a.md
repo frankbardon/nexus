@@ -1,0 +1,1046 @@
+# Agent2Agent (A2A) Interoperability
+
+[A2A](https://a2aproject.github.io/A2A/) is an open protocol for agent-to-agent
+communication. It is built around three objects: a **Task** (one unit of work,
+moving through a lifecycle), a **Message** (composed of **Parts**), and an
+**Artifact** (task output). An agent publishes an **Agent Card** at a well-known
+URL so a client can discover what it does and how to authenticate to it.
+
+Nexus speaks A2A in both directions, through five pieces:
+
+| Piece | What it is |
+|---|---|
+| `pkg/a2a` | A hand-rolled, dependency-free A2A codec: the data model, both HTTP bindings, the SSE transport, the Agent Card types, and the protocol error model. No third-party A2A SDK. |
+| `pkg/a2a/a2aclient` | The client on top of that codec: Agent Card resolution, `SendMessage`, streaming, resume, `GetTask`, `CancelTask`, with the timeout and retry policy that talking to a remote over HTTP requires. |
+| [`nexus.io.a2a`](../plugins/io/a2a.md) | **Standalone serve**: one HTTP listener that exposes a running Nexus instance as an A2A agent. One process, one conversation. |
+| [`cmd/nexus-broker`](./session-broker.md#the-a2a-front-door-agents) | **Broker-fronted serve**: one ingress publishing several agents, each spawning an OS-isolated instance per conversation. Many conversations, one URL. |
+| [`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md) | The **outbound** transport: one `delegate_a2a_<name>` tool per configured remote, letting a Nexus agent call other A2A agents. |
+
+**Two ways to serve, and the choice is the first one to make.** Standalone serve
+is one process bound to one conversation for its lifetime — right for an agent
+embedded in something else, or for a single long-running assistant. Broker-fronted
+serve is a gateway that starts and stops instances on demand, keyed by
+`contextId` — right for serving many callers behind one address. They speak the
+same protocol and publish the same shape of card; where they differ is set out in
+[What works today](#what-works-today) and, in operational detail, in the
+[session broker guide](./session-broker.md#the-a2a-front-door-agents).
+
+This guide covers the mapping between the two protocols and how a client drives
+a Nexus turn end to end. For every configuration key, its type and its default,
+the [Configuration Reference](../configuration/reference.md#nexusioa2a) is
+canonical.
+
+## Targeted spec version: 1.0.x
+
+Nexus targets **A2A specification 1.0.x** and nothing else. `pkg/a2a` exposes
+this as constants:
+
+```go
+a2a.ProtocolVersion // "1.0" — the Major.Minor value on the wire
+a2a.SpecVersion     // the spec revision + fetch date the codec was written against
+```
+
+**0.3.x is not supported.** 1.0 was a breaking revision, and two of its changes
+mean a 0.3 client cannot be served by a 1.0 codec even accidentally:
+
+- JSON-RPC method names are PascalCase operation names (`SendMessage`,
+  `GetTask`), not the 0.3-era dotted forms (`message/send`, `tasks/get`).
+- `Part` is flattened. There are no separate `TextPart` / `FilePart` /
+  `DataPart` types; a `Part` is one object with a content oneof (`text`, `raw`,
+  `url`, `data`) plus `mediaType`, `filename` and `metadata`.
+
+An explicit `A2A-Version: 0.3` is refused with `VersionNotSupportedError`. An
+**absent** `A2A-Version` is read as `1.0` by default rather than the literal
+§3.6.2 fallback of `0.3` — see [A2A version
+negotiation](../configuration/reference.md#a2a-version-negotiation) for the
+reasoning and the `strict_version_header` opt-out.
+
+## The mapping: `contextId` is a session, a Task is a turn
+
+| A2A | Nexus |
+|---|---|
+| `contextId` | A **session** (`~/.nexus/sessions/<id>/`) — one conversation with one `memory.history` buffer. |
+| `Task` | **One turn**: one `io.input`, the agent loop it drives, and the answer it produces. |
+| Task lifecycle | `SUBMITTED` on accept → `WORKING` at `agent.turn.start` → `COMPLETED` at `agent.turn.end`, or `FAILED`. |
+| `Message.parts` (text) | The turn's prompt, emitted as `before:io.input` (vetoable) then `io.input`. |
+| `Artifact` with a text Part | The turn's final assistant text, taken from `io.output` so output gates have had their say. |
+| `Artifact` with an `application/json` Part | The same text when it is a JSON document — structured output as a document, not a string. |
+| `Artifact` per tool result | Every `tool.result`, unconditionally. |
+| `Artifact` per written file | A path a `tool.result` reported writing, with the bytes inline as base64. |
+| `TaskStatusUpdateEvent.metadata` under the Nexus extension URI | `thinking.step`, `tool.invoke`, `subagent.*` and per-call token usage — only for clients that opted in. |
+| Agent Card | Hand-authored config, with interfaces/capabilities/security derived from the live listener. |
+
+A multi-turn conversation is therefore **N Tasks sharing one `contextId`**, not
+one long-lived Task. That is the mapping to hold in mind when reading the rest
+of this page: nothing accumulates inside a Task, because a Task is over the
+moment the turn is.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as A2A client
+    participant P as nexus.io.a2a
+    participant B as Nexus event bus
+    participant A as Agent loop
+
+    C->>P: SendStreamingMessage (contextId, parts)
+    P-->>C: Task TASK_STATE_SUBMITTED
+    P->>B: before:io.input (vetoable), then io.input
+    B->>A: agent.turn.start
+    P-->>C: statusUpdate TASK_STATE_WORKING
+    A->>B: tool.invoke / tool.result
+    P-->>C: artifactUpdate (tool result)
+    P-->>C: statusUpdate WORKING + nexus extension metadata (opt-in only)
+    A->>B: llm.response / io.output
+    B->>A: agent.turn.end
+    P-->>C: artifactUpdate (final text)
+    P-->>C: statusUpdate TASK_STATE_COMPLETED
+    Note over C,P: terminal state closes the SSE stream
+```
+
+## One process serves exactly one context
+
+This is the constraint that shapes everything about the standalone serve
+transport, so it is worth stating plainly rather than discovering from an error
+message.
+
+**A Nexus process owns exactly one session**, fixed at boot. It has one
+`memory.history` buffer, one session workspace on disk, one set of plugin data
+directories. There is no bus event that starts a second session inside a running
+process, and no event that resets history — adding one would be a cross-cutting
+change to every memory plugin, not a transport concern.
+
+So `nexus.io.a2a` binds its process to one A2A context:
+
+1. **The first call claims the session.** A client that names no `contextId` is
+   assigned the Nexus session id and gets it back on the Task, so it has
+   something stable to keep using. A client that names one has that name
+   recorded.
+2. **Later calls naming the same context continue it.** History is intact for
+   free, because `memory.history` already persists across turns within a
+   session.
+3. **A different `contextId` is refused** with `UnsupportedOperationError`, and
+   the refusal names the context the process is bound to.
+
+Refusing is the deliberate choice. The alternative — accepting the new
+`contextId` — would hand the caller a conversation already carrying another
+context's history while calling it new. A client cannot detect that, and the
+model would answer the second caller's question with the first caller's context
+in its prompt. An error a client can read and route around is strictly better
+than a confident wrong answer.
+
+The refusal is machine-readable, carrying both a stable `detail` token and the
+context that *is* served:
+
+```json
+{"error":{"code":400,"status":"FAILED_PRECONDITION",
+  "message":"context \"other\" is not served by this agent: it is bound to context \"demo\" for the life of its Nexus session, so run one instance per context",
+  "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+    "domain":"a2a-protocol.org","reason":"UNSUPPORTED_OPERATION",
+    "metadata":{"contextId":"demo","detail":"CONTEXT_NOT_SERVED"}}]}}
+```
+
+For the same reason, **one task runs at a time**. A `SendMessage` arriving while
+another task is *genuinely* in flight is refused with
+`UnsupportedOperationError` (`detail: TASK_ALREADY_IN_FLIGHT`): the listener
+fronts one agent loop, and two turns would interleave on the same bus and
+corrupt both conversations. A **sequential** send is a different thing entirely
+and is never refused — see [A terminal response means the slot is already
+back](#a-terminal-response-means-the-slot-is-already-back) below.
+
+**Multi-context A2A is the session broker's job, and it works today.** One
+process per context is exactly the shape the
+[session broker](./session-broker.md#the-a2a-front-door-agents) automates: an
+unknown `contextId` cold-spawns an OS-isolated `nexus` instance, a known one is
+routed to the instance already serving it, and one whose instance has been
+released re-spawns it with `-recall` so the conversation carries on. The client
+sends nothing but A2A and is never told a lease exists.
+
+So the single-context rule above is a property of **this plugin**, not of Nexus:
+a deployment serving many concurrent conversations puts the broker in front
+rather than running one listener per context and routing to them itself.
+
+### A terminal response means the slot is already back
+
+"In flight" means **concurrent**, never merely *recent*. **A client that has
+received a terminal response may immediately send again on the same
+`contextId`.** The in-flight slot is released *before* the response reporting the
+terminal state is written, on both response paths:
+
+- a blocking `SendMessage` does not write the finished Task until the turn that
+  produced it has returned the slot;
+- a `SendStreamingMessage` does not end its response on §11.7's terminal-frame
+  stream close until the same is true.
+
+That is a **documented contract**, not an incidental ordering. It is worth
+naming because the failure it prevents is invisible from the client side. The
+terminal frame reaches the response writer over a buffered channel, so a
+listener can be answering `COMPLETED` on one goroutine while another is still a
+step short of returning the slot. While that window existed, the most obvious
+client loop there is — send, await the terminal Task, send again — was refused
+against the slot of the turn it had just watched finish. The refusal named no
+wait and carried no retry guidance, and it only appeared on a loaded machine, so
+it read as flakiness rather than as a rule (issue #153).
+`plugins/io/a2a/slot_test.go` now pins the ordering deterministically, so a
+refactor that reintroduces the window fails a test instead of a client.
+
+Which is also why **`TASK_ALREADY_IN_FLIGHT` is not a retry-with-backoff
+condition**. There is no settling window to wait out. A client sending
+sequentially that sees this refusal has found a bug in the listener, not a state
+it should absorb; treating it as transient noise would hide exactly the defect
+the guarantee exists to make visible.
+
+**The one exception is a parked task.** `INPUT_REQUIRED` is not a terminal state
+— §11.7's stream-close rule keys off terminal states and this is not one — and a
+task parked there deliberately keeps holding the slot, because the human's answer
+resumes *that* turn rather than starting a second one. So a blocking
+`SendMessage` that returns a parked Task looks like an ending but has not freed
+the listener, and the next thing to send is the answer — carrying the same
+`taskId` — not a new request. Waiting for such a task to settle before
+reporting it would be worse than useless: it would withhold the question until
+`tasks.input_timeout` killed it. See [Human-in-the-loop: `INPUT_REQUIRED` and
+back](#human-in-the-loop-input_required-and-back).
+
+### Which refusal you get, and why the difference matters
+
+The two refusals above share one error type and one JSON-RPC code, so what a
+client branches on is the token in `metadata.detail`. They say opposite things
+about whether trying again could ever work:
+
+| `detail` | What it means | What a client should do |
+|---|---|---|
+| `CONTEXT_NOT_SERVED` | This process is bound to a *different* conversation, for the life of its Nexus session | **Permanent.** Dial a different instance — no amount of waiting makes this one serve a second context, and the [session broker](./session-broker.md#the-a2a-front-door-agents) automates the dialling |
+| `TASK_ALREADY_IN_FLIGHT` | Your context is the right one; a turn on it has not finished | **Transient.** The turn will end. If you were sending sequentially you should never see this at all |
+
+Because those two demand different responses, the `contextId` is resolved
+**before** the in-flight slot is checked, so a refusal always names the client's
+own mistake rather than whichever condition happened to be tested first.
+Checking the slot first told a client presenting a genuinely foreign context
+that a task was already in flight — a transient-sounding reason for a permanent
+problem, which points the caller at a retry loop that can never succeed.
+
+A refused request also leaves **no binding behind**: an unbound listener is
+claimed by the first turn that is *accepted*, not by the first that asks. A
+request refused for concurrency cannot capture this process's only conversation
+on its way out.
+
+## Worked example
+
+`configs/test-a2a-serve.yaml` ships a complete, credentialed listener with
+mocked LLM responses, so this runs with **no API key**.
+
+```bash
+make build
+bin/nexus -config configs/test-a2a-serve.yaml
+```
+
+> That config drives the engine with `nexus.io.test`, whose `timeout: 20s` ends
+> the session — and the process — twenty seconds after boot. Raise that value if
+> you want a longer window to poke at the endpoint by hand.
+
+It binds `127.0.0.1:18191` (the default for a real deployment is
+`127.0.0.1:8091`) and guards operations with the bearer token
+`test-a2a-token`.
+
+### 1. Fetch the Agent Card
+
+Discovery is unauthenticated by default — a client fetches the card precisely to
+learn which credentials to obtain, so gating it behind those credentials would
+be circular.
+
+```bash
+curl -s localhost:18191/.well-known/agent-card.json
+```
+
+```json
+{
+  "name": "nexus-test-agent",
+  "description": "A Nexus harness exposed over A2A for interop testing.",
+  "supportedInterfaces": [
+    { "url": "http://127.0.0.1:18191/a2a",    "protocolBinding": "JSONRPC",   "protocolVersion": "1.0" },
+    { "url": "http://127.0.0.1:18191/a2a/v1", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+  ],
+  "version": "0.1.0",
+  "capabilities": { "streaming": true, "pushNotifications": false, "extendedAgentCard": false },
+  "securitySchemes": {
+    "static": { "httpAuthSecurityScheme": {
+      "description": "Shared bearer token issued out-of-band by the operator of this agent.",
+      "scheme": "Bearer" } }
+  },
+  "securityRequirements": [ { "schemes": { "static": {} } } ],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [ { "id": "chat", "name": "Conversational turn", "…": "…" } ]
+}
+```
+
+Read three things off it. `supportedInterfaces` names both bindings and their
+URLs. `capabilities` is derived from the operations the plugin actually
+implements, so it never overstates. `securitySchemes` is derived from the
+configured validator chain, so what you are told to present is what is enforced.
+
+### 2. Send a message and stream the task
+
+`SendStreamingMessage` over the JSON-RPC binding:
+
+```bash
+curl -sN localhost:18191/a2a \
+  -H 'Authorization: Bearer test-a2a-token' \
+  -H 'A2A-Version: 1.0' \
+  -H 'Content-Type: application/a2a+json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":
+       {"message":{"messageId":"m1","role":"ROLE_USER",
+        "parts":[{"text":"hello"}],"contextId":"demo"}}}'
+```
+
+The response is `text/event-stream`. Each record's `data:` payload is a full
+JSON-RPC response envelope repeating the request id, whose `result` is one
+`StreamResponse` (task ids shortened here for readability):
+
+```
+data: {"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-0e42cb…","contextId":"demo","status":{"state":"TASK_STATE_SUBMITTED","timestamp":"2026-08-18T16:05:23.766Z"}}}}
+
+data: {"jsonrpc":"2.0","id":1,"result":{"statusUpdate":{"taskId":"task-0e42cb…","contextId":"demo","status":{"state":"TASK_STATE_WORKING","timestamp":"2026-08-18T16:05:23.767Z"}}}}
+
+data: {"jsonrpc":"2.0","id":1,"result":{"artifactUpdate":{"taskId":"task-0e42cb…","contextId":"demo","artifact":{"artifactId":"task-0e42cb…-response","name":"response","parts":[{"text":"Hello from a mocked Nexus agent."}]},"lastChunk":true}}}
+
+data: {"jsonrpc":"2.0","id":1,"result":{"statusUpdate":{"taskId":"task-0e42cb…","contextId":"demo","status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T16:05:23.768Z"}}}}
+```
+
+Four frames, in a fixed order:
+
+1. The opening **Task** in `TASK_STATE_SUBMITTED`. A2A requires a stream to open
+   with a Task or a Message, and no update event may name a task that does not
+   exist yet.
+2. A **status update** to `TASK_STATE_WORKING`, written when the agent turn
+   starts.
+3. An **artifact update** carrying the final assistant text as a text Part. A
+   turn that called tools would interleave one artifact update per tool result
+   before this one, and a client that opted into the Nexus extension would see
+   telemetry on the `WORKING` status updates between them — see [What a turn
+   publishes](#what-a-turn-publishes).
+4. A **status update** to `TASK_STATE_COMPLETED`, which **closes the stream**.
+
+Artifacts must precede the terminal status, and do: A2A closes a stream the
+moment a frame reports a terminal state, so an artifact queued after `COMPLETED`
+would be dropped and the client would see a completed task with no output.
+`TASK_STATE_FAILED`, `CANCELED` and `REJECTED` close the stream the same way, so
+a client handles one shape of ending rather than two.
+
+Over the **REST binding** the same stream is available at `POST
+<rest_prefix>/message:stream`, and each `data:` payload is a bare
+`StreamResponse` with no JSON-RPC envelope. `pkg/a2a`'s `SSEReader`
+auto-detects the framing per record, so a client need not know which binding the
+server chose before it starts reading.
+
+### 3. Or block and take the finished Task
+
+Blocking is A2A's default for `SendMessage` (§3.2.2): the call returns when the
+work is done, not when it was accepted. Here over the REST binding:
+
+```bash
+curl -s -X POST localhost:18191/a2a/v1/message:send \
+  -H 'Authorization: Bearer test-a2a-token' \
+  -H 'A2A-Version: 1.0' \
+  -H 'Content-Type: application/a2a+json' \
+  -d '{"message":{"messageId":"m2","role":"ROLE_USER",
+       "parts":[{"text":"and again"}],"contextId":"demo"}}'
+```
+
+```json
+{"task":{"id":"task-b102f6…","contextId":"demo",
+  "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T16:05:50.629Z"},
+  "artifacts":[{"artifactId":"task-b102f6…-response","name":"response",
+    "parts":[{"text":"Still here on the second turn."}]}]}}
+```
+
+The blocking reply is folded from exactly the frames the streaming path writes,
+so the two bindings cannot report different outcomes for the same turn. (The
+answer differs from the first call's only because the test config scripts two
+mock responses.)
+
+Because this call reused `contextId: "demo"`, it ran in the **same session** as
+the streaming call above, with the first exchange still in history. A different
+`contextId` is refused — that is the payload shown [earlier](#one-process-serves-exactly-one-context).
+
+`configuration.returnImmediately` answers with the task as it stands and lets
+the client follow it with `GetTask` or `SubscribeToTask`. That works because a
+run's lifetime is its **task's**, not its request's: the listener's single
+active-task slot is released when the task reaches a terminal state, so a client
+may also disconnect mid-turn and reattach later without failing its own task.
+The cost of that is why `CancelTask` exists — a turn nobody is watching would
+otherwise hold the process's only agent loop with nothing able to interrupt it.
+
+A blocking `SendMessage` returns on a terminal state **or** on
+`INPUT_REQUIRED`: a task waiting for the caller cannot be waited on by the
+caller.
+
+### 4. Reading tasks back
+
+A task outlives the call that created it. Poll one:
+
+```bash
+curl -s localhost:18191/a2a/v1/tasks/<task-id> \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+```
+
+```json
+{"id":"task-e0fc24…","contextId":"demo",
+ "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"},
+ "artifacts":[{"artifactId":"task-e0fc24…-response","name":"response",
+   "parts":[{"text":"Hello from a mocked Nexus agent."}]}],
+ "history":[{"messageId":"m1","contextId":"demo","taskId":"task-e0fc24…",
+   "role":"ROLE_USER","parts":[{"text":"Are you still there?"}]},
+  {"messageId":"msg-de55c4…","contextId":"demo","taskId":"task-e0fc24…",
+   "role":"ROLE_AGENT","parts":[{"text":"Hello from a mocked Nexus agent."}]}]}
+```
+
+`history` is the trail of message **references** the store retained, rendered as
+text messages — not a replay of Nexus's conversation buffer. §3.7 leaves it to
+the server which messages are persisted and warns clients not to assume all of
+them are present, so a bounded reference trail is a conforming history.
+`historyLength` caps it: `0` omits it, `N` keeps the most recent `N`.
+
+List them, newest first. History is included unless you cap it, so
+`historyLength=0` is the compact listing:
+
+```bash
+curl -s 'localhost:18191/a2a/v1/tasks?pageSize=1&historyLength=0' \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' | jq
+```
+
+```json
+{"tasks":[{"id":"task-e0fc24…","contextId":"demo",
+   "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"}}],
+ "nextPageToken":"","pageSize":1,"totalSize":1}
+```
+
+Artifacts are the other way round — omitted unless `includeArtifacts=true`,
+which is the specification's own default. The remaining filters are `contextId`,
+`status` and `statusTimestampAfter`. `nextPageToken` is empty when the walk is
+done and is a keyset cursor otherwise, so a task created while you page cannot
+make the walk skip or repeat a row.
+
+Re-attach a stream to a task, which replays its current state and then follows
+it live:
+
+```bash
+curl -sN -X POST localhost:18191/a2a/v1/tasks/<task-id>:subscribe \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0'
+```
+
+```
+data: {"task":{"id":"task-e0fc24…","contextId":"demo",
+  "status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-08-18T18:20:10.828Z"},
+  "artifacts":[…],"history":[…]}}
+```
+
+On a finished task that is one frame — the terminal snapshot — and the stream
+closes. On a task still running it is the current snapshot followed by the same
+frames every other attached stream receives; several clients may watch one task
+at once and all of them see the identical sequence from the point they joined.
+
+**A task belonging to another principal answers exactly as an unknown task id
+does**: the same `TaskNotFoundError`, the same 404, the same body. There is no
+"exists but is not yours", because that is an existence oracle for ids the
+caller was never told.
+
+### 5. Failure shapes worth knowing
+
+Missing or bad credentials, on the JSON-RPC binding:
+
+```
+HTTP/1.1 401 Unauthorized
+A2a-Version: 1.0
+Www-Authenticate: Bearer realm="nexus-a2a"
+
+{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"unauthorized",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+    "domain":"nexus.io.a2a","reason":"AUTHENTICATION_REQUIRED"}]}}
+```
+
+A deliberately unsupported operation, refused with the error type the
+specification reserves for exactly that condition:
+
+```bash
+curl -s localhost:18191/a2a \
+  -H 'Authorization: Bearer test-a2a-token' -H 'A2A-Version: 1.0' \
+  -H 'Content-Type: application/a2a+json' \
+  -d '{"jsonrpc":"2.0","id":9,"method":"GetExtendedAgentCard","params":{}}'
+```
+
+```json
+{"jsonrpc":"2.0","id":9,"error":{"code":-32004,
+  "message":"operation \"GetExtendedAgentCard\" is not supported by this agent",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
+    "reason":"UNSUPPORTED_OPERATION"}]}}
+```
+
+Cancelling a task that has already finished — a well-defined mistake, not a
+silent no-op:
+
+```json
+{"jsonrpc":"2.0","id":9,"error":{"code":-32002,
+  "message":"task is in terminal state TASK_STATE_COMPLETED and cannot be canceled",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
+    "metadata":{"taskId":"task-01J…"},"reason":"TASK_NOT_CANCELABLE"}]}}
+```
+
+A task id that this caller cannot see — unknown, or owned by somebody else:
+
+```json
+{"jsonrpc":"2.0","id":9,"error":{"code":-32001,"message":"Task not found",
+  "data":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"a2a-protocol.org",
+    "metadata":{"taskId":"task-x"},"reason":"TASK_NOT_FOUND"}]}}
+```
+
+The full per-binding error-envelope table is in the [Configuration
+Reference](../configuration/reference.md#error-envelopes).
+
+## What works today
+
+There are two serving surfaces and they do not implement identical sets, so the
+tables below are **per surface**. Both keep one map — `implementedOperations` in
+the plugin, `brokerImplementedOperations` in the broker — that gates what
+dispatches *and* what the Agent Card advertises, so on either surface the card
+and the behaviour cannot disagree.
+
+### Standalone serve (`nexus.io.a2a`)
+
+| Operation | JSON-RPC method | REST path | Status |
+|---|---|---|---|
+| Fetch the Agent Card | — | `GET /.well-known/agent-card.json` | **Works** |
+| Send a message, blocking | `SendMessage` | `POST <rest_prefix>/message:send` | **Works** |
+| Send a message, streaming | `SendStreamingMessage` | `POST <rest_prefix>/message:stream` | **Works** |
+| Read one task | `GetTask` | `GET <rest_prefix>/tasks/{id}` | **Works** — status, artifacts, history; `historyLength` honoured |
+| List tasks | `ListTasks` | `GET <rest_prefix>/tasks` | **Works** — keyset pagination, `contextId` / `status` / `statusTimestampAfter` / `includeArtifacts` filters |
+| Re-subscribe to a task | `SubscribeToTask` | `POST <rest_prefix>/tasks/{id}:subscribe` | **Works** — replays current state, then follows live; several streams per task |
+| Cancel a task | `CancelTask` | `POST <rest_prefix>/tasks/{id}:cancel` | **Works** — routes through `control.cancel`, settles at `CANCELED`; a terminal task is `TaskNotCancelableError` |
+| Continue an interrupted task | `SendMessage` with `taskId` | `POST <rest_prefix>/message:send` | **Works** — routes the answer to the parked `hitl.requested`; same turn, no new task |
+| Return before the turn ends | `configuration.returnImmediately` | same | **Works** — answers with the task; follow it with `GetTask` / `SubscribeToTask` |
+| Receive the answer as an artifact | — | — | **Works** — a text Part, plus an `application/json` Part when the answer is a JSON document |
+| Receive tool results as artifacts | — | — | **Works** — one artifact per `tool.result`, unconditionally |
+| Receive written files as artifacts | — | — | **Works** — inline base64 `raw` Parts, capped by `artifacts.max_file_bytes`; detected from what a `tool.result` reports, so an uninstrumented write is missed by design |
+| Receive Nexus telemetry | `A2A-Extensions` service parameter | same header | **Works** — thinking steps, tool calls, subagent progress and token usage on `TaskStatusUpdateEvent.metadata`; declared in the card, opt-in per request |
+
+Every A2A operation outside the push-notification family is now wired. All read
+operations are scoped to the calling principal — another principal's task is
+indistinguishable from one that does not exist — and so are `CancelTask` and
+continuation, which resolve the task through the same scoped lookup before they
+reveal anything about its state.
+
+### Broker-fronted serve (`cmd/nexus-broker`, the `agents:` block)
+
+The broker publishes the same operations per profile, at
+`/agents/<profile>/…`, and drives them by starting an isolated instance rather
+than by watching this process's bus. What differs is set out below; everything
+not mentioned behaves as the table above describes.
+
+| Capability | Standalone | Broker-fronted |
+|---|---|---|
+| Conversations per deployment | **One.** The process is bound to one `contextId` for its life; a second is refused with `CONTEXT_NOT_SERVED` | **Unbounded.** Each `contextId` gets its own OS-isolated instance, spawned on the first message and re-spawned with `-recall` after it is released |
+| Agents per listener | One | One per `agents:` profile, each with its own card, config and path namespace |
+| Agent Card | Served **unauthenticated** by default — the listener binds loopback; `card_requires_auth: true` gates it | **Behind the auth guard**, always, like every other broker route; an ingress does not publish its agent list to anyone who can reach the port |
+| Concurrent tasks on one conversation | **Refused** (`TASK_ALREADY_IN_FLIGHT`) — and only a genuinely concurrent one: the slot is released before a terminal response is written, so a *sequential* send is never refused | **Queued.** The second task sits in `SUBMITTED` — readable, streamable, cancellable — until the first is terminal. The broker has no per-conversation refusal to issue at all, so the one-task-at-a-time rule is a property of the standalone listener, not of A2A on Nexus |
+| Answer artifact | Yes | Yes |
+| Tool-result artifacts | **Yes**, one per `tool.result` | **No.** The instance IO envelope carries no tool results |
+| Written-file artifacts | **Yes**, inline base64 | **No**, for the same reason |
+| Nexus extension telemetry | **Yes**, opt-in per request | **No.** The envelope carries no thinking steps or per-call token usage |
+| `GetTask` / `ListTasks` / `SubscribeToTask` | From the plugin's task store, principal-scoped | From the broker's task store, scoped to principal **and profile**; answers after the instance is gone and across a broker restart |
+| `CancelTask`, HITL park and resume, `returnImmediately` | Yes | Yes |
+| Push notifications, `GetExtendedAgentCard` | Refused, capability `false` | Refused, capability `false` |
+| Retention | `tasks.ttl` `24h`, `tasks.max_per_context` `200` | `a2a.tasks.ttl` `24h`, `a2a.tasks.max_per_context` `50`, plus a lossy 4096-binding cap on conversation continuity |
+
+**The artifact rows are the honest headline.** Behind the broker an agent returns
+its answer and nothing else, because `nexus.io.broker`'s payload has no field for
+a tool result or a written file. That is a property of the transport between the
+broker and the instance, not a gap that a later story closes cheaply, and it is
+measured rather than asserted — see
+[Conformance](#conformance-one-corpus-two-mappings).
+
+### Outbound: what `nexus.agent.a2a_remote` does today
+
+The table above is the **serve** leg. The [outbound
+leg](../plugins/agents/a2a-remote.md) stands on its own:
+
+| Capability | Status |
+|---|---|
+| Fetch a remote's Agent Card, lazily on first use | **Works** — a remote that is down cannot fail this instance's boot; the tool description is rebuilt from the card and re-registered once |
+| Delegate a task, streaming | **Works** — `SendStreamingMessage`, frames republished as `io.output` / `subagent.iteration` while the run is live |
+| Delegate a task, blocking | **Works** — `stream: false` selects `SendMessage` |
+| Both bindings | **Works** — `binding: jsonrpc` (default) or `http+json`, or pin an endpoint and skip discovery |
+| Fold the terminal status message and the artifacts into one tool result | **Works** — XML-tagged, `CDATA`-wrapped, binary and URL parts described rather than inlined |
+| Credentials: `bearer`, `oauth2_client_credentials`, `mtls` | **Works** — per remote, never inherited, validated at `Init` |
+| Cancel the remote task when the local turn is cancelled | **Works** — `cancel.active` → `CancelTask`, and the same abandonment on every walk-away |
+| Chained human-in-the-loop | **Works**, on either binding — a remote that parks at `INPUT_REQUIRED` has its question raised locally as `hitl.requested`, and the answer resumes the same task. See [Chaining human-in-the-loop across a delegation](#chaining-human-in-the-loop-across-a-delegation) |
+| Consume the Nexus extension's telemetry from a remote Nexus | **Works** — requested by default, mapped onto `subagent.iteration` |
+| Result caching | **Works** — successes only, never one a human answered for |
+| Posture budgets | **Partial by design** — only `default_budget.timeout` and `max_recursion_depth` cross the boundary; a posture setting the token or tool-call budget is refused |
+| Push-notification webhooks | **Not supported** — see [Deliberately unsupported](#deliberately-unsupported) |
+
+### What a turn publishes
+
+A2A puts task **output** in artifacts and conversation in messages (§3.7). A
+turn's artifacts are:
+
+| `artifactId` | Contents |
+|---|---|
+| `<taskId>-response` | The answer as a text Part. Plus an `application/json` Part when the answer *is* a JSON object or array — one surrounding markdown fence is unwrapped first — so structured output is a document rather than a string a client re-parses. |
+| `<taskId>-tool-<callId>` | One per tool result: the output as text (or the error, flagged `nexus.tool.failed` in the artifact metadata), plus an `application/json` Part when the tool produced structured output. |
+| `<taskId>-file-<path>` | One per file the turn wrote: the bytes inline as a base64 `raw` Part carrying the filename and media type. |
+| `<taskId>-artifacts-truncated` | Only when the task spent its artifact budget: how many artifacts were withheld. |
+
+Tool results are artifacts **unconditionally** — there is no key to turn them
+off, because an interop transport whose observability depends on the operator
+having enabled it is one a partner cannot rely on. The volume that buys is
+answered by caps, not by a flag: `artifacts.max_file_bytes` (256 KiB) bounds one
+inline file, `artifacts.max_tool_output_bytes` (16 KiB) bounds one tool output,
+and `artifacts.max_task_bytes` (1 MiB) bounds one task. Every cap **degrades**
+rather than dropping silently: an over-cap file becomes a metadata note naming
+it, over-cap output is truncated with a note, and a task past its budget
+publishes a notice saying how much it withheld.
+
+A human-in-the-loop question is **not** an artifact. It rides the
+`INPUT_REQUIRED` status message and the task's message history, which is where a
+request for input belongs.
+
+**File detection is `tool.result`-based, and is incomplete by design.** A file is
+published only when a tool reports having written it, through the engine's
+`ToolResult.OutputFile` field or a structured-output key named by
+`artifacts.file_sources` (default: `nexus.tool.fileio`'s `write_file` reporting
+`path`). Snapshot-diffing the workspace is out of scope, so a shell command
+redirecting into a file — which reports stdout and an exit code and nothing about
+the file — publishes nothing. `nexus.tool.shell` therefore has no default rule
+rather than one that could never fire.
+
+### The Nexus extension: telemetry A2A has no field for
+
+Thinking steps, tool calls, subagent progress and token counts are not output —
+they are how the agent got to its output — so they ride an extension (§8.4)
+rather than an artifact:
+
+```
+https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1
+```
+
+The card declares it under `capabilities.extensions`, never as `required`. Ask
+for it per request:
+
+```bash
+curl -sN localhost:8091/a2a \
+  -H 'A2A-Version: 1.0' \
+  -H 'A2A-Extensions: https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{
+        "messageId":"m-1","role":"ROLE_USER","parts":[{"text":"search for X"}]}}}'
+```
+
+The response echoes `A2A-Extensions` with what was actually **activated**, and
+the frames carry payloads like:
+
+```json
+{
+  "statusUpdate": {
+    "taskId": "task-01J…",
+    "contextId": "01J…",
+    "status": { "state": "TASK_STATE_WORKING", "timestamp": "2026-08-18T12:00:01Z" },
+    "metadata": {
+      "https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1": {
+        "kind": "tool_call",
+        "taskId": "task-01J…",
+        "sequence": 3,
+        "source": "tool.invoke",
+        "toolCall": { "callId": "call-1", "name": "web_search",
+                      "arguments": { "query": "X" } }
+      }
+    }
+  }
+}
+```
+
+Two things are worth knowing. The status those frames carry is the task's
+**current** state, so a telemetry frame emitted while the task is parked reports
+`TASK_STATE_INPUT_REQUIRED` rather than pretending the task went back to work.
+And telemetry is **not persisted** — storing it would put a `WORKING` transition
+in the task's status history for every thinking step, so `GetTask` would replay a
+turn's reasoning as state changes the task never made. It is a live signal on an
+attached stream.
+
+A client that does not send the header gets a stream with no extension metadata
+on it at all. That is the point of an opt-in: it is honoured by not sending.
+
+### Human-in-the-loop: `INPUT_REQUIRED` and back
+
+A Nexus agent asking a human something (`ask_user`, or any plugin emitting
+`hitl.requested`) parks the task at `TASK_STATE_INPUT_REQUIRED` with the question
+on `status.message`. The task stays **live**: open SSE streams stay open, the
+state is written through to the store, and a blocking `SendMessage` returns the
+parked Task rather than waiting for a caller that is itself waiting on it.
+
+Answer it by sending a new message carrying the **same `taskId` and `contextId`**
+— A2A's own resume mechanism (§3.4):
+
+```bash
+curl -sS localhost:8091/a2a -H 'A2A-Version: 1.0' -H 'Content-Type: application/json' -d '{
+  "jsonrpc": "2.0", "id": 7, "method": "SendMessage",
+  "params": { "message": {
+    "messageId": "m-2", "role": "ROLE_USER",
+    "taskId": "task-01J…", "contextId": "01J…",
+    "parts": [ { "text": "staging" } ]
+  } }
+}' | jq '.result.task.status.state'
+```
+
+The task returns to `WORKING` **inside the turn that asked** — no second task,
+no second turn. The wait is bounded by `tasks.input_timeout` (default `15m`),
+after which the task is failed and the question retracted, because a parked task
+holds this process's one agent loop.
+
+Because a run now outlives the request that started it, the whole sequence
+survives a dropped connection: ask, disconnect, reattach with `SubscribeToTask`,
+answer, complete.
+
+### Chaining human-in-the-loop across a delegation
+
+The mapping runs both ways, and the two halves compose.
+
+Inbound (above), a Nexus agent's `hitl.requested` becomes an `INPUT_REQUIRED`
+status on the task it is serving. Outbound,
+[`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md) does the mirror
+image: a remote that parks at `INPUT_REQUIRED` has its question raised as a local
+`hitl.requested`, and the human's answer is sent back as an ordinary message
+carrying the **same `taskId` and `contextId`**.
+
+```
+        human
+          ^  hitl.requested / hitl.responded
+          |
+   [ Nexus A ] --A2A--> [ Nexus B ] --A2A--> [ agent C ]
+                          ^                     |
+                          |  INPUT_REQUIRED     |  INPUT_REQUIRED
+                          +---------------------+
+```
+
+C asks. B's `a2a_remote` turns that into B's own `hitl.requested`; B's
+`nexus.io.a2a` turns *that* into B's task parking at `INPUT_REQUIRED`; A's
+`a2a_remote` turns *that* into the question the human at the top actually sees.
+The answer walks back down, each hop resuming its own task under its own
+`taskId`. Nothing in the chain has to know how long it is.
+
+Both directions bound the wait, with the same key name and the same default:
+`tasks.input_timeout` on the serving side and `hitl.input_timeout` on the calling
+side, both `15m`, both disabled with `"0s"`. On the calling side the whole-call
+`timeout` **also** keeps running while the task is parked, and the earlier
+deadline wins — with the `5m` default `timeout` that is the call budget, so raise
+it for a remote you expect to ask questions. Either way the question is retracted
+with `hitl.cancel`, the remote task is cancelled, and the model is told the
+question went unanswered *and told not to answer it itself*.
+
+`AUTH_REQUIRED` is deliberately not chained: it asks for a credential, and no
+answer a person types is one.
+
+#### Nexus→Nexus chaining works on either binding
+
+A2A leaves it to the server whether an `INPUT_REQUIRED` park closes the SSE
+stream, and both readings are legal. `nexus.io.a2a` **holds it open** (keep-alive
+comments, no terminal frame) so a client can keep following the task. The
+question is therefore carried by the interruption **frame**, not by the stream
+ending, and `nexus.agent.a2a_remote` acts on that frame: it stops reading there,
+puts the question to a human, and resumes the task on a fresh connection with a
+message naming the same `taskId` (§3.2.2, §3.4). No configuration is needed —
+chaining works at the shipped default `stream: true`, and equally over the
+blocking binding, which returns the parked Task the moment it parks.
+
+`tests/integration/a2a_loopback_test.go` pins the Nexus→Nexus shape end to end,
+streaming included.
+
+### Planned, not available today
+
+Do not build against these. Everything below is either refused outright or
+simply absent right now; it is listed so the shape of the finished transport is
+visible, not so it can be relied on.
+
+- **Tool, file and telemetry artifacts behind the broker.** The
+  [broker-fronted surface](#broker-fronted-serve-cmdnexus-broker-the-agents-block)
+  publishes only a turn's answer, because the instance IO envelope carries
+  nothing else. Widening it means widening that envelope, which is a change to
+  every broker client and not to this transport.
+- **Workspace-wide file detection.** Files become artifacts only when a
+  `tool.result` reports the path (see [What a turn
+  publishes](#what-a-turn-publishes)); snapshot-diffing the session workspace is
+  deliberately out of scope, so a write by an uninstrumented path is missed.
+
+## Delegating to a remote agent
+
+Everything above is the **inbound** direction: a client driving a Nexus turn.
+The outbound direction is [`nexus.agent.a2a_remote`](../plugins/agents/a2a-remote.md),
+which turns each configured remote A2A agent into one LLM-facing tool:
+
+```yaml
+plugins:
+  active:
+    - nexus.agent.react
+    - nexus.agent.a2a_remote
+
+  nexus.agent.a2a_remote:
+    agents:
+      - name: researcher
+        base_url: https://research.internal
+        description: A specialist research agent reachable over A2A.
+```
+
+That registers `delegate_a2a_researcher`. Calling it sends the delegated task to
+the remote, drains the stream the remote answers with, and folds the terminal
+result back into the tool result.
+
+Several decisions in that path are worth stating here, because they are the ones
+a reader of this guide is most likely to be surprised by.
+
+**Remotes come from configuration only.** The tool schema exposes no `url`,
+`endpoint` or `host` parameter. A model-chosen address would be a server-side
+request forgery surface and an unbounded spend surface at once; which remotes an
+instance can reach is an operator decision.
+
+**Discovery is lazy.** A remote's Agent Card is fetched on *first use*, never at
+boot. A remote agent is somebody else's process, and one that is down —
+restarting, not deployed, behind a VPN — must not be able to fail this
+instance's startup. Until the card resolves the tool carries the configured
+`description`; the first successful call rebuilds it from the card's own
+`skills` and re-registers the tool once.
+
+**A2A's split answer is put back together.** A2A puts output in artifacts and
+conversation in messages, and a remote may put its whole answer in either. Both
+are folded into one XML-tagged document — `<final_response>` plus one
+`<artifact>` element each — so the calling model can tell the agent's summary
+from a tool's raw output and one artifact from the next. Remote text rides in
+`CDATA`; binary and URL parts are described rather than inlined; extension
+telemetry parts are dropped.
+
+**Nothing is an engine-level failure.** An unreachable card, a refused binding, a
+dead stream, an exhausted budget and a task that ends `FAILED` all become a clean
+tool error carrying a sentence the calling model can act on, alongside whatever
+partial output arrived.
+
+**A remote's question reaches the human, not the model.** A remote parking at
+`INPUT_REQUIRED` is not a failure: the question is raised on the local bus as
+`hitl.requested` — the same event `ask_user` produces — and the human's answer
+resumes the remote task with the **same `taskId` and `contextId`**, which is A2A's
+own resume mechanism (§3.4). The delegating model never sees the question and is
+never given the chance to answer it, because a model handed a question only a
+person can settle will invent an answer and then act on it. It works on either
+binding, including against a remote that holds its stream open across the park —
+`nexus.io.a2a` does; see [Chaining human-in-the-loop across a
+delegation](#chaining-human-in-the-loop-across-a-delegation).
+
+**A long delegation is not a black box.** The remote's narration becomes
+`io.output` and, for a remote Nexus instance, its own tool calls and subagent
+activity arrive through the Nexus extension and become `subagent.iteration`, so
+the TUI, the browser, AG-UI and the A2A serve transport can all render progress.
+This is why `extensions` defaults to the Nexus extension URI: a remote that has
+never heard of it answers exactly as before, and a remote Nexus answers with the
+telemetry that makes the delegation legible.
+
+**Cancelling the local turn cancels the remote task.** `cancel.active` retracts
+any pending question and issues `CancelTask` to every remote in flight. More
+generally: if this instance walks away from a non-terminal remote task — an
+exhausted budget, a broken stream, a question nobody answered — it tells the
+remote rather than leaving it working for a caller that has gone.
+
+**Credentials are per remote and checked at boot.** Each `agents[]` entry carries
+its own `credentials:` block — `bearer`, `oauth2_client_credentials` or `mtls` —
+and there is deliberately no plugin-level default, so a token can never reach a
+remote it was not issued for. Everything checkable without the network is
+checked at `Init`: an unset environment variable, an unreadable client
+certificate, a key belonging to the wrong type. **No credential value is ever
+logged.** On the first call the credential is compared against the card's
+`securitySchemes` and an obvious mismatch *warns* — a card's scheme block is
+optional and routinely incomplete, so refusing on that evidence would break
+working deployments. See
+[Remote A2A Agents → Credentials](../plugins/agents/a2a-remote.md#credentials).
+
+Budgets come from the [posture registry](../plugins/agents/postures.md) when a
+remote names a posture — but only `default_budget.timeout` and
+`max_recursion_depth`, since A2A gives a client no control over the remote's own
+token or tool-call spend. A posture setting either of those is refused rather
+than half-honoured.
+
+Because `nexus.io.a2a` speaks the same wire, pointing `a2a_remote` at another
+Nexus instance's serve endpoint is a complete Nexus→Nexus loopback, which is the
+cheapest faithful end-to-end proof of both directions at once — and is what
+`tests/integration/a2a_loopback_test.go` does. See [Nexus↔Nexus
+loopback](#nexusnexus-loopback) for what that proves and what it does not.
+
+## Deliberately unsupported
+
+These are not "not yet". They are decisions.
+
+### Push-notification webhooks
+
+The Agent Card declares `capabilities.pushNotifications: false`, and none of the
+four `*TaskPushNotificationConfig` operations exists — `DecodeCall` reports them
+as unsupported methods, and an inline `configuration.taskPushNotificationConfig`
+on a `SendMessage` is refused with `PushNotificationNotSupportedError`.
+
+Push delivery is not a small feature: it is an outbound HTTP client with retry,
+backoff, webhook-URL validation (an SSRF surface), and request signing so a
+receiver can trust the callback. SSE already covers the long-running-task case
+for every client that can hold a connection, so the machinery buys reach at a
+disproportionate cost in attack surface. The `TaskPushNotificationConfig` *type*
+exists in `pkg/a2a` only because `SendMessageConfiguration` references it.
+
+### `GetExtendedAgentCard`
+
+`capabilities.extendedAgentCard` is `false`. The extended card is the
+specification's answer to "my card must stay private": a second, authenticated
+document with more detail than the public one. Nexus's card is entirely
+hand-authored — nothing is derived from the tool catalog or the skills plugin —
+so there is no richer internal document for an extended card to reveal, and a
+second card would be a second thing to keep in sync with the first. An operator
+who needs the card private sets `card_requires_auth: true` and distributes it
+out-of-band, which §8.2 sanctions as "Direct Configuration".
+
+### The gRPC binding
+
+A2A defines three bindings; Nexus implements two, JSON-RPC 2.0 and HTTP+JSON.
+gRPC is deferred, and the reason is a dependency budget: it would pull `grpc`,
+`protobuf` and `genproto` into the **default** build of a repo that hand-rolls
+every LLM provider over `net/http`. The codec is deliberately
+transport-agnostic, so if gRPC ships it ships as a separate opt-in plugin and
+those dependencies stay out of `cmd/nexus` and `cmd/nexus-broker`.
+
+Nexus also does not adopt `a2aproject/a2a-go` for the same reason: the SDK drags
+in the same stack plus cobra.
+
+## Conformance: one corpus, two mappings
+
+Two independent mappings turn Nexus activity into A2A frames, and they share
+only the wire types in `pkg/a2a`:
+
+- `plugins/io/a2a` maps the **engine bus** (`agent.turn.start`, `tool.result`,
+  `hitl.requested`, …) onto A2A.
+- the session broker maps the **broker IO envelope** forwarded over its
+  dial-back WebSocket onto A2A.
+
+Nothing in the type system makes the two agree, so a shared conformance corpus
+does: `pkg/a2a/a2aconform` holds a set of JSON vectors describing A2A **output
+only**. A vector names an abstract step ("the agent produced final text", "the
+agent asked the human a question") and pins the exact frame sequence that step
+must produce; a mapping supplies a `Driver` that realizes those steps in its own
+vocabulary, and the runner does the comparing. Beyond a frame-by-frame
+comparison, every vector is independently replayed through `a2a.SSEWriter`, so
+each one also asserts §11.7's stream contract.
+
+`nexus.io.a2a`'s driver is `TestA2AConformance` in
+`plugins/io/a2a/conformance_test.go`; it declares every capability the
+vocabulary names and passes **9 of 9**. The broker's driver is the same test
+name in `cmd/nexus-broker/a2aconformance_test.go`, and it passes **5 of 9 with 4
+skipped**:
+
+| Vector | Broker | Why |
+|---|---|---|
+| `turn-completes`, `turn-fails`, `turn-canceled`, `hitl-interrupt-resume`, `hitl-parks-stream-open` | **Pass** | The IO envelope expresses all of it: an `input` payload starts a turn, `status: idle` ends it, an instance going away fails it, `cancel` settles it, `hitl.request` parks it |
+| `multi-artifact-turn`, `streaming-order-interleaves` | **Skipped** — needs `tool_artifacts` | `nexus.io.broker` subscribes to neither `tool.invoke` nor `tool.result`, and its payload has no field for either, so there is nothing to publish a tool artifact from — and nothing to interleave with |
+| `oversized-file-degrades` | **Skipped** — needs `tool_artifacts`, `file_artifacts` | Files a turn wrote are reported on a tool result, which is the same absence |
+| `artifact-budget-suppression` | **Skipped** — needs `tool_artifacts`, `artifact_budget` | The only artifact this mapping mints is the turn's own answer, which is never charged against a budget, so there is no budget to have |
+
+The skips are **declared**, not silent: a `Feature` gate makes a mapping state
+once, visibly, what it cannot express, the runner names every skipped vector on
+every run, and a mapping that declared a feature it cannot produce would pass a
+vector by lying about its transport. Weakening the four vectors so the broker
+could claim them would erase the one honest difference between the two surfaces.
+
+The oracle's own honesty is tested in `pkg/a2a/a2aconform/check_test.go`, which
+feeds `Check` deliberately-wrong observations and asserts each is reported.
+
+**The rule: any new A2A behaviour adds a vector there before it is implemented
+in a second mapping.** Back-filling vectors from a second mapping's observed
+output encodes the drift instead of catching it. And if a mapping cannot satisfy
+a vector, the vector is not weakened: either the mapping has a bug, or the
+expectation is wrong and the fix lands in the vector *with* a rationale saying
+why the old one was.
+
+### Nexus↔Nexus loopback
+
+The corpus checks one mapping against a written-down expectation. The loopback
+checks the two **legs** against each other: `tests/integration/a2a_loopback_test.go`
+boots two real engines — one running `nexus.agent.a2a_remote`, one running
+`nexus.io.a2a` on `127.0.0.1:18192` — and drives a full delegation between them
+under mocked LLM responses, so it needs no API key and runs in a couple of
+seconds inside the standard tagged suite.
+
+| Config | Role |
+|---|---|
+| `configs/test-a2a-loopback-caller.yaml` | the delegating engine, bearer credential, mock LLM |
+| `configs/test-a2a-loopback-server.yaml` | the callee's listener, bearer-guarded, mock LLM |
+| `configs/test-a2a-loopback-hitl-server.yaml` | the same callee, but its agent calls `ask_user` |
+
+It covers card fetch, a streaming run to `COMPLETED`, artifact return, bearer
+acceptance *and* refusal, a chained question answered on the caller's side, the
+two input deadlines (`tasks.input_timeout` and `hitl.input_timeout`) racing each
+other, and a local cancellation settling the remote task at `CANCELED`.
+
+**What it proves, and what it does not.** Conformance for this integration is
+**self-defined**: hand-written vectors plus this loopback. No external A2A
+implementation and no third-party test kit is in either path. The loopback
+therefore proves the two Nexus mappings are self-consistent — what one emits, the
+other reads — and says nothing about interoperating with somebody else's agent.
+That is a recorded limitation, not an oversight; the corpus above exists
+precisely because a loopback cannot catch a shared misreading of the
+specification.
+
+## Securing a listener
+
+The listener binds **loopback by default** (`127.0.0.1:8091`) and with no
+`bearer_token` or `auth:` block it admits every caller — which is only safe
+because of that bind address. Move `bind` off loopback and configure
+authentication in the same commit.
+
+Two spellings, mutually exclusive, identical to `nexus.io.agui`:
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    bind: "0.0.0.0:8091"
+    public_url: "https://agent.example.com"   # what the card advertises
+    bearer_token_env: NEXUS_A2A_TOKEN         # one shared secret
+```
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    auth:                                     # or the full validator chain
+      validators:
+        - type: jwks
+          issuer: "https://issuer.example.com/"
+          jwks_url: "https://issuer.example.com/.well-known/jwks.json"
+          audience: ["nexus-a2a"]
+          principal_claim: sub
+```
+
+Setting both is a boot error. The card's `securitySchemes` are derived from
+whichever you configured, so a client is told to present what is actually
+enforced — with one exception: a `proxy_headers` validator publishes **no**
+scheme, because it accepts no client credential at all, only an identity a
+trusted fronting proxy already established.
+
+`public_url` matters as soon as a reverse proxy is involved: it is what the card
+advertises in `supportedInterfaces`, and it defaults to `http://<bind>`, which
+is right for loopback and wrong behind a proxy.
+
+## See also
+
+- [A2A serve transport](../plugins/io/a2a.md) — the plugin page: surfaces, card
+  authoring, and the decisions behind the defaults
+- [Remote A2A agents (`nexus.agent.a2a_remote`)](../plugins/agents/a2a-remote.md)
+  — the outbound plugin page: lazy discovery, budgets, result folding, failure shapes
+- [Configuration Reference — `nexus.io.a2a`](../configuration/reference.md#nexusioa2a)
+  — canonical key list
+- [Configuration Reference — `nexus.agent.a2a_remote`](../configuration/reference.md#nexusagenta2a_remote)
+  — canonical key list for the outbound leg
+- [Authentication (`auth:`)](../configuration/reference.md#authentication-auth)
+  — the shared `pkg/nexusauth` validator chain
+- [Session Broker](./session-broker.md#the-a2a-front-door-agents) — the
+  broker-fronted surface: the `agents:` block, per-profile card URLs, the
+  spawn/resume lifecycle and the retention knobs
+- [AG-UI serve transport](../plugins/io-agui.md) — the structural sibling this
+  transport was modelled on

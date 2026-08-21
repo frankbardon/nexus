@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexus.local/schemas/plugins/nexus.agent.a2a_remote.json",
+  "title": "nexus.agent.a2a_remote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h)([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))*$",
+      "description": "A Go duration string such as \"30s\", \"5m\" or \"1h30m\". Bare numbers are rejected."
+    },
+    "binding": {
+      "type": "string",
+      "enum": ["jsonrpc", "json-rpc", "http+json", "rest"],
+      "description": "A2A protocol binding to speak. Defaults to jsonrpc, the binding every A2A implementation is expected to expose."
+    },
+    "extensions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "A2A protocol extension URIs to request via the A2A-Extensions service parameter. A server activates only the extensions a client asked for. Defaults to the Nexus extension URI (https://github.com/frankbardon/nexus/a2a/extensions/agent-events/v1), because this plugin consumes a remote Nexus instance's telemetry to republish its progress; set an empty list to request none. An empty list at agent level overrides an inherited plugin-level list."
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Credential this instance presents to THIS remote. Per agent only — there is no plugin-level default, so a credential can never reach a remote it was not written for. Validated at boot: an unset environment variable, an unreadable client certificate or a key naming the wrong type fails Init rather than the first delegation. No credential value is ever logged.",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["none", "bearer", "oauth2_client_credentials", "mtls"],
+          "description": "Which credential to present. Keys belonging to a different type are rejected at boot."
+        },
+        "token": {
+          "type": "string",
+          "description": "bearer: the token, inline. Prefer token_env; an inline secret lives in the config file. Takes precedence over token_env when both are set."
+        },
+        "token_env": {
+          "type": "string",
+          "description": "bearer: name of an environment variable holding the token. Read once at Init; a variable that is unset or empty fails boot."
+        },
+        "header": {
+          "type": "string",
+          "description": "bearer: header the token rides in. Defaults to \"Authorization\"."
+        },
+        "scheme": {
+          "type": "string",
+          "description": "bearer: the scheme word before the token. Defaults to \"Bearer\"; set it to an empty string to send the bare token, which is what an X-Api-Key style header wants."
+        },
+        "client_id": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the client id, inline. Prefer client_id_env."
+        },
+        "client_id_env": {
+          "type": "string",
+          "description": "oauth2_client_credentials: name of an environment variable holding the client id."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the client secret, inline. Prefer client_secret_env."
+        },
+        "client_secret_env": {
+          "type": "string",
+          "description": "oauth2_client_credentials: name of an environment variable holding the client secret."
+        },
+        "token_url": {
+          "type": "string",
+          "description": "oauth2_client_credentials: the token endpoint. Optional when the agent has a base_url — the endpoint is then discovered from the card's oauth2 clientCredentials flow on first use. Required for an agent that pins an endpoint instead, since there is no card to discover it from."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "oauth2_client_credentials: scopes requested in the token request. Not defaulted from the card: requesting every scope a remote advertises is broader than any deployment needs."
+        },
+        "audience": {
+          "type": "string",
+          "description": "oauth2_client_credentials: value of the non-standard but widely supported audience parameter, sent only when set."
+        },
+        "auth_style": {
+          "type": "string",
+          "enum": ["basic", "body"],
+          "description": "oauth2_client_credentials: how the client authenticates to the token endpoint. \"basic\" (default) is HTTP Basic per RFC 6749 section 2.3.1; \"body\" puts client_id and client_secret in the form body, for a server that only accepts that."
+        },
+        "refresh_leeway": {
+          "$ref": "#/$defs/duration",
+          "description": "oauth2_client_credentials: how far ahead of the stated expiry a token is replaced. Defaults to \"30s\". Clamped to half the token lifetime when the lifetime is shorter than the leeway."
+        },
+        "cert_file": {
+          "type": "string",
+          "description": "mtls: path to the PEM client certificate. Required for mtls. Supports ~ expansion. Read at Init."
+        },
+        "key_file": {
+          "type": "string",
+          "description": "mtls: path to the PEM private key matching cert_file. Required for mtls. Supports ~ expansion. Read at Init."
+        },
+        "ca_file": {
+          "type": "string",
+          "description": "mtls: path to a PEM bundle used to verify the REMOTE's certificate, for a private CA. Supports ~ expansion. Defaults to the system roots."
+        },
+        "server_name": {
+          "type": "string",
+          "description": "mtls: override the TLS server name used for SNI and certificate verification, for a remote reached by an address its certificate does not name."
+        }
+      }
+    },
+    "hitl": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Chained human-in-the-loop policy: what happens when a remote parks its task at TASK_STATE_INPUT_REQUIRED. With it on, the question is raised on the local bus as hitl.requested and the human's answer resumes the remote task with the same taskId and contextId. The delegating model never sees the question and is never given the chance to answer it.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Route a remote's INPUT_REQUIRED question to a human. Defaults to true. When false, a parked task becomes a clean tool error carrying the question, as it did before chaining existed."
+        },
+        "input_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Deadline for ONE question waiting on a human. Defaults to \"15m\", matching nexus.io.a2a's tasks.input_timeout. \"0s\" removes this deadline specifically; the whole-call timeout still applies, since it keeps running while the task is parked. The effective wait is whichever expires first, so with the default 5m call timeout this key is the looser of the two."
+        },
+        "max_rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many times one delegated call may bounce a question back to the human. Defaults to 4. Zero removes the cap, leaving the call budget as the only bound."
+        }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Retry policy for outbound A2A calls. Reads are retried on transport failures and 502/504; every operation is retried on 429/503, honouring Retry-After. Message sends are never retried on a transport failure, since A2A defines no idempotency key.",
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total attempts including the first. 1 disables retrying. Defaults to 3."
+        },
+        "base_delay": {
+          "$ref": "#/$defs/duration",
+          "description": "Delay before the second attempt; doubles thereafter. Defaults to \"200ms\"."
+        },
+        "max_delay": {
+          "$ref": "#/$defs/duration",
+          "description": "Cap on the computed backoff. A longer Retry-After from the server is still honoured in full. Defaults to \"5s\"."
+        }
+      }
+    }
+  },
+  "properties": {
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Remote A2A agents to expose as delegate targets. Each entry yields one LLM-facing tool.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-friendly identifier for the remote agent; used to derive the default tool name."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Base URL the remote agent is served under — the origin (and optional path prefix), NOT an operation endpoint. The Agent Card is fetched from /.well-known/agent-card.json beneath it, lazily on first use. Required unless jsonrpc_endpoint or rest_endpoint pins an endpoint."
+          },
+          "jsonrpc_endpoint": {
+            "type": "string",
+            "description": "Pin the JSON-RPC endpoint URL, skipping Agent Card discovery for it. Use when the endpoint is known out of band."
+          },
+          "rest_endpoint": {
+            "type": "string",
+            "description": "Pin the HTTP+JSON base URL — the prefix operation paths hang off, not a single operation URL — skipping Agent Card discovery for it."
+          },
+          "tool_name": {
+            "type": "string",
+            "description": "Override the LLM-facing tool name. Defaults to 'delegate_a2a_<name>'."
+          },
+          "description": {
+            "type": "string",
+            "description": "Tool description used until the remote's Agent Card resolves. Once it does, the description is rebuilt from the card's own skills."
+          },
+          "posture": {
+            "type": "string",
+            "description": "Registered AgentPosture name supplying the call's timeout and recursion-depth cap. Requires the posture.registry capability. A posture setting max_tokens or max_tool_calls is refused: neither can be enforced across an A2A boundary."
+          },
+          "binding": { "$ref": "#/$defs/binding" },
+          "validate_card": {
+            "type": "boolean",
+            "description": "Check a fetched Agent Card against the specification's required fields. Defaults to true."
+          },
+          "stream": {
+            "type": "boolean",
+            "description": "Use the streaming operation (SendStreamingMessage + SSE). Defaults to true; false forces a blocking SendMessage."
+          },
+          "timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Whole-call deadline covering discovery, the message and the stream. Defaults to \"5m\". A posture budget overrides it; the tool's timeout_seconds argument overrides both."
+          },
+          "request_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a control-plane call (Agent Card fetch, GetTask, CancelTask). Defaults to \"60s\". \"0s\" disables it."
+          },
+          "message_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a non-streaming SendMessage. Defaults to \"0s\" (none), because a blocking send legitimately takes as long as the remote's work does."
+          },
+          "stream_open_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Deadline for a streaming call's response headers. Defaults to \"30s\". \"0s\" disables it."
+          },
+          "stream_idle_timeout": {
+            "$ref": "#/$defs/duration",
+            "description": "Bound on total silence on an open stream, measured in bytes read so SSE keep-alive comments count as life. Defaults to \"5m\"; raise it for a slow remote. \"0s\" disables it."
+          },
+          "progress": {
+            "type": "boolean",
+            "description": "Republish this remote's incremental progress (its narration and, via the Nexus extension, its tool calls and subagent activity) onto the local bus as io.output and subagent.iteration. Defaults to true."
+          },
+          "hitl": { "$ref": "#/$defs/hitl" },
+          "extensions": { "$ref": "#/$defs/extensions" },
+          "retry": { "$ref": "#/$defs/retry" },
+          "credentials": { "$ref": "#/$defs/credentials" }
+        }
+      }
+    },
+    "cache": {
+      "type": "boolean",
+      "description": "Set false to disable result caching entirely. Defaults to true."
+    },
+    "cache_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Capacity of the in-process LRU result cache (entries). Defaults to 128. Zero disables eviction."
+    },
+    "max_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Hard cap on delegation depth across all remotes. Defaults to 3. Zero disables the cap. A posture's max_recursion_depth may narrow it further."
+    },
+    "binding": { "$ref": "#/$defs/binding" },
+    "validate_card": {
+      "type": "boolean",
+      "description": "Default for every agent's validate_card. Defaults to true."
+    },
+    "stream": {
+      "type": "boolean",
+      "description": "Default for every agent's stream. Defaults to true."
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default whole-call deadline for every agent. Defaults to \"5m\"."
+    },
+    "request_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default control-plane deadline for every agent. Defaults to \"60s\"."
+    },
+    "message_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default non-streaming SendMessage deadline for every agent. Defaults to \"0s\" (none)."
+    },
+    "stream_open_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default stream-open deadline for every agent. Defaults to \"30s\"."
+    },
+    "stream_idle_timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Default stream-idle bound for every agent. Defaults to \"5m\"."
+    },
+    "progress": {
+      "type": "boolean",
+      "description": "Default for every agent's progress. Defaults to true."
+    },
+    "hitl": { "$ref": "#/$defs/hitl" },
+    "extensions": { "$ref": "#/$defs/extensions" },
+    "retry": { "$ref": "#/$defs/retry" }
+  }
+}

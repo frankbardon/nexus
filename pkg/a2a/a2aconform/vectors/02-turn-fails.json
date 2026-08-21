@@ -1,0 +1,26 @@
+{
+  "id": "turn-fails",
+  "title": "An unrecoverable error settles the task at TASK_STATE_FAILED",
+  "rationale": "A failed turn is a TASK STATE, not a transport error: the work failed, the protocol did not. The client therefore handles ONE shape of ending rather than two, and the terminal-close rule of specification section 11.7 ends the stream exactly as a success would. The reason travels on the status message so a client learns what went wrong without a second call, and no artifact is published, because a turn that failed produced no output to publish.",
+  "features": ["turn", "failure"],
+  "steps": [
+    {"kind": "message", "text": "summarize the incident", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "failure", "reason": "the model provider refused the request"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "status",
+        "state": "TASK_STATE_FAILED",
+        "messageRole": "ROLE_AGENT",
+        "messageContains": ["the model provider refused the request"]
+      }
+    ],
+    "finalState": "TASK_STATE_FAILED",
+    "streamClosed": true,
+    "streamInterrupted": false
+  }
+}

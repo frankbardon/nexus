@@ -6,6 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+  # Manual re-validation of any ref. A merge commit whose body is GitHub's
+  # default aggregate of the branch's commit subjects can inherit a CI-skip
+  # directive from any one of them and suppress every workflow for that push;
+  # main then sits unvalidated with no way to re-trigger short of a fresh
+  # commit. This trigger is that way.
+  workflow_dispatch:
+
+  # Nightly validation of main, so a push run suppressed for any reason is
+  # caught within a day rather than silently never.
+  #
+  # No `branches:` key here on purpose: GitHub always runs `schedule:` against
+  # the repository's default branch (main). There is no branch selector for
+  # scheduled events — adding one would be ignored, not honoured.
+  schedule:
+    - cron: "17 7 * * *" # 07:17 UTC daily
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,6 +45,40 @@ jobs:
       - name: Test
         run: make test
 
+      # Separate step so a broker-integration failure is attributable at a
+      # glance instead of being buried in the unit-test output above. Reuses the
+      # Go toolchain from the "Set up Go" step; no extra setup needed.
+      #
+      # Scoped to ./cmd/nexus-broker/ deliberately: tests/integration/ carries
+      # the same //go:build integration tag but makes real LLM calls in live
+      # mode and would fail here without ANTHROPIC_API_KEY. The broker suite is
+      # loopback-only — it compiles and spawns its own stub instance binaries —
+      # so it needs no API key and no repo secrets.
+      - name: Broker integration tests
+        run: make test-broker-integration
+
+  # Deliberately its own job rather than another step in `test`: it runs
+  # concurrently with `test` and `lint`, so a green CI costs no extra
+  # wall-clock time, and `make test-race` needs CGO_ENABLED=1 (the race
+  # detector requires cgo on linux/amd64) which would otherwise leak into the
+  # CGO_ENABLED=0 build the `test` job exercises.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: Download dependencies
+        run: go mod download
+
+      # Same target the maintainer runs locally, so local and CI cannot drift.
+      - name: Race detector
+        run: make test-race
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -43,7 +93,12 @@ jobs:
         run: make vet
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        # Pinned, not @latest. staticcheck v0.8.0 requires Go >= 1.26 while this
+        # workflow pins Go 1.25 with GOTOOLCHAIN=local, so an unpinned install
+        # started failing the moment v0.8.0 was published -- on every commit,
+        # including ones that had already passed. v0.7.0 declares go 1.25.0.
+        # Bump this together with the go-version matrix, never separately.
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0  # keep in step with STATICCHECK_VERSION in the Makefile
 
       - name: Lint
         run: make lint

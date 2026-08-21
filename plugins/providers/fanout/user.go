@@ -6,9 +6,26 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// newTimer is a package-level variable so tests can replace it with a
-// fast-firing timer to avoid real delays.
-var newTimer = time.NewTimer
+// timerHandle is the subset of *time.Timer the user-choice deadline needs. It
+// is an interface rather than a concrete *time.Timer so tests can inject a
+// timer whose firing they control and whose Stop they can observe.
+type timerHandle interface {
+	// C returns the channel the deadline fires on.
+	C() <-chan time.Time
+	// Stop releases the timer's runtime resources.
+	Stop() bool
+}
+
+// realTimer adapts *time.Timer to timerHandle.
+type realTimer struct{ t *time.Timer }
+
+func (r realTimer) C() <-chan time.Time { return r.t.C }
+func (r realTimer) Stop() bool          { return r.t.Stop() }
+
+// newRealTimer is the production timer factory. Tests replace it per-Plugin via
+// the newTimer field — there is deliberately no package-level seam, so two
+// tests can never race on the same address.
+func newRealTimer(d time.Duration) timerHandle { return realTimer{t: time.NewTimer(d)} }
 
 // presentToUser emits a provider.fanout.choose event with all responses and
 // waits for the user to pick one via provider.fanout.chosen. On timeout or
@@ -50,6 +67,12 @@ func (p *Plugin) awaitUserChoice(fanoutID string, state *fanoutState, responses 
 	var chosenIndex int
 	fallback := false
 
+	// cancelDeadline releases the deadline goroutine and its timer as soon as
+	// the outcome is settled — a prompt user choice must not leave either alive
+	// for the remainder of the deadline.
+	cancelDeadline := make(chan struct{})
+	deadline := p.deadlineTimer(cancelDeadline)
+
 	select {
 	case idx := <-choiceCh:
 		if idx < 0 || idx >= len(responses) {
@@ -62,12 +85,13 @@ func (p *Plugin) awaitUserChoice(fanoutID string, state *fanoutState, responses 
 		} else {
 			chosenIndex = idx
 		}
-	case <-p.deadlineTimer(state):
+	case <-deadline:
 		p.logger.Warn("fanout user choice timed out, falling back to all strategy",
 			"fanout_id", fanoutID,
 		)
 		fallback = true
 	}
+	close(cancelDeadline)
 
 	// Clean up pending choice.
 	p.mu.Lock()
@@ -98,14 +122,24 @@ func (p *Plugin) awaitUserChoice(fanoutID string, state *fanoutState, responses 
 	p.emitFinalResponse(fanoutID, state, reordered)
 }
 
-// deadlineTimer returns a channel that fires after the configured deadline.
-func (p *Plugin) deadlineTimer(state *fanoutState) <-chan struct{} {
+// deadlineTimer returns a channel that is closed once the configured deadline
+// elapses. Closing cancel stops the timer and retires the watching goroutine
+// without firing, so a settled choice leaks neither.
+func (p *Plugin) deadlineTimer(cancel <-chan struct{}) <-chan struct{} {
+	newTimer := p.newTimer
+	if newTimer == nil {
+		newTimer = newRealTimer
+	}
+
 	ch := make(chan struct{})
+	timer := newTimer(p.cfg.deadline)
 	go func() {
-		timer := newTimer(p.cfg.deadline)
-		<-timer.C
-		timer.Stop()
-		close(ch)
+		defer timer.Stop()
+		select {
+		case <-timer.C():
+			close(ch)
+		case <-cancel:
+		}
 	}()
 	return ch
 }

@@ -57,8 +57,15 @@ type Plugin struct {
 	approvalMode  string // "approve", "deny", "per-prompt"
 	approvalRules []ApprovalRule
 	hitlResponses []hitlScript
-	mockResponses []MockResponse
-	timeout       time.Duration
+	// hitlAutoRespond gates the automatic answer to hitl.requested. It is true
+	// by default so every existing scenario keeps running unattended, and is
+	// switched off by a test that needs a question to stay GENUINELY
+	// unanswered — notably the A2A loopback, where the serving engine's
+	// question has to travel to the calling engine's human instead of being
+	// settled inside the process that asked it.
+	hitlAutoRespond bool
+	mockResponses   []MockResponse
+	timeout         time.Duration
 
 	// State
 	mu            sync.Mutex
@@ -183,6 +190,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				p.hitlResponses = append(p.hitlResponses, script)
 			}
 		}
+	}
+
+	p.hitlAutoRespond = true
+	if v, ok := ctx.Config["hitl_auto_respond"].(bool); ok {
+		p.hitlAutoRespond = v
 	}
 
 	p.parseMockResponses(ctx.Config)
@@ -502,6 +514,12 @@ func (p *Plugin) handlePlanApprovalRequest(e engine.Event[any]) {
 func (p *Plugin) handleHITL(e engine.Event[any]) {
 	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
+		return
+	}
+	// The event is still collected by the wildcard subscriber; only the answer
+	// is withheld. A test that switched this off wants to observe the question
+	// and let something else — another transport, another engine — answer it.
+	if !p.hitlAutoRespond {
 		return
 	}
 

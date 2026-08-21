@@ -1,0 +1,91 @@
+# Test: the CALLEE half of the Nexus->Nexus A2A loopback.
+#
+# This engine serves itself as an A2A agent over nexus.io.a2a, guarded by a
+# shared bearer token. The caller is configs/test-a2a-loopback-caller.yaml,
+# whose nexus.agent.a2a_remote plugin fetches this instance's Agent Card, sends
+# it a delegated task and streams the resulting A2A Task to COMPLETED.
+#
+# Together the two configs are the effort's conformance backstop: no external
+# A2A counterparty is in the test path, so both directions are proven against
+# each other. See tests/integration/a2a_loopback_test.go.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses (mock_responses) so
+# no API key is needed — it has no scripted inputs; the inbound A2A message is
+# the sole driver of the turn. Remove the mock_responses block to run live
+# against a real provider (needs ANTHROPIC_API_KEY).
+#
+# Run:
+#   bin/nexus -config configs/test-a2a-loopback-server.yaml
+#   go test -tags integration ./tests/integration/ -run TestA2ALoopback
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.a2a
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    # Active so an inbound CancelTask has control.cancel to route through,
+    # which is what the cancellation leg of the loopback exercises.
+    - nexus.control.cancel
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - content: "The remote Nexus agent completed the delegated task."
+
+  nexus.io.a2a:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    # 18191 belongs to configs/test-a2a-serve.yaml, so the loopback pair uses
+    # its own port and the two suites can never fight over a listener.
+    bind: 127.0.0.1:18192
+    public_url: http://127.0.0.1:18192
+    # The caller presents this token; see the credentials block in
+    # configs/test-a2a-loopback-caller.yaml. card_requires_auth stays at its
+    # default (false) on purpose: specification section 8.2 makes the card the
+    # PRE-authentication bootstrap document, and a2aclient fetches it before it
+    # has anything to present.
+    bearer_token: test-a2a-loopback-token
+    card:
+      name: nexus-loopback-agent
+      description: A Nexus instance serving itself over A2A for loopback interop testing.
+      version: 0.1.0
+      provider:
+        organization: Nexus
+        url: https://github.com/frankbardon/nexus
+      default_input_modes: ["text/plain"]
+      default_output_modes: ["text/plain"]
+      skills:
+        - id: chat
+          name: Conversational turn
+          description: Run a single conversational turn against the configured agent loop.
+          tags: ["chat", "react"]
+          examples:
+            - "Summarize the release notes."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are the remote test agent."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
