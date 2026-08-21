@@ -1,0 +1,92 @@
+# Test: the CALLER half of the Nexus->Nexus A2A loopback.
+#
+# This engine's ReAct agent is driven (mock LLM) to invoke delegate_a2a_peer,
+# the tool nexus.agent.a2a_remote registers for the remote named "peer". That
+# remote is a second Nexus engine running nexus.io.a2a, booted separately by the
+# integration test from configs/test-a2a-loopback-server.yaml on 127.0.0.1:18192.
+#
+# One delegation therefore exercises both legs of the A2A integration against
+# each other: card fetch, a streaming run to COMPLETED, the remote's artifacts
+# folded back into the tool result, cancellation, and — with the HITL server
+# config — a question raised on the remote and answered here.
+#
+# nexus.io.test supplies the scripted user input AND the mock LLM responses, so
+# no API key is needed:
+#   1. tool_call delegate_a2a_peer — hands the subtask to the remote agent.
+#   2. final content — closes this turn once the tool.result returns.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestA2ALoopback
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.agent.a2a_remote
+    - nexus.control.cancel
+    - nexus.gate.endless_loop
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Ask the remote Nexus agent to handle the release."
+    input_delay: 100ms
+    approval_mode: approve
+    timeout: 30s
+    mock_responses:
+      - tool_calls:
+          - name: delegate_a2a_peer
+            arguments: '{"task":"Handle the release for the loopback test."}'
+      - content: "The remote Nexus agent handled the release."
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test caller agent. Delegate to the remote A2A agent when asked."
+
+  nexus.agent.a2a_remote:
+    # Disabled so every test genuinely crosses the wire rather than replaying a
+    # previous run's folded result.
+    cache: false
+    # Well under the 5m built-in default so a wedged remote fails this test
+    # rather than stalling the suite. Note the default relationship the
+    # documentation calls out: the whole-call budget keeps running while a task
+    # is parked, so it — not hitl.input_timeout — is the binding deadline unless
+    # it is raised. Here it is deliberately the LOOSER of the two.
+    timeout: 60s
+    hitl:
+      input_timeout: 20s
+    agents:
+      - name: peer
+        # The loopback nexus.io.a2a listener. base_url is an ORIGIN: the Agent
+        # Card is fetched from /.well-known/agent-card.json beneath it and names
+        # the per-binding endpoints.
+        base_url: http://127.0.0.1:18192
+        description: A second Nexus instance reachable over A2A.
+        credentials:
+          type: bearer
+          token: test-a2a-loopback-token
+
+  nexus.gate.endless_loop:
+    max_iterations: 5
+
+  nexus.memory.capped:
+    max_messages: 20
+    persist: false

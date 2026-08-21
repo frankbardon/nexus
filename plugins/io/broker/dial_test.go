@@ -346,3 +346,109 @@ func TestInboundShutdownEmitsSessionEnd(t *testing.T) {
 		t.Error("shutdownRequested not latched after shutdown frame")
 	}
 }
+
+// TestOutboundHITLRequestCarriesModeAndChoices is the parity assertion for the
+// question payload.
+//
+// nexus.io.browser has always forwarded a HITL question's mode and options (via
+// ui.HITLRequestMessage); this transport forwarded only the prompt, so a
+// multiple-choice ask_user reached a broker client as bare prose it could not
+// answer by id — and a broker-side A2A mapping could not render the options
+// either. The ids are what a responder echoes back in choice_id, so a payload
+// without them is not an answerable question.
+func TestOutboundHITLRequestCarriesModeAndChoices(t *testing.T) {
+	stub := newStubBroker(t)
+	p, bus := newTestPlugin(t, stub.wsURL(), "lease-1", "")
+
+	p.client.Start()
+	waitConn(t, stub)
+	time.Sleep(50 * time.Millisecond)
+
+	if err := bus.Emit("hitl.requested", events.HITLRequest{
+		SchemaVersion: events.HITLRequestVersion,
+		ID:            "q-1",
+		TurnID:        "t-1",
+		Prompt:        "Which environment?",
+		Mode:          events.HITLModeChoices,
+		Choices: []events.HITLChoice{
+			{ID: "staging", Label: "Staging"},
+			{ID: "production", Label: "Production"},
+		},
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, f := range stub.snapshot() {
+			if f.Signal != brokerframe.SignalIO {
+				continue
+			}
+			var msg ioMessage
+			if json.Unmarshal(f.Payload, &msg) != nil || msg.Type != "hitl.request" {
+				continue
+			}
+			if msg.RequestID != "q-1" || msg.Prompt != "Which environment?" {
+				t.Fatalf("hitl.request payload = %+v", msg)
+			}
+			if msg.Mode != string(events.HITLModeChoices) {
+				t.Errorf("mode = %q, want %q", msg.Mode, events.HITLModeChoices)
+			}
+			if len(msg.Choices) != 2 {
+				t.Fatalf("choices = %+v, want 2", msg.Choices)
+			}
+			if msg.Choices[0].ID != "staging" || msg.Choices[0].Label != "Staging" {
+				t.Errorf("choices[0] = %+v, want the staging option", msg.Choices[0])
+			}
+			if msg.Choices[1].ID != "production" || msg.Choices[1].Label != "Production" {
+				t.Errorf("choices[1] = %+v, want the production option", msg.Choices[1])
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("stub broker never received the hitl.request IO frame")
+}
+
+// TestOutboundFreeTextHITLRequestOmitsChoices keeps the additive claim honest:
+// a question with no options must encode no `choices` key at all, so a
+// free-text question's frame is byte-identical to what it was before choices
+// existed and an older client sees no change.
+func TestOutboundFreeTextHITLRequestOmitsChoices(t *testing.T) {
+	stub := newStubBroker(t)
+	p, bus := newTestPlugin(t, stub.wsURL(), "lease-1", "")
+
+	p.client.Start()
+	waitConn(t, stub)
+	time.Sleep(50 * time.Millisecond)
+
+	if err := bus.Emit("hitl.requested", events.HITLRequest{
+		SchemaVersion: events.HITLRequestVersion,
+		ID:            "q-1",
+		Prompt:        "Approve the destructive migration?",
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, f := range stub.snapshot() {
+			if f.Signal != brokerframe.SignalIO {
+				continue
+			}
+			var decoded map[string]any
+			if json.Unmarshal(f.Payload, &decoded) != nil || decoded["type"] != "hitl.request" {
+				continue
+			}
+			if _, present := decoded["choices"]; present {
+				t.Errorf("a free-text question encoded a choices key: %v", decoded)
+			}
+			if decoded["mode"] != string(events.HITLModeFreeText) {
+				t.Errorf("mode = %v, want %q", decoded["mode"], events.HITLModeFreeText)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("stub broker never received the hitl.request IO frame")
+}

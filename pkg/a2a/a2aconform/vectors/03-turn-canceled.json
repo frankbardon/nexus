@@ -1,0 +1,27 @@
+{
+  "id": "turn-canceled",
+  "title": "A client cancellation settles the task at TASK_STATE_CANCELED",
+  "rationale": "Cancellation is a terminal transition the CLIENT causes, and it must be rendered as one: the task reaches TASK_STATE_CANCELED, the reason rides the status message, and the stream closes under the same terminal-close rule that ends a completed turn. A mapping that hung the connection up instead would be indistinguishable, client-side, from a crash. assert_active before the cancel keeps the vector honest about cancelling a LIVE task rather than a task that had already ended.",
+  "features": ["turn", "cancel"],
+  "steps": [
+    {"kind": "message", "text": "reindex everything", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "assert_active", "note": "the task must still be live for a cancellation to mean anything"},
+    {"kind": "cancel", "reason": "the client changed its mind"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "status",
+        "state": "TASK_STATE_CANCELED",
+        "messageRole": "ROLE_AGENT",
+        "messageContains": ["canceled"]
+      }
+    ],
+    "finalState": "TASK_STATE_CANCELED",
+    "streamClosed": true,
+    "streamInterrupted": false
+  }
+}

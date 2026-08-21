@@ -16,6 +16,13 @@ import (
 
 // Version is the schema version of the broker frame. Bump it on any
 // breaking change to the wire shape so both ends can detect a mismatch.
+//
+// It is not decorative: the broker VALIDATES it on the register frame and
+// refuses an instance that declares anything else, because a build mismatch
+// otherwise surfaces as a claim timing out with "instance did not become ready
+// in time" — a message that reads as a network fault. Bumping this is therefore
+// a deliberate, load-bearing act: every instance binary older than the bump
+// stops registering with the brokers that carry it.
 const Version = 1
 
 // Environment variable names the broker injects when spawning an instance
@@ -34,7 +41,8 @@ const (
 	// EnvSpawnSecret holds a per-spawn secret the broker generates and hands
 	// to the child process. The plugin echoes it in its register frame
 	// (Frame.Secret) and the broker requires it to match the value it minted
-	// for that lease.
+	// for that lease — on every registration, whether or not the broker
+	// authenticates its clients.
 	//
 	// It exists because the lease id ALONE is a poor authenticator for the
 	// dial-back socket: it travels in ws_urls, client requests and logs, so
@@ -69,12 +77,30 @@ const (
 	// client and the instance. The broker forwards these without parsing
 	// their contents.
 	SignalIO Signal = "io"
+
+	// SignalStreamGap tells a CLIENT that a range of client-bound frames it
+	// asked to resume from can no longer be supplied. Frame.Payload names the
+	// missing range; the broker's client gateway is the only thing that emits
+	// it, and only in answer to a resume request.
+	//
+	// It carries no Seq: a gap notice is a property of one CONNECTION, not of
+	// the lease's frame stream, so numbering it would shift every subsequent
+	// sequence for a client that reconnects and make the stream's numbering
+	// depend on how often a client dropped. It is written ahead of whatever
+	// the broker can still replay, so a client learns what it lost before it
+	// is handed what survived.
+	//
+	// An instance never sends or receives one. Adding it needed no Version
+	// bump for the same reason Frame.Seq did not: a broker only ever emits it
+	// to a client that opted in by presenting `?from_seq=`, so no peer built
+	// against an older broker can be handed a signal it cannot decode.
+	SignalStreamGap Signal = "stream-gap"
 )
 
 // valid reports whether s is a recognized signal.
 func (s Signal) valid() bool {
 	switch s {
-	case SignalRegister, SignalReady, SignalSessionIDReport, SignalShutdown, SignalIO:
+	case SignalRegister, SignalReady, SignalSessionIDReport, SignalShutdown, SignalIO, SignalStreamGap:
 		return true
 	default:
 		return false
@@ -86,6 +112,11 @@ type Frame struct {
 	// Version is the frame schema version. Encode stamps the current
 	// Version; Decode tolerates older/newer values so callers can decide
 	// how to react to a mismatch.
+	//
+	// The broker is the caller that decides: it refuses a register frame whose
+	// version is not its own and logs the skew by name. Tolerating the value
+	// here rather than rejecting it in Decode is what makes that possible — a
+	// decode error could not tell a skewed build from a corrupt frame.
 	Version int `json:"version"`
 
 	// LeaseID identifies the broker lease this frame belongs to. It is
@@ -103,9 +134,10 @@ type Frame struct {
 	// It is OPTIONAL on the wire (`omitempty`) and that is deliberate, not
 	// laxity: an instance binary predating this field encodes no `secret` key
 	// at all, and its frame must still DECODE cleanly so the broker can answer
-	// with a specific version-skew diagnosis instead of a JSON error. Whether an
-	// absent secret is ACCEPTED is the broker's policy decision (it is gated on
-	// the broker having an `auth:` block), not this package's.
+	// with a specific diagnosis instead of a JSON error. Whether an absent
+	// secret is ACCEPTED is the broker's policy decision, not this package's —
+	// and the broker's answer is now no, unconditionally, with or without an
+	// `auth:` block.
 	//
 	// It is meaningless on every other signal and must never be echoed back to
 	// a client: the broker forwards SignalIO frames verbatim, so nothing may
@@ -115,6 +147,27 @@ type Frame struct {
 	// SessionID is the engine session ID. Set on SignalSessionIDReport
 	// frames; empty otherwise.
 	SessionID string `json:"session_id,omitempty"`
+
+	// Seq is the broker-assigned, per-lease sequence number of a CLIENT-BOUND
+	// frame. It counts from 1 and increments by exactly one for every frame the
+	// broker sends a lease's client, whatever the signal, so a client can detect
+	// a gap rather than silently believing a truncated stream.
+	//
+	// THE BROKER ASSIGNS IT, ON CLIENT-BOUND FRAMES ONLY. An instance never sets
+	// it and never reads it: instance-bound frames carry no sequence at all, so
+	// the dial-back side needs no protocol awareness and nothing about it
+	// changed. Anything an instance puts here is overwritten by the broker
+	// before the frame reaches a client.
+	//
+	// It is OPTIONAL on the wire (`omitempty`) and zero means "unsequenced" —
+	// which is what every instance-bound frame is, and what every frame from a
+	// broker predating this field was. That is why adding it needed no Version
+	// bump: an older peer decodes a sequenced frame cleanly and ignores the key.
+	//
+	// The sequence is per LEASE, not per broker or per connection: two leases
+	// number independently from 1, and the counter lives and dies with the lease
+	// (it does not survive a broker restart).
+	Seq uint64 `json:"seq,omitempty"`
 
 	// Payload is an opaque IO payload, meaningful on SignalIO frames. The
 	// broker forwards it untouched between client and instance.

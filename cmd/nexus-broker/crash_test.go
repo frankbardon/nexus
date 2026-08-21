@@ -28,10 +28,8 @@ func seedLiveLeaseOwned(t *testing.T, reg *Registry, proc processHandle, owner n
 	}
 	inst := newWSConn(nil)
 	client := newWSConn(nil)
-	if err := reg.AttachInstance(id, inst, "", false); err != nil {
-		t.Fatalf("AttachInstance: %v", err)
-	}
-	if err := reg.AttachClient(id, client); err != nil {
+	attachTestInstance(t, reg, id, inst)
+	if _, err := reg.AttachClient(id, client); err != nil {
 		t.Fatalf("AttachClient: %v", err)
 	}
 	reg.SetProcess(id, proc)
@@ -50,7 +48,7 @@ func TestWatchExit_UnexpectedExitIsCrash(t *testing.T) {
 	id, l, client := seedLiveLease(t, reg, proc)
 
 	// The instance dies unexpectedly (nobody set releasing).
-	close(proc.exited)
+	proc.exit()
 	// watchExit returns once the crash has been handled, so we can assert
 	// synchronously without sleeps.
 	reg.watchExit(id)
@@ -90,7 +88,7 @@ func TestWatchExit_CrashReapsOwnedLeaseWithNoPrincipal(t *testing.T) {
 	proc := newFakeProcess(303)
 	id, l, client := seedLiveLeaseOwned(t, reg, proc, testOwner())
 
-	close(proc.exited)
+	proc.exit()
 	reg.watchExit(id) // synchronous: returns once the crash is handled
 
 	if reg.Has(id) {
@@ -132,7 +130,7 @@ func TestWatchExit_GracefulReleaseNotCrash(t *testing.T) {
 	l.reason = "manual release"
 	reg.mu.Unlock()
 
-	close(proc.exited)
+	proc.exit()
 	reg.watchExit(id) // synchronous: observes the latch and bails
 
 	// watchExit must not have torn anything down — that is the release path's job.
@@ -159,7 +157,7 @@ func TestReleaseLease_ClosesClientWithGracefulStatus(t *testing.T) {
 	reg := NewRegistry(testLogger(), 0)
 	proc := newFakeProcess(302)
 	id, _, client := seedLiveLease(t, reg, proc)
-	close(proc.exited)
+	proc.exit()
 
 	if err := reg.releaseLease(id, "manual release", time.Second); err != nil {
 		t.Fatalf("releaseLease: %v", err)

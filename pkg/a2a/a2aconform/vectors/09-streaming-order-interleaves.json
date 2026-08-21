@@ -1,0 +1,65 @@
+{
+  "id": "streaming-order-interleaves",
+  "title": "Status and artifact frames interleave after the opening frame",
+  "rationale": "A literal reading of specification section 11.7's ordering — all status updates, then all artifact updates — IS NOT IMPLEMENTABLE, because the terminal status frame that closes a stream necessarily follows the artifacts whose production it completes. This vector pins the real rule so nobody 'fixes' it into a phase gate: after the opening Task snapshot, status and artifact frames arrive in the order the turn produced them. Here a tool result lands, then a question interrupts the task, then the answer resumes it, then a second tool result and the answer land — status after artifact and artifact after status, both. What IS ordered is the part that matters: every artifact precedes the terminal status, because a client that stops reading at a terminal state would otherwise never see the output that state completes.",
+  "features": ["turn", "tool_artifacts", "hitl"],
+  "steps": [
+    {"kind": "message", "text": "research and apply the fix", "contextId": "ctx-conform", "messageId": "m-1"},
+    {"kind": "turn_start", "turnId": "turn-1"},
+    {"kind": "thinking", "text": "I should search before changing anything."},
+    {"kind": "tool_result", "callId": "call-1", "tool": "search", "output": "found 3 results"},
+    {
+      "kind": "ask_user",
+      "requestId": "q-1",
+      "prompt": "Proceed with the update?",
+      "choices": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}]
+    },
+    {"kind": "assert_parked"},
+    {"kind": "answer", "text": "yes", "messageId": "m-2"},
+    {"kind": "tool_result", "callId": "call-2", "tool": "apply", "output": "update applied"},
+    {"kind": "agent_text", "text": "The update is applied."},
+    {"kind": "assert_active"},
+    {"kind": "output", "text": "The update is applied."},
+    {"kind": "turn_end", "turnId": "turn-1"}
+  ],
+  "expect": {
+    "frames": [
+      {"kind": "task", "state": "TASK_STATE_SUBMITTED", "noMessage": true},
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "note": "a reasoning step produced no canonical frame; only the tool RESULT is output",
+        "artifactId": "{taskId}-tool-call-1",
+        "artifactName": "search",
+        "parts": [{"kind": "text", "equals": "found 3 results"}]
+      },
+      {
+        "kind": "status",
+        "note": "a status AFTER an artifact: the phase gate does not exist",
+        "state": "TASK_STATE_INPUT_REQUIRED",
+        "messageRole": "ROLE_AGENT",
+        "messageContains": ["Proceed with the update?"]
+      },
+      {"kind": "status", "state": "TASK_STATE_WORKING", "noMessage": true},
+      {
+        "kind": "artifact",
+        "note": "and an artifact after a status",
+        "artifactId": "{taskId}-tool-call-2",
+        "artifactName": "apply",
+        "parts": [{"kind": "text", "equals": "update applied"}]
+      },
+      {
+        "kind": "artifact",
+        "artifactId": "{taskId}-response",
+        "artifactName": "response",
+        "parts": [{"kind": "text", "equals": "The update is applied."}]
+      },
+      {"kind": "status", "state": "TASK_STATE_COMPLETED", "noMessage": true}
+    ],
+    "finalState": "TASK_STATE_COMPLETED",
+    "streamClosed": true,
+    "streamInterrupted": false,
+    "artifactsPrecedeTerminal": true,
+    "statusFollowsArtifact": true
+  }
+}
