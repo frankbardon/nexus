@@ -99,7 +99,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 	if streaming {
 		// A write failure on THIS connection no longer fails the task either,
 		// for the same reason: the answer outlives the socket that asked for it.
-		s.pumpStream(ctx, w, b, sub, opening, nil)
+		s.pumpStream(ctx, w, b, run, sub, opening, nil)
 		return
 	}
 	s.blockOnTask(ctx, w, b, sub, run, opening)
@@ -125,9 +125,11 @@ const parkedKeepaliveInterval = 20 * time.Second
 // handlers never touch it; they only push onto sub.frames.
 //
 // A nil sub means there is nothing live to follow: the snapshot is written and
-// the stream ends. onBroken, when supplied, is called if this connection cannot
-// carry the stream — see the call sites for why only one of them supplies it.
-func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b binding, sub *stream, opening a2a.Task, onBroken func(string)) {
+// the stream ends. r is the run sub belongs to, and is nil for exactly the same
+// reason — it is only read to wait for the task to settle before the response
+// ends. onBroken, when supplied, is called if this connection cannot carry the
+// stream — see the call sites for why only one of them supplies it.
+func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b binding, r *run, sub *stream, opening a2a.Task, onBroken func(string)) {
 	a2a.WriteSSEHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 
@@ -179,6 +181,14 @@ func (s *Server) pumpStream(ctx context.Context, w http.ResponseWriter, b bindin
 				return
 			}
 			if sse.Closed() {
+				// The stream closed on a terminal frame (specification section
+				// 11.7). The response is not finished until this returns, so
+				// settling first is what stops a client that follows the stream
+				// to its end from being refused TASK_ALREADY_IN_FLIGHT on its
+				// next send against a slot this turn had not yet returned
+				// (issue #153) — the same guarantee blockOnTask makes. Bounded
+				// by one mutex acquire; see the ordering note on run.terminate.
+				r.awaitSettled(ctx)
 				return
 			}
 		case <-sub.dropped:
@@ -213,7 +223,29 @@ func (s *Server) blockOnTask(ctx context.Context, w http.ResponseWriter, b bindi
 		select {
 		case frame := <-sub.frames:
 			applyFrame(&task, frame)
-			if state := task.Status.State; state.IsTerminal() || state.IsInterrupted() {
+			switch state := task.Status.State; {
+			case state.IsTerminal():
+				// The terminal frame crossed a BUFFERED channel, so seeing it
+				// says nothing about how far the run's terminal sequence has
+				// got. Waiting for the run to settle before answering is what
+				// makes this reply mean "the task ended" rather than "the task
+				// is ending": a client that reads a COMPLETED task and sends
+				// again on the same contextId must not be refused
+				// TASK_ALREADY_IN_FLIGHT by the slot of the turn it just
+				// watched finish (issue #153). The wait is bounded by one
+				// uncontended mutex acquire — see the ordering note on
+				// run.terminate — and honours ctx, so a client that has
+				// already gone is not waited on.
+				run.awaitSettled(ctx)
+				s.writeResult(w, b, a2a.TaskResponse(task))
+				return
+			case state.IsInterrupted():
+				// An interruption is NOT a termination: the task stays live and
+				// deliberately keeps holding the slot, because the answer
+				// resumes THIS turn rather than starting a second one (see
+				// run.park and resumeTurn). There is nothing to settle, and
+				// waiting on the run here would block until the input deadline
+				// killed the very question this reply carries.
 				s.writeResult(w, b, a2a.TaskResponse(task))
 				return
 			}

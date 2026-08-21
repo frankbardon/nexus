@@ -201,6 +201,23 @@ func Run(variant string) {
 	// switch would leave the second untested.
 	crashMidTurn := os.Getenv("STUB_CRASH_MID_TURN") == "1"
 
+	// When STUB_CRASH_AFTER_ANSWER=1 the stub plays a COMPLETE turn — `status:
+	// thinking`, the `output`, `status: idle` — and then exits abnormally in the
+	// same instant, with no graceful shutdown handshake.
+	//
+	// This is the production shape of a prompt exit: a oneshot IO profile that
+	// answers and returns, a plugin that calls os.Exit, an OOM kill landing just
+	// after the answer. Every frame the turn needs is on the wire BEFORE the
+	// process dies, so the only correct rendering is COMPLETED with the answer —
+	// and a broker that reacts to the process being reaped rather than to the
+	// socket EOF reports FAILED with nothing instead.
+	//
+	// It is deliberately a third switch rather than a mode of STUB_CRASH_MID_TURN:
+	// that one dies BEFORE answering and must keep meaning FAILED, and collapsing
+	// the two would make the fixture unable to tell "lost the answer" from
+	// "there was no answer".
+	crashAfterAnswer := os.Getenv("STUB_CRASH_AFTER_ANSWER") == "1"
+
 	// When STUB_RECONNECT=1 the stub mirrors the real nexus.io.broker plugin's
 	// reconnect loop (plugins/io/broker/server.go): a dropped connection is
 	// retried with backoff until a shutdown frame arrives. It is what makes the
@@ -209,15 +226,16 @@ func Run(variant string) {
 	reconnect := os.Getenv("STUB_RECONNECT") == "1"
 
 	sess := session{
-		recalled:        *recall != "",
-		addr:            addr,
-		leaseID:         leaseID,
-		spawnSecret:     spawnSecret,
-		sessionID:       sessionID,
-		ignoreShutdown:  ignoreShutdown,
-		crashAfterReady: crashAfterReady,
-		crashMidTurn:    crashMidTurn,
-		turnDelay:       turnDelay,
+		recalled:         *recall != "",
+		addr:             addr,
+		leaseID:          leaseID,
+		spawnSecret:      spawnSecret,
+		sessionID:        sessionID,
+		ignoreShutdown:   ignoreShutdown,
+		crashAfterReady:  crashAfterReady,
+		crashMidTurn:     crashMidTurn,
+		crashAfterAnswer: crashAfterAnswer,
+		turnDelay:        turnDelay,
 		report: Report{
 			Variant: variant,
 			Args:    rawArgs,
@@ -289,6 +307,9 @@ type session struct {
 	// crashMidTurn kills the process once a turn is visibly under way; see the
 	// STUB_CRASH_MID_TURN comment in Run.
 	crashMidTurn bool
+	// crashAfterAnswer kills the process the instant a complete turn has been
+	// written; see the STUB_CRASH_AFTER_ANSWER comment in Run.
+	crashAfterAnswer bool
 	// turnDelay stretches a turn's WORKING window; see STUB_TURN_DELAY in Run.
 	turnDelay time.Duration
 	report    Report
@@ -434,6 +455,14 @@ func (s session) answerTurn(ctx context.Context, conn *websocket.Conn, turn int)
 		if !s.emit(ctx, conn, msg) {
 			return
 		}
+	}
+
+	if s.crashAfterAnswer {
+		// The whole turn is on the wire; this process has no more to say. Exiting
+		// abnormally here — rather than returning and letting the socket close
+		// cleanly — is what makes the broker's crash teardown race the frames it
+		// has just been sent. See STUB_CRASH_AFTER_ANSWER in Run.
+		os.Exit(9)
 	}
 }
 

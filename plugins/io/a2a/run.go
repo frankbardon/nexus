@@ -1,6 +1,7 @@
 package a2a
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -127,9 +128,13 @@ type run struct {
 	// runConfig.textOnly.
 	textOnly bool
 
-	// done is closed once a terminal frame has been queued, so later bus
-	// events for this run are dropped rather than queued behind a stream that
-	// is already finished.
+	// done is closed once the terminal sequence has queued its frames AND
+	// returned the plugin's active-task slot. It therefore serves two readers:
+	// later bus events for this run are dropped rather than queued behind a
+	// stream that is already finished, and a response handler holding a terminal
+	// frame waits on it so it never reports an ended task while the slot that
+	// task held is still out. Both meanings are established by the single close
+	// in terminate — see the ordering note there.
 	done     chan struct{}
 	closeOne sync.Once
 
@@ -291,6 +296,32 @@ func (r *run) terminated() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// awaitSettled blocks until this run's terminal sequence has finished and the
+// plugin's active-task slot is back.
+//
+// A response handler calls it after it has SEEN a terminal frame but before it
+// tells the client the task ended: the frame crossed a buffered channel, so
+// observing it says nothing about how far run.terminate has got. Waiting here is
+// what makes a terminal A2A response mean "settled" rather than "settling", so a
+// sequential client's next send is not refused TASK_ALREADY_IN_FLIGHT against
+// the slot of the turn it just watched finish. See the ordering note on
+// terminate.
+//
+// It must only be reached once a terminal frame has been observed. From that
+// point the wait is bounded by one uncontended mutex acquire inside terminate,
+// and ctx is honoured regardless, so a client that has already gone is never
+// waited on. A nil run is a stream with nothing live behind it — a
+// SubscribeToTask on a finished task — and settles trivially.
+func (r *run) awaitSettled(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	select {
+	case <-r.done:
+	case <-ctx.Done():
 	}
 }
 
@@ -764,13 +795,41 @@ func (r *run) stopTimerLocked() {
 // --- terminal transitions ---
 
 // terminate runs the one-shot terminal sequence: disarm the input deadline,
-// emit whatever frames describe the ending, close done so nothing further is
-// queued, and release the plugin's active-task slot.
+// emit whatever frames describe the ending, release the plugin's active-task
+// slot, and only then close done.
 //
 // Every terminal path goes through it, which is what makes "the slot is
 // returned when the task ends" true by construction rather than by each caller
-// remembering. Ordering matters: the frames are emitted BEFORE done closes,
-// because emit drops anything queued after a terminal state.
+// remembering.
+//
+// # All three steps are ordered on purpose. Do not reorder them.
+//
+// frames() comes FIRST because emit drops anything queued once the task reads
+// as terminated, so a frame produced after the close would reach neither the
+// wire nor the store. This has always been true and is why complete() may
+// publish its artifact from inside the callback.
+//
+// onTerminal() comes BEFORE close(r.done) because r.done is what a request
+// waits on before it tells a client the task ended (see blockOnTask and
+// pumpStream), and that statement is only honest if the slot is already back.
+// The terminal frame reaches the HTTP goroutine over a BUFFERED channel, so
+// that goroutine can be writing the client's 200 while this one is still
+// between steps. With the release last, a client doing the obvious thing —
+// await COMPLETED, then send again on the same contextId — was refused
+// TASK_ALREADY_IN_FLIGHT by startTurn against a slot this very sequence had not
+// got round to returning (issue #153). Nothing there was a data race: every
+// p.active access is under p.mu, and -race only made it likely by slowing this
+// goroutine enough to widen the window. Releasing the slot ahead of frames()
+// would close the same window and is NOT the fix: it would admit two live runs
+// at once, the ending one still publishing while the next one's turn is already
+// on the bus. That crosstalk is what the turnID binding in onTurnEnd and
+// TestStaleTurnEndCannotCompleteTheNextTask guard, and widening it to span a
+// whole terminal emit is not a trade worth making.
+//
+// close(r.done) comes LAST so r.done carries one meaning for every reader: this
+// task is finished AND its slot is released. This is the ONLY close of that
+// channel, and closeOne makes the whole sequence all-or-nothing, so a reader
+// parked on it cannot be stranded by some other path settling the task.
 func (r *run) terminate(frames func()) bool {
 	fired := false
 	r.closeOne.Do(func() {
@@ -781,10 +840,10 @@ func (r *run) terminate(frames func()) bool {
 		r.mu.Unlock()
 
 		frames()
-		close(r.done)
 		if r.onTerminal != nil {
 			r.onTerminal()
 		}
+		close(r.done)
 	})
 	return fired
 }

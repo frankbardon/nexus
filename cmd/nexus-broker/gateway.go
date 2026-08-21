@@ -281,6 +281,17 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wc := newWSConn(conn)
+	// Declare, before the conn is published to a lease, that a read pump owns it
+	// and will latch its drain signal — and back that declaration with an
+	// unconditional deferred latch, so it holds on every path out of this
+	// handler, including any early return a later edit adds between the attach
+	// below and the readPump call further down. The order matters: the
+	// declaration must precede AttachInstance so Registry.mu publishes it (see
+	// wsConn.awaitDrain), and the latch must be unconditional because a teardown
+	// waits on it — a declaration without a guaranteed latch would turn a dropped
+	// frame into a teardown that blocks for the whole drain grace.
+	wc.expectDrain()
+	defer wc.markDrained()
 	// The register frame must carry BOTH the lease id and the per-spawn secret
 	// the broker handed this child through its environment. The secret is
 	// required unconditionally — see Registry.AttachInstance for why gating it on
@@ -761,7 +772,18 @@ func (g *Gateway) livenessPump(ctx context.Context, leaseID string, role peerRol
 // forwarding, letting the caller react to lifecycle signals (e.g. ready)
 // without disturbing routing. It returns when the connection closes or its
 // context is cancelled.
+//
+// It latches wc.drained on the way out, UNCONDITIONALLY and via defer, so every
+// exit path fires it: a read error, an EOF, a cancelled context, a panic, and
+// any early return a later edit adds. That latch is what a teardown waits on
+// instead of on the instance process being reaped (see
+// Registry.awaitInstanceDrain), which makes it load-bearing in a way a
+// best-effort signal would not be — a latch that can fail to fire converts a
+// dropped frame into a hung teardown. Do not make it conditional, and do not
+// REPLACE it with the call-site latch in handleInstance: that one is a backstop
+// for a conn whose pump never started, and it cannot see this loop's exit paths.
 func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forward func(string, brokerframe.Frame, []byte), observe func(brokerframe.Frame)) {
+	defer wc.markDrained()
 	for {
 		_, data, err := wc.conn.Read(ctx)
 		if err != nil {

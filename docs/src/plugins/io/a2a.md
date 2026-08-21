@@ -150,9 +150,10 @@ publishes](#what-a-turn-publishes) below.
 
 Refusals worth knowing about, each carrying the error type the specification
 reserves for it: a non-text Part (`ContentTypeNotSupportedError`), an inline
-`taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a second
-task while one is in flight (`UnsupportedOperationError` — the listener fronts
-one agent loop, and two turns would interleave on the same bus).
+`taskPushNotificationConfig` (`PushNotificationNotSupportedError`), and a
+genuinely concurrent second task while one is in flight
+(`UnsupportedOperationError` — the listener fronts one agent loop, and two turns
+would interleave on the same bus).
 `configuration.returnImmediately` is honoured, and a message naming a `taskId`
 is a continuation rather than a refusal; both are covered below.
 
@@ -255,7 +256,15 @@ It is a live signal on an attached stream; the store records what the task *is*.
 ## A task outlives the request that started it
 
 A run is this listener's single active task and is released when the **task**
-reaches a terminal state, not when the HTTP request that started it returns.
+reaches a terminal state, not when the HTTP request that started it returns —
+and the release happens **before** the response reporting that terminal state is
+written, on both the blocking and the streaming path. So a client that has read a
+terminal Task may immediately send again on the same `contextId` without meeting
+`TASK_ALREADY_IN_FLIGHT`. `slot_test.go` pins that ordering; the guide states the
+contract and the client-visible reasoning behind it, including why a task parked
+at `INPUT_REQUIRED` deliberately keeps the slot — see [A terminal response means
+the slot is already
+back](../../guides/a2a.md#a-terminal-response-means-the-slot-is-already-back).
 
 That one change is what makes the rest of this page possible. A client can
 disconnect mid-turn without failing its own task — the turn carries on, `GetTask`
@@ -360,6 +369,13 @@ resets history. So:
   history while calling it new, which is worse than an error. One instance per
   context is the answer, and the [session
   broker](../../guides/session-broker.md) exists to automate that.
+
+The context is resolved before the in-flight slot is checked, so this refusal
+(`CONTEXT_NOT_SERVED`, permanent) is never issued as `TASK_ALREADY_IN_FLIGHT`
+(transient) merely because a task happened to be running, and a refused request
+leaves no binding behind. The guide sets out [which refusal a client gets and why
+the difference
+matters](../../guides/a2a.md#which-refusal-you-get-and-why-the-difference-matters).
 
 ## Configuration
 

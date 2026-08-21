@@ -66,6 +66,15 @@ func (r *Registry) watchExit(id string) {
 	// Free the slot and close both connections. The process is already reaped,
 	// so this only drops the lease and closes the client (with the crash status,
 	// via clientCloseForReason) and any lingering instance connection.
+	//
+	// Remove does NOT tear the lease down immediately: because the process is
+	// reaped, it first waits (bounded) for the gateway's instance read pump to
+	// finish draining. That ordering is load-bearing here specifically. A
+	// crashing instance's LAST frames are exactly the ones still unread, and the
+	// pump routes every frame THROUGH THE LEASE — dropping the lease first left
+	// the pump reading and decoding frames it then delivered to nobody, because
+	// both the A2A ioSink and the client stream are looked up by lease id. See
+	// Registry.awaitInstanceDrain.
 	r.Remove(id)
 	r.logger.Info("lease removed after crash", "lease_id", id, "reason", reasonCrash)
 }

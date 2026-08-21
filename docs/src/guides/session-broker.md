@@ -1306,6 +1306,30 @@ The same escalation is what reaps an **adopted** instance after a restart (it ha
 no socket by construction, so it starts at step 2), which is why the two paths
 share one `SIGTERM`→`SIGKILL` window.
 
+#### A dying instance does not lose what it already said
+
+Teardown is ordered on the **socket**, not on the process. Every path that
+reacts to an instance going away — the crash watcher, a release, the idle
+sweeper — wakes on the instance process being **reaped**, and that signal says
+nothing about the instance's *frames*: the bytes it wrote on its way out are
+sitting in a socket buffer the broker has not read yet. The `EOF` is the event
+that *is* ordered after the last frame.
+
+So before a teardown closes an instance connection, and before it settles any
+A2A task attached to that lease, it waits for the broker's own instance read pump
+to finish draining. Because the process is already gone, the far end of the
+socket is already closed and the wait is normally microseconds; it is bounded by
+a fixed **2s** drain grace for the pathological half-open socket, and exceeding
+that logs a `WARN` naming the lease.
+
+What this buys is the difference between an honest failure and a lost answer. An
+instance that publishes its `output` and `status: idle` and then exits at once —
+a oneshot IO profile, a plugin calling `os.Exit`, an OOM kill landing just after
+the answer — settles `TASK_STATE_COMPLETED` **with its answer**, not
+`TASK_STATE_FAILED` with nothing. An instance that dies without answering still
+fails, still frees its slot, and still closes its client with the
+`4500 instance crashed` status.
+
 ```bash
 curl -s -X POST http://localhost:8080/release/lease-abc123
 # {"status":"released","lease_id":"lease-abc123"}
@@ -2270,7 +2294,10 @@ terminal state. That is what makes it robust rather than fragile —
 
 - the instance crashing or being idle-released fails the active task, which
   promotes the next one, which **acquires a fresh instance** and carries the
-  conversation on from its session;
+  conversation on from its session — *unless the turn had already answered*, in
+  which case it completes with its answer, because a teardown waits for the
+  broker to finish reading the instance's socket before it settles anything (see
+  [below](#a-dying-instance-does-not-lose-what-it-already-said));
 - cancelling a queued task removes it and disturbs nothing;
 - a queued turn is detached from the request that submitted it, so a client that
   hangs up has not withdrawn its message.

@@ -50,6 +50,43 @@ type wsConn struct {
 	closed chan struct{}
 	once   sync.Once
 
+	// drained is closed exactly once, by markDrained, when this connection's
+	// READ PUMP has returned — i.e. when every frame the peer managed to put on
+	// the wire has been decoded, observed and forwarded, and no more ever will
+	// be. It is NOT the same event as `closed`: `closed` says the socket was
+	// told to go away, `drained` says the broker has finished reading it.
+	//
+	// It exists because process exit is not causally ordered after an instance's
+	// last frame — the socket EOF is. A teardown that fires on the process being
+	// reaped can otherwise close this conn while the read pump is still working
+	// through frames that had ALREADY ARRIVED, and those frames are then
+	// discarded: a `status: thinking` that never becomes WORKING, or an `output`
+	// plus `status: idle` that never becomes COMPLETED-with-the-answer. See
+	// Registry.awaitInstanceDrain for the wait that closes that window and for
+	// why it is bounded.
+	//
+	// The latch is owned by Gateway.readPump, which closes it in a deferred call
+	// so EVERY exit path fires it — a read error, an EOF, a context
+	// cancellation, or any early return a later edit adds. A latch that can fail
+	// to fire turns a dropped frame into a hung teardown, which is strictly
+	// worse, so it is deliberately not conditional on anything.
+	drained     chan struct{}
+	drainedOnce sync.Once
+
+	// awaitDrain declares that this connection HAS a read pump — i.e. that
+	// something is going to latch drained — so a teardown knows there is
+	// anything to wait for. Without it the wait has no way to tell "the pump is
+	// mid-drain" from "no pump was ever started on this conn", and it would burn
+	// the whole drain grace on the second case. Plenty of leases are in the
+	// second case: every hand-built one in the unit suite, and any conn refused
+	// during registration.
+	//
+	// It is a plain bool with no lock because it is written exactly once, BEFORE
+	// the conn is handed to Registry.AttachInstance — so publication happens under
+	// Registry.mu, which is also the lock every reader holds. Declare it before
+	// the attach, never after, or that argument stops holding.
+	awaitDrain bool
+
 	// replayMu guards replay.
 	replayMu sync.Mutex
 
@@ -76,10 +113,27 @@ type wsConn struct {
 // newWSConn wraps an accepted WebSocket connection.
 func newWSConn(conn *websocket.Conn) *wsConn {
 	return &wsConn{
-		conn:   conn,
-		send:   make(chan []byte, 256),
-		closed: make(chan struct{}),
+		conn:    conn,
+		send:    make(chan []byte, 256),
+		closed:  make(chan struct{}),
+		drained: make(chan struct{}),
 	}
+}
+
+// expectDrain declares that a read pump owns this connection and will latch
+// drained when it finishes. Call it before publishing the conn to a lease; see
+// the awaitDrain field comment.
+func (c *wsConn) expectDrain() { c.awaitDrain = true }
+
+// markDrained latches this connection's read pump as finished. It is idempotent
+// and safe on a hand-built wsConn with no drained channel (tests build those),
+// because a nil channel cannot be closed and nothing can be waiting on one.
+func (c *wsConn) markDrained() {
+	c.drainedOnce.Do(func() {
+		if c.drained != nil {
+			close(c.drained)
+		}
+	})
 }
 
 // queue enqueues a frame for the write pump without blocking. It returns
@@ -1759,6 +1813,111 @@ func (r *Registry) LeaseForSession(sessionID string) (id string, attached, found
 	return "", false, false
 }
 
+// instanceDrainGrace bounds how long a teardown waits for a lease's instance
+// read pump to finish draining before it proceeds anyway.
+//
+// It is NOT an operator budget and is deliberately not configurable —
+// `release_grace` is the operator's shutdown budget and it has already elapsed
+// (or, on the crash path, never applied) by the time this window opens. This is
+// only the interval between "the OS has reaped the process" and "we stop
+// expecting its socket to EOF".
+//
+// Two seconds, for the same reason termGrace is two seconds: the wait it bounds
+// is normally MICROSECONDS. By the time it opens the process is already gone, so
+// its socket is already closed at the far end and the very next read returns
+// EOF; all the pump needs is to be scheduled once. Two seconds is what makes
+// that true on a machine so oversubscribed that a goroutine can wait milliseconds
+// for a run queue — which is exactly the machine the dropped-frame race was
+// found on — while still being short enough that the pathological case cannot
+// look like a hang to anything watching.
+//
+// The pathological case is a HALF-OPEN socket: the peer process is gone but the
+// OS has not torn its connection down, so the read blocks on a conversation that
+// will never end. That cannot happen to a local dial-back socket whose process
+// this broker reaped itself, but it can to an adopted one, and a teardown that
+// waited forever for it would be a worse bug than the one this window closes.
+const instanceDrainGrace = 2 * time.Second
+
+// processReapedLocked reports whether the lease's process-exit channel has
+// already been closed — i.e. whether the instance process has been wait()ed.
+// Caller MUST hold r.mu. A lease with no process at all (a hand-built test
+// lease, or one whose spawn never got that far) has a nil channel and reads as
+// NOT reaped, which is the honest answer: nothing is guaranteed to make its
+// socket EOF.
+func processReapedLocked(l *lease) bool {
+	select {
+	case <-l.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// instanceDrainChan returns the channel to wait on for the lease's instance read
+// pump to finish draining, or nil when there is nothing to wait for.
+//
+// THE REAPED PRECONDITION IS THE WHOLE SAFETY ARGUMENT. A wait is offered only
+// once the process has been reaped, because that is what guarantees the pump
+// will end on its own: the far end of the socket is already closed, so the next
+// read returns EOF and the pump returns. Waiting on a pump whose process is
+// still RUNNING would be waiting for a peer that has no reason to stop talking,
+// and that is a deadlock dressed up as an ordering fix. Do not relax this
+// precondition to "always wait" — every Registry.Remove call site that can have
+// an instance attached already observes the exit channel before it calls
+// through, so nothing is lost by it.
+//
+// The second precondition, awaitDrain, is what separates "a pump is draining
+// this conn" from "this conn never had a pump". A lease built by hand in a test,
+// or one whose registration was refused, has no pump and therefore nothing that
+// will ever latch drained; waiting on it would spend the whole grace on every
+// such teardown.
+func (r *Registry) instanceDrainChan(id string) <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.leases[id]
+	if !ok || l.instance == nil || !l.instance.awaitDrain || !processReapedLocked(l) {
+		return nil
+	}
+	return l.instance.drained
+}
+
+// awaitInstanceDrain blocks until the lease's instance read pump has finished
+// draining its socket, or until instanceDrainGrace expires.
+//
+// WHY THIS WAITS ON THE PUMP AND NOT ON THE PROCESS. Every teardown that reacts
+// to an instance dying wakes on the lease's process-exit channel, and that
+// channel says nothing about the instance's FRAMES: the process being reaped is
+// not causally ordered after the last frame it wrote, because those bytes were
+// handed to the kernel and are sitting in a socket buffer the broker has not
+// read yet. The socket EOF IS ordered after them. So a teardown that acts on the
+// exit signal alone races the read pump, and when it wins it discards frames
+// that had already arrived — telling an A2A client FAILED, with no answer, for a
+// turn whose `output` and `status: idle` were on the wire before the process
+// died. Waiting here is what makes "the instance is gone" mean "and here is
+// everything it said".
+//
+// This is not a new deadlock risk. See instanceDrainChan for why the wait is
+// naturally short, and instanceDrainGrace for what the bound is actually for.
+func (r *Registry) awaitInstanceDrain(id string) {
+	drained := r.instanceDrainChan(id)
+	if drained == nil {
+		return
+	}
+	select {
+	case <-drained:
+	case <-time.After(instanceDrainGrace):
+		// Warn, not Debug: this is a half-open socket to a process the OS has
+		// already reaped, and an operator seeing it repeatedly is looking at a
+		// network path that is silently swallowing connection teardowns. The
+		// teardown proceeds regardless — whatever the pump had not read is lost,
+		// which is the pre-fix behaviour, applied only to the case that earned it.
+		r.logger.Warn("instance read pump did not finish draining within the drain grace; "+
+			"tearing the lease down anyway. Any frame the instance wrote but the broker "+
+			"had not yet read is discarded",
+			"lease_id", id, "drain_grace", instanceDrainGrace)
+	}
+}
+
 // Has reports whether a lease id is known to the registry.
 func (r *Registry) Has(id string) bool {
 	r.mu.Lock()
@@ -1771,6 +1930,13 @@ func (r *Registry) Has(id string) bool {
 // every client-WebSocket ticket issued for the lease, and drops the lease from
 // the map. Safe to call on an unknown or already-removed lease.
 //
+// It DRAINS FIRST: if the lease's instance process has already been reaped,
+// Remove waits (bounded) for the gateway's instance read pump to finish before
+// it touches the lease at all, so a teardown cannot discard frames that had
+// already arrived. That wait is skipped entirely for a lease whose process is
+// still running or was never spawned — see instanceDrainChan for why the reaped
+// precondition is the safety argument rather than a shortcut.
+//
 // Ticket invalidation AND the lease-released journal record both live HERE
 // rather than in releaseLease, because Remove is the one point every teardown
 // converges on. releaseLease ends here, and crash detection (watchExit) calls
@@ -1779,6 +1945,21 @@ func (r *Registry) Has(id string) bool {
 // its instance recorded on disk as still running, which are exactly the gaps
 // both hooks exist to close. One call site, all three teardown reasons.
 func (r *Registry) Remove(id string) {
+	// DRAIN FIRST, BEFORE ANYTHING IS MUTATED. This has to precede the map
+	// deletion below, not merely the instance conn's close, because the LEASE IS
+	// WHAT THE READ PUMP ROUTES THROUGH: the pump looks its A2A ioSink and its
+	// client stream up by lease id on every frame, so a lease deleted while the
+	// pump is still draining turns each remaining frame into "dropping
+	// client-bound frame for a lease that is gone" and an ioSink lookup that
+	// returns nil. The frames are read, decoded — and then delivered to nobody.
+	// That is how a turn whose `output` and `status: idle` were on the wire
+	// before its process died still reported FAILED with no answer.
+	//
+	// It is a no-op unless the instance process has already been reaped, which is
+	// what guarantees the pump ends on its own; and it is bounded. See
+	// Registry.awaitInstanceDrain.
+	r.awaitInstanceDrain(id)
+
 	r.mu.Lock()
 	l, ok := r.leases[id]
 	var (

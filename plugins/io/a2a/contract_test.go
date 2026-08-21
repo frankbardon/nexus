@@ -1,14 +1,50 @@
 package a2a
 
 import (
+	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness/contract"
 )
+
+// settled blocks until every event in flight on the harness bus has finished
+// dispatching. Every emission assertion about a TURN must go through it, and
+// deleting it will not fail the suite on the next run — it will fail it once
+// every few dozen runs of the package on a CPU-contended machine (E3-S1 saw one
+// in sixteen under a full `make test-race`), which is worse.
+//
+// The window it closes is not a product defect. startTurn emits before:io.input
+// and io.input from a GOROUTINE on purpose (documented at that call site: the
+// whole turn runs inside the dispatch, so the HTTP goroutine has to be draining
+// frames already or a streaming client sees nothing until the turn is over). The
+// harness, meanwhile, records events from a SubscribeAll wildcard, and the bus
+// dispatches wildcards only AFTER every typed subscriber has returned. The
+// scripted agent that answers the turn — and by ending it releases the HTTP
+// response these tests read — IS one of those typed subscribers. So the response
+// can be complete while io.input has not yet been appended to the captured
+// stream: every event the agent produced downstream is on record, but not the
+// io.input that caused them. That is the exact shape of the failure this
+// synchronisation removes.
+//
+// Drain is the seam the harness already has (NewContract's own cleanup uses it),
+// and it is a barrier on the emission being asserted rather than a sleep: it
+// waits on the bus's in-flight count, and the io.input emit is by construction
+// still in flight when the response completes, because the agent that completed
+// it ran inside that emit. The deadline is generous but finite so a genuinely
+// wedged turn is a test failure and not a hung package.
+func settled(t *testing.T, h *contract.ContractHarness) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := h.Bus().Drain(ctx); err != nil {
+		t.Fatalf("harness bus did not settle before asserting emissions: %v", err)
+	}
+}
 
 // TestContract_TurnMapping asserts the declared event contract is the one the
 // plugin actually exercises: an A2A message emits io.input (gated first), and
@@ -46,6 +82,7 @@ func TestContract_TurnMapping(t *testing.T) {
 		t.Fatalf("SendMessage status = %d: %s", rec.Code, rec.Body)
 	}
 
+	settled(t, h)
 	h.AssertEmitted("io.input")
 	h.AssertNoUndeclaredEmissions()
 }
@@ -134,6 +171,7 @@ func TestContract_ObservingATurnStaysOffTheBus(t *testing.T) {
 		t.Errorf("artifact frames = %d, want the tool result and the response", artifacts)
 	}
 
+	settled(t, h)
 	h.AssertEmitted("io.input")
 	h.AssertNoUndeclaredEmissions()
 }
