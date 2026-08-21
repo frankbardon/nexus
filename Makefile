@@ -45,8 +45,34 @@ test:
 # CGO_ENABLED=0 above: on linux/amd64 (the CI runner) `go build -race` fails
 # outright with "-race requires cgo". Nothing in the build graph needs more than
 # libc headers under cgo, so no extra runner packages are required.
+#
+# RACE_TIMEOUT is the per-package `go test` budget, and it is deliberately far
+# larger than the default 600s. It is not padding for slow tests in general: it
+# exists for pkg/engine/sandbox/wasm, whose first test builds a wasm sandbox and
+# so pays the cold wazero AOT compile of yaegi.wasm.gz. Measured under -race,
+# that one package costs ~227s on the ubuntu CI runner and 245s on an idle
+# darwin/arm64 -- but 1477-1554s on that same darwin host under ~4x CPU
+# oversubscription. A 6x spread on CPU contention alone is the point: the
+# default 600s does not leave the required `race` job 2.6x of headroom, it
+# leaves it 2.6x of headroom ON AN UNCONTENDED RUNNER, and GitHub's shared
+# runners are not reliably that. Worse, when the budget is exceeded the failure
+# reads `test timed out after 10m0s` -- a hang, not a budget -- so a slow runner
+# looks like a deadlock somebody has to bisect.
+#
+# 40m is ~10x the uncontended figure and still ~1.5x the slowest contended
+# measurement, while keeping a genuine deadlock bounded: the tradeoff accepted
+# here is that a real hang takes up to 40 minutes to report instead of 10. That
+# is the right way round for a REQUIRED check -- a spurious timeout blocks every
+# PR and reads as a mystery, whereas a genuine deadlock blocks the PR either way
+# and only costs one job's wall clock. It stays well inside GitHub's 6h job cap,
+# so the job still terminates on its own.
+#
+# Do not lower this to "tidy up" a long-looking number without re-measuring the
+# wasm package under -race, under contention, on both platforms.
+RACE_TIMEOUT ?= 40m
+
 test-race:
-	CGO_ENABLED=1 $(GO) test -race ./...
+	CGO_ENABLED=1 $(GO) test -race -timeout $(RACE_TIMEOUT) ./...
 
 # Broker integration suite. cmd/nexus-broker/claim_integration_test.go is
 # //go:build integration, so `make test` (plain `go test ./...`, no tags) never
