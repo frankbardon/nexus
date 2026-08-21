@@ -370,6 +370,21 @@ func (m *a2aLeaseManager) watch(entry *a2aContextEntry, b *a2aLeaseBinding) {
 		}
 		entry.mu.Unlock()
 
+		// WAIT FOR THE FRAMES BEFORE DECLARING THE INSTANCE GONE. The exit channel
+		// above says the process was reaped; it says NOTHING about the frames it
+		// wrote on its way out, because those bytes are in a socket buffer the
+		// broker has not read yet. markGone settles every attached task, and a
+		// task's terminal latch then DROPS whatever the read pump translates next
+		// — so acting on the exit alone loses a `status: thinking` that had
+		// already arrived (the task never reaches WORKING) and, worse, loses an
+		// `output` plus `status: idle` that had already arrived, reporting FAILED
+		// with no answer for a turn that COMPLETED.
+		//
+		// The socket EOF is the signal that IS ordered after the last frame, so
+		// that is what this waits on. It is bounded and, because the process is
+		// already gone, normally instant. See Registry.awaitInstanceDrain.
+		m.registry.awaitInstanceDrain(b.leaseID)
+
 		b.markGone(a2aInstanceGoneReason)
 		m.logger.Info("a2a agent instance stopped", "lease_id", b.leaseID)
 	}()

@@ -2248,7 +2248,24 @@ type brokerHandle struct {
 // topology, and returns a handle that can stop it independently of t.Cleanup.
 func startStubBrokerHandle(t *testing.T, stubBin string, opts ...stubBrokerOption) *brokerHandle {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Discarded by default — a passing suite has no use for a broker's log, and
+	// several tests here run dozens of brokers.
+	//
+	// BROKER_TEST_LOG=1 sends it to stderr at DEBUG instead. That switch is not a
+	// convenience: every ordering defect this suite has caught was diagnosed from
+	// the broker's own log rather than from the assertion that failed, because the
+	// assertion says a state sequence was wrong and only the log says WHICH
+	// goroutine got there first. The frame-loss race fixed in
+	// ci-stabilization/E2-S4 was found by reading "dropping client-bound frame for
+	// a lease that is gone" landing between two io frames. Without a way to turn
+	// the log on, that is a rebuild-and-hope loop.
+	logw := io.Writer(io.Discard)
+	logLevel := slog.LevelInfo
+	if os.Getenv("BROKER_TEST_LOG") != "" {
+		logw = os.Stderr
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(logw, &slog.HandlerOptions{Level: logLevel}))
 
 	wiring := brokerWiring{
 		cfg: Config{

@@ -265,10 +265,20 @@ type Config struct {
 	// Gated on authentication exactly as MaxLeasesPerPrincipal is.
 	MaxQueuedPerPrincipal int `yaml:"max_queued_per_principal"`
 
-	// ReleaseGrace bounds how long a release (manual, idle, or crash teardown)
-	// waits for an instance to shut its engine down cleanly before the broker
-	// force-kills it. The session is always persisted by the graceful path; the
-	// kill is the orphan-prevention backstop.
+	// ReleaseGrace bounds how long a DELIBERATE release — manual (POST /release),
+	// idle reaping, an overrunning turn, broker shutdown — waits for an instance
+	// to shut its engine down cleanly before the broker force-kills it. The
+	// session is always persisted by the graceful path; the kill is the
+	// orphan-prevention backstop.
+	//
+	// It does NOT bound crash teardown, and never did. A crash is nothing but an
+	// unexpected exit: the process is already gone and already reaped by the time
+	// the broker notices, so there is no engine left to ask nicely and nothing to
+	// wait out. That path (Registry.watchExit) calls Registry.Remove directly and
+	// never consults this value. The only wait a crash teardown performs is the
+	// short, non-configurable instanceDrainGrace, which is a different question —
+	// "has the broker finished reading the dead instance's socket", not "has the
+	// instance finished shutting down".
 	ReleaseGrace time.Duration `yaml:"release_grace"`
 
 	// ReattachWindow bounds how long a lease restored from the journal at boot may

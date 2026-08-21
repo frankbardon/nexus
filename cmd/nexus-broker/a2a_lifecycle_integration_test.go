@@ -31,10 +31,11 @@ import (
 //     queue's own bookkeeping.
 //
 // Everything here runs on the same stub instance the claim suite spawns, so the
-// suite still needs no API key and makes no LLM call. Two stub switches earn
+// suite still needs no API key and makes no LLM call. Three stub switches earn
 // their keep below: STUB_TURN_DELAY stretches a turn's WORKING window so a
-// second client can observe it, and STUB_CRASH_MID_TURN kills the instance with
-// a turn already under way.
+// second client can observe it, STUB_CRASH_MID_TURN kills the instance with a
+// turn already under way, and STUB_CRASH_AFTER_ANSWER kills it in the instant
+// after a turn has been answered in full.
 
 // ---- fixtures ----
 
@@ -584,52 +585,43 @@ func assertJSONBody(t *testing.T, resp *http.Response) {
 // covered by the spawn-failure path, and it never exercises the "settle a live
 // task" half of the crash watcher.
 //
-// KNOWN FLAKY, DIAGNOSED, NOT YET FIXED — ci-stabilization/E2-S2. The paragraph
-// above overstates what the fixture guarantees. "DEMONSTRABLY started" is a coin
-// flip, and the coin is weighted by how loaded the machine is. The stub writes
-// `status: thinking` and calls os.Exit(9) in the SAME instant, which puts two
-// broker goroutines in a race — both wake on the same process-exit signal, and
-// neither waits for the instance's socket to be drained first:
+// WHAT "DEMONSTRABLY STARTED" COSTS, and why it is now free —
+// ci-stabilization/E2-S2 (diagnosis) and E2-S4 (fix).
 //
-//   - a2aLeaseManager.watch (a2aspawn.go) wakes on Registry.ExitedChan and calls
-//     markGone -> a2aTask.instanceGone, settling the task FAILED. A `status:
-//     thinking` frame read AFTER that is dropped by the terminal latch, so
-//     a2aTask.ensureWorking never emits the SUBMITTED -> WORKING transition.
-//   - Registry.Remove (reached from watchExit on the same signal) closes the
-//     instance conn, which aborts the gateway read pump mid-drain. The pump ends
-//     with "use of closed network connection" instead of EOF, discarding frames
-//     that had already ARRIVED and were merely waiting to be decoded.
+// The paragraph above used to overstate the fixture. The stub writes `status:
+// thinking` and calls os.Exit(9) in the SAME instant, and the broker's crash
+// teardown then reacted to the process being REAPED rather than to the socket
+// EOF. Two goroutines woke on the lease's process-exit channel and acted at
+// once: the A2A lease watcher settled the task FAILED, after which the terminal
+// latch dropped the already-arrived thinking frame so ensureWorking never
+// emitted WORKING; and Registry.Remove closed the instance conn, aborting the
+// gateway read pump mid-drain — it ended on "use of closed network connection"
+// instead of EOF, discarding frames that had ARRIVED and were merely waiting to
+// be decoded. Whether WORKING appeared was therefore a coin flip weighted by
+// machine load: 20 failures in 300 iterations on a 10-CPU box under 2x CPU
+// oversubscription, byte-identical to the failure CI recorded on 2026-08-20 (run
+// 32374973591, the "Broker integration tests" step of the required `test` job).
 //
-// The frame is not lost on the wire; it is discarded on the broker side. Process
-// exit is not causally ordered after an instance's last frame — the socket EOF
-// is. When the read pump wins, the broker log shows the io frame observed and the
-// pump ending on EOF, and this test passes. When the exit signal wins, the stream
-// is [SUBMITTED, FAILED] and the WORKING assertion below fires.
+// E2-S4 fixed the ordering rather than the fixture: both teardown paths now wait
+// (bounded, and normally microseconds — the process is already gone, so its
+// socket EOFs on the next read) for the instance read pump to finish draining.
+// See Registry.awaitInstanceDrain. Not one assertion below changed, and the
+// fixture is now deterministic for free, which is what a correct ordering buys.
 //
-// Reproduced 20 times in 300 iterations on a 10-CPU machine under 2x CPU
-// oversubscription: 8/100 and 3/40 untagged, and 5/60 under -race with ZERO data
-// races reported — which is itself the finding that it is an ordering race and
-// not a memory one. The failure is byte-identical to the one CI recorded on
-// 2026-08-20 (run 32374973591, the "Broker integration tests" step of the
-// required `test` job), so that failure is explained and is NOT the SIGHUP
-// self-kill that sighupguard_test.go closed.
+// So do NOT make this quiet by dropping the WORKING assertion or by sleeping in
+// the stub between the write and the exit — and do not reintroduce either if the
+// ordering ever regresses. That assertion is the only thing separating a crash
+// WITH a turn in flight from a crash BEFORE one, which is the entire reason this
+// fixture exists next to STUB_CRASH_AFTER_READY, and a sleep would trade a real
+// ordering guarantee for a timing guess that gets slower machines wrong all over
+// again.
 //
-// Do NOT make this quiet by dropping the WORKING assertion or by sleeping in the
-// stub between the write and the exit. That assertion is the only thing
-// separating a crash WITH a turn in flight from a crash BEFORE one, which is the
-// entire reason this fixture exists next to STUB_CRASH_AFTER_READY, and a sleep
-// would trade a real ordering guarantee for a timing guess that gets slower
-// machines wrong all over again. The fix belongs in the broker: both paths above
-// have to wait for the instance read pump to finish rather than for the process
-// to be reaped. That is a product change to the crash-teardown contract, not a
-// test change, and it is tracked separately.
-//
-// It is not only a fixture artifact. The same gap discards a turn's `output` and
-// `status: idle` when an instance answers and then exits promptly — a oneshot IO
-// profile, a plugin that calls os.Exit, an OOM kill landing just after the
-// answer — and the client is then told FAILED, without the answer, for a turn
-// that COMPLETED. What makes it rare in production and common here is only that
-// the stub writes and exits with nothing in between.
+// It was never only a fixture artifact, which is why the fix was a product
+// change. The same gap discarded a turn's `output` and `status: idle` when an
+// instance answered and then exited promptly — a oneshot IO profile, a plugin
+// that calls os.Exit, an OOM kill landing just after the answer — telling the
+// client FAILED, without the answer, for a turn that COMPLETED. That half is
+// pinned by TestA2AInstanceThatAnswersThenExitsStillCompletesTheTask below.
 func TestA2AInstanceCrashMidTaskFailsTheTaskAndFreesTheLease(t *testing.T) {
 	stubBin := buildStubInstance(t)
 	base, reg := startStubBrokerWithRegistry(t, stubBin,
@@ -675,6 +667,88 @@ func TestA2AInstanceCrashMidTaskFailsTheTaskAndFreesTheLease(t *testing.T) {
 	}
 	if task.Status.Message == nil {
 		t.Error("the terminal status carries no message, so a client is told nothing about why")
+	}
+}
+
+// TestA2AInstanceThatAnswersThenExitsStillCompletesTheTask is the production
+// half of the crash-teardown ordering, and it is the half that was broken.
+//
+// The fixture above kills the instance BEFORE it answers, so FAILED is the right
+// answer there whichever goroutine wins the race. This one kills it the instant
+// AFTER it answers: `status: thinking`, the `output`, `status: idle`, then
+// os.Exit(9) with no shutdown handshake. Every frame the turn needs is on the
+// wire before the process dies, so there is exactly one correct rendering —
+// COMPLETED, carrying the answer.
+//
+// Before ci-stabilization/E2-S4 the broker could not produce it. Two teardown
+// goroutines woke on the lease's process-exit channel and acted at once: the A2A
+// lease watcher settled the task FAILED, and Registry.Remove closed the instance
+// conn out from under the gateway's read pump. Both discarded frames that had
+// ALREADY ARRIVED and were merely waiting to be decoded, because process exit is
+// not causally ordered after an instance's last frame — the socket EOF is. The
+// client was then told FAILED, with no answer, for a turn that had completed.
+//
+// That is not a fixture artifact. It is what a oneshot IO profile looks like,
+// what a plugin calling os.Exit looks like, and what an OOM kill landing just
+// after the answer looks like. What made it rare in production and common in a
+// test is only how little happens between the write and the exit.
+//
+// The assertion that matters is the ARTIFACT, not just the state: a broker could
+// reach COMPLETED off the `status: idle` alone while having dropped the `output`,
+// and a client would then get an empty answer to a question it asked. Both frames
+// arrived before the exit, so both must survive it.
+func TestA2AInstanceThatAnswersThenExitsStillCompletesTheTask(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	base, reg := startStubBrokerWithRegistry(t, stubBin,
+		withAgents(map[string]AgentProfile{a2aStubProfileName: a2aProfileFor(t, reservedBinaryName)}),
+		withBinaries(stubEntryWithEnv(stubBin, map[string]string{"STUB_CRASH_AFTER_ANSWER": "1"})),
+		withReleaseGrace(2*time.Second),
+	)
+
+	frames := streamA2AMessage(t, base, a2aStubProfileName, "", "conv-answer-then-exit", "hello")
+	got := states(frames)
+	if !slices.Contains(got, string(a2a.TaskStateWorking)) {
+		t.Fatalf("the stream never reached WORKING, so the turn never started: %v", got)
+	}
+	if last := got[len(got)-1]; last != string(a2a.TaskStateCompleted) {
+		t.Fatalf("the stream ended on %q, want COMPLETED: the instance answered before it died, "+
+			"so a teardown that reports anything else has discarded frames that had already arrived: %v",
+			last, got)
+	}
+
+	wantAnswer := stubcore.TurnAnswer(stubcore.VariantBase,
+		stubcore.NewSessionID(stubcore.VariantBase), false)
+	var sawAnswer bool
+	for _, f := range frames {
+		if f.artifact == wantAnswer {
+			sawAnswer = true
+		}
+	}
+	if !sawAnswer {
+		t.Errorf("no artifact carried %q; the turn settled COMPLETED without the answer it produced, "+
+			"which is worse than failing: %v", wantAnswer, states(frames))
+	}
+
+	// The exit is still a crash, so the crash watcher must still free the slot.
+	// The drain wait bounds how long that takes; it must not defer it forever.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && len(reg.Snapshot().Leases) > 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(reg.Snapshot().Leases); n != 0 {
+		t.Errorf("leases = %d after the instance exited, want 0: waiting for the read pump must not "+
+			"leak the lease", n)
+	}
+
+	// And the terminal record survives the process that produced it, answer
+	// included — the durable store is read by a client precisely when the
+	// instance is gone.
+	task := getA2ATask(t, base, a2aStubProfileName, "", frames[0].taskID)
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("GetTask after the exit = %s, want COMPLETED", task.Status.State)
+	}
+	if len(task.Artifacts) == 0 {
+		t.Fatal("the stored task carries no artifact, so the answer did not survive the crash teardown")
 	}
 }
 
