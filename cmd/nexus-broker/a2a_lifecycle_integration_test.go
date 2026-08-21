@@ -585,43 +585,26 @@ func assertJSONBody(t *testing.T, resp *http.Response) {
 // covered by the spawn-failure path, and it never exercises the "settle a live
 // task" half of the crash watcher.
 //
-// WHAT "DEMONSTRABLY STARTED" COSTS, and why it is now free —
-// ci-stabilization/E2-S2 (diagnosis) and E2-S4 (fix).
+// The WORKING assertion is load-bearing and depends on a product guarantee.
 //
-// The paragraph above used to overstate the fixture. The stub writes `status:
-// thinking` and calls os.Exit(9) in the SAME instant, and the broker's crash
-// teardown then reacted to the process being REAPED rather than to the socket
-// EOF. Two goroutines woke on the lease's process-exit channel and acted at
-// once: the A2A lease watcher settled the task FAILED, after which the terminal
-// latch dropped the already-arrived thinking frame so ensureWorking never
-// emitted WORKING; and Registry.Remove closed the instance conn, aborting the
-// gateway read pump mid-drain — it ended on "use of closed network connection"
-// instead of EOF, discarding frames that had ARRIVED and were merely waiting to
-// be decoded. Whether WORKING appeared was therefore a coin flip weighted by
-// machine load: 20 failures in 300 iterations on a 10-CPU box under 2x CPU
-// oversubscription, byte-identical to the failure CI recorded on 2026-08-20 (run
-// 32374973591, the "Broker integration tests" step of the required `test` job).
+// The stub writes `status: thinking` and calls os.Exit(9) in the same instant, so
+// whether WORKING appears at all depends on the broker draining what the instance
+// already said before it settles the crash. It once did not — teardown reacted to
+// the process being reaped rather than to the socket EOF, and the frame was
+// discarded after arrival — which made this test fail a few percent of the time
+// under load. Registry.awaitInstanceDrain is what makes it deterministic; see the
+// ordering note there.
 //
-// E2-S4 fixed the ordering rather than the fixture: both teardown paths now wait
-// (bounded, and normally microseconds — the process is already gone, so its
-// socket EOFs on the next read) for the instance read pump to finish draining.
-// See Registry.awaitInstanceDrain. Not one assertion below changed, and the
-// fixture is now deterministic for free, which is what a correct ordering buys.
+// So do NOT quiet this by dropping the WORKING assertion or by sleeping in the
+// stub between the write and the exit. That assertion is the only thing
+// separating a crash WITH a turn in flight from a crash BEFORE one, which is why
+// this fixture exists next to STUB_CRASH_AFTER_READY, and a sleep would trade the
+// ordering guarantee for a timing guess that gets slower machines wrong again.
 //
-// So do NOT make this quiet by dropping the WORKING assertion or by sleeping in
-// the stub between the write and the exit — and do not reintroduce either if the
-// ordering ever regresses. That assertion is the only thing separating a crash
-// WITH a turn in flight from a crash BEFORE one, which is the entire reason this
-// fixture exists next to STUB_CRASH_AFTER_READY, and a sleep would trade a real
-// ordering guarantee for a timing guess that gets slower machines wrong all over
-// again.
-//
-// It was never only a fixture artifact, which is why the fix was a product
-// change. The same gap discarded a turn's `output` and `status: idle` when an
-// instance answered and then exited promptly — a oneshot IO profile, a plugin
-// that calls os.Exit, an OOM kill landing just after the answer — telling the
-// client FAILED, without the answer, for a turn that COMPLETED. That half is
-// pinned by TestA2AInstanceThatAnswersThenExitsStillCompletesTheTask below.
+// The same gap discarded a turn's `output` and `status: idle` when an instance
+// answered and then exited promptly, telling the client FAILED for a turn that
+// COMPLETED. That half is pinned by
+// TestA2AInstanceThatAnswersThenExitsStillCompletesTheTask below.
 func TestA2AInstanceCrashMidTaskFailsTheTaskAndFreesTheLease(t *testing.T) {
 	stubBin := buildStubInstance(t)
 	base, reg := startStubBrokerWithRegistry(t, stubBin,
