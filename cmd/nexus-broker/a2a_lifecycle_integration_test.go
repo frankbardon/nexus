@@ -583,6 +583,53 @@ func assertJSONBody(t *testing.T, resp *http.Response) {
 // disappears. A crash before the turn began would be a weaker fixture: it is
 // covered by the spawn-failure path, and it never exercises the "settle a live
 // task" half of the crash watcher.
+//
+// KNOWN FLAKY, DIAGNOSED, NOT YET FIXED — ci-stabilization/E2-S2. The paragraph
+// above overstates what the fixture guarantees. "DEMONSTRABLY started" is a coin
+// flip, and the coin is weighted by how loaded the machine is. The stub writes
+// `status: thinking` and calls os.Exit(9) in the SAME instant, which puts two
+// broker goroutines in a race — both wake on the same process-exit signal, and
+// neither waits for the instance's socket to be drained first:
+//
+//   - a2aLeaseManager.watch (a2aspawn.go) wakes on Registry.ExitedChan and calls
+//     markGone -> a2aTask.instanceGone, settling the task FAILED. A `status:
+//     thinking` frame read AFTER that is dropped by the terminal latch, so
+//     a2aTask.ensureWorking never emits the SUBMITTED -> WORKING transition.
+//   - Registry.Remove (reached from watchExit on the same signal) closes the
+//     instance conn, which aborts the gateway read pump mid-drain. The pump ends
+//     with "use of closed network connection" instead of EOF, discarding frames
+//     that had already ARRIVED and were merely waiting to be decoded.
+//
+// The frame is not lost on the wire; it is discarded on the broker side. Process
+// exit is not causally ordered after an instance's last frame — the socket EOF
+// is. When the read pump wins, the broker log shows the io frame observed and the
+// pump ending on EOF, and this test passes. When the exit signal wins, the stream
+// is [SUBMITTED, FAILED] and the WORKING assertion below fires.
+//
+// Reproduced 20 times in 300 iterations on a 10-CPU machine under 2x CPU
+// oversubscription: 8/100 and 3/40 untagged, and 5/60 under -race with ZERO data
+// races reported — which is itself the finding that it is an ordering race and
+// not a memory one. The failure is byte-identical to the one CI recorded on
+// 2026-08-20 (run 32374973591, the "Broker integration tests" step of the
+// required `test` job), so that failure is explained and is NOT the SIGHUP
+// self-kill that sighupguard_test.go closed.
+//
+// Do NOT make this quiet by dropping the WORKING assertion or by sleeping in the
+// stub between the write and the exit. That assertion is the only thing
+// separating a crash WITH a turn in flight from a crash BEFORE one, which is the
+// entire reason this fixture exists next to STUB_CRASH_AFTER_READY, and a sleep
+// would trade a real ordering guarantee for a timing guess that gets slower
+// machines wrong all over again. The fix belongs in the broker: both paths above
+// have to wait for the instance read pump to finish rather than for the process
+// to be reaped. That is a product change to the crash-teardown contract, not a
+// test change, and it is tracked separately.
+//
+// It is not only a fixture artifact. The same gap discards a turn's `output` and
+// `status: idle` when an instance answers and then exits promptly — a oneshot IO
+// profile, a plugin that calls os.Exit, an OOM kill landing just after the
+// answer — and the client is then told FAILED, without the answer, for a turn
+// that COMPLETED. What makes it rare in production and common here is only that
+// the stub writes and exits with nothing in between.
 func TestA2AInstanceCrashMidTaskFailsTheTaskAndFreesTheLease(t *testing.T) {
 	stubBin := buildStubInstance(t)
 	base, reg := startStubBrokerWithRegistry(t, stubBin,
@@ -593,6 +640,12 @@ func TestA2AInstanceCrashMidTaskFailsTheTaskAndFreesTheLease(t *testing.T) {
 
 	started := time.Now()
 	frames := streamA2AMessage(t, base, a2aStubProfileName, "", "conv-crash", "hello")
+	// This 30s check REPORTS, it does not bound. The deadline that actually stops
+	// a hung stream is streamA2AMessage's own collect(t, 60*time.Second), so the
+	// window in which this Errorf can fire at all is 30s to 60s. Read it as "the
+	// settle was slower than a crash has any business being", not as the test's
+	// timeout — and do not tighten it into one without moving the collect bound
+	// too, or the tighter number will simply never be reached.
 	if elapsed := time.Since(started); elapsed > 30*time.Second {
 		t.Errorf("the stream took %s to settle; a crashed instance must not hang a client", elapsed)
 	}
