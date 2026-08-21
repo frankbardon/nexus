@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -812,12 +811,20 @@ func TestReload_ConcurrentWithServing(t *testing.T) {
 // mechanism but not the trigger — and the trigger is the entire operator-facing
 // contract of this story.
 //
-// The test installs its OWN SIGHUP handler before signalling. That is not
-// belt-and-braces: SIGHUP's default disposition is to terminate the process, so
-// a signal that arrived before watchReloadSignals had called signal.Notify would
-// kill the test binary rather than fail a test. Registering first makes the
-// default unreachable for the whole test, and the retry loop then covers the
-// remaining race — the reload goroutine registering after the first signal.
+// Raising a REAL signal at this process is only safe because sighupguard_test.go
+// holds a SIGHUP handler open for the whole lifetime of the test binary. Read
+// that file before touching anything below: SIGHUP's default disposition is to
+// terminate the process, so a signal delivered while no handler is registered
+// kills the test binary instead of failing a test. The test used to install its
+// own guard and stop it on defer, which left two windows open — a signal
+// arriving before watchReloadSignals called signal.Notify, and the last poll's
+// signal still in flight after the cancel below tore that handler down. The
+// package-level guard closes both by never being stopped.
+//
+// Re-raising on every poll iteration is deliberate and stays: it is what covers
+// the reload goroutine registering after the first signal. There is no seam to
+// observe that registration, and a sleep or a single signal plus a longer
+// deadline would trade a real trigger for a timing guess.
 func TestReload_SIGHUPTriggersReload(t *testing.T) {
 	dir := t.TempDir()
 	base := writeNexusFixture(t, dir, "nexus")
@@ -829,10 +836,6 @@ func TestReload_SIGHUPTriggersReload(t *testing.T) {
 		`  nexus:`,
 		`    path: "`+base+`"`,
 	))
-
-	guard := make(chan os.Signal, 1)
-	signal.Notify(guard, syscall.SIGHUP)
-	defer signal.Stop(guard)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -854,8 +857,10 @@ func TestReload_SIGHUPTriggersReload(t *testing.T) {
 		return f.live.config().MaxConcurrent == 6
 	})
 
-	// Stop signalling before the handler goes away, so no SIGHUP can outlive it
-	// and hit the default disposition.
+	// Stop the reload goroutine before returning, so it cannot reload against a
+	// fixture the next test has already torn down. A signal that outlives it now
+	// lands on the package-level guard, so this is goroutine hygiene rather than
+	// the thing keeping the binary alive.
 	cancel()
 	<-done
 }
