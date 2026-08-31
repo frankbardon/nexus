@@ -284,9 +284,16 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	spawnID := generateSpawnID()
 	subResult := func() events.SubagentComplete {
 		if cc, ok := p.bus.(engine.CausationController); ok {
+			// SessionID is carried forward by hand: a pushed frame REPLACES the
+			// active one whole (see PushCausationContext), so omitting it would
+			// blank the session on every event this run emits rather than
+			// inherit it. This closure is invoked synchronously, so the read —
+			// like the p.currentDepth() read beside it — happens on the same
+			// goroutine that pushes and sees the caller's frame.
 			pop := cc.PushCausationContext(engine.CausationContext{
-				AgentID: p.subagentAgentID(spawnID),
-				Depth:   p.currentDepth() + 1,
+				SessionID: cc.CurrentCausationContext().SessionID,
+				AgentID:   p.subagentAgentID(spawnID),
+				Depth:     p.currentDepth() + 1,
 			})
 			defer pop()
 		}
