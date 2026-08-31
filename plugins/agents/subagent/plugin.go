@@ -209,16 +209,39 @@ func (p *Plugin) Emissions() []string {
 // runSubagent fall back to the bus-wide default — losing AgentID
 // and Depth — and the causation tree blank-spots out on exactly the
 // concurrent path it's built to attribute.
+//
+// The push stays inside the goroutine for that reason, but the READ
+// of the parent context must NOT: causationStacks is keyed by
+// goroutine ID, and the freshly spawned goroutine starts with an
+// empty stack. A cc.CurrentCausationContext() call made in there
+// would read the bus-wide default rather than the caller's frame —
+// which still yields the right SessionID for a spawn off a top-level
+// turn, and silently the wrong one for a spawn from inside a delegate
+// sub-session. So the controller assertion and the SessionID read
+// both happen below on the CALLING goroutine and are closed over.
+// Do not "simplify" them back inline into the goroutine.
 func (p *Plugin) handleSubagentSpawn(event engine.Event[any]) {
 	spawn, ok := event.Payload.(events.SubagentSpawn)
 	if !ok {
 		return
 	}
+	// Captured on the caller's goroutine — see the goroutine-boundary note above.
+	// A bus that doesn't implement CausationController leaves hasCausation false
+	// and the worker simply runs without a pushed frame, exactly as before.
+	cc, hasCausation := p.bus.(engine.CausationController)
+	var parentSessionID string
+	if hasCausation {
+		parentSessionID = cc.CurrentCausationContext().SessionID
+	}
 	go func() {
-		if cc, ok := p.bus.(engine.CausationController); ok {
+		if hasCausation {
+			// SessionID is carried forward by hand: a pushed frame REPLACES the
+			// active one whole (see PushCausationContext), so omitting it would
+			// blank the session on every event this worker emits.
 			pop := cc.PushCausationContext(engine.CausationContext{
-				AgentID: p.subagentAgentID(spawn.SpawnID),
-				Depth:   spawn.ParentDepth + 1,
+				SessionID: parentSessionID,
+				AgentID:   p.subagentAgentID(spawn.SpawnID),
+				Depth:     spawn.ParentDepth + 1,
 			})
 			defer pop()
 		}
