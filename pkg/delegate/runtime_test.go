@@ -180,3 +180,69 @@ func TestMemoryCache_LRUEviction(t *testing.T) {
 		t.Errorf("c should remain")
 	}
 }
+
+// TestRuntime_Run_PropagatesParentSessionID pins the causation contract across
+// the sub-session boundary: events emitted while a delegate call is in flight
+// must carry the PARENT's SessionID.
+//
+// The regression it guards is silent and total. A pushed CausationContext
+// replaces the active one whole — currentCausationContext returns the top of
+// the stack with no per-field merge — so a frame that omitted SessionID blanked
+// it rather than inheriting it, and every event a delegated sub-agent emitted
+// carried Causation.SessionID == "". Nothing failed; the events were simply
+// stranded outside the session they belonged to, which breaks any consumer that
+// keys on the session (authorization gates, per-session projections, replay).
+func TestRuntime_Run_PropagatesParentSessionID(t *testing.T) {
+	const parentSession = "sess-parent-1"
+
+	bus := engine.NewEventBus()
+	defer newFakeProvider(bus, "done")()
+
+	// StartSession's effect: the bus-wide default carries the session, which is
+	// what the parent goroutine sees before the delegate pushes its own frame.
+	cc, ok := bus.(engine.CausationController)
+	if !ok {
+		t.Fatalf("bus does not implement CausationController")
+	}
+	cc.SetDefaultCausationContext(engine.CausationContext{SessionID: parentSession})
+
+	// Observe an event the SUB-AGENT causes, not one the runtime emits directly:
+	// llm.request is published from inside the delegated loop, under the pushed
+	// frame, which is exactly where the blanking occurred.
+	var got []string
+	defer bus.Subscribe("llm.request", func(ev engine.Event[any]) {
+		got = append(got, ev.Causation.SessionID)
+	}, engine.WithPriority(1))()
+
+	reg := posture.NewRegistry()
+	_ = reg.Register(posture.AgentPosture{
+		Name:          "analyst",
+		SystemPrompt:  "Be analytical",
+		DefaultBudget: posture.ResourceBudget{Timeout: 5 * time.Second, MaxTokens: 1000},
+	})
+
+	r := &Runtime{
+		Registry: reg,
+		Bus:      bus,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxDepth: 3,
+	}
+
+	if _, err := r.Run(context.Background(), Input{
+		Posture: "analyst",
+		Task:    "Summarize.",
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(got) == 0 {
+		t.Fatalf("no llm.request observed; the test cannot prove anything")
+	}
+	for i, s := range got {
+		if s != parentSession {
+			t.Errorf("llm.request[%d] Causation.SessionID = %q, want %q "+
+				"(delegate must carry the parent's session across the sub-session boundary)",
+				i, s, parentSession)
+		}
+	}
+}
