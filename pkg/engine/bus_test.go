@@ -472,3 +472,90 @@ func TestBus_ExcludedTypeSkipsSeqAndRing(t *testing.T) {
 		t.Fatalf("after clear, expected seq 4 for core.tick; got %v", wildcardSeqs)
 	}
 }
+
+// TestPushCausationContext_ReplacesFrameWholeWithoutInheritingSessionID is a
+// CHARACTERIZATION test: it pins the semantics the bus actually implements, so
+// the per-call-site propagation idiom has a stated reason to exist. It does not
+// claim the semantics are the nicest available — only that they are deliberate
+// and that changing them is a decision, not a bug fix.
+//
+// A pushed CausationContext replaces the active one WHOLE.
+// currentCausationContext returns the top of the goroutine's stack as-is, with
+// no per-field merge, and reaches for the bus-wide default only when that stack
+// is empty. So a frame that omits SessionID does not inherit it — it blanks it,
+// for every event emitted under the frame.
+//
+// This is why the delegate regression was silent. SetDefaultCausationContext,
+// installed by Engine.StartSession, carries the SessionID for every emitter
+// that never pushes, so top-level events always look right; only events emitted
+// *underneath* a push were stranded outside their session.
+//
+// Callers that are still inside a session must therefore propagate SessionID
+// explicitly. pkg/delegate/runtime.go is the reference implementation, and the
+// final sub-test here is the same idiom in miniature.
+func TestPushCausationContext_ReplacesFrameWholeWithoutInheritingSessionID(t *testing.T) {
+	const sessionID = "sess-parent-1"
+
+	// emitUnder pushes c, emits one event under it, and reports the SessionID
+	// the bus stamped on that event.
+	emitUnder := func(t *testing.T, bus EventBus, c CausationContext) string {
+		t.Helper()
+		var got EventMeta
+		defer bus.Subscribe("scoped.evt", func(ev Event[any]) { got = ev.Meta() })()
+
+		pop := bus.(*eventBus).PushCausationContext(c)
+		defer pop()
+		if err := bus.Emit("scoped.evt", nil); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+		return got.Causation.SessionID
+	}
+
+	t.Run("over the bus-wide default", func(t *testing.T) {
+		// Engine.StartSession's effect: the session rides the bus-wide default.
+		bus := NewEventBus()
+		bus.(*eventBus).SetDefaultCausationContext(CausationContext{SessionID: sessionID})
+
+		// The default is consulted ONLY for a goroutine with an empty stack, so
+		// pushing a frame at all is enough to lose it.
+		got := emitUnder(t, bus, CausationContext{AgentID: "sub-agent-A", Depth: 1})
+		if got != "" {
+			t.Errorf("SessionID = %q, want %q: a pushed frame must not inherit the default", got, "")
+		}
+	})
+
+	t.Run("over an outer pushed frame", func(t *testing.T) {
+		bus := NewEventBus()
+
+		outerPop := bus.(*eventBus).PushCausationContext(CausationContext{SessionID: sessionID})
+		defer outerPop()
+
+		// Nor does a nested push inherit the frame directly beneath it.
+		got := emitUnder(t, bus, CausationContext{AgentID: "sub-agent-B", Depth: 2})
+		if got != "" {
+			t.Errorf("SessionID = %q, want %q: a nested frame must not inherit the frame below it", got, "")
+		}
+	})
+
+	t.Run("explicit propagation is the repair", func(t *testing.T) {
+		// The positive control: nothing about the mechanism is broken, the
+		// SessionID just has to be carried across by the caller. This is the
+		// pkg/delegate/runtime.go idiom, and it must be read on the SAME
+		// goroutine as the push — causationStacks is keyed by goroutine ID.
+		bus := NewEventBus()
+		cc, ok := bus.(CausationController)
+		if !ok {
+			t.Fatalf("bus does not implement CausationController")
+		}
+		cc.SetDefaultCausationContext(CausationContext{SessionID: sessionID})
+
+		got := emitUnder(t, bus, CausationContext{
+			SessionID: cc.CurrentCausationContext().SessionID,
+			AgentID:   "sub-agent-C",
+			Depth:     1,
+		})
+		if got != sessionID {
+			t.Errorf("SessionID = %q, want %q: explicit propagation must survive the push", got, sessionID)
+		}
+	})
+}

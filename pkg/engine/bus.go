@@ -271,6 +271,32 @@ func (b *eventBus) pushDispatch(seq uint64, eventID string) func() {
 // push shadows the outer until popped. The agent runtime, session bootstrap,
 // and sub-agent dispatch use this so plugin authors don't have to thread
 // session identity through every emit site.
+//
+// The pushed frame REPLACES the active context whole — there is no per-field
+// merge. currentCausationContext returns the top of the stack as-is and only
+// consults the bus-wide default (SetDefaultCausationContext, installed by
+// Engine.StartSession) when the goroutine's stack is empty. So a frame that
+// omits SessionID blanks it for every event emitted under that frame rather
+// than inheriting the caller's. Note the asymmetry with fillCausation, which
+// DOES merge per field — do not assume the stack behaves the same way.
+//
+// A caller that is still inside a session must therefore carry the SessionID
+// forward itself:
+//
+//	pop := cc.PushCausationContext(engine.CausationContext{
+//	    SessionID: cc.CurrentCausationContext().SessionID,
+//	    AgentID:   agentID,
+//	    Depth:     depth,
+//	})
+//	defer pop()
+//
+// pkg/delegate/runtime.go is the reference implementation. Because the stack
+// is keyed by goroutine ID, that CurrentCausationContext read must happen on
+// the same goroutine as the push — capture it before any `go` statement, or
+// the new goroutine reads the bus-wide default instead of the parent frame.
+//
+// TestPushCausationContext_ReplacesFrameWholeWithoutInheritingSessionID pins
+// these semantics.
 func (b *eventBus) PushCausationContext(c CausationContext) func() {
 	gid := goroutineID()
 	b.dispatchMu.Lock()
