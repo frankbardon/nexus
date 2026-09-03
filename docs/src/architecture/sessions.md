@@ -152,3 +152,28 @@ core:
 | `root` | `~/.nexus/sessions` | Base directory for all sessions |
 | `retention` | `30d` | Retention period for old sessions |
 | `id_format` | `timestamp` | Format for generating session IDs |
+
+## Object-Store Backing (optional)
+
+By default a session lives only on local disk. `core.sessions.object_store`
+optionally makes a remote object store the source of truth for a session
+*between* runs, so a session can be killed on one host and resumed on another
+with no shared filesystem — the case for containers, Cloud Run and Lambda,
+where there is no disk between invocations.
+
+Local disk remains the working copy *during* a run. The seam
+(`pkg/engine/objectstore.Backend`) is deliberately a **lifecycle** interface —
+`Hydrate`, `Put`, `Delete`, `List`, `Flush` over object keys — not an
+abstraction over `os.*`. Core and every plugin keep reading and writing
+ordinary local files, so "behaves exactly like local disk" is a guarantee
+rather than an aspiration, and SQLite keeps running against a real file.
+
+Backends are selected by name in the `database/sql` driver style. Each ships as
+its own Go module so the main module's dependency list never grows; an embedder
+blank-imports the module and names it in config. The interface refers to no
+cloud-specific concept, so a third party can implement it out of tree.
+
+With no backend named — the default — no object-store code runs at all.
+
+See [Configuration Reference](../configuration/reference.md#coresessionsobject_store)
+for the keys, their defaults and their validation behaviour.
