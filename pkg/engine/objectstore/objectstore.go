@@ -31,6 +31,7 @@ package objectstore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -166,6 +167,20 @@ type Config struct {
 	// FailurePolicy is degrade (default) or strict. Normalised to a non-empty
 	// value by Validate whenever BackendName is set.
 	FailurePolicy FailurePolicy `yaml:"failure_policy"`
+
+	// Logger is the engine's structured logger, already tagged with the
+	// subsystem and backend name. Injected by the engine immediately before
+	// Open; nil for anyone constructing a Config by hand, so a backend must
+	// nil-check (or route through slog.Default) rather than assume it.
+	//
+	// Passed on the Config rather than added as a Factory parameter on
+	// purpose: Factory's signature is the one thing out-of-repo backend
+	// modules compile against, and every future engine-injected value would
+	// otherwise break them. A yaml:"-" field is the house pattern for exactly
+	// this — Config.Raw and CoreConfig.ModelsRaw carry non-YAML state the
+	// same way — and it keeps the value out of the session config snapshot,
+	// which is built from the YAML keys only.
+	Logger *slog.Logger `yaml:"-"`
 }
 
 // Enabled reports whether a backend was selected. The zero Config is disabled,

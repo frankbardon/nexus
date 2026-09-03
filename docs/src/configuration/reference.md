@@ -172,6 +172,41 @@ Setting any key in the block while leaving `backend` empty is also an error:
 that combination is always a mistake, and silently ignoring it would leave the
 operator believing storage was configured.
 
+**Lifecycle.** With a backend configured, the engine:
+
+1. Opens the backend at the top of `Boot`, before anything touches the session
+   tree.
+2. **Hydrates eagerly and whole-tree** when resuming a session (`-recall`, or
+   an embedder setting `RecallSessionID`), under the object key prefix
+   `sessions/<session id>` beneath `bucket` + `prefix`. Hydration completes
+   before the workspace is opened and before the first turn runs, so every
+   subsequent read behaves exactly as it would on a host that never left —
+   there is no lazy or faulting read path.
+3. **Flushes and releases** the backend at the end of `Stop`, after plugins,
+   the journal and per-plugin SQLite have all closed.
+
+Behaviour worth knowing:
+
+- **An unknown session ID is not an error.** Recalling an ID the store has
+  never seen produces a valid, empty session, identical to one created locally.
+- **A tree already on local disk wins.** It is the live working copy, so
+  hydration is skipped rather than overwriting it with a possibly older remote
+  copy.
+- **A hydration that fails partway fails the boot** — under *both* failure
+  policies. Hydration lands in a staging directory and is committed with an
+  atomic rename, so a partial tree is discarded and never mistaken for a
+  complete session. `degrade` means "keep running against the local copy", and
+  at hydrate time there is no local copy.
+- **`session.lock` never crosses the seam.** It records the PID of the process
+  that owns the session on *one* machine; round-tripping it through the store
+  would make every resumed session look locked. It is stripped from anything
+  hydrated and is never uploaded.
+- **The local working copy is not wiped on clean exit.** On ephemeral compute
+  the filesystem disappears with the process anyway; on a durable host the
+  local tree is a warm cache and the copy `failure_policy: degrade` falls back
+  to. `core.sessions.retention` remains the operator-owned answer to when local
+  session data goes away.
+
 ### `core.models`
 
 Maps role names → model configurations. Roles can be:

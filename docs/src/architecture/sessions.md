@@ -175,5 +175,59 @@ cloud-specific concept, so a third party can implement it out of tree.
 
 With no backend named — the default — no object-store code runs at all.
 
+### Lifecycle points
+
+The engine touches the seam in exactly three places, all in `pkg/engine`:
+
+| When | What happens |
+|------|--------------|
+| Top of `Boot` | The configured backend is resolved once. A failure here fails the boot. |
+| Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`. |
+| End of `Stop` | `Flush` runs, then the backend is released. |
+
+Hydration is **eager and whole-tree**, and completes before the first turn
+runs. There is deliberately no lazy or faulting read: threading one through the
+engine and ~60 plugins would be impossible to get right, and SQLite could not
+use it at all — so "behaves exactly like local disk" would degrade from a
+guarantee to an aspiration.
+
+Hydration lands in a staging directory inside the sessions root and is
+published with an atomic rename, so a hydration that dies partway leaves
+nothing at `<root>/<session id>` and the partial tree is discarded. That failure
+fails the boot under **both** failure policies: `degrade` means "keep running
+against the local copy", and at hydrate time there is no local copy — degrading
+would hand the agent an empty session that looks complete.
+
+Resuming a session ID the store has never seen is **not** an error. It yields a
+valid empty session, created through the same code path as a brand-new local
+one, so the two are indistinguishable.
+
+`<sessions.root>/<id>/session.lock` (written on `Boot`, see
+[Human-in-the-Loop operations](../operations/hitl.md)) never crosses the seam in
+either direction. It records the PID of the process holding the session
+on one particular machine; a lock that travelled with the session would make
+every rehydrated session look permanently locked by a process that no longer
+exists. The exclusion is enforced at the seam itself, in
+`pkg/engine/session_objectstore.go`, so every present and future push path
+shares one definition of "never syncs".
+
+Plugins are unaware of any of this. Nothing is exposed on `PluginContext`, and
+no plugin calls the seam.
+
+### Lifetime of the local working copy
+
+The local tree under `core.sessions.root` is **not** wiped on clean exit.
+
+- On the target deployment — a container, Cloud Run, Lambda — the filesystem
+  vanishes when the process does, so wiping buys nothing beyond a slower
+  shutdown and a window where a crash mid-wipe leaves a half-deleted tree.
+- On a durable host the local tree is a warm cache: the next resume of the same
+  session skips hydration entirely, and, more importantly, it is the copy that
+  `failure_policy: degrade` falls back to. Deleting it would mean a store
+  outage at shutdown destroys the only good copy.
+- `core.sessions.retention` is already the operator-owned answer to "when does
+  local session data go away". A second, implicit, shutdown-triggered answer
+  would be a surprise, and deleting user data is irreversible.
+
 See [Configuration Reference](../configuration/reference.md#coresessionsobject_store)
 for the keys, their defaults and their validation behaviour.

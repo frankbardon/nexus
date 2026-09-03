@@ -68,6 +68,14 @@ type Engine struct {
 	runUnsubs  []func()
 	runCancel  context.CancelFunc
 	sessionEnd chan struct{}
+
+	// objectStore is the optional remote backing for the session tree. Nil
+	// whenever core.sessions.object_store names no backend, which is the
+	// default and the only state in which no object-store code runs at all.
+	// Unexported on purpose: plugins must never reach the seam, and the
+	// engine is the only thing that knows the lifecycle points it hangs off.
+	// See session_objectstore.go.
+	objectStore *sessionObjectStore
 }
 
 // New creates a fully wired Engine from a config file path.
@@ -214,12 +222,34 @@ func storageOptions(c StorageConfig) *storage.SQLiteOptions {
 // The CLI convenience wrapper Run calls Boot + wait-for-signal-or-session-end
 // + Stop in a single blocking call.
 func (e *Engine) Boot(ctx context.Context) error {
+	// Cleared at the end of a successful Boot so Stop owns teardown. Declared
+	// up front because the two cleanup defers below have to be installed at
+	// different points and must agree on what "Boot failed" means.
+	bootSucceeded := false
+
+	// Resolve the object-store backend before anything touches the session
+	// tree: hydration has to complete before a workspace is opened over it.
+	// With no backend configured this is a no-op and e.objectStore stays nil.
+	if err := e.openObjectStore(ctx); err != nil {
+		return err
+	}
+	// Release the backend handle if Boot fails after it was opened — the
+	// caller will not call Stop on a failed boot. Kept separate from the
+	// session-lock defer, which must be installed *after* acquisition so a
+	// boot refused because another process holds the lock does not delete
+	// that process's lock on the way out.
+	defer func() {
+		if !bootSucceeded {
+			e.releaseObjectStore()
+		}
+	}()
+
 	// Two-phase session startup: create the workspace directory first so
 	// the journal writer has a place to land its files, subscribe the
 	// writer, then publish the session-start metadata + event so they are
 	// the first entries the journal records (seq=1+).
 	if e.RecallSessionID != "" {
-		if err := e.prepareResumeSession(e.RecallSessionID); err != nil {
+		if err := e.prepareResumeSession(ctx, e.RecallSessionID); err != nil {
 			return fmt.Errorf("session recall failed: %w", err)
 		}
 	} else {
@@ -234,10 +264,7 @@ func (e *Engine) Boot(ctx context.Context) error {
 	if err := e.acquireSessionLock(); err != nil {
 		return err
 	}
-	// Release the lock if Boot fails after acquisition — the caller
-	// will not call Stop on a failed boot. Cleared at the end of a
-	// successful Boot so Stop owns the teardown.
-	bootSucceeded := false
+	// Release the lock if Boot fails after acquisition.
 	defer func() {
 		if !bootSucceeded && e.Session != nil {
 			_ = RemoveSessionLock(e.Session.RootDir)
@@ -699,6 +726,15 @@ func (e *Engine) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Flush-and-finalize the object store after every local writer has closed
+	// (plugins, journal, per-plugin SQLite) so the flush barrier covers a
+	// quiesced tree, and after the lock has been removed so the lock file is
+	// not even present to be considered for upload. A no-op when no backend
+	// is configured.
+	if err := e.finalizeObjectStore(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -879,7 +915,10 @@ func (e *Engine) Run(ctx context.Context) error {
 // so the journal writer can subscribe between them.
 func (e *Engine) ResumeSession(sessionID string) error {
 	if e.Session == nil {
-		if err := e.prepareResumeSession(sessionID); err != nil {
+		// No caller-supplied context on this exported signature, and hydration
+		// must still happen, so it gets the background context. Boot — the path
+		// that matters — passes its own.
+		if err := e.prepareResumeSession(context.Background(), sessionID); err != nil {
 			return err
 		}
 	}
@@ -887,8 +926,16 @@ func (e *Engine) ResumeSession(sessionID string) error {
 }
 
 // prepareResumeSession loads the workspace without emitting any bus events.
-func (e *Engine) prepareResumeSession(sessionID string) error {
+//
+// Hydration lives here rather than at the Boot call site so no path can open a
+// resumed workspace over a tree that has not been pulled down yet; both Boot
+// and the exported ResumeSession go through it.
+func (e *Engine) prepareResumeSession(ctx context.Context, sessionID string) error {
 	root := ExpandPath(e.Config.Core.Sessions.Root)
+
+	if err := e.hydrateSessionTree(ctx, sessionID); err != nil {
+		return err
+	}
 
 	session, err := LoadSessionWorkspace(root, sessionID, e.Bus)
 	if err != nil {
@@ -1019,6 +1066,11 @@ func (e *Engine) StartSession() error {
 func (e *Engine) prepareSession() error {
 	root := ExpandPath(e.Config.Core.Sessions.Root)
 
+	// No hydration on this path: NewSessionWorkspace mints a fresh random ID,
+	// so by construction the object store has nothing under it. The
+	// caller-named-ID case ("resume something that may not exist yet") is
+	// handled in prepareResumeSession, which falls through to the same
+	// empty-session construction when hydration finds no objects.
 	session, err := NewSessionWorkspace(root, e.Bus)
 	if err != nil {
 		return fmt.Errorf("creating session workspace: %w", err)

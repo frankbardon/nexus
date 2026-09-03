@@ -61,7 +61,20 @@ type SessionMeta struct {
 
 // NewSessionWorkspace creates a new session workspace with the standard directory structure.
 func NewSessionWorkspace(rootDir string, bus EventBus) (*SessionWorkspace, error) {
-	id := GenerateID()
+	return newSessionWorkspaceAt(rootDir, GenerateID(), bus)
+}
+
+// newSessionWorkspaceAt creates a session workspace under a caller-supplied ID.
+//
+// Split out of NewSessionWorkspace for the object-store hydrate path: resuming
+// a session ID the store has never seen must yield a tree indistinguishable
+// from a brand-new local session, and the only way to guarantee
+// "indistinguishable" is to run the same code rather than a second
+// almost-identical directory-creation routine that will drift.
+//
+// Unexported because minting a session under a caller-chosen ID is an
+// engine-internal concern; every external caller wants a fresh ID.
+func newSessionWorkspaceAt(rootDir string, id string, bus EventBus) (*SessionWorkspace, error) {
 	now := time.Now()
 	sessionDir := filepath.Join(rootDir, id)
 
