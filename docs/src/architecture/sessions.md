@@ -177,13 +177,14 @@ With no backend named — the default — no object-store code runs at all.
 
 ### Lifecycle points
 
-The engine touches the seam in exactly three places, all in `pkg/engine`:
+The engine touches the seam in exactly four places, all in `pkg/engine`:
 
 | When | What happens |
 |------|--------------|
 | Top of `Boot` | The configured backend is resolved once. A failure here fails the boot. |
 | Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`. |
-| End of `Stop` | `Flush` runs, then the backend is released. |
+| Every turn boundary | The whole tree is snapshotted and made durable, then a commit marker is published. |
+| End of `Stop` | A final snapshot runs, then `Flush`, then the backend is released. |
 
 Hydration is **eager and whole-tree**, and completes before the first turn
 runs. There is deliberately no lazy or faulting read: threading one through the
@@ -213,6 +214,117 @@ shares one definition of "never syncs".
 
 Plugins are unaware of any of this. Nothing is exposed on `PluginContext`, and
 no plugin calls the seam.
+
+### Turn-boundary snapshots
+
+**The hook is `agent.turn.end`, and it is handled in core.** That event is
+already the engine's definition of a turn boundary — the journal fsyncs on it
+and rotates on it, and the turn counter and `metadata/timing.jsonl` are driven
+by it — so hanging the snapshot anywhere else would invent a second,
+disagreeing notion of "turn". The subscription lives in
+`pkg/engine/session_objectstore.go`: no plugin implements an interface, calls a
+method, or learns that an object store exists. An agent loop emits the event it
+already emitted.
+
+Two more triggers exist. `session.snapshot.request` forces a snapshot for
+callers that do not emit turn events — an embedder driving the engine directly,
+or a custom agent loop — and `Stop` takes a final one, so a session that ends
+between turns (or ran no turns at all) is still in the bucket. Every snapshot
+publishes a `session.snapshot.result` carrying the object count, the byte total,
+the duration and whether it succeeded.
+
+The snapshot is **synchronous**: it blocks the goroutine that ended the turn
+until the bytes are durable. A background snapshot would report a turn complete
+while its state was still in flight, which is precisely the guarantee this
+exists to provide.
+
+It is installed as a **wildcard subscription filtered to `agent.turn.end`**,
+not a typed one, and that is a correctness requirement rather than a style
+choice. The bus runs every typed handler before any wildcard, and the journal is
+itself a wildcard. A typed handler would therefore snapshot a journal ending one
+envelope short of the very boundary it is reacting to — and a journal whose last
+turn has no `agent.turn.end` is exactly what
+`journal.Coordinator.IsPartialTurn` calls an unfinished turn, so every resume
+from that snapshot would re-fire the last input and re-run a turn that had
+already completed. Registering after the journal's wildcard also means the
+snapshot sees the writes the boundary itself produces — memory compaction, the
+turn counter, history pruning — rather than the state before them.
+
+#### What must not be copied naively
+
+Two things in the tree rewrite themselves while a reader is walking it, and both
+are staged into a temporary directory *beside* the session rather than uploaded
+in place.
+
+**Per-plugin SQLite.** A live `store.db` is a WAL database: committed
+transactions sit in `store.db-wal` until a checkpoint folds them back, and
+`store.db-shm` is a process-local index into that WAL. Neither sidecar means
+anything on another host, so the uploaded file has to stand alone. Every
+snapshot therefore runs `PRAGMA wal_checkpoint(TRUNCATE)` and then
+`VACUUM INTO` a staging path. The checkpoint is what makes the *live* file
+self-contained (and bounds `-wal` growth over a long session); `VACUUM INTO` is
+what makes the *snapshot* untearable, since a plugin committing between the
+checkpoint and the last read byte would otherwise produce a corrupt — not merely
+stale — file, and a corrupt file that uploads successfully is worse than a
+failed upload. `store.db-wal`, `store.db-shm` and `store.db-journal` are
+excluded from the seam entirely, in both directions.
+
+**The journal.** Rotation compresses `events.jsonl` into the next
+`events-NNN.jsonl.zst` and truncates the active segment, and it fires on the
+drain goroutine the instant an `agent.turn.end` envelope lands — the same event
+the snapshot reacts to. Read the active segment after the truncate but list the
+directory before the new `.zst` appears and the turn's events are in neither
+object; capture both and they are in the bucket twice. `journal.Writer.Snapshot`
+takes the writer's file mutex — the one rotation holds — and captures a single
+consistent instant: rotated segments and `header.json` are immutable once
+written and are read in place, while the mutable active segment is copied under
+the lock. A `Barrier` runs first so the capture includes the very turn that
+triggered it rather than trailing it by whatever is still queued.
+`journal/cache/` is ordinary data and is walked normally.
+
+#### Failure, and the commit marker
+
+Object stores have no multi-object transaction, so a tree spread over many
+objects cannot be replaced atomically. Three properties give
+"a failed or partial upload never replaces a good remote copy" anyway:
+
+1. Nothing is uploaded from a file that could be torn — see above.
+2. A snapshot **never deletes**. It adds and overwrites only, so a failure
+   cannot remove remote state it did not successfully replace.
+3. A **commit marker** at `sessions/<session id>.snapshot.json` is written and
+   flushed only after every other object is durable. It therefore only ever
+   advances past a complete snapshot: a failed or half-finished upload leaves it
+   naming the previous one, which is the snapshot guaranteed to be restorable.
+
+The marker is a *sibling* key, not a member of the tree. Because prefixes match
+whole segments, `sessions/<id>.snapshot.json` is deliberately not under prefix
+`sessions/<id>`, so it never hydrates back into the session and never becomes an
+input to the next snapshot.
+
+Generation directories — write the whole tree under `sessions/<id>/gen-<n>/` and
+flip a pointer — were considered and rejected. They give true atomic replace at
+the cost of a second full copy of every session in the bucket and an
+indirection hydration would have to resolve on every boot. The marker answers
+the same question for one small object.
+
+#### Cost
+
+The snapshot is `O(tree size)` on every turn, and a session tree only grows.
+Measured on an M1 Max against the in-memory backend (engine work only — staging,
+checkpoint, tree walk, per-object handoff — with no network):
+
+| Tree | Objects | Size | Per turn |
+|------|---------|------|----------|
+| 10 files + a 100-row store | 17 | 0.05 MiB | ~13 ms |
+| 200 files + a 5k-row store | 207 | 6.0 MiB | ~29–35 ms |
+| 1000 files + a 50k-row store | 1007 | 91 MiB | ~160–175 ms |
+
+That is a fixed floor of roughly 12 ms (checkpoint, `VACUUM INTO`, journal
+barrier, fsync) plus 500–600 MiB/s of local throughput; real network time lands
+on top. `BenchmarkSessionSnapshot` in `pkg/engine` reproduces it. Every snapshot logs `objects`, `bytes`, `db_bytes` and `duration`,
+and publishes the same numbers as `session.snapshot.result`, so the growth is
+visible rather than inferred. Delta upload and a size-dependent snapshot cadence
+are deliberately not designed yet.
 
 ### Lifetime of the local working copy
 

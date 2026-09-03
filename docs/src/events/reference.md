@@ -669,6 +669,8 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 |------------|---------|-------------|
 | `session.file.created` | `SessionFile` | New file in session |
 | `session.file.updated` | `SessionFile` | File updated in session |
+| `session.snapshot.request` | `SessionSnapshotRequest` | Ask the engine to snapshot the session tree to the object store |
+| `session.snapshot.result` | `SessionSnapshotResult` | Outcome of one whole-tree snapshot |
 
 **SessionFile**
 | Field | Type | Description |
@@ -676,6 +678,34 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 | `Path` | string | File path within session |
 | `Action` | string | `"created"` or `"updated"` |
 | `Size` | int | File size in bytes |
+
+**SessionSnapshotRequest**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Reason` | string | Free-form; appears in the log line and in the result |
+
+**SessionSnapshotResult**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session that was snapshotted |
+| `Trigger` | string | `"turn"`, `"shutdown"` or `"request"` |
+| `Sequence` | uint64 | Per-run snapshot counter, starting at 1 |
+| `TurnID` | string | Turn whose boundary triggered it; empty otherwise |
+| `Objects` | int | Objects uploaded, excluding the commit marker |
+| `Bytes` | int64 | Total size of those objects — the snapshot cost |
+| `DurationMs` | float64 | Wall time of the whole snapshot |
+| `OK` | bool | Whether the snapshot was made durable |
+| `ErrorMessage` | string | Empty on success |
+
+Both events exist only when `core.sessions.object_store.backend` names a
+backend; with none configured nothing subscribes and a request is inert.
+
+The engine snapshots at every `agent.turn.end` on its own, so nothing needs to
+emit `session.snapshot.request` in a normal run — it is the escape hatch for
+embedders driving the engine outside an agent loop, and for custom agents that
+emit no turn events. Snapshotting is handled in core and never depends on plugin
+cooperation. See
+[Sessions → Turn-boundary snapshots](../architecture/sessions.md#turn-boundary-snapshots).
 
 ---
 

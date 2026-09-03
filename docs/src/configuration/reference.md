@@ -182,10 +182,23 @@ operator believing storage was configured.
    before the workspace is opened and before the first turn runs, so every
    subsequent read behaves exactly as it would on a host that never left —
    there is no lazy or faulting read path.
-3. **Flushes and releases** the backend at the end of `Stop`, after plugins,
+3. **Snapshots the whole session tree at every turn boundary** — on
+   `agent.turn.end`, and on demand via `session.snapshot.request` — and again
+   at shutdown. A hard kill therefore loses at most the in-flight turn.
+4. **Flushes and releases** the backend at the end of `Stop`, after plugins,
    the journal and per-plugin SQLite have all closed.
 
 Behaviour worth knowing:
+
+- **The snapshot is synchronous.** It blocks the goroutine that ended the turn
+  until the upload is durable, because a turn reported complete while its state
+  is still in flight is exactly the guarantee the snapshot exists to provide.
+  The cost is `O(tree size)` per turn and is logged on every snapshot —
+  `objects`, `bytes`, `db_bytes` and `duration` — and published as
+  `session.snapshot.result`.
+- **`failure_policy` governs a failed snapshot.** `degrade` logs a warning and
+  keeps the run going against the local copy; `strict` additionally raises
+  `core.error`. Either way `session.snapshot.result` carries `ok: false`.
 
 - **An unknown session ID is not an error.** Recalling an ID the store has
   never seen produces a valid, empty session, identical to one created locally.
@@ -201,6 +214,15 @@ Behaviour worth knowing:
   that owns the session on *one* machine; round-tripping it through the store
   would make every resumed session look locked. It is stripped from anything
   hydrated and is never uploaded.
+- **SQLite sidecars never cross the seam either.** `store.db-wal`, `store.db-shm`
+  and `store.db-journal` describe a machine, not a session. Each `store.db` is
+  WAL-checkpointed and snapshotted as a standalone file at the turn boundary, so
+  the uploaded database restores with no sidecars beside it.
+- **A failed or partial snapshot never replaces the previous good copy.** A
+  commit marker at `sessions/<session id>.snapshot.json` — a sibling of the
+  tree, not a member of it — is written only after every other object is
+  durable, so it always names the last snapshot that completed. A snapshot only
+  ever adds and overwrites; it never deletes.
 - **The local working copy is not wiped on clean exit.** On ephemeral compute
   the filesystem disappears with the process anyway; on a durable host the
   local tree is a warm cache and the copy `failure_policy: degrade` falls back

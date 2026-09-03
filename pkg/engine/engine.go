@@ -413,6 +413,12 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}))
 
+	// Snapshot the whole session tree to the object store at every turn
+	// boundary. Installs nothing when no backend is configured, so the default
+	// path never grows a handler. See session_objectstore.go for why the hook
+	// is agent.turn.end and why it runs synchronously.
+	e.installObjectStoreSnapshots()
+
 	// Surface errors to the UI.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("core.error", func(event Event[any]) {
 		errInfo, ok := event.Payload.(events.ErrorInfo)
@@ -703,12 +709,24 @@ func (e *Engine) Stop(ctx context.Context) error {
 	// Close the journal last so any teardown events (plugin Shutdown,
 	// session.end finalization) reach disk. Use a short-deadline context
 	// so a stuck drain cannot block engine shutdown indefinitely.
+	//
+	// The writer is kept in a local so the shutdown snapshot below can still
+	// capture its segments: a closed writer is the ideal thing to snapshot,
+	// since nothing can rotate underneath it.
+	journalWriter := e.Journal
 	if e.Journal != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = e.Journal.Close(closeCtx)
 		cancel()
 		e.Journal = nil
 	}
+
+	// Final whole-tree snapshot, between the journal closing and per-plugin
+	// SQLite closing. Both halves of that sandwich matter: the journal must be
+	// closed so its last envelopes are on disk, and the SQLite handles must
+	// still be open because the snapshot checkpoints their WALs. A no-op when
+	// no object-store backend is configured.
+	e.snapshotSessionOnShutdown(journalWriter)
 
 	if e.Storage != nil {
 		if err := e.Storage.Close(); err != nil {

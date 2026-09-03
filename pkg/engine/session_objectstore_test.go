@@ -162,10 +162,30 @@ func TestObjectStoreExcludesSessionLock(t *testing.T) {
 		"files/report.md",
 		"plugins/nexus.scene/scene.jsonl",
 		"journal/000001.jsonl",
+		"plugins/nexus.gate.token_budget/notes.db",
+		"files/wal-analysis.md",
 	} {
 		if objectStoreExcluded(keep) {
-			t.Errorf("objectStoreExcluded(%q) = true; only the session lock is excluded", keep)
+			t.Errorf("objectStoreExcluded(%q) = true; session data must cross the seam", keep)
 		}
+	}
+}
+
+// SQLite sidecars describe a machine, not a session. A -wal hydrated beside a
+// store.db that was checkpointed and snapshotted separately would roll the
+// database back to a state neither file ever held.
+func TestObjectStoreExcludesSQLiteSidecars(t *testing.T) {
+	for _, excluded := range []string{
+		"plugins/nexus.gate.token_budget/store.db-wal",
+		"plugins/nexus.gate.token_budget/store.db-shm",
+		"plugins/nexus.gate.token_budget/store.db-journal",
+	} {
+		if !objectStoreExcluded(excluded) {
+			t.Errorf("objectStoreExcluded(%q) = false; SQLite sidecars must never cross the seam", excluded)
+		}
+	}
+	if objectStoreExcluded("plugins/nexus.gate.token_budget/store.db") {
+		t.Error("objectStoreExcluded excluded store.db itself; the snapshot is what must be uploaded")
 	}
 }
 
@@ -416,9 +436,13 @@ func TestStopFlushesAndClosesBackend(t *testing.T) {
 	if err := eng.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	// Three: the shutdown snapshot flushes the session objects, flushes again
+	// after the commit marker, and finalizeObjectStore adds the final barrier.
+	// The marker's own flush is the load-bearing one — it is what makes the
+	// marker unable to describe a snapshot that is not yet durable.
 	_, flushes, closes := backend.counts()
-	if flushes != 1 {
-		t.Errorf("Flush calls = %d, want exactly 1 on clean shutdown", flushes)
+	if flushes != 3 {
+		t.Errorf("Flush calls = %d, want 3 on clean shutdown (objects, marker, finalize)", flushes)
 	}
 	if closes != 1 {
 		t.Errorf("Close calls = %d, want 1 (io.Closer honoured without widening Backend)", closes)
@@ -441,8 +465,11 @@ func TestStopFlushesUnderCancelledContext(t *testing.T) {
 	if err := eng.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, flushes, _ := backend.counts(); flushes != 1 {
-		t.Errorf("Flush calls = %d, want 1 even with a cancelled Stop context", flushes)
+	// As in TestStopFlushesAndClosesBackend: shutdown snapshot (objects +
+	// marker) plus the finalize barrier. All three run on their own contexts,
+	// which is the point of the assertion.
+	if _, flushes, _ := backend.counts(); flushes != 3 {
+		t.Errorf("Flush calls = %d, want 3 even with a cancelled Stop context", flushes)
 	}
 }
 

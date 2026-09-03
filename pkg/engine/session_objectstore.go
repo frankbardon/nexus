@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,9 +10,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine/journal"
 	"github.com/frankbardon/nexus/pkg/engine/objectstore"
+	"github.com/frankbardon/nexus/pkg/engine/storage"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 // This file is the only place in the engine that talks to
@@ -72,6 +79,17 @@ type sessionObjectStore struct {
 	// failure policy and the backend name are available at the shutdown call
 	// site without reaching back into Engine.Config.
 	cfg objectstore.Config
+
+	// snapshotMu serialises whole-tree snapshots. Two snapshots interleaving
+	// would race on the commit marker and could publish a marker describing a
+	// snapshot that the other one had already half-overwritten. Nested agent
+	// loops make concurrent agent.turn.end dispatches entirely plausible, so
+	// this is not theoretical.
+	snapshotMu sync.Mutex
+	// snapshotSeq counts snapshots for this run, starting at 1. Carried in
+	// the commit marker and the result event so an operator can line a remote
+	// marker up against a log line.
+	snapshotSeq uint64
 }
 
 // close releases backend-held resources.
@@ -126,7 +144,24 @@ func sessionObjectKeyPrefix(sessionID string) string {
 // check at the hydrate call site so the turn-boundary push (E1-S4) and the
 // event-driven push (E2) share exactly one definition of "never syncs".
 func objectStoreExcluded(relPath string) bool {
-	return filepath.ToSlash(relPath) == sessionLockFilename
+	p := filepath.ToSlash(relPath)
+	if p == sessionLockFilename {
+		return true
+	}
+	// SQLite sidecars are the second thing that describes a machine rather
+	// than a session. store.db-wal holds committed frames not yet folded into
+	// the main database and store.db-shm is a process-local index into it;
+	// both are meaningless beside a database file that was checkpointed and
+	// snapshotted separately (see pkg/engine/storage/snapshot.go), and
+	// hydrating a stale -wal next to a fresh store.db is how a database gets
+	// silently rolled back to a state neither file ever held. -journal covers
+	// the rollback-mode equivalent for any handle not opened in WAL mode.
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if strings.HasSuffix(p, ".db"+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // openObjectStore resolves the configured backend once, at the very top of
@@ -366,4 +401,528 @@ func dirIsEmpty(dir string) (bool, error) {
 		return false, fmt.Errorf("reading %s: %w", dir, err)
 	}
 	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// Turn-boundary snapshots
+// ---------------------------------------------------------------------------
+
+// The durability half of the seam. Hydration (above) makes a session present;
+// this makes it survivable.
+//
+// # Why the turn boundary, and why agent.turn.end
+//
+// A turn is the unit a session can afford to lose. Snapshotting more often
+// costs a whole-tree upload per LLM call; snapshotting less often means a
+// killed container throws away work the user watched happen. agent.turn.end is
+// already the engine's definition of a turn boundary — the journal fsyncs on
+// it, rotates on it, and the turn counter and timing journal are driven by it
+// (see Boot) — so hanging the snapshot off anything else would invent a second,
+// disagreeing notion of "turn".
+//
+// Crucially the subscription lives *here*, in core. No plugin implements an
+// interface, calls a method, or knows the object store exists; an agent loop
+// emits the same event it already emitted before this file was written.
+// session.snapshot.request is the escape hatch for the two things the turn
+// boundary genuinely does not cover — an embedder driving the engine outside an
+// agent loop, and a custom agent that emits no turn events.
+//
+// The handler is a wildcard filtered to agent.turn.end rather than a typed
+// subscription, so that it runs after the journal has been handed the boundary
+// envelope. installObjectStoreSnapshots carries the full argument; it is the
+// difference between a resumed session continuing and a resumed session re-running
+// its last completed turn.
+//
+// # Why synchronous
+//
+// The handler blocks the goroutine that emitted agent.turn.end for the whole
+// upload. Doing it in a background goroutine was considered and rejected: it
+// would report a turn complete while its state was still in flight, which is
+// precisely the guarantee ("a hard kill loses at most the in-flight turn") the
+// snapshot exists to provide. The cost is real and is logged on every snapshot
+// — objects, bytes and duration — because it is O(tree size) per turn and the
+// tree only grows.
+//
+// # What "never replaces a good remote copy" means here
+//
+// Object stores have no multi-object transaction, so a tree spread over N
+// objects cannot be replaced atomically. Three things together give the
+// property anyway:
+//
+//  1. Nothing is uploaded from a file that could be torn. The two subsystems
+//     that rewrite themselves under a reader — per-plugin SQLite and the
+//     journal's active segment — are staged first, into a directory outside the
+//     session tree, and uploaded from there.
+//  2. A snapshot never deletes. It adds and overwrites only, so a failure can
+//     never remove remote state it did not successfully replace.
+//  3. A commit marker at sessions/<id>.snapshot.json is written and flushed
+//     only after every other object is durable. The marker therefore only ever
+//     advances past a complete snapshot: a failed or half-finished upload
+//     leaves it naming the previous one, which is the snapshot that is
+//     guaranteed restorable.
+//
+// The marker is a sibling key, not a member of the tree, which is why
+// objectstore.TrimKeyPrefix matches whole segments: sessions/<id>.snapshot.json
+// is deliberately *not* under prefix sessions/<id>, so it never hydrates back
+// into the session and never becomes an input to the next snapshot.
+//
+// The rejected alternative was generation directories — write the whole tree
+// under sessions/<id>/gen-<n>/ and flip a pointer. That gives true atomic
+// replace, and costs a second full copy of every session in the bucket plus a
+// key scheme hydration would have to resolve through an indirection on every
+// boot. The marker buys the same "is the remote state complete?" answer for one
+// small object.
+
+const (
+	// objectStoreSnapshotTimeout bounds one whole-tree snapshot. Generous
+	// because the snapshot is O(tree size) over a network, and tight enough
+	// that a wedged remote cannot hang an interactive agent indefinitely.
+	// Not a config key, for the same reason objectStoreFlushTimeout is not:
+	// an operator who wants different behaviour here wants a different
+	// failure_policy.
+	objectStoreSnapshotTimeout = 2 * time.Minute
+
+	// snapshotStagingPrefix names the directory holding the staged copies of
+	// files that cannot be uploaded in place. Dot-prefixed and rooted in the
+	// sessions root, exactly like hydrateStagingPrefix, so a leftover from a
+	// killed snapshot is visibly not a session.
+	snapshotStagingPrefix = ".snapshot-"
+
+	snapshotTriggerTurn     = "turn"
+	snapshotTriggerShutdown = "shutdown"
+	snapshotTriggerRequest  = "request"
+
+	// sessionSnapshotMarkerSuffix turns a session key prefix into the key of
+	// its commit marker.
+	sessionSnapshotMarkerSuffix = ".snapshot.json"
+
+	// sessionSnapshotMarkerVersion is the marker's own on-disk format version,
+	// kept separate from the bus event so an operator reading the bucket can
+	// tell what they are looking at without a Nexus build to hand.
+	sessionSnapshotMarkerVersion = 1
+)
+
+// sessionSnapshotMarkerKey is the commit-record key for a session. See the
+// block comment above for why it is a sibling of the tree rather than a member
+// of it.
+func sessionSnapshotMarkerKey(sessionID string) string {
+	return sessionObjectKeyPrefix(sessionID) + sessionSnapshotMarkerSuffix
+}
+
+// sessionSnapshotMarker is the JSON body of the commit record. Deliberately
+// small and deliberately without a file listing: it is written on every
+// snapshot, so anything proportional to the tree would make the marker itself a
+// cost that grows with the session.
+type sessionSnapshotMarker struct {
+	SchemaVersion int       `json:"_schema_version"`
+	SessionID     string    `json:"session_id"`
+	KeyPrefix     string    `json:"key_prefix"`
+	Sequence      uint64    `json:"sequence"`
+	Trigger       string    `json:"trigger"`
+	TurnID        string    `json:"turn_id,omitempty"`
+	CompletedAt   time.Time `json:"completed_at"`
+	Objects       int       `json:"objects"`
+	Bytes         int64     `json:"bytes"`
+}
+
+// snapshotRequest is what one snapshot needs to know about its caller.
+//
+// The journal writer is passed in rather than read from e.Journal because the
+// shutdown snapshot runs after Stop has closed and cleared it, and a closed
+// writer is still perfectly snapshottable — the segments are on disk and
+// nothing is going to rotate them.
+type snapshotRequest struct {
+	trigger string
+	turnID  string
+	reason  string
+	journal *journal.Writer
+}
+
+// snapshotEntry pairs a session-relative path with the local file the bytes
+// come from. The two differ for anything that had to be staged.
+type snapshotEntry struct {
+	rel string
+	src string
+}
+
+// snapshotStats is what the snapshot reports back — the cost measurement.
+type snapshotStats struct {
+	Sequence uint64
+	Objects  int
+	Bytes    int64
+	// DBBytes and DBDuration isolate the per-plugin SQLite share of the
+	// snapshot, which is the part that is O(database size) on every single
+	// turn regardless of how little changed.
+	DBBytes    int64
+	DBDuration time.Duration
+	Duration   time.Duration
+}
+
+// installObjectStoreSnapshots subscribes the turn-boundary and on-request
+// snapshot handlers. Called from Boot, after startJournal — see below for why
+// the order is not incidental.
+//
+// Nothing is subscribed when no backend is configured, so the default build
+// does not merely skip the work: it never enters the dispatch table, and
+// agent.turn.end costs exactly what it cost before this file existed.
+func (e *Engine) installObjectStoreSnapshots() {
+	if e.objectStore == nil {
+		return
+	}
+	if e.Journal == nil {
+		// Only reachable if this is ever called before startJournal. The
+		// snapshot still works — it just cannot capture a journal it has no
+		// handle on — but the ordering argument below no longer holds, so say
+		// so rather than degrading silently.
+		e.Logger.Warn("object store: installing snapshots with no journal writer; " +
+			"turn snapshots will not include the journal")
+	}
+
+	// A wildcard subscription filtered to agent.turn.end, NOT a typed
+	// subscription on it. That is a correctness requirement, not a style
+	// choice.
+	//
+	// EmitEvent runs every typed handler before any wildcard, and the journal
+	// is itself a wildcard, installed by startJournal earlier in Boot. A typed
+	// handler here would therefore run before the agent.turn.end envelope had
+	// even been handed to the journal, and would snapshot a journal ending one
+	// envelope short of the exact turn boundary it is reacting to. The
+	// consequence is not subtle: a journal whose last turn has no agent.turn.end
+	// is what journal.Coordinator.IsPartialTurn calls an unfinished turn, so
+	// every resume from that snapshot would re-fire the last input and re-run a
+	// turn that had already completed.
+	//
+	// Registering after the journal's wildcard puts this handler after it in
+	// dispatch order — wildcards run in subscription order — so the envelope is
+	// already queued by the time Barrier waits for it. It also means rotation
+	// for this turn has finished before the journal is captured.
+	//
+	// The cost is a string comparison per dispatched event, paid only when a
+	// backend is configured.
+	e.runUnsubs = append(e.runUnsubs, e.Bus.SubscribeAll(func(ev Event[any]) {
+		if ev.Type != "agent.turn.end" {
+			return
+		}
+		info, _ := ev.Payload.(events.TurnInfo)
+		e.runSessionSnapshot(snapshotRequest{
+			trigger: snapshotTriggerTurn,
+			turnID:  info.TurnID,
+			journal: e.Journal,
+		})
+	}))
+
+	// An explicit request has no ordering constraint — the request event is not
+	// a turn boundary and nothing reads it back — so it stays a plain typed
+	// subscription.
+	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("session.snapshot.request", func(ev Event[any]) {
+		req, _ := ev.Payload.(events.SessionSnapshotRequest)
+		e.runSessionSnapshot(snapshotRequest{
+			trigger: snapshotTriggerRequest,
+			reason:  req.Reason,
+			journal: e.Journal,
+		})
+	}, WithSource("nexus.engine.objectstore")))
+}
+
+// runSessionSnapshot performs one snapshot and reports the outcome on the bus,
+// applying the configured failure policy.
+//
+// It never returns an error: every caller is a bus handler or a shutdown step
+// that has nothing useful to do with one. The outcome travels as a
+// session.snapshot.result event, and under FailurePolicyStrict also as a
+// core.error, so a subscriber that cares about an unpersisted turn can see it.
+func (e *Engine) runSessionSnapshot(req snapshotRequest) {
+	store := e.objectStore
+	if store == nil || e.Session == nil {
+		return
+	}
+
+	// A fresh context with its own deadline: the shutdown caller routinely has
+	// an already-cancelled one, and the final snapshot is precisely the work
+	// that must still happen after cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), objectStoreSnapshotTimeout)
+	defer cancel()
+
+	stats, err := e.snapshotSessionTree(ctx, store, req)
+
+	result := events.SessionSnapshotResult{
+		SchemaVersion: events.SessionSnapshotResultVersion,
+		SessionID:     e.Session.ID,
+		Trigger:       req.trigger,
+		Sequence:      stats.Sequence,
+		TurnID:        req.turnID,
+		Objects:       stats.Objects,
+		Bytes:         stats.Bytes,
+		DurationMs:    float64(stats.Duration.Microseconds()) / 1000,
+		OK:            err == nil,
+	}
+
+	if err != nil {
+		result.ErrorMessage = err.Error()
+		if store.cfg.FailurePolicy == objectstore.FailurePolicyStrict {
+			// Strict means an unpersisted turn is worse than a failed one.
+			// The engine cannot un-run a turn that already completed, so the
+			// strongest honest signal is a loud, non-fatal error carrying the
+			// backend name — which is what an operator needs to decide whether
+			// to stop the run.
+			_ = e.Bus.Emit("core.error", events.ErrorInfo{
+				SchemaVersion: events.ErrorInfoVersion,
+				Source:        "nexus.engine.objectstore",
+				Err:           err,
+			})
+			e.Logger.Error("object store: session snapshot failed",
+				"backend", store.cfg.BackendName, "trigger", req.trigger, "error", err)
+		} else {
+			e.Logger.Warn("object store: session snapshot failed, the stored session is stale",
+				"backend", store.cfg.BackendName, "trigger", req.trigger, "error", err)
+		}
+	} else {
+		// The cost measurement. Logged on every snapshot rather than sampled,
+		// because "the database got big and turns got slow" is exactly the
+		// correlation an operator needs and it is invisible in aggregate.
+		e.Logger.Info("object store: session snapshot",
+			"session_id", e.Session.ID,
+			"trigger", req.trigger,
+			"reason", req.reason,
+			"sequence", stats.Sequence,
+			"objects", stats.Objects,
+			"bytes", stats.Bytes,
+			"db_bytes", stats.DBBytes,
+			"db_duration", stats.DBDuration,
+			"duration", stats.Duration,
+		)
+	}
+
+	_ = e.Bus.Emit("session.snapshot.result", result)
+}
+
+// snapshotSessionTree uploads the whole session tree and publishes the commit
+// marker. See the block comment above for the durability argument.
+// Named results are load-bearing: the deferred timer below writes to stats, and
+// with unnamed results that write would land on a copy the caller never sees —
+// silently reporting every snapshot as taking zero time, which is precisely the
+// number this whole path exists to surface.
+func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectStore, req snapshotRequest) (stats snapshotStats, err error) {
+	store.snapshotMu.Lock()
+	defer store.snapshotMu.Unlock()
+
+	store.snapshotSeq++
+	stats.Sequence = store.snapshotSeq
+
+	started := time.Now()
+	defer func() { stats.Duration = time.Since(started) }()
+
+	sessionRoot := e.Session.RootDir
+	sessionsRoot := ExpandPath(e.Config.Core.Sessions.Root)
+
+	// Staging lives beside the session, not inside it: a staging directory in
+	// the tree would be walked and uploaded as session data, and would have to
+	// be excluded by name forever after.
+	stage, err := os.MkdirTemp(sessionsRoot, snapshotStagingPrefix+e.Session.ID+"-")
+	if err != nil {
+		return stats, fmt.Errorf("snapshot: staging dir for session %q: %w", e.Session.ID, err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(stage); rmErr != nil {
+			e.Logger.Warn("object store: removing snapshot staging dir failed",
+				"session_id", e.Session.ID, "dir", stage, "error", rmErr)
+		}
+	}()
+
+	// staged maps a session-relative path to the file the bytes must come
+	// from. Every entry in it also tells the tree walk below to leave the live
+	// file alone.
+	staged := make(map[string]string)
+
+	// --- the journal ---------------------------------------------------
+	//
+	// Barrier first: appends are asynchronous, so without it this handler
+	// would snapshot a journal that stops a few envelopes short of the very
+	// turn boundary that triggered it, and every resume would re-fire its last
+	// input. Then capture a consistent instant, which is what keeps a
+	// concurrent rotation from dropping or duplicating a segment.
+	journalCaptured := false
+	if req.journal != nil {
+		if err := req.journal.Barrier(ctx); err != nil {
+			return stats, fmt.Errorf("snapshot: draining journal: %w", err)
+		}
+		files, err := req.journal.Snapshot(filepath.Join(stage, "journal"))
+		if err != nil {
+			return stats, fmt.Errorf("snapshot: capturing journal: %w", err)
+		}
+		for _, f := range files {
+			staged["journal/"+f.Name] = f.Path
+		}
+		journalCaptured = true
+	}
+
+	// --- per-plugin SQLite ---------------------------------------------
+	//
+	// Checkpoint then VACUUM INTO, per handle. This is the only way the
+	// uploaded store.db is restorable without its sidecars, and the only way
+	// a plugin committing mid-snapshot cannot tear the upload.
+	if e.Storage != nil {
+		dbStarted := time.Now()
+		snaps, err := e.Storage.Snapshot(storage.ScopeSession, filepath.Join(stage, "storage"))
+		if err != nil {
+			return stats, fmt.Errorf("snapshot: %w", err)
+		}
+		stats.DBDuration = time.Since(dbStarted)
+		for _, snap := range snaps {
+			rel, relErr := filepath.Rel(sessionRoot, snap.LivePath)
+			if relErr != nil || strings.HasPrefix(rel, "..") {
+				// A session-scope handle whose file is not under this session
+				// tree should be impossible; skipping rather than failing
+				// keeps a future scope reshuffle from breaking snapshots.
+				e.Logger.Warn("object store: session-scope store.db outside the session tree, not snapshotted",
+					"plugin", snap.PluginID, "path", snap.LivePath)
+				continue
+			}
+			staged[filepath.ToSlash(rel)] = snap.Path
+			stats.DBBytes += snap.Bytes
+			if snap.Checkpoint.Busy {
+				// Not fatal — VACUUM INTO still produced a consistent copy —
+				// but it means the *local* database file is still carrying a
+				// WAL, which is worth knowing when a resume looks stale.
+				e.Logger.Warn("object store: WAL checkpoint was busy before snapshot",
+					"plugin", snap.PluginID, "path", snap.LivePath)
+			}
+		}
+	}
+
+	// --- the rest of the tree ------------------------------------------
+	entries := make([]snapshotEntry, 0, len(staged)+32)
+	walkErr := filepath.WalkDir(sessionRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(sessionRoot, path)
+		if relErr != nil {
+			return fmt.Errorf("relativising %s: %w", path, relErr)
+		}
+		slash := filepath.ToSlash(rel)
+		if objectStoreExcluded(slash) {
+			return nil
+		}
+		if _, ok := staged[slash]; ok {
+			return nil
+		}
+		// Top-level journal files are described entirely by the captured
+		// instant. Anything the walk finds there that the instant did not name
+		// appeared after the capture — a segment a rotation has just written —
+		// and uploading it now would put the same events in the bucket twice,
+		// once in the new .zst and once in the active segment we staged.
+		// journal/cache/ is ordinary data and is deliberately still walked.
+		if journalCaptured && isJournalSegmentPath(slash) {
+			return nil
+		}
+		entries = append(entries, snapshotEntry{rel: slash, src: path})
+		return nil
+	})
+	if walkErr != nil {
+		return stats, fmt.Errorf("snapshot: walking session tree: %w", walkErr)
+	}
+	for rel, src := range staged {
+		entries = append(entries, snapshotEntry{rel: rel, src: src})
+	}
+
+	// Sorted so the upload order is reproducible across runs and platforms,
+	// which is what makes a failure diagnosable from a bucket listing. It also
+	// happens to put "journal/events-NNN.jsonl.zst" ahead of
+	// "journal/events.jsonl" ('-' sorts before '.'), so an interrupted
+	// snapshot leaves the bucket with a duplicated segment rather than a lost
+	// one — the recoverable half of the two. The commit marker is what makes
+	// that state detectable; this only decides which way it fails.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+
+	prefix := sessionObjectKeyPrefix(e.Session.ID)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return stats, fmt.Errorf("snapshot: %w", err)
+		}
+		info, statErr := os.Stat(entry.src)
+		if statErr != nil {
+			if errors.Is(statErr, fs.ErrNotExist) {
+				// The tree is live. A file that vanished between the walk and
+				// here (a tool cleaning up after itself, a cache sweep) is not
+				// a snapshot failure.
+				continue
+			}
+			return stats, fmt.Errorf("snapshot: stat %s: %w", entry.rel, statErr)
+		}
+		if err := store.backend.Put(ctx, prefix+"/"+entry.rel, entry.src); err != nil {
+			return stats, fmt.Errorf("snapshot: uploading %s: %w", entry.rel, err)
+		}
+		stats.Objects++
+		stats.Bytes += info.Size()
+	}
+
+	// The durability barrier. Everything above is only queued until this
+	// returns; the marker below must not be published ahead of it.
+	if err := store.backend.Flush(ctx); err != nil {
+		return stats, fmt.Errorf("snapshot: flushing session objects: %w", err)
+	}
+
+	if err := e.publishSnapshotMarker(ctx, store, stage, req, stats); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// publishSnapshotMarker writes and durably stores the commit record. Runs only
+// after every session object is durable, so the marker can only ever describe a
+// complete snapshot.
+func (e *Engine) publishSnapshotMarker(ctx context.Context, store *sessionObjectStore, stage string, req snapshotRequest, stats snapshotStats) error {
+	marker := sessionSnapshotMarker{
+		SchemaVersion: sessionSnapshotMarkerVersion,
+		SessionID:     e.Session.ID,
+		KeyPrefix:     sessionObjectKeyPrefix(e.Session.ID),
+		Sequence:      stats.Sequence,
+		Trigger:       req.trigger,
+		TurnID:        req.turnID,
+		CompletedAt:   time.Now().UTC(),
+		Objects:       stats.Objects,
+		Bytes:         stats.Bytes,
+	}
+	body, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return fmt.Errorf("snapshot: marshaling commit marker: %w", err)
+	}
+	path := filepath.Join(stage, "snapshot.json")
+	if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
+		return fmt.Errorf("snapshot: staging commit marker: %w", err)
+	}
+	if err := store.backend.Put(ctx, sessionSnapshotMarkerKey(e.Session.ID), path); err != nil {
+		return fmt.Errorf("snapshot: uploading commit marker: %w", err)
+	}
+	if err := store.backend.Flush(ctx); err != nil {
+		return fmt.Errorf("snapshot: flushing commit marker: %w", err)
+	}
+	return nil
+}
+
+// isJournalSegmentPath reports whether a session-relative path names a file
+// directly inside the journal directory — a segment or the header, all of which
+// journal.Writer.Snapshot is authoritative for. Files further down (the
+// tool-result cache at journal/cache/) are ordinary tree data.
+func isJournalSegmentPath(slash string) bool {
+	rest, ok := strings.CutPrefix(slash, "journal/")
+	return ok && !strings.Contains(rest, "/")
+}
+
+// snapshotSessionOnShutdown takes the final snapshot of a run.
+//
+// Without it a clean shutdown would flush a backend that had never been handed
+// the last turn's state — and a session that completed no turns at all would
+// leave nothing in the bucket whatsoever. Called from Stop after the plugins
+// and the journal have closed but before per-plugin SQLite does, because the
+// WAL checkpoint needs those handles open.
+func (e *Engine) snapshotSessionOnShutdown(jw *journal.Writer) {
+	if e.objectStore == nil || e.Session == nil {
+		return
+	}
+	e.runSessionSnapshot(snapshotRequest{trigger: snapshotTriggerShutdown, journal: jw})
 }

@@ -87,3 +87,47 @@ for concurrent independent workloads.
 
 Within a single process, `Storage` is safe for concurrent use across
 goroutines.
+
+## Checkpoints and snapshots
+
+A `store.db` is only half a database while a writer is active: committed
+transactions live in `store.db-wal` until a checkpoint folds them back, and
+`store.db-shm` is a process-local index into that WAL. Copying `store.db` on its
+own gets a file that opens cleanly and is silently missing data — the reason
+`cp store.db elsewhere` is never a backup.
+
+The manager exposes two operations for this:
+
+- `Manager.Checkpoint(scope)` runs `PRAGMA wal_checkpoint(TRUNCATE)` on every
+  open handle at a scope, folding the WAL back into the main file and resetting
+  it to zero length. `TRUNCATE` rather than `PASSIVE` (which gives up silently
+  the moment a reader is present) or `FULL` (which leaves the WAL at its
+  high-water mark, so one large batch costs the session forever). It blocks on
+  readers, bounded by the 5 s busy timeout.
+- `Manager.Snapshot(scope, destDir)` checkpoints and then `VACUUM INTO`s each
+  handle to `<destDir>/<pluginID>/store.db`, returning the live path, the
+  snapshot path, its size, the checkpoint result and the elapsed time.
+
+The two steps do different jobs and both are needed. The checkpoint makes the
+*live* file self-contained; `VACUUM INTO` makes the *snapshot* untearable, since
+it runs inside a read transaction and so cannot be torn by a plugin committing
+mid-copy. A plain `io.Copy` after the checkpoint would produce a corrupt rather
+than merely stale file in that case, which is strictly worse when the result is
+about to be uploaded over a good remote copy. `VACUUM INTO` also refuses an
+existing destination, so snapshotting over a live database is impossible by
+construction, and it compacts, so the snapshot is never larger than the live
+file. The driver is pure Go, so there is no CGO backup API available; this is the
+portable equivalent.
+
+The cost is `O(database size)`: roughly 220–265 MiB/s on an M1 Max
+(0.6 MiB → ~3 ms, 117 MiB → ~530 ms). `BenchmarkSnapshot` in
+`pkg/engine/storage` measures it.
+
+Only handles the manager has actually opened are covered, which is the right
+set: a `store.db` in the tree with no handle has no writer in this process and
+is already static.
+
+The engine's object-store seam is the caller. It snapshots session-scope
+handles at every turn boundary and never uploads `-wal`, `-shm` or `-journal`
+sidecars, so the stored database restores on a host that has never seen them.
+See [Sessions → Turn-boundary snapshots](sessions.md#turn-boundary-snapshots).
