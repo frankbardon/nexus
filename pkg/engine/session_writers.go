@@ -34,6 +34,12 @@ package engine
 // decision, and a table that only lives in prose is a table that goes stale.
 // docs/src/architecture/sessions.md carries the same content for humans.
 //
+// One row is write-through: pkg/engine/blobs. It is the only writer whose
+// object key is derived from the bytes it writes, which is what makes pushing
+// on write safe without any barrier — see session_objectstore_blobs.go for
+// what that does and does not buy, and for why the push is a plain func hook
+// rather than an event.
+//
 // Four rows below are turn-boundary-only *because they write outside every
 // session tree* — llm/batch (~/.nexus/batches), memory/longterm (~/.nexus/memory),
 // control/hitl (~/.nexus/hitl) and rag/ingest (~/.nexus/vectors/_cache), with
@@ -77,6 +83,22 @@ const (
 	// describe the *host* rather than the session, where a faithful copy is
 	// precisely the wrong thing to restore.
 	DispositionExcluded SessionWriterDisposition = "excluded-by-design"
+
+	// DispositionWriteThrough means the writer pushes to the object store the
+	// moment its bytes land, without going through the bus at all.
+	//
+	// It is a fourth disposition rather than a flavour of DispositionEmit
+	// because the two make different promises to a reader of this table. An
+	// "emit" row says a subscriber can observe the write; a "write-through"
+	// row says the bytes are already on their way to the store and no
+	// subscriber will ever hear about them. Collapsing them would license a
+	// sync backend to wait for events that are never emitted.
+	//
+	// Only justified where the object key is derived from the content, so a
+	// duplicate upload is a no-op rather than a race and no barrier is needed
+	// to order it against the turn-boundary snapshot. That is exactly one
+	// subtree today: the sha256-addressed blob store.
+	DispositionWriteThrough SessionWriterDisposition = "write-through"
 )
 
 // SessionTreeWriter records one writer's disposition.
@@ -248,13 +270,23 @@ func SessionTreeWriters() []SessionTreeWriter {
 		{
 			Source:      "pkg/engine/blobs/blobs.go",
 			Writes:      "blobs/<xx>/<sha256>.bin and .meta",
-			Disposition: DispositionTurnBoundary,
-			Why: "Content-addressed and immutable once written, so objectStoreImmutable " +
-				"already reduces the whole subtree to a once-ever upload per blob — the " +
-				"repeated cost a real-time push would remove is not being paid. The store " +
-				"is also a standalone package with no bus dependency, deliberately, so it " +
-				"can be used outside an engine; wiring a bus into it to save a delay that " +
-				"lasts until the end of the current turn is a bad trade.",
+			Disposition: DispositionWriteThrough,
+			Why: "Content-addressed and immutable once written, so the key is derived " +
+				"from the bytes and a duplicate upload is a no-op rather than a race — " +
+				"the one subtree that can be pushed the instant it lands with no barrier " +
+				"and no conflict window. What that buys is narrow and worth naming: " +
+				"objectStoreImmutable already made each blob a once-ever upload, so this " +
+				"is not bandwidth, it is the window between a blob landing and the next " +
+				"agent.turn.end — blobs are the largest objects in a tree, and a turn " +
+				"killed halfway otherwise loses every one it produced. Pushed by hook " +
+				"(blobs.WithPutHook), not by event: an emission per blob would put " +
+				"traffic on the hottest tool paths in a session to say what the key " +
+				"already says, and would make every session.file.* subscriber react to " +
+				"blob writes it has no use for. That also preserves the package's " +
+				"deliberate lack of a bus dependency, which is what lets it be used " +
+				"outside an engine. Local LRU eviction is NOT mirrored remotely: the " +
+				"sweep bounds disk, a bucket has no such bound, and deleting to match " +
+				"would destroy data the operator is paying to keep.",
 		},
 		{
 			Source:      "pkg/engine/storage/sqlite.go",

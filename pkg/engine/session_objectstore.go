@@ -314,6 +314,9 @@ func (e *Engine) releaseObjectStore() {
 	if store == nil {
 		return
 	}
+	// Before the handle goes: a still-running write-through worker would
+	// otherwise be free to Put against a backend that has just been closed.
+	e.stopBlobWriteThrough()
 	e.objectStore = nil
 	store.close(e.Logger)
 }
@@ -445,6 +448,10 @@ func (e *Engine) finalizeObjectStore() error {
 	if store == nil {
 		return nil
 	}
+	// Idempotent, and already done by Stop before the shutdown snapshot. Kept
+	// here so any other path into finalize cannot leave a worker uploading
+	// into a backend this function is about to close.
+	e.stopBlobWriteThrough()
 	e.objectStore = nil
 	defer store.close(e.Logger)
 

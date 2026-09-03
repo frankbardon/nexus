@@ -183,13 +183,14 @@ sync backend needs.
 
 The set of writers that bypass the helpers is closed and enumerable: the plugin-level
 ones all take their directory from `PluginDir()` or a config key, and the rest are
-named engine subsystems. Each has one of three dispositions, recorded in code as
+named engine subsystems. Each has one of four dispositions, recorded in code as
 `engine.SessionTreeWriters()` so an enforcement test can consume it:
 
 | Disposition | Meaning |
 |-------------|---------|
 | **emit** | Announces every write on the bus; a sync backend can push it as it lands. |
 | **turn-boundary-only** | Silent on the bus by decision. The bytes still reach the store, through the whole-tree snapshot taken at `agent.turn.end` and at shutdown. |
+| **write-through** | Pushed to the object store the moment the bytes land, with no bus event at all. Only safe where the object key is derived from the content, so a duplicate upload is a no-op rather than a race — exactly one subtree qualifies. |
 | **excluded-by-design** | Never leaves the machine at all — not on the bus, not in the snapshot. |
 
 | Writer | Writes | Disposition | Why |
@@ -205,7 +206,7 @@ named engine subsystems. Each has one of three dispositions, recorded in code as
 | `plugins/observe/sampler` | sampled journal + `metadata.json` | turn-boundary-only | Defaults to `~/.nexus/eval/samples`: an eval corpus accumulated outside sessions so it survives their cleanup. Also a copy of journal bytes the snapshot already carries. |
 | `pkg/engine/journal/writer.go`, `rotate.go` | `journal/events.jsonl`, `journal/events-NNN.jsonl.zst` | turn-boundary-only | Emitting here is a self-feeding loop, not a preference: the writer's input is every event on the bus. It holds no bus reference at all, which makes the loop impossible by construction. The snapshot captures the journal through `journal.Writer.Snapshot`. |
 | `pkg/engine/toolcache.go` | `journal/cache/<tool>/<argshash>.json` | turn-boundary-only | A replay companion to `journal/events.jsonl` and useless without it, so streaming one while the other waits would push half an artefact pair. It also runs inside a `tool.result` handler, where an emission would roughly double bus traffic on the hottest path. |
-| `pkg/engine/blobs` | `blobs/<xx>/<sha256>.bin` and `.meta` | turn-boundary-only | Content-addressed and immutable, so the snapshot already treats each blob as a once-ever upload — the repeated cost a real-time push would remove is not being paid. The package deliberately has no bus dependency. |
+| `pkg/engine/blobs` | `blobs/<xx>/<sha256>.bin` and `.meta` | write-through | Content-addressed, so the key is derived from the bytes and a duplicate upload is a no-op rather than a race — the one subtree that can be pushed the instant it lands with no barrier. Pushed by a plain func hook (`blobs.WithPutHook`), not by an event, which keeps the package free of a bus dependency and keeps blob traffic off the hottest tool paths in a session. Local LRU eviction is **not** mirrored remotely. See [Blobs push on write](#blobs-push-on-write). |
 | `pkg/engine/storage/sqlite.go` | `plugins/<pluginID>/store.db` | **excluded-by-design** | WAL mode. Committed frames live in `store.db-wal` until a checkpoint, so streaming partial writes uploads a database that is corrupt, or plausible and silently stale. It reaches the store only as a checkpointed `VACUUM INTO` snapshot; the `-wal` / `-shm` / `-journal` sidecars never cross the seam. |
 | `pkg/engine/session_lock.go` | `session.lock` | **excluded-by-design** | The file carries the local PID of the owning process and `Boot` refuses to start against a live one. Round-tripping it stamps one host's PID onto every later resume — correct by coincidence on a fresh container, and wrong the moment that number is in use. |
 
@@ -214,6 +215,12 @@ named engine subsystems. Each has one of three dispositions, recorded in code as
 > **A write under a session tree must announce itself on the bus.** Real-time sync is
 > exactly as complete as the events are, so a write nothing announced is history that
 > quietly never arrives.
+
+The one sanctioned alternative to announcing is pushing directly, and it is available
+only where the object key is derived from the content: see
+[Blobs push on write](#blobs-push-on-write). Anything else that is silent on the bus
+waits for the turn boundary, which is a decision the table has to record rather than a
+gap the table hides.
 
 The table above closes today's gap. `TestPluginRawWritesAreAnnouncedOrAllowlisted`
 (`pkg/engine/session_writers_enforce_test.go`) is what stops a future plugin reopening it.
@@ -440,7 +447,7 @@ and a snapshot that has already stored them does not store them again:
 | Path | Why it cannot change |
 |------|----------------------|
 | `journal/events-NNN.jsonl.zst` | Sealed at rotation. Rotation compresses the active segment into the next free `NNN` slot and never reopens it. |
-| `blobs/<xx>/<sha256>.bin` and `.meta` | Content-addressed. Different bytes would have a different sha256 and therefore a different name, so a file at that path either holds those bytes or does not exist. |
+| `blobs/<xx>/<sha256>.bin` and `.meta` | Content-addressed. Different bytes would have a different sha256 and therefore a different name, so a file at that path either holds those bytes or does not exist. Usually already uploaded before the snapshot runs at all — see [Blobs push on write](#blobs-push-on-write). |
 
 The skip is **by construction, never by diffing**. A file qualifies because its
 *identity* proves immutability, not because a hash or an mtime comparison
@@ -467,6 +474,60 @@ for and what it saved. Anything that later writes a per-object manifest must
 build it from the committed set, **not** from "what was uploaded this turn" — a
 manifest of only-what-was-uploaded would describe a session with its journal
 segments and blobs missing.
+
+#### Blobs push on write
+
+`<session>/blobs/` does not wait for the turn boundary. A blob store opened
+through `SessionWorkspace.BlobStore()` carries a `blobs.PutHook`, and each new
+blob's `.bin` and `.meta` are handed to a single background worker that uploads
+them and flushes once the queue goes quiet.
+
+**What that buys, precisely.** Not bandwidth — `objectStoreImmutable` already
+made each blob a once-ever upload, so the repeated per-turn cost was never
+being paid. What is left is the window between a blob landing and the next
+`agent.turn.end`. Blobs are the largest single objects in a session tree, so a
+turn that fetches a PDF, renders a screenshot and embeds an image otherwise
+holds all of it on local disk until the turn ends: a process killed halfway
+loses every blob it produced, and what survives is a conversation history full
+of `nexus-blob:` URIs that resolve to nothing after a resume on a fresh host.
+Write-through shrinks that window from "one turn" to "one queue drain", and
+spreads the upload across the turn instead of spiking at the end of it. That is
+a narrow win, and it is the whole win.
+
+**Why no barrier is needed.** The key is derived from the sha256 of the
+content, so the same key can only ever carry the same bytes. A write-through
+`Put` racing a snapshot `Put` of the same blob is two identical uploads, not a
+conflict: no read-modify-write, no window in which a partial object sits under
+a key another writer will fill with different content. `context/
+conversation.jsonl` has none of those properties, which is why the general push
+still waits for a boundary.
+
+**It is an optimisation, not the guarantee.** Every failure mode on this path —
+a full queue, a `Put` error, a drain that timed out at shutdown — costs the
+delay it was trying to remove and nothing else. The turn-boundary snapshot
+still walks the whole tree and still re-uploads any immutable file the store
+does not already hold at exactly the right size, so correctness lives there.
+
+**No event.** The push is a plain func hook rather than a `session.file.*`
+emission. An event per blob would have put traffic on the hottest tool paths in
+a session — every `read_image`, every `fetch_page_image`, every MCP binary
+payload — to carry a fact the object key already encodes, would have made every
+existing subscriber react to blob writes it has no use for, and would have cost
+`pkg/engine/blobs` its deliberate independence from the bus (it is a standalone
+content store usable outside an engine, and it still imports nothing outside
+the standard library).
+
+**Local eviction never deletes remotely.** The blob store sweeps by mtime under
+an LRU byte budget, and that budget exists to bound *disk* — exactly the
+constraint a bucket does not have. There is no delete hook, and nothing on this
+path ever calls `Backend.Delete`. A swept blob stays in the store; a `Get` for
+it afterwards is a local miss that hydration can repair, not a lost object.
+Mirroring the eviction would destroy data the operator is paying to keep, and
+would do it to content a later session may still reference by URI.
+
+`blobs/` is still created lazily, on the first `Put` — not at session boot and
+not by opening the store — so a session whose tools never produce a blob has no
+`blobs/` directory to sync at all.
 
 #### Failure, and the commit marker
 

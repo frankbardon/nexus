@@ -55,6 +55,7 @@ func TestSessionTreeWriters_AllAreDecided(t *testing.T) {
 		DispositionEmit:         true,
 		DispositionTurnBoundary: true,
 		DispositionExcluded:     true,
+		DispositionWriteThrough: true,
 	}
 	seen := map[string]bool{}
 	root := repoRoot(t)
@@ -71,7 +72,7 @@ func TestSessionTreeWriters_AllAreDecided(t *testing.T) {
 
 		if !valid[w.Disposition] {
 			t.Errorf("%s: disposition %q is not one of emit / turn-boundary-only / "+
-				"excluded-by-design", w.Source, w.Disposition)
+				"excluded-by-design / write-through", w.Source, w.Disposition)
 		}
 		// "Undecided" is the state this table removes, and an empty Why is
 		// indistinguishable from it.
@@ -150,5 +151,57 @@ func TestSessionTreeWriters_EmitEntriesActuallyAnnounce(t *testing.T) {
 			t.Errorf("%s is marked %q but calls neither AnnounceWrite nor "+
 				"AnnounceAppend", w.Source, DispositionEmit)
 		}
+	}
+}
+
+// A "write-through" row makes a stronger claim than any other: it says the
+// bytes are already on their way to the store and that no subscriber will ever
+// hear about them, so a reader who trusts the table stops looking for events.
+// The claim is only safe where the object key is derived from the content —
+// otherwise "push it the instant it lands" is a race with the turn-boundary
+// snapshot rather than a duplicate upload. Pinned by name for the one writer
+// that qualifies, and checked against the mechanism it names: a hook, not an
+// emission.
+func TestSessionTreeWriters_WriteThroughIsBlobsAndIsHookDriven(t *testing.T) {
+	root := repoRoot(t)
+	var found []SessionTreeWriter
+	for _, w := range SessionTreeWriters() {
+		if w.Disposition == DispositionWriteThrough {
+			found = append(found, w)
+		}
+	}
+	if len(found) != 1 || found[0].Source != "pkg/engine/blobs/blobs.go" {
+		t.Fatalf("write-through rows = %+v, want exactly pkg/engine/blobs/blobs.go — "+
+			"content-addressing is what makes a barrier-free push safe, and nothing "+
+			"else under a session tree has it", found)
+	}
+	w := found[0]
+
+	// The eviction decision is the one a future edit is most likely to get
+	// wrong, because "keep the bucket in sync with local disk" sounds right
+	// until you notice the LRU sweep exists to bound disk and a bucket has no
+	// such bound.
+	if !strings.Contains(w.Why, "eviction") {
+		t.Errorf("%s: Why does not record the eviction decision; local LRU eviction "+
+			"must not delete the remote object", w.Source)
+	}
+
+	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(w.Source)))
+	if err != nil {
+		t.Fatalf("%s: %v", w.Source, err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "PutHook") {
+		t.Errorf("%s is marked %q but exposes no PutHook for the engine to push "+
+			"through", w.Source, DispositionWriteThrough)
+	}
+	// The whole point of a hook rather than an event: the package must keep
+	// working outside an engine, which it cannot do if it learns about a bus.
+	// Checked as an import rather than as a mention, because the package doc
+	// legitimately names engine symbols in prose.
+	if strings.Contains(body, "github.com/frankbardon/nexus") {
+		t.Errorf("%s imports from the Nexus tree; the blob store must stay a "+
+			"standalone stdlib-only package, which is what a plain func hook "+
+			"preserves and what an event bus would have cost", w.Source)
 	}
 }

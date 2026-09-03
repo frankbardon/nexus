@@ -130,7 +130,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		}
 	}
 	if (p.enabled["read_image"] || p.enabled["read_document"]) && p.session != nil {
-		store, err := blobs.New(p.session.BlobsDir(), budget)
+		store, err := p.session.BlobStore(budget)
 		if err != nil {
 			return fmt.Errorf("fileio: blob store init: %w", err)
 		}

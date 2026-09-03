@@ -76,6 +76,11 @@ type Engine struct {
 	// engine is the only thing that knows the lifecycle points it hangs off.
 	// See session_objectstore.go.
 	objectStore *sessionObjectStore
+
+	// blobPushes is the write-through worker for the session blob store. Nil
+	// whenever objectStore is nil, so the default configuration grows no
+	// goroutine and no queue. See session_objectstore_blobs.go.
+	blobPushes *blobWriteThrough
 }
 
 // New creates a fully wired Engine from a config file path.
@@ -280,6 +285,13 @@ func (e *Engine) Boot(ctx context.Context) error {
 			_ = RemoveSessionLock(e.Session.RootDir)
 		}
 	}()
+
+	// Start pushing blobs the moment they land, rather than at the next turn
+	// boundary. Installed here — before plugin Init, which is where five of the
+	// six blob-store call sites open theirs — so no blob written by a plugin
+	// can predate the hook. It subscribes to nothing and emits nothing, so it
+	// is safe this side of startJournal. A no-op when no backend is configured.
+	e.installBlobWriteThrough()
 
 	if err := e.startJournal(); err != nil {
 		return fmt.Errorf("starting journal: %w", err)
@@ -730,6 +742,12 @@ func (e *Engine) Stop(ctx context.Context) error {
 		cancel()
 		e.Journal = nil
 	}
+
+	// Drain any blob pushed but not yet uploaded, before the shutdown snapshot
+	// rather than after it: the snapshot lists the session prefix to decide
+	// what it can skip, so a blob that write-through has already stored is one
+	// the snapshot does not have to upload again.
+	e.stopBlobWriteThrough()
 
 	// Final whole-tree snapshot, between the journal closing and per-plugin
 	// SQLite closing. Both halves of that sandwich matter: the journal must be

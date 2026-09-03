@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/frankbardon/nexus/pkg/engine/blobs"
 )
 
 // SessionConfigSnapshotPath returns the path to a session's config snapshot.
@@ -43,7 +46,26 @@ type SessionWorkspace struct {
 	RootDir   string
 	StartedAt time.Time
 	bus       EventBus
+
+	// blobPush is the object-store write-through sink for content-addressed
+	// blobs, installed by Boot and nil in every build or configuration with no
+	// backend. It is not on the bus: blobs are the one subtree whose push
+	// needs no event, because sha256 addressing makes a duplicate upload a
+	// no-op rather than a race, and an announcement per blob would put traffic
+	// on the hottest tool paths in a session to say something the key already
+	// says. See session_objectstore_blobs.go.
+	//
+	// Atomic because the write and the reads genuinely are on different
+	// goroutines: Boot installs it, and the reads come from whichever tool
+	// goroutine happens to Put a blob — including nexus.embeddings.cohere,
+	// which opens its store lazily inside a request handler rather than at
+	// Init.
+	blobPush atomic.Pointer[blobPushFunc]
 }
+
+// blobPushFunc receives the two files one blob is made of. Named rather than
+// used inline because atomic.Pointer needs a type to point at.
+type blobPushFunc func(binPath, metaPath string)
 
 // SessionMeta holds metadata about a session.
 type SessionMeta struct {
@@ -174,9 +196,66 @@ func (s *SessionWorkspace) FilesDir() string {
 
 // BlobsDir returns the path to the per-session blobs subdirectory used by
 // pkg/engine/blobs. Lazily created by the blob store on first Put — no
-// directory is forced at session boot.
+// directory is forced at session boot, and none by opening a store either, so
+// a session whose tools never produce a blob has no blobs/ directory at all.
 func (s *SessionWorkspace) BlobsDir() string {
 	return filepath.Join(s.RootDir, "blobs")
+}
+
+// BlobStore opens the session's content-addressed blob store, wired for
+// object-store write-through.
+//
+// This is the door every in-tree caller should use instead of calling
+// blobs.New(session.BlobsDir(), ...) directly. The difference is not the path —
+// it is the PutHook: a store opened here pushes each new blob to a configured
+// object store the moment it lands, rather than waiting for the whole-tree
+// snapshot at the next agent.turn.end. A store opened by hand still works and
+// still ends up in the bucket at the turn boundary; it just does not get the
+// write-through.
+//
+// The hook is installed unconditionally and costs one atomic load per *new*
+// blob when no backend is configured, which is what keeps the default path
+// indistinguishable from the one that existed before write-through: no
+// goroutine, no event, no upload, no branch anywhere else.
+//
+// byteBudget is the local LRU soft cap, passed straight through. It bounds
+// local disk only: evicting a blob here never deletes the object the store
+// already holds. See the blobs package doc.
+func (s *SessionWorkspace) BlobStore(byteBudget int64, opts ...blobs.Option) (*blobs.Store, error) {
+	if s == nil {
+		return nil, fmt.Errorf("opening blob store: no session workspace")
+	}
+	return blobs.New(s.BlobsDir(), byteBudget, append([]blobs.Option{blobs.WithPutHook(s.onBlobPut)}, opts...)...)
+}
+
+// onBlobPut is the blobs.PutHook every store from BlobStore carries. It runs
+// on whichever goroutine wrote the blob, outside the store's mutex, so it must
+// stay cheap: the installed sink hands the two paths to a background worker
+// and returns.
+func (s *SessionWorkspace) onBlobPut(h blobs.Handle, metaPath string) {
+	if s == nil {
+		return
+	}
+	push := s.blobPush.Load()
+	if push == nil {
+		return
+	}
+	(*push)(h.Path, metaPath)
+}
+
+// setBlobPush installs (or with a nil fn, removes) the write-through sink.
+// Engine-only: Boot installs it once a backend and a session both exist, and
+// Stop removes it before the backend handle is released so a late blob cannot
+// reach a closed backend.
+func (s *SessionWorkspace) setBlobPush(fn blobPushFunc) {
+	if s == nil {
+		return
+	}
+	if fn == nil {
+		s.blobPush.Store(nil)
+		return
+	}
+	s.blobPush.Store(&fn)
 }
 
 // MetadataDir returns the path to the metadata subdirectory.
