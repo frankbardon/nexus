@@ -198,7 +198,9 @@ named engine subsystems. Each has one of three dispositions, recorded in code as
 | `plugins/workflows/icm/session` | `plugins/nexus.workflows.icm/<runID>/` stage artifacts and sidecars | emit | An ICM run is long enough that waiting for a turn boundary discards completed stages on a crash. Every write funnels through `WriteArtifact` plus the two input-copy loops. |
 | `plugins/llm/batch` | one JSON state file per in-flight batch | turn-boundary-only | `batch.data_dir` defaults to `~/.nexus/batches`, outside every session tree. Its durability requirement is a local disk that survives a restart — the coordinator resumes batches by scanning the directory at boot — not a remote copy. |
 | `plugins/memory/longterm` | one markdown file per memory key | turn-boundary-only | Defaults to `~/.nexus/memory`; cross-session by definition, so deliberately not under a session. |
-| `plugins/rag/ingest` | embedding cache entries | turn-boundary-only | Defaults to `~/.nexus/vectors/_cache`, and is a cache of embeddings derivable from the source documents — pushing it spends bandwidth on bytes a resume can regenerate. |
+| `plugins/rag/ingest` | embedding cache entries (`cache.go`) and generated chunk prefixes under `<cache_dir>/_prefix` (`contextual.go`) | turn-boundary-only | Defaults to `~/.nexus/vectors/_cache`. Both are caches of output derivable from the source documents — pushing them spends bandwidth on bytes a resume can regenerate, and losing them costs latency and tokens, not correctness. |
+| `plugins/tools/codeexec` | skill helper `.go` sources into an `os.MkdirTemp` GOPATH | turn-boundary-only | Cannot be under a session tree. The helpers are staged into a fresh temp root purely so Yaegi's import resolver can find them, and the deferred cleanup deletes the whole root before the tool call returns — there is nothing durable to carry. |
+| `plugins/io/oneshot` | the run's JSON transcript, to `output_file` | turn-boundary-only | `output_file` is unset by default, so normally no file exists. When set it is an operator-chosen destination for a shell pipeline, normally outside the session, and `finalize` runs once at the end of the last turn or at shutdown — an announcement would buy the tail of a run that is already over. |
 | `plugins/control/hitl` | request/response files | turn-boundary-only | Defaults to `~/.nexus/hitl`, and is a filesystem IPC rendezvous rather than session state. Restoring an in-flight pair would re-ask a question that was already answered. |
 | `plugins/observe/sampler` | sampled journal + `metadata.json` | turn-boundary-only | Defaults to `~/.nexus/eval/samples`: an eval corpus accumulated outside sessions so it survives their cleanup. Also a copy of journal bytes the snapshot already carries. |
 | `pkg/engine/journal/writer.go`, `rotate.go` | `journal/events.jsonl`, `journal/events-NNN.jsonl.zst` | turn-boundary-only | Emitting here is a self-feeding loop, not a preference: the writer's input is every event on the bus. It holds no bus reference at all, which makes the loop impossible by construction. The snapshot captures the journal through `journal.Writer.Snapshot`. |
@@ -206,6 +208,41 @@ named engine subsystems. Each has one of three dispositions, recorded in code as
 | `pkg/engine/blobs` | `blobs/<xx>/<sha256>.bin` and `.meta` | turn-boundary-only | Content-addressed and immutable, so the snapshot already treats each blob as a once-ever upload — the repeated cost a real-time push would remove is not being paid. The package deliberately has no bus dependency. |
 | `pkg/engine/storage/sqlite.go` | `plugins/<pluginID>/store.db` | **excluded-by-design** | WAL mode. Committed frames live in `store.db-wal` until a checkpoint, so streaming partial writes uploads a database that is corrupt, or plausible and silently stale. It reaches the store only as a checkpointed `VACUUM INTO` snapshot; the `-wal` / `-shm` / `-journal` sidecars never cross the seam. |
 | `pkg/engine/session_lock.go` | `session.lock` | **excluded-by-design** | The file carries the local PID of the owning process and `Boot` refuses to start against a live one. Round-tripping it stamps one host's PID onto every later resume — correct by coincidence on a fresh container, and wrong the moment that number is in use. |
+
+### The invariant, and the test that holds it
+
+> **A write under a session tree must announce itself on the bus.** Real-time sync is
+> exactly as complete as the events are, so a write nothing announced is history that
+> quietly never arrives.
+
+The table above closes today's gap. `TestPluginRawWritesAreAnnouncedOrAllowlisted`
+(`pkg/engine/session_writers_enforce_test.go`) is what stops a future plugin reopening it.
+It runs inside `make test` — untagged, no network — and does the following:
+
+1. Parses every non-test Go file under `plugins/` with `go/parser` (standard library; this
+   guard adds no dependency).
+2. Flags direct calls to `os.WriteFile`, `os.Create`, `os.CreateTemp` and `os.OpenFile`,
+   resolving the `os` import through its local name so an alias or a dot-import is not a
+   way around it.
+3. Requires each flagged file to either call `AnnounceWrite` / `AnnounceAppend`, or carry a
+   row in `engine.SessionTreeWriters()`.
+
+If you trip it, the failure message spells out the three ways forward: announce the write,
+route it through `session.WriteFile` / `session.AppendFile`, or add a row with a `Why`. The
+allowlist is `SessionTreeWriters()` itself rather than a list local to the test, so
+silencing the guard and documenting the decision are the same edit — and a row whose file
+stops writing raw bytes is reported as stale by
+`TestSessionTreeWriters_PluginRowsStillWriteRawBytes`, so the list shrinks as well as grows.
+
+What the guard deliberately cannot see, so that it is not trusted past its limits:
+
+- Writes through an `*os.File` handed to another package, through `bufio` or `io.Copy` onto
+  a descriptor opened elsewhere, through `text/template.Execute`, or through a third-party
+  library.
+- Announcement is matched per file, not per call: a file with one announced and one
+  unannounced write reads as covered.
+- Only `plugins/` is scanned. `pkg/engine`'s raw writers are a small closed set of named
+  subsystems that already have rows; `cmd/` is not scanned at all.
 
 ## Session Lifecycle
 

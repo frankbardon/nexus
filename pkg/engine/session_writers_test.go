@@ -27,16 +27,21 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// The table is only worth having if it is complete. The survey that produced
-// it found twelve writers bypassing the SessionWorkspace helpers; a new one
-// appearing without a decision is the exact regression this whole story exists
-// to prevent, so the count is pinned rather than left open.
+// The table is only worth having if it is complete. A writer appearing without
+// a decision is the exact regression this whole story exists to prevent, so
+// the count is pinned rather than left open.
 //
-// Thirteen entries for twelve writers: the survey's journal row named two
-// files (writer.go and rotate.go) and Source is the allowlist key an
-// enforcement test matches raw os.* calls against, so each file needs its own
-// row. Splitting the row is not adding a writer.
-const sessionTreeWriterCount = 13
+// Sixteen entries. Thirteen came from the survey's twelve writers — the
+// journal row named two files (writer.go and rotate.go) and Source is the
+// allowlist key the enforcement scan matches raw os.* calls against, so each
+// file needs its own row; splitting that row is not adding a writer. Three
+// more arrived when TestPluginRawWritesAreAnnouncedOrAllowlisted first ran
+// against the whole of plugins/ rather than the survey's notes and found
+// writers the hand survey had missed: codeexec's temp GOPATH, oneshot's
+// transcript, and the second cache in rag/ingest. That is the enforcement
+// test doing its job on its first execution, and the reason the count is
+// pinned to the scan rather than to a document.
+const sessionTreeWriterCount = 16
 
 func TestSessionTreeWriters_AllAreDecided(t *testing.T) {
 	writers := SessionTreeWriters()

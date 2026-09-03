@@ -13,12 +13,21 @@ package engine
 // entirely invisible to the sync layer.
 //
 // The set is closed rather than open-ended. Every plugin-level writer here
-// obtains its directory from SessionWorkspace.PluginDir or from a config key,
-// and the engine-level ones are named subsystems — so this is twelve sites,
-// not "every plugin", and it can be enumerated and kept honest by a test.
-// Thirteen rows for twelve writers: the journal is one writer spread over
-// writer.go and rotate.go, and Source is the key an enforcement test matches a
-// raw os.* call against, so each file needs its own row.
+// obtains its directory from SessionWorkspace.PluginDir, from a config key, or
+// from a temp root, and the engine-level ones are named subsystems — so this is
+// a bounded list of sites, not "every plugin", and it can be enumerated and
+// kept honest by a test. One row per file rather than per writer: the journal
+// is one writer spread over writer.go and rotate.go, and Source is the key
+// TestPluginRawWritesAreAnnouncedOrAllowlisted matches a raw os.* call against,
+// so each file needs its own row.
+//
+// The list is maintained by that scan, not by hand. It started at thirteen
+// rows from a manual survey; the first run of the scan over all of plugins/
+// found three writers the survey had missed (codeexec's temp GOPATH, oneshot's
+// transcript, rag/ingest's second cache) and they were added rather than
+// excused. Rows below plugins/ are also checked in the other direction — a row
+// whose file no longer writes raw bytes is deleted, so the table cannot
+// accumulate dispositions attached to nothing.
 //
 // A registry in Go rather than a docs table alone: docs cannot be consumed by
 // the enforcement test that stops a *new* raw writer from appearing without a
@@ -116,6 +125,18 @@ func SessionTreeWriters() []SessionTreeWriter {
 				"than correctness.",
 		},
 		{
+			Source:      "plugins/rag/ingest/contextual.go",
+			Writes:      "generated chunk prefixes under <cache_dir>/_prefix",
+			Disposition: DispositionTurnBoundary,
+			Why: "The second cache in the same plugin, under the same cache_dir root " +
+				"and covered by the same argument as cache.go: the prefixes are LLM " +
+				"output regenerable from the source documents, so a lost cache costs " +
+				"latency and tokens on the next ingest rather than correctness. Kept as " +
+				"its own row instead of widening the cache.go row to the package, " +
+				"because Source is the key the enforcement scan matches a raw os.* call " +
+				"against and a package-level key would silence a future third writer here.",
+		},
+		{
 			Source:      "plugins/control/hitl/registry.go",
 			Writes:      "request/response JSON files under the hitl registry dir",
 			Disposition: DispositionTurnBoundary,
@@ -134,6 +155,31 @@ func SessionTreeWriters() []SessionTreeWriter {
 				"survive session cleanup. It is also a copy of journal bytes that are " +
 				"themselves snapshotted, so a real-time push would upload the same " +
 				"events twice.",
+		},
+		{
+			Source:      "plugins/tools/codeexec/plugin.go",
+			Writes:      "skill helper .go sources into an os.MkdirTemp GOPATH",
+			Disposition: DispositionTurnBoundary,
+			Why: "Cannot be under a session tree: stageSkillHelpers materialises the " +
+				"helper sources into a fresh os.MkdirTemp root purely so Yaegi's import " +
+				"resolver can find them, and the deferred cleanup deletes the whole root " +
+				"before the tool call returns. There is nothing durable for either the " +
+				"bus or the snapshot to carry. Staging inside the session instead was " +
+				"considered and rejected — it would leave a GOPATH-shaped directory of " +
+				"regenerable source in every synced session for no gain.",
+		},
+		{
+			Source:      "plugins/io/oneshot/plugin.go",
+			Writes:      "the run's JSON transcript, to the configured output_file",
+			Disposition: DispositionTurnBoundary,
+			Why: "output_file is unset by default and the transcript goes to stdout, so in " +
+				"the default configuration this writer produces no file at all. When it " +
+				"is set it is an operator-chosen destination for a shell pipeline to " +
+				"consume, normally outside the session. It is also the wrong shape for a " +
+				"real-time push: finalize runs once, at the end of the last turn or at " +
+				"Shutdown, so an announcement would buy at most the tail of a run that is " +
+				"already over — and oneshot is a batch transport whose output the caller " +
+				"reads off the local disk it named, not out of a bucket.",
 		},
 		{
 			Source:      "plugins/workflows/icm/session/session.go",
