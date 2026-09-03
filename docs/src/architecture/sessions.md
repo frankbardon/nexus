@@ -173,7 +173,12 @@ its own Go module so the main module's dependency list never grows; an embedder
 blank-imports the module and names it in config. The interface refers to no
 cloud-specific concept, so a third party can implement it out of tree.
 
-With no backend named — the default — no object-store code runs at all.
+With no backend named — the default — no object-store code runs at all: no
+handle is opened, no snapshot handler is subscribed, and a backend sitting
+registered in the process is never touched. Every shipped profile under
+`configs/` leaves the seam inert, and
+`TestDefaultPathNeverTouchesARegisteredBackend` in `pkg/engine` holds the
+default path to it.
 
 ### Lifecycle points
 
@@ -307,6 +312,15 @@ the cost of a second full copy of every session in the bucket and an
 indirection hydration would have to resolve on every boot. The marker answers
 the same question for one small object.
 
+The marker is currently **written but not read back**. Hydration pulls whatever
+objects exist under `sessions/<id>` without comparing them against
+`sessions/<id>.snapshot.json`, so a tree left mixed by an interrupted snapshot —
+some objects from snapshot *N*, some from a half-finished *N+1* — hydrates
+silently and is indistinguishable from a clean one. The marker still bounds the
+damage (a snapshot never deletes, so the mixed tree is a superset of a complete
+one), and `TestHydrationDoesNotValidateTheCommitMarker` in `pkg/engine` pins
+that behaviour so a future change to it is deliberate rather than accidental.
+
 #### Cost
 
 The snapshot is `O(tree size)` on every turn, and a session tree only grows.
@@ -325,6 +339,32 @@ on top. `BenchmarkSessionSnapshot` in `pkg/engine` reproduces it. Every snapshot
 and publishes the same numbers as `session.snapshot.result`, so the growth is
 visible rather than inferred. Delta upload and a size-dependent snapshot cadence
 are deliberately not designed yet.
+
+### What survives a kill
+
+The recovery point is the **last completed turn**. A process that dies without
+running `Stop` — SIGKILL, a container eviction, a Lambda timeout — loses only
+what was written after the last `agent.turn.end`; everything up to and including
+that boundary is restorable from the store, on a host that has never seen the
+session.
+
+`TestKillAndResumeRestoresIdenticalSessionState` in `pkg/engine` is that claim
+as an assertion, and it runs untagged inside `make test` against the in-memory
+backend. It boots an engine, writes conversation history, artifacts, blobs and
+per-plugin SQLite rows, completes one turn, writes some more, and then abandons
+the engine with every handle still open — no `Stop`, no shutdown snapshot, no
+flush — which is what forces the turn-boundary snapshot to be the only thing
+that could have saved the session. A second engine over a **separate, empty**
+data root then resumes the same session ID and is held to equality rather than
+to "it opened": the same history bytes and the same replayed messages, the same
+artifact bytes, the same blob bytes and media type, the same 500 SQLite rows
+through the storage manager with `PRAGMA integrity_check` clean — and none of
+the three writes made after the turn boundary. A companion test compares the
+whole hydrated tree against a content-hash fingerprint of the killed one, file
+by file.
+
+E4-S4 repeats the same scenario against MinIO, where a real wire protocol is in
+the loop.
 
 ### Lifetime of the local working copy
 
