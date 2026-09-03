@@ -32,7 +32,7 @@ var _ Backend = stubBackend{}
 func registerTemp(t *testing.T, name string, f Factory) {
 	t.Helper()
 	Register(name, f)
-	t.Cleanup(func() { unregister(name) })
+	t.Cleanup(func() { Unregister(name) })
 }
 
 func TestRegisterMakesBackendSelectable(t *testing.T) {
@@ -66,7 +66,7 @@ func TestRegisterPanics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(func() { unregister("dup"); unregister("nilf") })
+			t.Cleanup(func() { Unregister("dup"); Unregister("nilf") })
 			defer func() {
 				if recover() == nil {
 					t.Error("expected panic, got none")

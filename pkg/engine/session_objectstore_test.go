@@ -84,13 +84,15 @@ func newObjectStoreEngine(t *testing.T, b objectstore.Backend) (*Engine, string)
 	root := t.TempDir()
 	sessionsRoot := filepath.Join(root, "sessions")
 
-	// The registry has no exported unregister — production code has no
-	// business removing a driver — so each test registers under a name derived
-	// from its own name and simply leaves it there.
+	// The registry is process-global and Register panics on a duplicate, so the
+	// name is derived from the test and removed on cleanup. objectstore
+	// deliberately exports Unregister only for this: leaking the name would
+	// make a second run of the same test in one binary panic.
 	name := "scripted-" + t.Name()
 	objectstore.Register(name, func(context.Context, objectstore.Config) (objectstore.Backend, error) {
 		return b, nil
 	})
+	t.Cleanup(func() { objectstore.Unregister(name) })
 
 	cfg := DefaultConfig()
 	cfg.Core.Sessions.Root = sessionsRoot

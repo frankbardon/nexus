@@ -112,10 +112,23 @@ func Open(ctx context.Context, cfg Config) (Backend, error) {
 	return b, nil
 }
 
-// unregister removes a backend. Test-only: the registry is process-global and
-// a test that registers a fake must not leak it into the next test. Kept
-// unexported because production code has no business unregistering a driver.
-func unregister(name string) {
+// Unregister removes a backend, if present. It exists for tests: the registry
+// is process-global, so a test that registers a fake and does not remove it
+// makes every later test in the binary order-dependent, and Register panics on
+// the duplicate the second run would produce.
+//
+// It started out unexported, on the argument that production code has no
+// business removing a driver. That argument still holds — but an unexported
+// hook only isolates tests inside *this* package, and the callers that need
+// isolation are elsewhere: pkg/engine's seam tests, the shared contract suite,
+// and any out-of-tree backend module that wants to exercise its own
+// registration. Those had to resort to registering under a name derived from
+// the test name and leaking it. Exporting one clearly-labelled function is the
+// smaller cost.
+//
+// Nothing in Nexus calls it outside a test, and nothing should: unregistering
+// a backend a live Config names would turn a valid config into a boot failure.
+func Unregister(name string) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	delete(registry.factories, name)

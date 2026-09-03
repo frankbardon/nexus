@@ -229,5 +229,66 @@ The local tree under `core.sessions.root` is **not** wiped on clean exit.
   local session data go away". A second, implicit, shutdown-triggered answer
   would be a surprise, and deleting user data is irreversible.
 
+### Writing a backend
+
+A backend is an implementation of `objectstore.Backend` plus a `Register` call.
+It can live in any module: the interface names no bucket API, credential type
+or HTTP client, and `pkg/engine/objectstore` imports nothing outside the
+standard library.
+
+Two rules are easy to read past, and both corrupt sessions rather than
+producing an error:
+
+**Keys are validated, not merely documented.** Every method must reject a
+malformed key or prefix with an error wrapping `objectstore.ErrInvalidKey`,
+before touching the store or the filesystem. A key is `/`-separated, non-empty,
+with no leading or trailing `/`, no empty segment, no `.` or `..` segment, no
+`\`, and no NUL. `objectstore.ValidateKey` and `objectstore.ValidateKeyPrefix`
+implement exactly this; the `..` ban is what stops a hostile key from writing
+outside a hydration destination.
+
+**Prefixes match whole segments.** Key `K` is under prefix `P` when `P` is
+empty, or when `K` begins with `P + "/"`. Raw string matching — the native
+behaviour of `ListObjectsV2` and its GCS equivalent — makes the prefix
+`sessions/sess-1` select the objects of `sessions/sess-10`, which mixes two
+sessions into one tree. A backend listing with a raw prefix must post-filter.
+`objectstore.TrimKeyPrefix` is the rule in code, and also yields the relative
+path `Hydrate` needs: `Hydrate` **strips** the prefix, so
+`sessions/s1/files/a.md` under prefix `sessions/s1` lands at
+`<destDir>/files/a.md`.
+
+`Hydrate` adds and overwrites; it does not mirror. Entries already at the
+destination that no object corresponds to are left alone.
+
+#### The contract suite
+
+`pkg/engine/objectstore/objectstoretest` holds the shared conformance suite.
+Every backend — the in-memory one used by unit tests, and each out-of-tree
+module — is held to the same cases: key round-tripping, overwrite,
+delete-then-list, segment-aware prefixes, complete listings past one page,
+absent-key behaviour, zero-byte objects, key-syntax rejection, `Flush`
+idempotency and concurrent use.
+
+```go
+func TestContract(t *testing.T) {
+    objectstoretest.RunSuite(t, func(t *testing.T) objectstore.Backend {
+        return newMyBackend(t) // empty, cleaned up via t.Cleanup
+    })
+}
+```
+
+Each case gets its own backend, so the factory must hand back an empty one — a
+temp bucket, a cleared prefix, a fresh emulator namespace. `WithListProbeCount`
+lowers the 1200-object pagination probe for a backend that cannot afford it
+(below the backend's own page size the case stops proving anything), and
+`WithoutConcurrency` skips the parallel case.
+
+`objectstoretest.NewMemory` is the reference implementation that passes the
+suite, and doubles as the substituted seam for ordinary untagged unit tests. It
+is deliberately not registered as a driver at init: a `memory` backend silently
+selectable in production config would discard everything on exit while
+reporting success. `objectstoretest.RegisterMemory` makes it reachable by name
+for the duration of one test and removes it again on cleanup.
+
 See [Configuration Reference](../configuration/reference.md#coresessionsobject_store)
 for the keys, their defaults and their validation behaviour.

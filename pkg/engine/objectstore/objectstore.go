@@ -46,6 +46,18 @@ import (
 // job, so the engine never does prefix arithmetic and a backend is free to
 // choose its own physical layout underneath.
 //
+// Those rules are enforced, not merely documented: every method must reject a
+// malformed key or prefix with an error wrapping ErrInvalidKey, and must do so
+// before touching the remote store or the local filesystem. ValidateKey and
+// ValidateKeyPrefix implement exactly the behaviour the contract suite checks.
+//
+// A key prefix matches on *segment* boundaries. Key K is under prefix P when P
+// is empty, or when K begins with P + "/". Raw string matching — the native
+// behaviour of every cloud list API — would make the prefix "sessions/sess-1"
+// select the objects of "sessions/sess-10", so a backend listing with a raw
+// prefix must post-filter. TrimKeyPrefix is that rule in code, and also yields
+// the relative path Hydrate needs.
+//
 // # Durability
 //
 // Put and Delete may complete asynchronously — a backend is expected to queue
@@ -62,11 +74,21 @@ type Backend interface {
 	// so on return every subsequent os.* read must behave exactly as it would
 	// on a host that never left.
 	//
+	// The prefix is *stripped*: an object at "sessions/s1/files/a.md" hydrated
+	// under prefix "sessions/s1" lands at filepath.Join(destDir, "files",
+	// "a.md"). Existing entries at destDir that no object corresponds to are
+	// left alone — Hydrate adds and overwrites, it does not mirror.
+	//
 	// A keyPrefix with no objects is not an error: it means a brand-new
 	// session, and destDir is left as-is (a valid empty tree).
 	Hydrate(ctx context.Context, keyPrefix string, destDir string) error
 
-	// Put stores the file at localPath under key.
+	// Put stores the file at localPath under key, replacing any object already
+	// there. The local file is only read: Put must leave it in place and
+	// unmodified, since it is the live working copy the session keeps using.
+	//
+	// An unreadable or absent localPath is an error, and must not leave a
+	// partial or empty object at key.
 	//
 	// A local path is taken rather than an io.Reader deliberately: a path is
 	// re-openable and seekable, which is what lets an implementation size a
@@ -79,7 +101,13 @@ type Backend interface {
 	Delete(ctx context.Context, key string) error
 
 	// List returns the objects under keyPrefix, which may be empty to mean
-	// "everything the configured prefix covers". Order is unspecified.
+	// "everything the configured prefix covers". Order is unspecified, and
+	// callers must not depend on one.
+	//
+	// The result is complete: a backend whose remote API pages must follow
+	// every page. Returning only the first page is the single most common way
+	// to be quietly wrong here, so the contract suite lists past any plausible
+	// page size.
 	List(ctx context.Context, keyPrefix string) ([]Object, error)
 
 	// Flush blocks until every Put and Delete issued before the call is
