@@ -30,7 +30,7 @@ var registry = struct {
 // adds a backend to their build with a blank import and one config key, and
 // core never learns that the backend exists.
 //
-//	import _ "github.com/frankbardon/nexus-storage-s3"
+//	import _ "github.com/frankbardon/nexus/modules/objectstore-s3"
 //
 // Register panics on a nil factory, an empty name, or a duplicate name.
 // Panicking is correct here — every call happens in package init, so the

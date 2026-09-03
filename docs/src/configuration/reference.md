@@ -148,7 +148,7 @@ ships as its own Go module so the main module's dependency list is untouched;
 an embedder adds it to their build with a blank import and names it in config:
 
 ```go
-import _ "github.com/frankbardon/nexus-storage-s3"
+import _ "github.com/frankbardon/nexus/modules/objectstore-s3"
 ```
 
 ```yaml
@@ -390,6 +390,70 @@ configured.
 - **Journal output is already covered** by the session snapshot: the journal
   lives at `<session>/journal/` and is captured at a consistent instant on every
   turn boundary.
+
+#### The `s3` backend
+
+Shipped in-repo as its own Go module — `github.com/frankbardon/nexus/modules/objectstore-s3`,
+under `modules/objectstore-s3/`. It is not part of `bin/nexus`: the AWS SDK it
+depends on is exactly the kind of dependency the root module refuses to carry,
+so an embedder who wants it blank-imports it into their own `main`. See
+[Repository Go Modules](../guides/go-modules.md).
+
+It covers Amazon S3 and every S3-compatible store: MinIO, Cloudflare R2, Ceph
+RGW and Backblaze B2.
+
+It adds **no config keys of its own**. Everything it needs is already in the
+`core.object_store` block above; what follows is how this backend reads each
+key.
+
+| Key | How the `s3` backend uses it |
+|---|---|
+| `backend` | `s3` |
+| `bucket` | The bucket. Never created — it must exist, and the credentials must be able to read, write, delete and list it. |
+| `prefix` | Prepended to every object key. Matched back on **segment** boundaries, so a bucket shared between a `prod/nexus` and a `prod/nexus-staging` deployment keeps them apart. |
+| `region` | Signed into every request. Required against real AWS; with `endpoint` set it defaults to `us-east-1`, which every S3-compatible store accepts and none of them interprets. |
+| `endpoint` | An absolute `http://` or `https://` URL. Setting it also switches the client to **path-style addressing** (`https://host/bucket/key`), which is what makes MinIO, Ceph and Backblaze work unmodified — virtual-host addressing needs wildcard DNS and a wildcard certificate that a self-hosted store does not have. There is no separate path-style key, and none is needed: real AWS, which prefers virtual-host addressing, is the case where no endpoint is set. |
+| `credentials_file` | An ordinary AWS INI credentials file (`[default]`, `aws_access_key_id`, `aws_secret_access_key`, optional `aws_session_token`), so the same file works with the AWS CLI and can be mounted as a Kubernetes secret unchanged. `AWS_PROFILE` selects the profile. **Empty is the production path**, and means the SDK's default credential chain: environment variables, the shared config and credentials files, IRSA / EKS Pod Identity, ECS task roles, and the EC2 instance role via IMDSv2 — with expiry-aware refresh. Nexus neither reorders nor narrows that chain. |
+| `failure_policy` | Interpreted by the engine, not by the backend. |
+
+```yaml
+# Amazon S3 with a workload identity — no key material anywhere.
+core:
+  object_store:
+    backend: s3
+    bucket: nexus-sessions
+    prefix: prod/nexus
+    region: eu-west-2
+```
+
+```yaml
+# MinIO on a laptop, or any S3-compatible store.
+core:
+  object_store:
+    backend: s3
+    bucket: nexus
+    endpoint: http://127.0.0.1:9000
+    credentials_file: ~/.config/nexus/minio-credentials
+```
+
+**Boot-time validation.** A malformed endpoint, a `credentials_file` that is not
+there, and an unresolvable region all fail the boot naming the key. Nothing
+remote is checked: `failure_policy: degrade` exists so an object-store outage
+degrades a run rather than ending it, and a boot-time round trip to the bucket
+would make it structurally unable to do that.
+
+**Object keys mirror the local tree**, one key segment per directory, under
+`prefix`. Nothing is encoded, hashed or flattened, so the bucket is browsable —
+`<prefix>/sessions/<id>/plugins/nexus.scene/scene.jsonl` is exactly the path it
+came from. Empty files are stored as zero-byte objects and restored as empty
+files; this backend never writes a zero-byte directory marker, so there is
+nothing to confuse them with.
+
+**One object at a time, synchronously.** `Put` returns only once S3 has
+acknowledged the write, so there is no in-backend queue with a second retry
+regime underneath the engine's own — retry, backoff and `failure_policy` stay in
+one place. A single `PutObject` caps one object at 5 GiB; no session artifact
+Nexus produces approaches that.
 
 ### `core.models`
 
