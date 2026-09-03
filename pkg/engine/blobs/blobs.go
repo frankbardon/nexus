@@ -21,6 +21,25 @@
 // safe for concurrent Put/Get/Sweep across goroutines in one process.
 // Cross-process access is not supported (blob writes are atomic via
 // temp+rename, but Sweep is not coordinated across processes).
+//
+// # Object-store disposition: turn-boundary-only
+//
+// When rooted at a session's blobs/ directory this package writes under the
+// session tree with raw os.* calls and announces nothing on the bus. Two
+// things make that the right call rather than a gap.
+//
+// Blobs are content-addressed, so a file at blobs/<xx>/<sha256>.bin either
+// holds those bytes or does not exist — rewriting it with different content
+// would change its name. engine.objectStoreImmutable recognises that by
+// identity, which already reduces the whole subtree to a once-ever upload per
+// blob. The repeated per-turn cost that a real-time push would remove is not
+// being paid in the first place; the only thing left to win is the delay until
+// the current turn ends.
+//
+// And this package deliberately has no bus dependency: it is a standalone
+// content store usable outside an engine, and threading an event bus through
+// it to shave that delay is a poor trade for the coupling. Recorded in
+// engine.SessionTreeWriters.
 package blobs
 
 import (

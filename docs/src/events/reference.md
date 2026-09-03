@@ -689,6 +689,20 @@ payload. Treat the table below as the contract.
 Which event fires is decided by whether the path existed before the write, so a
 subscriber can rely on seeing exactly one `created` per path per session.
 
+**Who emits it.** `SessionWorkspace.WriteFile`, `AppendFile` and `SaveMeta`, plus the
+two announcement helpers `AnnounceWrite` / `AnnounceAppend` that writers holding their
+own `os.*` call use — today `nexus.scene` (its state file and patch journal),
+`nexus.workflows.icm` (stage artifacts and copied inputs) and `nexus.tool.fileio`
+(`write_file`). Every one of them publishes the *session-relative* path, so it can be
+used directly as an object key. `nexus.tool.pdf` used to emit a second, hand-built
+event beside the one `WriteFile` already produced, carrying the bare basename and no
+delta; it was removed rather than reconciled, and the plugin no longer emits
+`session.file.*` at all.
+
+Writers that deliberately stay silent — the journal, the tool cache, the blob store,
+per-plugin SQLite and the session lock among them — each have a recorded reason. See
+[Sessions](../architecture/sessions.md#every-raw-writer-has-a-decided-disposition).
+
 **The append-aware delta.** `offset` and `bytes_added` together say that the region
 `[offset, offset+bytes_added)` is the only part of the object that changed:
 

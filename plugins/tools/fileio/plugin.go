@@ -722,22 +722,18 @@ func (p *Plugin) handleWriteFile(tc events.ToolCall) {
 		return
 	}
 
-	// Emit session file event if writing within the session files directory.
+	// Announce the write when it landed inside the session tree. Delegated to
+	// AnnounceWrite rather than hand-built here: this emitter predates the
+	// offset / bytes_added delta and reported its path relative to FilesDir
+	// rather than to the session root, so it published "report.txt" where
+	// every other emitter publishes "files/report.txt" — two object keys for
+	// one file, as far as anything syncing the tree is concerned. Routing
+	// through the workspace makes that impossible to get wrong again, and
+	// makes the escape check (this tool can be configured to write outside the
+	// session entirely) the workspace's job rather than a string prefix test
+	// repeated per call site.
 	if p.session != nil {
-		filesDir := p.session.FilesDir()
-		absFiles, _ := filepath.Abs(filesDir)
-		if absFiles != "" && strings.HasPrefix(resolved, absFiles+string(filepath.Separator)) {
-			rel, _ := filepath.Rel(absFiles, resolved)
-			eventType := "session.file.created"
-			if existed {
-				eventType = "session.file.updated"
-			}
-			_ = p.bus.Emit(eventType, map[string]any{
-				"session_id": p.session.ID,
-				"path":       rel,
-				"size":       len(content),
-			})
-		}
+		p.session.AnnounceWrite(resolved, existed)
 	}
 
 	p.emitResult(tc,

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -430,4 +431,146 @@ func (s *SessionWorkspace) SaveMeta(meta *SessionMeta) error {
 		return fmt.Errorf("writing session metadata: %w", err)
 	}
 	return nil
+}
+
+// AnnounceWrite announces a whole-file write that a caller made under the
+// session tree with its own os.* call instead of routing through WriteFile.
+//
+// # Why a second door exists at all
+//
+// WriteFile is the door, and everything that can use it should. But a handful
+// of writers genuinely cannot: they hold a long-lived *os.File (the scene
+// patch journal), they write through temp-file + rename for atomicity (the ICM
+// artifact writer), or they own a directory tree whose layout is theirs rather
+// than the workspace's. Forcing those through WriteFile would mean either
+// giving up atomicity or re-implementing it inside the workspace for one
+// caller. Announcing after the fact is the honest alternative: the bytes
+// landed the way that writer needs them to, and the bus still learns about it.
+//
+// The rejected alternative was an fsnotify watcher over the session root.
+// It buys completeness without any call-site changes, and costs a watch
+// descriptor per directory, a rename storm to debounce on every atomic write,
+// and — fatally — no way to distinguish "the writer finished" from "the writer
+// is halfway through", which is exactly the distinction a sync backend needs.
+//
+// # Contract
+//
+// existed selects created vs updated and must be sampled *before* the write;
+// after it, every path exists. The emitted payload is byte-for-byte the shape
+// WriteFile emits — see AppendFile for what "offset" and "bytes_added" do and
+// do not promise. A whole-file write reports offset 0 and bytes_added == size.
+//
+// Announcing never fails the write that preceded it, so there is no error to
+// return: a dropped announcement costs a backend one deferred upload, whereas
+// a returned error would tempt a caller into treating a successful write as
+// failed. Silently does nothing when the workspace has no bus, when fullPath
+// is not under the session root, or when the path is one objectStoreExcluded
+// rejects — so it is impossible to announce store.db or session.lock by
+// mistake, however a future caller wires it up.
+func (s *SessionWorkspace) AnnounceWrite(fullPath string, existed bool) {
+	rel, ok := s.announceRel(fullPath)
+	if !ok {
+		return
+	}
+	size := statSize(fullPath)
+	eventType := "session.file.created"
+	if existed {
+		eventType = "session.file.updated"
+	}
+	_ = s.bus.Emit(eventType, map[string]any{
+		"session_id":  s.ID,
+		"path":        rel,
+		"size":        size,
+		"offset":      0,
+		"bytes_added": size,
+	})
+}
+
+// AnnounceAppend announces bytesAdded bytes appended to the end of fullPath by
+// a caller holding its own append-mode descriptor.
+//
+// Unlike AnnounceWrite it takes no "existed" flag, because for an append the
+// answer is derivable and the derived answer is better than a sampled one: a
+// file whose post-append offset is 0 held no bytes before the append, so this
+// is the write that made it observable and "created" is the useful signal.
+// Sampling existed instead would report "updated" for the first real line
+// written to a file some earlier O_CREATE had left empty — which is how the
+// scene patch journal, opened at plugin Init and appended to on the first tool
+// call, would otherwise never announce a creation at all.
+//
+// offset is derived as size-bytesAdded rather than read back from the caller's
+// descriptor, because the caller still owns that descriptor and this helper
+// must not seek it. That is exact for a single-writer append (the case every
+// caller here is) and clamps to 0 if a concurrent truncation makes the
+// arithmetic go negative — the conservative direction, since offset 0 reads as
+// "the whole object changed".
+func (s *SessionWorkspace) AnnounceAppend(fullPath string, bytesAdded int) {
+	rel, ok := s.announceRel(fullPath)
+	if !ok {
+		return
+	}
+	size := statSize(fullPath)
+	offset := size - bytesAdded
+	if offset < 0 {
+		offset = 0
+	}
+	eventType := "session.file.updated"
+	if offset == 0 {
+		eventType = "session.file.created"
+	}
+	_ = s.bus.Emit(eventType, map[string]any{
+		"session_id":  s.ID,
+		"path":        rel,
+		"size":        size,
+		"offset":      offset,
+		"bytes_added": bytesAdded,
+	})
+}
+
+// announceRel resolves an absolute (or relative-to-cwd) path to the
+// slash-separated session-relative form the session.file.* payload carries,
+// reporting ok=false when there is nothing to announce.
+//
+// The escape check is why callers may pass a path they are not sure about:
+// plugins whose output directory is configurable (the HITL registry, the
+// sampler, long-term memory) point outside every session tree by default, and
+// this returning false is the correct, silent outcome for them rather than
+// something each call site has to guard.
+func (s *SessionWorkspace) announceRel(fullPath string) (string, bool) {
+	if s == nil || s.bus == nil || fullPath == "" || s.RootDir == "" {
+		return "", false
+	}
+	root, err := filepath.Abs(s.RootDir)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", false
+	}
+	slash := filepath.ToSlash(rel)
+	if slash == "." || slash == ".." || strings.HasPrefix(slash, "../") {
+		return "", false
+	}
+	if objectStoreExcluded(slash) {
+		return "", false
+	}
+	return slash, true
+}
+
+// statSize reports a file's current size, or 0 when it cannot be read.
+//
+// 0 rather than dropping the announcement, for the same reason AppendFile
+// tolerates a failed Stat: a subscriber that re-reads the path is still
+// correct with a wrong size, and is unrecoverably wrong with no event at all.
+func statSize(fullPath string) int {
+	fi, err := os.Stat(fullPath)
+	if err != nil {
+		return 0
+	}
+	return int(fi.Size())
 }

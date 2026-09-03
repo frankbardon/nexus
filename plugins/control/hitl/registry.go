@@ -246,6 +246,17 @@ func validateRequestID(id string) error {
 
 // writeFileAtomic writes data to path via a same-directory tempfile then
 // renames into place so an fsnotify watcher cannot observe a partial file.
+//
+// Object-store disposition: turn-boundary-only. This is a raw os.* write that
+// announces nothing on the bus, deliberately. The registry directory defaults
+// to ~/.nexus/hitl, outside every session tree, and what it holds is a
+// filesystem IPC rendezvous rather than session state: an external responder
+// drops a YAML file in, the registry consumes it and removes both halves
+// within the same turn. Restoring an in-flight request/response pair onto
+// another host would re-ask a question that has already been answered — the
+// same class of mistake as restoring session.lock, which is why this stays
+// local even when an operator points `dir` inside a session tree. See
+// engine.SessionTreeWriters for the full disposition table.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")

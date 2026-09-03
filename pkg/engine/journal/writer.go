@@ -14,6 +14,22 @@ import (
 
 // Writer is the durable JSONL appender for a single session's journal.
 //
+// # Object-store disposition: turn-boundary-only
+//
+// The Writer puts bytes under the session tree (journal/events.jsonl) with raw
+// os.* calls and announces nothing on the bus. Unlike every other bypassing
+// writer, that is not a cost/benefit judgement — it is the only option. This
+// writer's *input* is every event dispatched on the bus, so an announcement
+// per journal write would produce an envelope, which would produce another
+// announcement, forever. The Writer holding no bus reference at all is what
+// makes that loop impossible by construction rather than by discipline, and is
+// the reason to leave it that way.
+//
+// The journal still syncs: the turn-boundary snapshot captures it through
+// Snapshot below, which takes one consistent instant across the active and
+// rotated segments so a snapshot can never contain the same events twice.
+// Recorded in SessionTreeWriters (pkg/engine/session_writers.go).
+//
 // Writes are decoupled from the bus dispatch goroutine via a buffered channel:
 // the bus's wildcard handler builds an Envelope (with seq + parent_seq
 // supplied by the bus) and pushes it on the channel; a drain goroutine

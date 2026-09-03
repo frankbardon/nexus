@@ -154,9 +154,58 @@ dispatch sequence number the journal never receives — which stalls its writer,
 only writes envelopes in contiguous sequence order. `StartSession` re-saves the
 metadata once the journal is running, so the file is still announced.
 
-Writers that hold their own directory and call `os.*` directly — the journal, the blob
-store, per-plugin SQLite, and plugins writing under `PluginDir()` — do not emit these
-events. They are covered by the turn-boundary snapshot instead.
+### Writers that bypass the helpers
+
+Not everything under a session tree goes through the workspace helpers. Some writers
+hold a long-lived `*os.File`, some write through temp-file + rename for atomicity, and
+some own a directory layout that is theirs rather than the workspace's. Two helpers
+exist for them:
+
+| Helper | Use |
+|--------|-----|
+| `AnnounceWrite(fullPath, existed)` | A whole-file write. `existed` must be sampled *before* the write and selects `created` vs `updated`. |
+| `AnnounceAppend(fullPath, bytesAdded)` | Bytes appended to the tail. Takes no `existed` flag — it derives `created` from a post-append offset of 0, so a descriptor opened with `O_CREATE` at plugin `Init` still announces a creation for the first real bytes written through it. |
+
+Both take an absolute path and emit exactly the payload `WriteFile` emits, with the
+path relativised to the session root. Both are silent when the workspace has no bus,
+when the path is not under the session root, or when the path is one the object-store
+seam excludes outright — so it is impossible to announce `store.db` or `session.lock`
+by mistake, and a plugin whose output directory is configurable can call them
+unconditionally instead of repeating an escape check.
+
+An fsnotify watcher over the session root was the rejected alternative. It buys
+completeness with no call-site changes, and costs a watch descriptor per directory, a
+rename storm to debounce on every atomic write, and — fatally — no way to tell "the
+writer finished" from "the writer is halfway through", which is the one distinction a
+sync backend needs.
+
+### Every raw writer has a decided disposition
+
+The set of writers that bypass the helpers is closed and enumerable: the plugin-level
+ones all take their directory from `PluginDir()` or a config key, and the rest are
+named engine subsystems. Each has one of three dispositions, recorded in code as
+`engine.SessionTreeWriters()` so an enforcement test can consume it:
+
+| Disposition | Meaning |
+|-------------|---------|
+| **emit** | Announces every write on the bus; a sync backend can push it as it lands. |
+| **turn-boundary-only** | Silent on the bus by decision. The bytes still reach the store, through the whole-tree snapshot taken at `agent.turn.end` and at shutdown. |
+| **excluded-by-design** | Never leaves the machine at all — not on the bus, not in the snapshot. |
+
+| Writer | Writes | Disposition | Why |
+|--------|--------|-------------|-----|
+| `plugins/scene` | `plugins/nexus.scene/scenes.json` + `scenes.jsonl` patch journal | emit | The highest-churn raw writer under a session, and the journal is the durable source of truth the replay primitive reconstructs scene state from — a run killed mid-turn otherwise loses exactly the scenes it just built. |
+| `plugins/workflows/icm/session` | `plugins/nexus.workflows.icm/<runID>/` stage artifacts and sidecars | emit | An ICM run is long enough that waiting for a turn boundary discards completed stages on a crash. Every write funnels through `WriteArtifact` plus the two input-copy loops. |
+| `plugins/llm/batch` | one JSON state file per in-flight batch | turn-boundary-only | `batch.data_dir` defaults to `~/.nexus/batches`, outside every session tree. Its durability requirement is a local disk that survives a restart — the coordinator resumes batches by scanning the directory at boot — not a remote copy. |
+| `plugins/memory/longterm` | one markdown file per memory key | turn-boundary-only | Defaults to `~/.nexus/memory`; cross-session by definition, so deliberately not under a session. |
+| `plugins/rag/ingest` | embedding cache entries | turn-boundary-only | Defaults to `~/.nexus/vectors/_cache`, and is a cache of embeddings derivable from the source documents — pushing it spends bandwidth on bytes a resume can regenerate. |
+| `plugins/control/hitl` | request/response files | turn-boundary-only | Defaults to `~/.nexus/hitl`, and is a filesystem IPC rendezvous rather than session state. Restoring an in-flight pair would re-ask a question that was already answered. |
+| `plugins/observe/sampler` | sampled journal + `metadata.json` | turn-boundary-only | Defaults to `~/.nexus/eval/samples`: an eval corpus accumulated outside sessions so it survives their cleanup. Also a copy of journal bytes the snapshot already carries. |
+| `pkg/engine/journal/writer.go`, `rotate.go` | `journal/events.jsonl`, `journal/events-NNN.jsonl.zst` | turn-boundary-only | Emitting here is a self-feeding loop, not a preference: the writer's input is every event on the bus. It holds no bus reference at all, which makes the loop impossible by construction. The snapshot captures the journal through `journal.Writer.Snapshot`. |
+| `pkg/engine/toolcache.go` | `journal/cache/<tool>/<argshash>.json` | turn-boundary-only | A replay companion to `journal/events.jsonl` and useless without it, so streaming one while the other waits would push half an artefact pair. It also runs inside a `tool.result` handler, where an emission would roughly double bus traffic on the hottest path. |
+| `pkg/engine/blobs` | `blobs/<xx>/<sha256>.bin` and `.meta` | turn-boundary-only | Content-addressed and immutable, so the snapshot already treats each blob as a once-ever upload — the repeated cost a real-time push would remove is not being paid. The package deliberately has no bus dependency. |
+| `pkg/engine/storage/sqlite.go` | `plugins/<pluginID>/store.db` | **excluded-by-design** | WAL mode. Committed frames live in `store.db-wal` until a checkpoint, so streaming partial writes uploads a database that is corrupt, or plausible and silently stale. It reaches the store only as a checkpointed `VACUUM INTO` snapshot; the `-wal` / `-shm` / `-journal` sidecars never cross the seam. |
+| `pkg/engine/session_lock.go` | `session.lock` | **excluded-by-design** | The file carries the local PID of the owning process and `Boot` refuses to start against a live one. Round-tripping it stamps one host's PID onto every later resume — correct by coincidence on a fresh container, and wrong the moment that number is in use. |
 
 ## Session Lifecycle
 

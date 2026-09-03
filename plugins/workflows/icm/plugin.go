@@ -89,6 +89,10 @@ type Plugin struct {
 	// dataDir is ctx.DataDir captured at Init for run-tree placement.
 	dataDir string
 
+	// session is the engine's session workspace, used only to announce
+	// artifact writes that bypass its helpers. Nil outside a session.
+	session *engine.SessionWorkspace
+
 	unsubs []func()
 }
 
@@ -194,6 +198,12 @@ func (p *Plugin) Emissions() []string {
 		"icm.turn",
 		"icm.fanout.item",
 		"icm.predicate.failed",
+		// Stage artifacts, sidecars and copied initial inputs are written
+		// with raw os.* calls under the run tree, so they announce
+		// themselves through SessionWorkspace.AnnounceWrite rather than
+		// through the workspace helpers. Same payload either way.
+		"session.file.created",
+		"session.file.updated",
 	}
 }
 
@@ -210,6 +220,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.skillToolName = runtime.SkillToolName(p.instanceID)
 	p.schemas = ctx.Schemas
 	p.dataDir = ctx.DataDir
+	// Captured so every run tree written under ctx.DataDir can announce its
+	// artifacts on the bus; see the Announce hook on session.Session. Nil when
+	// the engine was constructed without a session (tests), which the hook
+	// tolerates.
+	p.session = ctx.Session
 
 	if err := p.parseConfig(ctx.Config); err != nil {
 		return err
