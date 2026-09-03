@@ -52,6 +52,13 @@ type SessionSnapshotResult struct {
 	Trigger string `json:"trigger"`
 	// Sequence is the per-run snapshot counter, starting at 1.
 	Sequence uint64 `json:"sequence"`
+	// Generation is the session's commit generation: unlike Sequence it is
+	// seeded from the manifest the previous holder of the session committed,
+	// so it keeps increasing across a resume onto a different host. It is the
+	// stamp the commit marker and the per-object manifest in the bucket both
+	// carry, so a subscriber can name the exact remote state a snapshot
+	// produced. Zero when a snapshot failed before it could claim one.
+	Generation uint64 `json:"generation"`
 	// TurnID is the turn whose boundary triggered the snapshot. Empty for the
 	// shutdown and request triggers.
 	TurnID string `json:"turn_id,omitempty"`

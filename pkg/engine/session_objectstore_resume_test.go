@@ -716,72 +716,24 @@ func TestHydrationDoesNotBleedBetweenSimilarSessionIDs(t *testing.T) {
 	}
 }
 
-// TestHydrationDoesNotValidateTheCommitMarker documents current behaviour
-// rather than desired behaviour.
+// TestHydrationDoesNotValidateTheCommitMarker used to sit here.
 //
-// E1-S4 writes sessions/<id>.snapshot.json only after every other object is
-// durable, so the marker always names the last COMPLETE snapshot. Nothing
-// reads it back: hydrateSessionTree pulls whatever objects exist under the
-// prefix, so a tree left mixed by an interrupted snapshot — some objects from
-// snapshot N, some from a half-finished N+1 — hydrates silently and looks
+// It asserted E1-S5's finding as *current* behaviour: E1-S4 wrote
+// sessions/<id>.snapshot.json only after every other object was durable, so the
+// marker always named the last COMPLETE snapshot — and nothing read it back.
+// hydrateSessionTree pulled down whatever objects existed under the prefix, so
+// a tree left mixed by an interrupted snapshot hydrated silently and looked
 // exactly like a good session.
 //
-// The assertion below is deliberately of the "this is what happens today"
-// kind. Closing the gap is a production change (compare the tree against the
-// marker, refuse or roll back when they disagree) and is out of scope for a
-// test story; see the FOLLOWUPS note on E1-S5.
-func TestHydrationDoesNotValidateTheCommitMarker(t *testing.T) {
-	backendName := "memory-" + t.Name()
-	backend := objectstoretest.RegisterMemory(t, backendName, nil)
-
-	const sessionID = "sess-interrupted"
-	dir := t.TempDir()
-	writeSessionTree(t, dir, sessionID, map[string]string{
-		"files/from-snapshot-1.md": "committed",
-		// An object from a snapshot that never completed. A marker-validating
-		// hydration would reject or ignore this file; today it is
-		// indistinguishable from committed state.
-		"files/from-half-finished-snapshot-2.md": "never committed",
-	})
-	if err := backend.SeedTree(sessionObjectKeyPrefix(sessionID), dir); err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
-	// A marker describing the *previous*, smaller snapshot: fewer objects,
-	// an earlier sequence, a different turn.
-	marker := sessionSnapshotMarker{
-		SchemaVersion: sessionSnapshotMarkerVersion,
-		SessionID:     sessionID,
-		KeyPrefix:     sessionObjectKeyPrefix(sessionID),
-		Sequence:      1,
-		Trigger:       snapshotTriggerTurn,
-		TurnID:        "turn-1",
-		Objects:       1,
-	}
-	body, err := json.Marshal(marker)
-	if err != nil {
-		t.Fatalf("marshal marker: %v", err)
-	}
-	if err := backend.Seed(sessionSnapshotMarkerKey(sessionID), body); err != nil {
-		t.Fatalf("seeding marker: %v", err)
-	}
-
-	freshRoot := t.TempDir()
-	eng := resumeEngine(t, backendName, freshRoot)
-	if err := eng.openObjectStore(context.Background()); err != nil {
-		t.Fatalf("openObjectStore: %v", err)
-	}
-	t.Cleanup(eng.releaseObjectStore)
-	if err := eng.hydrateSessionTree(context.Background(), sessionID); err != nil {
-		t.Fatalf("hydrateSessionTree: %v", err)
-	}
-
-	restored := filepath.Join(freshRoot, "sessions", sessionID)
-	for _, rel := range []string{"files/from-snapshot-1.md", "files/from-half-finished-snapshot-2.md"} {
-		if _, err := os.Stat(filepath.Join(restored, filepath.FromSlash(rel))); err != nil {
-			t.Errorf("current behaviour is to hydrate every object under the prefix, but %q is missing: %v", rel, err)
-		}
-	}
-}
+// E3-S5 closed that gap with a generation stamp and a per-object manifest, and
+// the test was updated to assert the new behaviour rather than deleted. Its
+// successor is TestHydrationRestoresOnlyTheCommittedGeneration in
+// session_objectstore_manifest_test.go — same seeded scenario, opposite
+// expectation — beside the rest of the manifest coverage, including
+// TestInterruptedSnapshotRestoresTheCommittedGenerationIntact (the same thing
+// over a session a real engine produced) and
+// TestInterruptedSnapshotCanOverwriteACommittedObjectInPlace (the boundary of
+// the guarantee).
 
 // ---------------------------------------------------------------------------
 // Zero-impact default

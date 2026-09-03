@@ -261,11 +261,19 @@ func TestBootRecallHydratesBeforeSessionOpens(t *testing.T) {
 	if string(data) != "restored" {
 		t.Errorf("hydrated file = %q, want %q", data, "restored")
 	}
-	// Two hydrations, in this order: the session tree, then the owner marker
+	// Three hydrations, in this order: the session tree, the committed object
+	// manifest that hydration prunes the tree against, then the owner marker
 	// that split-brain detection reads before claiming the session. The tree
-	// must come first — the marker read happens after the workspace is open and
-	// must never be what a resume waits on.
-	wantPrefixes := []string{sessionObjectKeyPrefix(sessionID), sessionOwnerKeyPrefix(sessionID)}
+	// must come first, and the manifest must come before the tree is committed
+	// to its real path — an object from an interrupted snapshot must never be
+	// observable at the session root, even for an instant. The owner marker is
+	// last because that read happens after the workspace is open and must never
+	// be what a resume waits on.
+	wantPrefixes := []string{
+		sessionObjectKeyPrefix(sessionID),
+		sessionManifestKeyPrefix(sessionID),
+		sessionOwnerKeyPrefix(sessionID),
+	}
 	if got := backend.prefixes(); !slices.Equal(got, wantPrefixes) {
 		t.Errorf("Hydrate called with %v, want %v", got, wantPrefixes)
 	}
@@ -445,14 +453,16 @@ func TestStopFlushesAndClosesBackend(t *testing.T) {
 	if err := eng.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	// Five: the owner claim above, then the shutdown snapshot flushing the
-	// session objects and flushing again after the commit marker, then the
-	// owner marker's removal, then finalizeObjectStore's final barrier. The
-	// commit marker's own flush is the load-bearing one — it is what makes the
-	// marker unable to describe a snapshot that is not yet durable.
+	// Six: the owner claim above, then the shutdown snapshot flushing the
+	// session objects, flushing again after the per-object manifest and again
+	// after the commit marker, then the owner marker's removal, then
+	// finalizeObjectStore's final barrier. The manifest's and the marker's own
+	// flushes are the load-bearing ones, in that order — they are what make a
+	// manifest unable to describe objects that are not yet durable, and a
+	// marker unable to name a manifest that is not yet durable.
 	_, flushes, closes := backend.counts()
-	if flushes != 5 {
-		t.Errorf("Flush calls = %d, want 5 on clean shutdown (owner claim, objects, marker, owner release, finalize)", flushes)
+	if flushes != 6 {
+		t.Errorf("Flush calls = %d, want 6 on clean shutdown (owner claim, objects, manifest, marker, owner release, finalize)", flushes)
 	}
 	if closes != 1 {
 		t.Errorf("Close calls = %d, want 1 (io.Closer honoured without widening Backend)", closes)
@@ -476,11 +486,11 @@ func TestStopFlushesUnderCancelledContext(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	// As in TestStopFlushesAndClosesBackend: the Boot-time owner claim, the
-	// shutdown snapshot (objects + commit marker), the owner marker's removal
-	// and the finalize barrier. Every one of them runs on its own context,
-	// which is the point of the assertion.
-	if _, flushes, _ := backend.counts(); flushes != 5 {
-		t.Errorf("Flush calls = %d, want 5 even with a cancelled Stop context", flushes)
+	// shutdown snapshot (objects + manifest + commit marker), the owner
+	// marker's removal and the finalize barrier. Every one of them runs on its
+	// own context, which is the point of the assertion.
+	if _, flushes, _ := backend.counts(); flushes != 6 {
+		t.Errorf("Flush calls = %d, want 6 even with a cancelled Stop context", flushes)
 	}
 }
 

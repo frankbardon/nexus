@@ -298,19 +298,12 @@ func (s *SessionWorkspace) WriteFile(subpath string, data []byte) error {
 		if existed {
 			eventType = "session.file.updated"
 		}
-		_ = s.bus.Emit(eventType, map[string]any{
-			"session_id": s.ID,
-			"path":       subpath,
-			"size":       len(data),
-			// offset 0 with bytes_added == size is not padding to make the
-			// two emitters look alike: it is what actually happened. The
-			// previous contents are gone, so the changed region really does
-			// start at byte 0 and really does span the whole object, and a
-			// backend that coalesces on "offset > 0" correctly refuses to
-			// treat this as an append.
-			"offset":      0,
-			"bytes_added": len(data),
-		})
+		// offset 0 with bytes_added == size is not padding to make the two
+		// emitters look alike: it is what actually happened. The previous
+		// contents are gone, so the changed region really does start at byte 0
+		// and really does span the whole object, and a backend that coalesces
+		// on "offset > 0" correctly refuses to treat this as an append.
+		_ = s.bus.Emit(eventType, sessionFileEvent(s.ID, subpath, len(data), 0, len(data)))
 	}
 
 	return nil
@@ -434,13 +427,7 @@ func (s *SessionWorkspace) AppendFile(subpath string, data []byte) error {
 		if existed {
 			eventType = "session.file.updated"
 		}
-		_ = s.bus.Emit(eventType, map[string]any{
-			"session_id":  s.ID,
-			"path":        subpath,
-			"size":        size,
-			"offset":      offset,
-			"bytes_added": len(data),
-		})
+		_ = s.bus.Emit(eventType, sessionFileEvent(s.ID, subpath, size, offset, len(data)))
 	}
 
 	return nil
@@ -556,13 +543,7 @@ func (s *SessionWorkspace) AnnounceWrite(fullPath string, existed bool) {
 	if existed {
 		eventType = "session.file.updated"
 	}
-	_ = s.bus.Emit(eventType, map[string]any{
-		"session_id":  s.ID,
-		"path":        rel,
-		"size":        size,
-		"offset":      0,
-		"bytes_added": size,
-	})
+	_ = s.bus.Emit(eventType, sessionFileEvent(s.ID, rel, size, 0, size))
 }
 
 // AnnounceAppend announces bytesAdded bytes appended to the end of fullPath by
@@ -597,13 +578,7 @@ func (s *SessionWorkspace) AnnounceAppend(fullPath string, bytesAdded int) {
 	if offset == 0 {
 		eventType = "session.file.created"
 	}
-	_ = s.bus.Emit(eventType, map[string]any{
-		"session_id":  s.ID,
-		"path":        rel,
-		"size":        size,
-		"offset":      offset,
-		"bytes_added": bytesAdded,
-	})
+	_ = s.bus.Emit(eventType, sessionFileEvent(s.ID, rel, size, offset, bytesAdded))
 }
 
 // announceRel resolves an absolute (or relative-to-cwd) path to the
@@ -639,6 +614,41 @@ func (s *SessionWorkspace) announceRel(fullPath string) (string, bool) {
 		return "", false
 	}
 	return slash, true
+}
+
+// sessionFileEvent builds the session.file.created / .updated payload.
+//
+// The single definition of that shape, and the reason it exists is that there
+// was no guard on it at all. The payload is an untyped map — events.SessionFile
+// is declared but nothing on the wire uses it, so `make check-events` does not
+// see this at all — and four call sites were each spelling the same five keys
+// out by hand. That is exactly the shape of thing that acquires a fifth emitter
+// carrying an absolute path and three missing keys, which is what
+// cmd/desktop/internal/matcher was doing until E3-S5.
+//
+// The invariant every subscriber and the object-store seam depend on:
+//
+//   - path is *session-relative* and slash-separated, so it can be used
+//     directly as an object key under the session's prefix. ToSlash is applied
+//     here rather than trusted from the caller, because a subpath built with
+//     filepath.Join on Windows would otherwise put a backslash on the wire and
+//     store the same tree under two different key layouts depending on host OS.
+//   - session_id, size, offset and bytes_added are always present. A subscriber
+//     that has to treat a key as optional cannot distinguish "this emitter is
+//     old" from "this is a whole-object rewrite".
+//
+// Deliberately not a typed struct. Converting the emit to events.SessionFile is
+// a behaviour change for every existing subscriber (which type-asserts the map)
+// and the struct has no counterpart for offset or bytes_added; that conversion
+// is its own change, not a side effect of centralising the shape.
+func sessionFileEvent(sessionID, rel string, size, offset, bytesAdded int) map[string]any {
+	return map[string]any{
+		"session_id":  sessionID,
+		"path":        filepath.ToSlash(rel),
+		"size":        size,
+		"offset":      offset,
+		"bytes_added": bytesAdded,
+	}
 }
 
 // statSize reports a file's current size, or 0 when it cannot be read.

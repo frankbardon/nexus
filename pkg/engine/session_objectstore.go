@@ -93,6 +93,21 @@ type sessionObjectStore struct {
 	// marker up against a log line.
 	snapshotSeq uint64
 
+	// generation is the last committed generation of the *session*, which is
+	// not the same thing as snapshotSeq: a session resumed on a fresh host
+	// starts its sequence over at 1 but must not restart its generation, or a
+	// bucket would record the stamp going backwards and nothing reading it
+	// could order two markers. Seeded from the committed manifest — by
+	// hydration when there is one, lazily by the first snapshot otherwise —
+	// and incremented per snapshot from there.
+	//
+	// Guarded by snapshotMu, along with generationKnown, so the seed-then-
+	// increment is atomic with respect to a concurrent snapshot. That is why
+	// they are plain fields rather than atomics: the invariant is about the
+	// pair, not either one.
+	generation      uint64
+	generationKnown bool
+
 	// health is the degraded-state tracker that gives failure_policy its
 	// meaning, and retry is the bounded queue and worker that heals it. Both
 	// exist for the life of the handle — the queue has to accept work from the
@@ -114,6 +129,25 @@ type sessionObjectStore struct {
 // holding an SDK client, a connection pool or a background uploader implements
 // io.Closer and gets a real release point; one that holds nothing implements
 // nothing and costs nothing.
+// noteCommittedGeneration records the generation a read of the committed
+// manifest reported, so the next snapshot continues the sequence instead of
+// restarting it. Safe to call with 0 for "the store holds no manifest": that is
+// the correct baseline for a brand-new session and for a bucket written by a
+// build older than the manifest.
+//
+// First writer wins. Hydration calls this at boot and the first snapshot calls
+// it only when hydration did not, so a second call would mean a stale read
+// overwriting a live counter.
+func (s *sessionObjectStore) noteCommittedGeneration(g uint64) {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if s.generationKnown {
+		return
+	}
+	s.generation = g
+	s.generationKnown = true
+}
+
 func (s *sessionObjectStore) close(logger *slog.Logger) {
 	c, ok := s.backend.(io.Closer)
 	if !ok {
@@ -238,11 +272,24 @@ var rotatedJournalSegmentRe = regexp.MustCompile(`^journal/events-\d{3,}\.jsonl\
 // budget, and a snapshot never deletes — so a swept blob simply stays in the
 // bucket, which is the same outcome it had before this predicate existed.
 func objectStoreImmutable(relPath string) bool {
-	p := filepath.ToSlash(relPath)
-	if rotatedJournalSegmentRe.MatchString(p) {
-		return true
-	}
+	return rotatedJournalSegmentRe.MatchString(filepath.ToSlash(relPath)) ||
+		objectStoreContentAddressedBlob(relPath)
+}
 
+// objectStoreContentAddressedBlob reports whether a session-relative path names
+// a file in the sha256-addressed blob tree, so its *name* proves its bytes.
+//
+// Split out of objectStoreImmutable because the two halves of that predicate
+// have earned different privileges and conflating them would be a real bug.
+// Both are immutable, so both may be skipped on upload; but only this half is
+// exempt from hydration's prune-to-the-committed-manifest, because only this
+// half can legitimately be in the bucket without being in the last manifest
+// (the local LRU sweep, and the write-through push that runs outside every
+// snapshot) and only this half can never contradict the committed history. A
+// sealed journal segment from an interrupted generation would. See the
+// exemption argument in session_objectstore_manifest.go.
+func objectStoreContentAddressedBlob(relPath string) bool {
+	p := filepath.ToSlash(relPath)
 	rest, ok := strings.CutPrefix(p, "blobs/")
 	if !ok {
 		return false
@@ -407,6 +454,73 @@ func (e *Engine) hydrateSessionTree(ctx context.Context, sessionID string) error
 		// history over the top of the real one. A failed boot is recoverable;
 		// that is not.
 		return fmt.Errorf("hydrating session %q from object store: %w", sessionID, err)
+	}
+
+	manifestScratch, err := os.MkdirTemp("", "nexus-session-manifest-")
+	if err != nil {
+		return fmt.Errorf("hydrate: manifest scratch dir for session %q: %w", sessionID, err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(manifestScratch); rmErr != nil {
+			e.Logger.Warn("object store: removing the manifest scratch dir failed",
+				"session_id", sessionID, "dir", manifestScratch, "error", rmErr)
+		}
+	}()
+
+	// Prune to the committed generation before committing, for the same reason
+	// the scrub below runs here: an object from a snapshot that never finished
+	// must never be observable at dest, even for an instant.
+	//
+	// A failed read is not a failed hydration. The fallback is "materialise
+	// everything under the prefix", which is byte-for-byte the behaviour that
+	// shipped before this existed, so a transient store hiccup degrades to the
+	// old semantics rather than stranding a session nobody can open. It is
+	// logged loudly because the old semantics are exactly what E1-S5 proved is
+	// silently wrong on a mixed tree.
+	//
+	// The scratch directory is an OS temp dir rather than anything under the
+	// sessions root: a sibling of the staging tree would be picked up by
+	// anything listing the root for abandoned hydrations, and a child of it
+	// would be committed into the session if its removal ever failed.
+	manifest, haveManifest, manifestErr := e.readSessionSnapshotManifest(ctx, store, sessionID, manifestScratch)
+	switch {
+	case manifestErr != nil:
+		e.Logger.Warn("object store: reading the committed object manifest failed; "+
+			"hydrating every object under the prefix, which cannot tell a complete "+
+			"snapshot from an interrupted one",
+			"session_id", sessionID, "key", sessionManifestKey(sessionID), "error", manifestErr)
+	case !haveManifest:
+		// Every session written before this file existed, and every session
+		// that has never completed a snapshot. Info rather than warn: it is the
+		// ordinary shape of a first resume from an older bucket.
+		e.Logger.Info("object store: no committed object manifest for this session; "+
+			"hydrating every object under the prefix",
+			"session_id", sessionID, "key", sessionManifestKey(sessionID))
+		store.noteCommittedGeneration(0)
+	default:
+		kept, removed, retainedBlobs, pruneErr := pruneStagingToManifest(staging, manifest)
+		if pruneErr != nil {
+			return fmt.Errorf("hydrating session %q: pruning to the committed manifest: %w", sessionID, pruneErr)
+		}
+		store.noteCommittedGeneration(manifest.Generation)
+		e.Logger.Info("object store: hydrating the committed generation",
+			"session_id", sessionID,
+			"generation", manifest.Generation,
+			"manifest_objects", len(manifest.Objects),
+			"objects_kept", kept,
+			"objects_uncommitted", removed,
+			"blobs_ahead_of_generation", retainedBlobs)
+		if removed > 0 {
+			// The interrupted-snapshot case, made loud. The objects stay in
+			// the bucket — this effort never deletes remote data — so an
+			// operator can inspect them, and the next snapshot simply
+			// overwrites the ones the session still has.
+			e.Logger.Warn("object store: the bucket holds objects from a snapshot that never completed; "+
+				"they were not restored and were left in place",
+				"session_id", sessionID,
+				"generation", manifest.Generation,
+				"uncommitted_objects", removed)
+		}
 	}
 
 	// Scrub before committing, so an excluded object can never be observed at
@@ -603,6 +717,13 @@ func dirIsEmpty(dir string) (bool, error) {
 //     advances past a complete snapshot: a failed or half-finished upload
 //     leaves it naming the previous one, which is the snapshot that is
 //     guaranteed restorable.
+//  4. A per-object manifest at sessions/<id>.manifest/manifest.json, written
+//     between the two, records exactly which objects that generation asserts
+//     are present. Hydration materialises that set and nothing else, so the
+//     superset an interrupted snapshot leaves behind is restored as the last
+//     complete generation rather than as a mixture. Without it, (2) and (3)
+//     make the mixed state *detectable* but not *survivable* — see
+//     session_objectstore_manifest.go.
 //
 // The marker is a sibling key, not a member of the tree, which is why
 // objectstore.TrimKeyPrefix matches whole segments: sessions/<id>.snapshot.json
@@ -681,17 +802,34 @@ func sessionSnapshotMarkerKey(sessionID string) string {
 // sessionSnapshotMarker is the JSON body of the commit record. Deliberately
 // small and deliberately without a file listing: it is written on every
 // snapshot, so anything proportional to the tree would make the marker itself a
-// cost that grows with the session.
+// cost that grows with the session. The listing lives in the manifest beside
+// it — see session_objectstore_manifest.go for why the two were kept as
+// separate objects rather than folded into one.
 type sessionSnapshotMarker struct {
-	SchemaVersion int       `json:"_schema_version"`
-	SessionID     string    `json:"session_id"`
-	KeyPrefix     string    `json:"key_prefix"`
-	Sequence      uint64    `json:"sequence"`
-	Trigger       string    `json:"trigger"`
-	TurnID        string    `json:"turn_id,omitempty"`
-	CompletedAt   time.Time `json:"completed_at"`
-	Objects       int       `json:"objects"`
-	Bytes         int64     `json:"bytes"`
+	SchemaVersion int    `json:"_schema_version"`
+	SessionID     string `json:"session_id"`
+	KeyPrefix     string `json:"key_prefix"`
+	// Generation increases by one per completed snapshot and, unlike Sequence,
+	// carries across runs: it is seeded from the manifest the previous holder
+	// of the session committed. It is what ties this marker to the manifest at
+	// ManifestKey, and what lets an operator order two markers pulled from a
+	// bucket without trusting two hosts' clocks.
+	Generation uint64 `json:"generation"`
+	// ManifestKey names the per-object manifest for this generation. Recorded
+	// on the marker rather than left to be re-derived, so an operator holding
+	// only the marker can find the object listing without knowing the engine's
+	// key scheme.
+	ManifestKey string `json:"manifest_key"`
+	// Sequence is the per-*run* snapshot counter, starting at 1. Kept beside
+	// Generation rather than replaced by it: it is what lines a marker up
+	// against this process's log lines, which Generation cannot do once a
+	// session has been resumed.
+	Sequence    uint64    `json:"sequence"`
+	Trigger     string    `json:"trigger"`
+	TurnID      string    `json:"turn_id,omitempty"`
+	CompletedAt time.Time `json:"completed_at"`
+	Objects     int       `json:"objects"`
+	Bytes       int64     `json:"bytes"`
 }
 
 // snapshotRequest is what one snapshot needs to know about its caller.
@@ -722,13 +860,13 @@ type snapshotRequest struct {
 //
 // After the upload loop, the entries slice is the snapshot's *committed object
 // set* — every object this snapshot asserts is present remotely — with each
-// entry marked as uploaded, skipped or gone. That is deliberate and it matters
-// for anything that later wants to write a per-object manifest beside the
-// commit marker: the manifest must be built from `included`, NOT from "what we
-// called Put on". A skipped file is still part of the committed set, and a
-// manifest of only-what-was-uploaded would describe a session with its journal
-// segments and blobs missing — which a hydration honouring that manifest would
-// then faithfully reproduce.
+// entry marked as uploaded, skipped or gone. E3-S5 spends exactly that:
+// buildSnapshotManifest reads `included` to write the per-object manifest
+// beside the commit marker. It must never be built from "what we called Put
+// on". A skipped file is still part of the committed set, and a manifest of
+// only-what-was-uploaded would describe a session with its journal segments and
+// blobs missing — which hydration, which now honours the manifest, would then
+// faithfully reproduce.
 type snapshotEntry struct {
 	rel string
 	src string
@@ -748,6 +886,14 @@ type snapshotEntry struct {
 // snapshotStats is what the snapshot reports back — the cost measurement.
 type snapshotStats struct {
 	Sequence uint64
+	// Generation is the session-scoped, run-crossing stamp this snapshot
+	// committed. See sessionObjectStore.generation.
+	Generation uint64
+	// ManifestBytes is the size of the per-object manifest this snapshot
+	// published. Reported because it is the cost E1-S4's marker design
+	// deliberately refused and E3-S5 deliberately accepted, and a cost nobody
+	// measures is a cost that grows unnoticed.
+	ManifestBytes int64
 	// Objects and Bytes describe the committed object set: everything the
 	// snapshot asserts is durably present, uploaded this time or not. They
 	// keep the meaning they had before immutable-skip existed ("how big is
@@ -882,6 +1028,7 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 		SessionID:       e.Session.ID,
 		Trigger:         req.trigger,
 		Sequence:        stats.Sequence,
+		Generation:      stats.Generation,
 		TurnID:          req.turnID,
 		Objects:         stats.Objects,
 		Bytes:           stats.Bytes,
@@ -928,7 +1075,9 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 			"trigger", req.trigger,
 			"reason", req.reason,
 			"sequence", stats.Sequence,
+			"generation", stats.Generation,
 			"objects", stats.Objects,
+			"manifest_bytes", stats.ManifestBytes,
 			"bytes", stats.Bytes,
 			"objects_uploaded", stats.ObjectsUploaded,
 			"bytes_uploaded", stats.BytesUploaded,
@@ -990,6 +1139,39 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 				"session_id", e.Session.ID, "dir", stage, "error", rmErr)
 		}
 	}()
+
+	// The generation this snapshot will commit. Claimed up front and never
+	// rolled back on failure, so a run that fails three snapshots and then
+	// succeeds commits generation N+4 rather than N+1. Gaps are harmless —
+	// nothing counts generations, everything only compares them — and a
+	// counter that could go backwards after a failure is exactly the thing a
+	// generation stamp must never do.
+	//
+	// snapshotMu is already held, so the fields are touched directly rather
+	// than through noteCommittedGeneration — which takes the same mutex and
+	// would deadlock. The read only happens when hydration did not already
+	// seed the baseline: a session resumed over a warm local tree short-
+	// circuits hydration entirely and would otherwise restart its generation
+	// at 1, writing a stamp that goes backwards in the bucket.
+	if !store.generationKnown {
+		prior, found, readErr := e.readSessionSnapshotManifest(ctx, store, e.Session.ID, stage)
+		switch {
+		case readErr != nil:
+			// Not fatal. A generation that restarts is a diagnostic problem,
+			// not a correctness one — hydration reads the object set from the
+			// manifest itself, never from a comparison of two generation
+			// numbers — so failing the snapshot here would trade a real
+			// durability guarantee for a tidy counter.
+			e.Logger.Warn("object store: could not read the prior object manifest; "+
+				"the generation stamp restarts for this run",
+				"session_id", e.Session.ID, "error", readErr)
+		case found:
+			store.generation = prior.Generation
+		}
+		store.generationKnown = true
+	}
+	store.generation++
+	stats.Generation = store.generation
 
 	// staged maps a session-relative path to the file the bytes must come
 	// from. Every entry in it also tells the tree walk below to leave the live
@@ -1185,6 +1367,26 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 		return stats, fmt.Errorf("snapshot: flushing session objects: %w", err)
 	}
 
+	// The per-object manifest, then the marker. Both after the barrier above,
+	// in that order, and each with its own Flush — so a manifest is never
+	// visible before the objects it describes are durable, and a marker is
+	// never visible before the manifest it names. The only mismatch this
+	// ordering can produce is a manifest one generation ahead of the marker,
+	// which is a manifest that is still exactly right; see the block comment
+	// in session_objectstore_manifest.go.
+	//
+	// Built from `entries`, whose `included` flags were set by the upload loop
+	// above — NOT from a count of Puts. A skipped immutable file and a
+	// write-through blob are both in the committed set having been uploaded by
+	// neither. Getting this wrong would make hydration truncate every session.
+	manifest := buildSnapshotManifest(e.Session.ID, stats.Generation, entries)
+	if err := e.publishSnapshotManifest(ctx, store, stage, manifest); err != nil {
+		return stats, err
+	}
+	if fi, statErr := os.Stat(filepath.Join(stage, sessionManifestObjectName)); statErr == nil {
+		stats.ManifestBytes = fi.Size()
+	}
+
 	if err := e.publishSnapshotMarker(ctx, store, stage, req, stats); err != nil {
 		return stats, err
 	}
@@ -1280,6 +1482,8 @@ func (e *Engine) publishSnapshotMarker(ctx context.Context, store *sessionObject
 		SchemaVersion: sessionSnapshotMarkerVersion,
 		SessionID:     e.Session.ID,
 		KeyPrefix:     sessionObjectKeyPrefix(e.Session.ID),
+		Generation:    stats.Generation,
+		ManifestKey:   sessionManifestKey(e.Session.ID),
 		Sequence:      stats.Sequence,
 		Trigger:       req.trigger,
 		TurnID:        req.turnID,

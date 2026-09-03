@@ -105,6 +105,7 @@ var _ engine.Plugin = (*Plugin)(nil)
 type Plugin struct {
 	bus       engine.EventBus
 	logger    *slog.Logger
+	session   *engine.SessionWorkspace
 	unsubs    []func()
 	outputDir string // configured output directory for writing match results
 
@@ -158,7 +159,12 @@ func (p *Plugin) Emissions() []string {
 		"session.meta.title",
 		"session.meta.preview",
 		"session.meta.status",
+		// Emitted on this plugin's behalf by SessionWorkspace.AnnounceWrite,
+		// and only when output_dir points inside the session tree. Declared
+		// because it can happen, the same way nexus.scene and
+		// nexus.workflows.icm declare it.
 		"session.file.created",
+		"session.file.updated",
 	}
 }
 
@@ -166,6 +172,10 @@ func (p *Plugin) Emissions() []string {
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	// Held only so match-result writes can be announced. Nil-safe:
+	// AnnounceWrite is a method on *SessionWorkspace that returns immediately
+	// on a nil receiver or a nil bus.
+	p.session = ctx.Session
 	if dir, ok := ctx.Config["output_dir"].(string); ok {
 		p.outputDir = engine.ExpandPath(dir)
 	}
@@ -520,14 +530,23 @@ func (p *Plugin) writeResultFile(result MatchResult, jobText string) {
 
 	filename := fmt.Sprintf("match-%s.json", time.Now().Format("20060102-150405"))
 	path := filepath.Join(p.outputDir, filename)
+	// Sampled before the write: afterwards every path exists, and it is what
+	// selects session.file.created from .updated.
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		p.logger.Warn("cannot write match result file", "error", err, "path", path)
 		return
 	}
 
 	p.logger.Info("match result written", "path", path)
-	_ = p.bus.Emit("session.file.created", map[string]any{
-		"path":   path,
-		"action": "created",
-	})
+	// Announced through the workspace rather than hand-built. The emit that
+	// used to sit here carried the *absolute* path and none of session_id,
+	// size, offset or bytes_added, so a subscriber keyed on the path wrote it
+	// under a key no other emitter would ever produce, and the object-store
+	// seam could not have used it at all. AnnounceWrite is a no-op when the
+	// path is outside the session tree, which is the common case for this
+	// plugin's configurable output_dir — so it can be called unconditionally
+	// instead of repeating an escape check here.
+	p.session.AnnounceWrite(path, existed)
 }

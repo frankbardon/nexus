@@ -228,10 +228,22 @@ Behaviour worth knowing:
   WAL-checkpointed and snapshotted as a standalone file at the turn boundary, so
   the uploaded database restores with no sidecars beside it.
 - **A failed or partial snapshot never replaces the previous good copy.** A
-  commit marker at `sessions/<session id>.snapshot.json` — a sibling of the
-  tree, not a member of it — is written only after every other object is
-  durable, so it always names the last snapshot that completed. A snapshot only
-  ever adds and overwrites; it never deletes.
+  per-object manifest at `sessions/<session id>.manifest/manifest.json` and then
+  a commit marker at `sessions/<session id>.snapshot.json` — both siblings of
+  the tree, not members of it — are written only after every other object is
+  durable, so they always describe the last snapshot that completed. A snapshot
+  only ever adds and overwrites; it never deletes.
+- **Hydration restores exactly the committed generation.** The manifest lists
+  the object set of the generation the marker names, and objects in the bucket
+  that it does not name are not materialised into the session tree. They are
+  **left in the bucket, never deleted** — reclamation is the operator's. A
+  bucket with no manifest (written by an older build, or by a session that has
+  never completed a snapshot) hydrates whole, exactly as before. Content-
+  addressed blobs are the one thing never pruned, because the local blob store
+  sweeps under an LRU budget while the bucket does not, so a blob a committed
+  history references can legitimately outlive the manifest that named it. See
+  [Sessions → The generation stamp and the per-object
+  manifest](../architecture/sessions.md#the-generation-stamp-and-the-per-object-manifest).
 - **Two hosts opening one session is detected, never prevented.** The owner
   marker is a diagnostic, not a lease: no fencing token, no expiry the engine
   waits on, no refusal. A marker is treated as stale — and stays silent — when it

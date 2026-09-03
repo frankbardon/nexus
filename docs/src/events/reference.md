@@ -766,10 +766,11 @@ re-saves the metadata once the journal is running, so the file is still announce
 | Field | Type | Description |
 |-------|------|-------------|
 | `SessionID` | string | Session that was snapshotted |
-| `Trigger` | string | `"turn"`, `"shutdown"` or `"request"` |
+| `Trigger` | string | `"turn"`, `"shutdown"`, `"request"` or `"retry"` |
 | `Sequence` | uint64 | Per-run snapshot counter, starting at 1 |
+| `Generation` | uint64 | The session's commit generation. Unlike `Sequence` it is seeded from the manifest the previous holder committed, so it keeps increasing across a resume onto a different host. It is the stamp the commit marker and the per-object manifest in the bucket both carry. Zero when a snapshot failed before claiming one |
 | `TurnID` | string | Turn whose boundary triggered it; empty otherwise |
-| `Objects` | int | Size of the committed object set — everything the snapshot asserts is durably present, excluding the commit marker. Includes objects immutable-skip did not re-upload |
+| `Objects` | int | Size of the committed object set — everything the snapshot asserts is durably present, excluding the commit marker and the manifest. Includes objects immutable-skip did not re-upload, and it is exactly the set the [per-object manifest](../architecture/sessions.md#the-generation-stamp-and-the-per-object-manifest) names |
 | `Bytes` | int64 | Total size of those objects — how big the stored session is |
 | `ObjectsUploaded` | int | The share of that set this snapshot actually transferred |
 | `BytesUploaded` | int64 | Their total size. This, not `Bytes`, is the per-turn cost |

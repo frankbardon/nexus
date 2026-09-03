@@ -338,9 +338,9 @@ The engine touches the seam in exactly six places, all in `pkg/engine`:
 |------|--------------|
 | Top of `Boot` | The configured backend is resolved once. A failure here fails the boot. |
 | Top of `Boot`, before any plugin can open storage | App- and agent-scope plugin stores are hydrated. See [The other roots](#the-other-roots). |
-| Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`. |
+| Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`, then pruned to exactly the object set the committed manifest names. |
 | Once the workspace exists and the local lock is held | An owner marker is claimed at `sessions/<session id>.owner/owner.json`, and a second host holding the session is detected. See [Two hosts, one session](#two-hosts-one-session). |
-| Every turn boundary | The whole tree is snapshotted and made durable, a commit marker is published, then the shared plugin stores are snapshotted. |
+| Every turn boundary | The whole tree is snapshotted and made durable, a per-object manifest and then a commit marker are published, then the shared plugin stores are snapshotted. |
 | End of `Stop` | A final snapshot runs, the owner marker is removed, then `Flush`, then the backend is released. |
 
 Hydration is **eager and whole-tree**, and completes before the first turn
@@ -471,10 +471,11 @@ A skipped object is still part of the **committed object set**: `objects` and
 `bytes` on the commit marker and on `session.snapshot.result` describe the whole
 stored session, exactly as they did before the skip existed, and
 `objects_uploaded` / `objects_skipped` split that set into what this turn paid
-for and what it saved. Anything that later writes a per-object manifest must
-build it from the committed set, **not** from "what was uploaded this turn" — a
+for and what it saved. The [per-object manifest](#the-generation-stamp-and-the-per-object-manifest)
+is built from the committed set, **not** from "what was uploaded this turn" — a
 manifest of only-what-was-uploaded would describe a session with its journal
-segments and blobs missing.
+segments and blobs missing, and a hydration honouring it would then faithfully
+reproduce that truncated session.
 
 #### Blobs push on write
 
@@ -539,15 +540,18 @@ objects cannot be replaced atomically. Three properties give
 1. Nothing is uploaded from a file that could be torn — see above.
 2. A snapshot **never deletes**. It adds and overwrites only, so a failure
    cannot remove remote state it did not successfully replace.
-3. A **commit marker** at `sessions/<session id>.snapshot.json` is written and
-   flushed only after every other object is durable. It therefore only ever
-   advances past a complete snapshot: a failed or half-finished upload leaves it
-   naming the previous one, which is the snapshot guaranteed to be restorable.
+3. A **per-object manifest** at `sessions/<session id>.manifest/manifest.json`
+   is written and flushed after every other object is durable, listing exactly
+   the object set that generation asserts is present.
+4. A **commit marker** at `sessions/<session id>.snapshot.json` is written and
+   flushed after the manifest. It therefore only ever advances past a complete
+   snapshot: a failed or half-finished upload leaves it naming the previous one,
+   which is the snapshot guaranteed to be restorable.
 
-The marker is a *sibling* key, not a member of the tree. Because prefixes match
-whole segments, `sessions/<id>.snapshot.json` is deliberately not under prefix
-`sessions/<id>`, so it never hydrates back into the session and never becomes an
-input to the next snapshot.
+Both are *sibling* keys, not members of the tree. Because prefixes match whole
+segments, `sessions/<id>.snapshot.json` and `sessions/<id>.manifest/` are
+deliberately not under prefix `sessions/<id>`, so neither hydrates back into the
+session and neither becomes an input to the next snapshot.
 
 Generation directories — write the whole tree under `sessions/<id>/gen-<n>/` and
 flip a pointer — were considered and rejected. They give true atomic replace at
@@ -555,14 +559,82 @@ the cost of a second full copy of every session in the bucket and an
 indirection hydration would have to resolve on every boot. The marker answers
 the same question for one small object.
 
-The marker is currently **written but not read back**. Hydration pulls whatever
-objects exist under `sessions/<id>` without comparing them against
-`sessions/<id>.snapshot.json`, so a tree left mixed by an interrupted snapshot —
-some objects from snapshot *N*, some from a half-finished *N+1* — hydrates
-silently and is indistinguishable from a clean one. The marker still bounds the
-damage (a snapshot never deletes, so the mixed tree is a superset of a complete
-one), and `TestHydrationDoesNotValidateTheCommitMarker` in `pkg/engine` pins
-that behaviour so a future change to it is deliberate rather than accidental.
+#### The generation stamp and the per-object manifest
+
+A snapshot never deletes, so an **interrupted** snapshot leaves a superset: some
+objects from generation *N+1* sitting beside the rest of generation *N*. Without
+something to say which is which, that tree hydrates silently and produces a
+session whose artifacts disagree with its own history.
+
+Two records answer it, both siblings of the tree:
+
+| Key | Contents |
+|-----|----------|
+| `sessions/<id>.snapshot.json` | The commit marker: session ID, `generation`, `manifest_key`, per-run `sequence`, trigger, turn ID, completion time, object and byte counts. Deliberately small — an operator reads it by hand. |
+| `sessions/<id>.manifest/manifest.json` | The per-object manifest: `generation` plus a sorted array of the session-relative paths that generation asserts are present. Paths only — no sizes, no digests, no mtimes. It is a *set*, not an index. |
+
+`generation` increases by one per completed snapshot and, unlike `sequence`,
+carries **across runs**: a resuming host seeds it from the committed manifest, so
+a bucket never records the stamp going backwards. Gaps are normal — a failed
+snapshot claims a generation and does not roll it back.
+
+The write order is load-bearing and is the same write-last discipline the marker
+always had: objects → flush → manifest → flush → marker → flush. So a manifest is
+never visible before the objects it describes are durable, and a marker is never
+visible before the manifest it names. The only mismatch this ordering can produce
+is a manifest one generation ahead of the marker, which is a manifest that is
+still exactly right — which is why hydration keys off the manifest.
+
+The manifest is a directory-shaped prefix rather than a flat
+`sessions/<id>.manifest.json` because `objectstore.Backend` has no single-object
+read: `Hydrate` is the only way to pull bytes down, and it takes a prefix whose
+exact-match object is explicitly not "under" it. That is also why the commit
+marker itself cannot be what hydration reads. Widening the published interface
+with a `Get` would break every out-of-repo backend module.
+
+**What hydration does with it.** The tree is pulled into a staging directory as
+before, then everything the committed manifest does not name is removed — before
+the staging directory is renamed into place, so an uncommitted object is never
+observable at the session path even for an instant. The orphaned objects are
+**left in the bucket, never deleted**: reclamation is the operator's, and this
+seam never removes remote data.
+
+Two deliberate exceptions:
+
+- **No manifest at all** (a bucket written by an older build, or a session that
+  has never completed a snapshot) falls back to materialising everything under
+  the prefix — byte-for-byte the behaviour that shipped before — and logs it.
+- **Content-addressed blobs are never pruned**, even when the manifest does not
+  name them. That is a correctness requirement, not a bandwidth saving: the blob
+  store sweeps *local* disk under an LRU byte budget while a snapshot never
+  deletes remotely, so a blob referenced by a `nexus-blob:` URI in the committed
+  history can legitimately be in the bucket and absent from the manifest.
+  Pruning it would break a URI that resolves today. The exemption is also
+  exactly coextensive with "objects written outside a snapshot", because
+  write-through and its retry queue push nothing but blobs. Sealed journal
+  segments are immutable too and are deliberately **not** exempt — one from an
+  interrupted generation carries events the committed history does not.
+
+**Where the guarantee stops.** A snapshot overwrites in place and the manifest
+names *paths*, not versions. An interrupted snapshot that got as far as
+re-uploading a mutable object — `context/conversation.jsonl`, the active journal
+segment, a per-plugin `store.db` — has already replaced the committed
+generation's bytes at that key, and no listing of paths brings them back.
+Hydration restores exactly the committed *set*; within that set an overwritten
+object carries the dead generation's bytes. Closing that window means
+per-generation object keys, which is the generation-directories design costed and
+rejected above. `TestInterruptedSnapshotCanOverwriteACommittedObjectInPlace` in
+`pkg/engine` pins the boundary so it is not rediscovered by accident;
+`TestInterruptedSnapshotRestoresTheCommittedGenerationIntact` and
+`TestHydrationRestoresOnlyTheCommittedGeneration` pin the guarantee.
+
+**Cost.** The manifest is re-uploaded whole on every snapshot, which is the cost
+the commit marker was originally designed to avoid and which was accepted here in
+exchange for correctness. Measured by `BenchmarkSessionSnapshot`'s `manifest_KiB`
+metric: **18.9 KiB for the 1007-object / 91 MiB session** (~19 bytes per object,
+0.02% of the tree, against a 90.7 MiB per-turn upload). A blob-heavy session pays
+more per object because a content-addressed path is 69 characters — 157 KiB for
+2009 objects — which is still 0.55% of that shape's 27.9 MiB per-turn upload.
 
 #### Failure policy: `degrade` and `strict`
 

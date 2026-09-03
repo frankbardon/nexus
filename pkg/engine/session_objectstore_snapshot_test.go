@@ -713,6 +713,13 @@ func BenchmarkSessionSnapshot(b *testing.B) {
 			b.ReportMetric(float64(bytes)/(1<<20), "tree_MiB")
 			b.ReportMetric(float64(puts)/float64(b.N), "puts/op")
 			b.ReportMetric(float64(uploaded)/float64(b.N)/(1<<20), "upload_MiB/op")
+			// The cost E1-S4's marker design refused and E3-S5 accepted: the
+			// per-object manifest is re-uploaded whole on every snapshot, so
+			// its size is a per-turn cost that grows with the object count.
+			// Reported beside the numbers it has to be judged against.
+			if body, ok := backend.Get(sessionManifestKey(eng.Session.ID)); ok {
+				b.ReportMetric(float64(len(body))/(1<<10), "manifest_KiB")
+			}
 		})
 	}
 }
