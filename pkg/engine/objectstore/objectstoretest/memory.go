@@ -328,7 +328,7 @@ func (m *Memory) setErr(field *error, err error) {
 
 // RegisterMemory registers backend under name for the duration of one test and
 // returns it, so a test can drive the engine through real config
-// (core.sessions.object_store.backend: <name>) rather than reaching past it.
+// (core.object_store.backend: <name>) rather than reaching past it.
 //
 // The registry is process-global and Register panics on a duplicate, so the
 // cleanup is not optional — leaving the name behind would make a second run of

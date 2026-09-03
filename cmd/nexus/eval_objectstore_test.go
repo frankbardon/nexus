@@ -26,8 +26,8 @@ func TestLoadEvalObjectStoreReadsTheEngineBlock(t *testing.T) {
 	t.Cleanup(func() { objectstore.Unregister(name) })
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	body := "eval:\n  reports_dir: /tmp/reports\ncore:\n  sessions:\n    object_store:\n      backend: " +
-		name + "\n      bucket: eval-bucket\n"
+	body := "eval:\n  reports_dir: /tmp/reports\ncore:\n  object_store:\n    backend: " +
+		name + "\n    bucket: eval-bucket\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestPublishEvalRunExcludesPerCaseSessionTrees(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(
-		"core:\n  sessions:\n    object_store:\n      backend: "+name+"\n      bucket: eval-bucket\n"), 0o644); err != nil {
+		"core:\n  object_store:\n    backend: "+name+"\n    bucket: eval-bucket\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

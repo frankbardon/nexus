@@ -98,7 +98,7 @@ func resumeEngine(t *testing.T, backendName, dir string) *Engine {
 	cfg := DefaultConfig()
 	cfg.Core.Sessions.Root = filepath.Join(dir, "sessions")
 	cfg.Core.Storage.Root = dir
-	cfg.Core.Sessions.ObjectStore = objectstore.Config{
+	cfg.Core.ObjectStore = objectstore.Config{
 		BackendName:   backendName,
 		Bucket:        "test-bucket",
 		FailurePolicy: objectstore.FailurePolicyStrict,
@@ -884,9 +884,9 @@ func TestShippedConfigsLeaveTheObjectStoreDisabled(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig: %v", err)
 			}
-			if cfg.Core.Sessions.ObjectStore.Enabled() {
+			if cfg.Core.ObjectStore.Enabled() {
 				t.Errorf("object store enabled (%+v); shipped profiles must leave the seam inert",
-					cfg.Core.Sessions.ObjectStore)
+					cfg.Core.ObjectStore)
 			}
 		})
 	}

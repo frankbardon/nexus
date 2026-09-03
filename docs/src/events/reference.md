@@ -776,7 +776,7 @@ re-saves the metadata once the journal is running, so the file is still announce
 | `OK` | bool | Whether the snapshot was made durable |
 | `ErrorMessage` | string | Empty on success |
 
-Both events exist only when `core.sessions.object_store.backend` names a
+Both events exist only when `core.object_store.backend` names a
 backend; with none configured nothing subscribes and a request is inert.
 
 The engine snapshots at every `agent.turn.end` on its own, so nothing needs to

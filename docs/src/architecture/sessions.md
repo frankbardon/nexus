@@ -305,7 +305,7 @@ core:
 
 ## Object-Store Backing (optional)
 
-By default a session lives only on local disk. `core.sessions.object_store`
+By default a session lives only on local disk. `core.object_store`
 optionally makes a remote object store the source of truth for a session
 *between* runs, so a session can be killed on one host and resumed on another
 with no shared filesystem — the case for containers, Cloud Run and Lambda,
@@ -729,5 +729,5 @@ selectable in production config would discard everything on exit while
 reporting success. `objectstoretest.RegisterMemory` makes it reachable by name
 for the duration of one test and removes it again on cleanup.
 
-See [Configuration Reference](../configuration/reference.md#coresessionsobject_store)
+See [Configuration Reference](../configuration/reference.md#coreobject_store)
 for the keys, their defaults and their validation behaviour.

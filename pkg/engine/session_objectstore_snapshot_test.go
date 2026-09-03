@@ -43,7 +43,7 @@ func newMemoryObjectStoreEngine(t *testing.T, policy objectstore.FailurePolicy) 
 	if policy == "" {
 		policy = objectstore.FailurePolicyDegrade
 	}
-	cfg.Core.Sessions.ObjectStore = objectstore.Config{
+	cfg.Core.ObjectStore = objectstore.Config{
 		BackendName:   name,
 		Bucket:        "test-bucket",
 		FailurePolicy: policy,
@@ -631,7 +631,7 @@ func BenchmarkSessionSnapshot(b *testing.B) {
 			cfg := DefaultConfig()
 			cfg.Core.Sessions.Root = filepath.Join(root, "sessions")
 			cfg.Core.Storage.Root = root
-			cfg.Core.Sessions.ObjectStore = objectstore.Config{
+			cfg.Core.ObjectStore = objectstore.Config{
 				BackendName:   name,
 				Bucket:        "bench",
 				FailurePolicy: objectstore.FailurePolicyDegrade,

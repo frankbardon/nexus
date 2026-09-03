@@ -282,7 +282,7 @@ func isLowerHex(s string) bool {
 // keeps the default path byte-identical to a build that has never heard of
 // object storage: no goroutine, no handle, no branch taken anywhere below.
 func (e *Engine) openObjectStore(ctx context.Context) error {
-	cfg := e.Config.Core.Sessions.ObjectStore
+	cfg := e.Config.Core.ObjectStore
 	if !cfg.Enabled() {
 		return nil
 	}

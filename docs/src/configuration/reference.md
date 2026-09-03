@@ -115,29 +115,29 @@ plugins:
 | `sessions.root`                | string   | `~/.nexus/sessions`    | Base directory for session workspaces. |
 | `sessions.retention`           | string   | `30d`                  | Retention policy for old sessions. |
 | `sessions.id_format`           | string   | `timestamp`            | Session ID format: `timestamp`, `datetime_short`. |
-| `sessions.object_store.backend`          | string | *(empty)*   | Name of a registered object-store backend. Empty (the default) disables object storage entirely and no object-store code runs. An unregistered name **fails the boot**. See `core.sessions.object_store` below. |
-| `sessions.object_store.bucket`           | string | *(required if `backend` set)* | Bucket / container the backend writes to. Nexus never creates it. |
-| `sessions.object_store.prefix`           | string | *(empty)*   | Object key prefix within the bucket, so several deployments can share one bucket. An **object key**, not a filesystem path: no `~` expansion, and a leading or trailing `/` is rejected. |
-| `sessions.object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. |
-| `sessions.object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. |
-| `sessions.object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
-| `sessions.object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted: `degrade` keeps the session running against the local copy and retries; `strict` fails the turn. Any other value **fails the boot**. |
 | `agent_id`                     | string   | *(empty)*              | Partitions per-agent storage and other per-agent state. Set by multi-agent embedders (the desktop shell). Empty in CLI / single-agent embedders, which collapses agent-scope storage to app-scope. |
 | `storage.root`                 | string   | `~/.nexus`             | Data root for app- and agent-scope per-plugin storage. App-scope `.db` files land at `<root>/plugins/<pluginID>/store.db`; agent-scope at `<root>/agents/<agent_id>/plugins/<pluginID>/store.db`. |
 | `storage.busy_timeout_ms`      | int      | `5000`                 | SQLite `busy_timeout` PRAGMA per handle (milliseconds). |
 | `storage.cache_size_kb`        | int      | `2048`                 | SQLite `cache_size` PRAGMA per handle (negative-form, in KiB). |
 | `storage.pool_max_idle`        | int      | `2`                    | `*sql.DB.SetMaxIdleConns` per handle. |
 | `storage.pool_max_open`        | int      | `4`                    | `*sql.DB.SetMaxOpenConns` per handle. |
+| `object_store.backend`          | string | *(empty)*   | Name of a registered object-store backend. Empty (the default) disables object storage entirely and no object-store code runs. An unregistered name **fails the boot**. See `core.object_store` below. |
+| `object_store.bucket`           | string | *(required if `backend` set)* | Bucket / container the backend writes to. Nexus never creates it. |
+| `object_store.prefix`           | string | *(empty)*   | Object key prefix within the bucket, so several deployments can share one bucket. An **object key**, not a filesystem path: no `~` expansion, and a leading or trailing `/` is rejected. |
+| `object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. |
+| `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. |
+| `object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
+| `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted: `degrade` keeps the session running against the local copy and retries; `strict` fails the turn. Any other value **fails the boot**. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
 
-### `core.sessions.object_store`
+### `core.object_store`
 
 Optional. Makes a remote object store the source of truth for everything Nexus
-persists *between* runs, for deployments with no durable local disk. Despite
-living under `core.sessions`, the block is **not** session-only: the same
-backend also carries app- and agent-scope per-plugin storage and eval run
-output — see [Beyond the session tree](#beyond-the-session-tree) below. Local
-disk remains
+persists *between* runs, for deployments with no durable local disk. The block
+sits on `core` rather than under `core.sessions` because it is **not**
+session-only: the same backend carries the session tree, app- and agent-scope
+per-plugin storage, and eval run output — see
+[Beyond the session tree](#beyond-the-session-tree) below. Local disk remains
 the working copy *during* a run: core and every plugin keep reading and writing
 ordinary files, and the engine talks to the store only at lifecycle points.
 Absent this block — the default — behaviour is byte-identical to a build with
@@ -153,13 +153,12 @@ import _ "github.com/frankbardon/nexus-storage-s3"
 
 ```yaml
 core:
-  sessions:
-    object_store:
-      backend: s3
-      bucket: nexus-sessions
-      prefix: prod/nexus
-      region: us-east-1
-      failure_policy: degrade
+  object_store:
+    backend: s3
+    bucket: nexus-sessions
+    prefix: prod/nexus
+    region: us-east-1
+    failure_policy: degrade
 ```
 
 No core change is needed to add a backend, and a third party can implement the

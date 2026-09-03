@@ -33,40 +33,7 @@
           "properties": {
             "root":      {"type": "string", "description": "Session root directory (~/... allowed)."},
             "retention": {"type": "string", "description": "Retention horizon (e.g. '30d')."},
-            "id_format": {"type": "string", "description": "Session ID format: timestamp | datetime_short | uuid."},
-            "object_store": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "Optional remote object store that is the source of truth for a session between runs. Absent or with an empty backend, no object-store code runs.",
-              "properties": {
-                "backend": {
-                  "type": "string",
-                  "description": "Name of a registered object-store backend. Registration is by blank import of the backend module; an unregistered name fails the boot."
-                },
-                "bucket": {
-                  "type": "string",
-                  "description": "Bucket / container the backend writes to. Required when backend is set. Nexus never creates it."
-                },
-                "prefix": {
-                  "type": "string",
-                  "description": "Object key prefix within the bucket. An object key, not a filesystem path — no ~ expansion, no leading or trailing '/'."
-                },
-                "region": {"type": "string", "description": "Backend region, where the backend needs one."},
-                "endpoint": {
-                  "type": "string",
-                  "description": "Override the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable."
-                },
-                "credentials_file": {
-                  "type": "string",
-                  "description": "Path to a static credentials file (~/... allowed). Empty means ambient credentials — workload identity, instance role, environment."
-                },
-                "failure_policy": {
-                  "type": "string",
-                  "enum": ["degrade", "strict"],
-                  "description": "What happens when state cannot be persisted. 'degrade' (default) keeps the session running against the local copy; 'strict' fails the turn."
-                }
-              }
-            }
+            "id_format": {"type": "string", "description": "Session ID format: timestamp | datetime_short | uuid."}
           }
         },
         "storage": {
@@ -78,6 +45,39 @@
             "cache_size_kb":   {"type": "integer", "minimum": 0},
             "pool_max_idle":   {"type": "integer", "minimum": 0},
             "pool_max_open":   {"type": "integer", "minimum": 0}
+          }
+        },
+        "object_store": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional remote object store that is the source of truth for the engine's on-disk state between runs — sessions, app- and agent-scope plugin storage, and eval run output. Absent or with an empty backend, no object-store code runs.",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "description": "Name of a registered object-store backend. Registration is by blank import of the backend module; an unregistered name fails the boot."
+            },
+            "bucket": {
+              "type": "string",
+              "description": "Bucket / container the backend writes to. Required when backend is set. Nexus never creates it."
+            },
+            "prefix": {
+              "type": "string",
+              "description": "Object key prefix within the bucket. An object key, not a filesystem path — no ~ expansion, no leading or trailing '/'."
+            },
+            "region": {"type": "string", "description": "Backend region, where the backend needs one."},
+            "endpoint": {
+              "type": "string",
+              "description": "Override the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable."
+            },
+            "credentials_file": {
+              "type": "string",
+              "description": "Path to a static credentials file (~/... allowed). Empty means ambient credentials — workload identity, instance role, environment."
+            },
+            "failure_policy": {
+              "type": "string",
+              "enum": ["degrade", "strict"],
+              "description": "What happens when state cannot be persisted. 'degrade' (default) keeps the session running against the local copy; 'strict' fails the turn."
+            }
           }
         },
         "logging": {

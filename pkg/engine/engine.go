@@ -70,7 +70,7 @@ type Engine struct {
 	sessionEnd chan struct{}
 
 	// objectStore is the optional remote backing for the session tree. Nil
-	// whenever core.sessions.object_store names no backend, which is the
+	// whenever core.object_store names no backend, which is the
 	// default and the only state in which no object-store code runs at all.
 	// Unexported on purpose: plugins must never reach the seam, and the
 	// engine is the only thing that knows the lifecycle points it hangs off.

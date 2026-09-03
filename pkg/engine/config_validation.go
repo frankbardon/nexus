@@ -214,7 +214,7 @@ func validateEngineConfig(cfg *Config) *configValidationResult {
 	// Only surface the object-store block to the schema when a backend was
 	// actually named. Emitting an all-empty block on every boot would make the
 	// failure_policy enum reject "" for every operator who never opted in.
-	if ost := cfg.Core.Sessions.ObjectStore; ost.Enabled() {
+	if ost := cfg.Core.ObjectStore; ost.Enabled() {
 		block := map[string]any{"backend": ost.BackendName}
 		for k, v := range map[string]string{
 			"bucket":           ost.Bucket,
@@ -228,7 +228,7 @@ func validateEngineConfig(cfg *Config) *configValidationResult {
 				block[k] = v
 			}
 		}
-		top["core"].(map[string]any)["sessions"].(map[string]any)["object_store"] = block
+		top["core"].(map[string]any)["object_store"] = block
 	}
 	if len(cfg.Capabilities) > 0 {
 		caps := make(map[string]any, len(cfg.Capabilities))

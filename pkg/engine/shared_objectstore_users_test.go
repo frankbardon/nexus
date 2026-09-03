@@ -44,9 +44,9 @@ core:
   agent_id: %q
   sessions:
     root: %s
-    object_store:
-      backend: %s
-      bucket: test-bucket
+  object_store:
+    backend: %s
+    bucket: test-bucket
   storage:
     root: %s
 %s
@@ -149,9 +149,9 @@ core:
   agent_id: %q
   sessions:
     root: %s
-    object_store:
-      backend: %s
-      bucket: test-bucket
+  object_store:
+    backend: %s
+    bucket: test-bucket
   storage:
     root: %s
 %s

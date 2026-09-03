@@ -37,7 +37,7 @@ func newSharedRootEngine(t *testing.T, backendName, dataRoot, agentID string) *E
 	cfg.Core.Sessions.Root = filepath.Join(dataRoot, "sessions")
 	cfg.Core.Storage.Root = dataRoot
 	cfg.Core.AgentID = agentID
-	cfg.Core.Sessions.ObjectStore = objectstore.Config{
+	cfg.Core.ObjectStore = objectstore.Config{
 		BackendName:   backendName,
 		Bucket:        "test-bucket",
 		FailurePolicy: objectstore.FailurePolicyDegrade,

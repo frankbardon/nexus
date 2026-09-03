@@ -237,7 +237,7 @@ func TestRegisterMemoryIsReachableByNameAndCleansUp(t *testing.T) {
 			t.Fatalf("Registered(%q) = false after RegisterMemory", name)
 		}
 		cfg := objectstore.Config{BackendName: name, Bucket: "b"}
-		if err := cfg.Validate("core.sessions.object_store"); err != nil {
+		if err := cfg.Validate("core.object_store"); err != nil {
 			t.Fatalf("Validate against a registered memory backend = %v", err)
 		}
 		opened, err := objectstore.Open(context.Background(), cfg)

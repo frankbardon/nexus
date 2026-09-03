@@ -97,7 +97,7 @@ func newObjectStoreEngine(t *testing.T, b objectstore.Backend) (*Engine, string)
 	cfg := DefaultConfig()
 	cfg.Core.Sessions.Root = sessionsRoot
 	cfg.Core.Storage.Root = root
-	cfg.Core.Sessions.ObjectStore = objectstore.Config{
+	cfg.Core.ObjectStore = objectstore.Config{
 		BackendName:   name,
 		Bucket:        "test-bucket",
 		FailurePolicy: objectstore.FailurePolicyDegrade,
@@ -493,7 +493,7 @@ func TestFinalizeObjectStoreFailurePolicy(t *testing.T) {
 	t.Run("strict surfaces the failure", func(t *testing.T) {
 		backend := &scriptedBackend{flushErr: flushErr}
 		eng, _ := newObjectStoreEngine(t, backend)
-		eng.Config.Core.Sessions.ObjectStore.FailurePolicy = objectstore.FailurePolicyStrict
+		eng.Config.Core.ObjectStore.FailurePolicy = objectstore.FailurePolicyStrict
 		if err := eng.openObjectStore(context.Background()); err != nil {
 			t.Fatalf("openObjectStore: %v", err)
 		}

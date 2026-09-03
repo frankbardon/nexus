@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const testKey = "core.sessions.object_store"
+const testKey = "core.object_store"
 
 func TestConfigEnabled(t *testing.T) {
 	if (Config{}).Enabled() {

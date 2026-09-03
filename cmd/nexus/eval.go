@@ -598,7 +598,7 @@ const evalSessionsDirName = "_sessions"
 // config file the eval block came from.
 //
 // A second parse rather than a field on evalConfig: the block lives at
-// core.sessions.object_store, which is engine config, and evalConfig is
+// core.object_store, which is engine config, and evalConfig is
 // deliberately "just the eval: block". Reusing engine.LoadConfig instead was
 // rejected because an eval config file is not required to be a valid engine
 // config — the whole point of loadEvalConfig is that the rest of the file is
@@ -617,17 +617,15 @@ func loadEvalObjectStore(path string) (objectstore.Config, error) {
 	}
 	var wrapper struct {
 		Core struct {
-			Sessions struct {
-				ObjectStore objectstore.Config `yaml:"object_store"`
-			} `yaml:"sessions"`
+			ObjectStore objectstore.Config `yaml:"object_store"`
 		} `yaml:"core"`
 	}
 	if err := yaml.Unmarshal(data, &wrapper); err != nil {
-		return objectstore.Config{}, fmt.Errorf("parsing core.sessions.object_store: %w", err)
+		return objectstore.Config{}, fmt.Errorf("parsing core.object_store: %w", err)
 	}
-	cfg := wrapper.Core.Sessions.ObjectStore
+	cfg := wrapper.Core.ObjectStore
 	cfg.CredentialsFile = engine.ExpandPath(cfg.CredentialsFile)
-	if err := cfg.Validate("core.sessions.object_store"); err != nil {
+	if err := cfg.Validate("core.object_store"); err != nil {
 		return objectstore.Config{}, err
 	}
 	return cfg, nil

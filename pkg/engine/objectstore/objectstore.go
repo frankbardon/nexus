@@ -219,7 +219,7 @@ func (c Config) Enabled() bool { return c.BackendName != "" }
 // Validate checks the block for internal consistency and confirms the named
 // backend is actually registered, normalising FailurePolicy in the process.
 // keyPrefix is the dotted config path this block was parsed from (e.g.
-// "core.sessions.object_store") and appears in every message so an operator
+// "core.object_store") and appears in every message so an operator
 // is pointed at the exact key rather than at a symptom.
 //
 // This runs at config load, not at first write. A misconfigured bucket that
