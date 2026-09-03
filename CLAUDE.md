@@ -9,6 +9,7 @@ make build        # Build binary to bin/nexus
 make run          # Build and run with default config (configs/default.yaml)
 make test         # Run all tests
 make test-broker-integration  # Broker integration suite (tagged; no API key needed)
+make test-objectstore-minio   # modules/objectstore-s3 against MinIO (tagged; starts/stops its own container)
 make fmt          # Format code (gofmt)
 make submodules   # List the Go submodules under modules/ that every sweep covers
 make vet          # Run go vet
@@ -19,7 +20,7 @@ Run specific profile: `bin/nexus -config configs/coding.yaml`
 
 Run engine integration tests: `go test -tags integration ./tests/integration/ -v` (live mode needs `ANTHROPIC_API_KEY`)
 
-`make test` is untagged, so it skips both integration suites. CI runs `make test` plus `make test-broker-integration` as its own step; the engine suite under `tests/integration/` stays out of CI because live mode requires an API key.
+`make test` is untagged, so it skips every tagged suite. CI runs `make test`, then `make test-broker-integration` as its own step, and `make test-objectstore-minio` as its own job; the engine suite under `tests/integration/` stays out of CI because live mode requires an API key. `make test-objectstore-minio` runs the S3 backend's conformance suite against a real MinIO that `scripts/with-minio.sh` starts and stops on loopback — no cloud account and no repo secrets — and it fails rather than skips whenever MinIO was provisioned, so a green job means the tests actually ran.
 
 Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 

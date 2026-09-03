@@ -66,8 +66,9 @@ type NewBackend func(t *testing.T) objectstore.Backend
 const defaultListProbeCount = 1200
 
 type options struct {
-	listProbeCount  int
-	skipConcurrency bool
+	listProbeCount     int
+	skipConcurrency    bool
+	skipObjectAtPrefix bool
 }
 
 // Option tunes the suite for backends that cannot afford a default.
@@ -85,6 +86,33 @@ func WithListProbeCount(n int) Option {
 // of the requirement, which the interface states unconditionally.
 func WithoutConcurrency() Option {
 	return func(o *options) { o.skipConcurrency = true }
+}
+
+// WithoutObjectAtPrefix drops the tail of the prefix-matching case that stores
+// an object at exactly the prefix other objects live under - key
+// "sessions/sess-1" alongside "sessions/sess-1/files/a.txt".
+//
+// S3 and GCS both hold that state: their key spaces are flat, "/" has no
+// meaning beyond being a byte, and a key that happens to be another key's
+// prefix is unremarkable. The suite asserts the state because the *engine's*
+// key scheme can produce it and a backend that lets the object at the prefix
+// leak into a hydration writes a file where a directory belongs.
+//
+// Some stores cannot represent it at all. MinIO is the measured example: a PUT
+// to "sessions/sess-1" against a store already holding
+// "sessions/sess-1/files/a.txt" returns 200 and makes the child object
+// disappear from every subsequent list, in both single-drive and erasure modes.
+// That is a divergence from S3 in the emulator, not in the backend under test,
+// and the resulting bucket cannot even be emptied by listing it.
+//
+// So this exists for emulators, and only for emulators. It is not a way for a
+// backend to opt out of the semantic: a backend that needs it is claiming its
+// *store* has a flat-key-space limitation, which is a property worth stating
+// out loud at the call site. Run the rest of the suite unaffected -- every
+// other prefix-matching assertion in the case still runs, including the
+// "sess-1" versus "sess-10" collision that motivates the case.
+func WithoutObjectAtPrefix() Option {
+	return func(o *options) { o.skipObjectAtPrefix = true }
 }
 
 // RunSuite runs every conformance case against backends built by newBackend.
@@ -370,7 +398,7 @@ func caseDeleteMissingKey(h *harness, _ options) {
 	}
 }
 
-func caseListPrefixSegments(h *harness, _ options) {
+func caseListPrefixSegments(h *harness, opts options) {
 	// "sessions/sess-1" against "sessions/sess-10" is the exact collision the
 	// engine's key scheme produces, and raw string prefix matching - what every
 	// cloud list API does natively - gets it wrong.
@@ -401,6 +429,13 @@ func caseListPrefixSegments(h *harness, _ options) {
 
 	// An object AT the prefix is not under it: it has no path beneath a
 	// hydration destination, so there is nowhere for it to go.
+	//
+	// Left until last so that a store which cannot represent this state at all
+	// - see WithoutObjectAtPrefix - skips only this block and still runs every
+	// assertion above it.
+	if opts.skipObjectAtPrefix {
+		return
+	}
 	h.put("sessions/sess-1", "an object at the prefix itself")
 	h.wantKeys("sessions/sess-1",
 		"sessions/sess-1/files/a.txt",

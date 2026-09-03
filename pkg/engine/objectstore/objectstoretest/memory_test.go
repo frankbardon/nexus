@@ -22,7 +22,7 @@ func TestMemoryPassesContractSuite(t *testing.T) {
 // work. A tiny probe count also keeps this second full pass cheap.
 func TestRunSuiteHonoursOptions(t *testing.T) {
 	RunSuite(t, func(*testing.T) objectstore.Backend { return NewMemory() },
-		WithListProbeCount(3), WithoutConcurrency())
+		WithListProbeCount(3), WithoutConcurrency(), WithoutObjectAtPrefix())
 }
 
 func TestMemorySeedAndGet(t *testing.T) {

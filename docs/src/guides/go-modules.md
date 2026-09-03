@@ -110,6 +110,7 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 |---|---|---|
 | `make build` | builds `cmd/nexus` + `cmd/nexus-broker` | `go build ./...` (compile check; submodules ship no binary) |
 | `make test` | `go test ./...` | `go test ./...` |
+| `make test-objectstore-minio` | — | `modules/objectstore-s3` only, `-tags minio` |
 | `make test-race` | `go test -race ./...` | `go test -race ./...` |
 | `make fmt` | `go fmt ./...` | `go fmt ./...` |
 | `make vet` | `go vet ./...` | `go vet ./...` |
@@ -118,7 +119,13 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 | `make check-modules` | fails on a `go.mod` outside `modules/<name>/` | — |
 | `make submodules` | prints the discovered list | — |
 
-Two deliberate exceptions:
+Three deliberate exceptions:
+
+- **`test-objectstore-minio` is not a sweep.** It runs one submodule's
+  build-tagged suite against a MinIO container `scripts/with-minio.sh` starts and
+  stops, because MinIO emulates S3 and nothing else; the GCS module gets its own
+  emulator and its own target. Everything above stays untagged, which is what
+  keeps `make test` offline and secret-free even though it sweeps `modules/`.
 
 - **`check-events` stays root-only.** `scripts/check-event-versions.sh` `cd`s to
   the repository top level and inspects `pkg/events/` alone. Event structs live
@@ -128,9 +135,12 @@ Two deliberate exceptions:
   independently of the current module**, so the same pinned staticcheck runs
   inside a submodule without that module having to require it.
 
-CI needs no submodule-specific job: `.github/workflows/ci.yml` runs `make build`,
-`make test`, `make test-race`, `make vet` and `make lint`, and those cover
-`modules/` already. That is the design — one command per concern, shared verbatim
+CI needs no submodule-specific job for the sweeps: `.github/workflows/ci.yml`
+runs `make build`, `make test`, `make test-race`, `make vet` and `make lint`, and
+those cover `modules/` already. A build-tagged emulator suite is the one thing
+that does need a workflow edit, because no sweep runs it — the
+`objectstore-minio` job exists for that and runs the same make target a developer
+runs. That is the design — one command per concern, shared verbatim
 between CI and a developer's terminal, so the two cannot drift into a state where
 CI skips something. Adding a module under `modules/` requires no workflow edit.
 

@@ -68,6 +68,46 @@ jobs:
       - name: Broker integration tests
         run: make test-broker-integration
 
+  # The object-store backend in modules/objectstore-s3, against a real S3
+  # implementation instead of the in-process fake the `test` job runs.
+  #
+  # Its own job rather than another step in `test`, for the reason `race` is its
+  # own job: it runs concurrently, so a green CI costs no extra wall clock, and
+  # it needs a container runtime that nothing else in `test` should have to care
+  # about. Roughly 20-30s including the image pull.
+  #
+  # No secrets and no cloud account, which is what makes it CI-able at all —
+  # MinIO is an S3-compatible store that `make test-objectstore-minio` starts
+  # and stops itself on loopback. That is the same property that lets the broker
+  # integration suite run above, and the reason tests/integration/ is still
+  # excluded (it needs ANTHROPIC_API_KEY) does not apply here.
+  #
+  # The suite skips when no MinIO is reachable, so that a contributor without
+  # Docker gets an honest "not run" rather than a red they cannot act on. A skip
+  # here would be indistinguishable from a pass, which is exactly the
+  # invisible-forever failure mode the submodule plumbing exists to prevent — so
+  # scripts/with-minio.sh exports NEXUS_TEST_MINIO_REQUIRED, and the suite fails
+  # rather than skips in any run that provisioned MinIO. If this job is green,
+  # the tests ran.
+  #
+  # ubuntu-latest ships a working Docker daemon, so there is no setup step. No
+  # `go mod download` either: it covers the root module, and everything this job
+  # builds is either root-module code reached through the submodule's `replace`
+  # or a submodule dependency the make target fetches on demand.
+  objectstore-minio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+
+      # Same target the maintainer runs locally, so local and CI cannot drift.
+      - name: Object store suite against MinIO
+        run: make test-objectstore-minio
+
   # Deliberately its own job rather than another step in `test`: it runs
   # concurrently with `test` and `lint`, so a green CI costs no extra
   # wall-clock time, and `make test-race` needs CGO_ENABLED=1 (the race

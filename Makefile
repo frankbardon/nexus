@@ -1,4 +1,4 @@
-.PHONY: build build-broker run clean test test-race test-broker-integration fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
+.PHONY: build build-broker run clean test test-race test-broker-integration test-objectstore-minio fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
 
 BINARY_NAME=nexus
 BROKER_BINARY_NAME=nexus-broker
@@ -138,6 +138,39 @@ test-race:
 # test time; a cached PASS would not be a real gate.
 test-broker-integration:
 	$(GO) test -tags integration -count=1 ./cmd/nexus-broker/
+
+# Object-store suite against a real S3 implementation.
+#
+# modules/objectstore-s3/minio_test.go is //go:build minio, so `make test`
+# (plain `go test ./...`, no tags — including the submodule sweep) never runs
+# it. That is not tidiness: the submodule sweep IS untagged, so an emulator
+# suite left untagged would put a container start and ~10s of round trips into
+# the default loop and break the "fast, offline, secret-free" promise `make
+# test` makes.
+#
+# Follows test-broker-integration rather than tests/integration/. The engine
+# suite is excluded from CI because live mode needs ANTHROPIC_API_KEY; that
+# reasoning does not reach here. MinIO is an S3-compatible store running on
+# loopback in a container this target starts and stops itself, so this needs no
+# cloud account, no API key and no repository secret — exactly the property that
+# lets the broker suite run in CI, and this one runs there too.
+#
+# scripts/with-minio.sh owns the container lifecycle and records why it is a
+# script rather than a GitHub Actions `services:` block or testcontainers. It
+# also exports NEXUS_TEST_MINIO_REQUIRED, which turns the suite's
+# no-MinIO-so-skip path into a failure: the skip exists for a laptop with no
+# container runtime, and a skip in a run that provisioned MinIO would be green
+# while testing nothing.
+#
+# -count=1 for the broker suite's reason: the result depends on a server this
+# target just started, so a cached PASS from a previous run — possibly against a
+# different MinIO — would not be a gate.
+#
+# Not driven by GO_SUBMODULES. MinIO emulates S3 and nothing else, so this is
+# specific to modules/objectstore-s3 by nature; the GCS module gets its own
+# target and its own emulator.
+test-objectstore-minio:
+	scripts/with-minio.sh $(GO) test -C modules/objectstore-s3 -tags minio -count=1 ./...
 
 fmt:
 	$(GO) fmt ./...
