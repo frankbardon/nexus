@@ -314,9 +314,11 @@ func (e *Engine) releaseObjectStore() {
 	if store == nil {
 		return
 	}
-	// Before the handle goes: a still-running write-through worker would
-	// otherwise be free to Put against a backend that has just been closed.
+	// Before the handle goes: a still-running write-through worker or owner
+	// heartbeat would otherwise be free to Put against a backend that has just
+	// been closed.
 	e.stopBlobWriteThrough()
+	e.releaseSessionOwnership(store)
 	e.objectStore = nil
 	store.close(e.Logger)
 }
@@ -452,6 +454,15 @@ func (e *Engine) finalizeObjectStore() error {
 	// here so any other path into finalize cannot leave a worker uploading
 	// into a backend this function is about to close.
 	e.stopBlobWriteThrough()
+
+	// Stop the heartbeat and remove the owner marker. As late as possible so
+	// the heartbeat still covers the shutdown snapshot above, and before the
+	// backend is closed so the delete has a live handle. A clean exit removing
+	// its own marker is what stops the ordinary release-and-resume cycle from
+	// firing a split-brain alarm on every legitimate resume — see
+	// releaseSessionOwnership.
+	e.releaseSessionOwnership(store)
+
 	e.objectStore = nil
 	defer store.close(e.Logger)
 

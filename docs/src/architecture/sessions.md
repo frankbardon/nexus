@@ -332,15 +332,16 @@ default path to it.
 
 ### Lifecycle points
 
-The engine touches the seam in exactly five places, all in `pkg/engine`:
+The engine touches the seam in exactly six places, all in `pkg/engine`:
 
 | When | What happens |
 |------|--------------|
 | Top of `Boot` | The configured backend is resolved once. A failure here fails the boot. |
 | Top of `Boot`, before any plugin can open storage | App- and agent-scope plugin stores are hydrated. See [The other roots](#the-other-roots). |
 | Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`. |
+| Once the workspace exists and the local lock is held | An owner marker is claimed at `sessions/<session id>.owner/owner.json`, and a second host holding the session is detected. See [Two hosts, one session](#two-hosts-one-session). |
 | Every turn boundary | The whole tree is snapshotted and made durable, a commit marker is published, then the shared plugin stores are snapshotted. |
-| End of `Stop` | A final snapshot runs, then `Flush`, then the backend is released. |
+| End of `Stop` | A final snapshot runs, the owner marker is removed, then `Flush`, then the backend is released. |
 
 Hydration is **eager and whole-tree**, and completes before the first turn
 runs. There is deliberately no lazy or faulting read: threading one through the
@@ -625,6 +626,78 @@ captured at a consistent instant inside the session snapshot.
 
 Details, including the one-writing-host-at-a-time constraint a shared root
 brings, are in [Per-Plugin Storage → Object storage for app and agent
+scope](storage.md#object-storage-for-app-and-agent-scope).
+
+### Two hosts, one session
+
+The seam assumes a session has exactly one writing host at a time. **Nothing
+enforces that**, and the failure when it is violated is completely silent: two
+hosts hydrate the same session ID, both snapshot the whole tree at their own turn
+boundaries, and the loser's conversation history, journal and per-plugin
+`store.db` are overwritten at whole-file granularity with no error anywhere. On
+ephemeral compute, an instance the scheduler presumed dead but which is still
+running is routine rather than exotic.
+
+An **owner marker** makes that diagnosable. It is a small JSON object at
+`sessions/<id>.owner/owner.json` — a sibling of the session prefix, exactly like
+the commit marker, so it never hydrates into the tree and never becomes an input
+to the next snapshot:
+
+| Field | Meaning |
+|-------|---------|
+| `host` | `os.Hostname` of the holder. Per-instance on Kubernetes, Cloud Run and ECS. |
+| `pid` | The holder's OS process ID. Meaningful only together with `host`. |
+| `instance_id` | Unique per engine run — what tells two containers sharing a hostname and a PID apart. |
+| `claimed_at` | When the session was claimed. |
+| `heartbeat_at` | Refreshed every 30 seconds while the run is live. |
+
+`Boot` reads the marker before it writes its own — for a resumed session and a
+brand-new one alike — and a **clean `Stop` removes it**. The read also runs when
+hydration short-circuited because a local tree was already present, so a warm
+host whose stale local copy is shadowing a session another host has since taken
+over is detected too.
+
+If someone else still looks like the holder, the engine logs at **error** level
+and emits [`session.owner.conflict`](../events/reference.md#session-events) —
+and then carries on exactly as it would have. **This detects; it does not
+prevent.** No lock is taken, no fencing token is issued, nothing is refused and
+nothing waits. Refusing on a detection that can be wrong would let a false
+positive strand a session nobody can open, which is worse than the failure being
+detected. Fencing, expiry semantics and refusal are a real lease, and a real
+lease is a separate piece of work.
+
+The alarm is only worth having if it stays quiet on the happy path, so a marker
+is treated as live only when nothing says otherwise:
+
+| Signal | Verdict |
+|--------|---------|
+| The marker's `instance_id` is this run's | Ours. Silent. |
+| `host` matches this host and the PID is no longer running | The holder crashed here. Silent — the same signal-0 liveness probe `session.lock` uses, and sound only because the host matches. |
+| `heartbeat_at` stopped advancing more than 5 minutes ago | Holder presumed gone. Silent, logged at info as a takeover. |
+| Anything else | Conflict. |
+
+Both thresholds are constants, not config keys: 30 seconds between beats, ten
+missed beats before a marker reads as stale. The slack is deliberate — the
+timestamp comes from another machine's clock, and an alarm that fires because two
+hosts disagree about the time is an alarm everybody learns to ignore. The
+residual false alarm is a crash on a *different* host resumed inside the
+staleness window; nothing can distinguish that from a real second writer without
+a lease.
+
+The local session lock is **not** a substitute and does not go away. It carries a
+PID and is excluded from the seam for exactly that reason — a PID from host A
+means nothing on host B — so it can only see one machine. The two answer
+different questions.
+
+The conflict event is raised after `startJournal` and after plugin `Init`, not at
+the point of detection. The bus assigns a sequence number to every event whether
+the journal's wildcard is subscribed or not, and the writer only flushes
+contiguous sequences, so a single event emitted during hydration would stall the
+drain and empty the journal for the whole run.
+
+**Scope.** The marker covers session trees only. The shared roots — app- and
+agent-scope plugin storage — have a stronger version of the same problem and no
+marker yet; see [Per-Plugin Storage → Object storage for app and agent
 scope](storage.md#object-storage-for-app-and-agent-scope).
 
 ### What survives a kill

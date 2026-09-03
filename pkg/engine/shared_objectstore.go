@@ -100,9 +100,14 @@ import (
 // remote copy can never clobber a live local database mid-run; and the
 // snapshot is taken with the same checkpoint-then-VACUUM INTO discipline as the
 // session tree, so what lands remotely is always a self-consistent database
-// rather than a torn one. The split-brain *detection* work in E3-S3 is scoped
-// to sessions; extending its owner marker to shared roots is recorded as a
-// followup rather than smuggled in here.
+// rather than a torn one. Split-brain *detection* (session_owner.go) is scoped to
+// sessions and deliberately stops there. "Who owns this root" is a different
+// question from "who owns this session": a shared root is machine-wide and
+// outlives every session, so its holder is not one engine run and its marker
+// could not be claimed on Boot and released on Stop the way a session's is.
+// Extending detection here is what would turn the one-writing-host rule from a
+// documented constraint into a detected violation, and it needs its own answer
+// to that lifetime question rather than a reuse of this one.
 
 const (
 	// sessionsKeyRoot is the first key segment of every session tree. Named

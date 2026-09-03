@@ -185,10 +185,16 @@ operator believing storage was configured.
    before the workspace is opened and before the first turn runs, so every
    subsequent read behaves exactly as it would on a host that never left —
    there is no lazy or faulting read path.
-3. **Snapshots the whole session tree at every turn boundary** — on
+3. **Claims an owner marker** at `sessions/<session id>.owner/owner.json`
+   recording host, PID, a per-run instance ID and a heartbeat refreshed every 30
+   seconds, and reads whatever marker was already there. A second host that
+   still looks like the holder is logged at error level and raised as
+   `session.owner.conflict`. **Detection only** — nothing is refused, no lock is
+   taken and nothing waits. A clean `Stop` removes the marker.
+4. **Snapshots the whole session tree at every turn boundary** — on
    `agent.turn.end`, and on demand via `session.snapshot.request` — and again
    at shutdown. A hard kill therefore loses at most the in-flight turn.
-4. **Flushes and releases** the backend at the end of `Stop`, after plugins,
+5. **Flushes and releases** the backend at the end of `Stop`, after plugins,
    the journal and per-plugin SQLite have all closed.
 
 Behaviour worth knowing:
@@ -226,6 +232,14 @@ Behaviour worth knowing:
   tree, not a member of it — is written only after every other object is
   durable, so it always names the last snapshot that completed. A snapshot only
   ever adds and overwrites; it never deletes.
+- **Two hosts opening one session is detected, never prevented.** The owner
+  marker is a diagnostic, not a lease: no fencing token, no expiry the engine
+  waits on, no refusal. A marker is treated as stale — and stays silent — when it
+  belongs to this run, when its host matches and its PID is gone, or when its
+  heartbeat stopped advancing more than 5 minutes ago, so an ordinary resume
+  after a crash does not alarm. Both thresholds are constants rather than config
+  keys. See [Sessions → Two hosts, one
+  session](../architecture/sessions.md#two-hosts-one-session).
 - **The local working copy is not wiped on clean exit.** On ephemeral compute
   the filesystem disappears with the process anyway; on a durable host the
   local tree is a warm cache and the copy `failure_policy: degrade` falls back

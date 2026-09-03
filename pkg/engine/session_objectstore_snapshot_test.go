@@ -102,8 +102,11 @@ func TestTurnBoundarySnapshotUploadsTree(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if backend.Len() != 0 {
-		t.Fatalf("objects uploaded before any turn boundary: %v", backend.Keys())
+	// The owner marker is the one object Boot writes ahead of a turn boundary
+	// (session_owner.go). It is a diagnostic sibling of the tree, not session
+	// state, so nothing the session itself produced may be in the store yet.
+	if got := backend.Keys(); len(got) != 1 || got[0] != sessionOwnerMarkerKey(sessionID) {
+		t.Fatalf("objects uploaded before any turn boundary: %v", got)
 	}
 
 	var result events.SessionSnapshotResult

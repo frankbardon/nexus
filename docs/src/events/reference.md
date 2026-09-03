@@ -671,6 +671,7 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 | `session.file.updated` | map (see below) | An existing file in the session tree changed |
 | `session.snapshot.request` | `SessionSnapshotRequest` | Ask the engine to snapshot the session tree to the object store |
 | `session.snapshot.result` | `SessionSnapshotResult` | Outcome of one whole-tree snapshot |
+| `session.owner.conflict` | `SessionOwnerConflict` | A second host appears to hold this session — detection only, nothing is refused |
 
 **session.file.created / session.file.updated payload**
 
@@ -778,6 +779,28 @@ re-saves the metadata once the journal is running, so the file is still announce
 
 Both events exist only when `core.object_store.backend` names a
 backend; with none configured nothing subscribes and a request is inert.
+
+**SessionOwnerConflict**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session both hosts appear to be writing |
+| `HolderHost` | string | Hostname recorded in the owner marker found in the store |
+| `HolderPID` | int | The holder's OS process ID. Only meaningful together with `HolderHost` |
+| `HolderInstanceID` | string | Unique per engine run — what tells two containers sharing a hostname and a PID apart |
+| `HolderHeartbeatAt` | time.Time | The holder's last heartbeat, by the holder's own clock |
+| `HeartbeatAgeSeconds` | float64 | How old that heartbeat looked from here — the number the staleness decision was made on |
+| `LocalHost` | string | This process's hostname |
+| `LocalPID` | int | This process's PID |
+| `LocalInstanceID` | string | This run's instance ID |
+
+Emitted at most once per run, during `Boot`, and only when
+`core.object_store.backend` names a backend. **Detection, not prevention:** by the
+time it is emitted the engine has already claimed the session and is running
+normally. No lock is taken, no fencing token is issued, nothing is refused and
+nothing waits. A subscriber that wants to act — page an operator, stop the run —
+has to do so itself. See
+[Sessions → Two hosts, one session](../architecture/sessions.md#two-hosts-one-session).
 
 The engine snapshots at every `agent.turn.end` on its own, so nothing needs to
 emit `session.snapshot.request` in a normal run — it is the escape hatch for

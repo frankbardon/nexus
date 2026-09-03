@@ -1,10 +1,13 @@
 package events
 
+import "time"
+
 // Schema-version constants for session.* payloads. See doc.go.
 const (
 	SessionFileVersion            = 1
 	SessionSnapshotRequestVersion = 1
 	SessionSnapshotResultVersion  = 1
+	SessionOwnerConflictVersion   = 1
 )
 
 // SessionFile describes a file event within a session workspace.
@@ -72,4 +75,47 @@ type SessionSnapshotResult struct {
 	OK bool `json:"ok"`
 	// ErrorMessage is empty on success.
 	ErrorMessage string `json:"error,omitempty"`
+}
+
+// SessionOwnerConflict reports that a second host appears to hold the session
+// this process just opened against the object store.
+//
+// # Detection, not prevention
+//
+// Single-writer is assumed by the object-store design and deliberately not
+// enforced. Nothing about this event refuses, blocks, retries or fences: by the
+// time it is emitted the engine has already claimed the session and is running
+// normally. It exists because the failure it describes is otherwise completely
+// silent — two hosts snapshot the same session at their own turn boundaries and
+// the loser's whole tree, per-plugin databases included, is overwritten with no
+// error anywhere. A subscriber that wants to act (page an operator, stop the
+// run) has to do so itself.
+//
+// Emitted at most once per run, and only when an object-store backend is
+// configured.
+type SessionOwnerConflict struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	SessionID string `json:"session_id"`
+
+	// HolderHost, HolderPID and HolderInstanceID identify the process that
+	// wrote the owner marker found in the store. HolderInstanceID is unique
+	// per engine run, which is what makes two containers that happen to share
+	// a hostname and a PID still distinguishable.
+	HolderHost       string `json:"holder_host"`
+	HolderPID        int    `json:"holder_pid"`
+	HolderInstanceID string `json:"holder_instance_id"`
+	// HolderHeartbeatAt is the last heartbeat the holder recorded, by the
+	// holder's own clock.
+	HolderHeartbeatAt time.Time `json:"holder_heartbeat_at"`
+	// HeartbeatAgeSeconds is how old that heartbeat looked from here. Carried
+	// alongside the timestamp because the two clocks are not the same one, and
+	// the age is the number the staleness decision was actually made on.
+	HeartbeatAgeSeconds float64 `json:"heartbeat_age_seconds"`
+
+	// LocalHost, LocalPID and LocalInstanceID identify this process — the one
+	// that went ahead anyway.
+	LocalHost       string `json:"local_host"`
+	LocalPID        int    `json:"local_pid"`
+	LocalInstanceID string `json:"local_instance_id"`
 }

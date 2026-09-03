@@ -81,6 +81,17 @@ type Engine struct {
 	// whenever objectStore is nil, so the default configuration grows no
 	// goroutine and no queue. See session_objectstore_blobs.go.
 	blobPushes *blobWriteThrough
+
+	// sessionOwner is the owner marker and its heartbeat. Nil whenever
+	// objectStore is nil. See session_owner.go — it detects a second host
+	// holding the same session, and deliberately prevents nothing.
+	sessionOwner *sessionOwner
+
+	// ownerConflict holds a split-brain detection made during Boot until the
+	// journal is recording and plugins have subscribed. Emitting at the point
+	// of detection would stall the journal drain; see
+	// publishSessionOwnerConflict.
+	ownerConflict *events.SessionOwnerConflict
 }
 
 // New creates a fully wired Engine from a config file path.
@@ -286,6 +297,14 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}()
 
+	// Record this process as the session's holder in the object store, and
+	// raise the alarm if another host still looks like one. Detection only —
+	// nothing is refused and no lock is taken; see session_owner.go. Placed
+	// after the local session lock because that lock is the stronger,
+	// same-machine guard and should get the first word. A no-op when no
+	// backend is configured, and it never fails the boot.
+	e.claimSessionOwnership(ctx)
+
 	// Start pushing blobs the moment they land, rather than at the next turn
 	// boundary. Installed here — before plugin Init, which is where five of the
 	// six blob-store call sites open theirs — so no blob written by a plugin
@@ -440,6 +459,13 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// path never grows a handler. See session_objectstore.go for why the hook
 	// is agent.turn.end and why it runs synchronously.
 	e.installObjectStoreSnapshots()
+
+	// Raise any split-brain alarm detected while claiming ownership. Deferred
+	// to here from Boot's hydration phase for two reasons: the journal's
+	// wildcard is not subscribed before startJournal, and no plugin has
+	// subscribed to anything before Lifecycle.Boot. Emitting earlier would
+	// mean an event that neither the journal nor any IO surface ever sees.
+	e.publishSessionOwnerConflict()
 
 	// Surface errors to the UI.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("core.error", func(event Event[any]) {

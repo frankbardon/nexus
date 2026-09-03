@@ -109,6 +109,17 @@ already exists locally, so a remote copy cannot clobber a live local database
 mid-run; and every uploaded database is checkpointed and `VACUUM INTO`d, so what
 lands remotely is always self-consistent rather than torn.
 
+The constraint is still **documented rather than detected** here. Session trees
+carry an owner marker that makes a second writing host loud — see
+[Sessions → Two hosts, one session](sessions.md#two-hosts-one-session) — and the
+shared roots deliberately do not, because "who owns this root" is a different
+question from "who owns this session": a root is machine-wide and outlives every
+session, so its holder is not a single engine run and its marker could not be
+claimed and released on one run's lifecycle. Extending detection here is the
+mechanism that would turn the rule above from a documented constraint into a
+detected violation, and it is recorded as future work rather than smuggled into
+the session-scoped marker.
+
 ## Checkpoints and snapshots
 
 A `store.db` is only half a database while a writer is active: committed
