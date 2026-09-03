@@ -132,8 +132,12 @@ plugins:
 
 ### `core.sessions.object_store`
 
-Optional. Makes a remote object store the source of truth for a session
-*between* runs, for deployments with no durable local disk. Local disk remains
+Optional. Makes a remote object store the source of truth for everything Nexus
+persists *between* runs, for deployments with no durable local disk. Despite
+living under `core.sessions`, the block is **not** session-only: the same
+backend also carries app- and agent-scope per-plugin storage and eval run
+output — see [Beyond the session tree](#beyond-the-session-tree) below. Local
+disk remains
 the working copy *during* a run: core and every plugin keep reading and writing
 ordinary files, and the engine talks to the store only at lifecycle points.
 Absent this block — the default — behaviour is byte-identical to a build with
@@ -228,6 +232,59 @@ Behaviour worth knowing:
   local tree is a warm cache and the copy `failure_policy: degrade` falls back
   to. `core.sessions.retention` remains the operator-owned answer to when local
   session data goes away.
+
+#### Beyond the session tree
+
+The session tree is one of four roots. With a backend configured, the same
+`objectstore.Backend` — no per-root methods, no per-root config — also carries:
+
+| Root | Local path | Object key |
+|---|---|---|
+| Session tree | `<core.sessions.root>/<id>/` | `sessions/<id>/…` |
+| App-scope plugin storage | `<core.storage.root>/plugins/<pluginID>/store.db` | `plugins/<pluginID>/store.db` |
+| Agent-scope plugin storage | `<core.storage.root>/agents/<agent_id>/plugins/<pluginID>/store.db` | `agents/<agent_id>/plugins/<pluginID>/store.db` |
+| Eval run output | `<eval.reports_dir>/<run-id>/` | `eval/<run-id>/…` |
+
+Keys mirror the on-disk layout beneath the data root, one key segment per
+directory, so an operator browsing the bucket sees the directory names they
+already know. `core.storage.root` (default `~/.nexus`) remains the single lever
+controlling where these live locally, exactly as it does with no backend
+configured.
+
+- **Cross-session lifetimes are preserved.** An app-scope store keys to
+  `plugins/<pluginID>/store.db` with no session ID anywhere in it, which is
+  what keeps it machine-wide. `nexus.gate.token_budget` stores a *tenant* token
+  ceiling there precisely so it spans sessions; keying it under the session
+  that happened to flush it would turn that into a per-session ceiling with
+  nothing to notice — the gate would keep running and stop being a budget.
+- **Agent scope follows the same collapse the storage manager applies.** With
+  `core.agent_id` empty, agent-scope handles resolve to app scope, and so do
+  their keys. `nexus.vectorstore.sqlite_fts` (`scope: agent`) relies on this.
+- **Shared stores hydrate per plugin directory, and never over a local one.** A
+  plugin directory that already exists locally is left alone: it may be open in
+  this process or another one on the same machine, and replacing a `store.db`
+  under a live SQLite handle corrupts it rather than merely staling it. A
+  plugin directory with no local copy is hydrated at boot, before any plugin
+  can open a handle.
+- **They are snapshotted at the same turn boundary**, with the same
+  checkpoint-then-`VACUUM INTO` discipline, and are logged separately as
+  `shared_objects` / `shared_bytes` / `shared_db_duration` so a large
+  agent-scope index is distinguishable from a large session.
+- **One writing host at a time.** App- and agent-scope stores are shared across
+  sessions by definition. Two processes on *one* host share the local file and
+  SQLite serialises them, so the later upload is a superset of the earlier —
+  safe. Two processes on *different* hosts each have their own copy, and the
+  later flush overwrites the other's at whole-database granularity. See
+  [Per-Plugin Storage → Concurrency](../architecture/storage.md#concurrency).
+- **Eval output is published once, at the end of the run.** `nexus eval run`
+  uploads its run directory under `eval/<run-id>/` when the config file it was
+  given (`--config`) names a backend. The per-case session trees under
+  `_sessions/` are excluded — they are session trees, and sessions are the
+  seam's other root. A publish failure warns and does not change the eval exit
+  code, which is about the cases, not about the bucket.
+- **Journal output is already covered** by the session snapshot: the journal
+  lives at `<session>/journal/` and is captured at a consistent instant on every
+  turn boundary.
 
 ### `core.models`
 

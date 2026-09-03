@@ -348,14 +348,20 @@ func TestSnapshotDoesNotListWhenNothingIsImmutable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
 
+	// Boot lists once per shared root to discover which app- and agent-scope
+	// plugin stores the bucket holds (see shared_objectstore.go). That is a
+	// boot cost, not a per-turn one, so the baseline is taken after Boot and
+	// this stays a claim about the *snapshot*.
+	baseline := backend.Counts().Lists
+
 	if err := eng.Session.WriteFile("files/report.md", []byte("hello")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	endTurn(t, eng, "turn-1")
 	endTurn(t, eng, "turn-2")
 
-	if got := backend.Counts().Lists; got != 0 {
-		t.Errorf("backend listed %d times with no immutable files in the tree, want 0", got)
+	if got := backend.Counts().Lists - baseline; got != 0 {
+		t.Errorf("backend listed %d times during snapshots with no immutable files in the tree, want 0", got)
 	}
 }
 

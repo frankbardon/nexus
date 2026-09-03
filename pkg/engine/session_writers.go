@@ -33,6 +33,26 @@ package engine
 // the enforcement test that stops a *new* raw writer from appearing without a
 // decision, and a table that only lives in prose is a table that goes stale.
 // docs/src/architecture/sessions.md carries the same content for humans.
+//
+// Four rows below are turn-boundary-only *because they write outside every
+// session tree* — llm/batch (~/.nexus/batches), memory/longterm (~/.nexus/memory),
+// control/hitl (~/.nexus/hitl) and rag/ingest (~/.nexus/vectors/_cache), with
+// observe/sampler (~/.nexus/eval/samples) a fifth of the same shape. Extending
+// the seam past the session tree (shared_objectstore.go) revisited all five and
+// deliberately took none of them.
+//
+// What that work took is the *scoped* plugin stores — the SQLite databases
+// storage.Manager hands out for ScopeApp and ScopeAgent. Those have an
+// engine-owned, engine-derived path and a documented lifetime, so the seam can
+// map one onto an object key with filepath.Rel and be right by construction.
+// The five above are plugin-owned directories at arbitrary config-supplied
+// paths; covering them would mean the seam syncing whatever an operator typed
+// into a plugin config key, with no lifetime attached to it and no way to know
+// whether two engines pointing at one path are collaborators or strangers.
+// That is a different feature, and each row's own argument still stands on its
+// own merits: two of the five are regenerable caches, one is an IPC rendezvous
+// whose restoration would re-ask an answered question, and one is a second copy
+// of journal bytes that are already snapshotted.
 
 // SessionWriterDisposition names what the object-store seam does with the
 // bytes one writer puts under a session tree.
@@ -111,8 +131,10 @@ func SessionTreeWriters() []SessionTreeWriter {
 			Why: "Defaults to ~/.nexus/memory (or ~/.nexus/agents/<id>/memory) and is " +
 				"cross-session by definition — the entire point of the plugin is that " +
 				"notes outlive the session that wrote them, so its files are deliberately " +
-				"not under one. Durable placement for agent- and app-scope roots is a " +
-				"separate problem from session sync and is tracked as its own work.",
+				"not under one. Durable placement for agent- and app-scope roots was the " +
+				"separate problem this deferred to; that work covers the engine-owned " +
+				"scoped SQLite stores and deliberately not plugin-owned directories at " +
+				"config-supplied paths. See the header comment.",
 		},
 		{
 			Source:      "plugins/rag/ingest/cache.go",

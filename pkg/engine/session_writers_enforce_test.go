@@ -26,6 +26,25 @@ package engine
 // invariant is about — which makes the table describe the mechanism rather
 // than its users. See BLIND SPOTS below for what that costs.
 //
+// That scope question was left open when this file was written, on the grounds
+// that the next story to add engine-level writers should decide it. It did, and
+// the answer is: the scope stays plugins/, and the seam's own implementation
+// files belong to *neither* set — not SessionTreeWriters(), and not a separate
+// "not a session writer" allowlist beside it.
+//
+// The reason is that the table answers one question — "these bytes are session
+// state; what does the seam do with them?" — and the seam's own files do not
+// produce session state. session_objectstore.go and shared_objectstore.go write
+// staging directories and a commit marker: scaffolding for moving other
+// writers' bytes, deleted or uploaded within the call that created it. A row
+// for them would read "the object-store seam: uploaded by the object-store
+// seam", and a second allowlist of files exempt from the first is a list whose
+// only content is "we thought about this", which is what a comment is for.
+// The existing pkg/engine rows are there because those subsystems write durable
+// session state (journal segments, blobs, the tool cache, store.db), not
+// because they live under pkg/engine — which is the line to apply to any future
+// engine-level writer.
+//
 // BLIND SPOTS, recorded because a guard whose limits are undocumented gets
 // trusted past them:
 //   - Only direct os.WriteFile / os.Create / os.CreateTemp / os.OpenFile calls

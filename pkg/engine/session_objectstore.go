@@ -125,8 +125,11 @@ func (s *sessionObjectStore) close(logger *slog.Logger) {
 // prefix for trees that are not sessions: agent- and app-scope per-plugin
 // storage are the obvious future candidates. Flattening to "<id>/" would have
 // been shorter and would have made that impossible to add without a migration.
+// The reservation is spent by shared_objectstore.go, which puts app scope at
+// "plugins/...", agent scope at "agents/<id>/plugins/..." and eval output at
+// "eval/<run-id>/..." — beside this prefix, never under it.
 func sessionObjectKeyPrefix(sessionID string) string {
-	return "sessions/" + sessionID
+	return sessionsKeyRoot + "/" + sessionID
 }
 
 // objectStoreExcluded reports whether a session-relative path must never cross
@@ -717,7 +720,16 @@ type snapshotStats struct {
 	// turn regardless of how little changed.
 	DBBytes    int64
 	DBDuration time.Duration
-	Duration   time.Duration
+	// SharedObjects, SharedBytes and SharedDBDuration are the app- and
+	// agent-scope plugin stores, which live outside the session tree entirely.
+	// Reported separately rather than added to Objects/Bytes because those two
+	// describe the *session* — they are what the commit marker records and what
+	// a restore of this session reads back — and a machine-wide store is not
+	// part of it. See snapshotSharedStores.
+	SharedObjects    int
+	SharedBytes      int64
+	SharedDBDuration time.Duration
+	Duration         time.Duration
 }
 
 // installObjectStoreSnapshots subscribes the turn-boundary and on-request
@@ -859,6 +871,9 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 			"bytes_skipped", stats.BytesSkipped,
 			"db_bytes", stats.DBBytes,
 			"db_duration", stats.DBDuration,
+			"shared_objects", stats.SharedObjects,
+			"shared_bytes", stats.SharedBytes,
+			"shared_db_duration", stats.SharedDBDuration,
 			"duration", stats.Duration,
 		)
 	}
@@ -1095,6 +1110,18 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 
 	if err := e.publishSnapshotMarker(ctx, store, stage, req, stats); err != nil {
 		return stats, err
+	}
+
+	// The roots outside the session tree, last: a shared-root outage must not
+	// hold back a session that is otherwise fully durable, and the marker above
+	// is only about the session. See snapshotSharedStores for why its failure is
+	// still this snapshot's failure.
+	shared, sharedErr := e.snapshotSharedStores(ctx, store, stage)
+	stats.SharedObjects = shared.Objects
+	stats.SharedBytes = shared.Bytes
+	stats.SharedDBDuration = shared.DBDuration
+	if sharedErr != nil {
+		return stats, sharedErr
 	}
 	return stats, nil
 }

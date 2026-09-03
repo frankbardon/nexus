@@ -325,13 +325,14 @@ default path to it.
 
 ### Lifecycle points
 
-The engine touches the seam in exactly four places, all in `pkg/engine`:
+The engine touches the seam in exactly five places, all in `pkg/engine`:
 
 | When | What happens |
 |------|--------------|
 | Top of `Boot` | The configured backend is resolved once. A failure here fails the boot. |
+| Top of `Boot`, before any plugin can open storage | App- and agent-scope plugin stores are hydrated. See [The other roots](#the-other-roots). |
 | Before a resumed workspace is opened | The whole tree is hydrated from the store under the object key prefix `sessions/<session id>`. |
-| Every turn boundary | The whole tree is snapshotted and made durable, then a commit marker is published. |
+| Every turn boundary | The whole tree is snapshotted and made durable, a commit marker is published, then the shared plugin stores are snapshotted. |
 | End of `Stop` | A final snapshot runs, then `Flush`, then the backend is released. |
 
 Hydration is **eager and whole-tree**, and completes before the first turn
@@ -534,6 +535,36 @@ inferred.
 The residual `store.db` cost is `O(database size)` per turn regardless of how
 little changed, and delta upload for mutable files and a size-dependent snapshot
 cadence are still deliberately not designed.
+
+### The other roots
+
+The session tree is one of four roots the seam covers, and the only one with a
+commit marker, a turn-by-turn history and a lock. The other three are:
+
+| Root | Object key | Lifecycle |
+|------|------------|-----------|
+| App-scope plugin storage | `plugins/<pluginID>/store.db` | Hydrated at `Boot` before any plugin can open a handle; snapshotted at every turn boundary and at shutdown. |
+| Agent-scope plugin storage | `agents/<agent_id>/plugins/<pluginID>/store.db` | The same, when `core.agent_id` is set. With it empty the handle collapses to app scope and so does the key. |
+| Eval run output | `eval/<run-id>/…` | Published once by `nexus eval run` when its `--config` names a backend. Written once, never mutated, so there is nothing to hydrate. |
+
+Keys mirror the on-disk layout beneath the data root and sit **beside**
+`sessions/`, never under it. That is the reservation the `sessions/` segment was
+chosen for. Nesting shared state under the session that flushed it would give
+every session its own copy of a machine-wide store, which is how
+`nexus.gate.token_budget`'s tenant token ceiling would quietly turn into a
+per-session ceiling with nothing erroring.
+
+One interface serves all four: no `Backend` method mentions a root, and the
+per-root policy — when to push, what wins on a collision, whether a local copy
+may be overwritten — lives entirely on the engine side in
+`pkg/engine/shared_objectstore.go`.
+
+The journal needs no separate row: it lives at `<session>/journal/` and is
+captured at a consistent instant inside the session snapshot.
+
+Details, including the one-writing-host-at-a-time constraint a shared root
+brings, are in [Per-Plugin Storage → Object storage for app and agent
+scope](storage.md#object-storage-for-app-and-agent-scope).
 
 ### What survives a kill
 

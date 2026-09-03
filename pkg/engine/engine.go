@@ -244,6 +244,16 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}()
 
+	// Pull down the roots that live outside the session tree — app- and
+	// agent-scope plugin stores — before anything can open one. This has to
+	// happen before plugin Init, because storage.Manager.Open creates the
+	// plugin's directory as a side effect of handing out a handle and a
+	// present directory is what hydration treats as "the local copy wins".
+	// A no-op when no backend is configured.
+	if err := e.hydrateSharedRoots(ctx); err != nil {
+		return err
+	}
+
 	// Two-phase session startup: create the workspace directory first so
 	// the journal writer has a place to land its files, subscribe the
 	// writer, then publish the session-start metadata + event so they are
