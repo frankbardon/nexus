@@ -37,6 +37,17 @@ import (
 // already hold at the right size (listImmutableRemote). Correctness lives
 // there; this is an optimisation in front of it.
 //
+// E3-S4 changed one thing about that: a failed Put is now handed to the
+// bounded retry queue (session_objectstore_policy.go) instead of being dropped
+// on the floor, and it counts towards the degraded state that
+// session.storage.degraded publishes. The snapshot is still the authority —
+// which is exactly why a write-through failure does NOT close the strict turn
+// gate; failing a turn because an optimisation stumbled on an object the very
+// next snapshot repairs would make strict fire on transients it is not there
+// to catch. What retrying buys is an idle session: with no further turn
+// boundary coming, the queue is the only thing that would ever get those bytes
+// to the store.
+//
 // # Why this is safe to do without a barrier
 //
 // Blobs are the one subtree where "push it the instant it lands" needs no
@@ -146,8 +157,11 @@ func (e *Engine) installBlobWriteThrough() {
 	// worker to exit, but that wait is bounded — a drain that times out would
 	// otherwise leave the worker reading a field the shutdown goroutine is
 	// writing, which is a data race whose only symptom is a rare crash under
-	// -race. Neither value changes for the life of a run.
-	go e.runBlobWriteThrough(w, e.objectStore, e.Session)
+	// -race. Neither value changes for the life of a run. The sink closure
+	// below captures it for the same reason: it runs on a tool goroutine that
+	// shutdown cannot be synchronised with.
+	store := e.objectStore
+	go e.runBlobWriteThrough(w, store, e.Session)
 
 	e.Session.setBlobPush(func(binPath, metaPath string) {
 		select {
@@ -156,8 +170,15 @@ func (e *Engine) installBlobWriteThrough() {
 			// Never block the tool goroutine that produced the blob. A dropped
 			// push is a blob that uploads at the turn boundary instead of now,
 			// which is the behaviour this whole file is an improvement on, not
-			// a loss of data.
+			// a loss of data. It is still worth escalating to the pending-
+			// snapshot backstop: on an idle session no further turn boundary
+			// may ever arrive, and the backstop is what makes "eventually" true
+			// rather than "at the next turn, if there is one".
 			w.dropped.Add(1)
+			if r := store.retry; r != nil {
+				r.snapshotPending.Store(true)
+				r.signal()
+			}
 		}
 	})
 }
@@ -203,9 +224,10 @@ func (e *Engine) runBlobWriteThrough(w *blobWriteThrough, store *sessionObjectSt
 // pushBlobNow uploads one blob's two files. Reports whether anything was
 // stored, so the caller knows whether a flush is owed.
 //
-// Errors are logged and swallowed: this is the best-effort half of the seam,
-// and the failure policy that decides whether an unpersisted turn is fatal
-// belongs to the snapshot, which will retry these objects at the boundary.
+// Errors are handed to the retry queue rather than raised: this is the
+// best-effort half of the seam, and the failure policy that decides whether an
+// unpersisted turn is fatal belongs to the snapshot, which will retry these
+// objects at the boundary regardless.
 func (e *Engine) pushBlobNow(w *blobWriteThrough, store *sessionObjectStore, session *SessionWorkspace, item blobPushItem) bool {
 	if store == nil || session == nil {
 		return false
@@ -237,12 +259,22 @@ func (e *Engine) pushBlobNow(w *blobWriteThrough, store *sessionObjectStore, ses
 			// A blob swept by a concurrent LRU eviction between the hook and
 			// this Put lands here as a missing local file. It is not worth
 			// distinguishing: either way the snapshot is the authority, and
-			// either way the right response is a warning rather than an error
-			// that stops a turn.
+			// either way the right response is a deferred retry rather than an
+			// error that stops a turn. retryOnePush drops an item whose local
+			// file has since vanished, which covers the eviction case exactly.
 			w.failed.Add(1)
-			e.Logger.Warn("object store: blob write-through failed, the turn-boundary snapshot will retry",
+			e.noteObjectStorePushFailure(store, key, path, err)
+			e.Logger.Warn("object store: blob write-through failed, queued for retry",
 				"backend", store.cfg.BackendName, "key", key, "error", err)
-			return stored
+			// Carry on to the other half of the pair rather than abandoning it.
+			// Before the retry queue existed, bailing here was right: the
+			// second Put was almost certainly going to fail too and the
+			// snapshot was going to re-upload both anyway. Now the queue is
+			// what gets these bytes to the store on a session that sees no
+			// further turn boundary, and a .bin queued without its .meta is a
+			// blob that restores with no media type. One extra failed Put
+			// against an already-failing backend is the right price.
+			continue
 		}
 		w.pushed.Add(1)
 		stored = true
@@ -258,7 +290,12 @@ func (e *Engine) flushBlobPushes(store *sessionObjectStore) {
 	ctx, cancel := context.WithTimeout(context.Background(), objectStoreFlushTimeout)
 	defer cancel()
 	if err := store.backend.Flush(ctx); err != nil {
-		e.Logger.Warn("object store: blob write-through flush failed, the turn-boundary snapshot will retry",
+		// Flush is a whole-backend barrier, so its failure says nothing about
+		// which individual object survived it. Only a whole-tree walk can
+		// answer that, so this escalates straight to the pending-snapshot
+		// backstop rather than re-queueing the pushes it covered.
+		e.noteObjectStoreFailure(store, err, true)
+		e.Logger.Warn("object store: blob write-through flush failed, queued for retry",
 			"backend", store.cfg.BackendName, "error", err)
 	}
 }

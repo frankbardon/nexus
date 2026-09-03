@@ -8,6 +8,9 @@ const (
 	SessionSnapshotRequestVersion = 1
 	SessionSnapshotResultVersion  = 1
 	SessionOwnerConflictVersion   = 1
+
+	SessionStorageDegradedVersion  = 1
+	SessionStorageRecoveredVersion = 1
 )
 
 // SessionFile describes a file event within a session workspace.
@@ -44,7 +47,8 @@ type SessionSnapshotResult struct {
 	SchemaVersion int `json:"_schema_version"`
 
 	SessionID string `json:"session_id"`
-	// Trigger is what caused the snapshot: "turn", "shutdown" or "request".
+	// Trigger is what caused the snapshot: "turn", "shutdown", "request" or
+	// "retry" (the recovery worker healing a degraded store).
 	Trigger string `json:"trigger"`
 	// Sequence is the per-run snapshot counter, starting at 1.
 	Sequence uint64 `json:"sequence"`
@@ -118,4 +122,92 @@ type SessionOwnerConflict struct {
 	LocalHost       string `json:"local_host"`
 	LocalPID        int    `json:"local_pid"`
 	LocalInstanceID string `json:"local_instance_id"`
+}
+
+// SessionStorageDegraded reports that the configured object store stopped
+// accepting this session's state, and that the engine is running against the
+// local working copy while it retries.
+//
+// Emitted at most once per outage — an "episode" runs from the first failure to
+// the first success after it, so a subscriber counts outages rather than
+// failed requests — and only when `core.object_store.backend` names a backend.
+// `session.storage.recovered` closes the episode.
+//
+// # What it means under each failure policy
+//
+// Under `degrade` the session keeps taking turns. The honest caveat is that the
+// durability guarantee is *not* being met for as long as this state lasts, even
+// though nothing is failing: turns the user watched happen exist only on local
+// disk. That is the trade the operator chose.
+//
+// Under `strict` `TurnsBlocked` is true and every subsequent `io.input` is
+// vetoed until the state is durably stored. Note carefully what that does and
+// does not mean: the turn that hit the outage ALREADY RAN — its output was
+// streamed, its tools executed and its side effects are in the world. The
+// engine cannot un-run it. What `strict` guarantees is that no *further* turn
+// runs against state whose predecessor is not stored, and that the divergence
+// is never silent.
+//
+// Recovery is automatic under both policies. Nothing here needs an operator.
+type SessionStorageDegraded struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	SessionID string `json:"session_id"`
+	// Backend is the registered backend name from core.object_store.backend.
+	Backend string `json:"backend"`
+	// FailurePolicy is the resolved core.object_store.failure_policy:
+	// "degrade" or "strict".
+	FailurePolicy string `json:"failure_policy"`
+
+	// Since is when the episode opened — the first failure, not this event.
+	Since time.Time `json:"since"`
+	// ConsecutiveFailures is how many persistence failures the episode has
+	// seen so far.
+	ConsecutiveFailures uint64 `json:"consecutive_failures"`
+
+	// QueuedPushes is the depth of the bounded retry queue at emission.
+	QueuedPushes int `json:"queued_pushes"`
+	// DroppedPushes counts individual pushes discarded because the queue was
+	// full. A drop is not lost work: it escalates to a whole-tree snapshot,
+	// which re-uploads everything the store does not already hold.
+	DroppedPushes uint64 `json:"dropped_pushes"`
+	// SnapshotPending reports that a whole-tree snapshot is owed — the
+	// backstop that covers anything the queue could not.
+	SnapshotPending bool `json:"snapshot_pending"`
+
+	// TurnsBlocked reports that further input is being refused. Only ever true
+	// under failure_policy: strict.
+	TurnsBlocked bool `json:"turns_blocked"`
+
+	// Error is the most recent failure's message.
+	Error string `json:"error,omitempty"`
+}
+
+// SessionStorageRecovered closes the episode a SessionStorageDegraded opened:
+// the backlog drained, the session is durably stored again, and under `strict`
+// input is accepted again.
+//
+// Emitted only when the matching degraded event went out, so the two always
+// pair. Recovery needs no operator action — the retry worker gets there on its
+// own, and an outage that heals before the next turn boundary is closed by that
+// turn's ordinary snapshot with no retry at all.
+type SessionStorageRecovered struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	SessionID     string `json:"session_id"`
+	Backend       string `json:"backend"`
+	FailurePolicy string `json:"failure_policy"`
+
+	// DegradedForSeconds is the wall time from the first failure to recovery.
+	DegradedForSeconds float64 `json:"degraded_for_seconds"`
+	// Failures is how many persistence failures the episode saw in total.
+	Failures uint64 `json:"failures"`
+	// RetryAttempts is how many backoff attempts the recovery worker made.
+	// Zero when an ordinary turn-boundary snapshot healed it first.
+	RetryAttempts uint64 `json:"retry_attempts"`
+	// DrainedPushes is how many deferred pushes the retries got through.
+	DrainedPushes uint64 `json:"drained_pushes"`
+	// DroppedPushes is how many were discarded on queue overflow and covered
+	// by a whole-tree snapshot instead.
+	DroppedPushes uint64 `json:"dropped_pushes"`
 }

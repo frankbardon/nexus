@@ -672,6 +672,8 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 | `session.snapshot.request` | `SessionSnapshotRequest` | Ask the engine to snapshot the session tree to the object store |
 | `session.snapshot.result` | `SessionSnapshotResult` | Outcome of one whole-tree snapshot |
 | `session.owner.conflict` | `SessionOwnerConflict` | A second host appears to hold this session — detection only, nothing is refused |
+| `session.storage.degraded` | `SessionStorageDegraded` | The object store stopped accepting this session's state; the engine is running against the local working copy and retrying |
+| `session.storage.recovered` | `SessionStorageRecovered` | The backlog drained and the session is durably stored again |
 
 **session.file.created / session.file.updated payload**
 
@@ -801,6 +803,48 @@ normally. No lock is taken, no fencing token is issued, nothing is refused and
 nothing waits. A subscriber that wants to act — page an operator, stop the run —
 has to do so itself. See
 [Sessions → Two hosts, one session](../architecture/sessions.md#two-hosts-one-session).
+
+**SessionStorageDegraded**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session whose state could not be stored |
+| `Backend` | string | Registered backend name from `core.object_store.backend` |
+| `FailurePolicy` | string | Resolved `core.object_store.failure_policy`: `degrade` or `strict` |
+| `Since` | time.Time | When the outage began — the first failure, not this event |
+| `ConsecutiveFailures` | uint64 | Persistence failures so far in this outage |
+| `QueuedPushes` | int | Depth of the bounded retry queue (capacity 256) |
+| `DroppedPushes` | uint64 | Pushes discarded on queue overflow — escalated to a whole-tree snapshot, not lost |
+| `SnapshotPending` | bool | A whole-tree snapshot is owed: the backstop that covers anything the queue could not |
+| `TurnsBlocked` | bool | Further `io.input` is being refused. Only ever true under `failure_policy: strict` |
+| `Error` | string | The most recent failure's message |
+
+**SessionStorageRecovered**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session that is durably stored again |
+| `Backend` | string | Registered backend name |
+| `FailurePolicy` | string | Resolved failure policy |
+| `DegradedForSeconds` | float64 | Wall time from the first failure to recovery |
+| `Failures` | uint64 | Persistence failures the outage saw in total |
+| `RetryAttempts` | uint64 | Backoff attempts the recovery worker made. Zero when an ordinary turn-boundary snapshot healed it first |
+| `DrainedPushes` | uint64 | Deferred pushes the retries got through |
+| `DroppedPushes` | uint64 | Pushes discarded on overflow and covered by a snapshot instead |
+
+The two pair: exactly one `session.storage.degraded` per outage and one
+`session.storage.recovered` when it ends, so a subscriber counts outages rather
+than failed requests. Neither is emitted when `core.object_store.backend` is
+empty.
+
+**Under `degrade`** the session keeps taking turns while degraded. The honest
+caveat is that the durability guarantee is not being met for as long as the
+outage lasts, even though nothing is failing.
+
+**Under `strict`** `TurnsBlocked` is true and every subsequent `io.input` is
+vetoed until the state is stored. The turn that hit the outage **already ran** —
+its output was streamed, its tools executed — and the engine cannot un-run it.
+What `strict` guarantees is that no *further* turn runs against unstored state.
+Recovery is automatic under both policies; see [Configuration → Failure
+policy](../configuration/reference.md#failure-policy).
 
 The engine snapshots at every `agent.turn.end` on its own, so nothing needs to
 emit `session.snapshot.request` in a normal run — it is the escape hatch for

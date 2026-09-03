@@ -748,6 +748,14 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 	e.runUnsubs = nil
 
+	// Stop the object-store recovery worker before anything else is torn down.
+	// It snapshots through the journal writer this function closes further
+	// down, and it emits on a bus whose run subscriptions have just gone: both
+	// are reasons to have it gone first rather than racing the teardown. Its
+	// stop signal cancels the retry in flight, so this is prompt. A no-op when
+	// no backend is configured.
+	e.stopObjectStoreRetry()
+
 	e.EndSession()
 
 	if err := e.Lifecycle.Shutdown(ctx); err != nil {

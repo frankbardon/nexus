@@ -127,7 +127,7 @@ plugins:
 | `object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. |
 | `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. |
 | `object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
-| `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted: `degrade` keeps the session running against the local copy and retries; `strict` fails the turn. Any other value **fails the boot**. |
+| `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted. `degrade` (the default) keeps the session running against the local working copy and retries in the background; `strict` additionally refuses further input until the state is stored. Both retry with backoff and both recover on their own. Any other value **fails the boot**. See [Failure policy](#failure-policy) below. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
 
 ### `core.object_store`
@@ -205,9 +205,9 @@ Behaviour worth knowing:
   The cost is `O(tree size)` per turn and is logged on every snapshot —
   `objects`, `bytes`, `db_bytes` and `duration` — and published as
   `session.snapshot.result`.
-- **`failure_policy` governs a failed snapshot.** `degrade` logs a warning and
-  keeps the run going against the local copy; `strict` additionally raises
-  `core.error`. Either way `session.snapshot.result` carries `ok: false`.
+- **`failure_policy` governs a failed snapshot** — see
+  [Failure policy](#failure-policy) below for exactly what each value
+  guarantees. Either way `session.snapshot.result` carries `ok: false`.
 
 - **An unknown session ID is not an error.** Recalling an ID the store has
   never seen produces a valid, empty session, identical to one created locally.
@@ -245,6 +245,86 @@ Behaviour worth knowing:
   local tree is a warm cache and the copy `failure_policy: degrade` falls back
   to. `core.sessions.retention` remains the operator-owned answer to when local
   session data goes away.
+
+#### Failure policy
+
+`core.object_store.failure_policy` is the one durability trade-off the operator
+owns rather than the implementation. Both values retry, both surface the outage
+on the bus, and both recover with **no operator action** — what differs is
+whether the session keeps taking turns while the store is unreachable.
+
+| | `degrade` (default) | `strict` |
+|---|---|---|
+| Turn that hit the outage | completes | completes — **it is not un-run** |
+| Further turns | accepted | refused until the state is stored |
+| Bus | `session.storage.degraded`, then `session.storage.recovered` | same, with `turns_blocked: true` |
+| `core.error` | not raised | raised on every failed snapshot |
+| Recovery | automatic | automatic |
+| Boot-time hydration failure | fails the boot | fails the boot |
+
+**What `strict` guarantees, and what it does not.** When a turn's state cannot
+be persisted, the turn **has already happened**: its output was streamed to the
+user, its tools ran, and its side effects are in the world. Nothing in Nexus can
+un-run it, and no configuration makes it not have happened. What `strict` does
+is refuse to start *another* one:
+
+- the failure is raised immediately — `core.error`, an error-level log line, and
+  `session.snapshot.result` with `ok: false`;
+- `session.storage.degraded` goes out with `turns_blocked: true`;
+- every subsequent `io.input` is **vetoed** until a snapshot succeeds, with the
+  reason carrying the last error. The veto runs at priority 200, behind every
+  other `before:io.input` subscriber, so slash commands and cancellation still
+  work while the gate is closed;
+- the first successful snapshot clears the gate, emits
+  `session.storage.recovered` and the session carries on.
+
+So `strict` guarantees that **no turn ever runs against state whose predecessor
+was not durably stored, and the divergence is never silent.** It does not
+guarantee that the turn which hit the outage was prevented. A genuine
+pre-commit gate would need a vetoable turn-boundary event that does not exist,
+and would not help even if it did — by the time an agent loop can report a turn,
+the work is done.
+
+**What `degrade` costs.** Turns keep succeeding against the local working copy,
+and that is the point — an object-store outage should not take down an
+interactive agent that still has a perfectly good local tree. The honest caveat:
+**during a long outage the durability guarantee is not being met even though
+nothing is failing.** Work the user watched happen exists only on local disk, so
+a host that dies while degraded loses it. That is the trade being chosen.
+
+**Retry and the queue bound.** A single background worker per run retries with
+exponential backoff — 1 s, doubling, capped at 60 s — until the state lands. It
+handles two kinds of work:
+
+- a **bounded queue of deferred pushes**, capacity **256** objects, fed by blob
+  write-through failures;
+- a **pending whole-tree snapshot** flag, the backstop, set by a failed
+  snapshot, a failed flush, or a queue overflow.
+
+**Overflow does not lose work.** A push that does not fit in the queue is
+discarded and the whole-tree snapshot is marked pending in its place. That
+snapshot re-uploads every object the store does not already hold at the right
+size, so the escalation is strictly *stronger* than the item it replaced —
+coarser, and paid in bandwidth rather than durability. The same is true of the
+blob write-through queue (also 256), whose own overflow escalates the same way.
+Both bounds, the backoff schedule and the per-request timeouts are compiled-in
+constants rather than config keys: every knob has to be documented, validated
+and supported forever, and an operator who wants to tune them is really asking
+for a different `failure_policy`.
+
+**Recovery needs nobody.** An outage that heals mid-session drains on its own —
+either the next turn-boundary snapshot closes the episode, or, on an idle
+session where no further turn is coming, the retry worker does. The two events
+always pair: exactly one `session.storage.degraded` per outage and one
+`session.storage.recovered` when it ends, so a subscriber counts outages rather
+than failed requests.
+
+**One thing is deliberately not policy-governed.** A blob write-through failure
+never closes the `strict` gate. Write-through is an optimisation in front of the
+turn-boundary snapshot, which re-uploads anything the store is missing; failing
+a turn because that optimisation stumbled on an object the very next snapshot
+repairs would make `strict` fire on transients it is not there to catch. Such a
+failure still queues for retry and still counts towards the degraded state.
 
 #### Beyond the session tree
 

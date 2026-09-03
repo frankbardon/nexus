@@ -37,11 +37,43 @@ type Memory struct {
 	objects map[string]memObject
 	counts  Counts
 
-	hydrateErr error
-	putErr     error
-	deleteErr  error
-	listErr    error
-	flushErr   error
+	hydrateErr injectedErr
+	putErr     injectedErr
+	deleteErr  injectedErr
+	listErr    injectedErr
+	flushErr   injectedErr
+}
+
+// injectedErr is a fault a test asked for, with an optional budget.
+//
+// The budget exists because "the bucket went away and then came back" is a
+// distinct behaviour from "the bucket is down", and the engine's recovery path
+// is only testable against the first. Expressing it here rather than by racing
+// a goroutine to call SetFlushError(nil) at the right moment is what keeps the
+// recovery tests deterministic: the heal happens on a call boundary the fake
+// controls, not on a timing window the test hopes for.
+type injectedErr struct {
+	err error
+	// left is the number of remaining calls to fail. Negative means "for
+	// ever", which is what the unbounded setters install.
+	left int
+}
+
+// take reports the error this call should fail with, spending one unit of the
+// budget. Callers must hold m.mu.
+func (i *injectedErr) take() error {
+	if i.err == nil {
+		return nil
+	}
+	if i.left < 0 {
+		return i.err
+	}
+	err := i.err
+	i.left--
+	if i.left <= 0 {
+		i.err = nil
+	}
+	return err
 }
 
 type memObject struct {
@@ -82,7 +114,7 @@ func (m *Memory) Hydrate(ctx context.Context, keyPrefix string, destDir string) 
 
 	m.mu.Lock()
 	m.counts.Hydrates++
-	injected := m.hydrateErr
+	injected := m.hydrateErr.take()
 	// Snapshot under the lock and write outside it: holding a write lock
 	// across filesystem I/O would serialise every other caller behind the
 	// slowest thing this type does, which is exactly the shape of contention
@@ -131,7 +163,7 @@ func (m *Memory) Put(ctx context.Context, key string, localPath string) error {
 	}
 	m.mu.Lock()
 	m.counts.Puts++
-	injected := m.putErr
+	injected := m.putErr.take()
 	m.mu.Unlock()
 	if injected != nil {
 		return injected
@@ -162,8 +194,8 @@ func (m *Memory) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counts.Deletes++
-	if m.deleteErr != nil {
-		return m.deleteErr
+	if err := m.deleteErr.take(); err != nil {
+		return err
 	}
 	delete(m.objects, key)
 	return nil
@@ -183,8 +215,8 @@ func (m *Memory) List(_ context.Context, keyPrefix string) ([]objectstore.Object
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counts.Lists++
-	if m.listErr != nil {
-		return nil, m.listErr
+	if err := m.listErr.take(); err != nil {
+		return nil, err
 	}
 
 	var out []objectstore.Object
@@ -209,7 +241,7 @@ func (m *Memory) Flush(context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counts.Flushes++
-	return m.flushErr
+	return m.flushErr.take()
 }
 
 // Close satisfies io.Closer, which the engine type-asserts rather than
@@ -302,28 +334,44 @@ func (m *Memory) Counts() Counts {
 
 // SetHydrateError makes every subsequent Hydrate fail with err. Pass nil to
 // stop failing.
-func (m *Memory) SetHydrateError(err error) { m.setErr(&m.hydrateErr, err) }
+func (m *Memory) SetHydrateError(err error) { m.setErr(&m.hydrateErr, err, -1) }
 
 // SetPutError makes every subsequent Put fail with err.
-func (m *Memory) SetPutError(err error) { m.setErr(&m.putErr, err) }
+func (m *Memory) SetPutError(err error) { m.setErr(&m.putErr, err, -1) }
 
 // SetDeleteError makes every subsequent Delete fail with err.
-func (m *Memory) SetDeleteError(err error) { m.setErr(&m.deleteErr, err) }
+func (m *Memory) SetDeleteError(err error) { m.setErr(&m.deleteErr, err, -1) }
 
 // SetListError makes every subsequent List fail with err. The engine's
 // immutable-skip path is the main consumer: a backend that cannot say what it
 // holds must make the engine upload everything, never assume presence.
-func (m *Memory) SetListError(err error) { m.setErr(&m.listErr, err) }
+func (m *Memory) SetListError(err error) { m.setErr(&m.listErr, err, -1) }
 
 // SetFlushError makes every subsequent Flush fail with err. The engine's
 // failure_policy branch is the main consumer: degrade must swallow this and
 // strict must surface it.
-func (m *Memory) SetFlushError(err error) { m.setErr(&m.flushErr, err) }
+func (m *Memory) SetFlushError(err error) { m.setErr(&m.flushErr, err, -1) }
 
-func (m *Memory) setErr(field *error, err error) {
+// SetPutErrorTimes fails the next n Puts with err and heals after that.
+//
+// A bounded outage, which is what the engine's retry-and-recover path can only
+// be tested against: an unbounded one proves the retry happens but never that
+// it stops. n <= 0 clears any injected Put error.
+func (m *Memory) SetPutErrorTimes(err error, n int) { m.setErr(&m.putErr, err, n) }
+
+// SetFlushErrorTimes fails the next n Flushes with err and heals after that.
+// The counterpart to SetPutErrorTimes for the durability barrier, which is
+// where a snapshot most often dies.
+func (m *Memory) SetFlushErrorTimes(err error, n int) { m.setErr(&m.flushErr, err, n) }
+
+func (m *Memory) setErr(field *injectedErr, err error, n int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	*field = err
+	if err == nil || (n >= 0 && n == 0) {
+		*field = injectedErr{}
+		return
+	}
+	*field = injectedErr{err: err, left: n}
 }
 
 // RegisterMemory registers backend under name for the duration of one test and

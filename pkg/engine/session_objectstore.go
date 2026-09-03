@@ -92,6 +92,14 @@ type sessionObjectStore struct {
 	// the commit marker and the result event so an operator can line a remote
 	// marker up against a log line.
 	snapshotSeq uint64
+
+	// health is the degraded-state tracker that gives failure_policy its
+	// meaning, and retry is the bounded queue and worker that heals it. Both
+	// exist for the life of the handle — the queue has to accept work from the
+	// blob write-through path, which Boot installs before the retry worker is
+	// allowed to start emitting. See session_objectstore_policy.go.
+	health objectStoreHealth
+	retry  *objectStoreRetry
 }
 
 // close releases backend-held resources.
@@ -295,7 +303,7 @@ func (e *Engine) openObjectStore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening object store: %w", err)
 	}
-	e.objectStore = &sessionObjectStore{backend: backend, cfg: cfg}
+	e.objectStore = &sessionObjectStore{backend: backend, cfg: cfg, retry: newObjectStoreRetry()}
 	e.Logger.Info("object store enabled",
 		"backend", cfg.BackendName,
 		"bucket", cfg.Bucket,
@@ -314,9 +322,10 @@ func (e *Engine) releaseObjectStore() {
 	if store == nil {
 		return
 	}
-	// Before the handle goes: a still-running write-through worker or owner
-	// heartbeat would otherwise be free to Put against a backend that has just
-	// been closed.
+	// Before the handle goes: a still-running write-through worker, retry
+	// worker or owner heartbeat would otherwise be free to Put against a
+	// backend that has just been closed.
+	e.stopObjectStoreRetry()
 	e.stopBlobWriteThrough()
 	e.releaseSessionOwnership(store)
 	e.objectStore = nil
@@ -453,6 +462,7 @@ func (e *Engine) finalizeObjectStore() error {
 	// Idempotent, and already done by Stop before the shutdown snapshot. Kept
 	// here so any other path into finalize cannot leave a worker uploading
 	// into a backend this function is about to close.
+	e.stopObjectStoreRetry()
 	e.stopBlobWriteThrough()
 
 	// Stop the heartbeat and remove the owner marker. As late as possible so
@@ -476,6 +486,10 @@ func (e *Engine) finalizeObjectStore() error {
 	if err := store.backend.Flush(ctx); err != nil {
 		err = fmt.Errorf("flushing object store on shutdown: %w", err)
 		if store.cfg.FailurePolicy == objectstore.FailurePolicyStrict {
+			// Returned to the caller, which is Stop: under strict a shutdown
+			// that could not persist the session is a failed shutdown. There
+			// is no next turn to gate here and no worker left to retry with —
+			// the run is over — so the error is the whole signal.
 			return err
 		}
 		e.Logger.Warn("object store: shutdown flush failed, the stored session may be stale",
@@ -641,6 +655,11 @@ const (
 	snapshotTriggerTurn     = "turn"
 	snapshotTriggerShutdown = "shutdown"
 	snapshotTriggerRequest  = "request"
+	// snapshotTriggerRetry marks a snapshot the recovery worker took to heal a
+	// degraded store, rather than one a turn boundary asked for. Distinct on
+	// the commit marker and on session.snapshot.result so "the store came back"
+	// is distinguishable from "another turn ended".
+	snapshotTriggerRetry = "retry"
 
 	// sessionSnapshotMarkerSuffix turns a session key prefix into the key of
 	// its commit marker.
@@ -686,6 +705,16 @@ type snapshotRequest struct {
 	turnID  string
 	reason  string
 	journal *journal.Writer
+
+	// parent, when non-nil, is a context whose cancellation aborts this
+	// snapshot. Only the retry worker sets it, and only so that a retry in
+	// flight when shutdown begins unwinds instead of holding Stop for the
+	// length of a whole-tree snapshot against a wedged backend. Every other
+	// caller leaves it nil and gets the fresh background context the comment
+	// in runSessionSnapshot explains: hosts routinely hand Stop an
+	// already-cancelled context, and the shutdown snapshot is precisely the
+	// work that must still happen after cancellation.
+	parent context.Context
 }
 
 // snapshotEntry pairs a session-relative path with the local file the bytes
@@ -814,6 +843,12 @@ func (e *Engine) installObjectStoreSnapshots() {
 			journal: e.Journal,
 		})
 	}, WithSource("nexus.engine.objectstore")))
+
+	// The recovery worker and, under strict, the turn gate. Installed here
+	// rather than beside the blob write-through because this is the first
+	// point in Boot at which a background goroutine may safely emit: the
+	// journal's wildcard is subscribed and plugins have had their Init.
+	e.installObjectStoreRetry()
 }
 
 // runSessionSnapshot performs one snapshot and reports the outcome on the bus,
@@ -831,8 +866,13 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 
 	// A fresh context with its own deadline: the shutdown caller routinely has
 	// an already-cancelled one, and the final snapshot is precisely the work
-	// that must still happen after cancellation.
-	ctx, cancel := context.WithTimeout(context.Background(), objectStoreSnapshotTimeout)
+	// that must still happen after cancellation. The retry worker is the sole
+	// exception and passes its own cancellable parent — see snapshotRequest.
+	parent := req.parent
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, objectStoreSnapshotTimeout)
 	defer cancel()
 
 	stats, err := e.snapshotSessionTree(ctx, store, req)
@@ -855,18 +895,25 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 
 	if err != nil {
 		result.ErrorMessage = err.Error()
+		// Both policies now schedule recovery: the snapshot is marked pending
+		// and the worker retries it with backoff until it lands, so an outage
+		// that heals between turns — or on a session that never sees another
+		// turn — drains without operator action. Under strict this also closes
+		// the turn gate, which is the part that stops the divergence growing.
+		e.noteObjectStoreFailure(store, err, true)
+
 		if store.cfg.FailurePolicy == objectstore.FailurePolicyStrict {
 			// Strict means an unpersisted turn is worse than a failed one.
-			// The engine cannot un-run a turn that already completed, so the
-			// strongest honest signal is a loud, non-fatal error carrying the
-			// backend name — which is what an operator needs to decide whether
-			// to stop the run.
+			// The engine cannot un-run a turn that already completed — see the
+			// block comment in session_objectstore_policy.go — so the strongest
+			// honest signal is a loud error now plus a refusal to start the
+			// next turn until a snapshot succeeds.
 			_ = e.Bus.Emit("core.error", events.ErrorInfo{
 				SchemaVersion: events.ErrorInfoVersion,
 				Source:        "nexus.engine.objectstore",
 				Err:           err,
 			})
-			e.Logger.Error("object store: session snapshot failed",
+			e.Logger.Error("object store: session snapshot failed; refusing further input until it succeeds",
 				"backend", store.cfg.BackendName, "trigger", req.trigger, "error", err)
 		} else {
 			e.Logger.Warn("object store: session snapshot failed, the stored session is stale",
@@ -894,6 +941,18 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 			"shared_db_duration", stats.SharedDBDuration,
 			"duration", stats.Duration,
 		)
+
+		// A completed snapshot is the definition of "the store is caught up on
+		// this session": it walked the whole tree, uploaded everything the
+		// store did not already hold, and flushed. So it clears the pending
+		// backstop, and — once the deferred-push queue is empty too — closes
+		// the degraded episode and reopens the strict turn gate. This is the
+		// ordinary recovery path: a store that heals before the next turn
+		// boundary needs no retry at all.
+		if store.retry != nil {
+			store.retry.snapshotPending.Store(false)
+		}
+		e.maybeRecoverObjectStore(store)
 	}
 
 	_ = e.Bus.Emit("session.snapshot.result", result)

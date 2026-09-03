@@ -564,6 +564,71 @@ damage (a snapshot never deletes, so the mixed tree is a superset of a complete
 one), and `TestHydrationDoesNotValidateTheCommitMarker` in `pkg/engine` pins
 that behaviour so a future change to it is deliberate rather than accidental.
 
+#### Failure policy: `degrade` and `strict`
+
+A snapshot that cannot complete is where `core.object_store.failure_policy`
+earns its keep. Both values retry, both publish the outage on the bus, and both
+recover with **no operator action**. What differs is whether the session keeps
+taking turns while the store is unreachable.
+
+Under **`degrade`** — the default — the session keeps running against the local
+working copy. The failure is a warning, the state is queued for retry, and turns
+carry on. The honest caveat belongs here rather than only in a comment: *during
+a long outage the durability guarantee is not being met even though nothing is
+failing.* Work the user watched happen exists only on local disk, and a host that
+dies while degraded loses it. That is the trade the operator chose by selecting
+it.
+
+Under **`strict`** the failure additionally raises `core.error` and closes a
+turn gate: every subsequent `io.input` is vetoed until a snapshot succeeds. Be
+precise about what that buys, because the tempting summary is wrong:
+
+> **The turn that hit the outage already happened.** Its output was streamed to
+> the user, its tools ran, and its side effects are in the world. Nothing in
+> Nexus un-runs it.
+
+`strict` refuses the *next* turn, which is the last point at which nothing has
+happened yet. A genuine pre-commit gate would need a vetoable turn-boundary
+event, which does not exist — and would not help if it did, since by the time an
+agent loop can report a turn the work is done. So the guarantee is: **no turn
+ever runs against state whose predecessor was not durably stored, and the
+divergence is never silent.** Not: "the failed turn was prevented".
+
+The gate is a `before:io.input` subscriber at priority 200, behind every other
+one (`nexus.control.cancel` and `nexus.mcp.client` both sit at 5), so slash
+commands and cancellation still work while it is closed — an operator whose
+bucket is down must still be able to stop the run.
+
+**Retry, and the bound.** One background worker per run retries with exponential
+backoff (1 s, doubling, capped at 60 s). It carries two kinds of work: a bounded
+queue of deferred pushes, capacity 256 objects, fed by blob write-through
+failures; and a "whole-tree snapshot pending" flag, the backstop, set by a failed
+snapshot, a failed flush or a queue overflow. Overflow therefore **does not lose
+work** — the discarded push is replaced by a snapshot that re-uploads everything
+the store does not already hold at the right size, which is strictly stronger
+and merely coarser. The bounds, the schedule and the timeouts are compiled-in
+constants rather than config keys, on the same reasoning E3-S2 applied to the
+write-through constants: an operator who wants to tune them is asking for a
+different `failure_policy`.
+
+**Recovery drains itself.** Either the next turn-boundary snapshot closes the
+episode, or — on an idle session where no further turn is coming — the retry
+worker does, publishing its snapshot under the `retry` trigger. Exactly one
+`session.storage.degraded` goes out per outage and one
+`session.storage.recovered` when it ends, so a subscriber counts outages rather
+than failed requests.
+
+**One deliberate exception.** A blob write-through failure never closes the
+`strict` gate. Write-through is an optimisation in front of the snapshot, which
+re-uploads anything missing; failing a turn because it stumbled on an object the
+very next snapshot repairs would make `strict` fire on transients it is not there
+to catch. Such a failure still queues for retry and still counts towards the
+degraded state.
+
+Hydration failure is the one thing both policies treat identically: it fails the
+boot. `degrade` means "fall back to the local copy", and at hydrate time there is
+no local copy.
+
 #### Cost
 
 The snapshot is `O(tree size minus the immutable share)` on every turn, and a
