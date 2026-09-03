@@ -78,11 +78,20 @@ func newSessionWorkspaceAt(rootDir string, id string, bus EventBus) (*SessionWor
 	now := time.Now()
 	sessionDir := filepath.Join(rootDir, id)
 
+	// The bus is attached only after the bootstrap metadata write below, so
+	// that write stays silent. Engine.prepareSession documents that creating
+	// the workspace emits no bus events, and that is a hard invariant rather
+	// than a tidiness preference: it runs before startJournal, and the bus
+	// assigns a dispatch seq to every event whether or not the journal's
+	// wildcard is subscribed yet. An event here would consume seq 1 and never
+	// reach the writer, whose drain writes only in contiguous seq order — so
+	// the missing seq would stall every later envelope forever and the journal
+	// would be empty. StartSession re-saves the metadata once the journal is
+	// running, so the file is still announced, just not from in here.
 	s := &SessionWorkspace{
 		ID:        id,
 		RootDir:   sessionDir,
 		StartedAt: now,
-		bus:       bus,
 	}
 
 	// Create directory structure.
@@ -109,6 +118,7 @@ func newSessionWorkspaceAt(rootDir string, id string, bus EventBus) (*SessionWor
 		return nil, fmt.Errorf("saving initial metadata: %w", err)
 	}
 
+	s.bus = bus
 	return s, nil
 }
 
@@ -125,10 +135,11 @@ func LoadSessionWorkspace(rootDir string, sessionID string, bus EventBus) (*Sess
 		return nil, fmt.Errorf("session path %q is not a directory", sessionDir)
 	}
 
+	// Bus attached after the reactivation write below, for the same reason as
+	// newSessionWorkspaceAt: this runs before startJournal.
 	s := &SessionWorkspace{
 		ID:      sessionID,
 		RootDir: sessionDir,
-		bus:     bus,
 	}
 
 	// Read existing metadata to restore StartedAt.
@@ -145,6 +156,7 @@ func LoadSessionWorkspace(rootDir string, sessionID string, bus EventBus) (*Sess
 		return nil, fmt.Errorf("updating session metadata: %w", err)
 	}
 
+	s.bus = bus
 	return s, nil
 }
 
@@ -219,6 +231,23 @@ func (s *SessionWorkspace) ReadFile(subpath string) ([]byte, error) {
 }
 
 // AppendFile appends data to a file in the session workspace.
+// It emits session.file.created or session.file.updated events.
+//
+// It reuses WriteFile's two event types rather than introducing a third
+// "appended" type. Every existing subscriber — nexus.io.tui, nexus.io.browser,
+// nexus.io.wails, nexus.tool.fileio — treats these as "this path changed,
+// re-read it", which is exactly true of an append; a new type would have left
+// all of them silently blind to appends until each was updated, which is the
+// same invisibility this emission exists to remove. An append-aware delta
+// (how many bytes landed, and at what offset) is additional information about
+// the same change and belongs on the payload, not in a separate event type.
+//
+// Until that emission existed the highest-churn writers in a session were
+// invisible to the bus: conversation history (context/conversation.jsonl),
+// turn timing, compaction output, shell history and the HITL cache all append
+// here. conversation.jsonl was the sharpest case — WriteFile covered its
+// rewrites and nothing covered its appends, so it looked correct in a smoke
+// test and dropped data in a real run.
 func (s *SessionWorkspace) AppendFile(subpath string, data []byte) error {
 	fullPath := filepath.Join(s.RootDir, subpath)
 
@@ -226,6 +255,11 @@ func (s *SessionWorkspace) AppendFile(subpath string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", subpath, err)
 	}
+
+	// Sampled before the open: O_CREATE makes the file exist as a side effect,
+	// so checking afterwards would report every first append as an update and
+	// no subscriber would ever see the file appear.
+	existed := s.FileExists(subpath)
 
 	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -235,6 +269,30 @@ func (s *SessionWorkspace) AppendFile(subpath string, data []byte) error {
 
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("appending to file %s: %w", subpath, err)
+	}
+
+	if s.bus != nil {
+		// size is the size of the file after the write, not the length of the
+		// appended chunk, so the field means the same thing here as it does in
+		// WriteFile and a subscriber never has to know which helper produced
+		// the event. Stat goes through the open descriptor rather than the
+		// path so a concurrent append cannot make the two disagree. A failed
+		// Stat reports 0 rather than dropping the event: a subscriber that
+		// re-reads the path is still correct with a wrong size, and is
+		// unrecoverably wrong with no event at all.
+		var size int
+		if fi, statErr := f.Stat(); statErr == nil {
+			size = int(fi.Size())
+		}
+		eventType := "session.file.created"
+		if existed {
+			eventType = "session.file.updated"
+		}
+		_ = s.bus.Emit(eventType, map[string]any{
+			"session_id": s.ID,
+			"path":       subpath,
+			"size":       size,
+		})
 	}
 
 	return nil
@@ -278,14 +336,29 @@ func (s *SessionWorkspace) SessionMetadata() (*SessionMeta, error) {
 }
 
 // SaveMeta writes session metadata to disk.
+// It emits session.file.created or session.file.updated for
+// metadata/session.json.
+//
+// The write is routed through WriteFile rather than calling os.WriteFile and
+// emitting alongside it. metadata/session.json is rewritten on every
+// llm.response (token and cost totals) and every agent.turn.end (turn count),
+// so it is one of the most frequently changed files in a session and was
+// previously changing without a single event. Delegating means there is one
+// implementation of "write a session file and announce it" — a second copy
+// here would be free to drift in event type, payload shape or permissions,
+// and the two would then disagree about the most-written file in the tree.
 func (s *SessionWorkspace) SaveMeta(meta *SessionMeta) error {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling session metadata: %w", err)
 	}
 
-	metaPath := filepath.Join(s.MetadataDir(), "session.json")
-	if err := os.WriteFile(metaPath, data, 0o644); err != nil {
+	// Slash-separated literal, not filepath.Join: subpath is both a path
+	// fragment and the session-relative "path" carried on the emitted event,
+	// and every other caller of WriteFile spells it with forward slashes.
+	// filepath.Join under the session root handles the separator on the way to
+	// disk; joining here would put a backslash on the wire on Windows.
+	if err := s.WriteFile("metadata/session.json", data); err != nil {
 		return fmt.Errorf("writing session metadata: %w", err)
 	}
 	return nil

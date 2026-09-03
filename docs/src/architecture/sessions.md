@@ -92,14 +92,38 @@ session.PluginDir("nexus.tool.shell")  // ~/.nexus/sessions/<id>/plugins/nexus.t
 
 ## File Events
 
-When files are written to the session, events are emitted automatically:
+Every `SessionWorkspace` write helper announces itself on the bus, so a subscriber
+does not have to watch the filesystem to know what a session changed:
 
 | Event | When |
 |-------|------|
-| `session.file.created` | A new file is written |
-| `session.file.updated` | An existing file is overwritten |
+| `session.file.created` | A path under the session root appeared |
+| `session.file.updated` | A path that already existed changed |
 
-These events carry the file path, session ID, and file size. The TUI plugin subscribes to these to show file creation notifications.
+| Helper | Emits |
+|--------|-------|
+| `WriteFile` | `created` on first write, `updated` on every rewrite |
+| `AppendFile` | `created` on the append that creates the file, `updated` on every later append |
+| `SaveMeta` | `updated` for `metadata/session.json`, which is rewritten on every `llm.response` and every `agent.turn.end` |
+
+The payload carries `session_id`, the slash-separated session-relative `path`, and
+`size` — the size of the whole file after the write, not the size of the change. The
+TUI, browser and Wails transports subscribe to these to surface file activity; see
+[Event Reference](../events/reference.md) for the exact payload.
+
+`AppendFile` reuses the same two event types rather than a separate append event, so
+existing subscribers see appends without changing. The events say *this path changed,
+re-read it*; they do not carry the appended bytes or their offset.
+
+Creating or loading a workspace writes `metadata/session.json` silently. That happens
+before the journal writer subscribes to the bus, and an event there would consume a
+dispatch sequence number the journal never receives — which stalls its writer, since it
+only writes envelopes in contiguous sequence order. `StartSession` re-saves the
+metadata once the journal is running, so the file is still announced.
+
+Writers that hold their own directory and call `os.*` directly — the journal, the blob
+store, per-plugin SQLite, and plugins writing under `PluginDir()` — do not emit these
+events. They are covered by the turn-boundary snapshot instead.
 
 ## Session Lifecycle
 

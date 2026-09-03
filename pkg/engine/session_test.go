@@ -2,8 +2,11 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -167,6 +170,150 @@ func TestSessionWorkspace_WriteFile_EmitsCreatedAndUpdated(t *testing.T) {
 	}
 	if events[1] != "session.file.updated" {
 		t.Errorf("second emission = %q, want session.file.updated", events[1])
+	}
+}
+
+// collectSessionFileEvents subscribes to both session.file.* types and returns
+// a snapshot function. Emissions are recorded as "<type> <path> <size>" so a
+// test can assert the payload a sync backend actually reads, not merely that
+// something fired.
+func collectSessionFileEvents(bus EventBus) func() []string {
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	record := func(e Event[any]) {
+		data, _ := e.Payload.(map[string]any)
+		path, _ := data["path"].(string)
+		size, _ := data["size"].(int)
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, fmt.Sprintf("%s %s %d", e.Type, path, size))
+	}
+	bus.Subscribe("session.file.created", record)
+	bus.Subscribe("session.file.updated", record)
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+// Appends were the largest hole in the bus's picture of the session tree:
+// conversation history, turn timing and compaction output all land through
+// AppendFile, and none of them used to be announced.
+func TestSessionWorkspace_AppendFile_EmitsCreatedThenUpdated(t *testing.T) {
+	bus := NewEventBus()
+	ws, err := NewSessionWorkspace(t.TempDir(), bus)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	snapshot := collectSessionFileEvents(bus)
+
+	if err := ws.AppendFile("context/conversation.jsonl", []byte("one\n")); err != nil {
+		t.Fatalf("first AppendFile: %v", err)
+	}
+	if err := ws.AppendFile("context/conversation.jsonl", []byte("two\n")); err != nil {
+		t.Fatalf("second AppendFile: %v", err)
+	}
+
+	// The second event reports 8, the size of the whole file, not 4, the size
+	// of the chunk — same meaning the field carries on a WriteFile event.
+	want := []string{
+		"session.file.created context/conversation.jsonl 4",
+		"session.file.updated context/conversation.jsonl 8",
+	}
+	got := snapshot()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("emissions = %v, want %v", got, want)
+	}
+}
+
+// A file first written by WriteFile and then appended to must report the
+// append as an update. conversation.jsonl is written both ways, so getting
+// this wrong would replay it to a subscriber as a second creation.
+func TestSessionWorkspace_AppendFile_AfterWriteFileIsUpdate(t *testing.T) {
+	bus := NewEventBus()
+	ws, err := NewSessionWorkspace(t.TempDir(), bus)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := ws.WriteFile("context/conversation.jsonl", []byte("seed\n")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	snapshot := collectSessionFileEvents(bus)
+
+	if err := ws.AppendFile("context/conversation.jsonl", []byte("more\n")); err != nil {
+		t.Fatalf("AppendFile: %v", err)
+	}
+
+	want := []string{"session.file.updated context/conversation.jsonl 10"}
+	if got := snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("emissions = %v, want %v", got, want)
+	}
+}
+
+func TestSessionWorkspace_AppendFile_NilBusOK(t *testing.T) {
+	ws, err := NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := ws.AppendFile("files/x.log", []byte("y")); err != nil {
+		t.Fatalf("AppendFile with nil bus: %v", err)
+	}
+}
+
+// metadata/session.json is rewritten on every llm.response and every
+// agent.turn.end, so it is the most-changed file in a session and used to
+// change in complete silence.
+func TestSessionWorkspace_SaveMeta_EmitsUpdated(t *testing.T) {
+	bus := NewEventBus()
+	ws, err := NewSessionWorkspace(t.TempDir(), bus)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	snapshot := collectSessionFileEvents(bus)
+
+	meta, err := ws.SessionMetadata()
+	if err != nil {
+		t.Fatalf("SessionMetadata: %v", err)
+	}
+	meta.TurnCount = 7
+	if err := ws.SaveMeta(meta); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+
+	got := snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 emission, got %d (%v)", len(got), got)
+	}
+	// Forward slashes on every platform: the path is a wire value, not a
+	// local filesystem path.
+	if !strings.HasPrefix(got[0], "session.file.updated metadata/session.json ") {
+		t.Fatalf("emission = %q, want session.file.updated for metadata/session.json", got[0])
+	}
+}
+
+// Creating or loading a workspace must stay silent. Both run before
+// startJournal, and the bus numbers every dispatched event whether or not the
+// journal's wildcard is subscribed yet — an event here would burn a seq the
+// journal never receives, and its drain, which writes only in contiguous seq
+// order, would stall on the gap and never flush anything.
+func TestSessionWorkspace_ConstructionEmitsNothing(t *testing.T) {
+	bus := NewEventBus()
+	snapshot := collectSessionFileEvents(bus)
+
+	root := t.TempDir()
+	ws, err := NewSessionWorkspace(root, bus)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if _, err := LoadSessionWorkspace(root, ws.ID, bus); err != nil {
+		t.Fatalf("LoadSessionWorkspace: %v", err)
+	}
+
+	if got := snapshot(); len(got) != 0 {
+		t.Fatalf("workspace construction emitted %v, want nothing", got)
 	}
 }
 

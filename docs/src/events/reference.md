@@ -667,17 +667,45 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 
 | Event Type | Payload | Description |
 |------------|---------|-------------|
-| `session.file.created` | `SessionFile` | New file in session |
-| `session.file.updated` | `SessionFile` | File updated in session |
+| `session.file.created` | map (see below) | A file appeared in the session tree |
+| `session.file.updated` | map (see below) | An existing file in the session tree changed |
 | `session.snapshot.request` | `SessionSnapshotRequest` | Ask the engine to snapshot the session tree to the object store |
 | `session.snapshot.result` | `SessionSnapshotResult` | Outcome of one whole-tree snapshot |
 
-**SessionFile**
-| Field | Type | Description |
-|-------|------|-------------|
-| `Path` | string | File path within session |
-| `Action` | string | `"created"` or `"updated"` |
-| `Size` | int | File size in bytes |
+**session.file.created / session.file.updated payload**
+
+Emitted as a `map[string]any`, not as the `events.SessionFile` struct — the struct
+exists but nothing on the wire uses it, so `make check-events` does not guard this
+payload. Treat the table below as the contract.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `session_id` | string | Session the file belongs to |
+| `path` | string | Path relative to the session root, always slash-separated |
+| `size` | int | Size of the **file** in bytes after the write — not the size of the change |
+
+Which event fires is decided by whether the path existed before the write, so a
+subscriber can rely on seeing exactly one `created` per path per session.
+
+**Who emits them**
+
+| Emitter | Covers |
+|---|---|
+| `SessionWorkspace.WriteFile` | Whole-file writes: config snapshot, plugin manifest, memory rewrites, tool output |
+| `SessionWorkspace.AppendFile` | Appends: `context/conversation.jsonl`, `metadata/timing.jsonl`, compaction output, shell history, the HITL cache |
+| `SessionWorkspace.SaveMeta` | `metadata/session.json` — rewritten on every `llm.response` and every `agent.turn.end` |
+| `nexus.tool.fileio`, `nexus.tool.pdf` | Files those tools write into the session |
+
+`AppendFile` deliberately reuses the same two event types rather than introducing an
+append-specific one, so every existing subscriber sees appends without being changed.
+The events say *this path changed, re-read it*; they do not carry the appended bytes or
+their offset.
+
+Two moments are deliberately silent. Creating or loading a session workspace writes
+`metadata/session.json` without emitting, because that happens before the journal writer
+subscribes to the bus and an event there would consume a dispatch sequence number the
+journal never receives — which stalls its writer permanently. `Engine.StartSession`
+re-saves the metadata once the journal is running, so the file is still announced.
 
 **SessionSnapshotRequest**
 | Field | Type | Description |
