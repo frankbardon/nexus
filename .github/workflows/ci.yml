@@ -39,6 +39,17 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      # make build, make test, make vet and make lint each sweep the Go
+      # submodules under modules/ in addition to the root module -- see the
+      # GO_SUBMODULES block at the top of the Makefile. There is deliberately no
+      # separate submodule job or step here: a submodule is invisible to any
+      # ./... pattern, so the one thing that must never happen is a CI command
+      # that skips it without saying so, and the surest guard against that is one
+      # command per concern, shared verbatim with local development. A module
+      # added under modules/ is picked up by these steps with no workflow edit.
+      #
+      # The go mod download above covers the root module only; each submodule's
+      # dependencies are fetched on demand by the make target that needs them.
       - name: Build
         run: make build
 

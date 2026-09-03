@@ -26,6 +26,19 @@ cmd/*/build/
 *.out
 vendor/
 
+# Go workspaces. Never committed, deliberately: a go.work puts every workspace
+# module into a single build list, so the cloud SDKs required by the modules
+# under modules/ would take part in version selection for the root module too,
+# and `bin/nexus` built on a contributor's machine could resolve different
+# transitive versions than the binary CI and the release build. Keeping the root
+# module's dependency graph exactly what go.mod says is the whole reason those
+# backends live in separate modules. Each submodule carries a `replace` pointing
+# at ../.. instead, which is scoped to that module and affects nothing else.
+# A local go.work for an editor is fine -- that is why these are ignored rather
+# than merely absent. See docs/src/guides/go-modules.md.
+go.work
+go.work.sum
+
 # Docs
 docs/book/
 

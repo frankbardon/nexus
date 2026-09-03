@@ -10,6 +10,7 @@ make run          # Build and run with default config (configs/default.yaml)
 make test         # Run all tests
 make test-broker-integration  # Broker integration suite (tagged; no API key needed)
 make fmt          # Format code (gofmt)
+make submodules   # List the Go submodules under modules/ that every sweep covers
 make vet          # Run go vet
 make lint         # Run staticcheck (includes vet)
 ```
@@ -35,6 +36,15 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Session broker** (`cmd/nexus-broker/`) — Standalone HTTP/WS gateway service (NOT a plugin) that fronts OS-isolated `nexus` instances behind one ingress: clients `claim` a lease, the broker cold-spawns a `nexus` subprocess that dials back via the `nexus.io.broker` plugin, and instances `release` on demand/idle/crash with sessions persisted on disk. It is **protocol-aware for A2A** rather than a purely opaque pipe: each `agents:` profile publishes an Agent Card and both A2A bindings under `/agents/<name>/`, and the broker parses and translates the instance IO envelope itself — a message on an unknown `contextId` cold-spawns an instance, a known one routes to it, a released one re-spawns with `-recall`, concurrent tasks on one conversation are queued, and tasks stay readable from a durable store across release and restart. It is the second of the two A2A mappings judged by `pkg/a2a/a2aconform` (5 of 9 vectors; 4 skipped because the IO envelope carries no tool results). Everything outside the `agents:` namespace is still forwarded unparsed. `SIGHUP` re-reads the config file and atomically swaps the reloadable half (`binaries:`, `agents:` and the behavioural bounds) with live leases untouched; `auth:`, `listen_addr`, `advertise_addr`, `state_dir` and `broker_id` are boot-only and a change to them is reported and ignored. See `docs/src/guides/session-broker.md` and `docs/src/guides/a2a.md`.
 - **Identity layer** (`pkg/nexusauth/`) — Shared credential verification: `Principal`, a `Validator` interface with `static`/`jwks`/`introspect`/`proxy_headers` implementations, and an ordered first-success `Chain` built from an `auth:` config block. Used by `cmd/nexus-broker`, `nexus.io.agui` and `nexus.io.a2a`; never issues credentials, only verifies them.
 - **Plugin registry** (`pkg/engine/allplugins/`) — Shared `RegisterAll()` function used by both `cmd/nexus` and `pkg/testharness`. Single source of truth for plugin registration.
+- **Go submodules** (`modules/`) — Code that must not add dependencies to the root module lives in its own
+  `go.mod` under `modules/<name>/` (module path `github.com/frankbardon/nexus/modules/<name>`). Cloud
+  object-store backends are the motivating case: the root module's direct dependency list is defended, so an
+  AWS/GCP SDK goes in a submodule an embedder blank-imports. **No `go.work`** — it is gitignored, because a
+  workspace merges build lists and would let submodule SDKs move the root module's transitive versions; each
+  submodule carries `replace github.com/frankbardon/nexus => ../..` instead. `make build`, `test`, `test-race`,
+  `fmt`, `vet` and `lint` all sweep `modules/` (a separate module is invisible to `./...`), and
+  `make check-modules` fails a `go.mod` found anywhere else. Submodule tags are `modules/<name>/vX.Y.Z`, cut on
+  demand and versioned independently of the core `vX.Y.Z`. See `docs/src/guides/go-modules.md`.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
 - **Object-store contract suite** (`pkg/engine/objectstore/objectstoretest/`) — exported conformance suite every `objectstore.Backend` must pass (`RunSuite`), plus `NewMemory`, the in-memory backend that passes it and doubles as the substituted seam for untagged unit tests. Out-of-tree backend modules run the same suite. See `docs/src/architecture/sessions.md`.
