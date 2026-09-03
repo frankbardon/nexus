@@ -106,14 +106,47 @@ does not have to watch the filesystem to know what a session changed:
 | `AppendFile` | `created` on the append that creates the file, `updated` on every later append |
 | `SaveMeta` | `updated` for `metadata/session.json`, which is rewritten on every `llm.response` and every `agent.turn.end` |
 
-The payload carries `session_id`, the slash-separated session-relative `path`, and
-`size` — the size of the whole file after the write, not the size of the change. The
-TUI, browser and Wails transports subscribe to these to surface file activity; see
+The payload carries `session_id`, the slash-separated session-relative `path`, `size`
+(the size of the whole file after the write, not the size of the change), and an
+append-aware delta: `offset` and `bytes_added`. The TUI, browser and Wails transports
+subscribe to these to surface file activity; see
 [Event Reference](../events/reference.md) for the exact payload.
 
 `AppendFile` reuses the same two event types rather than a separate append event, so
-existing subscribers see appends without changing. The events say *this path changed,
-re-read it*; they do not carry the appended bytes or their offset.
+existing subscribers see appends without changing.
+
+### The append-aware delta
+
+Appends are the highest-churn writes in a session — conversation history, turn timing,
+compaction output and shell history all land through `AppendFile` — and a subscriber
+told only "this path changed" has to re-read (and, for a sync backend, re-upload) the
+whole file every time. `offset` and `bytes_added` say which part changed:
+
+| Shape | Meaning |
+|-------|---------|
+| `offset == 0 && bytes_added == size` | The whole object is new. Every `WriteFile`, and the first append that creates a file. |
+| `offset > 0 && offset + bytes_added == size` | A pure append. Every byte before `offset` is byte-identical to what the last event for this path described. |
+
+A distinct `session.file.appended` event was considered and rejected. It would have
+carried the same three numbers, cost every existing subscriber a change just to keep
+seeing appends, and — because `context/conversation.jsonl` is written by both helpers —
+forced each of them to merge two event streams to reconstruct one file's history. The
+delta is more information about a change subscribers already receive, so it belongs on
+the payload.
+
+**Object stores have no append primitive.** Nothing here lets a backend write the
+appended bytes into an existing object: S3, GCS and every S3-compatible store replace
+whole objects. What the delta buys is the freedom to *coalesce and defer* — a backend
+that knows the last two hundred events on `conversation.jsonl` only added bytes to the
+tail knows it can collapse them into one upload of the current file at the next
+boundary, and knows it has not missed a rewrite in between. Reading `offset` as "seek
+here and write `bytes_added` bytes into the bucket" is a misreading.
+
+`offset` is taken from the append descriptor's own position after the write, so it stays
+exact even if another writer appends to the same path in between. If that read fails it
+falls back to `0`, which reads as "the whole object changed" — the conservative
+direction, since a backend then re-uploads a file it could have coalesced rather than
+coalescing a change it should have treated as a rewrite.
 
 Creating or loading a workspace writes `metadata/session.json` silently. That happens
 before the journal writer subscribes to the bus, and an event there would consume a
@@ -311,6 +344,43 @@ the lock. A `Barrier` runs first so the capture includes the very turn that
 triggered it rather than trailing it by whatever is still queued.
 `journal/cache/` is ordinary data and is walked normally.
 
+#### What is never re-uploaded
+
+A snapshot is `O(whole tree)`, not `O(what changed)`, and that cost is paid on
+every turn. Two kinds of file in a session tree **cannot** change once written,
+and a snapshot that has already stored them does not store them again:
+
+| Path | Why it cannot change |
+|------|----------------------|
+| `journal/events-NNN.jsonl.zst` | Sealed at rotation. Rotation compresses the active segment into the next free `NNN` slot and never reopens it. |
+| `blobs/<xx>/<sha256>.bin` and `.meta` | Content-addressed. Different bytes would have a different sha256 and therefore a different name, so a file at that path either holds those bytes or does not exist. |
+
+The skip is **by construction, never by diffing**. A file qualifies because its
+*identity* proves immutability, not because a hash or an mtime comparison
+suggested it was unchanged — `blobs.Store.Put` touches mtime on every hit, so
+mtime would have been actively misleading here. General content-hash or
+mtime-based change detection over the rest of the tree is deliberately not
+implemented: ordinary session output is still re-uploaded in full every turn.
+
+Being unchangeable locally says nothing about whether the object ever reached the
+bucket, so immutability alone is only half the decision. Every snapshot **lists
+the session's key prefix** and skips a file only when that listing says the store
+holds it at exactly that size. A skipped file that is missing — or truncated — is
+uploaded like anything else, so a skip can never turn a gap into a permanent gap,
+and the skip repairs itself against anything that removes an object out of band.
+A backend that cannot list makes the snapshot upload everything, which is always
+the safe direction. The listing costs one or two round trips against as many
+avoided uploads as the session has immutable files.
+
+A skipped object is still part of the **committed object set**: `objects` and
+`bytes` on the commit marker and on `session.snapshot.result` describe the whole
+stored session, exactly as they did before the skip existed, and
+`objects_uploaded` / `objects_skipped` split that set into what this turn paid
+for and what it saved. Anything that later writes a per-object manifest must
+build it from the committed set, **not** from "what was uploaded this turn" — a
+manifest of only-what-was-uploaded would describe a session with its journal
+segments and blobs missing.
+
 #### Failure, and the commit marker
 
 Object stores have no multi-object transaction, so a tree spread over many
@@ -347,22 +417,37 @@ that behaviour so a future change to it is deliberate rather than accidental.
 
 #### Cost
 
-The snapshot is `O(tree size)` on every turn, and a session tree only grows.
-Measured on an M1 Max against the in-memory backend (engine work only — staging,
-checkpoint, tree walk, per-object handoff — with no network):
+The snapshot is `O(tree size minus the immutable share)` on every turn, and a
+session tree only grows. Measured on an M1 Max against the in-memory backend
+(engine work only — staging, checkpoint, tree walk, per-object handoff — with no
+network):
 
-| Tree | Objects | Size | Per turn |
-|------|---------|------|----------|
-| 10 files + a 100-row store | 17 | 0.05 MiB | ~13 ms |
-| 200 files + a 5k-row store | 207 | 6.0 MiB | ~29–35 ms |
-| 1000 files + a 50k-row store | 1007 | 91 MiB | ~160–175 ms |
+| Tree | Objects | Size | Uploaded per turn | Per turn |
+|------|---------|------|-------------------|----------|
+| 10 files + a 100-row store | 17 | 0.05 MiB | 17 objects / 0.05 MiB | ~13 ms |
+| 200 files + a 5k-row store | 207 | 6.0 MiB | 207 objects / 6.0 MiB | ~29–35 ms |
+| 1000 files + a 50k-row store | 1007 | 91 MiB | 1007 objects / 91 MiB | ~155–175 ms |
+| 1000 blobs + a 50k-row store | 2007 | 90 MiB | **7 objects / 28 MiB** | ~137 ms |
 
-That is a fixed floor of roughly 12 ms (checkpoint, `VACUUM INTO`, journal
+The first three rows are ordinary `files/` output, which nothing in the tree
+proves immutable and which is therefore still re-uploaded in full every turn. The
+last row is the same volume of bytes held as content-addressed blobs: before
+immutable-skip it uploaded 2007 objects and 90 MiB per turn (~200 ms); after, it
+uploads the 7 mutable objects and 28 MiB, of which the per-plugin `store.db` is
+almost all. On a 100 Mbit link that is roughly 7.6 s per turn down to 2.3 s.
+
+Underneath is a fixed floor of roughly 12 ms (checkpoint, `VACUUM INTO`, journal
 barrier, fsync) plus 500–600 MiB/s of local throughput; real network time lands
-on top. `BenchmarkSessionSnapshot` in `pkg/engine` reproduces it. Every snapshot logs `objects`, `bytes`, `db_bytes` and `duration`,
-and publishes the same numbers as `session.snapshot.result`, so the growth is
-visible rather than inferred. Delta upload and a size-dependent snapshot cadence
-are deliberately not designed yet.
+on top. `BenchmarkSessionSnapshot` in `pkg/engine` reproduces all four rows,
+reporting `puts/op` and `upload_MiB/op` alongside the tree size. Every snapshot
+logs `objects`, `bytes`, `objects_uploaded`, `bytes_uploaded`,
+`objects_skipped`, `bytes_skipped`, `db_bytes` and `duration`, and publishes the
+same numbers as `session.snapshot.result`, so the growth is visible rather than
+inferred.
+
+The residual `store.db` cost is `O(database size)` per turn regardless of how
+little changed, and delta upload for mutable files and a size-dependent snapshot
+cadence are still deliberately not designed.
 
 ### What survives a kill
 

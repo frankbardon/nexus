@@ -683,9 +683,36 @@ payload. Treat the table below as the contract.
 | `session_id` | string | Session the file belongs to |
 | `path` | string | Path relative to the session root, always slash-separated |
 | `size` | int | Size of the **file** in bytes after the write — not the size of the change |
+| `offset` | int | Byte offset at which the change begins |
+| `bytes_added` | int | Number of bytes written at `offset` |
 
 Which event fires is decided by whether the path existed before the write, so a
 subscriber can rely on seeing exactly one `created` per path per session.
+
+**The append-aware delta.** `offset` and `bytes_added` together say that the region
+`[offset, offset+bytes_added)` is the only part of the object that changed:
+
+| Shape | Meaning |
+|-------|---------|
+| `offset == 0 && bytes_added == size` | The whole object is new. Every `WriteFile`, and the first append that creates a file. |
+| `offset > 0 && offset + bytes_added == size` | A pure append. Every byte before `offset` is byte-identical to what the last event for this path described. |
+
+They were added to this payload rather than introduced as a separate
+`session.file.appended` event: a new type would have carried the same three numbers,
+cost every existing subscriber a change just to keep seeing appends, and — because
+`context/conversation.jsonl` is written by both `WriteFile` and `AppendFile` — forced
+each of them to merge two streams to reconstruct one file's history. New map keys are
+also invisible to subscribers that do not read them.
+
+**Object stores have no append primitive.** These keys do not let a sync backend write
+appended bytes into an existing object; S3, GCS and every S3-compatible store replace
+whole objects. What they buy is the freedom to *coalesce and defer* — collapse a run of
+tail appends into one upload of the current file at the next boundary, knowing no
+rewrite was missed in between. `offset` is not a seek position in the bucket.
+
+If the offset cannot be determined, `offset` is reported as `0`, which reads as a whole
+-object change: a backend then re-uploads a file it could have coalesced, rather than
+coalescing a change it should have treated as a rewrite.
 
 **Who emits them**
 
@@ -696,10 +723,16 @@ subscriber can rely on seeing exactly one `created` per path per session.
 | `SessionWorkspace.SaveMeta` | `metadata/session.json` — rewritten on every `llm.response` and every `agent.turn.end` |
 | `nexus.tool.fileio`, `nexus.tool.pdf` | Files those tools write into the session |
 
+`nexus.tool.pdf` emits a second, hand-built event of its own beside the one
+`SessionWorkspace.WriteFile` already emitted, and it carries neither `offset` nor
+`bytes_added`. Because the payload is an untyped map, a subscriber must treat both keys
+as optional and fall back to "the whole object changed" when they are absent — which is
+the same conservative reading `offset == 0` already asks for.
+
 `AppendFile` deliberately reuses the same two event types rather than introducing an
 append-specific one, so every existing subscriber sees appends without being changed.
-The events say *this path changed, re-read it*; they do not carry the appended bytes or
-their offset.
+The events say *this path changed, and here is which part of it changed*; they never
+carry the changed bytes themselves.
 
 Two moments are deliberately silent. Creating or loading a session workspace writes
 `metadata/session.json` without emitting, because that happens before the journal writer
@@ -719,8 +752,12 @@ re-saves the metadata once the journal is running, so the file is still announce
 | `Trigger` | string | `"turn"`, `"shutdown"` or `"request"` |
 | `Sequence` | uint64 | Per-run snapshot counter, starting at 1 |
 | `TurnID` | string | Turn whose boundary triggered it; empty otherwise |
-| `Objects` | int | Objects uploaded, excluding the commit marker |
-| `Bytes` | int64 | Total size of those objects — the snapshot cost |
+| `Objects` | int | Size of the committed object set — everything the snapshot asserts is durably present, excluding the commit marker. Includes objects immutable-skip did not re-upload |
+| `Bytes` | int64 | Total size of those objects — how big the stored session is |
+| `ObjectsUploaded` | int | The share of that set this snapshot actually transferred |
+| `BytesUploaded` | int64 | Their total size. This, not `Bytes`, is the per-turn cost |
+| `ObjectsSkipped` | int | Files whose identity proves they cannot have changed (sealed journal segments, content-addressed blobs) and that a listing confirmed the store already holds |
+| `BytesSkipped` | int64 | Their total size — what immutable-skip saved |
 | `DurationMs` | float64 | Wall time of the whole snapshot |
 | `OK` | bool | Whether the snapshot was made durable |
 | `ErrorMessage` | string | Empty on success |

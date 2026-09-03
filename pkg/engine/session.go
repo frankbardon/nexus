@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -191,6 +192,13 @@ func (s *SessionWorkspace) PluginDir(pluginID string) string {
 
 // WriteFile writes data to a file within the session workspace.
 // It emits session.file.created or session.file.updated events.
+//
+// The emitted payload carries an append-aware delta — "offset" and
+// "bytes_added" — alongside "size"; see the comment on AppendFile for why the
+// delta lives on this payload rather than in a third event type, and for what
+// a sync backend may and may not conclude from it. A whole-file write reports
+// offset 0 and bytes_added == size, which is the honest reading of "every byte
+// of this object is new".
 func (s *SessionWorkspace) WriteFile(subpath string, data []byte) error {
 	fullPath := filepath.Join(s.RootDir, subpath)
 
@@ -214,6 +222,14 @@ func (s *SessionWorkspace) WriteFile(subpath string, data []byte) error {
 			"session_id": s.ID,
 			"path":       subpath,
 			"size":       len(data),
+			// offset 0 with bytes_added == size is not padding to make the
+			// two emitters look alike: it is what actually happened. The
+			// previous contents are gone, so the changed region really does
+			// start at byte 0 and really does span the whole object, and a
+			// backend that coalesces on "offset > 0" correctly refuses to
+			// treat this as an append.
+			"offset":      0,
+			"bytes_added": len(data),
 		})
 	}
 
@@ -241,6 +257,39 @@ func (s *SessionWorkspace) ReadFile(subpath string) ([]byte, error) {
 // same invisibility this emission exists to remove. An append-aware delta
 // (how many bytes landed, and at what offset) is additional information about
 // the same change and belongs on the payload, not in a separate event type.
+//
+// # The append-aware delta, and what it does not promise
+//
+// The payload carries "offset" (where the change begins) and "bytes_added"
+// (how many bytes landed there) beside "size" (the file size afterwards). The
+// invariant across both emitters is that the region [offset, offset+bytes_added)
+// is the only part of the object that changed, so:
+//
+//	offset == 0 && bytes_added == size   the whole object is new (WriteFile)
+//	offset >  0 && offset+bytes_added == size   a pure append; every byte
+//	                                            before offset is byte-identical
+//	                                            to what the last event described
+//
+// A distinct session.file.appended event was the rejected alternative. It
+// would have carried exactly the same three numbers, cost every existing
+// subscriber a code change to keep seeing appends at all, and — because
+// conversation.jsonl is written by both WriteFile and AppendFile — forced each
+// of them to merge two event streams to reconstruct one file's history. The
+// delta is more information about a change subscribers already receive, not a
+// different kind of change; putting it in a separate type would have split one
+// fact across two topics. Adding map keys is also forward-compatible with the
+// untyped payload: a subscriber that does not read them is unaffected.
+//
+// Object stores have no append primitive. Nothing here lets a backend write
+// the appended bytes into an existing object — S3, GCS and every
+// S3-compatible store replace whole objects, and a "multipart append" is a
+// different object with a different lifecycle, not an edit. What the delta
+// buys is the ability to *coalesce and defer*: a backend that knows the last
+// 200 events on context/conversation.jsonl only added bytes to the tail knows
+// it can collapse them into one upload of the current file at the next
+// boundary, and knows it has not missed a rewrite in between. Anyone reading
+// "offset" as "seek here and write bytes_added bytes into the bucket" has
+// misread it.
 //
 // Until that emission existed the highest-churn writers in a session were
 // invisible to the bus: conversation history (context/conversation.jsonl),
@@ -284,14 +333,33 @@ func (s *SessionWorkspace) AppendFile(subpath string, data []byte) error {
 		if fi, statErr := f.Stat(); statErr == nil {
 			size = int(fi.Size())
 		}
+
+		// offset comes from the descriptor's own position after the write, not
+		// from size-len(data). Under O_APPEND the kernel seeks to end-of-file
+		// and writes atomically, leaving the position immediately after *our*
+		// bytes — so this stays exact even when another writer appends to the
+		// same path between our write and our Stat, where size-len(data) would
+		// silently point into someone else's chunk.
+		//
+		// Failure falls back to offset 0, which reads as "the whole object
+		// changed". That is the conservative direction: a backend re-uploads a
+		// file it could have coalesced, rather than coalescing a change it
+		// should have treated as a rewrite.
+		offset := 0
+		if end, seekErr := f.Seek(0, io.SeekCurrent); seekErr == nil && end >= int64(len(data)) {
+			offset = int(end) - len(data)
+		}
+
 		eventType := "session.file.created"
 		if existed {
 			eventType = "session.file.updated"
 		}
 		_ = s.bus.Emit(eventType, map[string]any{
-			"session_id": s.ID,
-			"path":       subpath,
-			"size":       size,
+			"session_id":  s.ID,
+			"path":        subpath,
+			"size":        size,
+			"offset":      offset,
+			"bytes_added": len(data),
 		})
 	}
 

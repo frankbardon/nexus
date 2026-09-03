@@ -48,11 +48,23 @@ type SessionSnapshotResult struct {
 	// TurnID is the turn whose boundary triggered the snapshot. Empty for the
 	// shutdown and request triggers.
 	TurnID string `json:"turn_id,omitempty"`
-	// Objects is how many objects were uploaded, excluding the commit marker.
+	// Objects is the size of the committed object set — every object the
+	// snapshot asserts is durably present, excluding the commit marker. It
+	// counts objects that immutable-skip did not re-upload, because they are
+	// still part of the stored session.
 	Objects int `json:"objects"`
-	// Bytes is the total size of those objects. This is the snapshot cost:
-	// it is paid in full on every snapshot and grows with the session.
+	// Bytes is the total size of those objects: how big the stored session is.
 	Bytes int64 `json:"bytes"`
+	// ObjectsUploaded and BytesUploaded are the share of the set this snapshot
+	// actually transferred. This, not Bytes, is the per-turn cost.
+	ObjectsUploaded int   `json:"objects_uploaded"`
+	BytesUploaded   int64 `json:"bytes_uploaded"`
+	// ObjectsSkipped and BytesSkipped are what immutable-skip saved: files
+	// whose identity proves they cannot have changed (sealed journal segments,
+	// content-addressed blobs) and which the store was listed to confirm it
+	// already holds.
+	ObjectsSkipped int   `json:"objects_skipped"`
+	BytesSkipped   int64 `json:"bytes_skipped"`
 	// DurationMs is the wall time of the whole snapshot, staging included.
 	DurationMs float64 `json:"duration_ms"`
 	// OK reports whether the snapshot was made durable. When false the remote

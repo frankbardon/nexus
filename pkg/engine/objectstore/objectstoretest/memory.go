@@ -40,6 +40,7 @@ type Memory struct {
 	hydrateErr error
 	putErr     error
 	deleteErr  error
+	listErr    error
 	flushErr   error
 }
 
@@ -182,6 +183,9 @@ func (m *Memory) List(_ context.Context, keyPrefix string) ([]objectstore.Object
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counts.Lists++
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 
 	var out []objectstore.Object
 	for key, obj := range m.objects {
@@ -305,6 +309,11 @@ func (m *Memory) SetPutError(err error) { m.setErr(&m.putErr, err) }
 
 // SetDeleteError makes every subsequent Delete fail with err.
 func (m *Memory) SetDeleteError(err error) { m.setErr(&m.deleteErr, err) }
+
+// SetListError makes every subsequent List fail with err. The engine's
+// immutable-skip path is the main consumer: a backend that cannot say what it
+// holds must make the engine upload everything, never assume presence.
+func (m *Memory) SetListError(err error) { m.setErr(&m.listErr, err) }
 
 // SetFlushError makes every subsequent Flush fail with err. The engine's
 // failure_policy branch is the main consumer: degrade must swallow this and

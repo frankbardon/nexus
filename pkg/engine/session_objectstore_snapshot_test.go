@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine/blobs"
 	"github.com/frankbardon/nexus/pkg/engine/objectstore"
 	"github.com/frankbardon/nexus/pkg/engine/objectstore/objectstoretest"
 	"github.com/frankbardon/nexus/pkg/engine/storage"
@@ -582,10 +584,21 @@ func TestConcurrentSnapshotsSerialise(t *testing.T) {
 // in-memory backend, which isolates the engine's own work (staging, the WAL
 // checkpoint, the tree walk, the per-object handoff) from network time.
 //
-// This is the story's required measurement, and the shape it reveals is the
-// point: the cost is O(tree size) and is paid in full on every turn, however
-// little changed. Delta upload and a size-dependent cadence are deliberately
-// undesigned; see the notes on E1-S4.
+// E1-S4 required this measurement and the shape it revealed was the point: the
+// cost was O(tree size), paid in full on every turn however little changed.
+// E2-S2 added the immutable-skip, so the "immutable" cases below are the
+// before/after: they hold the same bytes as their "files" siblings but as
+// content-addressed blobs, which cannot change once written and are therefore
+// uploaded exactly once per session rather than once per turn.
+//
+// The "files" cases are unchanged by immutable-skip and are kept precisely for
+// that reason — ordinary session output is still O(tree size) per turn, and
+// pretending otherwise by only benchmarking the improved shape would be the
+// dishonest version of this measurement. Delta upload for mutable files and a
+// size-dependent cadence remain deliberately undesigned; see the notes on
+// E1-S4.
+//
+// puts/op is the headline: how many objects one turn actually transfers.
 //
 //	go test ./pkg/engine/ -run '^$' -bench BenchmarkSessionSnapshot -benchtime 10x
 func BenchmarkSessionSnapshot(b *testing.B) {
@@ -595,10 +608,15 @@ func BenchmarkSessionSnapshot(b *testing.B) {
 		size    int
 		dbRows  int
 		dbValue int
+		// immutable writes the payload as content-addressed blobs rather than
+		// as ordinary files under files/, which is the composition
+		// immutable-skip applies to.
+		immutable bool
 	}{
-		{"small/10files-1KB/db-100rows", 10, 1 << 10, 100, 256},
-		{"medium/200files-16KB/db-5krows", 200, 16 << 10, 5_000, 512},
-		{"large/1000files-64KB/db-50krows", 1000, 64 << 10, 50_000, 512},
+		{name: "small/10files-1KB/db-100rows", files: 10, size: 1 << 10, dbRows: 100, dbValue: 256},
+		{name: "medium/200files-16KB/db-5krows", files: 200, size: 16 << 10, dbRows: 5_000, dbValue: 512},
+		{name: "large/1000files-64KB/db-50krows", files: 1000, size: 64 << 10, dbRows: 50_000, dbValue: 512},
+		{name: "large-immutable/1000blobs-64KB/db-50krows", files: 1000, size: 64 << 10, dbRows: 50_000, dbValue: 512, immutable: true},
 	}
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
@@ -624,10 +642,26 @@ func BenchmarkSessionSnapshot(b *testing.B) {
 			}
 			defer func() { _ = eng.Stop(context.Background()) }()
 
-			blob := make([]byte, tc.size)
-			for i := 0; i < tc.files; i++ {
-				if err := eng.Session.WriteFile(fmt.Sprintf("files/f%05d.bin", i), blob); err != nil {
+			if tc.immutable {
+				blobStore, err := blobs.New(eng.Session.BlobsDir(), 0)
+				if err != nil {
 					b.Fatal(err)
+				}
+				payload := make([]byte, tc.size)
+				for i := 0; i < tc.files; i++ {
+					// Distinct bytes per blob, or every Put would collapse onto
+					// one sha and the tree would hold a single object.
+					binary.LittleEndian.PutUint64(payload, uint64(i))
+					if _, err := blobStore.Put(payload, "application/octet-stream"); err != nil {
+						b.Fatal(err)
+					}
+				}
+			} else {
+				blob := make([]byte, tc.size)
+				for i := 0; i < tc.files; i++ {
+					if err := eng.Session.WriteFile(fmt.Sprintf("files/f%05d.bin", i), blob); err != nil {
+						b.Fatal(err)
+					}
 				}
 			}
 			st, err := eng.Storage.Open(storage.ScopeSession, "nexus.bench.store")
@@ -651,16 +685,31 @@ func BenchmarkSessionSnapshot(b *testing.B) {
 				}
 			}
 			b.SetBytes(bytes)
+			putsBefore := backend.Counts().Puts
+
+			// Bytes actually transferred per turn is the number that decides
+			// what a turn costs on a real link; the in-memory backend makes an
+			// upload almost free, so ns/op understates the saving badly.
+			var uploaded int64
+			unsub := eng.Bus.Subscribe("session.snapshot.result", func(ev Event[any]) {
+				if r, ok := ev.Payload.(events.SessionSnapshotResult); ok {
+					uploaded += r.BytesUploaded
+				}
+			})
+			defer unsub()
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				endTurnB(b, eng, fmt.Sprintf("turn-%d", i))
 			}
 			b.StopTimer()
+			puts := backend.Counts().Puts - putsBefore
 			// Reported after the loop because ResetTimer deletes
 			// user-reported metrics.
 			b.ReportMetric(float64(len(backend.Keys())), "objects")
 			b.ReportMetric(float64(bytes)/(1<<20), "tree_MiB")
+			b.ReportMetric(float64(puts)/float64(b.N), "puts/op")
+			b.ReportMetric(float64(uploaded)/float64(b.N)/(1<<20), "upload_MiB/op")
 		})
 	}
 }

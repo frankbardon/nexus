@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -162,6 +164,112 @@ func objectStoreExcluded(relPath string) bool {
 		}
 	}
 	return false
+}
+
+// rotatedJournalSegmentRe matches a sealed journal segment, mirroring
+// journal.rotatedRe (^events-(\d{3,})\.jsonl\.zst$) with the session-relative
+// directory in front. Deliberately a copy rather than an exported symbol from
+// pkg/engine/journal: what this file needs is not "the name rotation happens to
+// produce today" but "a name whose bytes can never change again", and pinning
+// it here means a future change to the rotation naming shows up as a skip that
+// stops applying — the safe direction — instead of silently widening what the
+// engine treats as immutable.
+var rotatedJournalSegmentRe = regexp.MustCompile(`^journal/events-\d{3,}\.jsonl\.zst$`)
+
+// objectStoreImmutable reports whether a session-relative path names a file
+// that cannot change once written, so a snapshot that has already uploaded it
+// need never upload it again.
+//
+// # Why this exists
+//
+// The turn-boundary snapshot is O(whole tree) per turn: it re-uploads every
+// object every turn, however little changed. E1-S4 measured a 91 MiB /
+// 1007-object session at ~170 ms of local engine work per turn, which on a
+// 100 Mbit link is roughly seven seconds of upload per turn, forever. Most of
+// a mature session's bytes are files that provably cannot have changed.
+//
+// # By construction, never by diffing
+//
+// A file qualifies here because its *identity* proves immutability, never
+// because a hash or an mtime comparison suggested it was unchanged. That
+// distinction is the whole reason this is a small, auditable change:
+//
+//   - journal/events-NNN.jsonl.zst is sealed at rotation. rotate.go compresses
+//     the active segment into the next free NNN slot and never reopens it; the
+//     journal's own Snapshot already relies on exactly this ("Rotated segments
+//     ... are immutable once written, so they are reported by their live
+//     paths").
+//   - blobs/<xx>/<sha256>.bin is content-addressed. Rewriting it with different
+//     bytes would change its sha256 and therefore its name, so a file at that
+//     path either holds those bytes or does not exist. blobs.Store.Put returns
+//     early on a present blob and touches only the mtime — which is precisely
+//     why mtime would have been the wrong signal and the name is the right one.
+//   - blobs/<xx>/<sha256>.meta is written once, by the same Put that created
+//     the .bin, and never rewritten (a later Put of the same content reads the
+//     existing media type back rather than replacing it).
+//
+// General content-hash or mtime-based change detection over the rest of the
+// tree is deliberately NOT here. It is the PRD's undesigned escape hatch, it
+// would need a persisted per-file digest to be worth anything, and it would
+// turn a predicate anyone can audit by reading it into a cache anyone can be
+// wrong about.
+//
+// # What immutability alone does not license
+//
+// Being unchangeable locally says nothing about whether the object reached the
+// bucket. This predicate is therefore only half the decision: the snapshot
+// skips a file only when a listing taken moments earlier
+// (listImmutableRemote) says the store holds it at exactly that size. A
+// skipped file that is somehow absent or truncated remotely is uploaded like
+// anything else, so a skip can never turn a gap into a permanent gap.
+//
+// Deletion is not a problem either. Blobs are swept locally under an LRU byte
+// budget, and a snapshot never deletes — so a swept blob simply stays in the
+// bucket, which is the same outcome it had before this predicate existed.
+func objectStoreImmutable(relPath string) bool {
+	p := filepath.ToSlash(relPath)
+	if rotatedJournalSegmentRe.MatchString(p) {
+		return true
+	}
+
+	rest, ok := strings.CutPrefix(p, "blobs/")
+	if !ok {
+		return false
+	}
+	dir, name, ok := strings.Cut(rest, "/")
+	if !ok || len(dir) != 2 || strings.Contains(name, "/") {
+		return false
+	}
+	var sha string
+	switch {
+	case strings.HasSuffix(name, ".bin"):
+		sha = strings.TrimSuffix(name, ".bin")
+	case strings.HasSuffix(name, ".meta"):
+		sha = strings.TrimSuffix(name, ".meta")
+	default:
+		// Anything else in the blob tree — most importantly the
+		// "<name>.tmp-*" files writeAtomic leaves mid-write — is not
+		// content-addressed and gets no promise.
+		return false
+	}
+	if len(sha) != 2*sha256.Size || !strings.HasPrefix(sha, dir) {
+		return false
+	}
+	return isLowerHex(sha)
+}
+
+// isLowerHex reports whether s is entirely lowercase hexadecimal. Spelled out
+// rather than routed through hex.DecodeString because uppercase hex decodes
+// fine and would let "BLOBS/AA/AA...bin" past a check whose entire job is to
+// recognise exactly the names blobs.Store.paths produces.
+func isLowerHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // openObjectStore resolves the configured backend once, at the very top of
@@ -440,8 +548,8 @@ func dirIsEmpty(dir string) (bool, error) {
 // would report a turn complete while its state was still in flight, which is
 // precisely the guarantee ("a hard kill loses at most the in-flight turn") the
 // snapshot exists to provide. The cost is real and is logged on every snapshot
-// — objects, bytes and duration — because it is O(tree size) per turn and the
-// tree only grows.
+// — objects, bytes, the uploaded/skipped split and duration — because it is
+// O(tree size minus the immutable share) per turn and the tree only grows.
 //
 // # What "never replaces a good remote copy" means here
 //
@@ -465,6 +573,27 @@ func dirIsEmpty(dir string) (bool, error) {
 // objectstore.TrimKeyPrefix matches whole segments: sessions/<id>.snapshot.json
 // is deliberately *not* under prefix sessions/<id>, so it never hydrates back
 // into the session and never becomes an input to the next snapshot.
+//
+// # Immutable-skip: the one thing a snapshot does not re-upload
+//
+// A snapshot is O(whole tree), not O(what changed), and that cost is paid on
+// every turn. Most of a mature session's bytes are files that provably cannot
+// have changed since the last snapshot: sealed journal segments and
+// content-addressed blobs. Those are skipped — see objectStoreImmutable for
+// the identity argument, and listImmutableRemote for the listing that proves
+// they actually reached the store.
+//
+// Three properties above survive the skip intact:
+//
+//   - "A snapshot never deletes" is unaffected; skipping is not deleting.
+//   - The commit marker still only advances past a complete snapshot, because
+//     a skipped object is one the store was confirmed to already hold. The
+//     marker's Objects and Bytes still describe the whole committed set, not
+//     just this turn's uploads.
+//   - Nothing is skipped on the basis of a diff. A file is skipped because its
+//     *name* proves its bytes, which is why there is no digest cache here to go
+//     stale and no mtime to be fooled by (blobs.Store.Put touches mtime on
+//     every hit, so mtime would have been actively misleading).
 //
 // The rejected alternative was generation directories — write the whole tree
 // under sessions/<id>/gen-<n>/ and flip a pointer. That gives true atomic
@@ -540,16 +669,49 @@ type snapshotRequest struct {
 
 // snapshotEntry pairs a session-relative path with the local file the bytes
 // come from. The two differ for anything that had to be staged.
+//
+// After the upload loop, the entries slice is the snapshot's *committed object
+// set* — every object this snapshot asserts is present remotely — with each
+// entry marked as uploaded, skipped or gone. That is deliberate and it matters
+// for anything that later wants to write a per-object manifest beside the
+// commit marker: the manifest must be built from `included`, NOT from "what we
+// called Put on". A skipped file is still part of the committed set, and a
+// manifest of only-what-was-uploaded would describe a session with its journal
+// segments and blobs missing — which a hydration honouring that manifest would
+// then faithfully reproduce.
 type snapshotEntry struct {
 	rel string
 	src string
+	// immutable is objectStoreImmutable(rel), computed once at walk time.
+	immutable bool
+	// size is the local size observed just before the upload decision.
+	size int64
+	// included reports whether this object is part of the committed set —
+	// true for both uploaded and skipped entries, false only for a file that
+	// vanished from the live tree between the walk and the upload.
+	included bool
+	// skipped reports that the object was already durably present and was not
+	// re-uploaded. Implies immutable.
+	skipped bool
 }
 
 // snapshotStats is what the snapshot reports back — the cost measurement.
 type snapshotStats struct {
 	Sequence uint64
-	Objects  int
-	Bytes    int64
+	// Objects and Bytes describe the committed object set: everything the
+	// snapshot asserts is durably present, uploaded this time or not. They
+	// keep the meaning they had before immutable-skip existed ("how big is
+	// the stored session"), which is what the commit marker records and what
+	// a restore cares about.
+	Objects int
+	Bytes   int64
+	// ObjectsUploaded/BytesUploaded and ObjectsSkipped/BytesSkipped split that
+	// set into what this snapshot actually paid for and what immutable-skip
+	// saved. This is the per-turn cost; Objects/Bytes is the session size.
+	ObjectsUploaded int
+	BytesUploaded   int64
+	ObjectsSkipped  int
+	BytesSkipped    int64
 	// DBBytes and DBDuration isolate the per-plugin SQLite share of the
 	// snapshot, which is the part that is O(database size) on every single
 	// turn regardless of how little changed.
@@ -646,15 +808,19 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 	stats, err := e.snapshotSessionTree(ctx, store, req)
 
 	result := events.SessionSnapshotResult{
-		SchemaVersion: events.SessionSnapshotResultVersion,
-		SessionID:     e.Session.ID,
-		Trigger:       req.trigger,
-		Sequence:      stats.Sequence,
-		TurnID:        req.turnID,
-		Objects:       stats.Objects,
-		Bytes:         stats.Bytes,
-		DurationMs:    float64(stats.Duration.Microseconds()) / 1000,
-		OK:            err == nil,
+		SchemaVersion:   events.SessionSnapshotResultVersion,
+		SessionID:       e.Session.ID,
+		Trigger:         req.trigger,
+		Sequence:        stats.Sequence,
+		TurnID:          req.turnID,
+		Objects:         stats.Objects,
+		Bytes:           stats.Bytes,
+		ObjectsUploaded: stats.ObjectsUploaded,
+		BytesUploaded:   stats.BytesUploaded,
+		ObjectsSkipped:  stats.ObjectsSkipped,
+		BytesSkipped:    stats.BytesSkipped,
+		DurationMs:      float64(stats.Duration.Microseconds()) / 1000,
+		OK:              err == nil,
 	}
 
 	if err != nil {
@@ -687,6 +853,10 @@ func (e *Engine) runSessionSnapshot(req snapshotRequest) {
 			"sequence", stats.Sequence,
 			"objects", stats.Objects,
 			"bytes", stats.Bytes,
+			"objects_uploaded", stats.ObjectsUploaded,
+			"bytes_uploaded", stats.BytesUploaded,
+			"objects_skipped", stats.ObjectsSkipped,
+			"bytes_skipped", stats.BytesSkipped,
 			"db_bytes", stats.DBBytes,
 			"db_duration", stats.DBDuration,
 			"duration", stats.Duration,
@@ -819,14 +989,27 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 		if journalCaptured && isJournalSegmentPath(slash) {
 			return nil
 		}
-		entries = append(entries, snapshotEntry{rel: slash, src: path})
+		entries = append(entries, snapshotEntry{
+			rel:       slash,
+			src:       path,
+			immutable: objectStoreImmutable(slash),
+		})
 		return nil
 	})
 	if walkErr != nil {
 		return stats, fmt.Errorf("snapshot: walking session tree: %w", walkErr)
 	}
 	for rel, src := range staged {
-		entries = append(entries, snapshotEntry{rel: rel, src: src})
+		// Rotated journal segments arrive here too: journal.Writer.Snapshot
+		// reports them by their *live* paths precisely because they are
+		// immutable, so the predicate applies to them exactly as it does to
+		// walked files. The staged active segment and the VACUUMed store.db
+		// copies are not immutable and are never skipped.
+		entries = append(entries, snapshotEntry{
+			rel:       rel,
+			src:       src,
+			immutable: objectStoreImmutable(rel),
+		})
 	}
 
 	// Sorted so the upload order is reproducible across runs and platforms,
@@ -839,7 +1022,14 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
 
 	prefix := sessionObjectKeyPrefix(e.Session.ID)
-	for _, entry := range entries {
+
+	// Learn what the store already holds before deciding to skip anything.
+	// One listing, against as many avoided uploads as the session has
+	// immutable files.
+	remote := e.listImmutableRemote(ctx, store, prefix, entries)
+
+	for i := range entries {
+		entry := &entries[i]
 		if err := ctx.Err(); err != nil {
 			return stats, fmt.Errorf("snapshot: %w", err)
 		}
@@ -848,16 +1038,53 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 			if errors.Is(statErr, fs.ErrNotExist) {
 				// The tree is live. A file that vanished between the walk and
 				// here (a tool cleaning up after itself, a cache sweep) is not
-				// a snapshot failure.
+				// a snapshot failure. It is also not part of the committed set,
+				// so it stays included == false.
 				continue
 			}
 			return stats, fmt.Errorf("snapshot: stat %s: %w", entry.rel, statErr)
 		}
+		entry.size = info.Size()
+
+		// The skip needs BOTH halves: the path's identity proves the bytes
+		// cannot have changed, and the memo proves those bytes reached the
+		// store. Sizes must agree too — a remote object of a different length
+		// under a content-addressed or sealed-segment key is a truncated or
+		// interrupted upload, and re-uploading is the only way to repair it.
+		// This is the acceptance criterion "a skipped file that is somehow
+		// missing remotely is still uploaded", in code.
+		if entry.immutable {
+			if size, ok := remote[entry.rel]; ok && size == entry.size {
+				entry.included = true
+				entry.skipped = true
+				continue
+			}
+		}
+
 		if err := store.backend.Put(ctx, prefix+"/"+entry.rel, entry.src); err != nil {
 			return stats, fmt.Errorf("snapshot: uploading %s: %w", entry.rel, err)
 		}
+		entry.included = true
+	}
+
+	// Counted from the marked entries rather than incremented inside the loop,
+	// so the numbers on the commit marker and the result event are derived from
+	// the same committed set a per-object manifest would be written from — not
+	// from a parallel tally that can drift away from it.
+	for i := range entries {
+		entry := &entries[i]
+		if !entry.included {
+			continue
+		}
 		stats.Objects++
-		stats.Bytes += info.Size()
+		stats.Bytes += entry.size
+		if entry.skipped {
+			stats.ObjectsSkipped++
+			stats.BytesSkipped += entry.size
+			continue
+		}
+		stats.ObjectsUploaded++
+		stats.BytesUploaded += entry.size
 	}
 
 	// The durability barrier. Everything above is only queued until this
@@ -870,6 +1097,75 @@ func (e *Engine) snapshotSessionTree(ctx context.Context, store *sessionObjectSt
 		return stats, err
 	}
 	return stats, nil
+}
+
+// listImmutableRemote asks the store which immutable-by-construction objects it
+// currently holds, session-relative path -> size.
+//
+// This is the half of immutable-skip that keeps a skip from turning a gap into
+// a permanent gap. objectStoreImmutable only says the local bytes cannot have
+// changed; it says nothing about whether they ever reached the bucket, and a
+// resumed session's blobs and rotated segments were hydrated *from* the store
+// rather than uploaded by this process.
+//
+// # Why this is re-listed on every snapshot rather than memoised for the run
+//
+// The memoised version was written first and is wrong. Put may complete
+// asynchronously — Flush is the interface's only durability promise — so a
+// snapshot whose uploads succeeded and whose Flush then failed has put nothing
+// durable in the store. A run-scoped memo would remember those objects as
+// present, the next snapshot would skip them, its Flush would succeed, and the
+// commit marker would advance past a set with a hole in it. The hole would then
+// be permanent: nothing in the run would ever look again.
+//
+// Re-listing makes the rule trivial to state and to audit — a file is skipped
+// only when a listing taken moments ago said the store has it, at that exact
+// size — and makes the skip self-repairing against anything that removes or
+// truncates an object out of band. The cost is one listing per snapshot against
+// hundreds or thousands of avoided uploads; a cloud list API returns a thousand
+// keys per request, so this is one or two round trips where the skip saves as
+// many uploads as the session has immutable files.
+//
+// Only immutable keys are kept. Everything else is re-uploaded every snapshot
+// regardless, so remembering it would build a map that grows with the session
+// for no reader.
+//
+// A failed listing is not fatal and returns nil, which skips nothing and
+// uploads everything — always the safe direction, and the same outcome as the
+// behaviour before this existed. Skipped entirely when the tree has no
+// immutable candidates, so a young session with no blobs and no rotated
+// segments pays no round trip at all.
+func (e *Engine) listImmutableRemote(ctx context.Context, store *sessionObjectStore, prefix string, entries []snapshotEntry) map[string]int64 {
+	candidates := false
+	for i := range entries {
+		if entries[i].immutable {
+			candidates = true
+			break
+		}
+	}
+	if !candidates {
+		return nil
+	}
+
+	objects, err := store.backend.List(ctx, prefix)
+	if err != nil {
+		e.Logger.Warn("object store: listing stored objects failed, re-uploading immutable files this snapshot",
+			"backend", store.cfg.BackendName, "key_prefix", prefix, "error", err)
+		return nil
+	}
+
+	remote := make(map[string]int64, len(objects))
+	for _, obj := range objects {
+		rel, ok := objectstore.TrimKeyPrefix(obj.Key, prefix)
+		if !ok {
+			continue
+		}
+		if !objectStoreImmutable(rel) {
+			continue
+		}
+		remote[rel] = obj.Size
+	}
+	return remote
 }
 
 // publishSnapshotMarker writes and durably stores the commit record. Runs only
