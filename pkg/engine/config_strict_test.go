@@ -181,9 +181,11 @@ core:
 // configs/demo-rewind.yaml, which had carried a silently-ignored
 // core.journal.fsync_mode block since it was written.
 func TestEveryShippedConfigStillLoads(t *testing.T) {
-	// Engine configs are not only under configs/ -- the demo recipes and the
-	// desktop app's embedded configs are the same file format and break the
-	// same way.
+	// Every engine config in the tree, including the ones TestConfigsSmokeBoot
+	// cannot reach: cmd/demo/config-*.yaml and cmd/desktop/config-*.yaml name
+	// plugins outside the default registry, so schema validation fails on them
+	// for reasons unrelated to the config. Loading needs no registry, so this
+	// half covers them.
 	globs := []string{
 		"../../configs/*.yaml",
 		"../../cmd/demo/config-*.yaml",

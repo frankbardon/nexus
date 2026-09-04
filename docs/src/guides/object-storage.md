@@ -559,11 +559,26 @@ use it at all — so "behaves exactly like local disk" would degrade from a
 guarantee to an aspiration.
 
 The consequence is that **time-to-first-turn on a resume scales with the size of
-the stored session**, and **no cold-start budget is asserted anywhere**. Nothing
-in the test suite fails when hydration gets slower. A long-running session that
-has accumulated a large `files/` tree or a large per-plugin database will pay
-for it on every resume onto a fresh host. Measure it for your own workload
-before assuming a resume is cheap.
+the stored session**. A long-running session that has accumulated a large
+`files/` tree or a large per-plugin database will pay for it on every resume
+onto a fresh host. Measure it for your own workload before assuming a resume is
+cheap.
+
+**No wall-clock budget is asserted, deliberately.** A millisecond threshold on a
+shared CI runner is either flaky or so loose it catches nothing, and it fails
+for reasons unrelated to this code. What *is* asserted is the cost *shape*, in
+`pkg/engine/session_objectstore_coldstart_test.go`: resuming costs exactly two
+backend round trips — the tree, then the committed-object manifest — regardless
+of session size, zero `List` calls, and zero writes back to the store; a warm
+tree costs no traffic at all; and hydration pulls only this session's key
+prefix, proven with a larger neighbouring session in the same bucket. Those
+numbers are exactly reproducible, and they are what turns into latency and
+egress against a real store.
+
+So a refactor toward per-object fetching — one request per file instead of one
+for the tree — fails the suite rather than quietly turning one round trip into
+thousands. What still will not fail the suite is the same two round trips
+carrying steadily more bytes, which is the growth this section is about.
 
 The snapshot side *is* measured: 0.05 MiB of tree costs ~12.5 ms of local engine
 work, 6 MiB ~30 ms, 91 MiB ~170 ms, plus network on top. Immutable-by-identity
@@ -616,28 +631,37 @@ tells you to remove the option if MinIO ever gains a flat key space. **If you
 run MinIO in production rather than as an emulator, this is a real constraint on
 your deployment, not a test detail.**
 
-### 9. A misspelled block boots with object storage silently disabled
+### 9. A misspelled block used to boot with object storage silently disabled
 
-This is pre-existing engine behaviour rather than something this feature
-introduced, and it bites hardest here. Plugin config is schema-validated with
-`additionalProperties: false`, so a plugin-level typo fails the boot. **The
-engine's own `core:` block is not validated that way**: `LoadConfigFromBytes` is
-non-strict and the validator rebuilds the map from the typed config, so a key
-YAML decoding did not recognise never reaches the schema.
+**Fixed.** Recorded here because the failure mode is worth knowing, and because
+anyone running a build from before the fix still has it.
 
-Concretely — `core: { object_stor: { … } }` boots clean, with object storage
-off:
+Plugin config has always been schema-validated with `additionalProperties:
+false`, so a plugin-level typo failed the boot. The engine's own `core:` block
+was not: `LoadConfigFromBytes` is non-strict, and the validator rebuilds the map
+from the already-decoded typed config, so a key YAML decoding dropped never
+reached the schema. `core: { object_stor: { … } }` therefore booted clean, with
+`enabled=false backend=""` and no error — every turn succeeding, nothing ever
+uploaded, and the first symptom an empty bucket after the host was replaced.
+
+`checkUnknownConfigKeys` now walks the raw YAML against the config structs' yaml
+tags and rejects an unknown key at any depth, naming the path and listing what
+was valid there:
 
 ```
-enabled=false backend=""
-validate: nil
+config: unknown key "core.object_stor" (valid keys here: agent_id, log_level,
+logging, max_concurrent_events, models, object_store, sessions, storage,
+tick_interval)
 ```
 
-A typo inside a correctly-spelled `object_store:` block is caught, because the
-block's own validation runs (`bucket is required when backend is set`). It is
-the block *name* that is unguarded. **Verify the wiring by looking for the
-snapshot log line, not by observing a clean boot** — see
-[Verifying the wiring](#verifying-the-wiring).
+Blocks whose keys are data rather than field names are exempt and unaffected:
+`plugins:` (plugin IDs, guarded by their own schemas), `core.models` (role names)
+and `capabilities:` (capability names).
+
+It is still worth verifying the wiring by looking for the snapshot log line
+rather than by observing a clean boot — see [Verifying the
+wiring](#verifying-the-wiring). A config can name a backend correctly and still
+be pointed at the wrong bucket.
 
 ---
 
