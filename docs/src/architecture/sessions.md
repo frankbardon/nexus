@@ -860,8 +860,40 @@ the three writes made after the turn boundary. A companion test compares the
 whole hydrated tree against a content-hash fingerprint of the killed one, file
 by file.
 
-E4-S4 repeats the same scenario against MinIO, where a real wire protocol is in
-the loop.
+`TestKillAndResumeAgainstMinIORestoresIdenticalSessionState` in
+`modules/objectstore-s3` repeats that scenario against MinIO, where a real wire
+protocol, real latency and real error mapping are in the loop. It lives in the
+S3 module rather than beside its sibling because that is the only package in the
+tree that can hold a real `engine.Engine` and a real S3 wire at once — the
+engine is in the root module, the backend is in that one — and it reaches the
+engine through the exported `engine.NewFromBytes` and an `object_store:` block,
+the same path an operator's config takes. It adds one assertion the in-memory
+run cannot make: the `store.db` object is pulled back out of the bucket with a
+client that is **not** the backend under test and opened as a database, so
+"MinIO is holding a valid, queryable, fully checkpointed SQLite file" is
+asserted rather than inferred. Against the memory backend an upload is a
+`[]byte` copied inside the process, so a broken WAL checkpoint would still round
+trip; here it does not.
+
+**The mid-flush kill, and the boundary it stops at.**
+`TestMidFlushKillAgainstMinIORestoresTheCommittedGeneration` kills a process
+partway through a snapshot — the tree objects of the dead generation reach the
+bucket, the manifest and the commit marker never do — and asserts what actually
+survives:
+
+- Hydration restores exactly the committed generation's **object set**. A key
+  the dead generation added and the committed manifest does not name is not
+  materialised.
+- Orphaned objects are left in the bucket, not deleted.
+
+and what does not, per **Where the guarantee stops** under [The generation stamp
+and the per-object manifest](#turn-boundary-snapshots): an object the dead
+generation **overwrote in place** carries the dead generation's bytes, because
+the manifest names paths rather than versions. The restored `store.db` reads the
+uncommitted generation, and the test asserts that rather than hoping otherwise.
+`TestInterruptedSnapshotCanOverwriteACommittedObjectInPlace` pins the same
+boundary against the in-memory backend; the MinIO run is where an argument that
+a real store would somehow keep the old bytes would be exposed.
 
 ### Lifetime of the local working copy
 

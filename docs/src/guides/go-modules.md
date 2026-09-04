@@ -127,6 +127,15 @@ Three deliberate exceptions:
   emulator and its own target. Everything above stays untagged, which is what
   keeps `make test` offline and secret-free even though it sweeps `modules/`.
 
+  That suite is also where the kill-and-resume cycle is proven against a real
+  store (`resume_minio_test.go`), which is why `modules/objectstore-s3/go.mod`
+  carries indirect requirements — `modernc.org/sqlite`, `gopkg.in/yaml.v3`,
+  `klauspost/compress` — that have nothing to do with S3. They come from the
+  root module's `pkg/engine`, which that **test** imports so it can drive a real
+  engine against a real bucket; no non-test file in the module imports anything
+  above `pkg/engine/objectstore`. The direction that matters is unchanged: the
+  root module still does not require this one.
+
 - **`check-events` stays root-only.** `scripts/check-event-versions.sh` `cd`s to
   the repository top level and inspects `pkg/events/` alone. Event structs live
   in the root module and nowhere else, so running it per submodule would repeat
