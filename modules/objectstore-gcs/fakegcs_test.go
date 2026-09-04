@@ -92,8 +92,14 @@ type fakeObject struct {
 // in-process fake would mean 1200 round trips inside `make test`, which buys
 // nothing here: what this fake can prove is that the iterator is drained at
 // all, and a page size of 50 proves that with a fraction of the objects. The
-// full-size probe belongs to the fake-gcs-server run, where the page size is
-// genuinely 1000 and the cost is paid once in a tagged suite.
+// full-size probe is paid once, in the tagged fake-gcs-server suite.
+//
+// Worth knowing when reading that suite: this fake is the *only* server in the
+// tree that paginates without being asked. fake-gcs-server has no default page
+// size at all -- measured by TestFakeGCSServerDoesNotPaginateUnlessAsked -- so
+// its 1200-object run buys volume rather than a boundary, and the boundary is
+// covered there by asking the server for a page size explicitly. The two are
+// complements in this direction too.
 const defaultFakePageSize = 50
 
 func newFakeGCS(t *testing.T, bucket string) *fakeGCS {

@@ -1,4 +1,4 @@
-.PHONY: build build-broker run clean test test-race test-broker-integration test-objectstore-minio fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
+.PHONY: build build-broker run clean test test-race test-broker-integration test-objectstore-minio test-objectstore-fake-gcs fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
 
 BINARY_NAME=nexus
 BROKER_BINARY_NAME=nexus-broker
@@ -168,9 +168,35 @@ test-broker-integration:
 #
 # Not driven by GO_SUBMODULES. MinIO emulates S3 and nothing else, so this is
 # specific to modules/objectstore-s3 by nature; the GCS module gets its own
-# target and its own emulator.
+# target and its own emulator, below.
 test-objectstore-minio:
 	scripts/with-minio.sh $(GO) test -C modules/objectstore-s3 -tags minio -count=1 ./...
+
+# Object-store suite against a real Cloud Storage implementation.
+#
+# Everything test-objectstore-minio says applies here: modules/objectstore-gcs's
+# emulator files are //go:build fakegcsserver, so `make test` (including its
+# untagged submodule sweep) never runs them; the emulator is loopback-only and
+# needs no cloud account, no API key and no repository secret; and -count=1
+# because the result depends on a server this target just started, so a cached
+# PASS would not be a gate.
+#
+# Deliberately a second target rather than a shared "emulator" one. MinIO
+# emulates S3 and fake-gcs-server emulates GCS; folding them together would mean
+# one red step for two unrelated stores, and neither suite could be run on its
+# own while working on its own backend.
+#
+# The build tag is the emulator's full name rather than "fakegcs", because that
+# name is already taken inside the module: fakegcs_test.go is the in-process
+# httptest fake the untagged suite runs against. scripts/with-fake-gcs.sh owns
+# the emulator lifecycle and records why it builds a pinned Go binary where
+# with-minio.sh runs a pinned container. It also exports
+# NEXUS_TEST_FAKE_GCS_REQUIRED, which turns the suite's no-emulator-so-skip path
+# into a failure: the skip exists for a machine that cannot produce the
+# emulator, and a skip in a run that provisioned one would be green while
+# testing nothing.
+test-objectstore-fake-gcs:
+	scripts/with-fake-gcs.sh $(GO) test -C modules/objectstore-gcs -tags fakegcsserver -count=1 ./...
 
 fmt:
 	$(GO) fmt ./...

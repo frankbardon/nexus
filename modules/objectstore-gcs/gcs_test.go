@@ -136,8 +136,8 @@ func TestContractSuite(t *testing.T) {
 		// The fake's page size is 50 (see defaultFakePageSize), so 200 objects
 		// span four pages and catch an iterator that is not drained. The
 		// suite's 1200 default exists to clear the API's real 1000-object page
-		// and is paid once, against fake-gcs-server, rather than 1200 times
-		// inside `make test`.
+		// and is paid once, in the tagged fake-gcs-server suite, rather than
+		// 1200 times inside `make test`.
 		objectstoretest.WithListProbeCount(200),
 	)
 }

@@ -111,6 +111,7 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 | `make build` | builds `cmd/nexus` + `cmd/nexus-broker` | `go build ./...` (compile check; submodules ship no binary) |
 | `make test` | `go test ./...` | `go test ./...` |
 | `make test-objectstore-minio` | — | `modules/objectstore-s3` only, `-tags minio` |
+| `make test-objectstore-fake-gcs` | — | `modules/objectstore-gcs` only, `-tags fakegcsserver` |
 | `make test-race` | `go test -race ./...` | `go test -race ./...` |
 | `make fmt` | `go fmt ./...` | `go fmt ./...` |
 | `make vet` | `go vet ./...` | `go vet ./...` |
@@ -121,20 +122,46 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 
 Three deliberate exceptions:
 
-- **`test-objectstore-minio` is not a sweep.** It runs one submodule's
-  build-tagged suite against a MinIO container `scripts/with-minio.sh` starts and
-  stops, because MinIO emulates S3 and nothing else; the GCS module gets its own
-  emulator and its own target. Everything above stays untagged, which is what
-  keeps `make test` offline and secret-free even though it sweeps `modules/`.
+- **The emulator targets are not sweeps.** Each runs one submodule's
+  build-tagged suite against an emulator the target starts and stops itself:
+  `test-objectstore-minio` against MinIO via `scripts/with-minio.sh`, and
+  `test-objectstore-fake-gcs` against fake-gcs-server via
+  `scripts/with-fake-gcs.sh`. Two targets rather than one shared "emulator"
+  target, because MinIO emulates S3 and fake-gcs-server emulates GCS — folding
+  them together would mean one red step for two unrelated stores, and neither
+  suite could be run on its own while working on its own backend. Everything
+  above stays untagged, which is what keeps `make test` offline and secret-free
+  even though it sweeps `modules/`.
 
-  That suite is also where the kill-and-resume cycle is proven against a real
-  store (`resume_minio_test.go`), which is why `modules/objectstore-s3/go.mod`
-  carries indirect requirements — `modernc.org/sqlite`, `gopkg.in/yaml.v3`,
-  `klauspost/compress` — that have nothing to do with S3. They come from the
-  root module's `pkg/engine`, which that **test** imports so it can drive a real
-  engine against a real bucket; no non-test file in the module imports anything
-  above `pkg/engine/objectstore`. The direction that matters is unchanged: the
-  root module still does not require this one.
+  The two scripts are the same shape on purpose — a pinned emulator version, a
+  readiness wait, a port nothing else can be holding, an EXIT trap, and a
+  `NEXUS_TEST_*_REQUIRED` variable that turns the suite's no-emulator skip into
+  a failure so a provisioned run cannot pass by skipping — and differ in one
+  place: `with-minio.sh` runs a pinned container, while `with-fake-gcs.sh`
+  builds a pinned Go binary with `go install <module>@<version>`, because
+  fake-gcs-server is a Go module and MinIO is not. That means the GCS emulator
+  suite needs no container runtime at all. Each script records the reasoning and
+  the alternatives that were rejected.
+
+  Both suites are also where the kill-and-resume cycle is proven against a real
+  store, which is why **both** `modules/objectstore-s3/go.mod` and
+  `modules/objectstore-gcs/go.mod` carry indirect requirements —
+  `modernc.org/sqlite`, `gopkg.in/yaml.v3`, `klauspost/compress` — that have
+  nothing to do with either cloud. They come from the root module's `pkg/engine`,
+  which those **tests** import so they can drive a real engine against a real
+  bucket; no non-test file in either module imports anything above
+  `pkg/engine/objectstore`. The direction that matters is unchanged: the root
+  module still does not require either one.
+
+  The cycle itself is written once, in `pkg/engine/objectstore/enginetest`, and
+  each module supplies only the four store-specific hooks it needs — register a
+  factory, make an empty bucket, list the bucket, read one object. It is exported
+  from the root module for the reason `objectstoretest` is: a backend may live in
+  a module this repository never sees, and passing the interface conformance
+  suite does not prove a session resumes from it. It is a separate package from
+  `objectstoretest` because it imports `pkg/engine`, and `pkg/engine`'s own tests
+  are `package engine` and import `objectstoretest` — so the two halves have to
+  sit in different packages or neither builds.
 
 - **`check-events` stays root-only.** `scripts/check-event-versions.sh` `cd`s to
   the repository top level and inspects `pkg/events/` alone. Event structs live
@@ -148,10 +175,12 @@ CI needs no submodule-specific job for the sweeps: `.github/workflows/ci.yml`
 runs `make build`, `make test`, `make test-race`, `make vet` and `make lint`, and
 those cover `modules/` already. A build-tagged emulator suite is the one thing
 that does need a workflow edit, because no sweep runs it — the
-`objectstore-minio` job exists for that and runs the same make target a developer
-runs. That is the design — one command per concern, shared verbatim
-between CI and a developer's terminal, so the two cannot drift into a state where
-CI skips something. Adding a module under `modules/` requires no workflow edit.
+`objectstore-minio` and `objectstore-fake-gcs` jobs exist for that, one per
+emulator, and each runs the same make target a developer runs. That is the
+design — one command per concern, shared verbatim between CI and a developer's
+terminal, so the two cannot drift into a state where CI skips something. Adding
+a module under `modules/` requires no workflow edit; adding an *emulator* suite
+to it does.
 
 Dependabot covers the submodules through a glob (`directories: [/, /modules/*]`)
 for the same reason.

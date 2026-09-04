@@ -907,29 +907,42 @@ the three writes made after the turn boundary. A companion test compares the
 whole hydrated tree against a content-hash fingerprint of the killed one, file
 by file.
 
-`TestKillAndResumeAgainstMinIORestoresIdenticalSessionState` in
-`modules/objectstore-s3` repeats that scenario against MinIO, where a real wire
-protocol, real latency and real error mapping are in the loop. It lives in the
-S3 module rather than beside its sibling because that is the only package in the
-tree that can hold a real `engine.Engine` and a real S3 wire at once — the
-engine is in the root module, the backend is in that one — and it reaches the
-engine through the exported `engine.NewFromBytes` and an `object_store:` block,
-the same path an operator's config takes. It adds one assertion the in-memory
-run cannot make: the `store.db` object is pulled back out of the bucket with a
-client that is **not** the backend under test and opened as a database, so
-"MinIO is holding a valid, queryable, fully checkpointed SQLite file" is
-asserted rather than inferred. Against the memory backend an upload is a
-`[]byte` copied inside the process, so a broken WAL checkpoint would still round
-trip; here it does not. Both MinIO kill tests express the kill as
-`engine.Abandon()` rather than by simply dropping the engine: against a real
-bucket an engine nobody stopped keeps a heartbeat and a retry worker writing
-objects into the bucket the test then has to delete, and `Abandon` is the one
-teardown that stops them without recording the clean exit the scenario depends
-on not having happened. See [Dropping a session without closing
+`enginetest.RunResumeSuite` in `pkg/engine/objectstore/enginetest` repeats that
+scenario against a real store, where a real wire protocol, real latency and real
+error mapping are in the loop. Two backends run it, each behind its own build
+tag and its own make target: `TestResumeSuiteAgainstMinIO` in
+`modules/objectstore-s3` (`make test-objectstore-minio`) and
+`TestResumeSuiteAgainstFakeGCSServer` in `modules/objectstore-gcs`
+(`make test-objectstore-fake-gcs`). The choreography is written once and shared,
+so the two backends cannot be held to different bars by accident; each module
+supplies only what is store-specific — registering a factory, making an empty
+bucket, listing it, and reading one object back with a client that is not the
+backend under test.
+
+The suite lives in the root module because the engine does, and the backends do
+not: only a module that requires both can hold a real `engine.Engine` and a real
+cloud wire at once. It reaches the engine through the exported
+`engine.NewFromBytes` and an `object_store:` block, the same path an operator's
+config takes. It adds one assertion the in-memory run cannot make: the
+`store.db` object is pulled back out of the bucket with that independent client
+and opened as a database, so "the store is holding a valid, queryable, fully
+checkpointed SQLite file" is asserted rather than inferred. Against the memory
+backend an upload is a `[]byte` copied inside the process, so a broken WAL
+checkpoint would still round trip; here it does not. Both kill cases express the
+kill as `engine.Abandon()` rather than by simply dropping the engine: against a
+real bucket an engine nobody stopped keeps a heartbeat and a retry worker
+writing objects into the bucket the test then has to delete, and `Abandon` is
+the one teardown that stops them without recording the clean exit the scenario
+depends on not having happened. See [Dropping a session without closing
 it](#dropping-a-session-without-closing-it).
 
-**The mid-flush kill, and the boundary it stops at.**
-`TestMidFlushKillAgainstMinIORestoresTheCommittedGeneration` kills a process
+What neither run covers is IAM. Both stores are emulators, and no emulator
+reproduces IRSA, EKS Pod Identity, GKE Workload Identity, Application Default
+Credentials resolution or Workload Identity Federation — the credential legs
+that justify taking a vendor SDK at all. Those stay a documented manual check.
+
+**The mid-flush kill, and the boundary it stops at.** The suite's
+`MidFlushKillRestoresTheCommittedGeneration` case kills a process
 partway through a snapshot — the tree objects of the dead generation reach the
 bucket, the manifest and the commit marker never do — and asserts what actually
 survives:
@@ -945,8 +958,8 @@ generation **overwrote in place** carries the dead generation's bytes, because
 the manifest names paths rather than versions. The restored `store.db` reads the
 uncommitted generation, and the test asserts that rather than hoping otherwise.
 `TestInterruptedSnapshotCanOverwriteACommittedObjectInPlace` pins the same
-boundary against the in-memory backend; the MinIO run is where an argument that
-a real store would somehow keep the old bytes would be exposed.
+boundary against the in-memory backend; the emulator runs are where an argument
+that a real store would somehow keep the old bytes would be exposed.
 
 ### Lifetime of the local working copy
 

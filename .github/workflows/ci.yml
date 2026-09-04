@@ -108,6 +108,46 @@ jobs:
       - name: Object store suite against MinIO
         run: make test-objectstore-minio
 
+  # The object-store backend in modules/objectstore-gcs, against a real Cloud
+  # Storage implementation instead of the in-process fake the `test` job runs.
+  #
+  # Its own job for the reasons objectstore-minio is its own job, and separate
+  # from it for one more: MinIO emulates S3 and fake-gcs-server emulates GCS, so
+  # a combined step would report one red for two unrelated stores and neither
+  # could be re-run on its own. Both jobs run concurrently, so holding the two
+  # backends to the same bar costs no extra wall clock. Roughly 30s, most of it
+  # the first build of the emulator.
+  #
+  # No secrets and no cloud account. `make test-objectstore-fake-gcs` builds a
+  # pinned fake-gcs-server with the Go toolchain this job already has and runs
+  # it on loopback — no container runtime is involved, which is why there is no
+  # setup step here beyond Go itself. scripts/with-fake-gcs.sh records why that
+  # differs from the MinIO job's container.
+  #
+  # The suite skips when no emulator is reachable, so a contributor who cannot
+  # build one gets an honest "not run" rather than a red they cannot act on. A
+  # skip here would be indistinguishable from a pass, so
+  # scripts/with-fake-gcs.sh exports NEXUS_TEST_FAKE_GCS_REQUIRED and the suite
+  # fails rather than skips in any run that provisioned the emulator. If this
+  # job is green, the tests ran.
+  #
+  # No `go mod download`: it covers the root module, and everything this job
+  # builds is either root-module code reached through the submodule's `replace`
+  # or a dependency the make target fetches on demand.
+  objectstore-fake-gcs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+
+      # Same target the maintainer runs locally, so local and CI cannot drift.
+      - name: Object store suite against fake-gcs-server
+        run: make test-objectstore-fake-gcs
+
   # Deliberately its own job rather than another step in `test`: it runs
   # concurrently with `test` and `lint`, so a green CI costs no extra
   # wall-clock time, and `make test-race` needs CGO_ENABLED=1 (the race
