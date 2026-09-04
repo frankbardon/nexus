@@ -342,6 +342,7 @@ The engine touches the seam in exactly six places, all in `pkg/engine`:
 | Once the workspace exists and the local lock is held | An owner marker is claimed at `sessions/<session id>.owner/owner.json`, and a second host holding the session is detected. See [Two hosts, one session](#two-hosts-one-session). |
 | Every turn boundary | The whole tree is snapshotted and made durable, a per-object manifest and then a commit marker are published, then the shared plugin stores are snapshotted. |
 | End of `Stop` | A final snapshot runs, the owner marker is removed, then `Flush`, then the backend is released. |
+| `Abandon` | Every background worker stops and the backend handle is dropped. No snapshot, no `Flush`, and the owner marker is left where it is. See [Dropping a session without closing it](#dropping-a-session-without-closing-it). |
 
 Hydration is **eager and whole-tree**, and completes before the first turn
 runs. There is deliberately no lazy or faulting read: threading one through the
@@ -789,7 +790,8 @@ to the next snapshot:
 | `heartbeat_at` | Refreshed every 30 seconds while the run is live. |
 
 `Boot` reads the marker before it writes its own — for a resumed session and a
-brand-new one alike — and a **clean `Stop` removes it**. The read also runs when
+brand-new one alike — and a **clean `Stop` removes it**, while
+[`Abandon`](#dropping-a-session-without-closing-it) deliberately leaves it. The read also runs when
 hydration short-circuited because a local tree was already present, so a warm
 host whose stale local copy is shadowing a session another host has since taken
 over is detected too.
@@ -837,6 +839,51 @@ agent-scope plugin storage — have a stronger version of the same problem and n
 marker yet; see [Per-Plugin Storage → Object storage for app and agent
 scope](storage.md#object-storage-for-app-and-agent-scope).
 
+### Dropping a session without closing it
+
+`Stop` and `Abandon` are the two ways a run ends, and they are not variants of
+each other. `Stop` closes a session: it takes a final snapshot, flushes, removes
+the owner marker, shuts plugins down, closes the journal and per-plugin SQLite,
+and releases the local lock. `Abandon` **drops** one:
+
+| | `Stop` | `Abandon` |
+|---|---|---|
+| Tick heartbeat, run-scoped subscriptions | stopped | stopped |
+| Object-store recovery worker | stopped | stopped |
+| Blob write-through worker | stopped, queue drained | stopped, queue **discarded** |
+| Owner-marker heartbeat | stopped | stopped |
+| Owner marker in the store | **deleted** | **left in place** |
+| Shutdown snapshot, `Flush` | yes | **no** |
+| Plugin `Shutdown`, journal close, SQLite close, session metadata, session lock | all done | **none of it** |
+
+It exists for two callers. A host on ephemeral compute that is being reclaimed
+and does not want to pay a whole-tree snapshot of a session nobody will read.
+And a test simulating a process death — an abandoned engine that keeps
+heartbeating and retrying is still writing into the bucket the test is trying to
+tear down, and stopping those workers without recording a clean exit is the only
+honest way to fake a kill.
+
+The owner marker is the part worth understanding. A clean `Stop` deletes it
+because the broker's ordinary release-and-respawn cycle resumes the same session
+minutes later, well inside the five-minute staleness window, and a marker left
+behind would fire the split-brain alarm on every legitimate resume. `Abandon`
+does not delete it, because doing so would record a clean release that never
+happened — the next host would resume in silence exactly where the evidence
+matters most. It does stop the heartbeat, though: a marker that kept beating for
+a run that no longer exists would read as live for ever and turn a genuine
+takeover into a reported conflict. With the beat stopped and the marker left, the
+next host applies the ordinary staleness rules from the table above — a dead PID
+on the same host, or a heartbeat past the threshold anywhere else — and takes
+over quietly.
+
+`Abandon` writes nothing and closes nothing local, so on its own it leaks the
+journal writer's goroutine and the open handles under the session tree. That is
+correct for a process about to exit and wrong for one that is not; a long-lived
+host can call `Stop` afterwards, which with the store handle already gone
+degenerates to local teardown and still writes nothing remote. It is idempotent,
+safe after `Stop` or on an engine that never booted, and costs nothing when no
+object store is configured.
+
 ### What survives a kill
 
 The recovery point is the **last completed turn**. A process that dies without
@@ -873,7 +920,13 @@ client that is **not** the backend under test and opened as a database, so
 "MinIO is holding a valid, queryable, fully checkpointed SQLite file" is
 asserted rather than inferred. Against the memory backend an upload is a
 `[]byte` copied inside the process, so a broken WAL checkpoint would still round
-trip; here it does not.
+trip; here it does not. Both MinIO kill tests express the kill as
+`engine.Abandon()` rather than by simply dropping the engine: against a real
+bucket an engine nobody stopped keeps a heartbeat and a retry worker writing
+objects into the bucket the test then has to delete, and `Abandon` is the one
+teardown that stops them without recording the clean exit the scenario depends
+on not having happened. See [Dropping a session without closing
+it](#dropping-a-session-without-closing-it).
 
 **The mid-flush kill, and the boundary it stops at.**
 `TestMidFlushKillAgainstMinIORestoresTheCommittedGeneration` kills a process

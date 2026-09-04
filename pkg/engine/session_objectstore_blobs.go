@@ -117,6 +117,15 @@ type blobWriteThrough struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
+	// discard turns the stop signal from "drain, then exit" into "exit now,
+	// leaving the queue where it is". Set only by Engine.Abandon, and always
+	// before stop is closed so the worker cannot observe one without the
+	// other. Draining is right at shutdown because the snapshot that follows
+	// would re-upload the same bytes anyway; it is wrong when the caller has
+	// declared the session dropped, where every queued Put is a write into a
+	// store nobody asked to update.
+	discard atomic.Bool
+
 	// Counters for the shutdown summary. Pushed and failed are worker-side,
 	// dropped is producer-side, so all three are atomic.
 	pushed  atomic.Uint64
@@ -196,6 +205,14 @@ func (e *Engine) runBlobWriteThrough(w *blobWriteThrough, store *sessionObjectSt
 	for {
 		select {
 		case item := <-w.queue:
+			// Checked in this branch too, not only under stop: select picks at
+			// random between two ready cases, so an abandoned worker that
+			// still has queue entries would otherwise upload an arbitrary
+			// number of them before it happened to notice the stop signal.
+			// The item read here is dropped, which is what discard means.
+			if w.discard.Load() {
+				return
+			}
 			if e.pushBlobNow(w, store, session, item) {
 				unflushed++
 			}
@@ -204,6 +221,9 @@ func (e *Engine) runBlobWriteThrough(w *blobWriteThrough, store *sessionObjectSt
 				unflushed = 0
 			}
 		case <-w.stop:
+			if w.discard.Load() {
+				return
+			}
 			for {
 				select {
 				case item := <-w.queue:
@@ -302,11 +322,28 @@ func (e *Engine) flushBlobPushes(store *sessionObjectStore) {
 
 // stopBlobWriteThrough detaches the hook, drains what is queued and waits for
 // the worker to exit. Idempotent, and a no-op when nothing was installed.
+// abandonBlobWriteThrough is the same teardown with the drain suppressed.
 //
 // The hook is removed before the drain so a blob written during shutdown
 // cannot be queued behind the barrier it is supposed to be inside, and well
 // before finalizeObjectStore closes the backend so no upload can race a closed
 // handle.
+// abandonBlobWriteThrough stops the worker WITHOUT draining: whatever is still
+// queued is left unsent. Used only by Engine.Abandon, where there is no
+// shutdown snapshot coming to make the drain redundant and the caller has
+// asked for no further writes at all.
+//
+// Anything already in flight still completes — a Put cannot be un-issued — so
+// this bounds new work, not the work in progress.
+func (e *Engine) abandonBlobWriteThrough() {
+	if w := e.blobPushes; w != nil {
+		// Before stopBlobWriteThrough closes stop, so the worker can never see
+		// the stop signal with discard still unset and drain on its way out.
+		w.discard.Store(true)
+	}
+	e.stopBlobWriteThrough()
+}
+
 func (e *Engine) stopBlobWriteThrough() {
 	w := e.blobPushes
 	if w == nil {

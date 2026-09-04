@@ -354,20 +354,6 @@ func runToKill(t *testing.T, backendName, bucket, endpoint string) *killedSessio
 	if err := eng.Boot(context.Background()); err != nil {
 		t.Fatalf("Boot: %v", err)
 	}
-	// The Stop below is TEARDOWN, not part of the scenario, and it is what
-	// makes the difference between the memory backend and a real one.
-	//
-	// t.Cleanup runs LIFO after the test body, so this fires after every
-	// assertion and after the resumed engine has stopped -- the kill is still
-	// "no Stop between the turn boundary and the resume", which is the whole
-	// property under test. It exists because an abandoned engine keeps a
-	// heartbeat and (under degrade) a retry worker running, and against MinIO
-	// those goroutines are still writing objects into the bucket that
-	// emptyAndRemoveBucket is trying to empty. Without this, teardown races
-	// them and DeleteBucket intermittently fails with BucketNotEmpty --
-	// a flake that would look like a bug in the code under test.
-	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
-
 	k := &killedSession{id: eng.Session.ID}
 
 	// context/conversation.jsonl specifically, because that is the file Boot's
@@ -475,6 +461,18 @@ func runToKill(t *testing.T, backendName, bucket, endpoint string) *killedSessio
 	k.lostBlobSHA = lost.SHA256
 
 	// *** kill *** -- the engine is dropped on the floor from here.
+	//
+	// Abandon is what a kill actually is: every background worker stops where
+	// it stands and nothing is persisted on the way out. No shutdown snapshot,
+	// no flush, no journal close, no SQLite checkpoint, and the owner marker
+	// stays in the bucket carrying a heartbeat that has stopped advancing --
+	// which is exactly the evidence a host that died would have left. It also
+	// removes the one way this test could lie about a real process death:
+	// against MinIO an engine left running keeps a heartbeat and (under
+	// degrade) a retry worker writing objects into the bucket that
+	// emptyAndRemoveBucket is trying to empty, and DeleteBucket then fails
+	// intermittently with BucketNotEmpty.
+	eng.Abandon()
 	return k
 }
 
@@ -687,15 +685,6 @@ func (b *interruptedBackend) arm(treePrefix string) {
 	b.blockOutside = treePrefix
 }
 
-// disarm restores normal behaviour. Used only from teardown; the armed state
-// deliberately survives the whole test so nothing the dying engine left running
-// can commit the generation the assertions depend on being uncommitted.
-func (b *interruptedBackend) disarm() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.blockOutside = ""
-}
-
 func (b *interruptedBackend) deleteCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -775,19 +764,6 @@ func TestMidFlushKillAgainstMinIORestoresTheCommittedGeneration(t *testing.T) {
 	if err := eng.Boot(context.Background()); err != nil {
 		t.Fatalf("Boot: %v", err)
 	}
-	// Teardown only, for the reason runToKill gives: an abandoned engine's
-	// retry worker keeps re-uploading into the bucket the deferred
-	// emptyAndRemoveBucket is trying to empty. It runs after every assertion
-	// (t.Cleanup is LIFO, and the resumed engine registers later), so no clean
-	// shutdown happens between the turn boundary and the resume -- which is
-	// the property under test. Disarming first keeps that final Stop from
-	// spending objectStoreRetryStopTimeout draining a queue that cannot drain.
-	t.Cleanup(func() {
-		if dying != nil {
-			dying.disarm()
-		}
-		_ = eng.Stop(context.Background())
-	})
 	sessionID := eng.Session.ID
 
 	// --- generation 1, committed ----------------------------------------
@@ -840,6 +816,15 @@ func TestMidFlushKillAgainstMinIORestoresTheCommittedGeneration(t *testing.T) {
 	if !failed {
 		t.Fatalf("the second turn's snapshot reported %+v; the interruption was not simulated", results)
 	}
+
+	// *** kill *** -- everything below reads the bucket, never this engine.
+	// Abandon stops the retry worker and the heartbeat without persisting
+	// anything, which is what a dead process would have done: nothing it left
+	// running can quietly commit generation 2 behind the assertions, and
+	// nothing is still uploading into the bucket the deferred
+	// emptyAndRemoveBucket has to empty. The backend stays armed for the same
+	// reason it always did -- a second line of defence costs nothing.
+	eng.Abandon()
 
 	// The state the kill left in MinIO, measured with the raw client: the tree
 	// of the dead generation is there, its commit is not. If either half of

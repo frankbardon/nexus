@@ -546,14 +546,10 @@ func (e *Engine) beatSessionOwner(store *sessionObjectStore, owner *sessionOwner
 //
 // Idempotent, and a no-op when nothing was claimed.
 func (e *Engine) releaseSessionOwnership(store *sessionObjectStore) {
-	owner := e.sessionOwner
+	owner := e.stopSessionOwnerHeartbeat()
 	if owner == nil {
 		return
 	}
-	e.sessionOwner = nil
-
-	owner.stopOnce.Do(func() { close(owner.stop) })
-	<-owner.done
 
 	if store != nil {
 		// A fresh background context: Stop is routinely handed an
@@ -570,11 +566,56 @@ func (e *Engine) releaseSessionOwnership(store *sessionObjectStore) {
 		}
 		cancel()
 	}
+}
+
+// abandonSessionOwnership stops the heartbeat and LEAVES the marker where it
+// is. It is releaseSessionOwnership minus the delete, and the missing delete is
+// the entire point.
+//
+// Engine.Abandon is a host saying "this session is being dropped, not closed".
+// Deleting the marker here would record the opposite: a marker's absence is how
+// a clean release announces itself, and the next host reads that absence as
+// "nobody was holding this" and resumes in silence. An abandoned session has
+// not been released, so it must not leave a release behind — the whole reason
+// releaseSessionOwnership deletes is to keep the alarm credible on the happy
+// path, and forging that signal on an unhappy one would spend the same
+// credibility from the other end.
+//
+// Leaving the marker *and* the heartbeat would be the mirror-image mistake: the
+// timestamp would keep advancing for a run that no longer exists, so the marker
+// would read as live for ever and a genuine takeover would be reported as a
+// split brain. Stopping the beat is what lets the marker go stale on its own,
+// after which sessionOwnerStillLive's ordinary rules apply — a dead PID on the
+// same host, or a heartbeat older than sessionOwnerStaleAfter anywhere else.
+//
+// Idempotent, and a no-op when nothing was claimed.
+func (e *Engine) abandonSessionOwnership() {
+	e.stopSessionOwnerHeartbeat()
+}
+
+// stopSessionOwnerHeartbeat stops the heartbeat goroutine, clears the
+// run-scoped owner state and removes the staging directory, then hands the
+// detached owner back so the caller can decide what happens to the marker
+// itself. Returns nil when nothing was claimed.
+//
+// The wait for the goroutine is unbounded on purpose: a beat in flight holds
+// only its own sessionOwnerIOTimeout, and returning while it is still running
+// would let it Put against a backend the caller is about to close.
+func (e *Engine) stopSessionOwnerHeartbeat() *sessionOwner {
+	owner := e.sessionOwner
+	if owner == nil {
+		return nil
+	}
+	e.sessionOwner = nil
+
+	owner.stopOnce.Do(func() { close(owner.stop) })
+	<-owner.done
 
 	if err := os.RemoveAll(owner.scratchDir); err != nil {
 		e.Logger.Warn("object store: removing the owner marker scratch dir failed",
 			"dir", owner.scratchDir, "error", err)
 	}
+	return owner
 }
 
 // publishSessionOwnerConflict raises the alarm recorded during Boot, once.

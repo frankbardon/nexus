@@ -818,6 +818,108 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Abandon stops the engine's background workers without persisting anything.
+//
+// It is Stop's counterpart for a host that is *dropping* a session rather than
+// closing it — an ephemeral container being reclaimed mid-session, or a test
+// simulating a process death. Stop's job is to leave the session durably
+// stored; Abandon's job is to leave it exactly as it is.
+//
+// # What it stops
+//
+//   - the tick heartbeat and every run-scoped bus subscription Boot installed,
+//     which includes the turn-boundary snapshot handler and the strict turn
+//     gate;
+//   - the object-store recovery worker;
+//   - the blob write-through worker, discarding whatever it still had queued;
+//   - the owner-marker heartbeat.
+//
+// It then drops the object-store handle, closing the backend if it implements
+// io.Closer. After this returns, nothing the engine started can write to the
+// object store again.
+//
+// # What it deliberately does not do
+//
+// No shutdown snapshot, no flush, no ownership release. It also does not shut
+// plugins down, close the journal, checkpoint per-plugin SQLite, finalize the
+// session metadata or remove the session lock: every local writer is left open
+// and the on-disk tree is left in the state a killed process would leave it.
+// That is the point — a caller reaching for this has decided the session's
+// stored state is already as good as it is going to get, and a final snapshot
+// of a tree nobody will read is pure cost on compute that is about to vanish.
+//
+// The price of that fidelity is that Abandon alone leaks the journal writer's
+// goroutine and the file handles under the session tree, which is correct for
+// a process about to exit and wrong for one that is not. A host that wants
+// those released too can call Stop afterwards: with the store handle already
+// gone, Stop degenerates to local teardown and writes nothing remote.
+//
+// # The owner marker
+//
+// The heartbeat stops; the marker stays. That asymmetry is load-bearing. A
+// clean Stop deletes the marker, which is what keeps the broker's ordinary
+// release-and-respawn cycle from raising a split-brain alarm on every
+// legitimate resume. Deleting it here would tell the next host this session was
+// cleanly released when it was not, throwing away the one piece of evidence
+// session_owner.go exists to preserve. Keeping the heartbeat running would be
+// the opposite error — the marker would read as live for ever and a genuine
+// takeover would be misreported as a conflict. With the beat stopped and the
+// marker left behind, the next host applies the ordinary staleness rules: a
+// dead PID on the same host, or a heartbeat older than sessionOwnerStaleAfter
+// anywhere else. See abandonSessionOwnership.
+//
+// Idempotent: calling it twice, after Stop, or on an engine that never booted
+// does nothing. Like Stop it is not safe to call concurrently with itself or
+// with Stop. Costs nothing when no object store is configured.
+func (e *Engine) Abandon() {
+	if e.runCancel != nil {
+		e.runCancel()
+		e.runCancel = nil
+	}
+
+	// Before the object-store handle is dropped below rather than after: the
+	// turn-boundary snapshot handler reads e.objectStore from whichever
+	// goroutine dispatched agent.turn.end, so unsubscribing first is what makes
+	// writing that field here not a data race. Stop depends on the same
+	// ordering for the same reason.
+	for _, unsub := range e.runUnsubs {
+		unsub()
+	}
+	e.runUnsubs = nil
+
+	// The recovery worker first, for the reason Stop gives at the same point:
+	// it snapshots through the journal writer and emits on the bus, so it has
+	// to be gone before anything is taken out from under it. Its stop signal
+	// cancels the retry in flight, so this is prompt.
+	e.stopObjectStoreRetry()
+
+	// Discard, not drain. stopBlobWriteThrough finishes the queue at shutdown
+	// because the snapshot immediately afterwards would re-upload the same
+	// bytes anyway; here no snapshot is coming and the caller has asked for no
+	// further writes, so every queued Put would be exactly the write this
+	// method exists to avoid.
+	e.abandonBlobWriteThrough()
+
+	// Stops beating, leaves the marker. See the doc comment above.
+	e.abandonSessionOwnership()
+
+	// Last, once nothing is left that could Put against it.
+	store := e.objectStore
+	if store == nil {
+		return
+	}
+	e.objectStore = nil
+	store.close(e.Logger)
+
+	sessionID := ""
+	if e.Session != nil {
+		sessionID = e.Session.ID
+	}
+	e.Logger.Info("object store: session abandoned; no shutdown snapshot was taken "+
+		"and the owner marker was left in place for the next host to age out",
+		"backend", store.cfg.BackendName, "session_id", sessionID)
+}
+
 // startJournal constructs the per-session journal writer and installs the
 // bus wildcard handler that feeds it. Called from Boot after the session
 // workspace exists and before any plugin Init runs.
