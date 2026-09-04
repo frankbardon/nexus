@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine/blobs"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 // SessionConfigSnapshotPath returns the path to a session's config snapshot.
@@ -619,12 +620,16 @@ func (s *SessionWorkspace) announceRel(fullPath string) (string, bool) {
 // sessionFileEvent builds the session.file.created / .updated payload.
 //
 // The single definition of that shape, and the reason it exists is that there
-// was no guard on it at all. The payload is an untyped map — events.SessionFile
-// is declared but nothing on the wire uses it, so `make check-events` does not
-// see this at all — and four call sites were each spelling the same five keys
-// out by hand. That is exactly the shape of thing that acquires a fifth emitter
+// was no guard on it at all: four call sites each spelled the same five keys out
+// by hand. That is exactly the shape of thing that acquires a fifth emitter
 // carrying an absolute path and three missing keys, which is what
 // cmd/desktop/internal/matcher was doing until E3-S5.
+//
+// The keys now come from events.SessionFile.Map rather than from a literal
+// here, so `make check-events` guards the wire shape: renaming or retyping a
+// field on that struct demands a SessionFileVersion bump, and adding one
+// without a wire key fails its own test. The payload stays a map because every
+// subscriber type-asserts one.
 //
 // The invariant every subscriber and the object-store seam depend on:
 //
@@ -636,19 +641,15 @@ func (s *SessionWorkspace) announceRel(fullPath string) (string, bool) {
 //   - session_id, size, offset and bytes_added are always present. A subscriber
 //     that has to treat a key as optional cannot distinguish "this emitter is
 //     old" from "this is a whole-object rewrite".
-//
-// Deliberately not a typed struct. Converting the emit to events.SessionFile is
-// a behaviour change for every existing subscriber (which type-asserts the map)
-// and the struct has no counterpart for offset or bytes_added; that conversion
-// is its own change, not a side effect of centralising the shape.
 func sessionFileEvent(sessionID, rel string, size, offset, bytesAdded int) map[string]any {
-	return map[string]any{
-		"session_id":  sessionID,
-		"path":        filepath.ToSlash(rel),
-		"size":        size,
-		"offset":      offset,
-		"bytes_added": bytesAdded,
-	}
+	return events.SessionFile{
+		SchemaVersion: events.SessionFileVersion,
+		SessionID:     sessionID,
+		Path:          filepath.ToSlash(rel),
+		Size:          size,
+		Offset:        offset,
+		BytesAdded:    bytesAdded,
+	}.Map()
 }
 
 // statSize reports a file's current size, or 0 when it cannot be read.

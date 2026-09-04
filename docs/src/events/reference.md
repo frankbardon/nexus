@@ -682,17 +682,29 @@ is inert, and none of the other four is ever emitted. See
 
 **session.file.created / session.file.updated payload**
 
-Emitted as a `map[string]any`, not as the `events.SessionFile` struct — the struct
-exists but nothing on the wire uses it, so `make check-events` does not guard this
-payload. Treat the table below as the contract.
+Emitted as a `map[string]any`, not as the `events.SessionFile` struct, because every
+subscriber type-asserts a map. The struct is nonetheless the definition of the shape:
+the payload is built by `events.SessionFile.Map`, so renaming or retyping a field
+trips `make check-events`, and adding one without a wire key fails its own test.
+Before that the struct was declared and unused, and this payload was guarded by
+nothing at all.
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `_schema_version` | int | `events.SessionFileVersion` — 2. A payload journaled before the struct became the definition has no such key, which the `v0 == v1` rule in `pkg/events/compat` covers; the other five keys are unchanged, so no migrator is registered |
 | `session_id` | string | Session the file belongs to |
 | `path` | string | Path relative to the session root, always slash-separated |
 | `size` | int | Size of the **file** in bytes after the write — not the size of the change |
 | `offset` | int | Byte offset at which the change begins |
 | `bytes_added` | int | Number of bytes written at `offset` |
+
+The three counts are Go `int`, not `int64`. That is the type that has always been on
+the wire and subscribers assert it directly, so widening the struct field would turn
+every one of those assertions into a silent zero.
+
+There is deliberately no `action` key. The action is the event type, and a copy of it
+in the payload is a second source of truth that can disagree with the first — which is
+what `nexus.tool.pdf` did, reporting every update as a creation.
 
 Which event fires is decided by whether the path existed before the write, so a
 subscriber can rely on seeing exactly one `created` per path per session.

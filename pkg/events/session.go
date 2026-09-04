@@ -4,7 +4,17 @@ import "time"
 
 // Schema-version constants for session.* payloads. See doc.go.
 const (
-	SessionFileVersion            = 1
+	// SessionFileVersion is 2 because version 1 named an Action field and no
+	// SessionID, Offset or BytesAdded -- but nothing ever emitted it, so 2 is
+	// the first version any subscriber will see. See SessionFile.
+	//
+	// No compat migrator is registered for 1->2, deliberately. The struct
+	// changed; the wire did not, beyond gaining _schema_version itself. A
+	// journaled payload written before this carries the same five keys under
+	// the same names, so it deserializes to a v2 payload with the version
+	// reading 0 -- which the v0 == v1 rule in pkg/events/compat already covers,
+	// and which every subscriber reads by key regardless.
+	SessionFileVersion            = 2
 	SessionSnapshotRequestVersion = 1
 	SessionSnapshotResultVersion  = 1
 	SessionOwnerConflictVersion   = 1
@@ -13,13 +23,67 @@ const (
 	SessionStorageRecoveredVersion = 1
 )
 
-// SessionFile describes a file event within a session workspace.
+// SessionFile describes a file event within a session workspace: the payload of
+// session.file.created and session.file.updated.
+//
+// It goes on the wire as a map rather than as this struct, via Map below. That
+// is not an oversight -- every existing subscriber type-asserts
+// map[string]any, and changing the payload type would break all of them for no
+// gain. The struct is the *definition* of that map, and Map is the only place
+// the keys are spelled.
+//
+// Before that, this struct was declared and nothing used it, while four call
+// sites each spelled the same keys out by hand. `make check-events` guards
+// structs in this package, so it was guarding a type no subscriber could ever
+// see, and guarding nothing at all about the shape that actually shipped. Two
+// hand-built emitters had already drifted -- one publishing a bare basename as
+// path, one an absolute host path with no session_id -- and the guard could not
+// have caught either.
+//
+// There is deliberately no Action field. The action is the event type
+// (session.file.created vs .updated), and a duplicate of it in the payload is a
+// second source of truth that can disagree with the first -- which is exactly
+// what nexus.tool.pdf did, hardcoding "created" on every write including
+// updates.
 type SessionFile struct {
 	SchemaVersion int `json:"_schema_version"`
 
-	Path   string // relative to session root
-	Action string // "created", "updated"
-	Size   int64
+	SessionID string // the session this file belongs to
+	// Path is relative to the session root and slash-separated, so it can be
+	// used directly as an object key under the session's prefix.
+	Path string
+	// Size is the file's size after the write.
+	//
+	// int, not int64, because int is what has always been on the wire: this
+	// struct never reached a subscriber, and every subscriber reading the map
+	// type-asserts .(int). Widening the field here would widen the payload and
+	// turn every one of those assertions into a silent zero -- a wire break
+	// dressed up as a type cleanup. The declared int64 was decorative.
+	Size int
+	// Offset is where the write began: 0 for a whole-file write, the previous
+	// length for an append. BytesAdded is how much it added. Together they let
+	// a subscriber upload a delta instead of re-reading the whole file; a
+	// subscriber that ignores both is still correct, just slower.
+	Offset     int
+	BytesAdded int
+}
+
+// Map renders the payload in the form that goes on the bus.
+//
+// The keys here are the wire contract. TestSessionFileMapCoversEveryField
+// asserts one key per exported field, so a field added to the struct without a
+// key here fails the build rather than shipping a payload that silently omits
+// it; a field renamed or retyped trips `make check-events`, which is what binds
+// the guard to the shape that actually ships.
+func (f SessionFile) Map() map[string]any {
+	return map[string]any{
+		"_schema_version": f.SchemaVersion,
+		"session_id":      f.SessionID,
+		"path":            f.Path,
+		"size":            f.Size,
+		"offset":          f.Offset,
+		"bytes_added":     f.BytesAdded,
+	}
 }
 
 // SessionSnapshotRequest asks the engine to snapshot the whole session tree to

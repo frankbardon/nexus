@@ -55,9 +55,43 @@ typos are not possible for plugins that ship a schema.
 the engine's signal that a future minor release may delete the shim.
 
 **Plugins without a schema** (legacy or third-party) are skipped with a `debug`
-log. They are not blocked from booting. The engine's own top-level keys
-(`core`, `engine`, `capabilities`, `plugins.active`, `journal`) are always
-validated against the engine schema.
+log. They are not blocked from booting.
+
+**The engine's own blocks are guarded separately, and by a different mechanism.**
+`core`, `engine`, `capabilities`, `plugins.active` and `journal` have their
+*values* checked by the engine schema, but unknown *key names* there could not be
+caught that way: `LoadConfigFromBytes` is a non-strict YAML decode, and the
+validator rebuilds those blocks from the already-decoded typed config, so a key
+YAML dropped never reached the schema at all. A misspelled block therefore used to
+boot clean with the feature it configured silently switched off — which is at its
+worst with `core.object_store`, where the run looks entirely healthy and simply
+never persists anything.
+
+`checkUnknownConfigKeys` now walks the raw YAML against the config structs' yaml
+tags before anything else and rejects an unknown key at any depth, naming the path
+and listing what was valid there:
+
+```
+config: unknown key "core.object_stor" (valid keys here: agent_id, log_level,
+logging, max_concurrent_events, models, object_store, sessions, storage,
+tick_interval)
+```
+
+Every unknown key in a file is reported in one message, so a bad config is fixed
+in one pass rather than one boot per typo.
+
+Three blocks are exempt because their keys are data rather than field names, and
+each is guarded elsewhere or not at all by design:
+
+| Block | Why it is exempt |
+|-------|------------------|
+| `plugins:` | Keys are plugin IDs. The blocks beneath them are guarded by the plugin schemas described above. |
+| `core.models` | Keys are role names you choose. Parsed out of the raw map by hand — it carries no struct tag to discover. |
+| `capabilities:` | Keys are capability names. |
+
+The check is derived from the structs by reflection rather than from a
+hand-maintained list, so adding a config field needs no corresponding edit — and
+there is no second list to drift into rejecting a legitimate new key.
 
 ### Schema authoring
 

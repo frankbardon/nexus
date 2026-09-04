@@ -247,6 +247,13 @@ func LoadConfigFromBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing raw config: %w", err)
 	}
 
+	// Reject a key the typed unmarshal above would have dropped in silence.
+	// Runs before the per-plugin extraction so a misspelled block fails the
+	// boot rather than disabling a feature quietly. See config_strict.go.
+	if err := checkUnknownConfigKeys(raw); err != nil {
+		return nil, err
+	}
+
 	if pluginsRaw, ok := raw["plugins"]; ok {
 		if pluginsMap, ok := pluginsRaw.(map[string]any); ok {
 			cfg.Plugins.Configs = extractPluginConfigs(pluginsMap)

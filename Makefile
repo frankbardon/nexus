@@ -202,17 +202,22 @@ fmt:
 	$(GO) fmt ./...
 	$(call in_submodules,$(GO) fmt ./...)
 
+# The tagged pass is here for the same reason it is on lint: without it, vet
+# never sees a file behind //go:build integration or //go:build minio. See
+# LINT_TAGS below.
 vet:
 	$(GO) vet ./...
+	$(GO) vet -tags $(LINT_TAGS) ./...
 	$(call in_submodules,$(GO) vet ./...)
+	$(call in_submodules,$(GO) vet -tags $(LINT_TAGS) ./...)
 
-# STATICCHECK_VERSION is pinned, never @latest. v0.8.0 declares go 1.26.0, so an
-# unpinned `go run ...@latest` breaks the moment a release outpaces the Go version
-# CI pins (GOTOOLCHAIN=local, Go 1.25) -- deterministically, on every commit,
-# including ones that passed hours earlier. It also passes on a developer machine
-# running a newer Go, which is how it reached main unnoticed.
+# STATICCHECK_VERSION is pinned, never @latest. An unpinned `go run ...@latest`
+# breaks the moment a release outpaces the Go version CI pins (GOTOOLCHAIN=local)
+# -- deterministically, on every commit, including ones that passed hours
+# earlier. It also passes on a developer machine running a newer Go, which is how
+# v0.8.0 reached main unnoticed while the floor was still 1.25.
 # Bump this together with the go-version matrix in .github/workflows/ci.yml.
-STATICCHECK_VERSION ?= v0.7.0
+STATICCHECK_VERSION ?= v0.8.0
 
 # check-events is deliberately NOT run per submodule: scripts/check-event-versions.sh
 # cd's to the repo top level and inspects pkg/events/ only, so running it from
@@ -223,9 +228,26 @@ STATICCHECK_VERSION ?= v0.7.0
 # `go run <pkg>@<version>` resolves independently of the current module, so the
 # same pinned staticcheck runs inside a submodule without that module needing to
 # require it.
+# LINT_TAGS is every build tag in the tree that gates Go files, so staticcheck
+# sees the tagged suites too. Without the second pass, a file behind //go:build
+# minio or //go:build integration compiled only when someone ran that suite --
+# and staticcheck never saw it at all, on any commit, including in CI.
+#
+# One combined list rather than a per-module list on purpose: a tag matching no
+# file in a module is a no-op, so `minio` costs nothing in the GCS module and the
+# sweep macro stays a single command.
+#
+# Blind spot: wasip1 is a GOOS constraint, not a build tag, so -tags does not
+# reach plugins/tools/codeexec's wasm files. Linting those needs GOOS=wasip1 and
+# a toolchain that can typecheck for it; `make verify-yaegi-wasm` is what
+# exercises them today.
+LINT_TAGS ?= integration,evalrecord,minio,fakegcsserver
+
 lint: vet check-events check-modules
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
+	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags $(LINT_TAGS) ./...
 	$(call in_submodules,$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...)
+	$(call in_submodules,$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags $(LINT_TAGS) ./...)
 
 # Static check: every pkg/events/ struct mutation must bump its
 # <Name>Version constant. Compares the working tree against

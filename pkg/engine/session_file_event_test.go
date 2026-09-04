@@ -10,10 +10,13 @@ package engine
 // keys. A subscriber keyed on `path` would have written it under a key no other
 // emitter can produce, and the object-store seam could not have used it at all.
 //
-// `make check-events` cannot catch this. events.SessionFile is declared but
-// nothing on the wire uses it — the payload is a map[string]any — so the lint
-// sees a struct nobody emits and a map nobody declared. That is the whole
-// reason this guard has to be a test.
+// `make check-events` could not catch this on its own. The payload is a
+// map[string]any, and events.SessionFile used to be a struct nobody emitted —
+// so the lint saw a type no subscriber could receive and a map no type
+// declared. sessionFileEvent now builds the map from events.SessionFile.Map, so
+// renaming or retyping a field does trip check-events; what the lint still
+// cannot see is whether an emitter goes through that helper at all, or what it
+// passes. That is the whole reason this guard has to be a test.
 //
 // Two halves, both required:
 //
@@ -52,7 +55,12 @@ import (
 // sessionFileEventKeys is the payload contract, in one place. Adding a key here
 // without adding it to sessionFileEvent, or the other way round, fails the
 // shape test below.
-var sessionFileEventKeys = []string{"session_id", "path", "size", "offset", "bytes_added"}
+//
+// _schema_version joined the four original keys when the payload started being
+// built from events.SessionFile.Map. It is additive — every subscriber reads
+// keys by name — and it brings session.file.* into line with every other event
+// in pkg/events, which have carried a version since they were structs.
+var sessionFileEventKeys = []string{"_schema_version", "session_id", "path", "size", "offset", "bytes_added"}
 
 // checkSessionFileEvent asserts one payload against the contract.
 func checkSessionFileEvent(t *testing.T, what string, sessionID string, payload any, wantPath string, wantSize, wantOffset, wantAdded int) {

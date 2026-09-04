@@ -24,14 +24,20 @@ func (fakeObjectStore) List(context.Context, string) ([]objectstore.Object, erro
 func (fakeObjectStore) Flush(context.Context) error { return nil }
 
 // registerFakeBackend stands in for the blank import an embedder writes.
-// There is deliberately no exported unregister — production code has no
-// business removing a driver — so every test uses its own unique name and the
-// registration simply lives for the rest of the test binary.
+//
+// The cleanup is not optional. The registry is process-global and Register
+// panics on a duplicate, so leaking the name makes `go test -count=2` panic on
+// the second run of the same test in one binary — which is what this helper did
+// until it was fixed. The comment here used to claim there was deliberately no
+// exported unregister; objectstore.Unregister has existed and been exported for
+// exactly this since the contract suite needed it, and every other registration
+// site in this package already paired the two.
 func registerFakeBackend(t *testing.T, name string) {
 	t.Helper()
 	objectstore.Register(name, func(context.Context, objectstore.Config) (objectstore.Backend, error) {
 		return fakeObjectStore{}, nil
 	})
+	t.Cleanup(func() { objectstore.Unregister(name) })
 }
 
 func TestDefaultConfig_ObjectStoreDisabled(t *testing.T) {

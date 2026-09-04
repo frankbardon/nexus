@@ -130,11 +130,22 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 | `make test-objectstore-fake-gcs` | — | `modules/objectstore-gcs` only, `-tags fakegcsserver` |
 | `make test-race` | `go test -race ./...` | `go test -race ./...` |
 | `make fmt` | `go fmt ./...` | `go fmt ./...` |
-| `make vet` | `go vet ./...` | `go vet ./...` |
-| `make lint` | `vet` + `check-events` + `check-modules` + staticcheck | staticcheck |
+| `make vet` | `go vet ./...`, then again with `-tags $(LINT_TAGS)` | same, both passes |
+| `make lint` | `vet` + `check-events` + `check-modules` + staticcheck, untagged and `-tags $(LINT_TAGS)` | staticcheck, both passes |
 | `make check-events` | root only | — |
 | `make check-modules` | fails on a `go.mod` outside `modules/<name>/` | — |
 | `make submodules` | prints the discovered list | — |
+
+`LINT_TAGS` defaults to `integration,evalrecord,minio,fakegcsserver` — every build
+tag in the tree that gates Go files. The second pass exists because a file behind
+`//go:build minio` compiled only when someone ran that suite, so neither vet nor
+staticcheck had ever seen it on any commit, CI included. One combined list is
+applied everywhere rather than a per-module list: a tag matching no file in a
+module is a no-op, so `minio` costs nothing in the GCS module.
+
+It does not cover `wasip1`, which is a GOOS constraint rather than a build tag —
+`-tags` will not reach `plugins/tools/codeexec`'s wasm files. `make
+verify-yaegi-wasm` is what exercises those.
 
 Three deliberate exceptions:
 
