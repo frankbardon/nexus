@@ -667,15 +667,200 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 
 | Event Type | Payload | Description |
 |------------|---------|-------------|
-| `session.file.created` | `SessionFile` | New file in session |
-| `session.file.updated` | `SessionFile` | File updated in session |
+| `session.file.created` | map (see below) | A file appeared in the session tree |
+| `session.file.updated` | map (see below) | An existing file in the session tree changed |
+| `session.snapshot.request` | `SessionSnapshotRequest` | Ask the engine to snapshot the session tree to the object store |
+| `session.snapshot.result` | `SessionSnapshotResult` | Outcome of one whole-tree snapshot |
+| `session.owner.conflict` | `SessionOwnerConflict` | A second host appears to hold this session — detection only, nothing is refused |
+| `session.storage.degraded` | `SessionStorageDegraded` | The object store stopped accepting this session's state; the engine is running against the local working copy and retrying |
+| `session.storage.recovered` | `SessionStorageRecovered` | The backlog drained and the session is durably stored again |
 
-**SessionFile**
+The last five exist only when `core.object_store.backend` names a backend. With
+none configured — the default — nothing subscribes, a `session.snapshot.request`
+is inert, and none of the other four is ever emitted. See
+[Object Storage](../guides/object-storage.md).
+
+**session.file.created / session.file.updated payload**
+
+Emitted as a `map[string]any`, not as the `events.SessionFile` struct — the struct
+exists but nothing on the wire uses it, so `make check-events` does not guard this
+payload. Treat the table below as the contract.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `session_id` | string | Session the file belongs to |
+| `path` | string | Path relative to the session root, always slash-separated |
+| `size` | int | Size of the **file** in bytes after the write — not the size of the change |
+| `offset` | int | Byte offset at which the change begins |
+| `bytes_added` | int | Number of bytes written at `offset` |
+
+Which event fires is decided by whether the path existed before the write, so a
+subscriber can rely on seeing exactly one `created` per path per session.
+
+**Who emits it.** `SessionWorkspace.WriteFile`, `AppendFile` and `SaveMeta`, plus the
+two announcement helpers `AnnounceWrite` / `AnnounceAppend` that writers holding their
+own `os.*` call use — today `nexus.scene` (its state file and patch journal),
+`nexus.workflows.icm` (stage artifacts and copied inputs), `nexus.tool.fileio`
+(`write_file`) and the desktop matcher plugin. Every one of them publishes the
+*session-relative* path, so it can be used directly as an object key. `nexus.tool.pdf` used to emit a second, hand-built
+event beside the one `WriteFile` already produced, carrying the bare basename and no
+delta; it was removed rather than reconciled, and the plugin no longer emits
+`session.file.*` at all.
+
+Writers that deliberately stay silent — the journal, the tool cache, the blob store,
+per-plugin SQLite and the session lock among them — each have a recorded reason. See
+[Sessions](../architecture/sessions.md#every-raw-writer-has-a-decided-disposition).
+
+**The append-aware delta.** `offset` and `bytes_added` together say that the region
+`[offset, offset+bytes_added)` is the only part of the object that changed:
+
+| Shape | Meaning |
+|-------|---------|
+| `offset == 0 && bytes_added == size` | The whole object is new. Every `WriteFile`, and the first append that creates a file. |
+| `offset > 0 && offset + bytes_added == size` | A pure append. Every byte before `offset` is byte-identical to what the last event for this path described. |
+
+They were added to this payload rather than introduced as a separate
+`session.file.appended` event: a new type would have carried the same three numbers,
+cost every existing subscriber a change just to keep seeing appends, and — because
+`context/conversation.jsonl` is written by both `WriteFile` and `AppendFile` — forced
+each of them to merge two streams to reconstruct one file's history. New map keys are
+also invisible to subscribers that do not read them.
+
+**Object stores have no append primitive.** These keys do not let a sync backend write
+appended bytes into an existing object; S3, GCS and every S3-compatible store replace
+whole objects. What they buy is the freedom to *coalesce and defer* — collapse a run of
+tail appends into one upload of the current file at the next boundary, knowing no
+rewrite was missed in between. `offset` is not a seek position in the bucket.
+
+If the offset cannot be determined, `offset` is reported as `0`, which reads as a whole
+-object change: a backend then re-uploads a file it could have coalesced, rather than
+coalescing a change it should have treated as a rewrite.
+
+**Who emits them**
+
+| Emitter | Covers |
+|---|---|
+| `SessionWorkspace.WriteFile` | Whole-file writes: config snapshot, plugin manifest, memory rewrites, tool output |
+| `SessionWorkspace.AppendFile` | Appends: `context/conversation.jsonl`, `metadata/timing.jsonl`, compaction output, shell history, the HITL cache |
+| `SessionWorkspace.SaveMeta` | `metadata/session.json` — rewritten on every `llm.response` and every `agent.turn.end` |
+| `SessionWorkspace.AnnounceWrite` / `AnnounceAppend` | Writers holding their own `os.*` call: `nexus.scene`, `nexus.workflows.icm`, `nexus.tool.fileio`, and the desktop matcher plugin |
+
+Every emitter goes through one of those five entry points, so every payload on the
+wire is built in one place. Two hand-built emitters that were not — `nexus.tool.pdf`
+and `cmd/desktop/internal/matcher` — published malformed events (a bare basename as
+`path`, an absolute host path, missing `session_id`, no delta keys); the first was
+removed and the second was routed through `AnnounceWrite`. Because the payload is an
+untyped map, a subscriber should still treat `offset` and `bytes_added` as optional
+and fall back to "the whole object changed" when they are absent — which is the same
+conservative reading `offset == 0` already asks for.
+
+`AppendFile` deliberately reuses the same two event types rather than introducing an
+append-specific one, so every existing subscriber sees appends without being changed.
+The events say *this path changed, and here is which part of it changed*; they never
+carry the changed bytes themselves.
+
+Two moments are deliberately silent. Creating or loading a session workspace writes
+`metadata/session.json` without emitting, because that happens before the journal writer
+subscribes to the bus and an event there would consume a dispatch sequence number the
+journal never receives — which stalls its writer permanently. `Engine.StartSession`
+re-saves the metadata once the journal is running, so the file is still announced.
+
+**SessionSnapshotRequest**
 | Field | Type | Description |
 |-------|------|-------------|
-| `Path` | string | File path within session |
-| `Action` | string | `"created"` or `"updated"` |
-| `Size` | int | File size in bytes |
+| `Reason` | string | Free-form; appears in the log line and in the result |
+
+**SessionSnapshotResult**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session that was snapshotted |
+| `Trigger` | string | `"turn"`, `"shutdown"`, `"request"` or `"retry"` |
+| `Sequence` | uint64 | Per-run snapshot counter, starting at 1 |
+| `Generation` | uint64 | The session's commit generation. Unlike `Sequence` it is seeded from the manifest the previous holder committed, so it keeps increasing across a resume onto a different host. It is the stamp the commit marker and the per-object manifest in the bucket both carry. Zero when a snapshot failed before claiming one |
+| `TurnID` | string | Turn whose boundary triggered it; empty otherwise |
+| `Objects` | int | Size of the committed object set — everything the snapshot asserts is durably present, excluding the commit marker and the manifest. Includes objects immutable-skip did not re-upload, and it is exactly the set the [per-object manifest](../architecture/sessions.md#the-generation-stamp-and-the-per-object-manifest) names |
+| `Bytes` | int64 | Total size of those objects — how big the stored session is |
+| `ObjectsUploaded` | int | The share of that set this snapshot actually transferred |
+| `BytesUploaded` | int64 | Their total size. This, not `Bytes`, is the per-turn cost |
+| `ObjectsSkipped` | int | Files whose identity proves they cannot have changed (sealed journal segments, content-addressed blobs) and that a listing confirmed the store already holds |
+| `BytesSkipped` | int64 | Their total size — what immutable-skip saved |
+| `DurationMs` | float64 | Wall time of the whole snapshot |
+| `OK` | bool | Whether the snapshot was made durable |
+| `ErrorMessage` | string | Empty on success |
+
+Both events exist only when `core.object_store.backend` names a
+backend; with none configured nothing subscribes and a request is inert.
+
+**SessionOwnerConflict**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session both hosts appear to be writing |
+| `HolderHost` | string | Hostname recorded in the owner marker found in the store |
+| `HolderPID` | int | The holder's OS process ID. Only meaningful together with `HolderHost` |
+| `HolderInstanceID` | string | Unique per engine run — what tells two containers sharing a hostname and a PID apart |
+| `HolderHeartbeatAt` | time.Time | The holder's last heartbeat, by the holder's own clock |
+| `HeartbeatAgeSeconds` | float64 | How old that heartbeat looked from here — the number the staleness decision was made on |
+| `LocalHost` | string | This process's hostname |
+| `LocalPID` | int | This process's PID |
+| `LocalInstanceID` | string | This run's instance ID |
+
+Emitted at most once per run, during `Boot`, and only when
+`core.object_store.backend` names a backend. **Detection, not prevention:** by the
+time it is emitted the engine has already claimed the session and is running
+normally. No lock is taken, no fencing token is issued, nothing is refused and
+nothing waits. A subscriber that wants to act — page an operator, stop the run —
+has to do so itself. See
+[Sessions → Two hosts, one session](../architecture/sessions.md#two-hosts-one-session).
+
+**SessionStorageDegraded**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session whose state could not be stored |
+| `Backend` | string | Registered backend name from `core.object_store.backend` |
+| `FailurePolicy` | string | Resolved `core.object_store.failure_policy`: `degrade` or `strict` |
+| `Since` | time.Time | When the outage began — the first failure, not this event |
+| `ConsecutiveFailures` | uint64 | Persistence failures so far in this outage |
+| `QueuedPushes` | int | Depth of the bounded retry queue (capacity 256) |
+| `DroppedPushes` | uint64 | Pushes discarded on queue overflow — escalated to a whole-tree snapshot, not lost |
+| `SnapshotPending` | bool | A whole-tree snapshot is owed: the backstop that covers anything the queue could not |
+| `TurnsBlocked` | bool | Further `io.input` is being refused. Only ever true under `failure_policy: strict` |
+| `Error` | string | The most recent failure's message |
+
+**SessionStorageRecovered**
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session that is durably stored again |
+| `Backend` | string | Registered backend name |
+| `FailurePolicy` | string | Resolved failure policy |
+| `DegradedForSeconds` | float64 | Wall time from the first failure to recovery |
+| `Failures` | uint64 | Persistence failures the outage saw in total |
+| `RetryAttempts` | uint64 | Backoff attempts the recovery worker made. Zero when an ordinary turn-boundary snapshot healed it first |
+| `DrainedPushes` | uint64 | Deferred pushes the retries got through |
+| `DroppedPushes` | uint64 | Pushes discarded on overflow and covered by a snapshot instead |
+
+The two pair: exactly one `session.storage.degraded` per outage and one
+`session.storage.recovered` when it ends, so a subscriber counts outages rather
+than failed requests. Neither is emitted when `core.object_store.backend` is
+empty.
+
+**Under `degrade`** the session keeps taking turns while degraded. The honest
+caveat is that the durability guarantee is not being met for as long as the
+outage lasts, even though nothing is failing.
+
+**Under `strict`** `TurnsBlocked` is true and every subsequent `io.input` is
+vetoed until the state is stored. The turn that hit the outage **already ran** —
+its output was streamed, its tools executed — and the engine cannot un-run it.
+What `strict` guarantees is that no *further* turn runs against unstored state.
+Recovery is automatic under both policies; see [Configuration → Failure
+policy](../configuration/reference.md#failure-policy).
+
+The engine snapshots at every `agent.turn.end` on its own, so nothing needs to
+emit `session.snapshot.request` in a normal run — it is the escape hatch for
+embedders driving the engine outside an agent loop, and for custom agents that
+emit no turn events. Snapshotting is handled in core and never depends on plugin
+cooperation. See
+[Sessions → Turn-boundary snapshots](../architecture/sessions.md#turn-boundary-snapshots).
 
 ---
 

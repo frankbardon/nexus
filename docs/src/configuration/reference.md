@@ -121,7 +121,447 @@ plugins:
 | `storage.cache_size_kb`        | int      | `2048`                 | SQLite `cache_size` PRAGMA per handle (negative-form, in KiB). |
 | `storage.pool_max_idle`        | int      | `2`                    | `*sql.DB.SetMaxIdleConns` per handle. |
 | `storage.pool_max_open`        | int      | `4`                    | `*sql.DB.SetMaxOpenConns` per handle. |
+| `object_store.backend`          | string | *(empty)*   | Name of a registered object-store backend. Empty (the default) disables object storage entirely and no object-store code runs. An unregistered name **fails the boot**. See `core.object_store` below. |
+| `object_store.bucket`           | string | *(required if `backend` set)* | Bucket / container the backend writes to. Nexus never creates it. |
+| `object_store.prefix`           | string | *(empty)*   | Object key prefix within the bucket, so several deployments can share one bucket. An **object key**, not a filesystem path: no `~` expansion, and a leading or trailing `/` is rejected. |
+| `object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. Required by `s3` against real AWS; accepted and ignored by `gcs`, where a bucket's location is a property of the bucket. |
+| `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. Each backend documents exactly what it means: for `s3` it also selects path-style addressing, for `gcs` it is an emulator switch that also turns authentication off when no credentials are available. |
+| `object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
+| `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted. `degrade` (the default) keeps the session running against the local working copy and retries in the background; `strict` additionally refuses further input until the state is stored. Both retry with backoff and both recover on their own. Any other value **fails the boot**. See [Failure policy](#failure-policy) below. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
+
+### `core.object_store`
+
+Optional. Makes a remote object store the source of truth for everything Nexus
+persists *between* runs, for deployments with no durable local disk. The block
+sits on `core` rather than under `core.sessions` because it is **not**
+session-only: the same backend carries the session tree, app- and agent-scope
+per-plugin storage, and eval run output — see
+[Beyond the session tree](#beyond-the-session-tree) below. Local disk remains
+the working copy *during* a run: core and every plugin keep reading and writing
+ordinary files, and the engine talks to the store only at lifecycle points.
+Absent this block — the default — behaviour is byte-identical to a build with
+no object-store support and no object-store code executes.
+
+Backends are selected **by name**, in the `database/sql` driver style. A backend
+ships as its own Go module so the main module's dependency list is untouched;
+an embedder adds it to their build with a blank import and names it in config:
+
+```go
+import _ "github.com/frankbardon/nexus/modules/objectstore-s3"
+```
+
+```yaml
+core:
+  object_store:
+    backend: s3
+    bucket: nexus-sessions
+    prefix: prod/nexus
+    region: us-east-1
+    failure_policy: degrade
+```
+
+No core change is needed to add a backend, and a third party can implement the
+`pkg/engine/objectstore.Backend` seam in their own repository.
+
+**[Object Storage](../guides/object-storage.md)** is the adoption guide: wiring a
+backend into your own binary end to end, credential setup for each shipped
+backend, and the full list of what this feature deliberately does not do —
+starting with the fact that **single-writer per session is assumed and not
+enforced**. This page stays canonical for the keys themselves.
+
+**Validation is at load, not at first write.** The whole block is checked while
+the YAML is parsed, so a typo, a missing bucket or a backend whose module was
+never imported fails the boot with the offending key in the message — rather
+than surfacing an hour into a session as a silently missing artifact. In
+particular, naming a backend whose module is not in the build reports that no
+backend module is imported.
+
+Setting any key in the block while leaving `backend` empty is also an error:
+that combination is always a mistake, and silently ignoring it would leave the
+operator believing storage was configured.
+
+**Lifecycle.** With a backend configured, the engine:
+
+1. Opens the backend at the top of `Boot`, before anything touches the session
+   tree.
+2. **Hydrates eagerly and whole-tree** when resuming a session (`-recall`, or
+   an embedder setting `RecallSessionID`), under the object key prefix
+   `sessions/<session id>` beneath `bucket` + `prefix`. Hydration completes
+   before the workspace is opened and before the first turn runs, so every
+   subsequent read behaves exactly as it would on a host that never left —
+   there is no lazy or faulting read path.
+3. **Claims an owner marker** at `sessions/<session id>.owner/owner.json`
+   recording host, PID, a per-run instance ID and a heartbeat refreshed every 30
+   seconds, and reads whatever marker was already there. A second host that
+   still looks like the holder is logged at error level and raised as
+   `session.owner.conflict`. **Detection only** — nothing is refused, no lock is
+   taken and nothing waits. A clean `Stop` removes the marker.
+4. **Snapshots the whole session tree at every turn boundary** — on
+   `agent.turn.end`, and on demand via `session.snapshot.request` — and again
+   at shutdown. A hard kill therefore loses at most the in-flight turn.
+5. **Flushes and releases** the backend at the end of `Stop`, after plugins,
+   the journal and per-plugin SQLite have all closed.
+
+Behaviour worth knowing:
+
+- **The snapshot is synchronous.** It blocks the goroutine that ended the turn
+  until the upload is durable, because a turn reported complete while its state
+  is still in flight is exactly the guarantee the snapshot exists to provide.
+  The cost is `O(tree size)` per turn and is logged on every snapshot —
+  `objects`, `bytes`, `db_bytes` and `duration` — and published as
+  `session.snapshot.result`.
+- **`failure_policy` governs a failed snapshot** — see
+  [Failure policy](#failure-policy) below for exactly what each value
+  guarantees. Either way `session.snapshot.result` carries `ok: false`.
+
+- **An unknown session ID is not an error.** Recalling an ID the store has
+  never seen produces a valid, empty session, identical to one created locally.
+- **A tree already on local disk wins.** It is the live working copy, so
+  hydration is skipped rather than overwriting it with a possibly older remote
+  copy.
+- **A hydration that fails partway fails the boot** — under *both* failure
+  policies. Hydration lands in a staging directory and is committed with an
+  atomic rename, so a partial tree is discarded and never mistaken for a
+  complete session. `degrade` means "keep running against the local copy", and
+  at hydrate time there is no local copy.
+- **`session.lock` never crosses the seam.** It records the PID of the process
+  that owns the session on *one* machine; round-tripping it through the store
+  would make every resumed session look locked. It is stripped from anything
+  hydrated and is never uploaded.
+- **SQLite sidecars never cross the seam either.** `store.db-wal`, `store.db-shm`
+  and `store.db-journal` describe a machine, not a session. Each `store.db` is
+  WAL-checkpointed and snapshotted as a standalone file at the turn boundary, so
+  the uploaded database restores with no sidecars beside it.
+- **A failed or partial snapshot never replaces the previous good copy.** A
+  per-object manifest at `sessions/<session id>.manifest/manifest.json` and then
+  a commit marker at `sessions/<session id>.snapshot.json` — both siblings of
+  the tree, not members of it — are written only after every other object is
+  durable, so they always describe the last snapshot that completed. A snapshot
+  only ever adds and overwrites; it never deletes.
+- **Hydration restores exactly the committed generation.** The manifest lists
+  the object set of the generation the marker names, and objects in the bucket
+  that it does not name are not materialised into the session tree. They are
+  **left in the bucket, never deleted** — reclamation is the operator's. A
+  bucket with no manifest (written by an older build, or by a session that has
+  never completed a snapshot) hydrates whole, exactly as before. Content-
+  addressed blobs are the one thing never pruned, because the local blob store
+  sweeps under an LRU budget while the bucket does not, so a blob a committed
+  history references can legitimately outlive the manifest that named it. See
+  [Sessions → The generation stamp and the per-object
+  manifest](../architecture/sessions.md#the-generation-stamp-and-the-per-object-manifest).
+- **Two hosts opening one session is detected, never prevented.** The owner
+  marker is a diagnostic, not a lease: no fencing token, no expiry the engine
+  waits on, no refusal. A marker is treated as stale — and stays silent — when it
+  belongs to this run, when its host matches and its PID is gone, or when its
+  heartbeat stopped advancing more than 5 minutes ago, so an ordinary resume
+  after a crash does not alarm. Both thresholds are constants rather than config
+  keys. See [Sessions → Two hosts, one
+  session](../architecture/sessions.md#two-hosts-one-session).
+- **The local working copy is not wiped on clean exit.** On ephemeral compute
+  the filesystem disappears with the process anyway; on a durable host the
+  local tree is a warm cache and the copy `failure_policy: degrade` falls back
+  to. `core.sessions.retention` remains the operator-owned answer to when local
+  session data goes away.
+
+#### Failure policy
+
+`core.object_store.failure_policy` is the one durability trade-off the operator
+owns rather than the implementation. Both values retry, both surface the outage
+on the bus, and both recover with **no operator action** — what differs is
+whether the session keeps taking turns while the store is unreachable.
+
+| | `degrade` (default) | `strict` |
+|---|---|---|
+| Turn that hit the outage | completes | completes — **it is not un-run** |
+| Further turns | accepted | refused until the state is stored |
+| Bus | `session.storage.degraded`, then `session.storage.recovered` | same, with `turns_blocked: true` |
+| `core.error` | not raised | raised on every failed snapshot |
+| Recovery | automatic | automatic |
+| Boot-time hydration failure | fails the boot | fails the boot |
+
+**What `strict` guarantees, and what it does not.** When a turn's state cannot
+be persisted, the turn **has already happened**: its output was streamed to the
+user, its tools ran, and its side effects are in the world. Nothing in Nexus can
+un-run it, and no configuration makes it not have happened. What `strict` does
+is refuse to start *another* one:
+
+- the failure is raised immediately — `core.error`, an error-level log line, and
+  `session.snapshot.result` with `ok: false`;
+- `session.storage.degraded` goes out with `turns_blocked: true`;
+- every subsequent `io.input` is **vetoed** until a snapshot succeeds, with the
+  reason carrying the last error. The veto runs at priority 200, behind every
+  other `before:io.input` subscriber, so slash commands and cancellation still
+  work while the gate is closed;
+- the first successful snapshot clears the gate, emits
+  `session.storage.recovered` and the session carries on.
+
+So `strict` guarantees that **no turn ever runs against state whose predecessor
+was not durably stored, and the divergence is never silent.** It does not
+guarantee that the turn which hit the outage was prevented. A genuine
+pre-commit gate would need a vetoable turn-boundary event that does not exist,
+and would not help even if it did — by the time an agent loop can report a turn,
+the work is done.
+
+**What `degrade` costs.** Turns keep succeeding against the local working copy,
+and that is the point — an object-store outage should not take down an
+interactive agent that still has a perfectly good local tree. The honest caveat:
+**during a long outage the durability guarantee is not being met even though
+nothing is failing.** Work the user watched happen exists only on local disk, so
+a host that dies while degraded loses it. That is the trade being chosen.
+
+**Retry and the queue bound.** A single background worker per run retries with
+exponential backoff — 1 s, doubling, capped at 60 s — until the state lands. It
+handles two kinds of work:
+
+- a **bounded queue of deferred pushes**, capacity **256** objects, fed by blob
+  write-through failures;
+- a **pending whole-tree snapshot** flag, the backstop, set by a failed
+  snapshot, a failed flush, or a queue overflow.
+
+**Overflow does not lose work.** A push that does not fit in the queue is
+discarded and the whole-tree snapshot is marked pending in its place. That
+snapshot re-uploads every object the store does not already hold at the right
+size, so the escalation is strictly *stronger* than the item it replaced —
+coarser, and paid in bandwidth rather than durability. The same is true of the
+blob write-through queue (also 256), whose own overflow escalates the same way.
+Both bounds, the backoff schedule and the per-request timeouts are compiled-in
+constants rather than config keys: every knob has to be documented, validated
+and supported forever, and an operator who wants to tune them is really asking
+for a different `failure_policy`.
+
+**Recovery needs nobody.** An outage that heals mid-session drains on its own —
+either the next turn-boundary snapshot closes the episode, or, on an idle
+session where no further turn is coming, the retry worker does. The two events
+always pair: exactly one `session.storage.degraded` per outage and one
+`session.storage.recovered` when it ends, so a subscriber counts outages rather
+than failed requests.
+
+**One thing is deliberately not policy-governed.** A blob write-through failure
+never closes the `strict` gate. Write-through is an optimisation in front of the
+turn-boundary snapshot, which re-uploads anything the store is missing; failing
+a turn because that optimisation stumbled on an object the very next snapshot
+repairs would make `strict` fire on transients it is not there to catch. Such a
+failure still queues for retry and still counts towards the degraded state.
+
+#### Beyond the session tree
+
+The session tree is one of four roots. With a backend configured, the same
+`objectstore.Backend` — no per-root methods, no per-root config — also carries:
+
+| Root | Local path | Object key |
+|---|---|---|
+| Session tree | `<core.sessions.root>/<id>/` | `sessions/<id>/…` |
+| App-scope plugin storage | `<core.storage.root>/plugins/<pluginID>/store.db` | `plugins/<pluginID>/store.db` |
+| Agent-scope plugin storage | `<core.storage.root>/agents/<agent_id>/plugins/<pluginID>/store.db` | `agents/<agent_id>/plugins/<pluginID>/store.db` |
+| Eval run output | `<eval.reports_dir>/<run-id>/` | `eval/<run-id>/…` |
+
+Keys mirror the on-disk layout beneath the data root, one key segment per
+directory, so an operator browsing the bucket sees the directory names they
+already know. `core.storage.root` (default `~/.nexus`) remains the single lever
+controlling where these live locally, exactly as it does with no backend
+configured.
+
+- **Cross-session lifetimes are preserved.** An app-scope store keys to
+  `plugins/<pluginID>/store.db` with no session ID anywhere in it, which is
+  what keeps it machine-wide. `nexus.gate.token_budget` stores a *tenant* token
+  ceiling there precisely so it spans sessions; keying it under the session
+  that happened to flush it would turn that into a per-session ceiling with
+  nothing to notice — the gate would keep running and stop being a budget.
+- **Agent scope follows the same collapse the storage manager applies.** With
+  `core.agent_id` empty, agent-scope handles resolve to app scope, and so do
+  their keys. `nexus.vectorstore.sqlite_fts` (`scope: agent`) relies on this.
+- **Shared stores hydrate per plugin directory, and never over a local one.** A
+  plugin directory that already exists locally is left alone: it may be open in
+  this process or another one on the same machine, and replacing a `store.db`
+  under a live SQLite handle corrupts it rather than merely staling it. A
+  plugin directory with no local copy is hydrated at boot, before any plugin
+  can open a handle.
+- **They are snapshotted at the same turn boundary**, with the same
+  checkpoint-then-`VACUUM INTO` discipline, and are logged separately as
+  `shared_objects` / `shared_bytes` / `shared_db_duration` so a large
+  agent-scope index is distinguishable from a large session.
+- **One writing host at a time.** App- and agent-scope stores are shared across
+  sessions by definition. Two processes on *one* host share the local file and
+  SQLite serialises them, so the later upload is a superset of the earlier —
+  safe. Two processes on *different* hosts each have their own copy, and the
+  later flush overwrites the other's at whole-database granularity. See
+  [Per-Plugin Storage → Concurrency](../architecture/storage.md#concurrency).
+- **Eval output is published once, at the end of the run.** `nexus eval run`
+  uploads its run directory under `eval/<run-id>/` when the config file it was
+  given (`--config`) names a backend. The per-case session trees under
+  `_sessions/` are excluded — they are session trees, and sessions are the
+  seam's other root. A publish failure warns and does not change the eval exit
+  code, which is about the cases, not about the bucket.
+- **Journal output is already covered** by the session snapshot: the journal
+  lives at `<session>/journal/` and is captured at a consistent instant on every
+  turn boundary.
+
+#### The `s3` backend
+
+Shipped in-repo as its own Go module — `github.com/frankbardon/nexus/modules/objectstore-s3`,
+under `modules/objectstore-s3/`. It is not part of `bin/nexus`: the AWS SDK it
+depends on is exactly the kind of dependency the root module refuses to carry,
+so an embedder who wants it blank-imports it into their own `main`. See
+[Repository Go Modules](../guides/go-modules.md).
+
+It covers Amazon S3 and every S3-compatible store: MinIO, Cloudflare R2, Ceph
+RGW and Backblaze B2.
+
+It adds **no config keys of its own**. Everything it needs is already in the
+`core.object_store` block above; what follows is how this backend reads each
+key.
+
+| Key | How the `s3` backend uses it |
+|---|---|
+| `backend` | `s3` |
+| `bucket` | The bucket. Never created — it must exist, and the credentials must be able to read, write, delete and list it. |
+| `prefix` | Prepended to every object key. Matched back on **segment** boundaries, so a bucket shared between a `prod/nexus` and a `prod/nexus-staging` deployment keeps them apart. |
+| `region` | Signed into every request. Required against real AWS; with `endpoint` set it defaults to `us-east-1`, which every S3-compatible store accepts and none of them interprets. |
+| `endpoint` | An absolute `http://` or `https://` URL. Setting it also switches the client to **path-style addressing** (`https://host/bucket/key`), which is what makes MinIO, Ceph and Backblaze work unmodified — virtual-host addressing needs wildcard DNS and a wildcard certificate that a self-hosted store does not have. There is no separate path-style key, and none is needed: real AWS, which prefers virtual-host addressing, is the case where no endpoint is set. |
+| `credentials_file` | An ordinary AWS INI credentials file (`[default]`, `aws_access_key_id`, `aws_secret_access_key`, optional `aws_session_token`), so the same file works with the AWS CLI and can be mounted as a Kubernetes secret unchanged. `AWS_PROFILE` selects the profile. **Empty is the production path**, and means the SDK's default credential chain: environment variables, the shared config and credentials files, IRSA / EKS Pod Identity, ECS task roles, and the EC2 instance role via IMDSv2 — with expiry-aware refresh. Nexus neither reorders nor narrows that chain. |
+| `failure_policy` | Interpreted by the engine, not by the backend. |
+
+```yaml
+# Amazon S3 with a workload identity — no key material anywhere.
+core:
+  object_store:
+    backend: s3
+    bucket: nexus-sessions
+    prefix: prod/nexus
+    region: eu-west-2
+```
+
+```yaml
+# MinIO on a laptop, or any S3-compatible store.
+core:
+  object_store:
+    backend: s3
+    bucket: nexus
+    endpoint: http://127.0.0.1:9000
+    credentials_file: ~/.config/nexus/minio-credentials
+```
+
+**Boot-time validation.** A malformed endpoint, a `credentials_file` that is not
+there, and an unresolvable region all fail the boot naming the key. Nothing
+remote is checked: `failure_policy: degrade` exists so an object-store outage
+degrades a run rather than ending it, and a boot-time round trip to the bucket
+would make it structurally unable to do that.
+
+**Object keys mirror the local tree**, one key segment per directory, under
+`prefix`. Nothing is encoded, hashed or flattened, so the bucket is browsable —
+`<prefix>/sessions/<id>/plugins/nexus.scene/scene.jsonl` is exactly the path it
+came from. Empty files are stored as zero-byte objects and restored as empty
+files; this backend never writes a zero-byte directory marker, so there is
+nothing to confuse them with.
+
+**One object at a time, synchronously.** `Put` returns only once S3 has
+acknowledged the write, so there is no in-backend queue with a second retry
+regime underneath the engine's own — retry, backoff and `failure_policy` stay in
+one place. A single `PutObject` caps one object at 5 GiB; no session artifact
+Nexus produces approaches that.
+
+#### The `gcs` backend
+
+Shipped in-repo as its own Go module — `github.com/frankbardon/nexus/modules/objectstore-gcs`,
+under `modules/objectstore-gcs/`. Like the `s3` backend it is not part of
+`bin/nexus`: the Google Cloud SDK it depends on is exactly the kind of
+dependency the root module refuses to carry, so an embedder who wants it
+blank-imports it into their own `main`. See
+[Repository Go Modules](../guides/go-modules.md).
+
+```go
+import _ "github.com/frankbardon/nexus/modules/objectstore-gcs"
+```
+
+It covers Google Cloud Storage, and — through `endpoint` — the Cloud Storage
+emulators.
+
+It adds **no config keys of its own**. Everything it needs is already in the
+`core.object_store` block above; what follows is how this backend reads each
+key, and the two keys it reads differently from `s3` are called out because a
+config copied between the two clouds will contain them.
+
+| Key | How the `gcs` backend uses it |
+|---|---|
+| `backend` | `gcs` |
+| `bucket` | The bucket. Never created — it must exist, and the principal needs `storage.objects.get`, `create`, `delete` and `list` on it (the `roles/storage.objectAdmin` role covers exactly those). No project ID is needed anywhere: a project is required to create or list *buckets*, and this backend does neither. |
+| `prefix` | Prepended to every object key. Matched back on **segment** boundaries, so a bucket shared between a `prod/nexus` and a `prod/nexus-staging` deployment keeps them apart. |
+| `region` | **Accepted and ignored**, with a warning logged once at boot. A GCS bucket's location is chosen when the bucket is created and no client ever names one, so there is nothing to apply the value to. It is not an error, because the same `core.object_store` block is shared with `s3` — where the region is signed into every request — and a config that travels between the two should not fail to boot over a key that cannot change behaviour here. |
+| `endpoint` | An absolute `http://` or `https://` URL naming a host, e.g. `http://127.0.0.1:4443`. The Cloud Storage JSON API path (`/storage/v1/`) is appended for you when the URL has none, so the key is spelled the same way for both backends; a URL that already carries a path is left alone, for an emulator behind a reverse proxy on a sub-path. Unlike `s3`, this is **an emulator switch, not a way to reach an alternative provider**: GCS has one production service, reached by leaving `endpoint` empty, and a VPC using Private Google Access or Private Service Connect gets there by DNS and routing policy rather than by a client-side override. Setting it also turns authentication **off** when no credentials are available — see `credentials_file`. |
+| `credentials_file` | A service-account JSON key file, the format `gcloud iam service-accounts keys create` produces, so the same file works with `gcloud` and can be mounted as a Kubernetes secret unchanged. Only that credential *type* is accepted: an external-account (Workload Identity Federation) or impersonation configuration names a URL the auth library will fetch a token from, and accepting one from a path that may have come from a shared config repository would hand an attacker a credential-exfiltration primitive. Those belong on the ambient path below, via `GOOGLE_APPLICATION_CREDENTIALS`, where an operator opts into them at the environment level. **Empty is the production path**, and means Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, the `gcloud` well-known file, GKE Workload Identity and the GCE service account via the metadata server, service-account impersonation, and Workload Identity Federation — with expiry-aware refresh and no key material on disk. Nexus neither reorders nor narrows that chain. |
+| `failure_policy` | Interpreted by the engine, not by the backend. |
+
+```yaml
+# Google Cloud Storage under GKE Workload Identity — no key material anywhere.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus-sessions
+    prefix: prod/nexus
+```
+
+```yaml
+# A static service-account key, for somewhere Workload Identity is not available.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus-sessions
+    credentials_file: ~/.config/nexus/gcs-service-account.json
+```
+
+```yaml
+# An emulator on a laptop. No credentials, no environment variables.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus
+    endpoint: http://127.0.0.1:4443
+```
+
+**Credential resolution, in order.** `credentials_file` if set; otherwise
+Application Default Credentials if they resolve; otherwise, **if `endpoint` is
+set**, an unauthenticated client, logged at warn level, which is the emulator
+path — every Cloud Storage emulator is unauthenticated, and doing this from
+config is what lets an emulator deployment be described entirely in YAML.
+Anything else **fails the boot**. That last step is deliberately stricter than
+the Google SDK, which builds a client happily when it cannot find credentials
+and fails at the first request instead; under `failure_policy: degrade` that
+would be a run that starts, looks healthy and persists nothing.
+
+**Boot-time validation.** A malformed `endpoint`, a `credentials_file` that is
+not there, and the no-credentials case above all fail the boot naming the key.
+Nothing remote is checked, for the same reason the `s3` backend checks nothing
+remote: `failure_policy: degrade` exists so an object-store outage degrades a
+run rather than ending it, and a boot-time round trip to the bucket would make
+it structurally unable to do that.
+
+**Object keys mirror the local tree**, one key segment per directory, under
+`prefix` — byte for byte the same layout the `s3` backend produces. That is a
+decision, not a coincidence: a deployment migrating between the two clouds, or
+replicating one bucket into the other, can do it with the vendors' own copy
+tools and no translation step. GCS has no directories — the console renders `/`
+as one, but a key is a single flat string — so depth costs nothing, and empty
+files are stored as zero-byte objects and restored as empty files. This backend
+never writes a zero-byte folder placeholder, so there is nothing to confuse them
+with.
+
+**One object at a time, synchronously**, exactly as `s3`: `Put` returns only
+once GCS has acknowledged the write, so there is no in-backend queue with a
+second retry regime underneath the engine's own. Two GCS-specific details fall
+out of that. Every upload and download is **CRC32C-verified end to end** by the
+SDK, so a successful `Put` means the bytes in the bucket are the bytes on disk,
+not merely that a request returned 200. And uploads and deletes are issued with
+the SDK's `RetryAlways` policy rather than its default, which would not retry
+them at all: an object insert without a precondition is not idempotent in
+general, but this backend always writes whole objects and takes last-write-wins,
+so a repeated request converges. Without that, a transient 503 would fail a push
+that the `s3` backend would have retried silently.
+
+**Deleting an object that is not there is not an error**, matching the seam and
+matching `s3`. GCS itself returns 404 where S3 returns 204; the backend absorbs
+the difference, which is what lets the engine retry a delete without
+special-casing the second attempt.
 
 ### `core.models`
 

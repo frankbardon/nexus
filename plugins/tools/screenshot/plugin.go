@@ -139,7 +139,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		}
 	}
 	if p.session != nil {
-		store, err := blobs.New(p.session.BlobsDir(), budget)
+		store, err := p.session.BlobStore(budget)
 		if err != nil {
 			return fmt.Errorf("screenshot: blob store init: %w", err)
 		}

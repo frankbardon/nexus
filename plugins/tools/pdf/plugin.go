@@ -307,15 +307,20 @@ func (p *Plugin) handleReadPDF(tc events.ToolCall) {
 			baseName = strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath)) + ".txt"
 		}
 		sessionPath := "files/" + baseName
+		// WriteFile already emits session.file.created / .updated for this
+		// path. A second hand-built emit used to sit here and was removed
+		// rather than reconciled: it fired unconditionally as "created" even
+		// when the file was being overwritten, carried the bare basename where
+		// every other emitter carries the session-relative path (so a sync
+		// backend keyed on it would have written "report.txt" alongside
+		// "files/report.txt" as two objects), and predated the offset /
+		// bytes_added delta so subscribers saw one event with the delta and
+		// one without. Its only unique key, "source", had no reader anywhere
+		// in the tree. This plugin does not declare session.file.* in
+		// Emissions() and now genuinely does not emit it.
 		if err := p.session.WriteFile(sessionPath, []byte(text)); err != nil {
 			p.logger.Warn("failed to save PDF text to session", "path", sessionPath, "error", err)
 		} else {
-			_ = p.bus.Emit("session.file.created", map[string]any{
-				"session_id": p.session.ID,
-				"path":       baseName,
-				"size":       len(text),
-				"source":     absPath,
-			})
 			p.logger.Info("saved PDF text to session", "path", sessionPath)
 		}
 	}

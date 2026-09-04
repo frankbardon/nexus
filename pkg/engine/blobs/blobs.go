@@ -20,7 +20,53 @@
 // The store is process-local and synchronized via an internal mutex. It is
 // safe for concurrent Put/Get/Sweep across goroutines in one process.
 // Cross-process access is not supported (blob writes are atomic via
-// temp+rename, but Sweep is not coordinated across processes).
+// temp+rename, but Sweep is not coordinated across processes). A PutHook does
+// not change that: the hook is a callback inside the same process, so two
+// processes rooted at one directory still have two uncoordinated Sweeps and
+// two independent hooks.
+//
+// # Object-store disposition: write-through
+//
+// When rooted at a session's blobs/ directory this package writes under the
+// session tree with raw os.* calls and announces nothing on the bus. The bytes
+// still reach a configured object store, and they reach it the moment they
+// land rather than at the next turn boundary — see WithPutHook.
+//
+// What write-through buys is narrow, and worth stating precisely so nobody
+// reads more into it. It is *not* a bandwidth saving: blobs are
+// content-addressed, so a file at blobs/<xx>/<sha256>.bin either holds those
+// bytes or does not exist, and engine.objectStoreImmutable already recognises
+// that by identity and reduces the whole subtree to a once-ever upload per
+// blob. The repeated per-turn cost was never being paid. What is left is
+// latency and durability *within* one turn: a turn that produces several large
+// blobs otherwise holds all of them on local disk until agent.turn.end, so a
+// process killed mid-turn loses them, and the turn boundary pays for all of
+// them at once. Pushing on write overlaps the upload with the rest of the turn
+// and shrinks the loss window from "one turn" to "one queue drain".
+//
+// It is a pure optimisation, deliberately. A push that fails, is dropped under
+// load, or never happens because no hook was installed costs nothing but the
+// delay it was trying to remove: the turn-boundary snapshot still walks the
+// whole tree, and it re-uploads any immutable file the store does not already
+// hold at the right size. Correctness stays with the snapshot.
+//
+// # No bus dependency
+//
+// This package still imports nothing outside the standard library and knows
+// nothing about an event bus, an object store or a session. WithPutHook takes
+// a plain func, which is what lets pkg/engine wire the push without this
+// package acquiring a dependency it would then carry into every standalone
+// use. Recorded in engine.SessionTreeWriters.
+//
+// # Eviction is local only
+//
+// Sweep and Delete remove local files and nothing else. There is deliberately
+// no delete hook: the LRU sweep exists to bound *disk*, which is exactly the
+// constraint a bucket does not have, so mirroring a local eviction remotely
+// would destroy data the operator is paying to keep — and would do it to
+// content-addressed objects a later session may still be referencing by URI.
+// A swept blob stays in the store; a Get for it after eviction is a local miss
+// that hydration can repair, not a lost object.
 package blobs
 
 import (
@@ -77,22 +123,81 @@ type Store struct {
 	root       string
 	byteBudget int64
 
+	// onPut is set once at construction and never mutated, so Put reads it
+	// without the mutex. Nil unless WithPutHook was passed.
+	onPut PutHook
+
 	mu sync.Mutex
 }
 
-// New opens or creates a blob store rooted at dir. dir is created if missing.
+// PutHook is notified after Put has durably written a *new* blob. It receives
+// the handle (whose Path is the .bin file) and the path of the .meta sidecar
+// written beside it, because a blob is two files and a consumer that copies
+// only one of them stores a blob with no media type.
+//
+// It is a plain func rather than an interface or an event bus on purpose: this
+// package is a standalone content store with no dependency outside the
+// standard library, and a func is the narrowest thing that lets pkg/engine
+// wire an object-store push into it without that dependency leaking back here.
+//
+// # What the hook may assume, and what it must not
+//
+// It runs exactly once per blob per Store, on the goroutine that called Put,
+// *after* the internal mutex has been released. Outside the lock is the whole
+// point: the hook is expected to do I/O (an upload), holding the store lock
+// across a network round trip would serialise every other Put behind it, and a
+// hook that called back into Put, Delete or Sweep would deadlock.
+//
+// The consequence of being outside the lock is that a concurrent Sweep may
+// evict the blob before the hook opens it. A hook must therefore treat a
+// missing file as ordinary, not as an error worth escalating.
+//
+// A Put that finds the content already present fires nothing: the bytes are
+// unchanged and by content-addressing they can only ever be those bytes, so a
+// second notification would describe a write that did not happen.
+//
+// Panics are not recovered. A hook is engine-supplied glue, not user code, and
+// swallowing a panic here would hide it behind a successful Put.
+type PutHook func(h Handle, metaPath string)
+
+// Option configures a Store at construction. Variadic on New so the existing
+// two-argument call shape keeps compiling — an out-of-tree caller that only
+// wants a local blob store never has to learn this exists.
+type Option func(*Store)
+
+// WithPutHook installs fn as the store's PutHook. A nil fn is ignored, so a
+// caller can pass a hook it may or may not have without branching.
+func WithPutHook(fn PutHook) Option {
+	return func(s *Store) {
+		if fn != nil {
+			s.onPut = fn
+		}
+	}
+}
+
+// New opens a blob store rooted at dir.
+//
+// The root directory is NOT created here: Put creates it (and the two-char
+// shard beneath it) on the first blob, so a session whose tools never produce
+// a blob never grows an empty blobs/ directory. That is deliberate, and it is
+// what SessionWorkspace.BlobsDir documents. The cost is that a root that
+// cannot be created is reported by the first Put rather than by New; the
+// alternative — an eager MkdirAll for early validation — put an empty
+// directory into every session tree, including every one that gets synced to
+// an object store, to catch a misconfiguration that Put reports anyway.
 //
 // byteBudget is the soft cap for total stored bytes. When zero, the store
 // is unbounded and Sweep is a no-op. When positive, callers should call
 // Sweep periodically (or after Put) to enforce the cap.
-func New(dir string, byteBudget int64) (*Store, error) {
+func New(dir string, byteBudget int64, opts ...Option) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("blobs: empty root directory")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("blobs: create root: %w", err)
+	s := &Store{root: dir, byteBudget: byteBudget}
+	for _, opt := range opts {
+		opt(s)
 	}
-	return &Store{root: dir, byteBudget: byteBudget}, nil
+	return s, nil
 }
 
 // Root returns the absolute root directory the store writes into.
@@ -123,28 +228,48 @@ func (s *Store) Put(data []byte, mediaType string) (Handle, error) {
 	sha := hex.EncodeToString(sum[:])
 	binPath, metaPath := s.paths(sha)
 
+	h, created, err := s.put(sha, binPath, metaPath, data, mediaType)
+	if err != nil || !created {
+		return h, err
+	}
+
+	// Outside s.put, therefore outside the mutex. See PutHook for why that is
+	// a requirement rather than a tidiness preference: the hook uploads, and a
+	// network round trip under the store lock would block every other Put.
+	if s.onPut != nil {
+		s.onPut(h, metaPath)
+	}
+	return h, nil
+}
+
+// put is Put's critical section. created reports whether this call is the one
+// that wrote the blob, which is what makes the hook fire exactly once per blob
+// however many callers race on the same content.
+func (s *Store) put(sha, binPath, metaPath string, data []byte, mediaType string) (h Handle, created bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if info, err := os.Stat(binPath); err == nil {
+	if info, statErr := os.Stat(binPath); statErr == nil {
 		// Already present — touch mtime for LRU and read back the existing
 		// media type so callers don't accidentally rewrite metadata.
 		now := time.Now()
 		_ = os.Chtimes(binPath, now, now)
 		mt, _ := readMeta(metaPath)
-		return Handle{SHA256: sha, MediaType: mt, Size: info.Size(), Path: binPath}, nil
+		return Handle{SHA256: sha, MediaType: mt, Size: info.Size(), Path: binPath}, false, nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
-		return Handle{}, fmt.Errorf("blobs: mkdir: %w", err)
+	// Creates the store root as well as the two-char shard, which is why New
+	// does not have to: MkdirAll builds every missing parent.
+	if mkErr := os.MkdirAll(filepath.Dir(binPath), 0o755); mkErr != nil {
+		return Handle{}, false, fmt.Errorf("blobs: mkdir: %w", mkErr)
 	}
-	if err := writeAtomic(binPath, data); err != nil {
-		return Handle{}, err
+	if wErr := writeAtomic(binPath, data); wErr != nil {
+		return Handle{}, false, wErr
 	}
-	if err := writeAtomic(metaPath, []byte(formatMeta(mediaType, int64(len(data))))); err != nil {
-		return Handle{}, err
+	if wErr := writeAtomic(metaPath, []byte(formatMeta(mediaType, int64(len(data))))); wErr != nil {
+		return Handle{}, false, wErr
 	}
-	return Handle{SHA256: sha, MediaType: mediaType, Size: int64(len(data)), Path: binPath}, nil
+	return Handle{SHA256: sha, MediaType: mediaType, Size: int64(len(data)), Path: binPath}, true, nil
 }
 
 // Get returns the bytes and media type for a blob, or os.ErrNotExist if
@@ -175,7 +300,11 @@ func (s *Store) Stat(sha string) (Handle, error) {
 	return Handle{SHA256: sha, MediaType: mt, Size: info.Size(), Path: binPath}, nil
 }
 
-// Delete removes a blob. Missing blobs are not an error.
+// Delete removes a blob from the local store. Missing blobs are not an error.
+//
+// Local only, and there is deliberately no delete counterpart to PutHook — see
+// the package doc's "Eviction is local only" section. Removing the local copy
+// says the disk is full, not that the content is unwanted.
 func (s *Store) Delete(sha string) error {
 	binPath, metaPath := s.paths(sha)
 	s.mu.Lock()
@@ -192,11 +321,22 @@ func (s *Store) Delete(sha string) error {
 // Sweep evicts blobs in LRU order until total stored bytes <= byteBudget.
 // Returns the count of evicted blobs and the total bytes freed.
 //
-// No-op when byteBudget is zero (unbounded store).
+// No-op when byteBudget is zero (unbounded store), and no-op when the root
+// does not exist yet — a store nobody has Put to has nothing to evict, and
+// since New no longer creates the root that is an ordinary state rather than
+// a broken one.
+//
+// Eviction is local. Nothing here touches a remote copy of a blob, and nothing
+// should: the byte budget bounds disk, a bucket has no such bound, and
+// deleting remotely to match would throw away content a later hydration is
+// expected to bring back. See the package doc.
 func (s *Store) Sweep() (evicted int, freed int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byteBudget <= 0 {
+		return 0, 0, nil
+	}
+	if _, statErr := os.Stat(s.root); os.IsNotExist(statErr) {
 		return 0, 0, nil
 	}
 
@@ -259,6 +399,12 @@ func (s *Store) Sweep() (evicted int, freed int64, err error) {
 // trigger Sweep.
 func (s *Store) TotalBytes() (int64, error) {
 	var total int64
+	// A root that was never created holds no bytes. Reported as 0 rather than
+	// as a walk error so callers do not have to special-case a store whose
+	// first Put has not happened yet.
+	if _, err := os.Stat(s.root); os.IsNotExist(err) {
+		return 0, nil
+	}
 	err := filepath.Walk(s.root, func(path string, info os.FileInfo, ferr error) error {
 		if ferr != nil {
 			return ferr

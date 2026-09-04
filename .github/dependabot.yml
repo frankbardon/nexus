@@ -1,7 +1,15 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    # `directories` (plural, glob-capable) rather than a single `directory`, so a
+    # new Go submodule under modules/ is covered the moment the directory exists
+    # instead of the day somebody remembers to come back here. The root module is
+    # listed alongside it and is updated independently on purpose: keeping the
+    # cloud SDKs out of the root module's dependency list is the entire reason
+    # those submodules exist, and a shared update PR would blur that.
+    directories:
+      - /
+      - /modules/*
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

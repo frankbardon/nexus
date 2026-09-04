@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/frankbardon/nexus/pkg/engine/objectstore"
 )
 
 // Config is the top-level configuration for the engine.
@@ -118,9 +120,20 @@ type CoreConfig struct {
 	// instance gets its own ScopeAgent storage tree under
 	// ~/.nexus/agents/<id>/. CLI and single-agent embedders leave it
 	// empty, which collapses ScopeAgent to ScopeApp.
-	AgentID   string         `yaml:"agent_id"`
-	Storage   StorageConfig  `yaml:"storage"`
-	ModelsRaw map[string]any `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+	AgentID string        `yaml:"agent_id"`
+	Storage StorageConfig `yaml:"storage"`
+	// ObjectStore optionally makes a remote object store the source of truth
+	// for the engine's on-disk state between runs, for deployments with no
+	// durable local disk. It governs four roots — the session tree, app- and
+	// agent-scope plugin storage, and eval run output — which is why it sits
+	// on core rather than under core.sessions.
+	//
+	// The zero value disables it and no object-store code runs at all, which
+	// is what keeps the default path byte-identical to a build without the
+	// feature. See pkg/engine/objectstore for why this is a lifecycle seam
+	// rather than a filesystem abstraction.
+	ObjectStore objectstore.Config `yaml:"object_store"`
+	ModelsRaw   map[string]any     `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
 }
 
 // StorageConfig tunes the per-plugin SQLite storage manager. Defaults match
@@ -293,8 +306,26 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+
+	// Resolve the object-store backend by name here, at load, rather than when
+	// the first object is written. A typo'd backend name or a backend module
+	// that was never blank-imported must fail the boot with the offending key
+	// in the message, not surface an hour into a session as a missing artifact.
+	//
+	// ExpandPath runs at this read site (the one place the engine reads the
+	// block) because objectstore must stay importable by out-of-repo backend
+	// modules without dragging in package engine.
+	osc := &c.Core.ObjectStore
+	osc.CredentialsFile = ExpandPath(osc.CredentialsFile)
+	if err := osc.Validate(objectStoreConfigKey); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
 	return nil
 }
+
+// objectStoreConfigKey is the dotted path the object-store block is parsed
+// from. Kept as a constant so validation messages and the docs cannot drift.
+const objectStoreConfigKey = "core.object_store"
 
 // extractPluginConfigs pulls per-plugin config maps from the plugins section.
 // Keys that are not "active" are treated as plugin IDs.

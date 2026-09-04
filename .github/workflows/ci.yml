@@ -39,6 +39,17 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      # make build, make test, make vet and make lint each sweep the Go
+      # submodules under modules/ in addition to the root module -- see the
+      # GO_SUBMODULES block at the top of the Makefile. There is deliberately no
+      # separate submodule job or step here: a submodule is invisible to any
+      # ./... pattern, so the one thing that must never happen is a CI command
+      # that skips it without saying so, and the surest guard against that is one
+      # command per concern, shared verbatim with local development. A module
+      # added under modules/ is picked up by these steps with no workflow edit.
+      #
+      # The go mod download above covers the root module only; each submodule's
+      # dependencies are fetched on demand by the make target that needs them.
       - name: Build
         run: make build
 
@@ -56,6 +67,86 @@ jobs:
       # so it needs no API key and no repo secrets.
       - name: Broker integration tests
         run: make test-broker-integration
+
+  # The object-store backend in modules/objectstore-s3, against a real S3
+  # implementation instead of the in-process fake the `test` job runs.
+  #
+  # Its own job rather than another step in `test`, for the reason `race` is its
+  # own job: it runs concurrently, so a green CI costs no extra wall clock, and
+  # it needs a container runtime that nothing else in `test` should have to care
+  # about. Roughly 20-30s including the image pull.
+  #
+  # No secrets and no cloud account, which is what makes it CI-able at all —
+  # MinIO is an S3-compatible store that `make test-objectstore-minio` starts
+  # and stops itself on loopback. That is the same property that lets the broker
+  # integration suite run above, and the reason tests/integration/ is still
+  # excluded (it needs ANTHROPIC_API_KEY) does not apply here.
+  #
+  # The suite skips when no MinIO is reachable, so that a contributor without
+  # Docker gets an honest "not run" rather than a red they cannot act on. A skip
+  # here would be indistinguishable from a pass, which is exactly the
+  # invisible-forever failure mode the submodule plumbing exists to prevent — so
+  # scripts/with-minio.sh exports NEXUS_TEST_MINIO_REQUIRED, and the suite fails
+  # rather than skips in any run that provisioned MinIO. If this job is green,
+  # the tests ran.
+  #
+  # ubuntu-latest ships a working Docker daemon, so there is no setup step. No
+  # `go mod download` either: it covers the root module, and everything this job
+  # builds is either root-module code reached through the submodule's `replace`
+  # or a submodule dependency the make target fetches on demand.
+  objectstore-minio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+
+      # Same target the maintainer runs locally, so local and CI cannot drift.
+      - name: Object store suite against MinIO
+        run: make test-objectstore-minio
+
+  # The object-store backend in modules/objectstore-gcs, against a real Cloud
+  # Storage implementation instead of the in-process fake the `test` job runs.
+  #
+  # Its own job for the reasons objectstore-minio is its own job, and separate
+  # from it for one more: MinIO emulates S3 and fake-gcs-server emulates GCS, so
+  # a combined step would report one red for two unrelated stores and neither
+  # could be re-run on its own. Both jobs run concurrently, so holding the two
+  # backends to the same bar costs no extra wall clock. Roughly 30s, most of it
+  # the first build of the emulator.
+  #
+  # No secrets and no cloud account. `make test-objectstore-fake-gcs` builds a
+  # pinned fake-gcs-server with the Go toolchain this job already has and runs
+  # it on loopback — no container runtime is involved, which is why there is no
+  # setup step here beyond Go itself. scripts/with-fake-gcs.sh records why that
+  # differs from the MinIO job's container.
+  #
+  # The suite skips when no emulator is reachable, so a contributor who cannot
+  # build one gets an honest "not run" rather than a red they cannot act on. A
+  # skip here would be indistinguishable from a pass, so
+  # scripts/with-fake-gcs.sh exports NEXUS_TEST_FAKE_GCS_REQUIRED and the suite
+  # fails rather than skips in any run that provisioned the emulator. If this
+  # job is green, the tests ran.
+  #
+  # No `go mod download`: it covers the root module, and everything this job
+  # builds is either root-module code reached through the submodule's `replace`
+  # or a dependency the make target fetches on demand.
+  objectstore-fake-gcs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+
+      # Same target the maintainer runs locally, so local and CI cannot drift.
+      - name: Object store suite against fake-gcs-server
+        run: make test-objectstore-fake-gcs
 
   # Deliberately its own job rather than another step in `test`: it runs
   # concurrently with `test` and `lint`, so a green CI costs no extra

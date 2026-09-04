@@ -14,6 +14,22 @@ import (
 
 // Writer is the durable JSONL appender for a single session's journal.
 //
+// # Object-store disposition: turn-boundary-only
+//
+// The Writer puts bytes under the session tree (journal/events.jsonl) with raw
+// os.* calls and announces nothing on the bus. Unlike every other bypassing
+// writer, that is not a cost/benefit judgement — it is the only option. This
+// writer's *input* is every event dispatched on the bus, so an announcement
+// per journal write would produce an envelope, which would produce another
+// announcement, forever. The Writer holding no bus reference at all is what
+// makes that loop impossible by construction rather than by discipline, and is
+// the reason to leave it that way.
+//
+// The journal still syncs: the turn-boundary snapshot captures it through
+// Snapshot below, which takes one consistent instant across the active and
+// rotated segments so a snapshot can never contain the same events twice.
+// Recorded in SessionTreeWriters (pkg/engine/session_writers.go).
+//
 // Writes are decoupled from the bus dispatch goroutine via a buffered channel:
 // the bus's wildcard handler builds an Envelope (with seq + parent_seq
 // supplied by the bus) and pushes it on the channel; a drain goroutine
@@ -26,7 +42,7 @@ type Writer struct {
 	rotateBytes int64
 	initialSeq  uint64
 
-	ch    chan *Envelope
+	ch    chan journalItem
 	doneC chan struct{}
 
 	// closed flips to true under sendMu's write lock when Close runs. Append
@@ -130,7 +146,7 @@ func NewWriter(dir string, opts WriterOptions) (*Writer, error) {
 		dir:         dir,
 		mode:        opts.FsyncMode,
 		rotateBytes: opts.RotateBytes,
-		ch:          make(chan *Envelope, opts.BufferSize),
+		ch:          make(chan journalItem, opts.BufferSize),
 		doneC:       make(chan struct{}),
 		activeFile:  f,
 		activeBuf:   bufio.NewWriter(f),
@@ -191,7 +207,76 @@ func (w *Writer) Append(env *Envelope) {
 	if w.closed.Load() {
 		return
 	}
-	w.ch <- env
+	w.ch <- journalItem{env: env}
+}
+
+// journalItem is what actually travels the drain channel. It carries either an
+// envelope to append or a barrier to signal, never both.
+//
+// The barrier rides the *same* channel as the envelopes rather than a second
+// channel selected alongside it, and that is the whole point: a select over two
+// channels picks between ready cases at random, so a barrier sent after an
+// envelope could still be served first and would then report "caught up" while
+// that envelope was still in flight. One FIFO channel makes "everything queued
+// before this call" a statement the drain can actually honour.
+//
+// The alternative — an unexported channel field on Envelope — was rejected
+// because Envelope is the on-disk record, and a control-plane field has no
+// business in a type whose whole job is to describe a line of JSONL.
+type journalItem struct {
+	env *Envelope
+	// barrier, when non-nil, is closed by the drain once every envelope
+	// queued ahead of it has been written, flushed and fsynced.
+	barrier chan struct{}
+}
+
+// Barrier blocks until the drain goroutine has written, flushed and fsynced
+// every envelope queued before the call.
+//
+// Appends are asynchronous: the bus's wildcard handler hands an envelope to a
+// channel and returns, so a bus handler running at a turn boundary observes a
+// journal that trails the turn it is reacting to by however many envelopes are
+// still queued. The object-store turn snapshot is exactly such a handler, and
+// without this barrier every snapshot would capture a journal ending mid-turn —
+// making a resumed session re-fire its last input on every single resume.
+//
+// One caveat, deliberate: the drain writes envelopes in contiguous seq order,
+// so a seq assigned by the bus but not yet handed to Append leaves a gap that
+// blocks everything behind it. Barrier does not wait for such a gap to close —
+// it cannot, since the missing envelope may never arrive — so it guarantees
+// "everything queued before the call, up to the first gap", not "everything the
+// bus has ever numbered".
+//
+// Returns nil once the writer is closed: Close already flushed and fsynced.
+func (w *Writer) Barrier(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+
+	w.sendMu.RLock()
+	if w.closed.Load() {
+		w.sendMu.RUnlock()
+		return nil
+	}
+	done := make(chan struct{})
+	select {
+	case w.ch <- journalItem{barrier: done}:
+		w.sendMu.RUnlock()
+	case <-ctx.Done():
+		w.sendMu.RUnlock()
+		return fmt.Errorf("journal barrier: %w", ctx.Err())
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-w.doneC:
+		// The writer closed while we waited; Close drains, flushes and syncs
+		// whatever was queued, so the barrier's promise still holds.
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("journal barrier: %w", ctx.Err())
+	}
 }
 
 // Close drains in-flight envelopes, fsyncs, and shuts the file. Safe to call
@@ -258,8 +343,18 @@ func (w *Writer) drain() {
 		}
 	}
 
-	for env := range w.ch {
-		pending[env.Seq] = env
+	for item := range w.ch {
+		if item.barrier != nil {
+			// Write everything contiguously available, then push it past the
+			// bufio writer and the kernel before releasing the waiter — a
+			// barrier that only guaranteed "handed to bufio" would be useless
+			// to a caller about to copy the file.
+			flush()
+			w.syncActive()
+			close(item.barrier)
+			continue
+		}
+		pending[item.env.Seq] = item.env
 		flush()
 	}
 
@@ -282,6 +377,20 @@ func (w *Writer) drain() {
 				_ = w.writeOne(env)
 			}
 		}
+	}
+}
+
+// syncActive pushes the buffered writer and the kernel page cache to disk.
+// Takes w.mu because it touches the same two fields writeToFile does, and is
+// called only from the drain goroutine, which never already holds it.
+func (w *Writer) syncActive() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.activeBuf != nil {
+		_ = w.activeBuf.Flush()
+	}
+	if w.activeFile != nil {
+		_ = w.activeFile.Sync()
 	}
 }
 

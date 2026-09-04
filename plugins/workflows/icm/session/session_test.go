@@ -470,3 +470,77 @@ func TestSession_ClearStage(t *testing.T) {
 		t.Errorf("expected nil for missing stage, got: %v", err)
 	}
 }
+
+// The Announce hook is what stops a run tree from being invisible to anything
+// syncing the session until the turn ends. It has to cover both doors into the
+// tree — WriteArtifact, which every stage output and sidecar funnels through,
+// and the initial-input copy, which is the only path that bypasses it.
+func TestSession_AnnounceFiresForArtifactsAndCopiedInputs(t *testing.T) {
+	type call struct {
+		path    string
+		existed bool
+	}
+	var calls []call
+
+	s, err := NewSession(t.TempDir(), "run_announce", nil)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	s.Announce = func(p string, existed bool) {
+		calls = append(calls, call{path: p, existed: existed})
+	}
+
+	artifact := s.ArtifactPath("01_draft", "out.md")
+	if err := s.WriteArtifact(artifact, []byte("first")); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+	// A re-run of the same stage overwrites; existed must flip so a subscriber
+	// sees exactly one "created" per path.
+	if err := s.WriteArtifact(artifact, []byte("second")); err != nil {
+		t.Fatalf("WriteArtifact rewrite: %v", err)
+	}
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "brief.md")
+	if err := os.WriteFile(src, []byte("brief"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := s.CopyInitialInputs([]string{src}); err != nil {
+		t.Fatalf("CopyInitialInputs: %v", err)
+	}
+
+	want := []call{
+		{path: artifact, existed: false},
+		{path: artifact, existed: true},
+		{path: filepath.Join(s.StageDir(reservedInputStage), "brief.md"), existed: false},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("announce calls = %+v, want %+v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Errorf("announce call %d = %+v, want %+v", i, calls[i], want[i])
+		}
+	}
+
+	// The temp file WriteArtifact renames from must never be announced: it is
+	// gone by the time a subscriber could act, so announcing it would tell a
+	// sync backend to upload a path that no longer exists.
+	for _, c := range calls {
+		if strings.HasSuffix(c.path, ".tmp") {
+			t.Errorf("announced a temp file: %s", c.path)
+		}
+	}
+}
+
+// Nil is the default and every existing caller relies on it, so writing with
+// no hook installed must stay a plain write.
+func TestSession_NilAnnounceHookIsInert(t *testing.T) {
+	s, err := NewSession(t.TempDir(), "run_noannounce", nil)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := s.WriteArtifact(s.ArtifactPath("01_draft", "out.md"), []byte("x")); err != nil {
+		t.Fatalf("WriteArtifact: %v", err)
+	}
+}

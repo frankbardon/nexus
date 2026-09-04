@@ -16,6 +16,12 @@ var rotatedRe = regexp.MustCompile(`^events-(\d{3,})\.jsonl\.zst$`)
 // rotateActiveSegment is the default rotateCb. It compresses the current
 // events.jsonl into the next events-NNN.jsonl.zst slot, truncates the active
 // segment to zero, and reopens the buffered writer. Caller must hold w.mu.
+//
+// Object-store disposition: turn-boundary-only, for the same self-feeding-loop
+// reason as the Writer it belongs to — see the Writer doc comment. Sealed
+// segments are additionally immutable, so objectStoreImmutable reduces each one
+// to a once-ever upload and the per-turn snapshot cost does not grow with
+// session length. Recorded in engine.SessionTreeWriters.
 func rotateActiveSegment(w *Writer) error {
 	if w.activeBuf != nil {
 		if err := w.activeBuf.Flush(); err != nil {

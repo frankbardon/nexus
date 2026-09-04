@@ -47,6 +47,13 @@ type Plugin struct {
 
 	sessionID string
 	dataDir   string
+	// session is captured so the two raw writers below (scenes.jsonl and
+	// scenes.json) can announce themselves on the bus. The plugin holds its
+	// own *os.File for the patch journal and writes scenes.json in one shot,
+	// so neither can go through the SessionWorkspace helpers; announcing
+	// after the fact is how they stop being invisible to the sync layer.
+	// Nil when the engine was constructed without a session (tests).
+	session *engine.SessionWorkspace
 
 	mu       sync.Mutex
 	journalF *os.File
@@ -78,6 +85,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.dataDir = ctx.DataDir
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 
 	if p.dataDir != "" {
@@ -135,6 +143,13 @@ func (p *Plugin) Emissions() []string {
 		"scene.created",
 		"scene.patched",
 		"scene.deleted",
+		// This plugin emitted eight event types and not one of them was about
+		// the two files it writes, so it looked instrumented while being
+		// entirely invisible to anything syncing the session tree. These two
+		// come from SessionWorkspace.AnnounceAppend / AnnounceWrite, which
+		// emit exactly the payload WriteFile does.
+		"session.file.created",
+		"session.file.updated",
 	}
 }
 
@@ -301,12 +316,13 @@ func (p *Plugin) respondError(tc events.ToolCall, msg string) {
 // session data dir. The replay primitive reads this back when a session
 // resumes without a memory snapshot, and the file is the durable source of
 // truth for time-travel scene reconstruction.
+//
+// Object-store disposition: emit. Every append announces itself on the bus via
+// AnnounceAppend, so a sync backend sees scene mutations as they land instead
+// of waiting for the turn to end. This is the highest-churn raw writer under a
+// session tree and the one whose loss hurts most — a run killed mid-turn drops
+// exactly the scenes it just built. See engine.SessionTreeWriters.
 func (p *Plugin) journalEvent(kind string, handle scene.SceneHandle, patch any, agentID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.journalF == nil {
-		return
-	}
 	line, err := json.Marshal(map[string]any{
 		"kind":     kind,
 		"scene_id": handle.ID,
@@ -318,7 +334,27 @@ func (p *Plugin) journalEvent(kind string, handle scene.SceneHandle, patch any, 
 	if err != nil {
 		return
 	}
-	_, _ = p.journalF.Write(append(line, '\n'))
+	line = append(line, '\n')
+
+	p.mu.Lock()
+	if p.journalF == nil {
+		p.mu.Unlock()
+		return
+	}
+	n, wErr := p.journalF.Write(line)
+	p.mu.Unlock()
+
+	// Announced outside p.mu on purpose. Emit dispatches synchronously on
+	// this goroutine, so a subscriber that reached back into the scene store
+	// — the replay primitive holds a Store() handle, and an IO transport
+	// reacting to a file event is exactly the shape that would — would
+	// deadlock against the lock this write was taken under. Nothing needs the
+	// announcement to be inside the critical section: the bytes are already
+	// durable and their offset is derived from the file, not from p.
+	if wErr != nil || n == 0 || p.session == nil {
+		return
+	}
+	p.session.AnnounceAppend(filepath.Join(p.dataDir, patchJournalName), n)
 }
 
 func (p *Plugin) openJournal() error {
@@ -334,6 +370,15 @@ func (p *Plugin) openJournal() error {
 
 // persistState writes a full snapshot of the in-memory store to scenes.json.
 // Called from Shutdown so a clean restart picks up where we left off.
+//
+// Object-store disposition: emit. The announcement is safe here even though
+// Shutdown runs late — a bus Emit after the journal writer has closed is
+// dropped by the writer rather than stalling it, because Append short-circuits
+// on the closed flag and no later envelope is waiting on this one's sequence
+// number. (The dangerous direction is the other one: emitting *before* the
+// journal subscribes, which strands a sequence number the drain waits on
+// forever. Nothing in this plugin writes that early — Init only reads
+// scenes.json and opens the journal descriptor.)
 func (p *Plugin) persistState() error {
 	handles := p.store.List(p.sessionID)
 	out := make([]scene.Scene, 0, len(handles))
@@ -347,7 +392,18 @@ func (p *Plugin) persistState() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(p.dataDir, stateName), data, 0o644)
+	path := filepath.Join(p.dataDir, stateName)
+	// Sampled before the write: afterwards every path exists, so checking then
+	// would report every first snapshot as an update and no subscriber would
+	// ever see scenes.json appear.
+	_, statErr := os.Stat(path)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	if p.session != nil {
+		p.session.AnnounceWrite(path, statErr == nil)
+	}
+	return nil
 }
 
 // loadState restores scenes.json on Init. Per-scene history is preserved.
