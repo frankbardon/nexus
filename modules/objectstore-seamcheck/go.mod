@@ -10,7 +10,7 @@ go 1.26.0
 // Inside the repo the replace below is what actually takes effect, and the
 // replace is ignored by anyone who depends on this module -- that asymmetry is
 // why the require line has to name a version that exists.
-require github.com/frankbardon/nexus v0.18.2
+require github.com/frankbardon/nexus v0.19.0
 
 // Local development and CI both build the seam from the working tree, not from
 // a published tag: the whole point of this module is to fail when a change in

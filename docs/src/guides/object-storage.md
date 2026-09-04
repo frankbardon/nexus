@@ -145,16 +145,25 @@ host binary — see [limitation 6](#6-the-shipped-binaries-cannot-use-object-sto
 ### 1. Add the module to your program
 
 ```console
-$ go get github.com/frankbardon/nexus@v0.18.2
-$ go get github.com/frankbardon/nexus/modules/objectstore-s3@main
+$ go get github.com/frankbardon/nexus@v0.19.0
+$ go get github.com/frankbardon/nexus/modules/objectstore-s3@v0.1.0
 ```
 
 The backend module is versioned independently of the core module and its tags
 are cut on demand, not on every core release (see
 [Repository Go Modules → Versioning and tagging](./go-modules.md#versioning-and-tagging)).
-A `modules/objectstore-s3/vX.Y.Z` tag may not exist for the version you want; Go
-resolves a branch or a commit SHA to a pseudo-version, which is what `@main`
-above does. Pin a real tag once one is cut.
+So a `modules/objectstore-s3/vX.Y.Z` may not exist for every core version — when
+the one you want has no tag, Go resolves a branch or a commit SHA to a
+pseudo-version (`@main`), and you pin a real tag once one is cut.
+
+**The backend module requires a core version that has the seam.** Each backend's
+`go.mod` names one, and `objectstore-s3/v0.1.0` requires core `v0.19.0`, the
+release the seam first shipped in. Asking for an older core than the backend
+declares does not silently degrade — it fails to build, because
+`pkg/engine/objectstore` is not there to import.
+
+**Go 1.26 or newer.** The core module's floor moved there when three dependencies
+did; there is no supported build on 1.25.
 
 ### 2. Blank-import it
 

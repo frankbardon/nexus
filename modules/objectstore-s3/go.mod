@@ -14,7 +14,7 @@ require (
 	// `go get` of this module from outside the repository resolves to a real seam.
 	// Inside the repository the replace below is what takes effect; consumers
 	// ignore it, which is exactly why this line has to name a tag that exists.
-	github.com/frankbardon/nexus v0.18.2
+	github.com/frankbardon/nexus v0.19.0
 )
 
 require (
