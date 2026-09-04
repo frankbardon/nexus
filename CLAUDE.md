@@ -40,7 +40,9 @@ All comms via central typed event bus — plugins never call each other direct.
 - **Go submodules** (`modules/`) — Code that must not add dependencies to the root module lives in its own
   `go.mod` under `modules/<name>/` (module path `github.com/frankbardon/nexus/modules/<name>`). Cloud
   object-store backends are the motivating case: the root module's direct dependency list is defended, so an
-  AWS/GCP SDK goes in a submodule an embedder blank-imports. **No `go.work`** — it is gitignored, because a
+  AWS/GCP SDK goes in a submodule an embedder blank-imports. Two ship today — `modules/objectstore-s3` and
+  `modules/objectstore-gcs` — plus `modules/objectstore-seamcheck`, the canary that keeps the seam usable
+  from outside the root module. **No `go.work`** — it is gitignored, because a
   workspace merges build lists and would let submodule SDKs move the root module's transitive versions; each
   submodule carries `replace github.com/frankbardon/nexus => ../..` instead. `make build`, `test`, `test-race`,
   `fmt`, `vet` and `lint` all sweep `modules/` (a separate module is invisible to `./...`), and

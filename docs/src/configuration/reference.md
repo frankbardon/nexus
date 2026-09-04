@@ -124,8 +124,8 @@ plugins:
 | `object_store.backend`          | string | *(empty)*   | Name of a registered object-store backend. Empty (the default) disables object storage entirely and no object-store code runs. An unregistered name **fails the boot**. See `core.object_store` below. |
 | `object_store.bucket`           | string | *(required if `backend` set)* | Bucket / container the backend writes to. Nexus never creates it. |
 | `object_store.prefix`           | string | *(empty)*   | Object key prefix within the bucket, so several deployments can share one bucket. An **object key**, not a filesystem path: no `~` expansion, and a leading or trailing `/` is rejected. |
-| `object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. |
-| `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. |
+| `object_store.region`           | string | *(empty)*   | Backend region, where the backend needs one. Required by `s3` against real AWS; accepted and ignored by `gcs`, where a bucket's location is a property of the bucket. |
+| `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. Each backend documents exactly what it means: for `s3` it also selects path-style addressing, for `gcs` it is an emulator switch that also turns authentication off when no credentials are available. |
 | `object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
 | `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted. `degrade` (the default) keeps the session running against the local working copy and retries in the background; `strict` additionally refuses further input until the state is stored. Both retry with backoff and both recover on their own. Any other value **fails the boot**. See [Failure policy](#failure-policy) below. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
@@ -454,6 +454,108 @@ acknowledged the write, so there is no in-backend queue with a second retry
 regime underneath the engine's own — retry, backoff and `failure_policy` stay in
 one place. A single `PutObject` caps one object at 5 GiB; no session artifact
 Nexus produces approaches that.
+
+#### The `gcs` backend
+
+Shipped in-repo as its own Go module — `github.com/frankbardon/nexus/modules/objectstore-gcs`,
+under `modules/objectstore-gcs/`. Like the `s3` backend it is not part of
+`bin/nexus`: the Google Cloud SDK it depends on is exactly the kind of
+dependency the root module refuses to carry, so an embedder who wants it
+blank-imports it into their own `main`. See
+[Repository Go Modules](../guides/go-modules.md).
+
+```go
+import _ "github.com/frankbardon/nexus/modules/objectstore-gcs"
+```
+
+It covers Google Cloud Storage, and — through `endpoint` — the Cloud Storage
+emulators.
+
+It adds **no config keys of its own**. Everything it needs is already in the
+`core.object_store` block above; what follows is how this backend reads each
+key, and the two keys it reads differently from `s3` are called out because a
+config copied between the two clouds will contain them.
+
+| Key | How the `gcs` backend uses it |
+|---|---|
+| `backend` | `gcs` |
+| `bucket` | The bucket. Never created — it must exist, and the principal needs `storage.objects.get`, `create`, `delete` and `list` on it (the `roles/storage.objectAdmin` role covers exactly those). No project ID is needed anywhere: a project is required to create or list *buckets*, and this backend does neither. |
+| `prefix` | Prepended to every object key. Matched back on **segment** boundaries, so a bucket shared between a `prod/nexus` and a `prod/nexus-staging` deployment keeps them apart. |
+| `region` | **Accepted and ignored**, with a warning logged once at boot. A GCS bucket's location is chosen when the bucket is created and no client ever names one, so there is nothing to apply the value to. It is not an error, because the same `core.object_store` block is shared with `s3` — where the region is signed into every request — and a config that travels between the two should not fail to boot over a key that cannot change behaviour here. |
+| `endpoint` | An absolute `http://` or `https://` URL naming a host, e.g. `http://127.0.0.1:4443`. The Cloud Storage JSON API path (`/storage/v1/`) is appended for you when the URL has none, so the key is spelled the same way for both backends; a URL that already carries a path is left alone, for an emulator behind a reverse proxy on a sub-path. Unlike `s3`, this is **an emulator switch, not a way to reach an alternative provider**: GCS has one production service, reached by leaving `endpoint` empty, and a VPC using Private Google Access or Private Service Connect gets there by DNS and routing policy rather than by a client-side override. Setting it also turns authentication **off** when no credentials are available — see `credentials_file`. |
+| `credentials_file` | A service-account JSON key file, the format `gcloud iam service-accounts keys create` produces, so the same file works with `gcloud` and can be mounted as a Kubernetes secret unchanged. Only that credential *type* is accepted: an external-account (Workload Identity Federation) or impersonation configuration names a URL the auth library will fetch a token from, and accepting one from a path that may have come from a shared config repository would hand an attacker a credential-exfiltration primitive. Those belong on the ambient path below, via `GOOGLE_APPLICATION_CREDENTIALS`, where an operator opts into them at the environment level. **Empty is the production path**, and means Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS`, the `gcloud` well-known file, GKE Workload Identity and the GCE service account via the metadata server, service-account impersonation, and Workload Identity Federation — with expiry-aware refresh and no key material on disk. Nexus neither reorders nor narrows that chain. |
+| `failure_policy` | Interpreted by the engine, not by the backend. |
+
+```yaml
+# Google Cloud Storage under GKE Workload Identity — no key material anywhere.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus-sessions
+    prefix: prod/nexus
+```
+
+```yaml
+# A static service-account key, for somewhere Workload Identity is not available.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus-sessions
+    credentials_file: ~/.config/nexus/gcs-service-account.json
+```
+
+```yaml
+# An emulator on a laptop. No credentials, no environment variables.
+core:
+  object_store:
+    backend: gcs
+    bucket: nexus
+    endpoint: http://127.0.0.1:4443
+```
+
+**Credential resolution, in order.** `credentials_file` if set; otherwise
+Application Default Credentials if they resolve; otherwise, **if `endpoint` is
+set**, an unauthenticated client, logged at warn level, which is the emulator
+path — every Cloud Storage emulator is unauthenticated, and doing this from
+config is what lets an emulator deployment be described entirely in YAML.
+Anything else **fails the boot**. That last step is deliberately stricter than
+the Google SDK, which builds a client happily when it cannot find credentials
+and fails at the first request instead; under `failure_policy: degrade` that
+would be a run that starts, looks healthy and persists nothing.
+
+**Boot-time validation.** A malformed `endpoint`, a `credentials_file` that is
+not there, and the no-credentials case above all fail the boot naming the key.
+Nothing remote is checked, for the same reason the `s3` backend checks nothing
+remote: `failure_policy: degrade` exists so an object-store outage degrades a
+run rather than ending it, and a boot-time round trip to the bucket would make
+it structurally unable to do that.
+
+**Object keys mirror the local tree**, one key segment per directory, under
+`prefix` — byte for byte the same layout the `s3` backend produces. That is a
+decision, not a coincidence: a deployment migrating between the two clouds, or
+replicating one bucket into the other, can do it with the vendors' own copy
+tools and no translation step. GCS has no directories — the console renders `/`
+as one, but a key is a single flat string — so depth costs nothing, and empty
+files are stored as zero-byte objects and restored as empty files. This backend
+never writes a zero-byte folder placeholder, so there is nothing to confuse them
+with.
+
+**One object at a time, synchronously**, exactly as `s3`: `Put` returns only
+once GCS has acknowledged the write, so there is no in-backend queue with a
+second retry regime underneath the engine's own. Two GCS-specific details fall
+out of that. Every upload and download is **CRC32C-verified end to end** by the
+SDK, so a successful `Put` means the bytes in the bucket are the bytes on disk,
+not merely that a request returned 200. And uploads and deletes are issued with
+the SDK's `RetryAlways` policy rather than its default, which would not retry
+them at all: an object insert without a precondition is not idempotent in
+general, but this backend always writes whole objects and takes last-write-wins,
+so a repeated request converges. Without that, a transient 503 would fail a push
+that the `s3` backend would have retried silently.
+
+**Deleting an object that is not there is not an error**, matching the seam and
+matching `s3`. GCS itself returns 404 where S3 returns 204; the backend absorbs
+the difference, which is what lets the engine retry a delete without
+special-casing the second attempt.
 
 ### `core.models`
 

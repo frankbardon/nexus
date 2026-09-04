@@ -971,5 +971,33 @@ selectable in production config would discard everything on exit while
 reporting success. `objectstoretest.RegisterMemory` makes it reachable by name
 for the duration of one test and removes it again on cleanup.
 
+#### Shipped backends, and what having two of them proves
+
+Two backends ship in-repo, each in its own module:
+`modules/objectstore-s3` (Amazon S3 and every S3-compatible store) and
+`modules/objectstore-gcs` (Google Cloud Storage). Neither is part of
+`bin/nexus`; an embedder blank-imports the one they want.
+
+The second one was written to answer a question about the seam rather than
+about Google. An interface with exactly one implementation is indistinguishable
+from that implementation's API with the names changed, and the whole premise of
+`pkg/engine/objectstore` is that a third party can implement it without a PR to
+this repository. GCS disagrees with S3 in several specific places — deleting a
+missing object is an error there and a success here; there is no region, and no
+project either; the client holds resources worth closing where the AWS one does
+not; uploads are not retried by default because an insert without a
+precondition is not idempotent.
+
+Every one of those turned out to be a translation the backend module owns.
+`modules/objectstore-gcs` passes `objectstoretest.RunSuite` **unmodified and
+with no option other than a reduced page-count probe**, and required no change
+to `pkg/engine/objectstore` at all. Two things in the interface earned their
+keep in the process: `Delete`'s "a missing key is not an error" rule, which
+picks the S3 behaviour precisely because it is the one a retrying caller wants
+and leaves the other store to absorb the difference, and the decision to have
+the engine type-assert `io.Closer` rather than put `Close` on the interface,
+which is why a backend holding an SDK client needed no widening of a published
+type.
+
 See [Configuration Reference](../configuration/reference.md#coreobject_store)
 for the keys, their defaults and their validation behaviour.
