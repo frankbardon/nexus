@@ -14,7 +14,7 @@ make test-objectstore-fake-gcs # modules/objectstore-gcs against fake-gcs-server
 make fmt          # Format code (gofmt)
 make submodules   # List the Go submodules under modules/ that every sweep covers
 make vet          # Run go vet
-make lint         # Run staticcheck (includes vet)
+make lint         # Run staticcheck + vet, untagged and again with every build tag
 ```
 
 Run specific profile: `bin/nexus -config configs/coding.yaml`
