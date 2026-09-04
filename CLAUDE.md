@@ -30,6 +30,7 @@ Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `
 All comms via central typed event bus — plugins never call each other direct.
 
 - **Engine** (`pkg/engine/`) — Event bus, plugin registry, lifecycle, session workspace, config loading, per-plugin SQLite storage (`pkg/engine/storage/`). Only "core" code.
+- **Object-store seam** (`pkg/engine/objectstore/`) — Optional `core.object_store` block makes a remote object store the source of truth for everything Nexus persists between runs: session trees, app- and agent-scope plugin SQLite, eval run output. A **lifecycle** interface (`Hydrate`/`Put`/`Delete`/`List`/`Flush`), **not** an `os.*` abstraction — core and plugins keep writing ordinary local files and the engine calls the backend at defined lifecycle points (eager whole-tree hydrate on resume, write-through for blobs, turn-boundary snapshot with WAL checkpoint + `VACUUM INTO`, generation stamp + per-object manifest, flush on `Stop`). Backends are `database/sql`-style: `Register`/`Open` by name, so a blank import plus a config key wires one with no core change. **`bin/nexus` and `bin/nexus-broker` import no backend** — this is library-only, adopting it means building your own binary. Single-writer per session is assumed and **not** enforced (owner marker + `session.owner.conflict` is detection-only logging; two writers means silent state loss). `failure_policy: degrade|strict`; `strict` gates the *next* turn, never the failed one. See `docs/src/guides/object-storage.md`.
 - **Events** (`pkg/events/`) — Typed event payload structs by domain: `core.go`, `llm.go`, `agent.go`, `tool.go`, `io.go`, `memory.go`, `skill.go`, `session.go`, `schema.go`.
 - **Plugins** (`plugins/`) — All behavior lives here. Each implements `engine.Plugin`.
 - **Desktop shell** (`pkg/desktop/`) — Reusable framework to embed Nexus in Wails desktop app. Manages per-agent engine lifecycles, settings, sessions, shell services.
@@ -51,7 +52,7 @@ All comms via central typed event bus — plugins never call each other direct.
   demand and versioned independently of the core `vX.Y.Z`. See `docs/src/guides/go-modules.md`.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
-- **Object-store contract suite** (`pkg/engine/objectstore/objectstoretest/`) — exported conformance suite every `objectstore.Backend` must pass (`RunSuite`), plus `NewMemory`, the in-memory backend that passes it and doubles as the substituted seam for untagged unit tests. Out-of-tree backend modules run the same suite. See `docs/src/architecture/sessions.md`.
+- **Object-store contract suite** (`pkg/engine/objectstore/objectstoretest/`) — exported conformance suite every `objectstore.Backend` must pass (`RunSuite`), plus `NewMemory`, the in-memory backend that passes it and doubles as the substituted seam for untagged unit tests. Out-of-tree backend modules run the same suite, plus `pkg/engine/objectstore/enginetest.RunResumeSuite`, the shared kill-and-resume cycle. See `docs/src/guides/object-storage.md` and `docs/src/architecture/sessions.md`.
 - **Integration tests** (`tests/integration/`) — Go tests behind `//go:build integration` tag. Two modes:
   - **Mock mode** (`mock_responses` set): No LLM calls, no API key, sub-second.
   - **Live mode** (no `mock_responses`): Real LLM calls via provider. Requires `ANTHROPIC_API_KEY`.
@@ -175,6 +176,10 @@ App- and agent-scope per-plugin storage live outside the session tree at
 `~/.nexus/plugins/<pluginID>/store.db` and
 `~/.nexus/agents/<agentID>/plugins/<pluginID>/store.db`. See
 `docs/src/architecture/storage.md`.
+
+All of that is local disk by default. `core.object_store` optionally makes a remote
+object store the source of truth for it between runs — see the object-store seam above
+and `docs/src/guides/object-storage.md`.
 
 ## Planning System
 

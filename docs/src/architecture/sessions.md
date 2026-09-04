@@ -1066,4 +1066,6 @@ which is why a backend holding an SDK client needed no widening of a published
 type.
 
 See [Configuration Reference](../configuration/reference.md#coreobject_store)
-for the keys, their defaults and their validation behaviour.
+for the keys, their defaults and their validation behaviour, and
+[Object Storage](../guides/object-storage.md) for the adoption path — wiring a
+backend into a binary, credentials, and the documented limitations.

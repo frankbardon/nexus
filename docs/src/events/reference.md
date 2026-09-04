@@ -675,6 +675,11 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 | `session.storage.degraded` | `SessionStorageDegraded` | The object store stopped accepting this session's state; the engine is running against the local working copy and retrying |
 | `session.storage.recovered` | `SessionStorageRecovered` | The backlog drained and the session is durably stored again |
 
+The last five exist only when `core.object_store.backend` names a backend. With
+none configured — the default — nothing subscribes, a `session.snapshot.request`
+is inert, and none of the other four is ever emitted. See
+[Object Storage](../guides/object-storage.md).
+
 **session.file.created / session.file.updated payload**
 
 Emitted as a `map[string]any`, not as the `events.SessionFile` struct — the struct
@@ -695,9 +700,9 @@ subscriber can rely on seeing exactly one `created` per path per session.
 **Who emits it.** `SessionWorkspace.WriteFile`, `AppendFile` and `SaveMeta`, plus the
 two announcement helpers `AnnounceWrite` / `AnnounceAppend` that writers holding their
 own `os.*` call use — today `nexus.scene` (its state file and patch journal),
-`nexus.workflows.icm` (stage artifacts and copied inputs) and `nexus.tool.fileio`
-(`write_file`). Every one of them publishes the *session-relative* path, so it can be
-used directly as an object key. `nexus.tool.pdf` used to emit a second, hand-built
+`nexus.workflows.icm` (stage artifacts and copied inputs), `nexus.tool.fileio`
+(`write_file`) and the desktop matcher plugin. Every one of them publishes the
+*session-relative* path, so it can be used directly as an object key. `nexus.tool.pdf` used to emit a second, hand-built
 event beside the one `WriteFile` already produced, carrying the bare basename and no
 delta; it was removed rather than reconciled, and the plugin no longer emits
 `session.file.*` at all.
@@ -738,13 +743,16 @@ coalescing a change it should have treated as a rewrite.
 | `SessionWorkspace.WriteFile` | Whole-file writes: config snapshot, plugin manifest, memory rewrites, tool output |
 | `SessionWorkspace.AppendFile` | Appends: `context/conversation.jsonl`, `metadata/timing.jsonl`, compaction output, shell history, the HITL cache |
 | `SessionWorkspace.SaveMeta` | `metadata/session.json` — rewritten on every `llm.response` and every `agent.turn.end` |
-| `nexus.tool.fileio`, `nexus.tool.pdf` | Files those tools write into the session |
+| `SessionWorkspace.AnnounceWrite` / `AnnounceAppend` | Writers holding their own `os.*` call: `nexus.scene`, `nexus.workflows.icm`, `nexus.tool.fileio`, and the desktop matcher plugin |
 
-`nexus.tool.pdf` emits a second, hand-built event of its own beside the one
-`SessionWorkspace.WriteFile` already emitted, and it carries neither `offset` nor
-`bytes_added`. Because the payload is an untyped map, a subscriber must treat both keys
-as optional and fall back to "the whole object changed" when they are absent — which is
-the same conservative reading `offset == 0` already asks for.
+Every emitter goes through one of those five entry points, so every payload on the
+wire is built in one place. Two hand-built emitters that were not — `nexus.tool.pdf`
+and `cmd/desktop/internal/matcher` — published malformed events (a bare basename as
+`path`, an absolute host path, missing `session_id`, no delta keys); the first was
+removed and the second was routed through `AnnounceWrite`. Because the payload is an
+untyped map, a subscriber should still treat `offset` and `bytes_added` as optional
+and fall back to "the whole object changed" when they are absent — which is the same
+conservative reading `offset == 0` already asks for.
 
 `AppendFile` deliberately reuses the same two event types rather than introducing an
 append-specific one, so every existing subscriber sees appends without being changed.

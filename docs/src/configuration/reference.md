@@ -164,6 +164,12 @@ core:
 No core change is needed to add a backend, and a third party can implement the
 `pkg/engine/objectstore.Backend` seam in their own repository.
 
+**[Object Storage](../guides/object-storage.md)** is the adoption guide: wiring a
+backend into your own binary end to end, credential setup for each shipped
+backend, and the full list of what this feature deliberately does not do —
+starting with the fact that **single-writer per session is assumed and not
+enforced**. This page stays canonical for the keys themselves.
+
 **Validation is at load, not at first write.** The whole block is checked while
 the YAML is parsed, so a typo, a missing bucket or a backend whose module was
 never imported fails the boot with the offending key in the message — rather

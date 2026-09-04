@@ -33,9 +33,25 @@ nexus/
   go.mod                      # the root module: github.com/frankbardon/nexus
   pkg/ plugins/ cmd/ ...      # all of it root-module code, no exceptions
   modules/
+    objectstore-s3/           # github.com/frankbardon/nexus/modules/objectstore-s3
+      go.mod
+    objectstore-gcs/          # github.com/frankbardon/nexus/modules/objectstore-gcs
+      go.mod
     objectstore-seamcheck/    # github.com/frankbardon/nexus/modules/objectstore-seamcheck
       go.mod
 ```
+
+That is every submodule that ships today, and the list is short enough to be
+worth naming rather than gesturing at:
+
+| Module | What it is | Dependency it carries |
+|---|---|---|
+| `objectstore-s3` | `objectstore.Backend` for Amazon S3 and every S3-compatible store. Registers as `s3`. See [Object Storage](./object-storage.md). | AWS SDK for Go v2 |
+| `objectstore-gcs` | `objectstore.Backend` for Google Cloud Storage. Registers as `gcs`. See [Object Storage](./object-storage.md). | `cloud.google.com/go/storage` |
+| `objectstore-seamcheck` | Not a backend and stores nothing. The permanent canary that keeps `objectstore.Backend` and `objectstoretest.RunSuite` usable from a module that is not the root one. | none |
+
+`make submodules` prints the same list from the filesystem, and is the
+authoritative answer if this table ever falls behind.
 
 Rules:
 

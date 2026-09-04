@@ -203,5 +203,14 @@ Agent scope follows the manager's collapse exactly: with `core.agent_id` empty,
 an agent-scope handle resolves to app scope and so does its key. Nothing is
 uploaded twice.
 
+**Shared roots have no owner marker.** A shared root outlives every session, so
+the claim-on-`Boot` / release-on-`Stop` cycle the session marker uses has no
+counterpart here, and reusing that marker would produce one every session
+clobbers and every clean shutdown deletes while other runs are still writing. The
+consequence is that the split-brain detection sessions get does not exist for
+these stores — see [Concurrency](#concurrency) above, and
+[Object Storage → Limitations](../guides/object-storage.md#limitations).
+
 See [Configuration Reference → Beyond the session
-tree](../configuration/reference.md#beyond-the-session-tree).
+tree](../configuration/reference.md#beyond-the-session-tree) and
+[Object Storage](../guides/object-storage.md).
