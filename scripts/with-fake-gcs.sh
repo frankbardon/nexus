@@ -31,7 +31,7 @@
 #     working Docker daemon" — a distinction that stops being academic the first
 #     time a maintainer's daemon is broken and the emulator suite is the only
 #     thing that cannot be run.
-#   - A stronger pin than an image tag. `@v1.56.0` is verified against the
+#   - A stronger pin than an image tag. `@v1.56.1` is verified against the
 #     checksum database, so the bytes that are built are the bytes that were
 #     published; a Docker tag is mutable by whoever owns the repository.
 #   - An existing house mechanism rather than a new one. `make lint` already
@@ -61,12 +61,11 @@ fi
 # the Makefile: an unpinned version turns "CI went red" into "CI went red and
 # nothing in this repository changed".
 #
-# Held at v1.56.0 on purpose. v1.56.1 raised its go directive to 1.26, and CI
-# pins Go 1.25 with GOTOOLCHAIN=local — so taking it would break this target for
-# everyone before it broke it for anyone who wanted the newer emulator. This is
-# the same trap that holds google.golang.org/api at v0.296.0 in
-# modules/objectstore-gcs/go.mod; move them together with the go-version matrix
-# in .github/workflows/ci.yml, never separately.
+# It was held at v1.56.0 while this repository's floor was Go 1.25, because
+# v1.56.1 raised its go directive to 1.26; the floor moved, so the pin tracks the
+# newest release again. If a future release outruns the go directive, move this
+# together with the go-version matrix in .github/workflows/ci.yml and the go
+# directives in every go.mod, never separately.
 #
 # Bumping it is a commit, and the commit is where a behaviour change in the
 # emulator gets noticed: TestFakeGCSServerDoesNotPaginateUnlessAsked and
@@ -74,7 +73,7 @@ fi
 # emulator behaviour the suite is built on, and both are version-sensitive by
 # design.
 EMULATOR="github.com/fsouza/fake-gcs-server"
-VERSION="${NEXUS_TEST_FAKE_GCS_VERSION:-v1.56.0}"
+VERSION="${NEXUS_TEST_FAKE_GCS_VERSION:-v1.56.1}"
 GO="${GO:-go}"
 
 # NEXUS_TEST_FAKE_GCS_REQUIRED is what stops this suite from being

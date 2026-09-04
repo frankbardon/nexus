@@ -3,7 +3,7 @@
 // lives in doc.go next door.
 module github.com/frankbardon/nexus/modules/objectstore-seamcheck
 
-go 1.25.5
+go 1.26.0
 
 // Pinned to the newest core release rather than left at a placeholder version,
 // so `go get` of this module from outside the repo resolves to something real.

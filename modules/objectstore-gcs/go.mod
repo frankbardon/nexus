@@ -5,7 +5,7 @@
 // which parts of GCS genuinely differ from S3.
 module github.com/frankbardon/nexus/modules/objectstore-gcs
 
-go 1.25.5
+go 1.26.0
 
 require (
 	cloud.google.com/go/auth v0.23.2
@@ -15,12 +15,12 @@ require (
 	// Inside the repository the replace below is what takes effect; consumers
 	// ignore it, which is exactly why this line has to name a tag that exists.
 	github.com/frankbardon/nexus v0.18.2
-	// Held one release behind the newest. v0.297.0 raised its go directive to
-	// 1.26, and CI pins Go 1.25 with GOTOOLCHAIN=local -- so taking it would
-	// break the build for everyone before it broke it for anyone who wanted the
-	// feature. Move this and the go directive above together, with the
-	// go-version matrix in .github/workflows/ci.yml, never separately.
-	google.golang.org/api v0.296.0
+	// Tracks the newest release. It was held at v0.296.0 while this repository's
+	// floor was Go 1.25, because v0.297.0 raised its go directive to 1.26; the
+	// floor moved, so the pin is gone rather than merely bumped. If a future
+	// release outruns the go directive above again, move the two together with
+	// the go-version matrix in .github/workflows/ci.yml, never separately.
+	google.golang.org/api v0.297.0
 )
 
 require (

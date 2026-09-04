@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ["1.25"]
+        go-version: ["1.26"]
     steps:
       - uses: actions/checkout@v7
 
@@ -102,7 +102,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       # Same target the maintainer runs locally, so local and CI cannot drift.
       - name: Object store suite against MinIO
@@ -142,7 +142,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       # Same target the maintainer runs locally, so local and CI cannot drift.
       - name: Object store suite against fake-gcs-server
@@ -161,7 +161,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Download dependencies
         run: go mod download
@@ -178,7 +178,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Vet
         run: make vet
@@ -189,7 +189,7 @@ jobs:
         # started failing the moment v0.8.0 was published -- on every commit,
         # including ones that had already passed. v0.7.0 declares go 1.25.0.
         # Bump this together with the go-version matrix, never separately.
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0  # keep in step with STATICCHECK_VERSION in the Makefile
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.0  # keep in step with STATICCHECK_VERSION in the Makefile
 
       - name: Lint
         run: make lint

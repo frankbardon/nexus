@@ -206,13 +206,13 @@ vet:
 	$(GO) vet ./...
 	$(call in_submodules,$(GO) vet ./...)
 
-# STATICCHECK_VERSION is pinned, never @latest. v0.8.0 declares go 1.26.0, so an
-# unpinned `go run ...@latest` breaks the moment a release outpaces the Go version
-# CI pins (GOTOOLCHAIN=local, Go 1.25) -- deterministically, on every commit,
-# including ones that passed hours earlier. It also passes on a developer machine
-# running a newer Go, which is how it reached main unnoticed.
+# STATICCHECK_VERSION is pinned, never @latest. An unpinned `go run ...@latest`
+# breaks the moment a release outpaces the Go version CI pins (GOTOOLCHAIN=local)
+# -- deterministically, on every commit, including ones that passed hours
+# earlier. It also passes on a developer machine running a newer Go, which is how
+# v0.8.0 reached main unnoticed while the floor was still 1.25.
 # Bump this together with the go-version matrix in .github/workflows/ci.yml.
-STATICCHECK_VERSION ?= v0.7.0
+STATICCHECK_VERSION ?= v0.8.0
 
 # check-events is deliberately NOT run per submodule: scripts/check-event-versions.sh
 # cd's to the repo top level and inspects pkg/events/ only, so running it from
