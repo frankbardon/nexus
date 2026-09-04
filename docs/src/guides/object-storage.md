@@ -616,6 +616,12 @@ still untested *in this configuration*. **A manual live check against a real
 cluster is warranted before relying on the workload-identity path in
 production**, and it is the one part of adoption this repo cannot do for you.
 
+[Operating Object Storage → Verifying workload identity for
+real](../operations/object-storage.md#verifying-workload-identity-for-real) is
+the five-step runbook for that check, including the failure that looks like
+success: a pod picking up the *node* instance role instead of the assumed one
+returns 200 and works, until node permissions are tightened.
+
 ### 8. MinIO cannot hold an object at another key's prefix
 
 The engine's key scheme can produce an object at key `sessions/sess-1` beside
@@ -709,6 +715,9 @@ no-`go.work` decision and the tagging policy.
 
 ## See also
 
+- [Operating Object Storage](../operations/object-storage.md) — bucket lifecycle
+  policy, orphan reclamation, reading cost off the snapshot log, what to alert
+  on, Kubernetes manifests, and how to verify workload identity for real
 - [Configuration Reference → `core.object_store`](../configuration/reference.md#coreobject_store) — canonical keys, defaults and validation
 - [Sessions → Object-Store Backing](../architecture/sessions.md#object-store-backing-optional) — design and rationale
 - [Per-Plugin Storage → Object storage for app and agent scope](../architecture/storage.md#object-storage-for-app-and-agent-scope)

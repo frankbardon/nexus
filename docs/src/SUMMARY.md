@@ -133,3 +133,8 @@
 - [Session Broker](./guides/session-broker.md)
 - [A2A Interoperability](./guides/a2a.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
+
+# Operations
+
+- [Object Storage](./operations/object-storage.md)
+- [Human-in-the-Loop and Session Rewind](./operations/hitl.md)
