@@ -65,6 +65,7 @@
   - [File Opener](./plugins/tools/opener.md)
   - [Code Exec (run_code)](./plugins/tools/code_exec.md)
   - [Knowledge Search](./plugins/tools/knowledge_search.md)
+  - [Session Tags](./plugins/tools/session_tags.md)
 - [Memory](./plugins/memory/index.md)
   - [Simple History](./plugins/memory/simple.md)
   - [Capped History](./plugins/memory/capped.md)
