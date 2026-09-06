@@ -493,22 +493,29 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	return r, true
 }
 
-// endRun clears the active run pointer if it still points at r, and clears
-// the identity bound at startRun/resumeRun so a subsequent unrelated run on
-// this listener never observes a stale principal.
+// endRun clears the identity bound at startRun/resumeRun, then clears the
+// active run pointer if it still points at r.
+//
+// That order is deliberate, not incidental: p.active == nil is what unblocks
+// startRun for the NEXT run on this listener (see startRun's "another run
+// already in flight" check). Clearing it before the reserved-label delete
+// finishes its read-modify-write round trip to metadata/session.json would
+// open a window where a new run's own SetReservedLabel bind could land, and
+// then this call's delayed write silently clobbers it back to absent — a
+// real lost-update race, not just a timing nuisance for a test polling
+// p.currentRun(). Deleting first, then releasing the slot, closes it.
 func (p *Plugin) endRun(r *run) {
+	if p.session != nil {
+		if err := p.session.DeleteReservedLabel(reservedPrincipalIDKey); err != nil {
+			p.logger.Warn("clearing _principal_id session label failed", "error", err)
+		}
+	}
+
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
 	}
 	p.mu.Unlock()
-
-	if p.session == nil {
-		return
-	}
-	if err := p.session.DeleteReservedLabel(reservedPrincipalIDKey); err != nil {
-		p.logger.Warn("clearing _principal_id session label failed", "error", err)
-	}
 }
 
 // bindSessionContext writes the per-run identity and business-context
