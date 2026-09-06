@@ -178,6 +178,15 @@ fails with `504 instance did not become ready in time` rather than misbehaving
 quietly. The registry chooses *which* build runs; it does not change the
 protocol any of them speak.
 
+**This is also how an instance gets object-store-backed sessions.** Object-store
+backends are separate Go modules and the shipped `nexus` binary imports none of
+them, so a `core.object_store` block in an instance profile fails that instance's
+boot. Spawning instances that persist to a bucket means registering a **custom
+build** here — `nexus` plus a blank import of the backend module — and pointing a
+`binaries:` entry at it. The broker itself is unaffected either way: its own lease
+and task state are its own, not the instance's session tree. See
+[Object Storage](./object-storage.md).
+
 ```yaml
 # broker.yaml
 binaries:

@@ -71,6 +71,15 @@ func (c *embeddingCache) Get(content string) []float32 {
 
 // Put stores a vector for content. Best-effort — failures are logged by
 // the caller if at all, not fatal for ingest.
+//
+// Object-store disposition: turn-boundary-only. This is a raw os.* write that
+// announces nothing on the bus, deliberately. The cache dir defaults to
+// ~/.nexus/vectors/_cache, outside every session tree; and even pointed inside
+// one it would not earn a real-time push, because these are embeddings
+// derivable from the source documents. Uploading them spends bandwidth on
+// bytes a resume can regenerate, and a cache that did not survive costs
+// latency rather than correctness. See engine.SessionTreeWriters for the full
+// disposition table.
 func (c *embeddingCache) Put(content string, vec []float32) error {
 	hash := c.key(content)
 	p := c.path(hash)

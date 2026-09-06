@@ -153,6 +153,16 @@ func readFile(path string) (*events.LongTermMemoryEntry, error) {
 }
 
 // writeFile serialises a memory entry as YAML frontmatter + markdown body.
+//
+// Object-store disposition: turn-boundary-only. This is a raw os.* write that
+// announces nothing on the bus, deliberately. path is rooted at the plugin's
+// configured base path, which defaults to ~/.nexus/memory (or
+// ~/.nexus/agents/<agentID>/memory) and is cross-session by definition — the
+// entire point of long-term memory is that notes outlive the session that
+// wrote them, so its files are deliberately not under one and there is nothing
+// for the session sync layer to carry. Durable placement for agent- and
+// app-scope roots is a separate problem with its own answer. See
+// engine.SessionTreeWriters for the full disposition table.
 func writeFile(path string, mf memoryFile, body string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("longterm: creating directory: %w", err)

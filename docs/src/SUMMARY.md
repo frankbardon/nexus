@@ -128,6 +128,13 @@
 - [Retrieval-Augmented Generation (RAG)](./guides/rag.md)
 - [Integration Testing](./guides/integration-testing.md)
 - [Plugin Contract Tests](./guides/plugin-contracts.md)
+- [Repository Go Modules](./guides/go-modules.md)
+- [Object Storage](./guides/object-storage.md)
 - [Session Broker](./guides/session-broker.md)
 - [A2A Interoperability](./guides/a2a.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
+
+# Operations
+
+- [Object Storage](./operations/object-storage.md)
+- [Human-in-the-Loop and Session Rewind](./operations/hitl.md)
