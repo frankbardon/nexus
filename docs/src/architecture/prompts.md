@@ -66,7 +66,13 @@ Beyond the structural `<prompt_section>` wrapping, each agent type uses semantic
 | `<prior_results>` | Completed step/dependency outputs | PlanExec, Orchestrator workers |
 | `<user_request>` | Original user input (CDATA-wrapped) | PlanExec, Orchestrator |
 | `<subtask_results>` | Worker outputs in synthesis prompts | Orchestrator |
-| `<session_context>` | Current session's non-reserved `Labels`, sorted `key: value` lines; omitted entirely when none are set | ReAct, Orchestrator (decompose + synthesis) |
+| `<session_context>` | Current session's non-reserved `Labels`, sorted `key: value` lines; omitted entirely when none are set | ReAct, Orchestrator (decompose + synthesis), Subagent (prepended ahead of the configured system prompt) |
+
+See [Session Tags](./session-tags.md) for what populates `Labels`, the
+reserved-prefix filter that keeps `_`-prefixed keys out of every prompt, and
+ICM's equivalent (`OperatorTemplateCtx.Context` and the per-turn
+`<session_context>` payload block, both outside the prompt-registry
+machinery on this page).
 
 User-provided content and LLM outputs are wrapped in CDATA blocks to prevent parsing conflicts.
 

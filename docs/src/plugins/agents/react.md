@@ -85,6 +85,16 @@ When `planning: true`, the agent requests a plan before starting iteration:
 4. The plan steps are injected into the system prompt as context
 5. Normal ReAct iteration begins with the plan as guidance
 
+## Session Context in Prompts
+
+The system prompt gets a `<session_context>` section alongside
+`<skill_context>`/`<execution_plan>`/`<current_task>`: the current session's
+general-namespace (non-`_`-prefixed) tags, rendered fresh on every build and
+omitted entirely when none are set. See [Prompt Registry → Agent-Level
+Semantic Tags](../../architecture/prompts.md#agent-level-semantic-tags) and
+[Session Tags](../../architecture/session-tags.md) for what populates it and
+why the reserved namespace never reaches the prompt.
+
 ## Tool Choice
 
 Controls whether the LLM must use tools. Supports static defaults, per-iteration sequences, and dynamic overrides.

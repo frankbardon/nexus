@@ -335,7 +335,7 @@ observability seam: one listener still serves a single session and one run at
 a time, so nothing in this transport itself keys behaviour on the bound
 identity. An external consumer (e.g. an embedder's own authorization layer)
 subscribes to `session.tag.set` / `session.tag.deleted` to observe the bind
-and the clear. See the [session-tag write path](../configuration/reference.md#cost-cli)
+and the clear. See [Session Tags](../architecture/session-tags.md)
 for the tag store itself.
 
 **Business context:** each `RunAgentInput.context` item (`description` /

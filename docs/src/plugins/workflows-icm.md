@@ -261,6 +261,18 @@ The judge posture and base workflow posture can also be configured at the
 plugin level (`default_judge_posture`, `default_workflow_posture`). The
 plugin-level keys win when both are set.
 
+`operator.md` and `operator.overlay.md` are rendered once per stage, at
+posture-registration time — not on every turn — as a Go `text/template`
+against `OperatorTemplateCtx`, which exposes `.Workspace`, `.Stage`, and
+`.Context`: the session's current general-namespace (non-`_`-prefixed) tags,
+usable in the template as `{{ .Context.<key> }}`. Because it renders once,
+`.Context` only reflects the tags set by the time the workspace loads — a tag
+written mid-run needs the per-turn `<session_context>` block described in
+[XML payload reference](#xml-payload-reference), not `operator.md`, to reach
+a stage that has already started. See
+[Session Tags](../architecture/session-tags.md) for the reserved-prefix rule
+`.Context` shares with every other consumer of session tags.
+
 ## Stage contracts
 
 Each stage is a single file: `contract.md`. It is YAML frontmatter (between
@@ -673,6 +685,8 @@ content; `_ref` variants point at filesystem paths.
     <artifact_ref path="01_outline/huge.json" size_bytes="48000"/>
     <fan_out_item key="topic"><![CDATA[{"slug":"act1","title":"Setup"}]]></fan_out_item>
   </layer_data>
+  <session_context>tenant: acme
+project: screenplay-pilot</session_context>
   <previous_attempt turn="2">
     <output><![CDATA[FADE IN: ...]]></output>
     <validator_feedback>
@@ -699,6 +713,11 @@ Notes:
 - Passing validator / exit-condition results are filtered out — the agent
   only sees actionable failures.
 - The instructions block contains the stage contract body verbatim.
+- `<session_context>` carries the session's current general-namespace tags as
+  sorted `key: value` lines, rebuilt fresh on every turn — unlike
+  `operator.md`'s one-time `.Context`, this reflects a tag written at any
+  point up to the turn being dispatched. Omitted entirely when no
+  general-namespace tags are set. See [Session Tags](../architecture/session-tags.md).
 
 ## Plan + progress events
 
@@ -938,6 +957,8 @@ its pending prompt. The run then completes with `icm.run.halted`,
   through.
 - [skills](skills.md) — the engine-level skill machinery; ICM's per-workspace
   skills are independent but share the same `SKILL.md` shape.
+- [Session Tags](../architecture/session-tags.md) — the `.Context` map
+  `operator.md` templates read and the per-turn `<session_context>` block.
 - `plugins/workflows/icm/schema.json` — JSON schema for the config block.
 - `plugins/workflows/icm/workspace/types.go` — full Go type model.
 - `plugins/workflows/icm/icmtypes/types.go` — `icm.*` event payload structs.

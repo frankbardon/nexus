@@ -89,7 +89,7 @@ This plugin can **only ever** touch the general (non-`_`-prefixed) namespace of 
 
 In short: there is no argument, config key, or call sequence through this plugin that reads, writes, or enumerates a reserved-prefixed tag. Reserved tags (for example the identity-derived `_principal_id` binding written by `nexus.io.agui`) are written through a direct Go method not exposed on the bus, entirely outside this plugin's reach.
 
-For the full mechanics of the reserved-prefix mechanism itself — what counts as reserved, who else can write general-namespace tags without going through this plugin, and how `session.tag.set`/`session.tag.deleted` announcements fit into the rest of the system — see [Configuration Reference](../../configuration/reference.md#cost-cli) (the authoritative description lives there today) and [Sessions](../../architecture/sessions.md). A dedicated narrative guide for the tagging system as a whole is planned separately.
+For the full mechanics of the reserved-prefix mechanism itself — what counts as reserved, who else can write general-namespace tags without going through this plugin, and how `session.tag.set`/`session.tag.deleted` announcements fit into the rest of the system — see [Session Tags](../../architecture/session-tags.md).
 
 ## Events
 

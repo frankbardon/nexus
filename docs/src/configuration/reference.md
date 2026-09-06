@@ -1634,8 +1634,10 @@ block at session start, so per-session host paths can be hard-coded:
 
 Source: `plugins/tools/session_tags/plugin.go`. Registers `session_tag_set`,
 `session_tag_get`, `session_tag_delete`, `session_tag_list` — LLM-facing
-tools over the general-namespace session tag store (`SessionMeta.Labels`,
-see `before:session.tag.set`/`before:session.tag.delete` above). **Off by
+tools over the general-namespace session tag store (`SessionMeta.Labels`; see
+[Session Tags](../architecture/session-tags.md) for the full mechanism, and
+the [Cost CLI](#cost-cli) section below for how `tenant`/`project`/`user`
+tags feed `nexus cost report`). **Off by
 default** — not in any stock config's `plugins.active`; an operator opts in
 explicitly to give the agent write access to its own session's tags.
 
@@ -3757,14 +3759,17 @@ Tags are populated by:
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
 
-`SessionMeta.Labels` now has a real write path, so `tenant`/`project`/`user`
-are reachable rather than requiring test code to poke `Labels` directly. A
+`SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
+reachable rather than requiring test code to poke `Labels` directly. A
 plugin sets a general-namespace label by emitting the vetoable
 `before:session.tag.set` event (`events.SessionTagSetRequest{Key, Value}`)
 and deletes one via `before:session.tag.delete`
 (`events.SessionTagDeleteRequest{Key}`); a successful apply persists to
 `metadata/session.json` and announces `session.tag.set` /
 `session.tag.deleted` (`events.SessionTagSet` / `events.SessionTagDeleted`).
+See [Session Tags](../architecture/session-tags.md) for the full mechanism —
+the reserved-namespace split, the four event types, and who writes what.
+
 Any key starting with `_` is reserved (host-only) and is rejected
 unconditionally on this path — `engine.IsReservedLabelKey` is the shared
 definition of that prefix. The only way to write a reserved key (e.g. the

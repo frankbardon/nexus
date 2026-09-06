@@ -73,6 +73,17 @@ plugins:
 
 The parent agent will see two tools: `spawn_researcher` and `spawn_writer`.
 
+## Session Context in Prompts
+
+Each spawned agent's system prompt gets a `<session_context>` block
+prepended ahead of the configured `system_prompt`/`system_prompt_file`
+content — the current session's general-namespace (non-`_`-prefixed) tags,
+rendered fresh per spawn and omitted entirely when none are set. See
+[Prompt Registry → Agent-Level Semantic
+Tags](../../architecture/prompts.md#agent-level-semantic-tags) and
+[Session Tags](../../architecture/session-tags.md) for what populates it and
+why the reserved namespace never reaches the prompt.
+
 ## Subagent Events
 
 When a subagent runs, these events are emitted:

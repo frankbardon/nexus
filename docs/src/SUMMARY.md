@@ -15,6 +15,7 @@
 - [Causation](./architecture/causation.md)
 - [Plugin System](./architecture/plugin-system.md)
 - [Sessions](./architecture/sessions.md)
+- [Session Tags](./architecture/session-tags.md)
 - [Per-Plugin Storage](./architecture/storage.md)
 - [Model Registry](./architecture/models.md)
 - [Prompt Registry](./architecture/prompts.md)
