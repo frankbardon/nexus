@@ -2,6 +2,7 @@ package session_tags
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,9 +51,7 @@ func seedLabels(t *testing.T, sessionDir string, labels map[string]string) {
 	if meta.Labels == nil {
 		meta.Labels = map[string]string{}
 	}
-	for k, v := range labels {
-		meta.Labels[k] = v
-	}
+	maps.Copy(meta.Labels, labels)
 	out, err := json.MarshalIndent(&meta, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal session.json: %v", err)
