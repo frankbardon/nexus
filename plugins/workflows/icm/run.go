@@ -30,6 +30,15 @@ func (p *Plugin) runWorkflow(in events.UserInput) {
 		p.emitOutput(turnID, fmt.Sprintf("icm: session create failed: %v", err))
 		return
 	}
+	// Every artifact this run writes lands under the engine's session tree
+	// with raw os.* calls, so the run tree would otherwise be invisible to
+	// anything syncing that tree until the turn ended. Wiring the hook here
+	// rather than inside session.NewSession keeps that package free of an
+	// engine import. AnnounceWrite no-ops when the path is not under the
+	// session root, so a future dataDir outside it degrades quietly.
+	if p.session != nil {
+		sess.Announce = p.session.AnnounceWrite
+	}
 
 	// Write the immutable run.json so the run is inspectable from disk
 	// even before any stage has executed.

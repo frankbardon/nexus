@@ -11,6 +11,34 @@ import (
 // sqliteStore is the SQLite-backed Storage implementation. Each instance owns
 // one *sql.DB pointing at a single .db file. The kv table is created lazily
 // on first KV method call so plugins that only use DB() never see it.
+//
+// # Object-store disposition: excluded from real-time sync by design
+//
+// A session-scope handle writes plugins/<pluginID>/store.db under the session
+// tree without going through the SessionWorkspace helpers, and it deliberately
+// announces nothing on the bus. That is a decision, not an oversight.
+//
+// The DSN below opens the database in WAL mode. In WAL mode a committed
+// transaction lives in store.db-wal until a checkpoint folds it back into
+// store.db, and store.db-shm is a process-local index into that WAL. So at any
+// moment a writer has been active since the last checkpoint, the main file
+// alone is not a complete database. Streaming partial writes of it to an
+// object store therefore does not produce a database that is merely *behind* —
+// it produces one that is corrupt, or (worse, because it opens cleanly) one
+// that is plausible and silently missing every transaction still in the WAL. A
+// corrupt object that uploads successfully is worse than no upload at all,
+// because it replaces a good remote copy.
+//
+// The database reaches the store exactly one way: at a turn boundary, as a
+// checkpointed VACUUM INTO snapshot taken from inside a read transaction — see
+// snapshot.go in this package for why those two steps are both required and in
+// that order. The -wal, -shm and -journal sidecars never cross the seam at all;
+// objectStoreExcluded (pkg/engine/session_objectstore.go) rejects them by
+// suffix, because hydrating a stale -wal beside a fresh store.db is how a
+// database gets rolled back to a state neither file ever held.
+//
+// Recorded alongside the other eleven bypassing writers in SessionTreeWriters
+// (pkg/engine/session_writers.go).
 type sqliteStore struct {
 	db      *sql.DB
 	path    string

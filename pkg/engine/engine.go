@@ -68,6 +68,30 @@ type Engine struct {
 	runUnsubs  []func()
 	runCancel  context.CancelFunc
 	sessionEnd chan struct{}
+
+	// objectStore is the optional remote backing for the session tree. Nil
+	// whenever core.object_store names no backend, which is the
+	// default and the only state in which no object-store code runs at all.
+	// Unexported on purpose: plugins must never reach the seam, and the
+	// engine is the only thing that knows the lifecycle points it hangs off.
+	// See session_objectstore.go.
+	objectStore *sessionObjectStore
+
+	// blobPushes is the write-through worker for the session blob store. Nil
+	// whenever objectStore is nil, so the default configuration grows no
+	// goroutine and no queue. See session_objectstore_blobs.go.
+	blobPushes *blobWriteThrough
+
+	// sessionOwner is the owner marker and its heartbeat. Nil whenever
+	// objectStore is nil. See session_owner.go — it detects a second host
+	// holding the same session, and deliberately prevents nothing.
+	sessionOwner *sessionOwner
+
+	// ownerConflict holds a split-brain detection made during Boot until the
+	// journal is recording and plugins have subscribed. Emitting at the point
+	// of detection would stall the journal drain; see
+	// publishSessionOwnerConflict.
+	ownerConflict *events.SessionOwnerConflict
 }
 
 // New creates a fully wired Engine from a config file path.
@@ -214,12 +238,44 @@ func storageOptions(c StorageConfig) *storage.SQLiteOptions {
 // The CLI convenience wrapper Run calls Boot + wait-for-signal-or-session-end
 // + Stop in a single blocking call.
 func (e *Engine) Boot(ctx context.Context) error {
+	// Cleared at the end of a successful Boot so Stop owns teardown. Declared
+	// up front because the two cleanup defers below have to be installed at
+	// different points and must agree on what "Boot failed" means.
+	bootSucceeded := false
+
+	// Resolve the object-store backend before anything touches the session
+	// tree: hydration has to complete before a workspace is opened over it.
+	// With no backend configured this is a no-op and e.objectStore stays nil.
+	if err := e.openObjectStore(ctx); err != nil {
+		return err
+	}
+	// Release the backend handle if Boot fails after it was opened — the
+	// caller will not call Stop on a failed boot. Kept separate from the
+	// session-lock defer, which must be installed *after* acquisition so a
+	// boot refused because another process holds the lock does not delete
+	// that process's lock on the way out.
+	defer func() {
+		if !bootSucceeded {
+			e.releaseObjectStore()
+		}
+	}()
+
+	// Pull down the roots that live outside the session tree — app- and
+	// agent-scope plugin stores — before anything can open one. This has to
+	// happen before plugin Init, because storage.Manager.Open creates the
+	// plugin's directory as a side effect of handing out a handle and a
+	// present directory is what hydration treats as "the local copy wins".
+	// A no-op when no backend is configured.
+	if err := e.hydrateSharedRoots(ctx); err != nil {
+		return err
+	}
+
 	// Two-phase session startup: create the workspace directory first so
 	// the journal writer has a place to land its files, subscribe the
 	// writer, then publish the session-start metadata + event so they are
 	// the first entries the journal records (seq=1+).
 	if e.RecallSessionID != "" {
-		if err := e.prepareResumeSession(e.RecallSessionID); err != nil {
+		if err := e.prepareResumeSession(ctx, e.RecallSessionID); err != nil {
 			return fmt.Errorf("session recall failed: %w", err)
 		}
 	} else {
@@ -234,15 +290,27 @@ func (e *Engine) Boot(ctx context.Context) error {
 	if err := e.acquireSessionLock(); err != nil {
 		return err
 	}
-	// Release the lock if Boot fails after acquisition — the caller
-	// will not call Stop on a failed boot. Cleared at the end of a
-	// successful Boot so Stop owns the teardown.
-	bootSucceeded := false
+	// Release the lock if Boot fails after acquisition.
 	defer func() {
 		if !bootSucceeded && e.Session != nil {
 			_ = RemoveSessionLock(e.Session.RootDir)
 		}
 	}()
+
+	// Record this process as the session's holder in the object store, and
+	// raise the alarm if another host still looks like one. Detection only —
+	// nothing is refused and no lock is taken; see session_owner.go. Placed
+	// after the local session lock because that lock is the stronger,
+	// same-machine guard and should get the first word. A no-op when no
+	// backend is configured, and it never fails the boot.
+	e.claimSessionOwnership(ctx)
+
+	// Start pushing blobs the moment they land, rather than at the next turn
+	// boundary. Installed here — before plugin Init, which is where five of the
+	// six blob-store call sites open theirs — so no blob written by a plugin
+	// can predate the hook. It subscribes to nothing and emits nothing, so it
+	// is safe this side of startJournal. A no-op when no backend is configured.
+	e.installBlobWriteThrough()
 
 	if err := e.startJournal(); err != nil {
 		return fmt.Errorf("starting journal: %w", err)
@@ -385,6 +453,19 @@ func (e *Engine) Boot(ctx context.Context) error {
 			}
 		}
 	}))
+
+	// Snapshot the whole session tree to the object store at every turn
+	// boundary. Installs nothing when no backend is configured, so the default
+	// path never grows a handler. See session_objectstore.go for why the hook
+	// is agent.turn.end and why it runs synchronously.
+	e.installObjectStoreSnapshots()
+
+	// Raise any split-brain alarm detected while claiming ownership. Deferred
+	// to here from Boot's hydration phase for two reasons: the journal's
+	// wildcard is not subscribed before startJournal, and no plugin has
+	// subscribed to anything before Lifecycle.Boot. Emitting earlier would
+	// mean an event that neither the journal nor any IO surface ever sees.
+	e.publishSessionOwnerConflict()
 
 	// Surface errors to the UI.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("core.error", func(event Event[any]) {
@@ -667,6 +748,14 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 	e.runUnsubs = nil
 
+	// Stop the object-store recovery worker before anything else is torn down.
+	// It snapshots through the journal writer this function closes further
+	// down, and it emits on a bus whose run subscriptions have just gone: both
+	// are reasons to have it gone first rather than racing the teardown. Its
+	// stop signal cancels the retry in flight, so this is prompt. A no-op when
+	// no backend is configured.
+	e.stopObjectStoreRetry()
+
 	e.EndSession()
 
 	if err := e.Lifecycle.Shutdown(ctx); err != nil {
@@ -676,12 +765,30 @@ func (e *Engine) Stop(ctx context.Context) error {
 	// Close the journal last so any teardown events (plugin Shutdown,
 	// session.end finalization) reach disk. Use a short-deadline context
 	// so a stuck drain cannot block engine shutdown indefinitely.
+	//
+	// The writer is kept in a local so the shutdown snapshot below can still
+	// capture its segments: a closed writer is the ideal thing to snapshot,
+	// since nothing can rotate underneath it.
+	journalWriter := e.Journal
 	if e.Journal != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = e.Journal.Close(closeCtx)
 		cancel()
 		e.Journal = nil
 	}
+
+	// Drain any blob pushed but not yet uploaded, before the shutdown snapshot
+	// rather than after it: the snapshot lists the session prefix to decide
+	// what it can skip, so a blob that write-through has already stored is one
+	// the snapshot does not have to upload again.
+	e.stopBlobWriteThrough()
+
+	// Final whole-tree snapshot, between the journal closing and per-plugin
+	// SQLite closing. Both halves of that sandwich matter: the journal must be
+	// closed so its last envelopes are on disk, and the SQLite handles must
+	// still be open because the snapshot checkpoints their WALs. A no-op when
+	// no object-store backend is configured.
+	e.snapshotSessionOnShutdown(journalWriter)
 
 	if e.Storage != nil {
 		if err := e.Storage.Close(); err != nil {
@@ -699,7 +806,118 @@ func (e *Engine) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Flush-and-finalize the object store after every local writer has closed
+	// (plugins, journal, per-plugin SQLite) so the flush barrier covers a
+	// quiesced tree, and after the lock has been removed so the lock file is
+	// not even present to be considered for upload. A no-op when no backend
+	// is configured.
+	if err := e.finalizeObjectStore(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// Abandon stops the engine's background workers without persisting anything.
+//
+// It is Stop's counterpart for a host that is *dropping* a session rather than
+// closing it — an ephemeral container being reclaimed mid-session, or a test
+// simulating a process death. Stop's job is to leave the session durably
+// stored; Abandon's job is to leave it exactly as it is.
+//
+// # What it stops
+//
+//   - the tick heartbeat and every run-scoped bus subscription Boot installed,
+//     which includes the turn-boundary snapshot handler and the strict turn
+//     gate;
+//   - the object-store recovery worker;
+//   - the blob write-through worker, discarding whatever it still had queued;
+//   - the owner-marker heartbeat.
+//
+// It then drops the object-store handle, closing the backend if it implements
+// io.Closer. After this returns, nothing the engine started can write to the
+// object store again.
+//
+// # What it deliberately does not do
+//
+// No shutdown snapshot, no flush, no ownership release. It also does not shut
+// plugins down, close the journal, checkpoint per-plugin SQLite, finalize the
+// session metadata or remove the session lock: every local writer is left open
+// and the on-disk tree is left in the state a killed process would leave it.
+// That is the point — a caller reaching for this has decided the session's
+// stored state is already as good as it is going to get, and a final snapshot
+// of a tree nobody will read is pure cost on compute that is about to vanish.
+//
+// The price of that fidelity is that Abandon alone leaks the journal writer's
+// goroutine and the file handles under the session tree, which is correct for
+// a process about to exit and wrong for one that is not. A host that wants
+// those released too can call Stop afterwards: with the store handle already
+// gone, Stop degenerates to local teardown and writes nothing remote.
+//
+// # The owner marker
+//
+// The heartbeat stops; the marker stays. That asymmetry is load-bearing. A
+// clean Stop deletes the marker, which is what keeps the broker's ordinary
+// release-and-respawn cycle from raising a split-brain alarm on every
+// legitimate resume. Deleting it here would tell the next host this session was
+// cleanly released when it was not, throwing away the one piece of evidence
+// session_owner.go exists to preserve. Keeping the heartbeat running would be
+// the opposite error — the marker would read as live for ever and a genuine
+// takeover would be misreported as a conflict. With the beat stopped and the
+// marker left behind, the next host applies the ordinary staleness rules: a
+// dead PID on the same host, or a heartbeat older than sessionOwnerStaleAfter
+// anywhere else. See abandonSessionOwnership.
+//
+// Idempotent: calling it twice, after Stop, or on an engine that never booted
+// does nothing. Like Stop it is not safe to call concurrently with itself or
+// with Stop. Costs nothing when no object store is configured.
+func (e *Engine) Abandon() {
+	if e.runCancel != nil {
+		e.runCancel()
+		e.runCancel = nil
+	}
+
+	// Before the object-store handle is dropped below rather than after: the
+	// turn-boundary snapshot handler reads e.objectStore from whichever
+	// goroutine dispatched agent.turn.end, so unsubscribing first is what makes
+	// writing that field here not a data race. Stop depends on the same
+	// ordering for the same reason.
+	for _, unsub := range e.runUnsubs {
+		unsub()
+	}
+	e.runUnsubs = nil
+
+	// The recovery worker first, for the reason Stop gives at the same point:
+	// it snapshots through the journal writer and emits on the bus, so it has
+	// to be gone before anything is taken out from under it. Its stop signal
+	// cancels the retry in flight, so this is prompt.
+	e.stopObjectStoreRetry()
+
+	// Discard, not drain. stopBlobWriteThrough finishes the queue at shutdown
+	// because the snapshot immediately afterwards would re-upload the same
+	// bytes anyway; here no snapshot is coming and the caller has asked for no
+	// further writes, so every queued Put would be exactly the write this
+	// method exists to avoid.
+	e.abandonBlobWriteThrough()
+
+	// Stops beating, leaves the marker. See the doc comment above.
+	e.abandonSessionOwnership()
+
+	// Last, once nothing is left that could Put against it.
+	store := e.objectStore
+	if store == nil {
+		return
+	}
+	e.objectStore = nil
+	store.close(e.Logger)
+
+	sessionID := ""
+	if e.Session != nil {
+		sessionID = e.Session.ID
+	}
+	e.Logger.Info("object store: session abandoned; no shutdown snapshot was taken "+
+		"and the owner marker was left in place for the next host to age out",
+		"backend", store.cfg.BackendName, "session_id", sessionID)
 }
 
 // startJournal constructs the per-session journal writer and installs the
@@ -879,7 +1097,10 @@ func (e *Engine) Run(ctx context.Context) error {
 // so the journal writer can subscribe between them.
 func (e *Engine) ResumeSession(sessionID string) error {
 	if e.Session == nil {
-		if err := e.prepareResumeSession(sessionID); err != nil {
+		// No caller-supplied context on this exported signature, and hydration
+		// must still happen, so it gets the background context. Boot — the path
+		// that matters — passes its own.
+		if err := e.prepareResumeSession(context.Background(), sessionID); err != nil {
 			return err
 		}
 	}
@@ -887,8 +1108,16 @@ func (e *Engine) ResumeSession(sessionID string) error {
 }
 
 // prepareResumeSession loads the workspace without emitting any bus events.
-func (e *Engine) prepareResumeSession(sessionID string) error {
+//
+// Hydration lives here rather than at the Boot call site so no path can open a
+// resumed workspace over a tree that has not been pulled down yet; both Boot
+// and the exported ResumeSession go through it.
+func (e *Engine) prepareResumeSession(ctx context.Context, sessionID string) error {
 	root := ExpandPath(e.Config.Core.Sessions.Root)
+
+	if err := e.hydrateSessionTree(ctx, sessionID); err != nil {
+		return err
+	}
 
 	session, err := LoadSessionWorkspace(root, sessionID, e.Bus)
 	if err != nil {
@@ -1019,6 +1248,11 @@ func (e *Engine) StartSession() error {
 func (e *Engine) prepareSession() error {
 	root := ExpandPath(e.Config.Core.Sessions.Root)
 
+	// No hydration on this path: NewSessionWorkspace mints a fresh random ID,
+	// so by construction the object store has nothing under it. The
+	// caller-named-ID case ("resume something that may not exist yet") is
+	// handled in prepareResumeSession, which falls through to the same
+	// empty-session construction when hydration finds no objects.
 	session, err := NewSessionWorkspace(root, e.Bus)
 	if err != nil {
 		return fmt.Errorf("creating session workspace: %w", err)

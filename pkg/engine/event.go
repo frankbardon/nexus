@@ -56,8 +56,13 @@ type EventCausation struct {
 	// ParentSeq mirrors ParentID via the per-session monotonic sequence.
 	// Zero when no parent is detectable.
 	ParentSeq uint64
-	// SessionID is the session this event belongs to. Empty when emitted
-	// outside any session context (engine boot, shutdown).
+	// SessionID is the session this event belongs to, taken from the
+	// causation context active on the emitting goroutine (else the
+	// bus-wide default). Empty when emitted outside any session context
+	// (engine boot, shutdown) — and also empty when a pushed frame simply
+	// omitted it, because PushCausationContext replaces the active context
+	// whole and inherits nothing. Sub-agent dispatch must propagate this
+	// explicitly; see EventBus.PushCausationContext for the idiom.
 	SessionID string
 	// AgentID identifies the agent that produced the event. For sub-agent
 	// activity this is the sub-agent's identity, not the parent agent's,

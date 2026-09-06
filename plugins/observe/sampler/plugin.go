@@ -288,6 +288,15 @@ func (p *Plugin) readSessionStatus() string {
 // out_dir under <session-id>/journal/, then writes a metadata.json sibling.
 // When the configured Redactor is non-identity, the active events.jsonl
 // segment is rewritten line-by-line through it after the byte copy.
+//
+// Object-store disposition: turn-boundary-only. Every write below is a raw
+// os.* call that announces nothing on the bus, deliberately. out_dir defaults
+// to ~/.nexus/eval/samples: an eval corpus accumulated across sessions and
+// deliberately outside all of them, so sampled cases survive the cleanup of
+// the session that produced them. The bytes are also a redacted copy of
+// journal files that are themselves captured by the turn-boundary snapshot, so
+// a real-time push would carry the same events to the store twice. See
+// engine.SessionTreeWriters for the full disposition table.
 func (p *Plugin) snapshot(sessionID, reason, status string) (string, []string, error) {
 	caseDir := filepath.Join(p.cfg.outDir, sessionID)
 	dstJournal := filepath.Join(caseDir, "journal")

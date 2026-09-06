@@ -136,6 +136,16 @@ func (c *ToolCache) Lookup(toolID string, args map[string]any) (events.ToolResul
 // result writes the same bytes; same args + different result overwrites.
 // Overwrites are the price of args-keyed cache when the same args
 // produce different outputs across runs (e.g. shell "date").
+//
+// Object-store disposition: turn-boundary-only. This is a raw write under the
+// session tree that deliberately announces nothing on the bus, for two
+// reasons. First, journal/cache/ is a replay companion to
+// journal/events.jsonl and is meaningless without it — the journal is itself
+// turn-boundary-only (it cannot emit without feeding itself), so streaming the
+// cache would push half of an artefact pair and buy nothing. Second, this runs
+// inside a tool.result handler, so an announcement here would roughly double
+// bus traffic on the hottest path in a session in order to advance an upload
+// the other half is not ready for. Recorded in SessionTreeWriters.
 func (c *ToolCache) write(toolID, key string, res events.ToolResult) error {
 	path := c.pathFor(toolID, key)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

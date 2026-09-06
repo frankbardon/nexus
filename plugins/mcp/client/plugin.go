@@ -131,7 +131,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	if p.session != nil {
-		store, err := blobs.New(p.session.BlobsDir(), defaultBlobByteBudget)
+		store, err := p.session.BlobStore(defaultBlobByteBudget)
 		if err != nil {
 			p.logger.Warn("mcp.client: blob store init failed, large binary payloads will be inlined", "error", err)
 		} else {

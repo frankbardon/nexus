@@ -1,6 +1,6 @@
 module github.com/frankbardon/nexus
 
-go 1.25.5
+go 1.26.0
 
 require (
 	codeberg.org/readeck/go-readability/v2 v2.1.2

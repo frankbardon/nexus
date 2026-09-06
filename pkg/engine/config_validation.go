@@ -211,6 +211,25 @@ func validateEngineConfig(cfg *Config) *configValidationResult {
 	if cfg.Core.ModelsRaw != nil {
 		top["core"].(map[string]any)["models"] = cfg.Core.ModelsRaw
 	}
+	// Only surface the object-store block to the schema when a backend was
+	// actually named. Emitting an all-empty block on every boot would make the
+	// failure_policy enum reject "" for every operator who never opted in.
+	if ost := cfg.Core.ObjectStore; ost.Enabled() {
+		block := map[string]any{"backend": ost.BackendName}
+		for k, v := range map[string]string{
+			"bucket":           ost.Bucket,
+			"prefix":           ost.Prefix,
+			"region":           ost.Region,
+			"endpoint":         ost.Endpoint,
+			"credentials_file": ost.CredentialsFile,
+			"failure_policy":   string(ost.FailurePolicy),
+		} {
+			if v != "" {
+				block[k] = v
+			}
+		}
+		top["core"].(map[string]any)["object_store"] = block
+	}
 	if len(cfg.Capabilities) > 0 {
 		caps := make(map[string]any, len(cfg.Capabilities))
 		for k, v := range cfg.Capabilities {

@@ -14,6 +14,24 @@ import (
 // sessionLockFilename is the on-disk name of the per-session lock file.
 // It lives directly under the session root so a session is "locked"
 // exactly when this file is present and points at a live PID.
+//
+// # Object-store disposition: excluded by design, never uploaded
+//
+// This file is written with raw os.* calls under the session tree and is the
+// one writer there whose bytes must never leave the machine — not on the bus,
+// not in the turn-boundary snapshot. The reason is not tidiness: the lock
+// describes a *running process*, not session state. It carries the local PID
+// of the owner, and Boot refuses to start against a lock whose PID is still
+// alive (see IsLockStale below). Round-tripping it through an object store
+// would stamp one host's PID onto every subsequent resume — on a fresh
+// container that PID is almost certainly free, so the lock reads as stale and
+// gets overwritten, which makes the engine correct by coincidence and wrong
+// the instant the number happens to be in use by an unrelated process.
+//
+// The exclusion is enforced by objectStoreExcluded (pkg/engine/session_objectstore.go)
+// on both the hydrate and the upload path, so it holds however a future caller
+// wires the seam up. Recorded alongside the other eleven bypassing writers in
+// SessionTreeWriters (pkg/engine/session_writers.go).
 const sessionLockFilename = "session.lock"
 
 // SessionLock describes the contents of a session.lock file. The PID

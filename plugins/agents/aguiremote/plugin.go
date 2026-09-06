@@ -291,7 +291,16 @@ func (p *Plugin) runRemote(ra *remoteAgent, task string, contextMap map[string]a
 	}
 
 	if cc, ok := p.bus.(engine.CausationController); ok {
-		pop := cc.PushCausationContext(engine.CausationContext{AgentID: agentID, Depth: depth})
+		// SessionID is carried forward by hand: a pushed frame REPLACES the
+		// active one whole (see PushCausationContext), so omitting it would
+		// blank the session on every event this remote run emits rather than
+		// inherit it. The read is on this goroutine, which is the one that
+		// pushes, so it sees the caller's frame.
+		pop := cc.PushCausationContext(engine.CausationContext{
+			SessionID: cc.CurrentCausationContext().SessionID,
+			AgentID:   agentID,
+			Depth:     depth,
+		})
 		defer pop()
 	}
 

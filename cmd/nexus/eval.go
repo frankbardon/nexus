@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/engine/objectstore"
 	"github.com/frankbardon/nexus/pkg/eval/baseline"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 	"github.com/frankbardon/nexus/pkg/eval/promote"
@@ -156,7 +158,7 @@ func runEvalRun(args []string) int {
 		fmt.Fprintf(os.Stderr, "create run dir: %v\n", err)
 		return 1
 	}
-	sessionsRoot := filepath.Join(runDir, "_sessions")
+	sessionsRoot := filepath.Join(runDir, evalSessionsDirName)
 	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "create sessions dir: %v\n", err)
 		return 1
@@ -192,6 +194,8 @@ func runEvalRun(args []string) int {
 		_ = report.WriteSummary(sf, r)
 		sf.Close()
 	}
+
+	publishEvalRun(ctx, *configPath, runID, runDir)
 
 	// Human summary to stderr (TTY-aware).
 	_ = report.WriteTerminalSummary(os.Stdout, r)
@@ -583,6 +587,87 @@ func loadEvalConfig(path string) evalConfig {
 		return evalConfig{}
 	}
 	return wrapper.Eval
+}
+
+// evalSessionsDirName is the run-directory child holding the throwaway session
+// trees an eval run gives each case. Named as a constant because
+// publishEvalRun has to exclude exactly the directory runEvalRun creates.
+const evalSessionsDirName = "_sessions"
+
+// loadEvalObjectStore parses the engine's object-store block out of the same
+// config file the eval block came from.
+//
+// A second parse rather than a field on evalConfig: the block lives at
+// core.object_store, which is engine config, and evalConfig is
+// deliberately "just the eval: block". Reusing engine.LoadConfig instead was
+// rejected because an eval config file is not required to be a valid engine
+// config — the whole point of loadEvalConfig is that the rest of the file is
+// ignored — and failing an eval run over an unrelated engine key would be a
+// regression for every existing user.
+//
+// CredentialsFile is expanded here because this is the read site, which is the
+// house rule; objectstore cannot expand it itself without importing engine.
+func loadEvalObjectStore(path string) (objectstore.Config, error) {
+	if path == "" {
+		return objectstore.Config{}, nil
+	}
+	data, err := os.ReadFile(engine.ExpandPath(path))
+	if err != nil {
+		return objectstore.Config{}, nil
+	}
+	var wrapper struct {
+		Core struct {
+			ObjectStore objectstore.Config `yaml:"object_store"`
+		} `yaml:"core"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
+		return objectstore.Config{}, fmt.Errorf("parsing core.object_store: %w", err)
+	}
+	cfg := wrapper.Core.ObjectStore
+	cfg.CredentialsFile = engine.ExpandPath(cfg.CredentialsFile)
+	if err := cfg.Validate("core.object_store"); err != nil {
+		return objectstore.Config{}, err
+	}
+	return cfg, nil
+}
+
+// publishEvalRun collects an eval run's output into the configured object
+// store, under eval/<run-id>/.
+//
+// This is the fourth root of the seam. An eval run is written once and never
+// mutated, so it needs no hydration, no turn boundary and no commit marker —
+// a single upload at the end of the run is the whole lifecycle, which is why it
+// is a call here rather than an engine hook.
+//
+// The per-case session trees under _sessions/ are excluded. They are session
+// trees, and sessions are the seam's other root with their own key layout and
+// their own commit marker; copying them in under eval/ would store the same
+// bytes twice under two schemes, and they are also by far the largest part of a
+// run directory.
+//
+// Failures warn and do not change the exit code. The report is already on local
+// disk and the run's pass/fail verdict is about the cases, not about whether a
+// bucket accepted a copy; turning a storage outage into a failed eval run would
+// make CI red for the wrong reason.
+func publishEvalRun(ctx context.Context, configPath, runID, runDir string) {
+	cfg, err := loadEvalObjectStore(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: eval report not published: %v\n", err)
+		return
+	}
+	if !cfg.Enabled() {
+		return
+	}
+	cfg.Logger = slog.Default().With("subsystem", "objectstore", "backend", cfg.BackendName)
+
+	prefix := engine.EvalObjectKeyPrefix(runID)
+	objects, bytes, err := engine.PublishTree(ctx, cfg, prefix, runDir,
+		func(rel string, isDir bool) bool { return isDir && rel == evalSessionsDirName })
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: publishing eval report to %q failed: %v\n", prefix, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "published %d objects (%d bytes) to %s/%s\n", objects, bytes, cfg.Bucket, prefix)
 }
 
 // discoverCases walks dir, treating each immediate child directory as a case.

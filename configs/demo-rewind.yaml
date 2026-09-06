@@ -78,8 +78,14 @@ core:
     root: ~/.nexus/demo-rewind-sessions
     retention: 30d
     id_format: datetime_short
-  journal:
-    fsync_mode: turn-boundary
+
+# Top-level, not under core: the journal is its own block. This config carried
+# it as core.journal.fsync_mode for its whole life, which was wrong twice over
+# -- wrong nesting and wrong key name -- and yaml.v3 dropped it in silence, so
+# the demo that exists to exercise the journal was running on the default the
+# whole time. checkUnknownConfigKeys is what caught it.
+journal:
+  fsync: turn-boundary
 
 plugins:
   active:
