@@ -437,7 +437,7 @@ func TestE2E_ContextItemsProduceMatchingTagSetAnnouncements(t *testing.T) {
 //     never rides UserInput, it rides the session tag store instead.
 func TestE2E_UserInputPayloadUnchangedByPrincipalBinding(t *testing.T) {
 	wantFields := []string{"SchemaVersion", "Content", "Files", "SessionID", "PreloadMessages"}
-	typ := reflect.TypeOf(events.UserInput{})
+	typ := reflect.TypeFor[events.UserInput]()
 	if typ.NumField() != len(wantFields) {
 		t.Fatalf("events.UserInput has %d fields, want %d (%v) — a field was added or removed", typ.NumField(), len(wantFields), wantFields)
 	}
@@ -446,9 +446,9 @@ func TestE2E_UserInputPayloadUnchangedByPrincipalBinding(t *testing.T) {
 			t.Errorf("events.UserInput field[%d] = %q, want %q", i, got, name)
 		}
 	}
-	for i := 0; i < typ.NumField(); i++ {
-		if strings.Contains(strings.ToLower(typ.Field(i).Name), "principal") {
-			t.Errorf("events.UserInput gained a principal-shaped field %q; identity must ride the session tag store (session.tag.set), not UserInput", typ.Field(i).Name)
+	for field := range typ.Fields() {
+		if strings.Contains(strings.ToLower(field.Name), "principal") {
+			t.Errorf("events.UserInput gained a principal-shaped field %q; identity must ride the session tag store (session.tag.set), not UserInput", field.Name)
 		}
 	}
 
