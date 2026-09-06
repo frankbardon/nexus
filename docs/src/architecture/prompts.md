@@ -66,6 +66,7 @@ Beyond the structural `<prompt_section>` wrapping, each agent type uses semantic
 | `<prior_results>` | Completed step/dependency outputs | PlanExec, Orchestrator workers |
 | `<user_request>` | Original user input (CDATA-wrapped) | PlanExec, Orchestrator |
 | `<subtask_results>` | Worker outputs in synthesis prompts | Orchestrator |
+| `<session_context>` | Current session's non-reserved `Labels`, sorted `key: value` lines; omitted entirely when none are set | ReAct, Orchestrator (decompose + synthesis) |
 
 User-provided content and LLM outputs are wrapped in CDATA blocks to prevent parsing conflicts.
 
