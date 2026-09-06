@@ -104,6 +104,16 @@ func versionedPayloads() []versionedPayload {
 		{"SkillResourceData", func() any { return SkillResourceData{SchemaVersion: SkillResourceDataVersion} }, SkillResourceDataVersion},
 		// session.go
 		{"SessionFile", func() any { return SessionFile{SchemaVersion: SessionFileVersion} }, SessionFileVersion},
+		{"SessionTagSetRequest", func() any {
+			return SessionTagSetRequest{SchemaVersion: SessionTagSetRequestVersion}
+		}, SessionTagSetRequestVersion},
+		{"SessionTagDeleteRequest", func() any {
+			return SessionTagDeleteRequest{SchemaVersion: SessionTagDeleteRequestVersion}
+		}, SessionTagDeleteRequestVersion},
+		{"SessionTagSet", func() any { return SessionTagSet{SchemaVersion: SessionTagSetVersion} }, SessionTagSetVersion},
+		{"SessionTagDeleted", func() any {
+			return SessionTagDeleted{SchemaVersion: SessionTagDeletedVersion}
+		}, SessionTagDeletedVersion},
 		// schema.go
 		{"SchemaRegistration", func() any { return SchemaRegistration{SchemaVersion: SchemaRegistrationVersion} }, SchemaRegistrationVersion},
 		{"SchemaDeregistration", func() any { return SchemaDeregistration{SchemaVersion: SchemaDeregistrationVersion} }, SchemaDeregistrationVersion},

@@ -3737,6 +3737,21 @@ Tags are populated by:
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
 
+`SessionMeta.Labels` now has a real write path, so `tenant`/`project`/`user`
+are reachable rather than requiring test code to poke `Labels` directly. A
+plugin sets a general-namespace label by emitting the vetoable
+`before:session.tag.set` event (`events.SessionTagSetRequest{Key, Value}`)
+and deletes one via `before:session.tag.delete`
+(`events.SessionTagDeleteRequest{Key}`); a successful apply persists to
+`metadata/session.json` and announces `session.tag.set` /
+`session.tag.deleted` (`events.SessionTagSet` / `events.SessionTagDeleted`).
+Any key starting with `_` is reserved (host-only) and is rejected
+unconditionally on this path — `engine.IsReservedLabelKey` is the shared
+definition of that prefix. The only way to write a reserved key (e.g. the
+identity binding `_principal_id`) is the direct Go method
+`SessionWorkspace.SetReservedLabel`/`DeleteReservedLabel`, which is not
+exposed on the bus.
+
 ---
 
 ## Session broker (`nexus-broker`)

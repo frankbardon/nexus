@@ -384,6 +384,12 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}, WithPriority(100), WithSource("nexus.engine.tag_seeder")))
 
+	// Give SessionMeta.Labels — the store the seeder above reads tenant/
+	// project/user from — a real write path: before:session.tag.set and
+	// before:session.tag.delete, with the reserved ("_"-prefixed) namespace
+	// unconditionally barred from this path. See session_tags.go.
+	e.installSessionTagHandlers()
+
 	// Track token usage and cost from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {
 		resp, ok := event.Payload.(events.LLMResponse)
