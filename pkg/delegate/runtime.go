@@ -155,10 +155,28 @@ func (r *Runtime) Run(ctx context.Context, in Input) (Output, error) {
 
 	// Push causation so every event emitted during the sub-session carries
 	// the sub-agent's identity and depth automatically.
+	//
+	// SessionID is carried forward from the parent deliberately. A pushed frame
+	// replaces the active one WHOLE — currentCausationContext returns the top of
+	// the stack with no per-field merge, and falls back to the bus-wide default
+	// only when the goroutine has nothing pushed at all — so a frame that omits
+	// SessionID does not inherit the parent's, it BLANKS it. Every event a
+	// delegated sub-agent emits would then carry an empty Causation.SessionID,
+	// contradicting the field's own contract (empty only "outside any session
+	// context (engine boot, shutdown)") and stranding sub-agent work outside the
+	// session it belongs to. fillCausation already anticipates this case —
+	// "sub-agents propagating the parent's ID across a sub-session boundary" —
+	// and this is that propagation.
+	//
+	// subSessionID is NOT the session here. It identifies the delegate CALL: it
+	// rides AgentID and the start/complete payloads, while the session stays the
+	// one the caller's turn opened. Conflating the two is what left the field
+	// empty.
 	if cc, ok := r.Bus.(engine.CausationController); ok {
 		pop := cc.PushCausationContext(engine.CausationContext{
-			AgentID: agentID,
-			Depth:   depth,
+			SessionID: cc.CurrentCausationContext().SessionID,
+			AgentID:   agentID,
+			Depth:     depth,
 		})
 		defer pop()
 	}

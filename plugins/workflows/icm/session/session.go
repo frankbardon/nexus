@@ -49,7 +49,32 @@ type Session struct {
 	// on-disk RunState document.
 	stateMu sync.Mutex
 
+	// Announce, when set, is called after every artifact this session writes
+	// under the run tree, with the absolute path and whether it already
+	// existed. The plugin wires it to SessionWorkspace.AnnounceWrite so a
+	// sync backend learns about stage output as it lands rather than at the
+	// next turn boundary — an ICM run is long enough that waiting discards
+	// completed stages on a crash.
+	//
+	// A plain func field rather than an engine.SessionWorkspace parameter on
+	// NewSession/OpenSession, for two reasons. This package is a pure
+	// filesystem-layout library with no engine import, deliberately, and one
+	// callback is a smaller price than that dependency. And the constructors
+	// have twenty-six call sites across the ICM tests, none of which care
+	// about announcements; a nil-by-default field leaves every one of them
+	// unchanged and correct.
+	Announce func(fullPath string, existed bool)
+
 	logger *slog.Logger
+}
+
+// announce fires the optional hook, tolerating a nil Session or hook so
+// callers never have to guard.
+func (s *Session) announce(fullPath string, existed bool) {
+	if s == nil || s.Announce == nil {
+		return
+	}
+	s.Announce(fullPath, existed)
 }
 
 // NewSession creates the session root directory and its .icm/ subfolder.
@@ -230,11 +255,21 @@ func (s *Session) ResolveLogicalRef(ref string) (string, error) {
 // WriteArtifact ensures the parent directory exists and writes content
 // atomically via temp file + rename. The orchestrator funnels every
 // artifact write through this so the disk layout is uniform.
+//
+// Object-store disposition: emit. Because every artifact write already funnels
+// through here, one announcement covers sidecars, run metadata and stage
+// output alike. The temp file is deliberately not announced: it is an
+// implementation detail of atomicity that exists for one syscall and is gone
+// by the time anyone could act on the event, and announcing it would tell a
+// sync backend to upload a path that no longer exists.
 func (s *Session) WriteArtifact(path string, content []byte) error {
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("session: mkdir %s: %w", parent, err)
 	}
+	// Sampled before the rename, when it still answers the question a
+	// subscriber is asking. Afterwards the destination always exists.
+	_, statErr := os.Stat(path)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, content, 0o644); err != nil {
 		return fmt.Errorf("session: write %s: %w", tmp, err)
@@ -243,6 +278,7 @@ func (s *Session) WriteArtifact(path string, content []byte) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("session: rename %s: %w", path, err)
 	}
+	s.announce(path, statErr == nil)
 	return nil
 }
 
@@ -282,7 +318,7 @@ func (s *Session) CopyInitialInputs(srcPaths []string) error {
 		return fmt.Errorf("session: mkdir 00_input: %w", err)
 	}
 	for _, src := range srcPaths {
-		if err := copyFile(src, filepath.Join(dst, filepath.Base(src))); err != nil {
+		if err := s.copyFile(src, filepath.Join(dst, filepath.Base(src))); err != nil {
 			return fmt.Errorf("session: copy initial input %s: %w", src, err)
 		}
 	}
@@ -316,7 +352,7 @@ func (s *Session) CopyInitialInputsFromDir(workspaceInputsDir string) error {
 			continue
 		}
 		src := filepath.Join(workspaceInputsDir, e.Name())
-		if err := copyFile(src, filepath.Join(dst, e.Name())); err != nil {
+		if err := s.copyFile(src, filepath.Join(dst, e.Name())); err != nil {
 			return fmt.Errorf("session: copy %s: %w", src, err)
 		}
 	}
@@ -338,7 +374,16 @@ func (s *Session) ClearStage(stageID string) error {
 // copyFile is a minimal byte-stream copy. The session package
 // deliberately does not preserve mode bits — every artifact under the
 // session lands at 0o644 via WriteArtifact's WriteFile.
-func copyFile(src, dst string) error {
+//
+// A method rather than the package function it used to be, so the copied file
+// gets the same announcement WriteArtifact gives a written one. Initial inputs
+// are the only bytes that enter a run tree without passing through
+// WriteArtifact, so leaving them silent would have made 00_input/ the one
+// stage a sync backend could not see arrive.
+func (s *Session) copyFile(src, dst string) error {
+	// Sampled before the copy: os.Create makes the destination exist.
+	_, statErr := os.Stat(dst)
+
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -348,7 +393,15 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// Closed explicitly, before announcing: a subscriber that reacts by
+	// reading or uploading the file must not race our own buffered writes.
+	if err := out.Close(); err != nil {
+		return err
+	}
+	s.announce(dst, statErr == nil)
+	return nil
 }

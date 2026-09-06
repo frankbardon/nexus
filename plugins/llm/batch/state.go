@@ -46,6 +46,16 @@ func stateFilename(batchID string) string {
 // saveBatch writes (or overwrites) the state file for one batch. The caller
 // is responsible for ensuring dir exists; we don't MkdirAll here so accidental
 // typos in config don't silently create stray directories.
+//
+// Object-store disposition: turn-boundary-only. This is a raw os.* write that
+// announces nothing on the bus, deliberately. dir comes from batch.data_dir,
+// which defaults to ~/.nexus/batches — machine scope, outside every session
+// tree, so in the default configuration there is nothing under a session for a
+// real-time push to carry; pointing it inside one is legal and the whole-tree
+// snapshot then covers it. An emission would not be worth it either way: the
+// coordinator resumes in-flight batches by scanning this directory at boot, so
+// what these files need is a local disk that survives a process restart, not a
+// remote copy. See engine.SessionTreeWriters for the full disposition table.
 func saveBatch(dir string, b *batchState) error {
 	if dir == "" {
 		return fmt.Errorf("batch: empty state dir")

@@ -252,7 +252,7 @@ func (p *Plugin) resolveBlob(sha string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("blob URI cannot be resolved: plugin has no session workspace; inline bytes via EmbeddingsInput.Image instead")
 	}
 	if p.blobStore == nil {
-		store, err := blobs.New(p.session.BlobsDir(), 0)
+		store, err := p.session.BlobStore(0)
 		if err != nil {
 			return nil, "", fmt.Errorf("open blob store: %w", err)
 		}
