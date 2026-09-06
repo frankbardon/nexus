@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/posture"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
 )
@@ -458,6 +459,118 @@ func TestBuild_MissingNamedPostureErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nonexistent") {
 		t.Errorf("error %q does not mention missing posture name", err.Error())
+	}
+}
+
+// 15. OperatorTemplateCtx.Context surfaces the session's current
+// non-reserved Labels to the operator template as `{{ .Context.<key> }}` —
+// the ICM worked example for this effort's session-context exposure — while
+// a reserved ("_"-prefixed) key present in the same Labels map, such as
+// _principal_id, never reaches the rendered prompt. This is a security-
+// relevant regression guard for the identity/context separation this effort
+// requires, not incidental coverage: a future change that lets a reserved
+// key leak into .Context breaks this test.
+func TestBuild_ContextFromSessionLabels(t *testing.T) {
+	sess, err := engine.NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := sess.SetLabel("dataset", "acme-q3"); err != nil {
+		t.Fatalf("SetLabel: %v", err)
+	}
+	if err := sess.SetReservedLabel("_principal_id", "user-42"); err != nil {
+		t.Fatalf("SetReservedLabel: %v", err)
+	}
+
+	wf := newWorkflow(t, `{{ .Stage.ID }}: dataset={{ .Context.dataset }}`, "doc\n")
+	stage := newStage("01_draft")
+
+	b := &PostureBuilder{
+		Workflow:   wf,
+		InstanceID: "nexus.workflows.icm",
+		Registry:   posture.NewRegistry(),
+		Session:    sess,
+	}
+
+	got, err := b.Build(stage)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !strings.Contains(got.SystemPrompt, "dataset=acme-q3") {
+		t.Errorf("SystemPrompt missing rendered Context.dataset: %s", got.SystemPrompt)
+	}
+	if strings.Contains(got.SystemPrompt, "user-42") || strings.Contains(got.SystemPrompt, "_principal_id") {
+		t.Errorf("SystemPrompt leaked reserved label into .Context: %s", got.SystemPrompt)
+	}
+}
+
+// 16. Context is read fresh from the session at every Build call, never
+// cached on the PostureBuilder — a label written between two renders (here
+// standing in for two stages dispatched at different points in a session's
+// lifetime) must be visible to the later one.
+func TestBuild_ContextNotStaleAcrossRenders(t *testing.T) {
+	sess, err := engine.NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := sess.SetLabel("dataset", "acme-q3"); err != nil {
+		t.Fatalf("SetLabel: %v", err)
+	}
+
+	wf := newWorkflow(t, `dataset={{ .Context.dataset }}`, "doc\n")
+	stage := newStage("01_draft")
+
+	b := &PostureBuilder{
+		Workflow:   wf,
+		InstanceID: "nexus.workflows.icm",
+		Registry:   posture.NewRegistry(),
+		Session:    sess,
+	}
+
+	first, err := b.Build(stage)
+	if err != nil {
+		t.Fatalf("Build (first): %v", err)
+	}
+	if !strings.Contains(first.SystemPrompt, "dataset=acme-q3") {
+		t.Errorf("first render missing dataset=acme-q3: %s", first.SystemPrompt)
+	}
+
+	if err := sess.SetLabel("dataset", "acme-q4"); err != nil {
+		t.Fatalf("SetLabel (update): %v", err)
+	}
+
+	second, err := b.Build(stage)
+	if err != nil {
+		t.Fatalf("Build (second): %v", err)
+	}
+	if !strings.Contains(second.SystemPrompt, "dataset=acme-q4") {
+		t.Errorf("second render did not pick up updated label, still: %s", second.SystemPrompt)
+	}
+	if strings.Contains(second.SystemPrompt, "acme-q3") {
+		t.Errorf("second render still shows stale value: %s", second.SystemPrompt)
+	}
+}
+
+// 17. A PostureBuilder with no Session configured (the shape every existing
+// test in this file uses) renders .Context as an empty map rather than
+// erroring or leaving the field nil-and-unsafe — existing Workspace/Stage
+// rendering behavior is completely unaffected by this addition.
+func TestBuild_ContextEmptyWithoutSession(t *testing.T) {
+	wf := newWorkflow(t, `[{{ range $k, $v := .Context }}{{ $k }}={{ $v }}{{ end }}]`, "doc\n")
+	stage := newStage("01_draft")
+
+	b := &PostureBuilder{
+		Workflow:   wf,
+		InstanceID: "nexus.workflows.icm",
+		Registry:   posture.NewRegistry(),
+	}
+
+	got, err := b.Build(stage)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !strings.Contains(got.SystemPrompt, "[]") {
+		t.Errorf("SystemPrompt = %q, want empty rendered Context block", got.SystemPrompt)
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/posture"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
@@ -41,6 +42,15 @@ type OperatorTemplateCtx struct {
 	Workspace WorkspaceTplCtx
 	// Stage describes the single stage this posture dispatches.
 	Stage StageTplCtx
+	// Context is the session's current non-reserved Labels (see
+	// engine.IsReservedLabelKey), read fresh at render time — never a value
+	// cached at PostureBuilder construction — so a tag written mid-session
+	// is visible to any stage template rendered afterward. Reserved
+	// ("_"-prefixed) keys, e.g. "_principal_id", are filtered out
+	// unconditionally and never reach this map. Usable in operator.md and
+	// other stage templates as `{{ .Context.<key> }}`. Empty, non-nil when
+	// there is no session or no non-reserved labels are set.
+	Context map[string]string
 }
 
 // WorkspaceTplCtx is the workspace-level slice of OperatorTemplateCtx.
@@ -99,6 +109,11 @@ type PostureBuilder struct {
 	// Inputs.Skills automatically get SkillToolName appended to their
 	// AllowedTools.
 	AutoIncludeSkillTool bool
+	// Session is the engine session workspace, used to read the current
+	// session's Labels at each operator-template render (see
+	// OperatorTemplateCtx.Context). Nil is tolerated — Context resolves to
+	// an empty map — for instances built without a session (e.g. tests).
+	Session *engine.SessionWorkspace
 }
 
 // Build returns the derived AgentPosture for a workflow stage. The
@@ -219,6 +234,32 @@ func (b *PostureBuilder) resolveBase(name string) (*posture.AgentPosture, error)
 	return p, nil
 }
 
+// currentContext returns the session's current non-reserved Labels, read
+// fresh from disk on every call — never memoized on the PostureBuilder — so
+// a tag written after this builder was constructed, or after an earlier
+// stage already rendered its prompt, is visible to a later render. Returns
+// an empty, non-nil map (never nil, so range/template access is always
+// safe) when there is no session or its metadata can't be read; a missing
+// session is the normal case for tests and standalone builder use, so this
+// is deliberately not an error.
+func (b *PostureBuilder) currentContext() map[string]string {
+	out := make(map[string]string)
+	if b.Session == nil {
+		return out
+	}
+	meta, err := b.Session.SessionMetadata()
+	if err != nil {
+		return out
+	}
+	for k, v := range meta.Labels {
+		if engine.IsReservedLabelKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // renderOperatorPrompt parses the workspace operator template body and
 // renders it with the supplied stage. The stage-level prompt overlay (if
 // any) is appended to the rendered result so it can refine the operator
@@ -240,6 +281,7 @@ func (b *PostureBuilder) renderOperatorPrompt(stage *workspace.Stage) (string, e
 			Output:    outputTplCtx(stage.Output),
 			HumanGate: string(stage.HumanGate),
 		},
+		Context: b.currentContext(),
 	}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, ctx); err != nil {

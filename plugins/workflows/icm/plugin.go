@@ -290,6 +290,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		Registry:             p.postureReg,
 		SkillToolName:        p.skillToolName,
 		AutoIncludeSkillTool: p.cfg.AutoIncludeSkillReferenceTool,
+		Session:              p.session,
 	}
 
 	// Bus subscriptions. Per-event handlers are stubs in the skeleton —

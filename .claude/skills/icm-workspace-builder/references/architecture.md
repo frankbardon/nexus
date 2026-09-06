@@ -162,6 +162,14 @@ type OperatorTemplateCtx struct {
         }
         HumanGate string
     }
+    // Context is the session's current non-reserved Labels (session tags),
+    // read fresh at render time — not cached from session start — so a tag
+    // set or changed mid-session is visible to any stage rendered
+    // afterward. Reserved ("_"-prefixed) keys, e.g. _principal_id, are
+    // filtered out unconditionally and never reach the template. Usable as
+    // `{{ .Context.dataset }}` etc. Empty when no session or no non-reserved
+    // labels are set.
+    Context map[string]string
 }
 ```
 
