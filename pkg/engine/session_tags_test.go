@@ -263,6 +263,60 @@ func TestDeleteReservedLabel_SetsAndAnnounces(t *testing.T) {
 	}
 }
 
+func TestSetLabel_SetsAndAnnounces(t *testing.T) {
+	bus := NewEventBus()
+	ws, err := NewSessionWorkspace(t.TempDir(), bus)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+
+	var got events.SessionTagSet
+	var fired bool
+	bus.Subscribe("session.tag.set", func(e Event[any]) {
+		fired = true
+		got, _ = e.Payload.(events.SessionTagSet)
+	})
+
+	if err := ws.SetLabel("dataset", "prod"); err != nil {
+		t.Fatalf("SetLabel: %v", err)
+	}
+	if !fired {
+		t.Fatal("expected session.tag.set to fire for a direct general write")
+	}
+	if got.Key != "dataset" || got.Value != "prod" {
+		t.Fatalf("announce payload = %+v", got)
+	}
+
+	meta, err := ws.SessionMetadata()
+	if err != nil {
+		t.Fatalf("SessionMetadata: %v", err)
+	}
+	if meta.Labels["dataset"] != "prod" {
+		t.Fatalf("Labels[dataset] = %q, want prod", meta.Labels["dataset"])
+	}
+}
+
+// SetLabel is a second sanctioned direct-write seam (see its doc comment),
+// but it must not become a second way to write into the reserved namespace: a
+// caller passing a "_"-prefixed key is rejected exactly like the general bus
+// path rejects one, with Labels left untouched.
+func TestSetLabel_RejectsReservedKey(t *testing.T) {
+	ws, err := NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := ws.SetLabel("_principal_id", "spoofed"); err == nil {
+		t.Fatal("expected error setting a reserved key via SetLabel")
+	}
+	meta, err := ws.SessionMetadata()
+	if err != nil {
+		t.Fatalf("SessionMetadata: %v", err)
+	}
+	if _, ok := meta.Labels["_principal_id"]; ok {
+		t.Fatal("SetLabel wrote a reserved key despite rejecting it")
+	}
+}
+
 func TestDeleteReservedLabel_RejectsNonReservedKey(t *testing.T) {
 	ws, err := NewSessionWorkspace(t.TempDir(), nil)
 	if err != nil {

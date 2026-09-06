@@ -54,6 +54,11 @@ const (
 // the network without explicit operator opt-in.
 const defaultBindAddr = "127.0.0.1:8090"
 
+// reservedPrincipalIDKey is the reserved-namespace session label startRun/
+// resumeRun bind the request's resolved principal into, and endRun clears.
+// See bindSessionContext.
+const reservedPrincipalIDKey = "_principal_id"
+
 // customBridgedEvents are Nexus-specific bus events with no canonical AG-UI
 // equivalent. They ride the AG-UI Custom event (name = bus event type) so a
 // conformance client sees a documented superset rather than silently dropping
@@ -77,6 +82,11 @@ type Plugin struct {
 	server *Server
 
 	sessionID string
+	// session is the SessionWorkspace startRun/resumeRun/endRun bind/clear the
+	// per-run identity and context tags on (see bindSessionContext). Nil when
+	// the plugin is constructed without a session (some unit tests); every
+	// tag write is a no-op in that case.
+	session *engine.SessionWorkspace
 
 	bindAddr string
 
@@ -249,6 +259,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 
 	p.bindAddr = defaultBindAddr
@@ -446,6 +457,11 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	p.active = r
 	p.mu.Unlock()
 
+	// Bind the per-run identity and context tags BEFORE the run's io.input is
+	// emitted below (ordering matters — see bindSessionContext), mirroring
+	// this package's existing "register before unblocking" discipline.
+	p.bindSessionContext(input)
+
 	// RunStarted is emitted eagerly so even a run with no agent produces a
 	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
 	r.markStarted()
@@ -477,13 +493,66 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	return r, true
 }
 
-// endRun clears the active run pointer if it still points at r.
+// endRun clears the active run pointer if it still points at r, and clears
+// the identity bound at startRun/resumeRun so a subsequent unrelated run on
+// this listener never observes a stale principal.
 func (p *Plugin) endRun(r *run) {
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
 	}
 	p.mu.Unlock()
+
+	if p.session == nil {
+		return
+	}
+	if err := p.session.DeleteReservedLabel(reservedPrincipalIDKey); err != nil {
+		p.logger.Warn("clearing _principal_id session label failed", "error", err)
+	}
+}
+
+// bindSessionContext writes the per-run identity and business-context
+// signals into the session's tag store. It is called by both startRun and
+// resumeRun BEFORE the run's io.input (startRun) or hitl.responded/
+// tool.result (resumeRun) is emitted — ordering matters, mirroring this
+// package's existing "register before unblocking" discipline (see resume.go's
+// run-registration comment) so a consumer of session.tag.set/deleted
+// (e.g. an external identity registry) never observes the turn's first
+// downstream event before the identity it is bound to.
+//
+// _principal_id is bound via SetReservedLabel, the only sanctioned writer of
+// a "_"-prefixed key. RunAgentInput.Context items are written directly via
+// SetLabel as general-namespace tags (Description -> key, Value -> value),
+// bypassing the vetoable before:session.tag.set path entirely — this is
+// already-authenticated, already-decoded trusted input, the same reasoning
+// buildUserInput applies to input.messages.
+//
+// Every call re-binds fresh from input's own resolved principal: there is no
+// "unchanged principal, skip the write" special case, so a resumed thread
+// under a different principal always gets a new bind, never a stale one
+// carried over from the run it continues. No-op when the plugin was
+// constructed without a session (some unit tests).
+func (p *Plugin) bindSessionContext(input runInput) {
+	if p.session == nil {
+		return
+	}
+	if input.principalID != "" {
+		if err := p.session.SetReservedLabel(reservedPrincipalIDKey, input.principalID); err != nil {
+			p.logger.Warn("binding _principal_id session label failed",
+				"error", err, "principal_id", input.principalID)
+		}
+	}
+	for _, item := range input.contextItems {
+		if item.Description == "" {
+			// A context item with no key has nothing to bind to; skip it
+			// rather than write an empty-string key.
+			continue
+		}
+		if err := p.session.SetLabel(item.Description, item.Value); err != nil {
+			p.logger.Warn("writing session context tag failed",
+				"error", err, "key", item.Description)
+		}
+	}
 }
 
 // currentRun returns the active run or nil.

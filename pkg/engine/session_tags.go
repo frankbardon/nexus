@@ -65,6 +65,40 @@ func (s *SessionWorkspace) DeleteReservedLabel(key string) error {
 	return s.applyLabel(key, "", true)
 }
 
+// SetLabel writes a general-namespace (non-reserved) session label directly,
+// bypassing the before:session.tag.set vetoable bus path entirely.
+//
+// # A second sanctioned direct-write seam, for trusted decode-time input
+//
+// Every other general-namespace write goes through installSessionTagHandlers,
+// which lets a subscriber veto. This method exists for a caller that already
+// sits on trusted, already-authenticated, already-decoded input and gains
+// nothing from a veto hop — the same reasoning nexus.io.agui's buildUserInput
+// already applies to RunAgentInput.messages when folding them into
+// events.UserInput with no veto hop of its own. RunAgentInput.Context items
+// are the motivating case: they ride an authenticated transport already, so
+// re-litigating them through a gate built for untrusted general writes (e.g.
+// a tool call) would add a hop with no caller able to usefully veto it.
+//
+// A reserved ("_"-prefixed) key is rejected here, defensively, for the exact
+// reason SetReservedLabel/DeleteReservedLabel reject a non-reserved one: this
+// method bypasses the general validation completely, and without this check
+// a caller mistake (or a client smuggling a "_"-prefixed key through
+// RunAgentInput.Context) could write into the reserved namespace with none of
+// the vetoable path's protection. See installSessionTagHandlers's doc comment
+// for the risk this guards against on the bus path; this is the same guard on
+// this second, non-bus path.
+//
+// Ends by calling the same internal apply-and-announce step every other
+// label write uses, so session.tag.set fires here exactly as it does for the
+// vetoable general path or a reserved direct write.
+func (s *SessionWorkspace) SetLabel(key, value string) error {
+	if IsReservedLabelKey(key) {
+		return fmt.Errorf("session labels: SetLabel called with reserved key %q (must not start with %q); use SetReservedLabel", key, reservedLabelPrefix)
+	}
+	return s.applyLabel(key, value, false)
+}
+
 // applyLabel is the single internal apply-and-announce step for every
 // session-label write, general or reserved. Both installSessionTagHandlers
 // (after it has already rejected a reserved key on the general path) and

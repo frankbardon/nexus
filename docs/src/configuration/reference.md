@@ -3750,7 +3750,13 @@ unconditionally on this path — `engine.IsReservedLabelKey` is the shared
 definition of that prefix. The only way to write a reserved key (e.g. the
 identity binding `_principal_id`) is the direct Go method
 `SessionWorkspace.SetReservedLabel`/`DeleteReservedLabel`, which is not
-exposed on the bus.
+exposed on the bus. A second direct (non-bus) method,
+`SessionWorkspace.SetLabel`, writes a general-namespace key with no veto hop
+for a caller that already sits on trusted, already-authenticated,
+already-decoded input — `nexus.io.agui`'s `startRun`/`resumeRun` use it to
+write each `RunAgentInput.context` item as a general tag. It rejects a
+reserved key just as the bus path does, so it cannot become a second way into
+the reserved namespace.
 
 ---
 

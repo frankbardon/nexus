@@ -50,6 +50,13 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	p.active = r
 	p.mu.Unlock()
 
+	// Re-bind identity/context BEFORE the hitl.responded/tool.result goroutine
+	// below unblocks the parked agent — same "register before unblocking"
+	// discipline as the run registration above. This request's own resolved
+	// principal replaces whatever was bound at the interrupted run; a resume
+	// under a different principal is never left with the stale bind.
+	p.bindSessionContext(input)
+
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))
 
