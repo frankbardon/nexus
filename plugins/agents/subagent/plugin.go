@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -24,8 +25,9 @@ const (
 
 // Plugin manages subagent spawning and lifecycle.
 type Plugin struct {
-	bus    engine.EventBus
-	logger *slog.Logger
+	bus     engine.EventBus
+	logger  *slog.Logger
+	session *engine.SessionWorkspace
 
 	instanceID       string // full configured ID (may include /suffix)
 	toolName         string
@@ -69,6 +71,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.session = ctx.Session
 
 	// If launched as an instance (e.g. "nexus.agent.subagent/researcher"),
 	// adopt the full ID and derive a tool name from the suffix.
@@ -336,6 +339,43 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 	_ = p.bus.Emit("tool.result", toolResult)
 }
 
+// sessionContextBody returns the current session's non-reserved Labels as a
+// sorted "key: value" line list, suitable for engine.XMLWrap("session_context",
+// ...). Read fresh from disk on every call — never memoized on the plugin —
+// so a tag written mid-session (e.g. via nexus.tool.session_tags) is visible
+// to the very next subagent spawn. Returns "" (never a lone
+// "<session_context/>") when there is no session, its metadata can't be read,
+// or every Labels key is reserved ("_"-prefixed, see
+// engine.IsReservedLabelKey) — a reserved key must never reach the prompt.
+func (p *Plugin) sessionContextBody() string {
+	if p.session == nil {
+		return ""
+	}
+	meta, err := p.session.SessionMetadata()
+	if err != nil || len(meta.Labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(meta.Labels))
+	for k := range meta.Labels {
+		if engine.IsReservedLabelKey(k) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	var body strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			body.WriteString("\n")
+		}
+		fmt.Fprintf(&body, "%s: %s", k, meta.Labels[k])
+	}
+	return body.String()
+}
+
 // runSubagent executes an isolated agent loop and returns the result.
 func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnID string) events.SubagentComplete {
 	logger := p.logger.With("spawn_id", spawnID)
@@ -366,9 +406,13 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 	// Initialize conversation history.
 	var history []events.Message
 	if systemPrompt != "" {
+		content := systemPrompt
+		if sessionContext := p.sessionContextBody(); sessionContext != "" {
+			content = engine.XMLWrap("session_context", sessionContext) + "\n\n" + systemPrompt
+		}
 		history = append(history, events.Message{
 			Role:    "system",
-			Content: systemPrompt,
+			Content: content,
 		})
 	}
 	history = append(history, events.Message{
