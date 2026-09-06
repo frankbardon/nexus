@@ -642,6 +642,7 @@ func (p *Plugin) buildOrchestrator(runID string, sess *session.Session) *runtime
 	payload := &runtime.PayloadBuilder{
 		Workflow:                 p.workflow,
 		Session:                  sess,
+		EngineSession:            p.session,
 		InlineArtifactLimitBytes: p.cfg.InlineArtifactLimitBytes,
 		Logger:                   p.logger,
 	}
