@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -33,8 +34,9 @@ const (
 // them explicitly. See docs/plugins/auto-activation.md and CLAUDE.md for
 // the expansion and merge rules.
 type Plugin struct {
-	bus    engine.EventBus
-	logger *slog.Logger
+	bus     engine.EventBus
+	logger  *slog.Logger
+	session *engine.SessionWorkspace
 
 	systemPrompt     string
 	systemPromptFile string
@@ -127,6 +129,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.session = ctx.Session
 
 	if pe, ok := ctx.Config["planning"].(bool); ok {
 		p.planningEnabled = pe
@@ -720,6 +723,43 @@ func (p *Plugin) handleSkillLoaded(content events.SkillContent) {
 	p.logger.Info("loaded skill context", "name", content.Name)
 }
 
+// sessionContextBody returns the current session's non-reserved Labels as a
+// sorted "key: value" line list, suitable for engine.XMLWrap("session_context",
+// ...). Read fresh from disk on every call — never memoized on the plugin —
+// so a tag written mid-session (e.g. via nexus.tool.session_tags) is visible
+// to the very next LLM request. Returns "" (never a lone "<session_context/>")
+// when there is no session, its metadata can't be read, or every Labels key
+// is reserved ("_"-prefixed, see engine.IsReservedLabelKey) — a reserved key
+// must never reach the prompt.
+func (p *Plugin) sessionContextBody() string {
+	if p.session == nil {
+		return ""
+	}
+	meta, err := p.session.SessionMetadata()
+	if err != nil || len(meta.Labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(meta.Labels))
+	for k := range meta.Labels {
+		if engine.IsReservedLabelKey(k) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	var body strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			body.WriteString("\n")
+		}
+		fmt.Fprintf(&body, "%s: %s", k, meta.Labels[k])
+	}
+	return body.String()
+}
+
 func (p *Plugin) sendLLMRequest() {
 	p.mu.Lock()
 
@@ -729,6 +769,10 @@ func (p *Plugin) sendLLMRequest() {
 	if len(p.skillContexts) > 0 {
 		sysBuilder.WriteString("\n\n")
 		sysBuilder.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+	}
+	if sessionContext := p.sessionContextBody(); sessionContext != "" {
+		sysBuilder.WriteString("\n\n")
+		sysBuilder.WriteString(engine.XMLWrap("session_context", sessionContext))
 	}
 	if p.currentPlan != nil && len(p.currentPlan.Steps) > 0 && p.currentPlanStep >= 0 {
 		var planBody strings.Builder

@@ -90,6 +90,19 @@ type runInput struct {
 	// RunAgentInput.tools. They are surfaced to the agent for the duration of the
 	// run and a call to one suspends the run awaiting the client's result.
 	tools []agui.Tool
+	// principalID is the caller identity s.authorize(r) already resolved for
+	// this request (empty when auth is disabled). startRun/resumeRun bind it
+	// into the session's reserved "_principal_id" tag before the run's
+	// io.input/hitl.responded unblocks anything downstream; endRun clears it.
+	// Every call re-binds fresh from this field — a resumed thread under a
+	// different principal gets a new bind, never a stale one.
+	principalID string
+	// contextItems are the client-supplied RunAgentInput.Context entries.
+	// startRun/resumeRun write each directly as a general-namespace session
+	// tag (Description -> key, Value -> value), no veto — this is already-
+	// authenticated, already-decoded trusted input, the same reasoning
+	// buildUserInput applies to input.messages.
+	contextItems []agui.ContextItem
 }
 
 // newRunStarted builds a RunStarted event for a run.

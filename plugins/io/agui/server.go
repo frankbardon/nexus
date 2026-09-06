@@ -225,12 +225,14 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	in := runInput{
-		threadID: input.ThreadID,
-		runID:    input.RunID,
-		messages: input.Messages,
-		resume:   input.Resume,
-		tools:    input.Tools,
-		state:    input.State,
+		threadID:     input.ThreadID,
+		runID:        input.RunID,
+		messages:     input.Messages,
+		resume:       input.Resume,
+		tools:        input.Tools,
+		state:        input.State,
+		principalID:  principal.ID,
+		contextItems: input.Context,
 	}
 
 	var run *run

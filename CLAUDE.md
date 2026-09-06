@@ -114,6 +114,7 @@ plugins/
   tools/pdf/             # read_pdf tool via poppler-utils (pdftotext, pdfinfo)
   tools/opener/          # open_path tool (platform-aware: open / xdg-open / start)
   tools/knowledge_search/ # LLM-facing "knowledge_search" tool; queries configured namespaces via vector.store + embeddings.provider, returns top-k with source paths for citation
+  tools/session_tags/    # Opt-in agent read/write access to its own session's general-namespace tags; session_tag_set/get/delete/list tools, reserved ("_"-prefixed) namespace unreachable
   search/brave/          # search.provider adapter: Brave Search REST API
   search/anthropic_native/ # search.provider adapter: Anthropic's server-side web_search tool (direct HTTP)
   search/openai_native/  # search.provider adapter: OpenAI's server-side web_search via Responses API

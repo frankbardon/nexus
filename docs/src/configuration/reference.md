@@ -1630,6 +1630,28 @@ The engine substitutes `${session_id}` in any string under the `sandbox:`
 block at session start, so per-session host paths can be hard-coded:
 `host: ~/.nexus/sessions/${session_id}/files`.
 
+### `nexus.tool.session_tags`
+
+Source: `plugins/tools/session_tags/plugin.go`. Registers `session_tag_set`,
+`session_tag_get`, `session_tag_delete`, `session_tag_list` — LLM-facing
+tools over the general-namespace session tag store (`SessionMeta.Labels`; see
+[Session Tags](../architecture/session-tags.md) for the full mechanism, and
+the [Cost CLI](#cost-cli) section below for how `tenant`/`project`/`user`
+tags feed `nexus cost report`). **Off by
+default** — not in any stock config's `plugins.active`; an operator opts in
+explicitly to give the agent write access to its own session's tags.
+
+Restricted to the general (non-`_`-prefixed) namespace: `session_tag_set`/
+`session_tag_delete` ride the same vetoable `before:session.tag.set`/
+`before:session.tag.delete` path any other caller uses, so a reserved-prefixed
+key is rejected identically — this plugin has no elevated privilege and no
+bypass. `session_tag_get`/`session_tag_list` report a reserved-prefixed key
+as not found / omit it entirely, never revealing its presence.
+
+| Key                 | Type | Default          | Description |
+|---------------------|------|------------------|-------------|
+| `tools.<tool_name>` | bool | `true` for each  | Per-tool enable/disable: `session_tag_set`, `session_tag_get`, `session_tag_delete`, `session_tag_list`. |
+
 ---
 
 ## Memory
@@ -3736,6 +3758,30 @@ Tags are populated by:
 - The engine's `before:llm.request` seeder (`session_id`, plus `tenant`/`project`/`user` from `SessionMeta.Labels`).
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
+
+`SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
+reachable rather than requiring test code to poke `Labels` directly. A
+plugin sets a general-namespace label by emitting the vetoable
+`before:session.tag.set` event (`events.SessionTagSetRequest{Key, Value}`)
+and deletes one via `before:session.tag.delete`
+(`events.SessionTagDeleteRequest{Key}`); a successful apply persists to
+`metadata/session.json` and announces `session.tag.set` /
+`session.tag.deleted` (`events.SessionTagSet` / `events.SessionTagDeleted`).
+See [Session Tags](../architecture/session-tags.md) for the full mechanism —
+the reserved-namespace split, the four event types, and who writes what.
+
+Any key starting with `_` is reserved (host-only) and is rejected
+unconditionally on this path — `engine.IsReservedLabelKey` is the shared
+definition of that prefix. The only way to write a reserved key (e.g. the
+identity binding `_principal_id`) is the direct Go method
+`SessionWorkspace.SetReservedLabel`/`DeleteReservedLabel`, which is not
+exposed on the bus. A second direct (non-bus) method,
+`SessionWorkspace.SetLabel`, writes a general-namespace key with no veto hop
+for a caller that already sits on trusted, already-authenticated,
+already-decoded input — `nexus.io.agui`'s `startRun`/`resumeRun` use it to
+write each `RunAgentInput.context` item as a general tag. It rejects a
+reserved key just as the bus path does, so it cannot become a second way into
+the reserved namespace.
 
 ---
 

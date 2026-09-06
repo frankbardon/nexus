@@ -90,6 +90,16 @@ The orchestrator can recognize dependencies between subtasks. Dependent subtasks
 - **`fail_fast: false`** (default) — Other workers continue even if one fails. Failed results are included in synthesis.
 - **`fail_fast: true`** — All remaining workers are cancelled when any worker fails.
 
+## Session Context in Prompts
+
+Both the per-worker system prompt (dispatching) and the synthesis system
+prompt get a `<session_context>` section: the current session's
+general-namespace (non-`_`-prefixed) tags, rendered fresh for each build and
+omitted entirely when none are set. See [Prompt Registry → Agent-Level
+Semantic Tags](../../architecture/prompts.md#agent-level-semantic-tags) and
+[Session Tags](../../architecture/session-tags.md) for what populates it and
+why the reserved namespace never reaches either prompt.
+
 ## Example Configuration
 
 ```yaml

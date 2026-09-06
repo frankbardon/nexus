@@ -325,9 +325,27 @@ outage must not read to a client as "re-authenticate". See the
 [status mapping table](../configuration/reference.md#authentication-auth-on-nexusioagui).
 
 **Principal:** the resolved identity is recorded on the `agui run started` log
-record as `principal_id` (empty when auth is disabled). Nothing keys behaviour on
-it yet — one listener serves a single session and one run at a time, so there is
-no second principal to distinguish.
+record as `principal_id` (empty when auth is disabled). It is also bound into
+the session's tag store: `startRun`/`resumeRun` write it as the reserved
+`_principal_id` session label before the run's `io.input` (or, on resume,
+`hitl.responded`) is emitted, and `endRun` clears it. Every run/resume re-binds
+fresh from that request's own resolved principal — a resumed thread under a
+different principal gets a new bind, never a stale one. This is a pure
+observability seam: one listener still serves a single session and one run at
+a time, so nothing in this transport itself keys behaviour on the bound
+identity. An external consumer (e.g. an embedder's own authorization layer)
+subscribes to `session.tag.set` / `session.tag.deleted` to observe the bind
+and the clear. See [Session Tags](../architecture/session-tags.md)
+for the tag store itself.
+
+**Business context:** each `RunAgentInput.context` item (`description` /
+`value`) is written directly as a general-namespace session tag
+(`description` -> key, `value` -> value) at the same points, with no veto —
+this is already-authenticated, already-decoded input. A client cannot use
+this to write the reserved `_principal_id` key: the reserved prefix (`_`) is
+enforced at the tag store regardless of caller, so a `context` item whose
+`description` starts with `_` is rejected rather than silently overwriting
+the bound identity.
 
 ### Shared state
 

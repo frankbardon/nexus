@@ -3,11 +3,13 @@
 // A payload bundles the grounding (skills + grounding files the agent must
 // internalize) and the layer data (declared input artifacts and an optional
 // fan-out item) the sub-agent transforms. Optional feedback blocks
-// (previous_attempt, previous_iteration) carry retry / loop signal. The
-// builder is pure — it reads from the filesystem only, never the event bus
-// — so it can be exercised in isolation. The operator system prompt is
-// rendered separately at posture-registration time and is NOT produced
-// here.
+// (previous_attempt, previous_iteration) carry retry / loop signal. An
+// optional session_context block surfaces the session's current non-reserved
+// Labels, read fresh on every Build call — dynamic per-turn context lives
+// only here, never (only) in the system prompt. The builder is pure — it
+// reads from the filesystem only, never the event bus — so it can be
+// exercised in isolation. The operator system prompt is rendered separately
+// at posture-registration time and is NOT produced here.
 package runtime
 
 import (
@@ -16,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -39,6 +42,12 @@ type PayloadBuilder struct {
 	Workflow *workspace.Workflow
 	// Session is the active run that owns artifact paths.
 	Session *session.Session
+	// EngineSession is the engine-level session workspace, used to read the
+	// current session's Labels fresh on every Build call (see
+	// sessionContextBody). Nil is tolerated — the <session_context> block is
+	// simply omitted — for builders constructed without a session (e.g.
+	// tests).
+	EngineSession *engine.SessionWorkspace
 	// InlineArtifactLimitBytes is the inline-vs-ref size threshold.
 	// Zero falls back to defaultInlineArtifactLimitBytes.
 	InlineArtifactLimitBytes int
@@ -131,6 +140,7 @@ func (b *PayloadBuilder) Build(in PayloadInputs) (string, error) {
 	if err := b.writeLayerData(&sb, in); err != nil {
 		return "", err
 	}
+	b.writeSessionContext(&sb)
 	if in.PreviousAttempt != nil {
 		b.writePreviousAttempt(&sb, in.PreviousAttempt)
 	}
@@ -340,6 +350,54 @@ func (b *PayloadBuilder) writeFanOutItem(sb *strings.Builder, key string, value 
 	sb.WriteByte('\n')
 	engine.XMLClose(sb, "fan_out_item")
 	return nil
+}
+
+// writeSessionContext emits the <session_context> block: the current
+// session's non-reserved Labels, read fresh on every call (see
+// sessionContextBody) so a tag written mid-run is visible on the very next
+// turn dispatched after it — never a value cached at builder construction.
+// Omitted entirely (no empty wrapper) when there is nothing to show.
+func (b *PayloadBuilder) writeSessionContext(sb *strings.Builder) {
+	if body := b.sessionContextBody(); body != "" {
+		sb.WriteString(engine.XMLWrap("session_context", body))
+	}
+}
+
+// sessionContextBody returns the current session's non-reserved Labels as a
+// sorted "key: value" line list, suitable for engine.XMLWrap("session_context",
+// ...). Read fresh from disk on every call — never memoized on the builder —
+// so a tag written between two Build calls for the same stage (e.g. via
+// nexus.tool.session_tags) is visible to the later one. Returns "" (never a
+// lone "<session_context/>") when there is no EngineSession, its metadata
+// can't be read, or every Labels key is reserved ("_"-prefixed, see
+// engine.IsReservedLabelKey) — a reserved key must never reach the payload.
+func (b *PayloadBuilder) sessionContextBody() string {
+	if b.EngineSession == nil {
+		return ""
+	}
+	meta, err := b.EngineSession.SessionMetadata()
+	if err != nil || len(meta.Labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(meta.Labels))
+	for k := range meta.Labels {
+		if engine.IsReservedLabelKey(k) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	var body strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			body.WriteString("\n")
+		}
+		fmt.Fprintf(&body, "%s: %s", k, meta.Labels[k])
+	}
+	return body.String()
 }
 
 // writePreviousAttempt emits the validator-retry feedback block.

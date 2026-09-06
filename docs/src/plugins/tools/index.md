@@ -13,6 +13,7 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 | [Human-in-the-Loop](../control/hitl.md) | `nexus.control.hitl` | `ask_user` | Ask the user a question or approve an action (multi-choice supported) |
 | [Code Exec](./code_exec.md) | `nexus.tool.code_exec` | `run_code` | Run a Go script that orchestrates multiple tool calls in one turn |
 | [Knowledge Search](./knowledge_search.md) | `nexus.tool.knowledge_search` | `knowledge_search` | Semantic search over configured RAG namespaces; returns top-k chunks with source paths for citation |
+| [Session Tags](./session_tags.md) | `nexus.tool.session_tags` | `session_tag_set`, `session_tag_get`, `session_tag_delete`, `session_tag_list` | Opt-in agent read/write access to its own session's general-namespace tags |
 
 ## How Tools Work
 

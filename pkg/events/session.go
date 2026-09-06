@@ -21,6 +21,11 @@ const (
 
 	SessionStorageDegradedVersion  = 1
 	SessionStorageRecoveredVersion = 1
+
+	SessionTagSetRequestVersion    = 1
+	SessionTagDeleteRequestVersion = 1
+	SessionTagSetVersion           = 1
+	SessionTagDeletedVersion       = 1
 )
 
 // SessionFile describes a file event within a session workspace: the payload of
@@ -281,4 +286,61 @@ type SessionStorageRecovered struct {
 	// DroppedPushes is how many were discarded on queue overflow and covered
 	// by a whole-tree snapshot instead.
 	DroppedPushes uint64 `json:"dropped_pushes"`
+}
+
+// SessionTagSetRequest is the payload of before:session.tag.set — a request
+// to write one key/value pair into SessionMeta.Labels.
+//
+// This rides the bus as the struct itself, not a hand-spelled map: it is
+// carried as VetoablePayload.Original (an any), the same way
+// events.LLMRequest rides before:llm.request, and there is no legacy
+// map[string]any subscriber to keep compatible the way SessionFile has.
+//
+// The one and only handler for this event lives in the core engine
+// (installSessionTagHandlers in pkg/engine): it rejects Key outright when it
+// matches the reserved ("_"-prefixed) namespace — see
+// engine.IsReservedLabelKey — and otherwise applies the write and fires
+// SessionTagSet. There is no other sanctioned way to reach Labels through
+// the bus.
+type SessionTagSetRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	Key   string
+	Value string
+}
+
+// SessionTagDeleteRequest is the payload of before:session.tag.delete — a
+// request to remove one key from SessionMeta.Labels. Same reserved-key
+// rejection rule and same single core handler as SessionTagSetRequest; see
+// its doc comment.
+type SessionTagDeleteRequest struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	Key string
+}
+
+// SessionTagSet announces that a session label was written — the general
+// (bus-request) path via before:session.tag.set, or the reserved
+// (direct-Go-call) path via SessionWorkspace.SetReservedLabel. Both routes
+// end at the same internal apply-and-announce step, so this is the one
+// channel anything watching session labels needs to subscribe to,
+// regardless of which path produced the write.
+type SessionTagSet struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	SessionID string
+	Key       string
+	Value     string
+}
+
+// SessionTagDeleted announces that a session label was removed — the
+// general or reserved path, same as SessionTagSet. It is also the end-of-run
+// signal for AG-UI's identity binding: a transport that set `_principal_id`
+// on run start deletes it on run end, and this is what a subscriber
+// watching for "this principal's run finished" observes.
+type SessionTagDeleted struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	SessionID string
+	Key       string
 }

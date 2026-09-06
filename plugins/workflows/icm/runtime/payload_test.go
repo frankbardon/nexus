@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/icmtypes"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/session"
 	"github.com/frankbardon/nexus/plugins/workflows/icm/workspace"
@@ -621,4 +622,117 @@ func TestBuild_SharedGrounding(t *testing.T) {
 	if !strings.Contains(shared[0].Text, "no PII") {
 		t.Errorf("body = %q", shared[0].Text)
 	}
+}
+
+// 11. session_context surfaces the session's current non-reserved Labels —
+// the ICM per-turn worked example for this effort's session-context
+// exposure — while a reserved ("_"-prefixed) key present in the same Labels
+// map, such as _principal_id, never reaches the payload. This is a
+// security-relevant regression guard for the identity/context separation
+// this effort requires, not incidental coverage: a future change that lets
+// a reserved key leak into the payload breaks this test.
+func TestBuild_SessionContext(t *testing.T) {
+	f := setup(t)
+	engSess, err := engine.NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := engSess.SetLabel("dataset", "acme-q3"); err != nil {
+		t.Fatalf("SetLabel: %v", err)
+	}
+	if err := engSess.SetReservedLabel("_principal_id", "user-42"); err != nil {
+		t.Fatalf("SetReservedLabel: %v", err)
+	}
+
+	b := &PayloadBuilder{Workflow: f.workflow, Session: f.session, EngineSession: engSess}
+	stage := &workspace.Stage{ID: "01_draft", Folder: f.stageDir, Role: "drafter"}
+
+	out, err := b.Build(PayloadInputs{Stage: stage, Turn: 1})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	root := parse(t, out)
+	sc := root.child("session_context")
+	if sc == nil {
+		t.Fatalf("no <session_context>: %s", out)
+	}
+	mustContain(t, sc.Text, "dataset: acme-q3")
+	mustNotContain(t, out, "user-42")
+	mustNotContain(t, out, "_principal_id")
+}
+
+// 12. No non-reserved Labels (only a reserved one set) -> no
+// <session_context> wrapper at all, matching this file's existing
+// "no empty wrapper" convention for previous_attempt/previous_iteration.
+func TestBuild_SessionContextAbsentWithoutLabels(t *testing.T) {
+	f := setup(t)
+	engSess, err := engine.NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := engSess.SetReservedLabel("_principal_id", "user-42"); err != nil {
+		t.Fatalf("SetReservedLabel: %v", err)
+	}
+
+	b := &PayloadBuilder{Workflow: f.workflow, Session: f.session, EngineSession: engSess}
+	stage := &workspace.Stage{ID: "01_draft", Folder: f.stageDir, Role: "drafter"}
+
+	out, err := b.Build(PayloadInputs{Stage: stage, Turn: 1})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	mustNotContain(t, out, "session_context")
+}
+
+// 13. No EngineSession at all (the shape every other test in this file uses,
+// via fixture.builder()) -> no <session_context>, existing behavior
+// completely unaffected by this addition.
+func TestBuild_SessionContextAbsentWithoutSession(t *testing.T) {
+	f := setup(t)
+	stage := &workspace.Stage{ID: "01_draft", Folder: f.stageDir, Role: "drafter"}
+
+	out, err := f.builder().Build(PayloadInputs{Stage: stage, Turn: 1})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	mustNotContain(t, out, "session_context")
+}
+
+// 14. Session context is read fresh from the session at every Build call,
+// never cached on the PayloadBuilder — a label changed between two Build
+// calls for the same stage (standing in for two turns dispatched at
+// different points in a run) must be visible to the later one. This is the
+// test that proves the E3-S5 fix: PostureBuilder.Build (E3-S1) only proved
+// freshness at the render-call level, which is baked once at Ready() and
+// never re-rendered; PayloadBuilder.Build is the mechanism ICM's own
+// dispatch path actually invokes fresh on every real per-turn call.
+func TestBuild_SessionContextNotStaleAcrossTurns(t *testing.T) {
+	f := setup(t)
+	engSess, err := engine.NewSessionWorkspace(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewSessionWorkspace: %v", err)
+	}
+	if err := engSess.SetLabel("dataset", "acme-q3"); err != nil {
+		t.Fatalf("SetLabel: %v", err)
+	}
+
+	b := &PayloadBuilder{Workflow: f.workflow, Session: f.session, EngineSession: engSess}
+	stage := &workspace.Stage{ID: "01_draft", Folder: f.stageDir, Role: "drafter"}
+
+	first, err := b.Build(PayloadInputs{Stage: stage, Turn: 1})
+	if err != nil {
+		t.Fatalf("Build (turn 1): %v", err)
+	}
+	mustContain(t, first, "dataset: acme-q3")
+
+	if err := engSess.SetLabel("dataset", "acme-q4"); err != nil {
+		t.Fatalf("SetLabel (update): %v", err)
+	}
+
+	second, err := b.Build(PayloadInputs{Stage: stage, Turn: 2})
+	if err != nil {
+		t.Fatalf("Build (turn 2): %v", err)
+	}
+	mustContain(t, second, "dataset: acme-q4")
+	mustNotContain(t, second, "acme-q3")
 }

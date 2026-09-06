@@ -290,6 +290,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		Registry:             p.postureReg,
 		SkillToolName:        p.skillToolName,
 		AutoIncludeSkillTool: p.cfg.AutoIncludeSkillReferenceTool,
+		Session:              p.session,
 	}
 
 	// Bus subscriptions. Per-event handlers are stubs in the skeleton —
@@ -641,6 +642,7 @@ func (p *Plugin) buildOrchestrator(runID string, sess *session.Session) *runtime
 	payload := &runtime.PayloadBuilder{
 		Workflow:                 p.workflow,
 		Session:                  sess,
+		EngineSession:            p.session,
 		InlineArtifactLimitBytes: p.cfg.InlineArtifactLimitBytes,
 		Logger:                   p.logger,
 	}

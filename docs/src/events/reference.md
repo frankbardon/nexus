@@ -674,11 +674,17 @@ Chunks are flushed on every newline and on a ~512-byte threshold so long lines w
 | `session.owner.conflict` | `SessionOwnerConflict` | A second host appears to hold this session — detection only, nothing is refused |
 | `session.storage.degraded` | `SessionStorageDegraded` | The object store stopped accepting this session's state; the engine is running against the local working copy and retrying |
 | `session.storage.recovered` | `SessionStorageRecovered` | The backlog drained and the session is durably stored again |
+| `before:session.tag.set` | `SessionTagSetRequest` (vetoable) | Request to write one key/value pair into `SessionMeta.Labels` |
+| `before:session.tag.delete` | `SessionTagDeleteRequest` (vetoable) | Request to remove one key from `SessionMeta.Labels` |
+| `session.tag.set` | `SessionTagSet` | A session label was written, by either the general (bus) path or the reserved (direct-Go-call) path |
+| `session.tag.deleted` | `SessionTagDeleted` | A session label was removed, by either path |
 
-The last five exist only when `core.object_store.backend` names a backend. With
-none configured — the default — nothing subscribes, a `session.snapshot.request`
-is inert, and none of the other four is ever emitted. See
-[Object Storage](../guides/object-storage.md).
+The five object-store rows exist only when `core.object_store.backend` names a
+backend. With none configured — the default — nothing subscribes, a
+`session.snapshot.request` is inert, and none of the other four is ever
+emitted. See [Object Storage](../guides/object-storage.md). The four session
+tag events are independent of the object store and always active — see
+[Session Tag Events](#session-tag-events) below.
 
 **session.file.created / session.file.updated payload**
 
@@ -873,6 +879,66 @@ embedders driving the engine outside an agent loop, and for custom agents that
 emit no turn events. Snapshotting is handled in core and never depends on plugin
 cooperation. See
 [Sessions → Turn-boundary snapshots](../architecture/sessions.md#turn-boundary-snapshots).
+
+### Session Tag Events
+
+`SessionMeta.Labels` — the session's key/value tag store — is split into two
+disjoint namespaces: reserved keys (starting with `_`) and general keys
+(everything else). Only general keys are reachable through the two
+`before:*` events below; a reserved key is rejected unconditionally,
+regardless of caller. See [Session Tags](../architecture/session-tags.md)
+for the full mechanism.
+
+**SessionTagSetRequest** — payload of `before:session.tag.set`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | string | The label key to write |
+| `Value` | string | The label value |
+
+**SessionTagDeleteRequest** — payload of `before:session.tag.delete`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | string | The label key to remove |
+
+Both ride the bus as the struct itself (via `VetoablePayload.Original`), not
+as a hand-spelled map — the same shape `before:llm.request` uses. The single
+handler for both lives in the core engine: it vetoes unconditionally when
+`Key` matches the reserved namespace (`engine.IsReservedLabelKey`), with a
+`VetoResult.Reason` naming the rejection, and otherwise applies the write
+immediately and fires the matching announce event below. There is no second
+"apply" step after the veto check passes — the request event doubles as the
+trigger, because the core engine is the only thing that knows how to mutate
+`SessionMeta.Labels` safely.
+
+**SessionTagSet** — payload of `session.tag.set`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session the label belongs to |
+| `Key` | string | The label key that was written |
+| `Value` | string | The label value that was written |
+
+**SessionTagDeleted** — payload of `session.tag.deleted`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SessionID` | string | Session the label belonged to |
+| `Key` | string | The label key that was removed |
+
+Both announce events fire from every successful write, whichever path
+produced it: the vetoable general path above, or the reserved-namespace
+direct-Go-call path (`SessionWorkspace.SetReservedLabel` /
+`DeleteReservedLabel`, e.g. `nexus.io.agui`'s `_principal_id` identity
+binding), which never touches the bus at all. A subscriber that only cares
+"this session's tags changed" needs only these two event types regardless of
+which path wrote the label. `SessionTagDeleted` is also the end-of-run
+signal for `nexus.io.agui`'s identity binding: a transport that set
+`_principal_id` on run start deletes it on run end.
+
+Unlike the object-store events above, all four session tag events are always
+active — they do not depend on `core.object_store.backend`.
 
 ---
 

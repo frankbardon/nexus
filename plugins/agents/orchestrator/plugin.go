@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -72,8 +73,9 @@ type subtask struct {
 
 // Plugin implements the Orchestrator-Worker agent pattern.
 type Plugin struct {
-	bus    engine.EventBus
-	logger *slog.Logger
+	bus     engine.EventBus
+	logger  *slog.Logger
+	session *engine.SessionWorkspace
 
 	maxWorkers            int
 	maxSubtasks           int
@@ -130,6 +132,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.session = ctx.Session
 
 	if v, ok := ctx.Config["max_workers"].(int); ok {
 		p.maxWorkers = v
@@ -238,6 +241,43 @@ func (p *Plugin) Emissions() []string {
 		"agent.turn.end",
 		"agent.plan",
 	}
+}
+
+// sessionContextBody returns the current session's non-reserved Labels as a
+// sorted "key: value" line list, suitable for engine.XMLWrap("session_context",
+// ...). Read fresh from disk on every call — never memoized on the plugin —
+// so a tag written mid-session (e.g. via nexus.tool.session_tags) is visible
+// to the very next LLM request, decompose or synthesize alike. Returns ""
+// (never a lone "<session_context/>") when there is no session, its metadata
+// can't be read, or every Labels key is reserved ("_"-prefixed, see
+// engine.IsReservedLabelKey) — a reserved key must never reach either prompt.
+func (p *Plugin) sessionContextBody() string {
+	if p.session == nil {
+		return ""
+	}
+	meta, err := p.session.SessionMetadata()
+	if err != nil || len(meta.Labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(meta.Labels))
+	for k := range meta.Labels {
+		if engine.IsReservedLabelKey(k) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	var body strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			body.WriteString("\n")
+		}
+		fmt.Fprintf(&body, "%s: %s", k, meta.Labels[k])
+	}
+	return body.String()
 }
 
 // handleGateRetry is called when a gate signals that a previously vetoed LLM
@@ -397,6 +437,10 @@ func (p *Plugin) sendDecomposeRequest() {
 	}
 	if len(p.skillContexts) > 0 {
 		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
+	}
+	if sessionContext := p.sessionContextBody(); sessionContext != "" {
+		systemPrompt.WriteString(engine.XMLWrap("session_context", sessionContext))
 		systemPrompt.WriteString("\n")
 	}
 
@@ -790,6 +834,10 @@ func (p *Plugin) sendSynthesizeRequest() {
 	}
 	if len(p.skillContexts) > 0 {
 		systemPrompt.WriteString(engine.XMLWrap("skill_context", strings.Join(p.skillContexts, "\n")))
+		systemPrompt.WriteString("\n")
+	}
+	if sessionContext := p.sessionContextBody(); sessionContext != "" {
+		systemPrompt.WriteString(engine.XMLWrap("session_context", sessionContext))
 		systemPrompt.WriteString("\n")
 	}
 
