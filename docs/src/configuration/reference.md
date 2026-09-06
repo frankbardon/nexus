@@ -1630,6 +1630,26 @@ The engine substitutes `${session_id}` in any string under the `sandbox:`
 block at session start, so per-session host paths can be hard-coded:
 `host: ~/.nexus/sessions/${session_id}/files`.
 
+### `nexus.tool.session_tags`
+
+Source: `plugins/tools/session_tags/plugin.go`. Registers `session_tag_set`,
+`session_tag_get`, `session_tag_delete`, `session_tag_list` — LLM-facing
+tools over the general-namespace session tag store (`SessionMeta.Labels`,
+see `before:session.tag.set`/`before:session.tag.delete` above). **Off by
+default** — not in any stock config's `plugins.active`; an operator opts in
+explicitly to give the agent write access to its own session's tags.
+
+Restricted to the general (non-`_`-prefixed) namespace: `session_tag_set`/
+`session_tag_delete` ride the same vetoable `before:session.tag.set`/
+`before:session.tag.delete` path any other caller uses, so a reserved-prefixed
+key is rejected identically — this plugin has no elevated privilege and no
+bypass. `session_tag_get`/`session_tag_list` report a reserved-prefixed key
+as not found / omit it entirely, never revealing its presence.
+
+| Key                 | Type | Default          | Description |
+|---------------------|------|------------------|-------------|
+| `tools.<tool_name>` | bool | `true` for each  | Per-tool enable/disable: `session_tag_set`, `session_tag_get`, `session_tag_delete`, `session_tag_list`. |
+
 ---
 
 ## Memory

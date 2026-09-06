@@ -121,6 +121,7 @@ import (
 	openerplugin "github.com/frankbardon/nexus/plugins/tools/opener"
 	pdfplugin "github.com/frankbardon/nexus/plugins/tools/pdf"
 	screenshotplugin "github.com/frankbardon/nexus/plugins/tools/screenshot"
+	sessiontagsplugin "github.com/frankbardon/nexus/plugins/tools/session_tags"
 	"github.com/frankbardon/nexus/plugins/tools/shell"
 	webplugin "github.com/frankbardon/nexus/plugins/tools/web"
 
@@ -265,6 +266,10 @@ func RegisterAll(r *engine.PluginRegistry) {
 	r.Register("nexus.tool.web", webplugin.New)
 	r.Register("nexus.tool.knowledge_search", knowledgesearchplugin.New)
 	r.Register("nexus.tool.docs_search", docssearch.New)
+	// Opt-in agent-writable general-namespace session tags — off by default,
+	// not in any stock config's plugins.active. Activate explicitly to give
+	// an agent session_tag_set/get/delete/list.
+	r.Register("nexus.tool.session_tags", sessiontagsplugin.New)
 
 	// Gates
 	r.Register("nexus.gate.approval_policy", approvalpolicygate.New)
