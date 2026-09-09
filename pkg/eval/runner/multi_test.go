@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 )
 
@@ -194,6 +195,52 @@ plugins:
 				},
 			},
 		},
+	}
+}
+
+// TestRunMany_ThreadsExtraPlugins proves MultiOptions.PerCase.ExtraPlugins —
+// forwarded verbatim through runOne's Run(ctx, &caseCopy, opts.PerCase) call
+// (multi.go:96) — reaches the per-case engine boot exactly as it does via a
+// direct Run() call. Reuses E1-S1's fakeExtraPlugin/buildExtraPluginCase
+// (runner_test.go) rather than a second fake. If PerCase's embedding did not
+// thread ExtraPlugins through, this case would fail boot with "plugin ...
+// not found in registry" — the same error TestRun_UnregisteredExtraPluginFailsBoot
+// asserts for the single-case path.
+func TestRunMany_ThreadsExtraPlugins(t *testing.T) {
+	const extraID = "acme.tool.echo"
+	c, sessionsRoot := buildExtraPluginCase(t, extraID)
+
+	fake := &fakeExtraPlugin{id: extraID}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	results := RunMany(ctx, []*evalcase.Case{c}, MultiOptions{
+		PerCase: Options{
+			SessionsRoot: sessionsRoot,
+			ExtraPlugins: map[string]engine.PluginFactory{
+				extraID: func() engine.Plugin { return fake },
+			},
+		},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.CaseID != c.ID {
+		t.Fatalf("CaseID: got %q want %q", res.CaseID, c.ID)
+	}
+	if !res.Pass {
+		var diag []string
+		for _, a := range res.Assertions {
+			if !a.Pass {
+				diag = append(diag, a.Kind+": "+a.Message)
+			}
+		}
+		t.Fatalf("expected pass, got fail. failures=%v counts=%v", diag, res.Counts)
+	}
+	if !fake.initCalled {
+		t.Error("expected ExtraPlugins-registered plugin to be Init'd by the engine via RunMany")
 	}
 }
 

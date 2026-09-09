@@ -68,7 +68,7 @@ care about, or shrink the sequence-distance threshold from `0.30` to
 `0.15`. For latency, lower the `p50_ms` / `p95_ms` budgets to whatever
 the captured run actually exhibits, plus a small headroom.
 
-See [`case-format.md`](./case-format.md) for the seven assertion kinds
+See [`case-format.md`](./case-format.md) for the nine assertion kinds
 and their fields.
 
 ## 4. Run the case
