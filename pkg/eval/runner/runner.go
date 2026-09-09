@@ -37,6 +37,13 @@ type Result struct {
 	// JournalDir is the case's golden journal dir, echoed back for the
 	// reporter's convenience.
 	JournalDir string `json:"journal_dir,omitempty"`
+	// Transcript is a rendered, legible plain-text rendering of the
+	// session's full, unfiltered observed event stream (see
+	// RenderTranscript). Populated for both Run and RunLive — they share
+	// buildResult's tail — but it exists primarily for RunLive: a
+	// downstream judge call feeds it as protocol.Request.UserInput
+	// alongside a rubric (E2-S3).
+	Transcript string `json:"transcript,omitempty"`
 }
 
 // Options tune Run.
@@ -346,6 +353,7 @@ func buildResult(c *evalcase.Case, finalObserved []evalcase.ObservedEvent) (*Res
 		Pass:       true,
 		Counts:     make(map[string]int),
 		JournalDir: c.JournalDir,
+		Transcript: RenderTranscript(finalObserved),
 	}
 	if len(finalObserved) > 0 {
 		res.StartedAt = finalObserved[0].Timestamp
