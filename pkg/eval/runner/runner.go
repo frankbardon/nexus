@@ -52,6 +52,27 @@ type Options struct {
 	// use as core.sessions.root. Tests pass t.TempDir(); production passes
 	// the empty string and accepts the case-config default.
 	SessionsRoot string
+	// ExtraPlugins registers additional plugin factories onto the engine's
+	// registry, keyed by plugin ID, alongside the built-ins
+	// allplugins.RegisterAll already provides. This is an embedder's seam
+	// for booting cases that reference their own (non-nexus.*) plugins —
+	// e.g. an eval harness embedded in another module, exercising its own
+	// tools or agents.
+	//
+	// Registering an ID here only makes its factory available to the
+	// engine's registry; it does not activate the plugin. The case's own
+	// config (`plugins.active`) must still name the ID for the engine to
+	// construct and Init it during Boot — exactly as for any built-in.
+	//
+	// An ID that collides with a built-in registered by
+	// allplugins.RegisterAll is not guarded against: entries here are
+	// registered after the built-ins, so PluginRegistry.Register's existing
+	// silent-overwrite behavior means an ExtraPlugins entry always wins over
+	// a same-ID built-in. This is deliberate, not an oversight — it lets an
+	// embedder shadow a built-in for testing.
+	//
+	// A nil or empty map changes nothing about existing behavior.
+	ExtraPlugins map[string]engine.PluginFactory
 }
 
 // Run executes one case end-to-end and returns its Result.
@@ -100,6 +121,9 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 		eng.Logger = opts.Logger
 	}
 	allplugins.RegisterAll(eng.Registry)
+	for id, factory := range opts.ExtraPlugins {
+		eng.Registry.Register(id, factory)
+	}
 
 	bootCtx, bootCancel := context.WithTimeout(ctx, opts.BootTimeout)
 	defer bootCancel()
