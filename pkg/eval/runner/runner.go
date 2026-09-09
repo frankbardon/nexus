@@ -44,6 +44,12 @@ type Result struct {
 	// downstream judge call feeds it as protocol.Request.UserInput
 	// alongside a rubric (E2-S3).
 	Transcript string `json:"transcript,omitempty"`
+	// CustomScores is caller-populated — neither Run nor RunLive sets it.
+	// An external caller (e.g. after computing a correctness check or a
+	// judge verdict) sets it on the Result it already holds before
+	// passing the Result to report.Aggregate, which copies it onto the
+	// corresponding CaseEntry.
+	CustomScores map[string]float64 `json:"custom_scores,omitempty"`
 }
 
 // Options tune Run.

@@ -43,6 +43,10 @@ type CaseEntry struct {
 	EndedAt    time.Time        `json:"ended_at"`
 	Assertions []AssertionEntry `json:"assertions"`
 	Counts     map[string]int   `json:"counts,omitempty"`
+	// CustomScores is copied from the corresponding runner.Result. It is
+	// caller-populated (Run/RunLive never set it) — see runner.Result's
+	// own doc comment.
+	CustomScores map[string]float64 `json:"custom_scores,omitempty"`
 }
 
 // AssertionEntry mirrors evalcase.AssertionResult but with deterministic
@@ -63,11 +67,12 @@ func Aggregate(mode string, results []*runner.Result) *Report {
 	}
 	for _, res := range results {
 		entry := &CaseEntry{
-			CaseID:    res.CaseID,
-			Pass:      res.Pass,
-			StartedAt: res.StartedAt,
-			EndedAt:   res.EndedAt,
-			Counts:    res.Counts,
+			CaseID:       res.CaseID,
+			Pass:         res.Pass,
+			StartedAt:    res.StartedAt,
+			EndedAt:      res.EndedAt,
+			Counts:       res.Counts,
+			CustomScores: res.CustomScores,
 		}
 		for _, a := range res.Assertions {
 			entry.Assertions = append(entry.Assertions, AssertionEntry{
