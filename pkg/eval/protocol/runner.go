@@ -7,12 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/allplugins"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
+	"github.com/frankbardon/nexus/pkg/eval/internal/livedrive"
 	"github.com/frankbardon/nexus/pkg/events"
 	"gopkg.in/yaml.v3"
 )
@@ -93,45 +93,19 @@ func Run(ctx context.Context, req *Request) (*Response, error) {
 	// Wait for completion: ctx done, MaxTurns reached, or session-end fired.
 	// nexus.io.test signals io.session.end after the last turn ends, which
 	// is the natural completion signal. MaxTurns is a hard cap on top.
-	turnCtx, turnCancel := context.WithCancel(ctx)
-	defer turnCancel()
-
-	var (
-		mu        sync.Mutex
-		turnEnds  int
-		hitCap    bool
-		capReason string
-	)
-
-	unsub := eng.Bus.Subscribe("agent.turn.end", func(_ engine.Event[any]) {
-		mu.Lock()
-		turnEnds++
-		if req.MaxTurns > 0 && turnEnds >= req.MaxTurns {
-			hitCap = true
-			capReason = fmt.Sprintf("max_turns=%d reached", req.MaxTurns)
-			turnCancel()
+	// The wait itself is shared with runner.RunLive via livedrive.WaitForIdle
+	// — see that package's doc comment for why it's factored out.
+	_, err = livedrive.WaitForIdle(ctx, eng, req.MaxTurns)
+	if err != nil {
+		// ctx was cancelled/timed out before either natural completion or
+		// the MaxTurns cap. Surface as TIMEOUT.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrTimeout("inspect-mode deadline exceeded before session end")
 		}
-		mu.Unlock()
-	})
-	defer unsub()
-
-	// Block until: session ended, MaxTurns hit, or ctx cancelled.
-	select {
-	case <-eng.SessionEnded():
-		// Natural completion via nexus.io.test signalling io.session.end.
-	case <-turnCtx.Done():
-		mu.Lock()
-		cap := hitCap
-		mu.Unlock()
-		if !cap {
-			// turnCtx == ctx parent cancelled. Surface as TIMEOUT.
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, ErrTimeout("inspect-mode deadline exceeded before session end")
-			}
-			return nil, ErrTimeout("inspect-mode context cancelled before session end")
-		}
-		// MaxTurns cap hit — fall through to project the journal as-is.
+		return nil, ErrTimeout("inspect-mode context cancelled before session end")
 	}
+	// Natural completion or MaxTurns cap hit — either way, fall through to
+	// project the journal as-is.
 
 	// Stop before reading the journal so the writer flushes.
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -152,7 +126,6 @@ func Run(ctx context.Context, req *Request) (*Response, error) {
 	if resp.ToolCalls == nil {
 		resp.ToolCalls = []ToolCall{}
 	}
-	_ = capReason // recorded in turn-end logs already; reserved for future surfacing
 
 	return resp, nil
 }
