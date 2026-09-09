@@ -3,7 +3,10 @@ package evalcase
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +34,7 @@ type Assertion struct {
 	TokenBudget           *TokenBudgetSpec
 	Latency               *LatencySpec
 	ResponseContains      *ResponseContainsSpec
+	ContainsValue         *ContainsValueSpec
 }
 
 // EventEmittedSpec passes when at least Count.Min and at most Count.Max
@@ -107,6 +111,53 @@ type ResponseContainsSpec struct {
 	EventType   string   `yaml:"event_type,omitempty"`
 	Contains    []string `yaml:"contains,omitempty"`
 	ContainsAny []string `yaml:"contains_any,omitempty"`
+}
+
+// ContainsValueSpec asserts that a selected event's text content (default
+// selection: same as ResponseContainsSpec — the final assistant response,
+// via selectResponseText) contains at least one numeric token within
+// Tolerance of Value.
+//
+// Tolerance defaulting: when Tolerance is zero (unset — the struct's own
+// zero value, so an explicit `tolerance: 0` in YAML is indistinguishable
+// from omitting it and gets the same inferred default), it defaults to half
+// the smallest decimal unit implied by how many digits were written after
+// Value's decimal point in assertions.yaml — e.g. `value: 42.3` infers
+// tolerance 0.05; `value: 100` infers tolerance 0.5. A plain Go float64
+// field cannot itself remember "how many digits were written" (42.3 and
+// 42.30 are the same float64), and by the time ParseAssertions reaches this
+// spec's decode step the entry has already round-tripped once through
+// map[string]any (see rawAssertionsFile / ParseAssertions's entryBytes
+// re-marshal) — so any "original YAML text" capture done here would already
+// be reading a normalized, shortest-round-trip re-marshal, not the user's
+// literal keystrokes. Given that, this implementation infers digit count
+// directly from Value itself at evaluation time, via
+// strconv.FormatFloat(Value, 'f', -1, 64) (Go's own shortest string that
+// round-trips back to the identical float64) — which is provably the same
+// string ParseAssertions's yaml.v3 re-marshal would have produced for this
+// field, so capturing "raw text" earlier in the pipeline would infer an
+// identical default. This is a deliberate simplification documented here
+// rather than added machinery (a yaml.Node walk) that would only reproduce
+// the same result through more code. Practical consequence: `value: 42.30`
+// infers the same default tolerance as `value: 42.3` (both are the float64
+// 42.3) — set Tolerance explicitly when that distinction matters.
+//
+// Unit (e.g. "%", "$") is stripped from the selected text, along with
+// thousands-separator commas, before numeric tokens are extracted — see
+// extractNumericTokens.
+//
+// Extraction is word-boundary-aware: a numeric token immediately preceded
+// or followed by another digit is rejected, so `value: 4.2` never matches
+// text containing "24.2" (see extractNumericTokens).
+//
+// A candidate passes if its absolute difference from Value is <= Tolerance
+// — the tolerance boundary is INCLUSIVE (a value exactly Tolerance away
+// passes).
+type ContainsValueSpec struct {
+	EventType string  `yaml:"event_type,omitempty"`
+	Value     float64 `yaml:"value"`
+	Tolerance float64 `yaml:"tolerance,omitempty"`
+	Unit      string  `yaml:"unit,omitempty"`
 }
 
 // rawAssertionsFile is the YAML schema we unmarshal into; the kind is read
@@ -209,6 +260,12 @@ func ParseAssertions(data []byte) (Assertions, error) {
 				return Assertions{}, fmt.Errorf("deterministic[%d] response_contains: at least one of 'contains'/'contains_any' is required", i)
 			}
 			a.ResponseContains = spec
+		case "contains_value":
+			spec := &ContainsValueSpec{}
+			if err := yaml.Unmarshal(entryBytes, spec); err != nil {
+				return Assertions{}, fmt.Errorf("deterministic[%d] contains_value: %w", i, err)
+			}
+			a.ContainsValue = spec
 		default:
 			return Assertions{}, fmt.Errorf("deterministic[%d]: unknown kind %q", i, kind)
 		}
@@ -257,6 +314,8 @@ func (a Assertion) Evaluate(observed, golden []ObservedEvent) AssertionResult {
 		return evalLatency(*a.Latency, observed)
 	case "response_contains":
 		return evalResponseContains(*a.ResponseContains, observed)
+	case "contains_value":
+		return evalContainsValue(*a.ContainsValue, observed)
 	default:
 		return AssertionResult{Kind: a.Kind, Pass: false, Message: "unknown assertion kind"}
 	}
@@ -761,6 +820,142 @@ func asciiLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+func evalContainsValue(spec ContainsValueSpec, observed []ObservedEvent) AssertionResult {
+	text, found := selectResponseText(spec.EventType, observed)
+	if !found {
+		return AssertionResult{
+			Kind:    "contains_value",
+			Pass:    false,
+			Message: fmt.Sprintf("no matching event with text content found (event_type=%q)", defaultDisplay(spec.EventType)),
+		}
+	}
+
+	tolerance := spec.Tolerance
+	if tolerance == 0 {
+		tolerance = defaultValueTolerance(spec.Value)
+	}
+
+	candidates := extractNumericTokens(text, spec.Unit)
+
+	pass := false
+	closestDiff := math.Inf(1)
+	closestRaw := ""
+	rawTokens := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		rawTokens = append(rawTokens, c.raw)
+		diff := math.Abs(c.value - spec.Value)
+		if diff < closestDiff {
+			closestDiff = diff
+			closestRaw = c.raw
+		}
+		if diff <= tolerance {
+			pass = true
+		}
+	}
+
+	msg := ""
+	if !pass {
+		if len(candidates) == 0 {
+			msg = fmt.Sprintf("no numeric tokens found in text (event_type=%q)", defaultDisplay(spec.EventType))
+		} else {
+			msg = fmt.Sprintf("no numeric token within tolerance %v of %v (closest match %q, off by %v)", tolerance, spec.Value, closestRaw, closestDiff)
+		}
+	}
+	return AssertionResult{
+		Kind:    "contains_value",
+		Pass:    pass,
+		Message: msg,
+		Diagnostics: map[string]any{
+			"value":       spec.Value,
+			"tolerance":   tolerance,
+			"unit":        spec.Unit,
+			"event_type":  defaultDisplay(spec.EventType),
+			"candidates":  rawTokens,
+			"closest_raw": closestRaw,
+		},
+	}
+}
+
+// defaultValueTolerance infers ContainsValueSpec's default Tolerance from
+// how many digits appear after the decimal point in value's own
+// shortest-round-trip string form (see ContainsValueSpec's doc comment for
+// why this, rather than a captured "raw YAML text," is the chosen source).
+// Half the smallest implied unit: 0 decimal digits -> 0.5, 1 -> 0.05, 2 ->
+// 0.005, and so on.
+func defaultValueTolerance(value float64) float64 {
+	s := strconv.FormatFloat(value, 'f', -1, 64)
+	digits := 0
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		digits = len(s) - dot - 1
+	}
+	return 0.5 / math.Pow10(digits)
+}
+
+// numericToken is one word-boundary-correct numeric candidate extracted
+// from a ContainsValueSpec's selected text.
+type numericToken struct {
+	raw   string // the matched substring, post-unit-stripping, pre-comma-stripping
+	value float64
+}
+
+// numericTokenPattern matches a numeric run: either comma-thousands-grouped
+// digits (e.g. "1,234") or a plain digit run (e.g. "12345"), each with an
+// optional decimal fraction. It intentionally does not match a leading
+// sign — this file has no requirement to distinguish "-4.2" from a hyphen
+// in prose (e.g. a "12-34" range), and treating '-' as a boundary character
+// keeps that ambiguous case out of scope rather than guessing at it.
+var numericTokenPattern = regexp.MustCompile(`(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?`)
+
+// extractNumericTokens finds every word-boundary-correct numeric token in
+// text and parses it to a float64.
+//
+// unit (e.g. "%", "$"), when non-empty, is stripped from text before
+// matching — since unit characters are never part of numericTokenPattern's
+// digit/comma/dot character classes, this only matters for units that
+// would otherwise sit directly adjacent to a token and could confuse a
+// boundary check (see below); it has no effect on which digits are
+// captured.
+//
+// Word-boundary awareness: because numericTokenPattern's digit run is
+// greedy, a leftmost match at a run's actual start already consumes the
+// whole run (e.g. matching "24.2" begins at the '2', not "4.2" — there is
+// no separate attempt to start mid-run). This function additionally
+// double-checks that invariant explicitly: a match whose immediately
+// preceding or following byte is itself an ASCII digit is rejected. That
+// makes the guarantee "a search for 4.2 never matches inside 24.2" hold by
+// construction, not by incidental regex greediness alone.
+//
+// Thousands-separator commas are stripped from each matched token before
+// strconv.ParseFloat.
+func extractNumericTokens(text, unit string) []numericToken {
+	scan := text
+	if unit != "" {
+		scan = strings.ReplaceAll(scan, unit, "")
+	}
+	var out []numericToken
+	for _, loc := range numericTokenPattern.FindAllStringIndex(scan, -1) {
+		start, end := loc[0], loc[1]
+		if start > 0 && isASCIIDigit(scan[start-1]) {
+			continue
+		}
+		if end < len(scan) && isASCIIDigit(scan[end]) {
+			continue
+		}
+		raw := scan[start:end]
+		cleaned := strings.ReplaceAll(raw, ",", "")
+		v, err := strconv.ParseFloat(cleaned, 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, numericToken{raw: raw, value: v})
+	}
+	return out
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 // turnDurationsMs returns the wall-clock-equivalent duration in milliseconds
