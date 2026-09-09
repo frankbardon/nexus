@@ -609,16 +609,41 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 }
 
 // sanitizeSchemaForGemini strips JSON Schema keywords Gemini's schema dialect
-// doesn't accept (e.g. additionalProperties, $schema, $id). Walks recursively.
+// doesn't accept (e.g. additionalProperties, $schema, $id) and collapses
+// draft 2020-12 "type" unions (e.g. ["string","null"], as commonly emitted by
+// MCP servers built with zod-to-json-schema) into Gemini's singular "type"
+// plus "nullable", since Gemini's Schema.type is a non-repeating enum and
+// rejects an array outright. Walks recursively.
 func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
 	out := make(map[string]any, len(schema))
+	nullable := false
 	for k, v := range schema {
 		switch k {
 		case "$schema", "$id", "$ref", "additionalProperties", "definitions", "$defs":
 			continue
+		}
+		if k == "type" {
+			if types, ok := v.([]any); ok {
+				resolved := ""
+				for _, t := range types {
+					ts, _ := t.(string)
+					if ts == "null" {
+						nullable = true
+						continue
+					}
+					if ts != "" && resolved == "" {
+						resolved = ts
+					}
+				}
+				if resolved == "" {
+					resolved = "string"
+				}
+				out["type"] = resolved
+				continue
+			}
 		}
 		switch vv := v.(type) {
 		case map[string]any:
@@ -636,6 +661,9 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 		default:
 			out[k] = v
 		}
+	}
+	if nullable {
+		out["nullable"] = true
 	}
 	return out
 }
