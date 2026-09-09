@@ -136,6 +136,104 @@ func TestDecide_LatencyP95Drop(t *testing.T) {
 	}
 }
 
+func TestDecide_CustomScoreDrop(t *testing.T) {
+	a := &report.Report{
+		SchemaVersion: report.SchemaVersion,
+		Cases: []*report.CaseEntry{
+			{CaseID: "c1", Pass: true, CustomScores: map[string]float64{
+				"rubric_a": 0.9,
+				"rubric_b": 0.5,
+			}},
+		},
+		Summary: report.Summary{Total: 1, Passed: 1},
+	}
+	b := &report.Report{
+		SchemaVersion: report.SchemaVersion,
+		Cases: []*report.CaseEntry{
+			{CaseID: "c1", Pass: true, CustomScores: map[string]float64{
+				// rubric_a drops 0.9 -> 0.6 = -0.3, exceeding a 0.2 threshold.
+				"rubric_a": 0.6,
+				// rubric_b drops 0.5 -> 0.4 = -0.1, within a 0.2 threshold.
+				"rubric_b": 0.4,
+			}},
+		},
+		Summary: report.Summary{Total: 1, Passed: 1},
+	}
+	d, err := Compute(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var c1 *CaseDelta
+	for _, c := range d.Cases {
+		if c.CaseID == "c1" {
+			c1 = c
+		}
+	}
+	if c1 == nil {
+		t.Fatal("missing c1 in diff")
+	}
+	if got := c1.CustomScoreDeltas["rubric_a"]; !almostEqual(got, -0.3) {
+		t.Errorf("rubric_a delta = %v, want -0.3", got)
+	}
+	if got := c1.CustomScoreDeltas["rubric_b"]; !almostEqual(got, -0.1) {
+		t.Errorf("rubric_b delta = %v, want -0.1", got)
+	}
+
+	// A drop exceeding its configured threshold trips Decide, exactly like
+	// the latency p95 gate.
+	if !d.Decide(Thresholds{FailOnCustomScoreDrop: map[string]float64{"rubric_a": 0.2}}) {
+		t.Errorf("expected custom-score breach; diff=%+v", d)
+	}
+	if !d.Breached.CustomScoreDrop {
+		t.Error("CustomScoreDrop flag not set")
+	}
+
+	// A drop within threshold does not trip Decide.
+	if d.Decide(Thresholds{FailOnCustomScoreDrop: map[string]float64{"rubric_b": 0.2}}) {
+		t.Errorf("expected no breach for in-threshold drop; diff=%+v", d)
+	}
+
+	// A name with no configured threshold does not trip Decide, even
+	// though it also dropped.
+	if d.Decide(Thresholds{FailOnCustomScoreDrop: map[string]float64{"rubric_c": 0.01}}) {
+		t.Errorf("expected no breach for unconfigured name; diff=%+v", d)
+	}
+}
+
+func TestCompute_CustomScoreDeltas_OneSidedName(t *testing.T) {
+	a := makeReport("run-a", &report.CaseEntry{
+		CaseID: "c1", Pass: true,
+		CustomScores: map[string]float64{"only_baseline": 0.8},
+	})
+	b := makeReport("run-b", &report.CaseEntry{
+		CaseID: "c1", Pass: true,
+		CustomScores: map[string]float64{"only_candidate": 0.4},
+	})
+	d, err := Compute(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := d.Cases[0]
+	// Present only in baseline: treated as a full drop to zero.
+	if got := c1.CustomScoreDeltas["only_baseline"]; got != -0.8 {
+		t.Errorf("only_baseline delta = %v, want -0.8", got)
+	}
+	// Present only in candidate: treated as a full gain from zero.
+	if got := c1.CustomScoreDeltas["only_candidate"]; got != 0.4 {
+		t.Errorf("only_candidate delta = %v, want 0.4", got)
+	}
+}
+
+func almostEqual(a, b float64) bool {
+	const eps = 1e-9
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < eps
+}
+
 func TestSchemaMismatch(t *testing.T) {
 	a := makeReport("a", passCase("x"))
 	b := makeReport("b", passCase("x"))
