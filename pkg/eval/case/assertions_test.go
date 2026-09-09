@@ -379,6 +379,143 @@ func TestLatency_NoTurns(t *testing.T) {
 	}
 }
 
+// -- response_contains --------------------------------------------------------
+
+func TestResponseContains_AllPresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The total revenue was $4.2M, up 12% year over year.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"REVENUE", "$4.2M"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: %s", r.Message)
+	}
+}
+
+func TestResponseContains_OneMissing(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The total revenue was $4.2M.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"revenue", "profit"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 'profit' is absent")
+	}
+}
+
+func TestResponseContains_ContainsAny_OnePresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Here is the chart you asked for.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{ContainsAny: []string{"CHART", "graph", "table"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: %s", r.Message)
+	}
+}
+
+func TestResponseContains_ContainsAny_NonePresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Here is a summary.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{ContainsAny: []string{"chart", "graph", "table"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: none of contains_any present")
+	}
+}
+
+func TestResponseContains_DefaultsToFinalAssistantResponse(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		// A tool-call-only turn must be skipped by the default selection.
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			ToolCalls:     []events.ToolCallRequest{{ID: "1", Name: "search", Arguments: "{}"}},
+		}},
+		{Type: "tool.invoke", Timestamp: t0.Add(time.Millisecond)},
+		{Type: "tool.result", Timestamp: t0.Add(2 * time.Millisecond)},
+		{Type: "llm.response", Timestamp: t0.Add(3 * time.Millisecond), Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The answer is 42.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"42"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass (final assistant response should be the last non-tool-call turn): %s", r.Message)
+	}
+}
+
+func TestResponseContains_NonDefaultEventType(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The final answer is 42.",
+			FinishReason:  "stop",
+		}},
+		{Type: "io.output", Timestamp: t0.Add(time.Millisecond), Payload: map[string]any{
+			"Content": "Rendered card: Revenue Summary",
+		}},
+	}
+	a := Assertion{
+		Kind: "response_contains",
+		ResponseContains: &ResponseContainsSpec{
+			EventType: "io.output",
+			Contains:  []string{"Revenue Summary"},
+		},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass selecting io.output content: %s", r.Message)
+	}
+
+	// The same substring is absent from the default (final assistant
+	// response) selection, proving EventType actually redirected the search.
+	a.ResponseContains = &ResponseContainsSpec{Contains: []string{"Revenue Summary"}}
+	r = a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 'Revenue Summary' is not in the final assistant response")
+	}
+}
+
 // -- ParseAssertions round-trip ---------------------------------------------
 
 func TestParseAssertions_AllKinds(t *testing.T) {
@@ -398,13 +535,16 @@ func TestParseAssertions_AllKinds(t *testing.T) {
     max_input_tokens: 8000
   - kind: latency
     p95_ms: 5000
+  - kind: response_contains
+    contains: [hello]
+    contains_any: [world, there]
 `
 	a, err := ParseAssertions([]byte(yaml))
 	if err != nil {
 		t.Fatalf("ParseAssertions: %v", err)
 	}
-	if len(a.Deterministic) != 7 {
-		t.Fatalf("got %d kinds want 7", len(a.Deterministic))
+	if len(a.Deterministic) != 8 {
+		t.Fatalf("got %d kinds want 8", len(a.Deterministic))
 	}
 	expectedKinds := []string{
 		"event_emitted",
@@ -414,10 +554,31 @@ func TestParseAssertions_AllKinds(t *testing.T) {
 		"event_sequence_strict",
 		"token_budget",
 		"latency",
+		"response_contains",
 	}
 	for i, k := range expectedKinds {
 		if a.Deterministic[i].Kind != k {
 			t.Errorf("kind[%d]=%q want %q", i, a.Deterministic[i].Kind, k)
 		}
+	}
+	rc := a.Deterministic[7].ResponseContains
+	if rc == nil {
+		t.Fatal("expected ResponseContains spec to be populated")
+	}
+	if len(rc.Contains) != 1 || rc.Contains[0] != "hello" {
+		t.Errorf("Contains = %v, want [hello]", rc.Contains)
+	}
+	if len(rc.ContainsAny) != 2 {
+		t.Errorf("ContainsAny = %v, want 2 entries", rc.ContainsAny)
+	}
+}
+
+func TestParseAssertions_ResponseContains_RequiresContainsOrContainsAny(t *testing.T) {
+	yaml := `deterministic:
+  - kind: response_contains
+`
+	_, err := ParseAssertions([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error when neither 'contains' nor 'contains_any' is set")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -29,6 +30,7 @@ type Assertion struct {
 	EventSequenceStrict   *EventSequenceStrictSpec
 	TokenBudget           *TokenBudgetSpec
 	Latency               *LatencySpec
+	ResponseContains      *ResponseContainsSpec
 }
 
 // EventEmittedSpec passes when at least Count.Min and at most Count.Max
@@ -92,6 +94,19 @@ type TokenBudgetSpec struct {
 type LatencySpec struct {
 	P50Ms int `yaml:"p50_ms,omitempty"`
 	P95Ms int `yaml:"p95_ms,omitempty"`
+}
+
+// ResponseContainsSpec asserts that the text content of a selected event
+// (by default, the final assistant response) contains the required
+// substring(s). Matching is case-insensitive.
+type ResponseContainsSpec struct {
+	// EventType selects which event's Content field to search. Empty means
+	// "the final assistant response" — the last llm.response event that has
+	// no pending tool calls and non-empty Content (mirrors
+	// protocol.isFinalAssistant's "real final turn" definition).
+	EventType   string   `yaml:"event_type,omitempty"`
+	Contains    []string `yaml:"contains,omitempty"`
+	ContainsAny []string `yaml:"contains_any,omitempty"`
 }
 
 // rawAssertionsFile is the YAML schema we unmarshal into; the kind is read
@@ -185,6 +200,15 @@ func ParseAssertions(data []byte) (Assertions, error) {
 				return Assertions{}, fmt.Errorf("deterministic[%d] latency: %w", i, err)
 			}
 			a.Latency = spec
+		case "response_contains":
+			spec := &ResponseContainsSpec{}
+			if err := yaml.Unmarshal(entryBytes, spec); err != nil {
+				return Assertions{}, fmt.Errorf("deterministic[%d] response_contains: %w", i, err)
+			}
+			if len(spec.Contains) == 0 && len(spec.ContainsAny) == 0 {
+				return Assertions{}, fmt.Errorf("deterministic[%d] response_contains: at least one of 'contains'/'contains_any' is required", i)
+			}
+			a.ResponseContains = spec
 		default:
 			return Assertions{}, fmt.Errorf("deterministic[%d]: unknown kind %q", i, kind)
 		}
@@ -231,6 +255,8 @@ func (a Assertion) Evaluate(observed, golden []ObservedEvent) AssertionResult {
 		return evalTokenBudget(*a.TokenBudget, observed)
 	case "latency":
 		return evalLatency(*a.Latency, observed)
+	case "response_contains":
+		return evalResponseContains(*a.ResponseContains, observed)
 	default:
 		return AssertionResult{Kind: a.Kind, Pass: false, Message: "unknown assertion kind"}
 	}
@@ -593,6 +619,148 @@ func evalLatency(spec LatencySpec, observed []ObservedEvent) AssertionResult {
 			"p95_ms":       p95,
 		},
 	}
+}
+
+func evalResponseContains(spec ResponseContainsSpec, observed []ObservedEvent) AssertionResult {
+	text, found := selectResponseText(spec.EventType, observed)
+	if !found {
+		return AssertionResult{
+			Kind:    "response_contains",
+			Pass:    false,
+			Message: fmt.Sprintf("no matching event with text content found (event_type=%q)", defaultDisplay(spec.EventType)),
+		}
+	}
+
+	missing := []string{}
+	for _, want := range spec.Contains {
+		if !containsFold(text, want) {
+			missing = append(missing, want)
+		}
+	}
+
+	anyOK := len(spec.ContainsAny) == 0
+	matched := ""
+	for _, want := range spec.ContainsAny {
+		if containsFold(text, want) {
+			anyOK = true
+			matched = want
+			break
+		}
+	}
+
+	pass := len(missing) == 0 && anyOK
+	msg := ""
+	if !pass {
+		var parts []string
+		if len(missing) > 0 {
+			parts = append(parts, fmt.Sprintf("missing required substring(s): %v", missing))
+		}
+		if !anyOK {
+			parts = append(parts, fmt.Sprintf("none of contains_any present: %v", spec.ContainsAny))
+		}
+		msg = strings.Join(parts, "; ")
+	}
+	return AssertionResult{
+		Kind:    "response_contains",
+		Pass:    pass,
+		Message: msg,
+		Diagnostics: map[string]any{
+			"missing":      missing,
+			"matched_any":  matched,
+			"event_type":   defaultDisplay(spec.EventType),
+			"text_preview": truncateForDiagnostics(text, 200),
+		},
+	}
+}
+
+// defaultDisplay renders eventType for diagnostics/messages, naming the
+// implicit default explicitly rather than showing an empty string.
+func defaultDisplay(eventType string) string {
+	if eventType == "" {
+		return "llm.response (final assistant response)"
+	}
+	return eventType
+}
+
+// truncateForDiagnostics caps s at n bytes for diagnostics payloads, without
+// the UTF-8-safety ceremony truncateForSummary (protocol package) has —
+// diagnostics are for humans reading a report, not for a wire response.
+func truncateForDiagnostics(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// selectResponseText locates the text content a response_contains assertion
+// searches. When eventType is empty it defaults to the final assistant
+// response: the last llm.response event with no pending tool calls and
+// non-empty Content, mirroring protocol.isFinalAssistant's "real final
+// turn" definition. Otherwise it returns the last eventType event's Content
+// field. ok is false when no event both matches and carries text.
+func selectResponseText(eventType string, observed []ObservedEvent) (text string, ok bool) {
+	target := eventType
+	if target == "" {
+		target = "llm.response"
+	}
+	for i := len(observed) - 1; i >= 0; i-- {
+		e := observed[i]
+		if e.Type != target {
+			continue
+		}
+		flat := flattenPayload(e.Payload)
+		if eventType == "" {
+			if tc, has := lookupCI(flat, "ToolCalls"); has && !isEmptySlice(tc) {
+				// Tool-call turn — not the final assistant message.
+				continue
+			}
+		}
+		content, has := lookupCI(flat, "Content")
+		if !has {
+			continue
+		}
+		s, isString := content.(string)
+		if !isString || s == "" {
+			continue
+		}
+		return s, true
+	}
+	return "", false
+}
+
+// isEmptySlice reports whether v (a flattenPayload-normalized field value,
+// so always []any or nil after the JSON round-trip) is empty.
+func isEmptySlice(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	return len(s) == 0
+}
+
+// containsFold reports whether s contains substr, ASCII case-insensitively.
+// Mirrors equalFold's rationale: avoid strings.EqualFold/ToLower's unicode
+// tables for a check this file only ever needs on ASCII assertion text.
+func containsFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	return strings.Contains(asciiLower(s), asciiLower(substr))
+}
+
+// asciiLower lowercases the ASCII letters in s, leaving everything else
+// (including any non-ASCII bytes) untouched.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if 'A' <= b[i] && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // turnDurationsMs returns the wall-clock-equivalent duration in milliseconds
