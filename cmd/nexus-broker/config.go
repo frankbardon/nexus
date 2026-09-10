@@ -24,9 +24,10 @@ import (
 // Config holds the nexus-broker service configuration. It is loaded from a
 // YAML file at startup, mirroring the engine's file-based config style.
 //
-// All keys are live: listen_addr (gateway bind), binaries (the named registry
-// of nexus variants this broker may spawn, superseding the deprecated
-// nexus_binary_path), advertise_addr (client-reachable address),
+// All keys are live: listen_addr (gateway bind), log_level (this process's
+// slog level), binaries (the named registry of nexus variants this broker may
+// spawn, superseding the deprecated nexus_binary_path), advertise_addr
+// (client-reachable address),
 // max_concurrent (capacity cap),
 // client_replay_buffer_bytes (per-lease client-bound replay retention),
 // idle_timeout (idle reaping), max_turn_duration (in-flight turn bound),
@@ -41,6 +42,20 @@ import (
 type Config struct {
 	// ListenAddr is the host:port the broker's HTTP/WS gateway binds to.
 	ListenAddr string `yaml:"listen_addr"`
+
+	// LogLevel is the level this process's own slog handler is built at:
+	// "trace", "debug", "info", "warn" or "error". Parsed through the SAME
+	// pkg/engine.ParseLogLevel the engine's own core.log_level uses, so the two
+	// vocabularies never drift apart. Defaults to "info", matching the engine's
+	// default. An unrecognized value is not a boot failure — ParseLogLevel falls
+	// back to slog.LevelInfo, exactly as it does for the engine.
+	//
+	// It is BOOT-ONLY, not reloadable: main.go builds the handler from this value
+	// once, before the SIGHUP reload machinery (reload.go) exists to have
+	// anything to swap it on, and slog offers no live level knob for a
+	// slog.NewTextHandler built without a slog.LevelVar. A reloaded file that
+	// changes it is reported and ignored — see bootOnlyKeys.
+	LogLevel string `yaml:"log_level"`
 
 	// AdvertiseAddr is the address CLIENTS use to reach THIS broker, and it is
 	// the highest-precedence input to the ws_url returned by POST /claim.
@@ -1094,6 +1109,7 @@ const defaultMaxQueueDepth = 64
 func DefaultConfig() Config {
 	return Config{
 		ListenAddr:              ":8080",
+		LogLevel:                "info",
 		NexusBinaryPath:         defaultNexusBinaryPath,
 		MaxConcurrent:           8,
 		ClientReplayBufferBytes: defaultClientReplayBufferBytes,
