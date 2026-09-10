@@ -144,6 +144,30 @@ When you add a new log call or touch an existing one:
    defaulting to `Info`; erring toward DEBUG or TRACE keeps that from
    recurring.
 
+## Gate vetoes: WARN vs. INFO
+
+The rubric's INFO row calls out "a gate actually vetoed/blocked
+something" as the rare, ops-relevant case. In practice that splits
+further, and the gate plugins (`plugins/gates/**`) settled the split
+this way: if the gate arranges its own automatic recovery around the
+veto, it's WARN, not INFO — a rate limiter that pauses and auto-
+retries, a context-window gate that triggers compaction and auto-
+retries, an approval-policy gate that applies a default answer on
+timeout, a token-budget gate that downgrades the model, or a content-
+safety/prompt-injection gate running in a non-blocking mode. The
+system keeps going on its own, so it's the same "unexpected but
+recovered" case as a retry — WARN, not INFO. INFO stays reserved for
+the terminal case: the veto stops the turn with no gate-arranged
+recovery — an iteration cap hit, a schema/stop-words gate blocking
+after exhausting retries, a content-safety/prompt-injection gate in
+hard-block mode, an approval-policy gate with no default timing out,
+or a rate limiter's queue-full hard reject.
+
+The same logic applies outside gates: infrastructure-level recovery
+from an external failure — a tool-execution timeout that gets caught
+and handled — is WARN too. It isn't a policy veto at all, just the
+ordinary "unexpected but recovered" WARN case.
+
 ## Exceptions
 
 The rubric above is the default, not an absolute. One call site is a
