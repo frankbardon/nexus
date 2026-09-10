@@ -141,7 +141,7 @@ plugins:
 
 | Key                            | Type     | Default                | Description |
 |--------------------------------|----------|------------------------|-------------|
-| `log_level`                    | string   | `info`                 | Global log level: `trace`, `debug`, `info`, `warn`, `error`. `trace` is below `debug` — an ultra-verbose per-event level (bus dispatch, every tool-call arg, wire payloads) that stays off even during normal debug troubleshooting; call sites emit it via `logger.Log(ctx, engine.LevelTrace, "msg", "key", val)` since `*slog.Logger` has no `.Trace()` convenience method. |
+| `log_level`                    | string   | `info`                 | Global log level: `trace`, `debug`, `info`, `warn`, `error`. `trace` is below `debug` — an ultra-verbose per-event level (bus dispatch, every tool-call arg, wire payloads) that stays off even during normal debug troubleshooting; call sites emit it via `logger.Log(ctx, engine.LevelTrace, "msg", "key", val)` since `*slog.Logger` has no `.Trace()` convenience method. See [Logging Levels](../operations/logging.md) for the full level-assignment rubric. |
 | `tick_interval`                | duration | `1s`                   | Interval for the internal `core.tick` heartbeat. |
 | `max_concurrent_events`        | int      | `100`                  | Maximum concurrent event handlers across the bus. |
 | `logging.bootstrap_stderr`     | bool     | `false`                | Register a stderr sink at engine construction so pre-sink slog records appear on the terminal. **Rejected** at validation time when any of `nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails` is active. |

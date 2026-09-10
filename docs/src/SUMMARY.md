@@ -141,3 +141,4 @@
 
 - [Object Storage](./operations/object-storage.md)
 - [Human-in-the-Loop and Session Rewind](./operations/hitl.md)
+- [Logging Levels](./operations/logging.md)
