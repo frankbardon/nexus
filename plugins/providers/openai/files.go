@@ -319,7 +319,7 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 			}
 
 			filename := fmt.Sprintf("nexus-%s-%d-%d", part.Type, i, j)
-			p.logger.Info("openai: uploading file part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
+			p.logger.Debug("openai: uploading file part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
 			id, err := p.uploadFile(ctx, part.Data, part.MimeType, filename, p.files.Purpose)
 			if err != nil {
 				return nil, fmt.Errorf("openai: files upload: %w", err)

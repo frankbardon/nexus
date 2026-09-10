@@ -221,7 +221,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 
-	s.logger.Debug("realtime client connected", "remote", r.RemoteAddr)
+	s.logger.Info("realtime client connected", "remote", r.RemoteAddr)
 
 	// Bind the per-connection lifetime to rootCtx so Shutdown propagates.
 	ctx, cancel := context.WithCancel(s.rootCtx)
@@ -235,7 +235,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	_ = conn.Close(websocket.StatusNormalClosure, "")
-	s.logger.Debug("realtime client disconnected", "remote", r.RemoteAddr)
+	s.logger.Info("realtime client disconnected", "remote", r.RemoteAddr)
 }
 
 func (s *Server) readPump(ctx context.Context, c *client) {

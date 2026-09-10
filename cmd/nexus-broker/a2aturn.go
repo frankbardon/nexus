@@ -398,7 +398,7 @@ func (s *A2AServer) cancelTask(caller nexusauth.Principal, profile, taskID strin
 				"profile", task.profile, "task_id", taskID, "error", err)
 		}
 	}
-	s.logger.Info("a2a task canceled", "profile", task.profile, "task_id", taskID)
+	s.logger.Debug("a2a task canceled", "profile", task.profile, "task_id", taskID)
 	return task.snapshotTask(), nil
 }
 

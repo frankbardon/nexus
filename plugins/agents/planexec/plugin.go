@@ -387,7 +387,7 @@ func (p *Plugin) handleSkillLoadedEvent(event engine.Event[any]) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
-		p.logger.Info("loaded skill context", "name", content.Name)
+		p.logger.Debug("loaded skill context", "name", content.Name)
 	}
 }
 
@@ -399,7 +399,7 @@ func (p *Plugin) handleToolRegisterEvent(event engine.Event[any]) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.registeredTools = append(p.registeredTools, td)
-	p.logger.Info("registered tool", "name", td.Name)
+	p.logger.Debug("registered tool", "name", td.Name)
 }
 
 func (p *Plugin) handlePlanApprovalResponseEvent(event engine.Event[any]) {
@@ -444,7 +444,7 @@ func (p *Plugin) handleCompactedEvent(event engine.Event[any]) {
 	defer p.mu.Unlock()
 	p.history = make([]events.Message, len(cc.Messages))
 	copy(p.history, cc.Messages)
-	p.logger.Info("history replaced by compaction", "messages", len(cc.Messages))
+	p.logger.Debug("history replaced by compaction", "messages", len(cc.Messages))
 }
 
 // handleGateRetry is called when a gate signals that a previously vetoed LLM
@@ -457,7 +457,7 @@ func (p *Plugin) handleGateRetry(_ engine.Event[any]) {
 	}
 	p.mu.Unlock()
 
-	p.logger.Info("gate.llm.retry received, re-sending LLM request")
+	p.logger.Debug("gate.llm.retry received, re-sending LLM request")
 	p.sendStepLLMRequest()
 }
 
@@ -650,7 +650,7 @@ func (p *Plugin) sendStepLLMRequest() {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", req)
@@ -698,14 +698,14 @@ func (p *Plugin) handleExecutorResponse(resp events.LLMResponse) {
 			}
 
 			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
-				p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
+				p.logger.Debug("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
 				syntheticResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 					Name:   tc.Name,
 					Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 					TurnID: turnID,
 				}
 				if rv, rvErr := p.bus.EmitVetoable("before:tool.result", &syntheticResult); rvErr == nil && rv.Vetoed {
-					p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
+					p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
 					continue
 				}
 				_ = p.bus.Emit("tool.result", syntheticResult)
@@ -803,7 +803,7 @@ func (p *Plugin) completeCurrentStep(status, result string) {
 		p.mu.Unlock()
 
 		p.emitStatus("thinking", "Step failed, re-planning")
-		p.logger.Info("re-planning after step failure", "failed_step", stepIdx+1, "replan_count", replanCount+1)
+		p.logger.Warn("re-planning after step failure", "failed_step", stepIdx+1, "replan_count", replanCount+1)
 		p.requestReplan()
 		return
 	}
@@ -907,7 +907,7 @@ func (p *Plugin) sendSynthesisRequest() {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", req)
@@ -944,7 +944,7 @@ func (p *Plugin) handleSynthesizerResponse(resp events.LLMResponse) {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {
-		p.logger.Info("io.output vetoed", "reason", veto.Reason)
+		p.logger.Warn("io.output vetoed", "reason", veto.Reason)
 	} else {
 		_ = p.bus.Emit("io.output", output)
 	}

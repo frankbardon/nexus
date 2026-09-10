@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/frankbardon/nexus/pkg/brokerframe"
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 // ioMessage is the opaque IO payload carried inside a brokerframe.Frame on
@@ -626,7 +627,7 @@ func (c *client) SendIO(msg ioMessage) {
 		// Dormant transport: no broker_addr or no lease_id, so Ready never
 		// dialled and never will. Keep the original drop-at-debug behaviour
 		// rather than pinning memory for a link that is not coming up.
-		c.logger.Debug("dropping broker frame", "type", msg.Type, "reason", "transport not started")
+		c.logger.Log(context.Background(), engine.LevelTrace, "dropping broker frame", "type", msg.Type, "reason", "transport not started")
 		return
 	}
 	c.enqueueOutbound(data)

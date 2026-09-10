@@ -326,7 +326,7 @@ func (p *Plugin) submit(ctx context.Context, sub events.BatchSubmit) error {
 	}); err != nil {
 		// Persist failure is non-fatal but loud — the poller still runs in
 		// memory. Operator just loses restart resilience for this batch.
-		p.logger.Error("batch: persist state failed", "batch_id", batchID, "error", err)
+		p.logger.Warn("batch: persist state failed", "batch_id", batchID, "error", err)
 	}
 
 	p.startPoller(ab)

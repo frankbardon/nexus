@@ -99,7 +99,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 func (p *Plugin) registerTool(def events.ToolDef) {
 	if !p.enabled[def.Name] {
-		p.logger.Info("session_tags: tool disabled by config", "tool", def.Name)
+		p.logger.Debug("session_tags: tool disabled by config", "tool", def.Name)
 		return
 	}
 	_ = p.bus.Emit("tool.register", def)
@@ -410,7 +410,7 @@ func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string, structure
 		TurnID:           tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
-		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)

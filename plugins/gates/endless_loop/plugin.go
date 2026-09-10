@@ -145,7 +145,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	}
 
 	if count > p.maxIterations {
-		p.logger.Warn("endless loop gate triggered",
+		p.logger.Info("endless loop gate triggered",
 			"iteration", count, "max", p.maxIterations)
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,

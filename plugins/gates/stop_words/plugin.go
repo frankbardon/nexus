@@ -122,7 +122,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 			continue
 		}
 		if found := p.findStopWord(msg.Content); found != "" {
-			p.logger.Warn("stop word found in input", "word", found)
+			p.logger.Info("stop word found in input", "word", found)
 			vp.Veto = engine.VetoResult{
 				Vetoed: true,
 				Reason: fmt.Sprintf("Input contains prohibited term: %q", found),
@@ -146,7 +146,7 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 	}
 
 	if found := p.findStopWord(output.Content); found != "" {
-		p.logger.Warn("stop word found in output", "word", found)
+		p.logger.Info("stop word found in output", "word", found)
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
 			Reason: fmt.Sprintf("Output contains prohibited term: %q", found),

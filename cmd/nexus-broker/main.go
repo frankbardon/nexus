@@ -20,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 func main() {
@@ -34,13 +36,23 @@ func run() error {
 	configPath := flag.String("config", "broker.yaml", "path to broker config file")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// A fixed-level bootstrap logger, used ONLY to report a config load failure.
+	// The real level lives in the config it is trying to load, so nothing more
+	// informed is available yet — this is the one line in the process whose level
+	// config.log_level cannot govern.
+	bootLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
-		logger.Error("failed to load config", "path", *configPath, "error", err)
+		bootLogger.Error("failed to load config", "path", *configPath, "error", err)
 		return err
 	}
+
+	// The broker's real logger, built from the resolved config. log_level is
+	// boot-only (see reloadableKeys/bootOnlyKeys in reload.go): it is consumed
+	// here, at construction, before the SIGHUP reload machinery exists to swap it
+	// — a reload that changed it would have no live handler to apply it to.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: engine.ParseLogLevel(cfg.LogLevel)}))
 
 	// Non-fatal config complaints (deprecated keys, folded aliases) are collected
 	// during the load rather than logged there, because config is parsed before

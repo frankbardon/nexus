@@ -176,7 +176,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
-	p.logger.Info("hitl prompt synthesizer initialized",
+	p.logger.Debug("hitl prompt synthesizer initialized",
 		"model_role", p.modelRole,
 		"max_action_ref_chars", p.maxActionRefChars,
 		"cache_enabled", p.cacheEnabled,

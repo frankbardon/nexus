@@ -546,7 +546,7 @@ func (p *Plugin) finishSummarisation(summary string) {
 		// Keep summarising == true so we don't re-trigger from the
 		// trigger path; release the lock and dispatch the retry.
 		p.mu.Unlock()
-		p.logger.Info("summary_buffer rejected: missing preserved kinds; retrying",
+		p.logger.Warn("summary_buffer rejected: missing preserved kinds; retrying",
 			"reported_kinds", preservedKinds,
 			"required", p.requirePreservedKinds,
 		)

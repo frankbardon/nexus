@@ -293,10 +293,10 @@ func (p *Plugin) handleGateRetry(_ engine.Event[any]) {
 
 	switch currentPhase {
 	case phaseDecomposing:
-		p.logger.Info("gate.llm.retry received, re-sending decompose request")
+		p.logger.Debug("gate.llm.retry received, re-sending decompose request")
 		p.sendDecomposeRequest()
 	case phaseSynthesizing:
-		p.logger.Info("gate.llm.retry received, re-sending synthesize request")
+		p.logger.Debug("gate.llm.retry received, re-sending synthesize request")
 		p.sendSynthesizeRequest()
 	}
 }
@@ -370,7 +370,7 @@ func (p *Plugin) handleSkillLoadedEvent(event engine.Event[any]) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
-		p.logger.Info("loaded skill context", "name", content.Name)
+		p.logger.Debug("loaded skill context", "name", content.Name)
 	}
 }
 
@@ -382,7 +382,7 @@ func (p *Plugin) handleToolRegisterEvent(event engine.Event[any]) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.registeredTools = append(p.registeredTools, td)
-	p.logger.Info("registered tool", "name", td.Name)
+	p.logger.Debug("registered tool", "name", td.Name)
 }
 
 // Core logic — Phase 1: Decomposition.
@@ -505,7 +505,7 @@ func (p *Plugin) sendDecomposeRequest() {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", req)
@@ -523,7 +523,7 @@ func (p *Plugin) handleDecomposeResponse(resp events.LLMResponse) {
 
 	tasks, err := parseSubtasksJSON(resp.Content)
 	if err != nil {
-		p.logger.Error("failed to parse subtasks from LLM response", "error", err)
+		p.logger.Warn("failed to parse subtasks from LLM response", "error", err)
 		// Fall back: treat the entire task as a single subtask.
 		tasks = []subtask{
 			{
@@ -901,7 +901,7 @@ func (p *Plugin) sendSynthesizeRequest() {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", req)
@@ -937,7 +937,7 @@ func (p *Plugin) handleSynthesizeResponse(resp events.LLMResponse) {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {
-		p.logger.Info("io.output vetoed", "reason", veto.Reason)
+		p.logger.Warn("io.output vetoed", "reason", veto.Reason)
 	} else {
 		_ = p.bus.Emit("io.output", output)
 	}

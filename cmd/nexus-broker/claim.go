@@ -617,7 +617,7 @@ func (s *ClaimServer) handleClaim(w http.ResponseWriter, r *http.Request) {
 	// gap would be the worse outcome. The response then omits `ticket`.
 	ticket, mintErr := s.tickets.mint(spawn.leaseID, owner.ID)
 	if mintErr != nil {
-		s.logger.Error("minting claim ticket failed; claim returns no ticket",
+		s.logger.Warn("minting claim ticket failed; claim returns no ticket",
 			"lease_id", spawn.leaseID, "principal_id", owner.ID, "error", mintErr)
 	}
 

@@ -96,7 +96,7 @@ func (h *Handler) AttemptRetry(
 
 	content := originalContent
 	for attempt := range h.config.MaxRetries {
-		h.logger.Info("retrying LLM request",
+		h.logger.Warn("retrying LLM request",
 			"attempt", attempt+1,
 			"max_retries", h.config.MaxRetries,
 			"error", validationErr)

@@ -197,7 +197,7 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 	}
 
 	// Retries exhausted — veto with error info.
-	p.logger.Warn("json schema validation failed after retries",
+	p.logger.Info("json schema validation failed after retries",
 		"error", result.Error, "retries", p.maxRetries)
 	vp.Veto = engine.VetoResult{
 		Vetoed: true,

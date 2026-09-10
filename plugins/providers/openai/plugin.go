@@ -134,7 +134,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.filesAPIURL = filesAPIBaseURL
 	if p.files.Enabled {
 		p.fileCache = newFileCache()
-		p.logger.Info("files API enabled",
+		p.logger.Debug("files API enabled",
 			"purpose", p.files.Purpose,
 			"upload_threshold", p.files.UploadThreshold,
 			"cache_uploads", p.files.CacheUploads,
@@ -144,7 +144,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
-		p.logger.Info("retry enabled",
+		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
 			"backoff", string(p.retry.Backoff),
 			"initial_delay", p.retry.InitialDelay,
@@ -304,7 +304,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
-	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	// Files API preflight: when enabled, upload file-type Data parts and
 	// swap in the returned file_id before serializing the request body. We
@@ -965,7 +965,7 @@ func (p *Plugin) debugLog(label string, data []byte) {
 
 	filename := fmt.Sprintf("plugins/%s/%04d_%s.json", pluginID, seq, label)
 	if err := p.session.WriteFile(filename, data); err != nil {
-		p.logger.Error("failed to write debug log", "file", filename, "error", err)
+		p.logger.Warn("failed to write debug log", "file", filename, "error", err)
 	}
 }
 

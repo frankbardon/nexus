@@ -276,9 +276,9 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 		case <-time.After(time.Duration(r.timeoutSeconds) * time.Second):
 			if defaultID != "" {
 				resp = events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: requestID, ChoiceID: defaultID}
-				p.logger.Info("approval timed out, applying default", "default", defaultID, "action", actionKind)
+				p.logger.Warn("approval timed out, applying default", "default", defaultID, "action", actionKind)
 			} else {
-				p.logger.Warn("approval timed out with no default", "action", actionKind)
+				p.logger.Info("approval timed out with no default", "action", actionKind)
 				return approvalOutcome{rejected: true, reason: "approval timed out with no default"}
 			}
 		}

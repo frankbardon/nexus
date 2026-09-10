@@ -138,10 +138,11 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 			continue
 		}
 		if matched := p.findInjection(msg.Content); matched != "" {
-			p.logger.Warn("prompt injection detected",
-				"pattern", matched, "action", p.action)
-
 			if p.action == "block" {
+				// Actually blocks the request — ops-relevant, no
+				// gate-arranged auto-recovery.
+				p.logger.Info("prompt injection detected",
+					"pattern", matched, "action", p.action)
 				vp.Veto = engine.VetoResult{
 					Vetoed: true,
 					Reason: fmt.Sprintf("Prompt injection detected: %s", matched),
@@ -150,7 +151,9 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 					Role: "system",
 				})
 			} else {
-				// Warn mode — emit warning but don't veto.
+				// Warn mode — degraded-but-recovered: request proceeds.
+				p.logger.Warn("prompt injection detected",
+					"pattern", matched, "action", p.action)
 				_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: "Warning: potential prompt injection detected in input.",
 					Role: "system",
 				})

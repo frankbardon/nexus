@@ -432,7 +432,7 @@ func (p *Plugin) handleSkillLoaded(e engine.Event[any]) {
 	// content (the markdown body) still reaches the agent the same way; only
 	// the in-script `import "skills/<name>"` binding is unavailable.
 	if p.compiler == compilerYaegiWasm {
-		p.logger.Info("skipping skill helper load under compiler=yaegi-wasm",
+		p.logger.Debug("skipping skill helper load under compiler=yaegi-wasm",
 			"skill", sc.Name, "skill_runtime", sc.Runtime)
 		return
 	}
@@ -830,7 +830,7 @@ func (p *Plugin) emitResultParts(tc events.ToolCall, stdout, result, errMsg stri
 		TurnID:      tc.TurnID,
 	}
 	if veto, verr := p.bus.EmitVetoable("before:tool.result", &r); verr == nil && veto.Vetoed {
-		p.logger.Info("code_exec tool.result vetoed", "reason", veto.Reason)
+		p.logger.Debug("code_exec tool.result vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", r)

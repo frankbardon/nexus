@@ -415,6 +415,7 @@ func TestReload_BootOnlyKeysAreReportedAndIgnored(t *testing.T) {
 
 	f := newReloadFixture(t, reloadYAML(
 		`listen_addr: "127.0.0.1:8080"`,
+		`log_level: "debug"`,
 		`advertise_addr: "ws://broker.example:8080"`,
 		`state_dir: "`+stateA+`"`,
 		`broker_id: "broker-a"`,
@@ -429,6 +430,7 @@ func TestReload_BootOnlyKeysAreReportedAndIgnored(t *testing.T) {
 
 	f.rewrite(reloadYAML(
 		`listen_addr: "127.0.0.1:9999"`,
+		`log_level: "trace"`,
 		`advertise_addr: "wss://elsewhere.example"`,
 		`state_dir: "`+stateB+`"`,
 		`broker_id: "broker-b"`,
@@ -452,6 +454,7 @@ func TestReload_BootOnlyKeysAreReportedAndIgnored(t *testing.T) {
 		got, want any
 	}{
 		{"listen_addr", cfg.ListenAddr, "127.0.0.1:8080"},
+		{"log_level", cfg.LogLevel, "debug"},
 		{"advertise_addr", cfg.AdvertiseAddr, "ws://broker.example:8080"},
 		{"state_dir", cfg.StateDir, stateA},
 		{"broker_id", cfg.BrokerID, "broker-a"},
@@ -478,7 +481,7 @@ func TestReload_BootOnlyKeysAreReportedAndIgnored(t *testing.T) {
 	if !strings.Contains(logs, "only read at boot") {
 		t.Fatalf("no boot-only report in the log:\n%s", logs)
 	}
-	for _, key := range []string{"listen_addr", "advertise_addr", "state_dir", "broker_id",
+	for _, key := range []string{"listen_addr", "log_level", "advertise_addr", "state_dir", "broker_id",
 		"reattach_window", "auth", "auth.admin_scope"} {
 		if !strings.Contains(logs, key) {
 			t.Errorf("the boot-only report does not name %s", key)
