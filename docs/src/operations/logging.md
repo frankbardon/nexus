@@ -143,3 +143,20 @@ When you add a new log call or touch an existing one:
    The rubric's failure mode in the wild has been contributors
    defaulting to `Info`; erring toward DEBUG or TRACE keeps that from
    recurring.
+
+## Exceptions
+
+The rubric above is the default, not an absolute. One call site is a
+deliberate, named exception — recorded here (2026-09-10) so a future
+contributor doesn't "fix" it by demoting it:
+
+`cmd/nexus-broker/auth.go`'s `wrap` method logs
+`g.logger.Info("auth allowed", ...)` on every authenticated request,
+including routine polling such as `/metrics` scrapes. Under "no
+per-request chatter at INFO" that reads like a DEBUG demotion
+candidate. It stays at INFO because it is, by design, the broker's
+only security audit trail — there is no separate audit sink. As the
+code comment on `deny` (same file, line ~227) states, every allow and
+every deny emits exactly one structured `slog` record, and that record
+*is* the audit trail. Completeness of that trail was judged to
+outweigh the noise-reduction goal for this one call site.
