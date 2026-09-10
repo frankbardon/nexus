@@ -76,6 +76,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.approval.request", Priority: 50},
 		{EventType: "hitl.requested", Priority: 50},
 		{EventType: "cancel.complete", Priority: 50},
+		{EventType: "core.ready", Priority: 50},
 	}
 }
 
@@ -94,8 +95,10 @@ func (p *Plugin) Emissions() []string {
 }
 
 // Init reads config/env and wires the bus handlers. It constructs (but does
-// not dial) the client — dialing happens in Ready so the engine is fully up
-// before the broker is told the instance is ready.
+// not dial) the client — dialing happens in handleCoreReady, gated on the
+// engine-wide "core.ready" event, so the engine is fully up before the
+// broker is told the instance is ready. See handleCoreReady's own doc
+// comment for why this plugin's own Ready() is not where that dial happens.
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
@@ -136,6 +139,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.requested", p.handleHITLRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("cancel.complete", p.handleCancelComplete, engine.WithSource(pluginID)),
+		p.bus.Subscribe("core.ready", p.handleCoreReady, engine.WithSource(pluginID)),
 	)
 
 	// spawn_secret_present records WHETHER a secret was resolved, never its
@@ -148,21 +152,52 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	return nil
 }
 
-// Ready dials the broker and starts the reconnect loop. When no broker
-// address is configured (e.g. unit/contract tests, or a config that activates
-// the plugin without broker wiring) it stays dormant rather than erroring so
-// the engine still boots cleanly.
+// Ready is a no-op. Dialing the broker and starting the reconnect loop is
+// deferred to handleCoreReady, gated on the engine-wide "core.ready" event
+// (pkg/engine/lifecycle.go's own Boot: emitted once EVERY plugin's own
+// Ready() has returned) rather than done directly here — see
+// handleCoreReady's own doc comment for why. Kept as a real method (not
+// removed) only because engine.Plugin requires one.
 func (p *Plugin) Ready() error {
+	return nil
+}
+
+// handleCoreReady starts the broker dial-back once the whole engine has
+// finished its Ready phase. lifecycle.go's own Boot runs every plugin's
+// Ready() IN PARALLEL ("Ready phase (parallel, per PRD 4.5)") with no
+// ordering guarantee between this plugin and any other — in particular
+// nexus.io.agui, whose own Ready() calls Start(), which returns once its
+// listener's net.Listen has succeeded but BEFORE its Serve goroutine has
+// necessarily reached its first Accept. Dialing directly from THIS plugin's
+// old Ready() raced that: the broker dial-back is a fast, synchronous
+// loopback round trip, so it routinely completed — and told cmd/nexus-broker
+// "ready to accept IO" — before nexus.io.agui's own listener had begun
+// serving, sometimes by tens of milliseconds under a real engine boot (21
+// plugins, confirmed by direct reproduction), not the sub-millisecond gap
+// the original "Announce readiness to accept IO" design assumed. A caller
+// that reverse-proxies the instant the broker's own /claim answers can land
+// squarely in that window — indistinguishable from a dead instance to the
+// caller, since the connection is refused or reset. Deferring to
+// "core.ready" (emitted only after readyWg.Wait() — i.e., after every
+// plugin's Ready() has returned, io.agui's included) closes that window down
+// to the same narrow, sub-millisecond gap oneshot.Ready()'s own doc comment
+// already documents for the identical class of race against
+// mcp.client.Ready().
+//
+// The dormant-when-unconfigured guard moves here unchanged from the old
+// Ready() — a broker-less config (unit/contract tests, or a config that
+// activates this plugin without broker wiring) still logs the identical WARN
+// and never dials, just later than before.
+func (p *Plugin) handleCoreReady(engine.Event[any]) {
 	if p.brokerAddr == "" {
 		p.logger.Warn("broker IO plugin has no broker_addr; staying dormant")
-		return nil
+		return
 	}
 	if p.leaseID == "" {
 		p.logger.Warn("broker IO plugin has no lease_id; staying dormant")
-		return nil
+		return
 	}
 	p.client.Start()
-	return nil
 }
 
 // Shutdown unsubscribes and closes the dial-back connection cleanly.
