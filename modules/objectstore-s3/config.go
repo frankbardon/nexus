@@ -89,7 +89,7 @@ func New(ctx context.Context, cfg objectstore.Config) (objectstore.Backend, erro
 
 	client := s3.NewFromConfig(awsCfg, clientOptions(cfg)...)
 
-	logger.Debug("s3 object store opened",
+	logger.Info("s3 object store opened",
 		"bucket", cfg.Bucket,
 		"prefix", cfg.Prefix,
 		"region", awsCfg.Region,
