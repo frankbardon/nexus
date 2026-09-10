@@ -242,7 +242,7 @@ func (p *Plugin) applyDecision(req *events.LLMRequest, role, why string) {
 	if prevModel != "" {
 		req.Metadata["_routed_from_model"] = prevModel
 	}
-	p.logger.Debug("classifier routed", "reason", why, "from_role", prevRole, "to_role", role)
+	p.logger.Log(context.Background(), engine.LevelTrace, "classifier routed", "reason", why, "from_role", prevRole, "to_role", role)
 }
 
 // classifyAndCache emits a classification request, awaits the response
@@ -274,7 +274,7 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		},
 	}
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &probe); err == nil && veto.Vetoed {
-		p.logger.Debug("classifier probe vetoed, skipping", "reason", veto.Reason)
+		p.logger.Warn("classifier probe vetoed, skipping", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", probe)
@@ -286,14 +286,14 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		}
 		choice := resolveChoice(resp.Content, p.candidateRoles)
 		if choice == "" {
-			p.logger.Debug("classifier returned unparseable choice", "content", resp.Content)
+			p.logger.Warn("classifier returned unparseable choice", "content", resp.Content)
 			return
 		}
 		if p.cacheEnabled {
 			p.cache.put(key, choice)
 		}
 	case <-time.After(time.Duration(p.latencyMs) * time.Millisecond):
-		p.logger.Debug("classifier timeout, cache not warmed", "key", key)
+		p.logger.Warn("classifier timeout, cache not warmed", "key", key)
 	}
 }
 
