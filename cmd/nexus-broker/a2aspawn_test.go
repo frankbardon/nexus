@@ -527,7 +527,14 @@ func TestA2AContextBindingSurvivesBrokerRestart(t *testing.T) {
 	inst.Release()
 	// The broker goes away; so does its instance.
 	original.exit()
-	if err := first.registry.releaseLease(original.leaseID, "manual release", time.Second); err != nil {
+	// original.exit() races this call against the real production watchExit
+	// goroutine (started at claim time, claim.go), which also tears the lease
+	// down on an unexpected process exit. Whichever side latches l.releasing
+	// first wins the teardown; if watchExit wins and finishes first, this call
+	// finds the lease already gone and gets errUnknownLease instead of nil.
+	// Both outcomes mean the same thing here — the lease is gone — so accept
+	// either.
+	if err := first.registry.releaseLease(original.leaseID, "manual release", time.Second); err != nil && !errors.Is(err, errUnknownLease) {
 		t.Fatalf("releaseLease: %v", err)
 	}
 	if err := first.contexts.Close(); err != nil {
@@ -556,7 +563,11 @@ func TestA2AWithoutStateDirForgetsAcrossRestart(t *testing.T) {
 	original := first.runner.instances()[0]
 	inst.Release()
 	original.exit()
-	if err := first.registry.releaseLease(original.leaseID, "manual release", time.Second); err != nil {
+	// See TestA2AContextBindingSurvivesBrokerRestart: this races the production
+	// watchExit goroutine, which may win and tear the lease down first, in which
+	// case this call sees errUnknownLease instead of nil. Either outcome means
+	// the lease is gone, which is all this test needs.
+	if err := first.registry.releaseLease(original.leaseID, "manual release", time.Second); err != nil && !errors.Is(err, errUnknownLease) {
 		t.Fatalf("releaseLease: %v", err)
 	}
 
