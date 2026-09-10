@@ -191,11 +191,13 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 	}
 
 	checkList := strings.Join(matched, ", ")
-	p.logger.Warn("content safety checks triggered",
-		"checks", checkList, "action", p.action)
 
 	switch p.action {
 	case "block":
+		// Actually blocks the output — ops-relevant, no gate-arranged
+		// auto-recovery.
+		p.logger.Info("content safety checks triggered",
+			"checks", checkList, "action", p.action)
 		msg := strings.ReplaceAll(p.message, "{checks}", checkList)
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -206,6 +208,9 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		})
 
 	case "redact":
+		// Degraded-but-recovered: output proceeds with matches redacted.
+		p.logger.Warn("content safety checks triggered",
+			"checks", checkList, "action", p.action)
 		content := output.Content
 		for _, c := range p.checks {
 			for _, name := range matched {
@@ -248,12 +253,14 @@ func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
 	}
 
 	checkList := strings.Join(matched, ", ")
-	p.logger.Warn("content safety checks triggered on tool.result",
-		"tool", result.Name, "id", result.ID,
-		"checks", checkList, "action", p.action)
 
 	switch p.action {
 	case "block":
+		// Actually blocks the tool result — ops-relevant, no gate-arranged
+		// auto-recovery.
+		p.logger.Info("content safety checks triggered on tool.result",
+			"tool", result.Name, "id", result.ID,
+			"checks", checkList, "action", p.action)
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
 			Reason: fmt.Sprintf("Content safety (tool.result): %s", checkList),
@@ -268,6 +275,10 @@ func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
 			TurnID:        result.TurnID,
 		})
 	case "redact":
+		// Degraded-but-recovered: tool result proceeds with matches redacted.
+		p.logger.Warn("content safety checks triggered on tool.result",
+			"tool", result.Name, "id", result.ID,
+			"checks", checkList, "action", p.action)
 		content := result.Output
 		for _, c := range p.checks {
 			for _, name := range matched {

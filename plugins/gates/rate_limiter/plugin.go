@@ -217,7 +217,7 @@ func (p *Plugin) handleRejectMode(vp *engine.VetoablePayload, waitDuration time.
 	seconds := int(waitDuration.Seconds()) + 1
 	msg := strings.ReplaceAll(p.pauseMessage, "{seconds}", fmt.Sprintf("%d", seconds))
 
-	p.logger.Info("rate limit reached (reject mode), scheduling retry",
+	p.logger.Warn("rate limit reached (reject mode), scheduling retry",
 		"wait_seconds", seconds)
 
 	vp.Veto = engine.VetoResult{
@@ -252,7 +252,7 @@ func (p *Plugin) handleQueueMode(vp *engine.VetoablePayload, waitDuration time.D
 	select {
 	case p.queueCh <- struct{}{}:
 	default:
-		p.logger.Warn("rate limit queue full, rejecting request",
+		p.logger.Info("rate limit queue full, rejecting request",
 			"max_pending", p.maxPending)
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -267,7 +267,7 @@ func (p *Plugin) handleQueueMode(vp *engine.VetoablePayload, waitDuration time.D
 	seconds := int(waitDuration.Seconds()) + 1
 	msg := strings.ReplaceAll(p.pauseMessage, "{seconds}", fmt.Sprintf("%d", seconds))
 
-	p.logger.Info("rate limit reached (queue mode), enqueued retry",
+	p.logger.Warn("rate limit reached (queue mode), enqueued retry",
 		"queue_depth", len(p.queueCh))
 
 	vp.Veto = engine.VetoResult{
@@ -309,7 +309,7 @@ func (p *Plugin) drain() {
 			p.timestamps = append(p.timestamps, p.nowFunc())
 			p.mu.Unlock()
 
-			p.logger.Info("draining rate-limit queue slot",
+			p.logger.Debug("draining rate-limit queue slot",
 				"queue_depth", len(p.queueCh))
 			_ = p.bus.Emit("gate.llm.retry", map[string]any{
 				"source": pluginID,
