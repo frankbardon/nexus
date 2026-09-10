@@ -297,7 +297,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 			TurnID: tc.TurnID,
 		}
 		if veto, vErr := p.bus.EmitVetoable("before:tool.result", &errResult); vErr == nil && veto.Vetoed {
-			p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+			p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 			return
 		}
 		_ = p.bus.Emit("tool.result", errResult)
@@ -333,7 +333,7 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 		TurnID: tc.TurnID,
 	}
 	if veto, vErr := p.bus.EmitVetoable("before:tool.result", &toolResult); vErr == nil && veto.Vetoed {
-		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", toolResult)
@@ -425,7 +425,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 
 	// Iteration limiting now handled by nexus.gate.endless_loop plugin.
 	for iteration := 0; ; iteration++ {
-		logger.Info("subagent iteration", "iteration", iteration)
+		logger.Debug("subagent iteration", "iteration", iteration)
 
 		req := events.LLMRequest{
 			Role:     modelRole,
@@ -439,7 +439,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 		}
 		resp, err := delegate.SyncLLM(context.Background(), p.bus, req)
 		if err != nil {
-			logger.Info("subagent llm error", "err", err)
+			logger.Error("subagent llm error", "err", err)
 			return p.completeSubagent(spawnID, parentTurnID, "", err.Error(), iteration, totalUsage, totalCost)
 		}
 
@@ -518,7 +518,7 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 		}
 
 		if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
-			p.logger.Info("subagent tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
+			p.logger.Debug("subagent tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
 			resultCh <- events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 				Name:   tc.Name,
 				Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),

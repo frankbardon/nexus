@@ -250,7 +250,7 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 			result.Error = out.Error
 		}
 		if veto, vErr := p.bus.EmitVetoable("before:tool.result", &result); vErr == nil && veto.Vetoed {
-			p.logger.Info("delegate tool.result vetoed", "reason", veto.Reason)
+			p.logger.Debug("delegate tool.result vetoed", "reason", veto.Reason)
 			return
 		}
 		_ = p.bus.Emit("tool.result", result)

@@ -275,7 +275,7 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 		})
 
 		if opts.budget.MaxTokens > 0 && totalTokens >= opts.budget.MaxTokens {
-			opts.logger.Info("budget exhausted: tokens", "used", totalTokens, "cap", opts.budget.MaxTokens)
+			opts.logger.Warn("budget exhausted: tokens", "used", totalTokens, "cap", opts.budget.MaxTokens)
 			return Output{
 				Status:        StatusPartial,
 				Result:        resp.Content,
@@ -295,7 +295,7 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 		}
 
 		if opts.budget.MaxToolCalls > 0 && toolCalls+len(resp.ToolCalls) > opts.budget.MaxToolCalls {
-			opts.logger.Info("budget exhausted: tool calls",
+			opts.logger.Warn("budget exhausted: tool calls",
 				"used", toolCalls, "requested", len(resp.ToolCalls), "cap", opts.budget.MaxToolCalls)
 			return Output{
 				Status:        StatusPartial,

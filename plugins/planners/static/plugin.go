@@ -110,7 +110,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
-	p.logger.Info("static planner initialized", "steps", len(p.steps), "approval", p.approval)
+	p.logger.Debug("static planner initialized", "steps", len(p.steps), "approval", p.approval)
 	return nil
 }
 
