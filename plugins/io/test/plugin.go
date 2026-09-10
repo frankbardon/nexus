@@ -300,7 +300,7 @@ func (p *Plugin) feedInputs() {
 		p.inputsSent++
 		p.mu.Unlock()
 
-		p.logger.Info("test IO sending input", "index", i, "content_len", len(input))
+		p.logger.Debug("test IO sending input", "index", i, "content_len", len(input))
 		payload := events.UserInput{SchemaVersion: events.UserInputVersion, Content: input}
 		if veto, err := p.bus.EmitVetoable("before:io.input", &payload); err == nil && veto.Vetoed {
 			continue
@@ -334,7 +334,7 @@ func (p *Plugin) feedInputs() {
 		stuck := p.allInputsSent && p.turnDepth > 0 && !p.finalized
 		p.mu.Unlock()
 		if stuck {
-			p.logger.Info("test IO detected stalled turn, ending session")
+			p.logger.Warn("test IO detected stalled turn, ending session")
 			p.endSession()
 		}
 	}()

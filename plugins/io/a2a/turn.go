@@ -163,7 +163,7 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 		}
 	}()
 
-	p.logger.Debug("a2a task started",
+	p.logger.Info("a2a task started",
 		"task_id", r.taskID,
 		"context_id", contextID,
 		"message_id", in.messageID,
@@ -310,7 +310,7 @@ func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal, opts strea
 		p.logger.Warn("a2a could not route an answer to the bus", "task_id", in.taskID, "error", err)
 	}
 
-	p.logger.Debug("a2a task resumed",
+	p.logger.Info("a2a task resumed",
 		"task_id", r.taskID, "context_id", r.contextID, "hitl_request_id", parked.requestID)
 	return r, sub, opening, nil
 }
@@ -550,7 +550,7 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 		func() { p.expireInput(r, req.ID) }) {
 		return
 	}
-	p.logger.Debug("a2a task awaiting input",
+	p.logger.Info("a2a task awaiting input",
 		"task_id", r.taskID, "hitl_request_id", req.ID, "timeout", p.cfg.inputTimeout)
 }
 
@@ -575,7 +575,7 @@ func (p *Plugin) handleHITLResponded(e engine.Event[any]) {
 		return
 	}
 	if r.resume(resp.RequestID) {
-		p.logger.Debug("a2a task resumed after input",
+		p.logger.Info("a2a task resumed after input",
 			"task_id", r.taskID, "hitl_request_id", resp.RequestID, "cancelled", resp.Cancelled)
 	}
 }
@@ -638,7 +638,7 @@ func (p *Plugin) handleError(e engine.Event[any]) {
 	if info.Err != nil {
 		reason = info.Err.Error()
 	}
-	p.logger.Warn("a2a task failed", "task_id", r.taskID, "source", info.Source, "error", info.Err)
+	p.logger.Error("a2a task failed", "task_id", r.taskID, "source", info.Source, "error", info.Err)
 	r.fail(reason)
 }
 
