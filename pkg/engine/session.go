@@ -290,7 +290,7 @@ func (s *SessionWorkspace) WriteFile(subpath string, data []byte) error {
 
 	existed := s.FileExists(subpath)
 
-	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
+	if err := writeFileAtomic(fullPath, data, 0o644); err != nil {
 		return fmt.Errorf("writing file %s: %w", subpath, err)
 	}
 
@@ -307,6 +307,50 @@ func (s *SessionWorkspace) WriteFile(subpath string, data []byte) error {
 		_ = s.bus.Emit(eventType, sessionFileEvent(s.ID, subpath, len(data), 0, len(data)))
 	}
 
+	return nil
+}
+
+// writeFileAtomic writes data to path via a same-directory temp file plus
+// rename, so a process killed mid-write can never leave path holding a
+// truncated file. os.Rename is atomic on POSIX only when the source and
+// destination share a filesystem, which a same-directory temp file
+// guarantees; a reader (or a re-opened SessionWorkspace after a crash) that
+// stats path at any point either sees path's previous complete contents or
+// the new complete contents — never a partial write, because the rename is
+// the only operation that ever touches path itself.
+//
+// This mirrors the idiom already used at pkg/engine/blobs.writeAtomic and
+// plugins/control/hitl.writeFileAtomic rather than inventing a third
+// variant; it stays unexported and duplicated (not hoisted into a shared
+// helper) per CLAUDE.md's "don't genericize early" — three call sites with
+// slightly different error-wrapping conventions do not yet justify one.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	// Match the permissions os.WriteFile would have applied directly;
+	// os.CreateTemp always creates with 0o600 regardless of perm.
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
 	return nil
 }
 
