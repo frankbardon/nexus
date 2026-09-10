@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -413,7 +414,7 @@ func (t *a2aTask) deliver(msg brokerIOMessage) {
 			"profile", t.profile, "task_id", t.taskID, "prompt_id", msg.PromptID)
 
 	default:
-		t.logger.Debug("ignoring an instance io payload this a2a mapping does not map",
+		t.logger.Log(context.Background(), engine.LevelTrace, "ignoring an instance io payload this a2a mapping does not map",
 			"profile", t.profile, "task_id", t.taskID, "type", msg.Type)
 	}
 }

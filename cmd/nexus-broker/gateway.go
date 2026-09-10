@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
@@ -234,7 +235,7 @@ func (g *Gateway) handleInstance(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
-		g.logger.Error("instance websocket accept failed", "error", err)
+		g.logger.Warn("instance websocket accept failed", "error", err)
 		return
 	}
 
@@ -518,7 +519,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
-		g.logger.Error("client websocket accept failed", "error", err)
+		g.logger.Warn("client websocket accept failed", "error", err)
 		return
 	}
 
@@ -619,7 +620,7 @@ func parseFromSeq(query url.Values) (uint64, bool) {
 func (g *Gateway) logResume(leaseID string, resume clientResume) {
 	if resume.gap == nil {
 		if len(resume.frames) > 0 {
-			g.logger.Info("replaying buffered frames to a resuming client",
+			g.logger.Debug("replaying buffered frames to a resuming client",
 				"lease_id", leaseID, "frames", len(resume.frames), "last_seq", resume.lastSeq)
 		}
 		return
@@ -824,7 +825,7 @@ func (g *Gateway) readPump(ctx context.Context, leaseID string, wc *wsConn, forw
 func (g *Gateway) forwardToInstance(leaseID string, frame brokerframe.Frame, data []byte) {
 	peer := g.registry.InstanceConn(leaseID)
 	if peer == nil {
-		g.logger.Debug("no peer attached, dropping frame",
+		g.logger.Log(context.Background(), engine.LevelTrace, "no peer attached, dropping frame",
 			"lease_id", leaseID, "signal", frame.Signal)
 		g.registry.Metrics().frameDropped(frameDropNoInstance)
 		return
@@ -851,14 +852,14 @@ func (g *Gateway) forwardToInstance(leaseID string, frame brokerframe.Frame, dat
 func (g *Gateway) forwardToClient(leaseID string, frame brokerframe.Frame, _ []byte) {
 	seq, outcome, err := g.registry.SendClientFrame(leaseID, frame)
 	if err != nil {
-		g.logger.Debug("dropping client-bound frame for a lease that is gone",
+		g.logger.Log(context.Background(), engine.LevelTrace, "dropping client-bound frame for a lease that is gone",
 			"lease_id", leaseID, "signal", frame.Signal, "error", err)
 		g.registry.Metrics().frameDropped(frameDropLeaseGone)
 		return
 	}
 	switch outcome {
 	case clientFrameBuffered:
-		g.logger.Debug("no client attached; frame retained for replay",
+		g.logger.Log(context.Background(), engine.LevelTrace, "no client attached; frame retained for replay",
 			"lease_id", leaseID, "signal", frame.Signal, "seq", seq)
 	case clientFrameDropped:
 		g.logger.Warn("peer send buffer full, dropping frame",
