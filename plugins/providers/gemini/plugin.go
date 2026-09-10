@@ -117,7 +117,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.cache = newCacheState(ctx.Config, p.logger)
 
 	if p.retry.Enabled {
-		p.logger.Info("retry enabled",
+		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
 			"backoff", string(p.retry.Backoff),
 			"initial_delay", p.retry.InitialDelay,
@@ -125,16 +125,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 	if p.thinking.Enabled {
-		p.logger.Info("thinking enabled",
+		p.logger.Debug("thinking enabled",
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
 	}
 	if p.codeExecution {
-		p.logger.Info("code_execution tool enabled")
+		p.logger.Debug("code_execution tool enabled")
 	}
 	if p.cache.enabled {
-		p.logger.Info("prompt caching enabled",
+		p.logger.Debug("prompt caching enabled",
 			"min_tokens", p.cache.minTokens,
 			"ttl", p.cache.ttl,
 		)
@@ -283,7 +283,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
-	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	body, err := p.buildRequestBody(model, maxTokens, req)
 	if err != nil {
@@ -1030,7 +1030,7 @@ func (p *Plugin) debugLog(label string, data []byte) {
 
 	filename := fmt.Sprintf("plugins/%s/%04d_%s.json", pluginID, seq, label)
 	if err := p.session.WriteFile(filename, data); err != nil {
-		p.logger.Error("failed to write debug log", "file", filename, "error", err)
+		p.logger.Warn("failed to write debug log", "file", filename, "error", err)
 	}
 }
 

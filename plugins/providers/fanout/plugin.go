@@ -321,7 +321,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	allDone := state.received >= state.expected
 	state.mu.Unlock()
 
-	p.logger.Info("fanout response received",
+	p.logger.Log(context.Background(), engine.LevelTrace, "fanout response received",
 		"fanout_id", fanoutID,
 		"provider", provider,
 		"model", resp.Model,
