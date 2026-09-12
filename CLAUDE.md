@@ -150,7 +150,7 @@ plugins/
   planners/dynamic/      # LLM-generated execution plans
   planners/static/       # Config-defined fixed execution plans
   skills/                # Skill discovery and catalog
-  system/dynvars/        # Dynamic prompt variables (date, time, cwd, session_dir, os) — opt-in
+  system/dynvars/        # Dynamic runtime variables (date, time, timezone, cwd, session_dir, os, allowlisted X-Nexus-* headers) — opt-in. Prepends a <runtime_context> XML block to the LAST USER MESSAGE of every outbound llm.request (before:llm.request, priority 20) rather than registering a system-prompt section: per-turn values in the system prompt invalidate the prompt cache at position zero. Decorates the request only — it clones the message slice, so the block never enters memory.history and repeated turns cannot accumulate stale copies; do NOT add a pass that rewrites stored messages
   gates/endless_loop/    # Iteration limit (replaces agent max_iterations)
   gates/stop_words/      # Banned word checking (input + output)
   gates/token_budget/    # Session token ceiling

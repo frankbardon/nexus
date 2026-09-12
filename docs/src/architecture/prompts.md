@@ -27,10 +27,8 @@ You are a helpful assistant.
 </available_skills>
 </prompt_section>
 
-<prompt_section name="dynvars">
-- Date: 2026-04-08
-- OS: darwin
-- CWD: /Users/frank/projects/myapp
+<prompt_section name="my-plugin">
+Whatever your plugin contributes.
 </prompt_section>
 ```
 
@@ -51,8 +49,13 @@ The function is called every time a prompt is assembled, so it can return differ
 
 | Plugin | Section Name | Priority | Content |
 |--------|-------------|----------|---------|
-| `nexus.system.dynvars` | `dynvars` | 90 | Current date, time, timezone, CWD, OS |
 | `nexus.skills` | `skill-catalog` | 80 | XML-formatted list of available skills |
+
+`nexus.system.dynvars` used to register a section here. It no longer does:
+per-turn values (the clock above all) invalidate the prompt cache at position
+zero when they sit in the system prompt, so it now prepends a
+`<runtime_context>` block to the turn's own user message via
+`before:llm.request` instead. See [Dynamic Variables](../plugins/system.md).
 
 ## Agent-Level Semantic Tags
 
@@ -107,5 +110,5 @@ type PromptRegistry struct {
 ## Use Cases
 
 - **Skill catalogs** — The skills plugin registers available skills so the agent knows what's available
-- **Dynamic variables** — The dynvars plugin injects current date/time and system info
+- **Custom per-agent framing** — Anything stable enough to belong in the system prompt
 - **Custom context** — Your plugins can inject any context the agent should be aware of

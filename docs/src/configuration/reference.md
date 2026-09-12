@@ -3163,9 +3163,14 @@ Source: `plugins/skills/plugin.go`. Registers the `activate_skill` LLM tool.
 
 ### `nexus.system.dynvars`
 
-Source: `plugins/system/dynvars/plugin.go`. Registers a system-prompt section at
-priority 100 that lists runtime variables. Each flag defaults to `false` —
-opt-in only.
+Source: `plugins/system/dynvars/plugin.go`. Prepends a `<runtime_context>` XML
+block listing runtime variables to the **last user message** of every outbound
+`llm.request` (subscribes at priority 20; registers no Prompt Registry section).
+Each flag defaults to `false` — opt-in only.
+
+The block never enters conversation history: it is applied to the request, not
+to the persisted message, so repeated turns cannot accumulate stale copies. See
+[Dynamic Variables](../plugins/system.md).
 
 | Key           | Type | Default | Description |
 |---------------|------|---------|-------------|

@@ -129,7 +129,8 @@ plugins:
 ```
 
 Each named header, when the current turn carries it, contributes one line to
-the plugin's `<system-context>` block:
+the plugin's `<runtime_context>` block, which is prepended to the turn's user
+message:
 
 ```
 Request header X-Nexus-timezone: Europe/Amsterdam
