@@ -509,6 +509,13 @@ func (p *Plugin) endRun(r *run) {
 		if err := p.session.DeleteReservedLabel(reservedPrincipalIDKey); err != nil {
 			p.logger.Warn("clearing _principal_id session label failed", "error", err)
 		}
+		// The request headers are cleared here for the same reason and with
+		// the same ordering constraint as the identity above: they describe
+		// the run that is ending, and leaving them bound would let the next
+		// caller's plugins read a header this listener was never sent.
+		if err := p.session.SetRequestHeaders(nil); err != nil {
+			p.logger.Warn("clearing X-Nexus-* request header labels failed", "error", err)
+		}
 	}
 
 	p.mu.Lock()
@@ -549,6 +556,14 @@ func (p *Plugin) bindSessionContext(input runInput) {
 				"error", err, "principal_id", input.principalID)
 		}
 	}
+	// The request's X-Nexus-* headers REPLACE whatever the previous run bound,
+	// including when this run carried none — SetRequestHeaders clears the
+	// namespace for an empty map. That is the point: a plugin reading
+	// _header.tenant must never be handed the last run's tenant because this
+	// run's POST omitted the header.
+	if err := p.session.SetRequestHeaders(input.headers); err != nil {
+		p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+	}
 	for _, item := range input.contextItems {
 		if item.Description == "" {
 			// A context item with no key has nothing to bind to; skip it
@@ -571,7 +586,10 @@ func (p *Plugin) currentRun() *run {
 
 // buildUserInput maps a RunAgentInput's messages to a Nexus UserInput. The
 // trailing user message becomes Content; any earlier messages ride as
-// PreloadMessages so a resumed thread keeps prior context.
+// PreloadMessages so a resumed thread keeps prior context. The POST's
+// X-Nexus-* headers ride along on Headers, which is the seam an io.input
+// handler reads instead of the session labels bindSessionContext writes —
+// same values, no metadata read.
 func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 	sessionID := input.threadID
 	if sessionID == "" {
@@ -580,6 +598,7 @@ func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 	ui := events.UserInput{
 		SchemaVersion: events.UserInputVersion,
 		SessionID:     sessionID,
+		Headers:       input.headers,
 	}
 	msgs := input.messages
 	// Find the trailing user message to use as the live turn Content.

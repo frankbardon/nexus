@@ -8,6 +8,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 // binding selects the wire framing a response is rendered in. The zero value is
@@ -41,6 +42,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, calle
 		s.writeError(w, b, protoErr)
 		return
 	}
+	// Out-of-band caller context rides the transport, not the A2A message, so
+	// both bindings pick it up here rather than in translateSendMessage (which
+	// sees only the decoded request body).
+	in.headers = nexusheaders.Extract(r.Header)
 	if s.cfg.bridge == nil {
 		// Defensive: a Server constructed without a bridge cannot drive the bus.
 		s.writeError(w, b, errNoBridge())

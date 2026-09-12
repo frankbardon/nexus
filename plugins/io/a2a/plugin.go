@@ -202,6 +202,13 @@ type Plugin struct {
 	// session, which is what makes the contextId binding below single-valued.
 	sessionID string
 
+	// session is that same session's workspace, held for the one thing the id
+	// alone cannot do: binding the turn's X-Nexus-* request headers into the
+	// reserved "_header.*" labels so a plugin that never sees io.input can
+	// still read them. Nil in unit tests that construct the plugin without a
+	// session; every use is guarded.
+	session *engine.SessionWorkspace
+
 	// mu guards active and contextID: both are read by net/http goroutines and
 	// written by them, while bus handlers read active from arbitrary engine
 	// goroutines.
@@ -304,6 +311,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 
 	cfg, err := parseConfig(ctx.Config)

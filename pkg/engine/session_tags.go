@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/frankbardon/nexus/pkg/events"
@@ -99,14 +100,43 @@ func (s *SessionWorkspace) SetLabel(key, value string) error {
 	return s.applyLabel(key, value, false)
 }
 
-// applyLabel is the single internal apply-and-announce step for every
-// session-label write, general or reserved. Both installSessionTagHandlers
+// applyLabel is the single-key form of applyLabels, and the shape every
+// caller that writes one label at a time uses. Both installSessionTagHandlers
 // (after it has already rejected a reserved key on the general path) and
 // SetReservedLabel/DeleteReservedLabel (after validating the key actually is
-// reserved) call this — never SaveMeta directly — so there is exactly one
-// place that mutates Labels and exactly one announce event for anything
-// downstream watching session labels to subscribe to.
+// reserved) call this — never SaveMeta directly.
 func (s *SessionWorkspace) applyLabel(key, value string, deleted bool) error {
+	if deleted {
+		return s.applyLabels(nil, []string{key})
+	}
+	return s.applyLabels(map[string]string{key: value}, nil)
+}
+
+// applyLabels is the single internal apply-and-announce step for every
+// session-label write, general or reserved, one key or many — so there is
+// exactly one place that mutates Labels and exactly one announce event per
+// key for anything downstream watching session labels to subscribe to.
+//
+// # Why a batch form exists at all
+//
+// A whole-set replacement (SetRequestHeaders is the motivating caller: it
+// rebinds every X-Nexus-* header of a request on every turn) would otherwise
+// be N separate read-modify-write round trips through SessionMetadata and
+// SaveMeta, each one re-reading and re-serializing the whole session file to
+// change one key. Worse, a crash midway through would leave the labels
+// half-replaced. One read, one write, then the announcements keeps a
+// replacement atomic on disk and cheap per turn.
+//
+// Deletes are applied before sets so a caller replacing a set can pass the
+// stale keys and the fresh ones together without ordering them itself. Both
+// the application and the announcements run in sorted key order, so two runs
+// of the same replacement produce the same sequence of events rather than
+// whichever order Go's map iteration happened to take.
+func (s *SessionWorkspace) applyLabels(set map[string]string, del []string) error {
+	if len(set) == 0 && len(del) == 0 {
+		return nil
+	}
+
 	meta, err := s.SessionMetadata()
 	if err != nil {
 		return fmt.Errorf("reading session metadata: %w", err)
@@ -114,11 +144,22 @@ func (s *SessionWorkspace) applyLabel(key, value string, deleted bool) error {
 	if meta.Labels == nil {
 		meta.Labels = make(map[string]string)
 	}
-	if deleted {
-		delete(meta.Labels, key)
-	} else {
-		meta.Labels[key] = value
+
+	delKeys := append([]string(nil), del...)
+	sort.Strings(delKeys)
+	setKeys := make([]string, 0, len(set))
+	for k := range set {
+		setKeys = append(setKeys, k)
 	}
+	sort.Strings(setKeys)
+
+	for _, key := range delKeys {
+		delete(meta.Labels, key)
+	}
+	for _, key := range setKeys {
+		meta.Labels[key] = set[key]
+	}
+
 	if err := s.SaveMeta(meta); err != nil {
 		return fmt.Errorf("saving session metadata: %w", err)
 	}
@@ -126,20 +167,21 @@ func (s *SessionWorkspace) applyLabel(key, value string, deleted bool) error {
 	if s.bus == nil {
 		return nil
 	}
-	if deleted {
+	for _, key := range delKeys {
 		_ = s.bus.Emit("session.tag.deleted", events.SessionTagDeleted{
 			SchemaVersion: events.SessionTagDeletedVersion,
 			SessionID:     s.ID,
 			Key:           key,
 		})
-		return nil
 	}
-	_ = s.bus.Emit("session.tag.set", events.SessionTagSet{
-		SchemaVersion: events.SessionTagSetVersion,
-		SessionID:     s.ID,
-		Key:           key,
-		Value:         value,
-	})
+	for _, key := range setKeys {
+		_ = s.bus.Emit("session.tag.set", events.SessionTagSet{
+			SchemaVersion: events.SessionTagSetVersion,
+			SessionID:     s.ID,
+			Key:           key,
+			Value:         set[key],
+		})
+	}
 	return nil
 }
 

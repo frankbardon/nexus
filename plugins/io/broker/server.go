@@ -72,6 +72,17 @@ type ioMessage struct {
 
 	// cancel (client -> server)
 	Source string `json:"source,omitempty"`
+
+	// input (broker -> instance). The X-Nexus-* headers of the client HTTP
+	// request the broker translated into this message, keyed by normalized
+	// name. The broker terminates the client connection and this instance does
+	// not, so the transport hop is the ONLY way per-request caller context
+	// reaches a plugin here — see pkg/nexusheaders.
+	//
+	// Additive and omitempty: an older broker in front of a newer instance
+	// simply never sets it, and the instance behaves exactly as it did before,
+	// so no brokerframe.Version bump is implied.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // ioChoice is one option of a multiple-choice hitl.request, mirroring

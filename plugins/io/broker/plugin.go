@@ -43,6 +43,12 @@ type Plugin struct {
 	leaseID    string
 	sessionID  string
 
+	// session is held so a turn's forwarded X-Nexus-* request headers can be
+	// bound into the reserved "_header.*" labels, the read seam for a plugin
+	// that never sees io.input. Nil when the engine runs without a session;
+	// every use is guarded.
+	session *engine.SessionWorkspace
+
 	// spawnSecret is the per-spawn second factor the broker handed this process
 	// at exec. It is echoed in the register frame and is NEVER logged: unlike
 	// brokerAddr and leaseID (both of which appear in the init record below and
@@ -122,6 +128,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 
 	p.client = newClient(p.logger, clientConfig{
@@ -338,13 +345,28 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 func (p *Plugin) handleInbound(msg ioMessage) {
 	switch msg.Type {
 	case "input":
-		go func(content string) {
-			input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: content}
+		go func(content string, headers map[string]string) {
+			// The headers are the broker's report of the client HTTP request
+			// it translated — this process never saw that request. Bound
+			// before the emit so a plugin handling io.input cannot observe
+			// the turn ahead of its context; a message the broker forwarded
+			// without headers clears the namespace rather than leaving the
+			// previous turn's values standing.
+			if p.session != nil {
+				if err := p.session.SetRequestHeaders(headers); err != nil {
+					p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+				}
+			}
+			input := events.UserInput{
+				SchemaVersion: events.UserInputVersion,
+				Content:       content,
+				Headers:       headers,
+			}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(msg.Content)
+		}(msg.Content, msg.Headers)
 
 	case "approval.response":
 		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{

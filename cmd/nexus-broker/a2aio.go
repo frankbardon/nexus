@@ -72,6 +72,12 @@ type brokerIOMessage struct {
 
 	// cancel (broker -> instance)
 	Source string `json:"source,omitempty"`
+
+	// input (broker -> instance). The X-Nexus-* headers of the client HTTP
+	// request this message was translated from. This binary terminates that
+	// request and the instance does not, so forwarding them here is the only
+	// way per-request caller context reaches a plugin inside the instance.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // brokerIOChoice mirrors plugins/io/broker's ioChoice: one option of a

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 const (
@@ -35,6 +37,22 @@ type varConfig struct {
 	CWD        bool
 	SessionDir bool
 	OS         bool
+
+	// RequestHeaders names the X-Nexus-* request headers of the current turn
+	// to surface in the prompt, by normalized header name (`X-Nexus-Timezone`
+	// -> `timezone`). Empty by default.
+	//
+	// # Why an allowlist and not a boolean
+	//
+	// These values are client-controlled and unauthenticated — a caller writes
+	// whatever it likes into them (see pkg/nexusheaders). The engine therefore
+	// binds them into the RESERVED session-label namespace, which every
+	// <session_context> builder filters out, so nothing reaches a prompt just
+	// because somebody sent it. This setting is the deliberate exception, and
+	// naming each header is what keeps it deliberate: an operator who wants the
+	// caller's timezone in the prompt gets exactly that, and does not silently
+	// also get whatever new header a client starts sending next month.
+	RequestHeaders []string
 }
 
 // New creates a new dynamic variables plugin.
@@ -76,6 +94,21 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["os"].(bool); ok {
 		p.config.OS = v
+	}
+	if raw, ok := ctx.Config["request_headers"].([]any); ok {
+		for _, item := range raw {
+			name, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("nexus.system.dynvars: request_headers entries must be strings, got %T", item)
+			}
+			name = strings.ToLower(strings.TrimSpace(name))
+			name = strings.TrimPrefix(name, strings.ToLower(nexusheaders.Prefix))
+			if name == "" {
+				continue
+			}
+			p.config.RequestHeaders = append(p.config.RequestHeaders, name)
+		}
+		sort.Strings(p.config.RequestHeaders)
 	}
 
 	if p.prompts != nil {
@@ -128,6 +161,18 @@ func (p *Plugin) buildSection() string {
 	}
 	if p.config.OS && p.system != nil {
 		lines = append(lines, fmt.Sprintf("OS: %s/%s", p.system.OS, p.system.Arch))
+	}
+	// Read per render, not cached at Init: the headers belong to the turn in
+	// flight, and a session serving several callers rebinds them on every one.
+	// A header the caller did not send contributes no line at all, rather than
+	// an empty one the model would have to interpret.
+	for _, name := range p.config.RequestHeaders {
+		if p.session == nil {
+			break
+		}
+		if value, ok := p.session.RequestHeader(name); ok && value != "" {
+			lines = append(lines, fmt.Sprintf("Request header %s%s: %s", nexusheaders.Prefix, name, value))
+		}
 	}
 
 	if len(lines) == 0 {

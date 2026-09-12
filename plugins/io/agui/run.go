@@ -97,6 +97,13 @@ type runInput struct {
 	// Every call re-binds fresh from this field — a resumed thread under a
 	// different principal gets a new bind, never a stale one.
 	principalID string
+	// headers are the X-Nexus-* request headers of the POST that opened this
+	// run (nil when it carried none). startRun/resumeRun bind them into the
+	// session's reserved "_header.*" labels alongside principalID, and
+	// buildUserInput carries them on the turn's events.UserInput. Like
+	// principalID, every call re-binds fresh from this field, so a run whose
+	// request dropped a header never inherits the previous run's value.
+	headers map[string]string
 	// contextItems are the client-supplied RunAgentInput.Context entries.
 	// startRun/resumeRun write each directly as a general-namespace session
 	// tag (Description -> key, Value -> value), no veto — this is already-

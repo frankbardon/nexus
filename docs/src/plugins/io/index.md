@@ -12,6 +12,16 @@ I/O plugins handle user interaction — displaying agent output and collecting u
 | [Oneshot](./oneshot.md) | `nexus.io.oneshot` | Non-interactive single-turn JSON transcript (scripting / CI) |
 | [Broker IO](./broker.md) | `nexus.io.broker` | Dial-back transport for instances spawned by the [session broker](../../guides/session-broker.md) |
 
+## Request Headers
+
+Every web-facing transport (`nexus.io.agui`, `nexus.io.a2a`, `nexus.io.browser`,
+`nexus.io.realtime`, and `nexus.io.broker` via the gateway) forwards request
+headers named `X-Nexus-*` into the engine, where plugins read them from
+`events.UserInput.Headers` or `session.RequestHeaders()`. It is how a client
+passes per-request context — tenant, locale, timezone, a trace correlator —
+without putting it in the prompt. No configuration turns it on. See
+[Request Headers](../../guides/request-headers.md).
+
 ## I/O Event Flow
 
 Both I/O plugins follow the same event pattern:

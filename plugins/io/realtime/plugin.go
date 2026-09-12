@@ -36,6 +36,12 @@ type Plugin struct {
 	logger *slog.Logger
 	server *Server
 
+	// session is held so a turn's X-Nexus-* request headers can be bound into
+	// the reserved "_header.*" labels, the read seam for a plugin that never
+	// sees io.input. Nil when the engine runs without a session; every use is
+	// guarded.
+	session *engine.SessionWorkspace
+
 	listenAddr string
 	path       string
 	maxClients int
@@ -83,6 +89,7 @@ func (p *Plugin) Emissions() []string {
 func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
+	p.session = ctx.Session
 
 	p.listenAddr = ":7676"
 	if v, ok := ctx.Config["listen_addr"].(string); ok && v != "" {
@@ -230,19 +237,29 @@ func (p *Plugin) handleHITLRequest(e engine.Event[any]) {
 // client. Following io/browser's pattern, we offload to a goroutine for
 // io.input; the lighter cancel/audio/approval emits are short-circuit
 // dispatches that complete quickly enough to ride the read pump.
-func (p *Plugin) handleInbound(env envelope) {
+func (p *Plugin) handleInbound(env envelope, headers map[string]string) {
 	switch env.Type {
 	case "input":
-		go func(content string) {
+		go func(content string, headers map[string]string) {
+			// Bound before the emit so a plugin handling io.input never
+			// observes the turn ahead of its context; a connection that sent
+			// no X-Nexus-* header clears the namespace rather than leaving
+			// another connection's values standing.
+			if p.session != nil {
+				if err := p.session.SetRequestHeaders(headers); err != nil {
+					p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+				}
+			}
 			input := events.UserInput{
 				SchemaVersion: events.UserInputVersion,
 				Content:       content,
+				Headers:       headers,
 			}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(env.Content)
+		}(env.Content, headers)
 
 	case "audio.chunk":
 		_ = p.bus.Emit("voice.audio.input.chunk", events.VoiceAudioInputChunk{

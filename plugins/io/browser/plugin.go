@@ -24,6 +24,13 @@ type Plugin struct {
 	hub     *Hub
 	unsubs  []func()
 
+	// session is held for one purpose the Server's own copy cannot serve:
+	// binding a turn's X-Nexus-* request headers into the reserved
+	// "_header.*" labels from the input callback, so a plugin that never sees
+	// io.input can still read them. Nil when the engine runs without a
+	// session; every use is guarded.
+	session *engine.SessionWorkspace
+
 	host        string
 	port        int
 	openBrowser bool
@@ -125,6 +132,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	sessionID := ""
 	if ctx.Session != nil {
 		sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 	p.adapter = NewAdapter(p.hub, sessionID)
 	p.server = NewServer(p.hub, ctx.Session, p.logger, p.host, p.port, ctx.Capabilities, ctx.Bus)
@@ -135,18 +143,37 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	// current goroutine waiting for a WebSocket response. Running the handler
 	// on the readPump goroutine would deadlock since readPump cannot read the
 	// answer while it is blocked inside the handler chain.
-	p.adapter.OnInput(func(msg ui.InputMessage) {
+	p.adapter.OnInput(func(clientID string, msg ui.InputMessage) {
 		if msg.Content == "/quit" || msg.Content == "/exit" {
 			_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "browser"})
 			return
 		}
-		go func(content string) {
-			input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: content}
+		// The X-Nexus-* headers of the upgrade this message arrived on. They
+		// are resolved per message rather than once at connect time because
+		// several browsers may share one session, and a turn must carry the
+		// context of the connection that actually typed it.
+		headers := p.hub.Headers(clientID)
+		go func(content string, headers map[string]string) {
+			// Bound before the emit, for the reason engine.SetRequestHeaders
+			// documents: a plugin reading the headers while handling io.input
+			// must not observe the turn ahead of its context. A message from a
+			// connection that sent none clears the namespace rather than
+			// leaving another connection's values standing.
+			if p.session != nil {
+				if err := p.session.SetRequestHeaders(headers); err != nil {
+					p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+				}
+			}
+			input := events.UserInput{
+				SchemaVersion: events.UserInputVersion,
+				Content:       content,
+				Headers:       headers,
+			}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(msg.Content)
+		}(msg.Content, headers)
 	})
 
 	p.adapter.OnApprovalResponse(func(msg ui.ApprovalResponseMessage) {

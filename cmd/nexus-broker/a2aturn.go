@@ -10,6 +10,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/a2a"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 // This file drives one A2A turn across the broker: it decodes the inbound
@@ -67,6 +68,12 @@ type a2aTurnInput struct {
 	// taskID is the task this message continues, empty for a message that
 	// starts a new one (specification section 3.4).
 	taskID string
+	// headers are the X-Nexus-* headers of the client HTTP request this
+	// message arrived on. The broker terminates that request and the instance
+	// does not, so forwarding them on the IO envelope is the only way a plugin
+	// inside the instance can read per-request caller context. See
+	// pkg/nexusheaders.
+	headers map[string]string
 }
 
 // ---- starting and continuing a turn ----
@@ -205,7 +212,7 @@ func (s *A2AServer) beginTurn(ctx context.Context, card *servedAgentCard, in a2a
 	// Bound before the send, because the send goes through it.
 	task.useInstance(instance)
 
-	if err := task.send(brokerIOMessage{Type: ioTypeInput, Content: in.text}); err != nil {
+	if err := task.send(brokerIOMessage{Type: ioTypeInput, Content: in.text, Headers: in.headers}); err != nil {
 		// The message never reached the agent, so there is no turn to report on.
 		// The caller settles the task, which releases the lease.
 		return errSendFailed(card.profile, err)
@@ -412,6 +419,10 @@ func (s *A2AServer) handleSendMessage(w http.ResponseWriter, r *http.Request, ca
 		s.writeA2AError(w, card.profile, b, protoErr)
 		return
 	}
+	// Out-of-band caller context rides the transport rather than the A2A
+	// message, so it is read here rather than in translateA2ASendMessage,
+	// which sees only the decoded body.
+	in.headers = nexusheaders.Extract(r.Header)
 
 	caller := callerPrincipal(r)
 	var (

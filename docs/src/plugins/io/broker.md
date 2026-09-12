@@ -216,6 +216,22 @@ it; see [the guide](../../guides/session-broker.md#post-releaselease_id--release
 Anything still in the outbound buffer is flushed on a bound rather than waited
 out — see [Output is buffered across a reconnect](#output-is-buffered-across-a-reconnect).
 
+## Request headers
+
+This instance never sees the client's HTTP request — `nexus-broker` terminates
+it — so the gateway extracts the request's `X-Nexus-*` headers itself and
+forwards them on the `input` message of the IO envelope. This plugin then
+applies them exactly as an in-process web transport would: onto
+`events.UserInput.Headers` and into the session's reserved `_header.*` labels.
+
+That covers the broker's A2A surface, the part of the gateway that parses and
+translates client requests. Traffic outside the `agents:` namespace is
+forwarded unparsed, so it carries no headers through the hop.
+
+The envelope field is additive and `omitempty`: an older broker in front of a
+newer instance never sets it, and the instance behaves exactly as before. See
+[Request Headers](../../guides/request-headers.md).
+
 ## Security
 
 The plugin makes **no authorization decisions**. It presents the credentials the

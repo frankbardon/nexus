@@ -522,6 +522,18 @@ Swap the method for `CancelTask` to see the `UnsupportedOperationError`
 not exist for the `TaskNotFoundError` (`-32001`), or drop the `Authorization`
 header for the `401` and its RFC 6750 challenge.
 
+## Request headers
+
+Request headers named `X-Nexus-*` are forwarded into the engine on every turn
+this transport starts, keyed by normalized name (`X-Nexus-Tenant-ID` ->
+`tenant-id`). Plugins read them from `events.UserInput.Headers` or, outside the
+`io.input` path, from `session.RequestHeaders()`. Nothing authenticates them —
+they are the caller's own statement about its request — so they are bound to
+the reserved, prompt-invisible session-label namespace and surfaced to the
+model only when an operator names one in `nexus.system.dynvars.request_headers`.
+No configuration turns the forwarding on. See
+[Request Headers](../../guides/request-headers.md).
+
 ## See also
 
 - [A2A Interoperability guide](../../guides/a2a.md) — the protocol mapping, a

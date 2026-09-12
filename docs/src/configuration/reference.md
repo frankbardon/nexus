@@ -3175,6 +3175,7 @@ opt-in only.
 | `cwd`         | bool | `false` | Include the engine working directory. |
 | `session_dir` | bool | `false` | Include the session workspace root. |
 | `os`          | bool | `false` | Include `os/arch`. |
+| `request_headers` | list of strings | `[]` | Normalized `X-Nexus-*` request header names to surface in the prompt, e.g. `["timezone", "locale"]`. Each named header contributes a `Request header X-Nexus-<name>: <value>` line when the current turn carries it, and nothing when it does not. Entries are lowercased and may be written with or without the `X-Nexus-` prefix. Header values are client-controlled and unauthenticated, so every header must be named explicitly — there is no "all headers" setting. See [Request Headers](../guides/request-headers.md). |
 
 ---
 
