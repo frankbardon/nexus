@@ -149,3 +149,65 @@ func TestExtract_ResultIsIndependent(t *testing.T) {
 		t.Errorf("Extract() result changed with the request header: %q", got["tenant"])
 	}
 }
+
+func TestSanitize_NormalizesEitherNameForm(t *testing.T) {
+	got := Sanitize(map[string]string{
+		"tenant-id":          "acme",
+		"X-Nexus-Request-ID": "req-1",
+		"x-nexus-locale":     "nl-NL",
+	})
+	want := map[string]string{"tenant-id": "acme", "request-id": "req-1", "locale": "nl-NL"}
+	if len(got) != len(want) {
+		t.Fatalf("Sanitize() = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("Sanitize()[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+func TestSanitize_DropsUnusableNames(t *testing.T) {
+	got := Sanitize(map[string]string{
+		"bad key":                           "v",
+		"":                                  "v",
+		"ok":                                "v",
+		"X-Nexus-":                          "v",
+		strings.Repeat("a", MaxNameBytes+1): "v",
+	})
+	if len(got) != 1 || got["ok"] != "v" {
+		t.Errorf("Sanitize() = %v, want only the usable name", got)
+	}
+}
+
+// Sanitize is the second door into the same room, so it must enforce the same
+// bounds Extract does.
+func TestSanitize_SharesExtractBounds(t *testing.T) {
+	in := map[string]string{}
+	for i := 0; i < MaxCount+10; i++ {
+		in[fmt.Sprintf("h%03d", i)] = "v"
+	}
+	if got := len(Sanitize(in)); got != MaxCount {
+		t.Errorf("Sanitize kept %d, want the MaxCount %d Extract enforces", got, MaxCount)
+	}
+
+	long := Sanitize(map[string]string{"big": strings.Repeat("x", MaxValueBytes+500)})
+	if got := len(long["big"]); got != MaxValueBytes {
+		t.Errorf("Sanitize value length = %d, want %d", got, MaxValueBytes)
+	}
+}
+
+func TestSanitize_StripsControlCharacters(t *testing.T) {
+	if got := Sanitize(map[string]string{"note": "line\r\none"})["note"]; got != "lineone" {
+		t.Errorf("Sanitize()[note] = %q, want control characters stripped", got)
+	}
+}
+
+func TestSanitize_EmptyReturnsNil(t *testing.T) {
+	if got := Sanitize(nil); got != nil {
+		t.Errorf("Sanitize(nil) = %v, want nil", got)
+	}
+	if got := Sanitize(map[string]string{"bad key": "v"}); got != nil {
+		t.Errorf("Sanitize() = %v, want nil when nothing survives", got)
+	}
+}

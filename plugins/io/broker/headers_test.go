@@ -145,25 +145,98 @@ func TestClientHeadersAnnouncementAppliesToTheNextInput(t *testing.T) {
 	}
 }
 
-// The pipe is opaque, so a client CAN set headers on its own envelope and the
-// broker cannot strip it. The broker's announcement — derived from the HTTP
-// request an operator's proxy controls — must win, or a caller could overwrite
-// what that proxy asserted about it.
-func TestClientHeadersAnnouncementBeatsAClientSuppliedField(t *testing.T) {
+// The two sources merge: the connection carries what is fixed for the
+// conversation, the turn carries what varies, and a key the connection set is
+// NOT overridable — the pipe is opaque, so a client can put anything on its own
+// envelope, and a proxy-injected value must survive that.
+func TestPerTurnHeadersMergeUnderTheAnnouncement(t *testing.T) {
 	_, run := newHeaderTestPlugin(t)
 
-	run(ioMessage{Type: "client.headers", Headers: map[string]string{"subject": "alice"}})
+	run(ioMessage{Type: "client.headers", Headers: map[string]string{
+		"subject": "alice",
+		"tenant":  "acme",
+	}})
 	in := run(ioMessage{
 		Type:    "input",
 		Content: "hello",
-		Headers: map[string]string{"subject": "root", "extra": "smuggled"},
+		Headers: map[string]string{
+			"subject":    "root",    // collides: the connection wins
+			"request-id": "req-123", // per-turn only: comes through
+		},
 	})
 
 	if in.Headers["subject"] != "alice" {
-		t.Errorf("io.input Headers[subject] = %q, want the announced alice", in.Headers["subject"])
+		t.Errorf("Headers[subject] = %q, want the connection's alice; a caller must not overwrite it",
+			in.Headers["subject"])
 	}
-	if _, present := in.Headers["extra"]; present {
-		t.Errorf("io.input Headers = %v; an announcement replaces the message field wholesale", in.Headers)
+	if in.Headers["tenant"] != "acme" {
+		t.Errorf("Headers[tenant] = %q, want the connection's acme", in.Headers["tenant"])
+	}
+	if in.Headers["request-id"] != "req-123" {
+		t.Errorf("Headers[request-id] = %q, want the per-turn value", in.Headers["request-id"])
+	}
+}
+
+// Per-turn values genuinely vary turn to turn on one connection, which is the
+// whole reason the merge exists.
+func TestPerTurnHeadersVaryAcrossTurns(t *testing.T) {
+	_, run := newHeaderTestPlugin(t)
+
+	run(ioMessage{Type: "client.headers", Headers: map[string]string{"tenant": "acme"}})
+
+	for _, want := range []string{"req-1", "req-2", "req-3"} {
+		in := run(ioMessage{
+			Type:    "input",
+			Content: "hello",
+			Headers: map[string]string{"request-id": want},
+		})
+		if in.Headers["request-id"] != want {
+			t.Errorf("Headers[request-id] = %q, want %q", in.Headers["request-id"], want)
+		}
+		if in.Headers["tenant"] != "acme" {
+			t.Errorf("the fixed header was lost on a per-turn update: %v", in.Headers)
+		}
+	}
+}
+
+// The per-turn half bypasses nexusheaders.Extract, so it must be normalized and
+// bounded on the way in rather than trusted as already-clean.
+func TestPerTurnHeadersAreNormalizedAndBounded(t *testing.T) {
+	_, run := newHeaderTestPlugin(t)
+
+	run(ioMessage{Type: "client.headers", Headers: map[string]string{"tenant": "acme"}})
+	in := run(ioMessage{
+		Type:    "input",
+		Content: "hello",
+		Headers: map[string]string{
+			"X-Nexus-Request-ID": "req-1",         // prefixed + cased: normalized
+			"bad key":            "dropped",       // not a usable label key
+			"note":               "line\r\nbreak", // control characters stripped
+		},
+	})
+
+	if in.Headers["request-id"] != "req-1" {
+		t.Errorf("a prefixed per-turn name was not normalized: %v", in.Headers)
+	}
+	if _, present := in.Headers["bad key"]; present {
+		t.Errorf("an unusable name survived: %v", in.Headers)
+	}
+	if got := in.Headers["note"]; got != "linebreak" {
+		t.Errorf("Headers[note] = %q, want control characters stripped", got)
+	}
+}
+
+// Identity is deliberately NOT part of the merge.
+func TestPerTurnHeadersCannotContributeIdentity(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	id, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "client.headers", PrincipalID: "alice"},
+		ioMessage{Type: "input", Content: "hello", PrincipalID: "root",
+			Headers: map[string]string{"principal_id": "root"}},
+	)
+	if !ok || id != "alice" {
+		t.Errorf("_principal_id = (%q, %v), want the announced alice", id, ok)
 	}
 }
 

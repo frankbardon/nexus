@@ -29,6 +29,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 const pluginID = "nexus.io.broker"
@@ -353,27 +354,71 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 	})
 }
 
-// inputHeaders resolves which X-Nexus-* headers an inbound `input` belongs to.
+// inputHeaders resolves which X-Nexus-* headers an inbound `input` belongs to,
+// by merging the two sources a turn can have.
 //
-// The broker fills the message's own Headers on the surface it decodes (A2A),
-// and announces them on a separate `client.headers` payload on the surfaces it
-// forwards verbatim. An announcement WINS where one has been made, and that
-// precedence is the security-relevant half of this function rather than a tie
-// break: on the opaque pipe a client can set `headers` on its own envelope and
-// the broker cannot strip it, so if the message field won, a caller could
-// overwrite whatever an operator's reverse proxy asserted about it. The
-// announcement comes from the HTTP request, which is the hop that proxy
-// controls.
+// # The two sources, and why neither alone is enough
 //
-// With no announcement ever made, the message's own field stands — that is the
-// A2A path, where the broker built the message from the request itself.
+// A client connection's headers are fixed at the WebSocket handshake — that is
+// the only request a WebSocket has — and the broker announces them ahead of
+// every IO frame. That suits the values describing the CONVERSATION: the
+// tenant, the caller's subject, the locale. It cannot carry a value that
+// changes from one turn to the next, because there is no new handshake to put
+// one on.
+//
+// So a client may also attach headers to the `input` payload itself, which is
+// per-turn by construction. Those fill in AROUND the connection's rather than
+// replacing them.
+//
+// # Connection-scoped wins, per key
+//
+// Where both name the same header the announcement wins, and that is the
+// security-relevant half of this function rather than a tie break. The
+// announcement comes from the HTTP handshake — the hop an operator's reverse
+// proxy controls and injects into — while the message field is whatever the
+// client typed on a pipe the broker forwards verbatim and cannot filter. If
+// the message won, anything a trusted proxy asserted about a caller could be
+// overridden by that caller.
+//
+// The rule this gives an integrator is simple: put fixed values on the
+// handshake, varying values on the turn, and never the same key on both. A
+// value that must change per turn simply must not be pinned on the handshake.
+//
+// Identity is NOT merged — see inputPrincipalID, which keeps the announcement
+// outright. A verified identity has no per-turn variant worth the risk of a
+// client being able to contribute one.
+//
+// With no announcement ever made the message's own field stands entirely: that
+// is the A2A path, where the broker built the payload from the request itself,
+// so the field is the broker's and not a client's.
 func (p *Plugin) inputHeaders(msg ioMessage) map[string]string {
 	p.clientMu.Lock()
-	defer p.clientMu.Unlock()
-	if p.clientHeadersKnown {
-		return p.clientHeaders
+	connection := p.clientHeaders
+	known := p.clientHeadersKnown
+	p.clientMu.Unlock()
+
+	if !known {
+		return msg.Headers
 	}
-	return msg.Headers
+	// Client-authored, so it gets the same normalization and the same bounds
+	// the handshake path already applies. Without this a caller could name a
+	// header anything, or send a megabyte of them, on a path that bypasses
+	// nexusheaders.Extract entirely.
+	perTurn := nexusheaders.Sanitize(msg.Headers)
+	if len(perTurn) == 0 {
+		return connection
+	}
+	if len(connection) == 0 {
+		return perTurn
+	}
+	out := make(map[string]string, len(perTurn)+len(connection))
+	for k, v := range perTurn {
+		out[k] = v
+	}
+	for k, v := range connection {
+		out[k] = v // last write wins: the handshake is authoritative
+	}
+	return out
 }
 
 // inputPrincipalID resolves the verified identity an inbound `input` belongs

@@ -227,12 +227,40 @@ An empty announcement is sent too, and is what clears the instance's copy, so
 a second client connection that sends no header does not inherit the first
 one's values.
 
-**The announcement wins over a `headers` field on the client's own `input`
-envelope.** Because the pipe is opaque, a client can set that field and the
-broker cannot strip it. The announcement comes from the HTTP request — the hop
-an operator's reverse proxy controls and injects into — so if the client's
-field won, anything a trusted proxy asserted could be overridden by the caller
-it was asserting about.
+#### Fixed on the handshake, varying on the turn
+
+A WebSocket has headers only at the upgrade, so the announcement carries the
+values that are fixed for the **conversation** — tenant, subject, locale. For a
+value that changes turn to turn there is no new handshake to put it on, so a
+client may also attach `headers` to the `input` payload itself, which is
+per-turn by construction. The two are **merged**.
+
+```
+handshake:  X-Nexus-Tenant: acme          ← fixed for the conversation
+input:      {"headers": {"request-id": "req-123"}}   ← this turn only
+instance:   {tenant: acme, request-id: req-123}
+```
+
+**Where both name the same header, the handshake wins.** That precedence is
+the security-relevant half rather than a tie break: the announcement comes from
+the HTTP request, the hop an operator's reverse proxy controls and injects
+into, while the message field is whatever the client typed on a pipe the broker
+forwards verbatim and cannot filter. If the message won, anything a trusted
+proxy asserted about a caller could be overridden by that caller.
+
+So the integrator's rule is: **put fixed values on the handshake, varying
+values on the turn, and never the same key on both.** A value that must change
+per turn simply must not be pinned on the handshake, or the pinned one wins
+every time.
+
+Per-turn headers go through the same normalization and the same bounds as the
+handshake path (`nexusheaders.Sanitize`), so a name may be written either
+`request-id` or `X-Nexus-Request-ID`, an unusable name is dropped, and the
+count and size caps below apply to the merged pair.
+
+**Identity is not merged.** `principal_id` on a client's own payload is ignored
+outright whenever an announcement exists — a verified identity has no per-turn
+variant worth the risk of a client being able to contribute one.
 
 Both the envelope field and the announcement are additive: an older broker
 sends neither, and the instance behaves exactly as it did before.
@@ -275,7 +303,8 @@ broker's own validator, so it holds regardless of who connects.
 
 ## Reference
 
-- Convention, normalization and bounds: `pkg/nexusheaders`
+- Convention, normalization and bounds: `pkg/nexusheaders` — `Extract` for an
+  `http.Header`, `Sanitize` for values that arrive in a transport's own payload
 - Event field: `events.UserInput.Headers` (schema v3)
 - Session seam: `engine.SessionWorkspace.SetRequestHeaders` /
   `RequestHeaders` / `RequestHeader`

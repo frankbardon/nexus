@@ -235,10 +235,18 @@ client-facing surfaces differently:
   connection's headers. An empty one clears, which is what stops a second
   client connection inheriting the first's values.
 
-Where an announcement has been made it **wins** over a `headers` field on the
-client's own `input` envelope: the announcement comes from the HTTP request an
-operator's reverse proxy controls, while the envelope field is whatever the
-client typed on a pipe the broker cannot filter.
+The two sources **merge**. The announcement carries what is fixed for the
+connection (a WebSocket has headers only at the upgrade); a client may attach
+`headers` to its own `input` payload for values that vary per turn, and those
+fill in around the connection's. Where both name the same header the
+announcement wins — it comes from the HTTP handshake an operator's reverse
+proxy controls, while the envelope field is whatever the client typed on a pipe
+the broker cannot filter. Put fixed values on the handshake, varying values on
+the turn, never the same key on both.
+
+Per-turn headers are normalized and bounded identically to the handshake path.
+Identity is not merged: a `principal_id` on a client's payload is ignored
+whenever an announcement exists.
 
 Both are additive: an older broker sends neither and this plugin behaves
 exactly as before.

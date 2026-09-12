@@ -2334,9 +2334,11 @@ instance that never sees its HTTP request.
   the `input` payload it builds.
 - On the **client stream** (`GET /leases/{lease_id}/stream`) the broker
   forwards client frames verbatim, so instead it sends its own `client.headers`
-  payload immediately ahead of each client IO frame. That announcement wins
-  over any `headers` a client sets on its own envelope, because it comes from
-  the HTTP hop your proxy controls and the envelope field does not.
+  payload immediately ahead of each client IO frame, carrying the handshake's
+  headers. Values that vary per turn ride the client's own `input` payload and
+  are merged under those — where both name the same header the handshake wins,
+  because it comes from the HTTP hop your proxy controls and the envelope field
+  does not. Put fixed values on the handshake, varying values on the turn.
 
 Alongside them the broker forwards the **principal it resolved** for the
 request — from a ticket or a bearer token, through the `auth:` chain that also

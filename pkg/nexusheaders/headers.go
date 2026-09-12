@@ -73,7 +73,27 @@ func Name(field string) (string, bool) {
 	if len(field) <= len(Prefix) || !strings.EqualFold(field[:len(Prefix)], Prefix) {
 		return "", false
 	}
-	name := strings.ToLower(field[len(Prefix):])
+	return validName(field[len(Prefix):])
+}
+
+// normalizeName accepts a name written either with the prefix or without it,
+// for a caller that holds already-extracted values rather than an http.Header.
+// Name is the stricter form: on a real header the prefix is what marks the
+// field as ours, so its absence there means the field is somebody else's.
+func normalizeName(raw string) (string, bool) {
+	// >= rather than >: a bare "X-Nexus-" must strip to the empty string and be
+	// rejected by validName, exactly as Name rejects it on a real header.
+	// Leaving it unstripped would admit "x-nexus-" as a literal header name.
+	if len(raw) >= len(Prefix) && strings.EqualFold(raw[:len(Prefix)], Prefix) {
+		raw = raw[len(Prefix):]
+	}
+	return validName(raw)
+}
+
+// validName lowercases a prefix-stripped name and rejects anything a session
+// label key and a prompt line cannot both hold verbatim.
+func validName(name string) (string, bool) {
+	name = strings.ToLower(name)
 	if name == "" || len(name) > MaxNameBytes {
 		return "", false
 	}
@@ -107,25 +127,71 @@ func Extract(h http.Header) map[string]string {
 	if len(h) == 0 {
 		return nil
 	}
-
-	type entry struct {
-		name  string
-		value string
-	}
 	var entries []entry
 	for field, values := range h {
 		name, ok := Name(field)
 		if !ok {
 			continue
 		}
-		value := sanitize(strings.Join(values, ", "))
-		if len(value) > MaxValueBytes {
-			value = value[:MaxValueBytes]
+		entries = append(entries, entry{name: name, value: strings.Join(values, ", ")})
+	}
+	return bound(entries)
+}
+
+// Sanitize applies the same normalization and bounds to a map that already
+// claims to hold X-Nexus-* values, and is the entry point for values that did
+// NOT arrive on an http.Header — a transport that carries them in its own
+// payload, such as the per-turn headers a client may attach to the session
+// broker's instance IO envelope.
+//
+// Names may be written either normalized (`tenant-id`) or with the prefix
+// still on (`X-Nexus-Tenant-ID`); both land on the same key. A name that could
+// not have come off a real header — wrong character set, empty, over-long — is
+// dropped rather than corrected, because a caller that sent one has a bug and
+// silently reshaping it would hide that.
+//
+// Sharing the bounds with Extract is the point of the function existing. These
+// values reach the same places (session metadata, potentially a prompt), so a
+// second entry point with its own limits would be a second, weaker door into
+// the same room.
+func Sanitize(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	var entries []entry
+	for rawName, value := range in {
+		name, ok := normalizeName(rawName)
+		if !ok {
+			continue
 		}
 		entries = append(entries, entry{name: name, value: value})
 	}
+	return bound(entries)
+}
+
+// entry is one candidate header on its way through normalization.
+type entry struct {
+	name  string
+	value string
+}
+
+// bound sanitizes each value and applies MaxValueBytes, MaxCount and
+// MaxTotalBytes, returning nil when nothing survives.
+//
+// Over-bound input is dropped in a defined order: names are sorted, then kept
+// while the bounds allow. Sorting first is what makes the dropping
+// deterministic — the same input yields the same map on every run and in a
+// replay, instead of whichever entries Go's map iteration happened to reach
+// first.
+func bound(entries []entry) map[string]string {
 	if len(entries) == 0 {
 		return nil
+	}
+	for i := range entries {
+		entries[i].value = sanitize(entries[i].value)
+		if len(entries[i].value) > MaxValueBytes {
+			entries[i].value = entries[i].value[:MaxValueBytes]
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
