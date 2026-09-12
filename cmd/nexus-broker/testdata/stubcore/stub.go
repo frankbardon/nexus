@@ -127,6 +127,13 @@ type Report struct {
 	// actually reached the process the broker spawned, rather than being
 	// assembled correctly and dropped somewhere in between.
 	ClientHeaders map[string]string `json:"client_headers,omitempty"`
+
+	// ClientPrincipalID is the identity carried on that same announcement: what
+	// the broker's own credential validator resolved, as opposed to what the
+	// caller asserted in ClientHeaders. Reported separately for the same reason
+	// it travels separately — a test that could not tell them apart could not
+	// prove the verified one survived the hop.
+	ClientPrincipalID string `json:"client_principal_id,omitempty"`
 }
 
 // Run is the stub's whole main(). variant is the caller's compile-time
@@ -364,6 +371,7 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 	// a report request discloses. It is connection-scoped, exactly as the
 	// broker's own announcement is.
 	var clientHeaders map[string]string
+	var clientPrincipalID string
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -401,7 +409,7 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 			// would put a frame no real instance produces in front of every
 			// answer a test is waiting for.
 			if isPayloadType(frame.Payload, "client.headers") {
-				clientHeaders = decodeClientHeaders(frame.Payload)
+				clientHeaders, clientPrincipalID = decodeClientContext(frame.Payload)
 				continue
 			}
 			payload := frame.Payload
@@ -413,6 +421,7 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				// fail, so this is belt-and-braces.
 				report := s.report
 				report.ClientHeaders = clientHeaders
+				report.ClientPrincipalID = clientPrincipalID
 				if encoded, mErr := json.Marshal(report); mErr == nil {
 					payload = encoded
 				} else {
@@ -442,17 +451,18 @@ func isInputPayload(payload []byte) bool {
 	return isPayloadType(payload, "input")
 }
 
-// decodeClientHeaders pulls the header map off a `client.headers` payload. An
-// announcement carrying none decodes to nil, which is the clear the broker
-// means by it.
-func decodeClientHeaders(payload []byte) map[string]string {
+// decodeClientContext pulls the header map and the verified principal off a
+// `client.headers` payload. An announcement carrying neither decodes to nil and
+// "", which is the clear the broker means by it.
+func decodeClientContext(payload []byte) (map[string]string, string) {
 	var msg struct {
-		Headers map[string]string `json:"headers"`
+		Headers     map[string]string `json:"headers"`
+		PrincipalID string            `json:"principal_id"`
 	}
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		return nil
+		return nil, ""
 	}
-	return msg.Headers
+	return msg.Headers, msg.PrincipalID
 }
 
 // isPayloadType reports whether an IO payload is an object carrying the named

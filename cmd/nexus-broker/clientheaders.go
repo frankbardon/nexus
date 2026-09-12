@@ -57,19 +57,33 @@ import (
 // inheriting the first one's values.
 
 // ioTypeClientHeaders is the instance-bound IO payload type carrying one client
-// connection's X-Nexus-* request headers. It is broker-originated: no client
-// and no instance ever sends one.
+// connection's X-Nexus-* request headers and the principal this broker resolved
+// for it. It is broker-originated: no client and no instance ever sends one,
+// which is what makes the principal on it trustworthy inside the instance —
+// there is no path by which a client's own frame can carry that field to the
+// far end, because a client frame is forwarded verbatim and this payload type
+// is only ever produced here.
 const ioTypeClientHeaders = "client.headers"
 
 // announceClientHeaders wraps an instance-bound forward function so that every
-// SignalIO frame is preceded by a `client.headers` payload reporting headers.
+// SignalIO frame is preceded by a `client.headers` payload reporting this
+// connection's headers and the principal the broker resolved for it.
+//
+// The two travel together because they describe the same connection and must
+// never be observed apart — an instance holding one turn's identity beside
+// another turn's attributes would be worse than holding neither. They stay
+// SEPARATE FIELDS because they carry different weight: the headers are what
+// the caller said about itself, and the principal is what this broker's
+// credential validator checked (resolveClientPrincipal, which is also what
+// ownsLease gates on). An instance that could not tell them apart would have
+// no way to keep an authorization decision off the unverified half.
 //
 // Non-IO frames (pings, liveness, control) are forwarded untouched: they do not
 // carry user input, so there is nothing for a header to describe.
-func (g *Gateway) announceClientHeaders(headers map[string]string, forward func(string, brokerframe.Frame, []byte)) func(string, brokerframe.Frame, []byte) {
+func (g *Gateway) announceClientHeaders(headers map[string]string, principalID string, forward func(string, brokerframe.Frame, []byte)) func(string, brokerframe.Frame, []byte) {
 	return func(leaseID string, frame brokerframe.Frame, data []byte) {
 		if frame.Signal == brokerframe.SignalIO {
-			g.sendClientHeaders(leaseID, headers)
+			g.sendClientHeaders(leaseID, headers, principalID)
 		}
 		forward(leaseID, frame, data)
 	}
@@ -82,10 +96,11 @@ func (g *Gateway) announceClientHeaders(headers map[string]string, forward func(
 // that follows. Losing the headers costs a turn its out-of-band context, which
 // is a degradation; refusing the turn over it would be an outage, and the
 // headers are supplementary by construction.
-func (g *Gateway) sendClientHeaders(leaseID string, headers map[string]string) {
+func (g *Gateway) sendClientHeaders(leaseID string, headers map[string]string, principalID string) {
 	data, err := encodeIOFrame(leaseID, brokerIOMessage{
-		Type:    ioTypeClientHeaders,
-		Headers: headers,
+		Type:        ioTypeClientHeaders,
+		Headers:     headers,
+		PrincipalID: principalID,
 	})
 	if err != nil {
 		g.logger.Warn("could not encode the client's request headers for the instance",

@@ -57,7 +57,12 @@ const defaultBindAddr = "127.0.0.1:8090"
 // reservedPrincipalIDKey is the reserved-namespace session label startRun/
 // resumeRun bind the request's resolved principal into, and endRun clears.
 // See bindSessionContext.
-const reservedPrincipalIDKey = "_principal_id"
+//
+// Aliased from the engine rather than spelled again here: nexus.io.broker
+// binds the same label from the principal the broker resolved, and two
+// transports writing one label from two copies of its name is exactly the
+// drift worth designing out.
+const reservedPrincipalIDKey = engine.ReservedPrincipalIDKey
 
 // customBridgedEvents are Nexus-specific bus events with no canonical AG-UI
 // equivalent. They ride the AG-UI Custom event (name = bus event type) so a
@@ -506,7 +511,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 // p.currentRun(). Deleting first, then releasing the slot, closes it.
 func (p *Plugin) endRun(r *run) {
 	if p.session != nil {
-		if err := p.session.DeleteReservedLabel(reservedPrincipalIDKey); err != nil {
+		if err := p.session.SetPrincipalID(""); err != nil {
 			p.logger.Warn("clearing _principal_id session label failed", "error", err)
 		}
 		// The request headers are cleared here for the same reason and with
@@ -551,7 +556,7 @@ func (p *Plugin) bindSessionContext(input runInput) {
 		return
 	}
 	if input.principalID != "" {
-		if err := p.session.SetReservedLabel(reservedPrincipalIDKey, input.principalID); err != nil {
+		if err := p.session.SetPrincipalID(input.principalID); err != nil {
 			p.logger.Warn("binding _principal_id session label failed",
 				"error", err, "principal_id", input.principalID)
 		}

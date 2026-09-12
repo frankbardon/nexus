@@ -2338,9 +2338,25 @@ instance that never sees its HTTP request.
   over any `headers` a client sets on its own envelope, because it comes from
   the HTTP hop your proxy controls and the envelope field does not.
 
-Nothing configures this, and nothing authenticates the values — see
+Alongside them the broker forwards the **principal it resolved** for the
+request — from a ticket or a bearer token, through the `auth:` chain that also
+gates lease ownership — which `nexus.io.broker` binds to `_principal_id`. So an
+instance can tell what the caller *asserted* (headers) from what the broker
+*checked* (principal), and gate on the second.
+
+Nothing configures the header forwarding, and nothing authenticates the header
+values. Treat them as data injection, not an auth surface — see
 [Request Headers](./request-headers.md) for the bounds, the reserved label
 namespace they land in, and how to surface one to the model.
+
+**Lock the client endpoints to the service that fronts them.** Any caller that
+can reach `GET /leases/{lease_id}/stream` with a valid lease credential sets its
+own `X-Nexus-*` headers, so if a ticket can reach a scripted client, every
+header value is caller-chosen. Restricting the broker to your own gateway at
+the network layer is what makes "our gateway stamps these" a control rather
+than an assumption. (`_principal_id` needs no such care — the broker's own
+validator produces it.)
+
 
 ## Capacity and queueing
 

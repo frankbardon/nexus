@@ -212,7 +212,16 @@ func (s *A2AServer) beginTurn(ctx context.Context, card *servedAgentCard, in a2a
 	// Bound before the send, because the send goes through it.
 	task.useInstance(instance)
 
-	if err := task.send(brokerIOMessage{Type: ioTypeInput, Content: in.text, Headers: in.headers}); err != nil {
+	// caller is the principal this binary's own validator resolved for the A2A
+	// request, the same one the task is owned by. It rides the input rather than
+	// a separate announcement because on this surface the broker builds the
+	// payload itself — see clientheaders.go for why the opaque pipe cannot.
+	if err := task.send(brokerIOMessage{
+		Type:        ioTypeInput,
+		Content:     in.text,
+		Headers:     in.headers,
+		PrincipalID: caller.ID,
+	}); err != nil {
 		// The message never reached the agent, so there is no turn to report on.
 		// The caller settles the task, which releases the lease.
 		return errSendFailed(card.profile, err)

@@ -57,29 +57,65 @@ headers, err := p.session.RequestHeaders()
 `p.session` is the `*engine.SessionWorkspace` from `PluginContext.Session`. It
 is nil when the engine runs without a session, so guard the call.
 
-## These values are not authenticated
+**The verified caller identity** — where the transport has an `auth:` chain —
+is read from the same session, and is the value to gate on:
 
-A header says only what the caller typed. Nothing verifies it, and nothing
-can: it is an unsigned string on an HTTP request.
+```go
+if id, ok := p.session.PrincipalID(); ok {
+    // id was checked by a pkg/nexusauth validator, not asserted by the caller.
+}
+```
 
-That is not a reason to avoid them — it is a reason to use them for what they
-are. `X-Nexus-Tenant: acme` is a useful statement of which tenant the caller
-*claims*, once the credential the request also carried has been validated.
-Credential validation is [`pkg/nexusauth`](./a2a.md#authentication)'s job, and
-it is a different mechanism reached through the `auth:` block. A header is
-never a substitute for it.
+## This is a data-injection mechanism, not an auth surface
 
-Two consequences follow from that, and both are deliberate:
+Treat `X-Nexus-*` as a way to hand plugins some data about the request, and
+nothing more. A header says only what the caller typed — nothing verifies it,
+and nothing can: it is an unsigned string on an HTTP request. Any caller that
+can reach the transport can send any value.
 
-- **Headers are invisible to the model by default.** They are bound into the
-  reserved (`_`-prefixed) session-label namespace, which every
-  `<session_context>` prompt builder filters out. A caller cannot get text in
-  front of the LLM by inventing a header. Surfacing one is an explicit opt-in
-  (below).
-- **Nothing else can forge one.** The reserved namespace is unreachable from
-  the general `before:session.tag.set` bus path, so no plugin — and no agent
-  holding the `nexus.tool.session_tags` tools — can write or overwrite a
-  `_header.*` label. The transport is the only writer.
+So it is the right tool for **descriptive context** that shapes behaviour —
+tenant, locale, timezone, a feature flag, a correlation id — and the wrong tool
+for anything that grants access. Do not gate a decision on a header, and do not
+put a secret in one.
+
+Verified identity is a separate mechanism with a separate slot. A transport's
+`auth:` block builds a [`pkg/nexusauth`](./a2a.md#authentication) validator
+chain, and the identity it *checks* is bound to the reserved `_principal_id`
+label, readable via `session.PrincipalID()`. That is what an authorization
+decision belongs on. The two are deliberately kept in differently-named slots
+so a reader can always tell which it is holding:
+
+| | `_header.<name>` | `_principal_id` |
+|---|---|---|
+| Source | what the caller asserted | what a validator checked |
+| Trust | none | the transport's `auth:` chain |
+| Use for | context, behaviour | authorization |
+| Read with | `session.RequestHeaders()` | `session.PrincipalID()` |
+
+Both live in the reserved (`_`-prefixed) namespace, which buys two things:
+
+- **Invisible to the model by default.** Every `<session_context>` prompt
+  builder filters reserved keys out, so a caller cannot get text in front of
+  the LLM by inventing a header. Surfacing one is an explicit opt-in (below).
+- **Unforgeable by plugins.** The reserved namespace is unreachable from the
+  general `before:session.tag.set` bus path, so no plugin — and no agent
+  holding the `nexus.tool.session_tags` tools — can write or overwrite either
+  label. The transport is the only writer.
+
+A header named `principal_id` lands at `_header.principal_id` and is not the
+verified identity; the two cannot collide.
+
+### Headers are persisted
+
+Bound headers are written into `SessionMeta.Labels`, which lives in
+`metadata/session.json` — and with `core.object_store` enabled, that file is
+snapshotted to the remote store at every turn boundary.
+
+That is a feature for context and a liability for secrets. **Never put an
+access token, API key or password in an `X-Nexus-*` header**: you would be
+writing a live credential to disk and to a bucket. Pass a subject or an opaque
+correlator instead and exchange it for the credential downstream, keeping the
+secret out of the session tree entirely.
 
 ## Surfacing a header to the model
 
@@ -200,6 +236,42 @@ it was asserting about.
 Both the envelope field and the announcement are additive: an older broker
 sends neither, and the instance behaves exactly as it did before.
 
+#### The verified principal crosses the hop too
+
+The broker resolves a principal for every client request — from a `?ticket=`
+or an `Authorization` header, through its `auth:` chain — and gates lease
+ownership on it. That identity is forwarded to the instance alongside the
+headers, on its own `principal_id` field, and `nexus.io.broker` binds it to
+`_principal_id`. So a plugin inside a broker-spawned instance reads the same
+identity the gateway checked, not merely what the caller asserted.
+
+The two travel together on one payload because they describe the same
+connection and must never be observed apart — an instance holding one turn's
+identity beside another turn's attributes would be worse than holding neither.
+They stay separate *fields* because only one of them is verified. On the
+generic pipe a client authors its own `input` payload and could set
+`principal_id` on it, so the broker's announcement wins outright: the
+announcement is broker-originated, and the broker only ever emits it from the
+principal its own validator resolved.
+
+With authentication disabled the announcement carries no principal, which is
+the honest answer — there is then no verified identity, only claims.
+
+#### Lock the broker to your gateway
+
+**Recommended:** make the broker's client endpoints reachable only from the
+service that fronts them. Any client that can reach
+`GET /leases/{lease_id}/stream` with a valid lease credential can set its own
+`X-Nexus-*` headers, so if tickets can reach a scripted client, every header
+value is caller-chosen. Network isolation is what turns "our gateway stamps
+these" from an assumption into a control.
+
+This is not a reason to distrust the mechanism — headers are caller-supplied by
+design and the guide says so throughout — but if you intend to *act* on a
+header, that action is only as trustworthy as the set of things that can reach
+the endpoint. Identity is the exception: `_principal_id` is checked by the
+broker's own validator, so it holds regardless of who connects.
+
 ## Reference
 
 - Convention, normalization and bounds: `pkg/nexusheaders`
@@ -208,3 +280,5 @@ sends neither, and the instance behaves exactly as it did before.
   `RequestHeaders` / `RequestHeader`
 - Label namespace: `_header.<name>`, reserved — see
   [Sessions](../architecture/sessions.md)
+- Verified identity: `engine.ReservedPrincipalIDKey` (`_principal_id`),
+  `SessionWorkspace.SetPrincipalID` / `PrincipalID`

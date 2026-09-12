@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/frankbardon/nexus/pkg/brokerframe"
+	"github.com/frankbardon/nexus/pkg/nexusauth"
 )
 
 // dialWithHeaders is dial() with extra request headers on the handshake, which
@@ -152,4 +153,104 @@ func TestGateway_NonIOFramesAreNotAnnounced(t *testing.T) {
 	if got := readFrame(t, instance); got.Signal != brokerframe.SignalStreamGap {
 		t.Errorf("instance got %q first, want the non-IO frame forwarded with nothing in front", got.Signal)
 	}
+}
+
+// decodeAnnouncementMessage reads one frame and returns the whole client.headers
+// payload, for the assertions that care about more than the header map.
+func decodeAnnouncementMessage(t *testing.T, conn *websocket.Conn) brokerIOMessage {
+	t.Helper()
+	f := readFrame(t, conn)
+	if f.Signal != brokerframe.SignalIO {
+		t.Fatalf("expected an io frame, got %+v", f)
+	}
+	var msg brokerIOMessage
+	if err := json.Unmarshal(f.Payload, &msg); err != nil {
+		t.Fatalf("decoding payload %s: %v", f.Payload, err)
+	}
+	if msg.Type != ioTypeClientHeaders {
+		t.Fatalf("expected a %q payload, got %q (%s)", ioTypeClientHeaders, msg.Type, f.Payload)
+	}
+	return msg
+}
+
+// The gap this closes: the broker verifies an identity to gate lease ownership
+// and used to drop it, leaving the instance able to read only the caller's own
+// unverified claims. The verified principal must cross the hop with them.
+func TestGateway_AnnouncementCarriesTheVerifiedPrincipal(t *testing.T) {
+	wsURL, _, registry := newTestGatewayWithAuth(t, mustAuthChain(t, twoPrincipalAuthYAML))
+
+	leaseID, err := registry.NewLease(nexusauth.Principal{ID: ownerPrincipal})
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	registry.SetSpawnSecret(leaseID, testSpawnSecret)
+	instance := dial(t, wsURL+instanceWSPath)
+	defer instance.Close(websocket.StatusNormalClosure, "")
+	writeFrame(t, instance, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalRegister,
+		Secret:  testSpawnSecret,
+	})
+	waitFor(t, func() bool { return registry.InstanceConn(leaseID) != nil })
+
+	client, _, err := dialLeaseWithHeaders(t, wsURL, leaseID, ownerToken, map[string]string{
+		"X-Nexus-Tenant": "acme",
+	})
+	if err != nil {
+		t.Fatalf("owner dial: %v", err)
+	}
+	defer client.Close(websocket.StatusNormalClosure, "")
+	waitFor(t, func() bool { return registry.ClientConn(leaseID) != nil })
+
+	writeFrame(t, client, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"type":"input","content":"hello"}`),
+	})
+
+	msg := decodeAnnouncementMessage(t, instance)
+	if msg.PrincipalID != ownerPrincipal {
+		t.Errorf("announced principal = %q, want the resolved %q", msg.PrincipalID, ownerPrincipal)
+	}
+	// Identity and attributes travel together, so an instance can never read
+	// one turn's identity beside another turn's attributes.
+	if msg.Headers["tenant"] != "acme" {
+		t.Errorf("announced headers = %v, want tenant=acme alongside the principal", msg.Headers)
+	}
+}
+
+// With authentication disabled there is no verified identity, and the
+// announcement must say so rather than inventing one.
+func TestGateway_AnnouncementCarriesNoPrincipalWithoutAuth(t *testing.T) {
+	wsURL, registry := newTestGateway(t)
+	instance, leaseID := attachedLease(t, wsURL, registry)
+
+	client := dial(t, wsURL+ClientWSPath(leaseID))
+	defer client.Close(websocket.StatusNormalClosure, "")
+	waitFor(t, func() bool { return registry.ClientConn(leaseID) != nil })
+
+	writeFrame(t, client, brokerframe.Frame{
+		LeaseID: leaseID,
+		Signal:  brokerframe.SignalIO,
+		Payload: []byte(`{"type":"input","content":"hello"}`),
+	})
+
+	if msg := decodeAnnouncementMessage(t, instance); msg.PrincipalID != "" {
+		t.Errorf("announced principal = %q with auth disabled, want empty", msg.PrincipalID)
+	}
+}
+
+// dialLeaseWithHeaders is dialLease with extra handshake headers.
+func dialLeaseWithHeaders(t *testing.T, wsURL, leaseID, token string, headers map[string]string) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	h := http.Header{}
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	if token != "" {
+		h.Set("Authorization", "Bearer "+token)
+	}
+	return websocket.Dial(ctx, wsURL+ClientWSPath(leaseID), &websocket.DialOptions{HTTPHeader: h})
 }

@@ -241,8 +241,16 @@ operator's reverse proxy controls, while the envelope field is whatever the
 client typed on a pipe the broker cannot filter.
 
 Both are additive: an older broker sends neither and this plugin behaves
-exactly as before. See
-[Request Headers](../../guides/request-headers.md).
+exactly as before.
+
+The announcement also carries the **principal the broker resolved** for the
+request, which this plugin binds to `_principal_id` — so a plugin inside the
+instance can read the identity the gateway checked (`session.PrincipalID()`)
+rather than only the attributes the caller asserted. It is a separate field
+because only one of the two is verified, and the announcement's copy wins over
+any `principal_id` a client sets on its own envelope. A turn whose connection
+carried no verified identity clears the previous turn's rather than inheriting
+it. See [Request Headers](../../guides/request-headers.md).
 
 ## Security
 

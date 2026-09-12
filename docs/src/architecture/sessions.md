@@ -71,12 +71,18 @@ Two reserved namespaces ship today:
 
 | Key | Written by | Holds |
 |-----|-----------|-------|
-| `_principal_id` | `nexus.io.agui` | the caller identity the auth chain resolved for the current run |
-| `_header.<name>` | every web IO transport | one `X-Nexus-*` request header of the current turn — see [Request Headers](../guides/request-headers.md) |
+| `_principal_id` | `nexus.io.agui`, `nexus.io.broker` | the caller identity a `pkg/nexusauth` validator **verified** for the current turn (`SessionWorkspace.SetPrincipalID` / `PrincipalID`) |
+| `_header.<name>` | every web IO transport | one `X-Nexus-*` request header of the current turn — what the caller **asserted**, unverified — see [Request Headers](../guides/request-headers.md) |
 
 Both are per-turn: they are bound before the turn's first downstream event and
 replaced or cleared when it ends, so a plugin never reads a previous caller's
 value as if it were current.
+
+The two are kept in separate, differently-named slots because they carry
+different weight. An authorization decision belongs on `_principal_id`, which a
+validator checked; `_header.*` is caller-supplied context that shapes
+behaviour. A header named `principal_id` lands at `_header.principal_id` and
+cannot collide with the verified one.
 
 ## Session Workspace API
 

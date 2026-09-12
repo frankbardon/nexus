@@ -191,3 +191,145 @@ func TestMessageHeadersStandWithoutAnAnnouncement(t *testing.T) {
 		t.Errorf("io.input Headers = %v, want the message's own tenant=acme", in.Headers)
 	}
 }
+
+// principalDuring runs one input and reports what _principal_id was bound to
+// while the turn was in flight.
+func principalDuring(t *testing.T, p *Plugin, session *engine.SessionWorkspace, bus engine.EventBus, msgs ...ioMessage) (string, bool) {
+	t.Helper()
+	type seen struct {
+		id string
+		ok bool
+	}
+	got := make(chan seen, 1)
+	unsub := bus.Subscribe("io.input", func(engine.Event[any]) {
+		id, ok := session.PrincipalID()
+		select {
+		case got <- seen{id: id, ok: ok}:
+		default:
+		}
+	})
+	defer unsub()
+
+	for _, msg := range msgs {
+		p.handleInbound(msg)
+	}
+	select {
+	case s := <-got:
+		return s.id, s.ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("io.input never emitted")
+		return "", false
+	}
+}
+
+// newPrincipalTestPlugin is the header harness plus the handles the principal
+// assertions need.
+func newPrincipalTestPlugin(t *testing.T) (*Plugin, *engine.SessionWorkspace, engine.EventBus) {
+	t.Helper()
+	bus := engine.NewEventBus()
+	session, err := engine.NewSessionWorkspace(filepath.Join(t.TempDir(), "sessions"), bus)
+	if err != nil {
+		t.Fatalf("new session workspace: %v", err)
+	}
+	p := New().(*Plugin)
+	p.bus = bus
+	p.logger = slog.Default()
+	p.session = session
+	return p, session, bus
+}
+
+// The gap this closes: the broker verifies an identity to gate lease ownership,
+// and until now dropped it. A turn must be able to read it.
+func TestAnnouncedPrincipalIsBoundForTheTurn(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	id, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "client.headers", Headers: map[string]string{"tenant": "acme"}, PrincipalID: "alice"},
+		ioMessage{Type: "input", Content: "hello"},
+	)
+	if !ok || id != "alice" {
+		t.Errorf("_principal_id during the turn = (%q, %v), want alice", id, ok)
+	}
+}
+
+// The whole point of carrying identity separately from headers: a client
+// authoring its own input payload on the opaque pipe must not be able to name
+// itself anyone.
+func TestAnnouncedPrincipalBeatsAClientSuppliedField(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	id, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "client.headers", PrincipalID: "alice"},
+		ioMessage{Type: "input", Content: "hello", PrincipalID: "root"},
+	)
+	if !ok || id != "alice" {
+		t.Errorf("_principal_id = (%q, %v), want the announced alice, not the client's claim", id, ok)
+	}
+}
+
+// A turn under an unauthenticated connection must clear the previous turn's
+// identity rather than inherit it.
+func TestAnnouncedPrincipalClearsWhenAbsent(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	if _, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "client.headers", PrincipalID: "alice"},
+		ioMessage{Type: "input", Content: "one"},
+	); !ok {
+		t.Fatal("the first turn bound no principal")
+	}
+
+	id, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "client.headers"},
+		ioMessage{Type: "input", Content: "two"},
+	)
+	if ok {
+		t.Errorf("_principal_id = %q after an announcement carrying none; it must be cleared", id)
+	}
+}
+
+// With no announcement — the A2A path — the message's field is the broker's own
+// and stands.
+func TestMessagePrincipalStandsWithoutAnAnnouncement(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	id, ok := principalDuring(t, p, session, bus,
+		ioMessage{Type: "input", Content: "hello", PrincipalID: "alice"},
+	)
+	if !ok || id != "alice" {
+		t.Errorf("_principal_id = (%q, %v), want the message's own alice", id, ok)
+	}
+}
+
+// Identity and attributes must never be readable from different turns.
+func TestPrincipalAndHeadersAreBoundTogether(t *testing.T) {
+	p, session, bus := newPrincipalTestPlugin(t)
+
+	var (
+		gotID      string
+		gotHeaders map[string]string
+	)
+	done := make(chan struct{})
+	unsub := bus.Subscribe("io.input", func(engine.Event[any]) {
+		gotID, _ = session.PrincipalID()
+		gotHeaders, _ = session.RequestHeaders()
+		close(done)
+	})
+	defer unsub()
+
+	p.handleInbound(ioMessage{
+		Type:        "client.headers",
+		Headers:     map[string]string{"tenant": "acme"},
+		PrincipalID: "alice",
+	})
+	p.handleInbound(ioMessage{Type: "input", Content: "hello"})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("io.input never emitted")
+	}
+	if gotID != "alice" || gotHeaders["tenant"] != "acme" {
+		t.Errorf("bound identity/attributes = (%q, %v), want alice/acme together", gotID, gotHeaders)
+	}
+}

@@ -105,3 +105,61 @@ func stubReportWithHeaders(t *testing.T, cr claimResponse, headers map[string]st
 	}
 	return report
 }
+
+// TestClaimVerifiedPrincipalReachesTheSpawnedInstance is the whole point of
+// carrying identity separately from attributes, proved end to end: the broker
+// authenticates a caller, gates lease ownership on that identity, and the
+// instance it spawned can read the SAME identity — not merely whatever the
+// caller asserted about itself.
+//
+// The forged header is the assertion that matters. It travels, because headers
+// are caller-supplied by construction and nothing pretends otherwise; the
+// principal beside it does not change, because no client frame can produce
+// that field at the far end.
+func TestClaimVerifiedPrincipalReachesTheSpawnedInstance(t *testing.T) {
+	stubBin := buildStubInstance(t)
+	b := startAuthedStubBroker(t, stubBin)
+
+	resp := b.Do(t, http.MethodPost, "/claim", b.Token, `{"config":"engine:\n  name: stub\n"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("claim status = %d, want 200", resp.StatusCode)
+	}
+	var cr claimResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+
+	report := stubReportWithAuthAndHeaders(t, cr, b.Token, map[string]string{
+		"X-Nexus-Tenant":  "acme",
+		"X-Nexus-Subject": "somebody-else",
+	})
+
+	if report.ClientPrincipalID != b.Principal {
+		t.Errorf("instance saw principal %q, want the broker-resolved %q",
+			report.ClientPrincipalID, b.Principal)
+	}
+	if report.ClientHeaders["tenant"] != "acme" {
+		t.Errorf("instance saw headers %v, want tenant=acme", report.ClientHeaders)
+	}
+	// The asserted subject is delivered as an assertion and nothing more: it
+	// must not have displaced the verified identity.
+	if report.ClientHeaders["subject"] != "somebody-else" {
+		t.Errorf("asserted subject = %q; a header is caller-supplied and travels as-is",
+			report.ClientHeaders["subject"])
+	}
+	if report.ClientPrincipalID == report.ClientHeaders["subject"] {
+		t.Error("a caller-asserted header became the verified identity; the two must stay distinct")
+	}
+}
+
+// stubReportWithAuthAndHeaders is stubReportWithHeaders for an authenticated
+// broker: the bearer token rides the handshake alongside the X-Nexus-* headers.
+func stubReportWithAuthAndHeaders(t *testing.T, cr claimResponse, token string, headers map[string]string) stubcore.Report {
+	t.Helper()
+	all := map[string]string{}
+	for k, v := range headers {
+		all[k] = v
+	}
+	all["Authorization"] = "Bearer " + token
+	return stubReportWithHeaders(t, cr, all)
+}

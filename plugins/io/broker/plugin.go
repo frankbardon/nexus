@@ -60,6 +60,11 @@ type Plugin struct {
 	// the A2A path, where the headers ride on the input message itself.
 	clientHeaders      map[string]string
 	clientHeadersKnown bool
+	// clientPrincipalID is the identity the broker's own credential validator
+	// resolved for that connection, announced alongside the headers. Empty when
+	// the broker runs with authentication disabled, which is the honest answer:
+	// there is then no verified identity to report.
+	clientPrincipalID string
 
 	// spawnSecret is the per-spawn second factor the broker handed this process
 	// at exec. It is echoed in the register frame and is NEVER logged: unlike
@@ -371,6 +376,27 @@ func (p *Plugin) inputHeaders(msg ioMessage) map[string]string {
 	return msg.Headers
 }
 
+// inputPrincipalID resolves the verified identity an inbound `input` belongs
+// to, by the same precedence inputHeaders applies and for a sharper reason.
+//
+// On the opaque client-stream pipe a client authors its own `input` payload, so
+// it could set principal_id on it. An announcement therefore wins outright
+// where one has been made: it is broker-originated, and the broker only ever
+// emits it from the principal its own validator resolved. Without that rule a
+// caller could name itself anyone simply by typing the field.
+//
+// With no announcement ever made — the A2A path, where the broker builds the
+// payload from the request itself — the message's own field is the broker's,
+// not a client's, and stands.
+func (p *Plugin) inputPrincipalID(msg ioMessage) string {
+	p.clientMu.Lock()
+	defer p.clientMu.Unlock()
+	if p.clientHeadersKnown {
+		return p.clientPrincipalID
+	}
+	return msg.PrincipalID
+}
+
 // --- inbound (broker frames -> bus) ---
 //
 // handleInbound runs on the client's read pump goroutine. Bus dispatch is
@@ -388,10 +414,11 @@ func (p *Plugin) handleInbound(msg ioMessage) {
 		p.clientMu.Lock()
 		p.clientHeaders = msg.Headers
 		p.clientHeadersKnown = true
+		p.clientPrincipalID = msg.PrincipalID
 		p.clientMu.Unlock()
 
 	case "input":
-		go func(content string, headers map[string]string) {
+		go func(content string, headers map[string]string, principalID string) {
 			// The headers are the broker's report of the client HTTP request
 			// it translated — this process never saw that request. Bound
 			// before the emit so a plugin handling io.input cannot observe
@@ -401,6 +428,14 @@ func (p *Plugin) handleInbound(msg ioMessage) {
 			if p.session != nil {
 				if err := p.session.SetRequestHeaders(headers); err != nil {
 					p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+				}
+				// Bound alongside the headers and never conditionally: a turn
+				// whose request carried no verified identity must CLEAR the
+				// previous turn's, or a plugin gating on _principal_id would
+				// read the last caller's identity as this one's — the one
+				// failure here that is worse than having no identity at all.
+				if err := p.session.SetPrincipalID(principalID); err != nil {
+					p.logger.Warn("binding _principal_id session label failed", "error", err)
 				}
 			}
 			input := events.UserInput{
@@ -412,7 +447,7 @@ func (p *Plugin) handleInbound(msg ioMessage) {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(msg.Content, p.inputHeaders(msg))
+		}(msg.Content, p.inputHeaders(msg), p.inputPrincipalID(msg))
 
 	case "approval.response":
 		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{

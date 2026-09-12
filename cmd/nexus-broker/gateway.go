@@ -586,7 +586,7 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// place those headers exist. See clientheaders.go for why they ride a frame
 	// of their own rather than being folded into the client's payload, which is
 	// forwarded verbatim.
-	forward := g.announceClientHeaders(clientRequestHeaders(r), g.forwardToInstance)
+	forward := g.announceClientHeaders(clientRequestHeaders(r), caller.ID, g.forwardToInstance)
 	g.readPump(ctx, leaseID, wc, forward, func(f brokerframe.Frame) {
 		if f.Signal == brokerframe.SignalIO {
 			g.registry.markActivity(leaseID)

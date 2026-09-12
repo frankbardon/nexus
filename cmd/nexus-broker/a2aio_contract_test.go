@@ -96,7 +96,8 @@ func TestIOMessageEncodesTheSameJSON(t *testing.T) {
 		Choices:  []brokerIOChoice{{ID: "yes", Label: "Yes"}},
 		ChoiceID: "yes", FreeText: "ft",
 		Resumable: boolPtr(true), Source: "broker",
-		Headers: map[string]string{"tenant": "acme"},
+		Headers:     map[string]string{"tenant": "acme"},
+		PrincipalID: "user-1",
 	}
 	raw, err := json.Marshal(full)
 	if err != nil {
