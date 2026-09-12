@@ -4,7 +4,7 @@ import "time"
 
 // Schema-version constants for io.* payloads. See doc.go.
 const (
-	UserInputVersion             = 2
+	UserInputVersion             = 3
 	AgentOutputVersion           = 1
 	OutputChunkVersion           = 1
 	StreamRefVersion             = 1
@@ -22,11 +22,11 @@ const (
 
 // UserInput represents input submitted by the user.
 //
-// SchemaVersion bumped to 2 when PreloadMessages was added. Producers that
-// only set Content/Files/SessionID remain forward-compatible: the new field
-// is an optional slice, so v1 emitters that stamp SchemaVersion = 1 still
-// parse cleanly into the v2 struct (PreloadMessages is nil). Consumers that
-// emit fresh v2 payloads stamp UserInputVersion.
+// SchemaVersion bumped to 2 when PreloadMessages was added, and to 3 when
+// Headers was. Producers that only set the older fields remain forward-
+// compatible: every added field is an optional map or slice, so a v1 or v2
+// emitter still parses cleanly into the v3 struct (the newer fields are nil).
+// Consumers that emit fresh v3 payloads stamp UserInputVersion.
 type UserInput struct {
 	SchemaVersion int `json:"_schema_version"`
 
@@ -44,6 +44,22 @@ type UserInput struct {
 	// Added in v2 for MCP prompt expansion; also useful for scripted
 	// oneshot IO and replay.
 	PreloadMessages []Message
+
+	// Headers carries the X-Nexus-* request headers of the HTTP request that
+	// opened this turn, keyed by normalized name (`X-Nexus-Tenant-ID` ->
+	// `tenant-id`). See pkg/nexusheaders for the convention and the bounds,
+	// and engine.SessionWorkspace.SetRequestHeaders for the parallel binding
+	// every web transport performs before emitting this event.
+	//
+	// Nil for a transport with no HTTP request behind it (TUI, oneshot, Wails)
+	// and for a web request that carried no X-Nexus-* header. A handler must
+	// treat it as a hint from the caller, never as an authenticated claim:
+	// nothing verifies these values, which is why the engine binds them into
+	// the reserved, prompt-invisible label namespace rather than the general
+	// one.
+	//
+	// Added in v3.
+	Headers map[string]string
 }
 
 // FileAttachment is a file attached to user input.

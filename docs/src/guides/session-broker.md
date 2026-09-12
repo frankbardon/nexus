@@ -2322,6 +2322,44 @@ every attached stream closes, the instance is told to cancel the turn, and the
 queue moves. Fifteen minutes is chosen against a human: a question routed to a
 person has to survive being paged, read, thought about and answered.
 
+## Request headers
+
+Request headers named `X-Nexus-*` on a client request are carried across the
+broker hop and delivered to plugins inside the instance, on both client-facing
+surfaces. It is how a caller passes per-request context — a tenant, a locale, a
+timezone, a subject a reverse proxy in front of the broker asserted — to an
+instance that never sees its HTTP request.
+
+- On the **A2A** surface the broker decodes the request and sets the headers on
+  the `input` payload it builds.
+- On the **client stream** (`GET /leases/{lease_id}/stream`) the broker
+  forwards client frames verbatim, so instead it sends its own `client.headers`
+  payload immediately ahead of each client IO frame, carrying the handshake's
+  headers. Values that vary per turn ride the client's own `input` payload and
+  are merged under those — where both name the same header the handshake wins,
+  because it comes from the HTTP hop your proxy controls and the envelope field
+  does not. Put fixed values on the handshake, varying values on the turn.
+
+Alongside them the broker forwards the **principal it resolved** for the
+request — from a ticket or a bearer token, through the `auth:` chain that also
+gates lease ownership — which `nexus.io.broker` binds to `_principal_id`. So an
+instance can tell what the caller *asserted* (headers) from what the broker
+*checked* (principal), and gate on the second.
+
+Nothing configures the header forwarding, and nothing authenticates the header
+values. Treat them as data injection, not an auth surface — see
+[Request Headers](./request-headers.md) for the bounds, the reserved label
+namespace they land in, and how to surface one to the model.
+
+**Lock the client endpoints to the service that fronts them.** Any caller that
+can reach `GET /leases/{lease_id}/stream` with a valid lease credential sets its
+own `X-Nexus-*` headers, so if a ticket can reach a scripted client, every
+header value is caller-chosen. Restricting the broker to your own gateway at
+the network layer is what makes "our gateway stamps these" a control rather
+than an assumption. (`_principal_id` needs no such care — the broker's own
+validator produces it.)
+
+
 ## Capacity and queueing
 
 `max_concurrent` caps live instances. Each claim acquires a slot **before**

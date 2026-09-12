@@ -135,6 +135,7 @@
 - [Object Storage](./guides/object-storage.md)
 - [Session Broker](./guides/session-broker.md)
 - [A2A Interoperability](./guides/a2a.md)
+- [Request Headers](./guides/request-headers.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
 
 # Operations

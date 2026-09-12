@@ -30,6 +30,13 @@ type Client struct {
 	done        chan struct{}
 	userAgent   string
 	connectedAt time.Time
+
+	// headers are the X-Nexus-* headers of the HTTP request this connection
+	// was upgraded from. They are connection-scoped rather than per-message
+	// because that is the only place a WebSocket transport HAS headers: after
+	// the upgrade there are no further requests to read them from. A client
+	// that needs to change one reconnects.
+	headers map[string]string
 }
 
 // NewHub creates a new connection hub.
@@ -86,6 +93,19 @@ func (h *Hub) Close() {
 		delete(h.clients, id)
 	}
 	h.mu.Unlock()
+}
+
+// Headers returns the X-Nexus-* headers of the named client's upgrade
+// request, or nil when the client is unknown or sent none. The map is the one
+// stored at Register and must not be mutated by the caller; nothing in this
+// package writes it after the client is registered.
+func (h *Hub) Headers(clientID string) map[string]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if c, ok := h.clients[clientID]; ok {
+		return c.headers
+	}
+	return nil
 }
 
 // ClientCount returns the number of connected clients.

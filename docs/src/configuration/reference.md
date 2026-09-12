@@ -3163,9 +3163,14 @@ Source: `plugins/skills/plugin.go`. Registers the `activate_skill` LLM tool.
 
 ### `nexus.system.dynvars`
 
-Source: `plugins/system/dynvars/plugin.go`. Registers a system-prompt section at
-priority 100 that lists runtime variables. Each flag defaults to `false` —
-opt-in only.
+Source: `plugins/system/dynvars/plugin.go`. Prepends a `<runtime_context>` XML
+block listing runtime variables to the **last user message** of every outbound
+`llm.request` (subscribes at priority 20; registers no Prompt Registry section).
+Each flag defaults to `false` — opt-in only.
+
+The block never enters conversation history: it is applied to the request, not
+to the persisted message, so repeated turns cannot accumulate stale copies. See
+[Dynamic Variables](../plugins/system.md).
 
 | Key           | Type | Default | Description |
 |---------------|------|---------|-------------|
@@ -3175,6 +3180,7 @@ opt-in only.
 | `cwd`         | bool | `false` | Include the engine working directory. |
 | `session_dir` | bool | `false` | Include the session workspace root. |
 | `os`          | bool | `false` | Include `os/arch`. |
+| `request_headers` | list of strings | `[]` | Normalized `X-Nexus-*` request header names to surface in the prompt, e.g. `["timezone", "locale"]`. Each named header contributes a `Request header X-Nexus-<name>: <value>` line when the current turn carries it, and nothing when it does not. Entries are lowercased and may be written with or without the `X-Nexus-` prefix. Header values are client-controlled and unauthenticated, so every header must be named explicitly — there is no "all headers" setting. See [Request Headers](../guides/request-headers.md). |
 
 ---
 

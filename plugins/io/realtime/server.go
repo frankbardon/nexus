@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 // envelope is the JSON message carried over the WebSocket in either
@@ -57,7 +58,7 @@ type Server struct {
 	addr       string
 	path       string
 	maxClients int
-	onInbound  func(envelope)
+	onInbound  func(env envelope, headers map[string]string)
 
 	mu       sync.RWMutex
 	clients  map[*client]struct{}
@@ -76,12 +77,22 @@ type client struct {
 	conn *websocket.Conn
 	send chan envelope
 	done chan struct{}
+
+	// headers are the X-Nexus-* headers of the HTTP request this connection
+	// was upgraded from — connection-scoped because a WebSocket has headers
+	// only at the upgrade. A client that needs to change one reconnects.
+	headers map[string]string
 }
 
 // NewServer constructs a server but does not listen yet — call Start.
 // Mostly broken out from the plugin so tests can construct a server
 // against an ephemeral port without touching plugin lifecycle.
-func NewServer(logger *slog.Logger, addr, path string, maxClients int, onInbound func(envelope)) *Server {
+// onInbound is called once per inbound frame with the frame and the X-Nexus-*
+// headers of the upgrade the connection was opened with. The headers are
+// passed alongside rather than folded into the envelope on purpose: the
+// envelope is the client-authored wire type, so a field on it would be
+// something a client could set, and these must come from the transport.
+func NewServer(logger *slog.Logger, addr, path string, maxClients int, onInbound func(env envelope, headers map[string]string)) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -212,9 +223,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := &client{
-		conn: conn,
-		send: make(chan envelope, 256),
-		done: make(chan struct{}),
+		conn:    conn,
+		send:    make(chan envelope, 256),
+		done:    make(chan struct{}),
+		headers: nexusheaders.Extract(r.Header),
 	}
 
 	s.mu.Lock()
@@ -255,7 +267,7 @@ func (s *Server) readPump(ctx context.Context, c *client) {
 			return
 		}
 		if s.onInbound != nil {
-			s.onInbound(env)
+			s.onInbound(env, c.headers)
 		}
 	}
 }

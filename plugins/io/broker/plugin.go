@@ -23,11 +23,13 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 const pluginID = "nexus.io.broker"
@@ -42,6 +44,28 @@ type Plugin struct {
 	brokerAddr string
 	leaseID    string
 	sessionID  string
+
+	// session is held so a turn's forwarded X-Nexus-* request headers can be
+	// bound into the reserved "_header.*" labels, the read seam for a plugin
+	// that never sees io.input. Nil when the engine runs without a session;
+	// every use is guarded.
+	session *engine.SessionWorkspace
+
+	// clientMu guards clientHeaders and clientHeadersKnown, written from the
+	// read pump and read by the input path.
+	clientMu sync.Mutex
+	// clientHeaders are the X-Nexus-* request headers of the client connection
+	// currently attached at the broker, as last reported by a `client.headers`
+	// payload. clientHeadersKnown distinguishes "the broker has told us, and
+	// the answer was none" from "the broker has never told us" — the second is
+	// the A2A path, where the headers ride on the input message itself.
+	clientHeaders      map[string]string
+	clientHeadersKnown bool
+	// clientPrincipalID is the identity the broker's own credential validator
+	// resolved for that connection, announced alongside the headers. Empty when
+	// the broker runs with authentication disabled, which is the honest answer:
+	// there is then no verified identity to report.
+	clientPrincipalID string
 
 	// spawnSecret is the per-spawn second factor the broker handed this process
 	// at exec. It is echoed in the register frame and is NEVER logged: unlike
@@ -122,6 +146,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if ctx.Session != nil {
 		p.sessionID = ctx.Session.ID
+		p.session = ctx.Session
 	}
 
 	p.client = newClient(p.logger, clientConfig{
@@ -329,6 +354,94 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 	})
 }
 
+// inputHeaders resolves which X-Nexus-* headers an inbound `input` belongs to,
+// by merging the two sources a turn can have.
+//
+// # The two sources, and why neither alone is enough
+//
+// A client connection's headers are fixed at the WebSocket handshake — that is
+// the only request a WebSocket has — and the broker announces them ahead of
+// every IO frame. That suits the values describing the CONVERSATION: the
+// tenant, the caller's subject, the locale. It cannot carry a value that
+// changes from one turn to the next, because there is no new handshake to put
+// one on.
+//
+// So a client may also attach headers to the `input` payload itself, which is
+// per-turn by construction. Those fill in AROUND the connection's rather than
+// replacing them.
+//
+// # Connection-scoped wins, per key
+//
+// Where both name the same header the announcement wins, and that is the
+// security-relevant half of this function rather than a tie break. The
+// announcement comes from the HTTP handshake — the hop an operator's reverse
+// proxy controls and injects into — while the message field is whatever the
+// client typed on a pipe the broker forwards verbatim and cannot filter. If
+// the message won, anything a trusted proxy asserted about a caller could be
+// overridden by that caller.
+//
+// The rule this gives an integrator is simple: put fixed values on the
+// handshake, varying values on the turn, and never the same key on both. A
+// value that must change per turn simply must not be pinned on the handshake.
+//
+// Identity is NOT merged — see inputPrincipalID, which keeps the announcement
+// outright. A verified identity has no per-turn variant worth the risk of a
+// client being able to contribute one.
+//
+// With no announcement ever made the message's own field stands entirely: that
+// is the A2A path, where the broker built the payload from the request itself,
+// so the field is the broker's and not a client's.
+func (p *Plugin) inputHeaders(msg ioMessage) map[string]string {
+	p.clientMu.Lock()
+	connection := p.clientHeaders
+	known := p.clientHeadersKnown
+	p.clientMu.Unlock()
+
+	if !known {
+		return msg.Headers
+	}
+	// Client-authored, so it gets the same normalization and the same bounds
+	// the handshake path already applies. Without this a caller could name a
+	// header anything, or send a megabyte of them, on a path that bypasses
+	// nexusheaders.Extract entirely.
+	perTurn := nexusheaders.Sanitize(msg.Headers)
+	if len(perTurn) == 0 {
+		return connection
+	}
+	if len(connection) == 0 {
+		return perTurn
+	}
+	out := make(map[string]string, len(perTurn)+len(connection))
+	for k, v := range perTurn {
+		out[k] = v
+	}
+	for k, v := range connection {
+		out[k] = v // last write wins: the handshake is authoritative
+	}
+	return out
+}
+
+// inputPrincipalID resolves the verified identity an inbound `input` belongs
+// to, by the same precedence inputHeaders applies and for a sharper reason.
+//
+// On the opaque client-stream pipe a client authors its own `input` payload, so
+// it could set principal_id on it. An announcement therefore wins outright
+// where one has been made: it is broker-originated, and the broker only ever
+// emits it from the principal its own validator resolved. Without that rule a
+// caller could name itself anyone simply by typing the field.
+//
+// With no announcement ever made — the A2A path, where the broker builds the
+// payload from the request itself — the message's own field is the broker's,
+// not a client's, and stands.
+func (p *Plugin) inputPrincipalID(msg ioMessage) string {
+	p.clientMu.Lock()
+	defer p.clientMu.Unlock()
+	if p.clientHeadersKnown {
+		return p.clientPrincipalID
+	}
+	return msg.PrincipalID
+}
+
 // --- inbound (broker frames -> bus) ---
 //
 // handleInbound runs on the client's read pump goroutine. Bus dispatch is
@@ -337,14 +450,49 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 // pump — mirroring io/browser and io/realtime.
 func (p *Plugin) handleInbound(msg ioMessage) {
 	switch msg.Type {
+	case "client.headers":
+		// Broker-originated: it reports the X-Nexus-* headers of the client
+		// connection whose frames follow. Recorded rather than acted on; the
+		// next input is what consumes it. An absent map clears the record,
+		// which is how a new client connection that sends no header avoids
+		// inheriting the previous one's values.
+		p.clientMu.Lock()
+		p.clientHeaders = msg.Headers
+		p.clientHeadersKnown = true
+		p.clientPrincipalID = msg.PrincipalID
+		p.clientMu.Unlock()
+
 	case "input":
-		go func(content string) {
-			input := events.UserInput{SchemaVersion: events.UserInputVersion, Content: content}
+		go func(content string, headers map[string]string, principalID string) {
+			// The headers are the broker's report of the client HTTP request
+			// it translated — this process never saw that request. Bound
+			// before the emit so a plugin handling io.input cannot observe
+			// the turn ahead of its context; a message the broker forwarded
+			// without headers clears the namespace rather than leaving the
+			// previous turn's values standing.
+			if p.session != nil {
+				if err := p.session.SetRequestHeaders(headers); err != nil {
+					p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+				}
+				// Bound alongside the headers and never conditionally: a turn
+				// whose request carried no verified identity must CLEAR the
+				// previous turn's, or a plugin gating on _principal_id would
+				// read the last caller's identity as this one's — the one
+				// failure here that is worse than having no identity at all.
+				if err := p.session.SetPrincipalID(principalID); err != nil {
+					p.logger.Warn("binding _principal_id session label failed", "error", err)
+				}
+			}
+			input := events.UserInput{
+				SchemaVersion: events.UserInputVersion,
+				Content:       content,
+				Headers:       headers,
+			}
 			if veto, err := p.bus.EmitVetoable("before:io.input", &input); err == nil && veto.Vetoed {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(msg.Content)
+		}(msg.Content, p.inputHeaders(msg), p.inputPrincipalID(msg))
 
 	case "approval.response":
 		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{

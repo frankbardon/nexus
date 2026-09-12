@@ -48,7 +48,7 @@ type SessionMeta struct {
     EndedAt              *time.Time        // When the session ended (nil if active)
     Profile              string            // Config profile name
     Plugins              []string          // Active plugin IDs
-    Labels               map[string]string // User-defined labels
+    Labels               map[string]string // User-defined labels (see below)
     TurnCount            int               // Number of conversation turns
     TokensUsed           int               // Total tokens consumed
     PromptTokensUsed     int               // Input tokens consumed
@@ -57,6 +57,32 @@ type SessionMeta struct {
     Status               string            // "active" or "ended"
 }
 ```
+
+### Label namespaces
+
+`Labels` holds two kinds of key. A key beginning with `_` is **reserved**:
+host-only, written exclusively through `SessionWorkspace.SetReservedLabel` /
+`DeleteReservedLabel` as a direct Go call, unreachable from the general
+`before:session.tag.set` bus path, and filtered out of every
+`<session_context>` prompt block. Every other key is general-namespace — an
+agent's own tags, writable over the bus and readable by the model.
+
+Two reserved namespaces ship today:
+
+| Key | Written by | Holds |
+|-----|-----------|-------|
+| `_principal_id` | `nexus.io.agui`, `nexus.io.broker` | the caller identity a `pkg/nexusauth` validator **verified** for the current turn (`SessionWorkspace.SetPrincipalID` / `PrincipalID`) |
+| `_header.<name>` | every web IO transport | one `X-Nexus-*` request header of the current turn — what the caller **asserted**, unverified — see [Request Headers](../guides/request-headers.md) |
+
+Both are per-turn: they are bound before the turn's first downstream event and
+replaced or cleared when it ends, so a plugin never reads a previous caller's
+value as if it were current.
+
+The two are kept in separate, differently-named slots because they carry
+different weight. An authorization decision belongs on `_principal_id`, which a
+validator checked; `_header.*` is caller-supplied context that shapes
+behaviour. A header named `principal_id` lands at `_header.principal_id` and
+cannot collide with the verified one.
 
 ## Session Workspace API
 
@@ -71,6 +97,10 @@ data, err := session.ReadFile("context/mydata.json")
 
 // Append to a file (useful for JSONL logs)
 session.AppendFile("context/events.jsonl", line)
+
+// Read the current turn's X-Nexus-* request headers (web transports only)
+tz, ok := session.RequestHeader("timezone")
+headers, err := session.RequestHeaders()
 
 // List files in a subdirectory
 files, err := session.ListFiles("context")
