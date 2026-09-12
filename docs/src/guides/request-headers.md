@@ -151,7 +151,7 @@ as structure.
 | `nexus.io.a2a` | the JSON-RPC or HTTP+JSON request, including the one that resumes a task parked at `INPUT_REQUIRED` |
 | `nexus.io.browser` | the WebSocket upgrade, per connection |
 | `nexus.io.realtime` | the WebSocket upgrade, per connection |
-| `nexus.io.broker` | forwarded by `nexus-broker` on the instance IO envelope — see below |
+| `nexus.io.broker` | forwarded by `nexus-broker` on every client-facing surface — see below |
 
 `nexus.io.tui`, `nexus.io.oneshot` and `nexus.io.wails` have no HTTP request
 behind them, so `UserInput.Headers` is nil and no `_header.*` label is bound.
@@ -159,20 +159,46 @@ behind them, so `UserInput.Headers` is nil and no `_header.*` label is bound.
 ### Through the session broker
 
 An instance spawned by `cmd/nexus-broker` never sees the client's HTTP
-request — the broker terminates it. The broker therefore extracts the
-`X-Nexus-*` headers itself and forwards them on the `input` message of the
-instance IO envelope, where `nexus.io.broker` applies them exactly as an
-in-process transport would.
+request — the broker terminates it — so the broker extracts the `X-Nexus-*`
+headers itself and passes them across the hop. Both of its client-facing
+surfaces are covered, by two mechanisms, because the broker relates to them
+differently.
 
-That forwarding covers the broker's **A2A** surface, which is the part of the
-gateway that parses and translates client requests
-(see [Session Broker](./session-broker.md)). Everything outside the `agents:`
-namespace is still forwarded unparsed, so a client speaking a protocol the
-broker does not decode carries no headers through the hop.
+On the **A2A** surface (`/agents/<name>/...`) the broker decodes the request
+and builds the instance's `input` payload itself, so it simply sets the
+headers on that message.
 
-The envelope field is additive and `omitempty`: an older broker in front of a
-newer instance simply never sets it, and the instance behaves as it did
-before.
+On the **generic client stream** (`GET /leases/{lease_id}/stream`) the broker
+is an opaque pipe: the client speaks the instance IO envelope directly and the
+gateway forwards its frames verbatim, never decoding or rewriting them. That
+rule is what lets an instance run a newer build than the broker in front of
+it, and it is not worth breaking to attach a header. So the headers travel as
+a frame of their own — the broker sends an instance-bound `client.headers`
+payload immediately ahead of each client IO frame, reporting that connection's
+headers, and `nexus.io.broker` applies it to the input that follows.
+
+Injecting a broker-authored frame is not the same as modifying a client's:
+every byte a client sent still arrives unchanged, and an instance that does
+not recognise the payload ignores it, so an older instance behind a newer
+broker is unaffected. The announcement is re-sent ahead of every IO frame
+rather than once at connect, which costs one small frame per user action and
+in exchange has no state to go stale — an announcement sent before the
+instance has dialled back would simply be dropped, and an instance re-spawned
+mid-connection after a crash would otherwise come up knowing nothing.
+
+An empty announcement is sent too, and is what clears the instance's copy, so
+a second client connection that sends no header does not inherit the first
+one's values.
+
+**The announcement wins over a `headers` field on the client's own `input`
+envelope.** Because the pipe is opaque, a client can set that field and the
+broker cannot strip it. The announcement comes from the HTTP request — the hop
+an operator's reverse proxy controls and injects into — so if the client's
+field won, anything a trusted proxy asserted could be overridden by the caller
+it was asserting about.
+
+Both the envelope field and the announcement are additive: an older broker
+sends neither, and the instance behaves exactly as it did before.
 
 ## Reference
 

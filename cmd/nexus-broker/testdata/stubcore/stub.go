@@ -120,6 +120,13 @@ type Report struct {
 	// Env holds every EnvReportPrefix-prefixed variable the process was started
 	// with, keyed by full name.
 	Env map[string]string `json:"env"`
+
+	// ClientHeaders is the most recent `client.headers` payload this connection
+	// was sent, by normalized header name. It is the far end of the broker's
+	// X-Nexus-* hop: the only way to prove a header set on a client handshake
+	// actually reached the process the broker spawned, rather than being
+	// assembled correctly and dropped somewhere in between.
+	ClientHeaders map[string]string `json:"client_headers,omitempty"`
 }
 
 // Run is the stub's whole main(). variant is the caller's compile-time
@@ -353,6 +360,10 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 	// under its own turn id — a broker anchors a task to a turn, and two turns
 	// sharing an id would let one task adopt the other's output.
 	turns := 0
+	// clientHeaders holds the most recent `client.headers` announcement, which
+	// a report request discloses. It is connection-scoped, exactly as the
+	// broker's own announcement is.
+	var clientHeaders map[string]string
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -383,6 +394,16 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				s.answerTurn(ctx, conn, turns)
 				continue
 			}
+			// A `client.headers` payload is the broker telling this instance
+			// the X-Nexus-* request headers of the client connection whose
+			// frames follow. A real instance (nexus.io.broker) RECORDS it and
+			// emits nothing, so this stub must swallow it too: echoing it back
+			// would put a frame no real instance produces in front of every
+			// answer a test is waiting for.
+			if isPayloadType(frame.Payload, "client.headers") {
+				clientHeaders = decodeClientHeaders(frame.Payload)
+				continue
+			}
 			payload := frame.Payload
 			if string(payload) == ReportRequest {
 				// A malformed report is answered with an empty payload rather
@@ -390,7 +411,9 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 				// would surface as a test timeout, which says nothing about
 				// what went wrong. json.Marshal of a Report cannot realistically
 				// fail, so this is belt-and-braces.
-				if encoded, mErr := json.Marshal(s.report); mErr == nil {
+				report := s.report
+				report.ClientHeaders = clientHeaders
+				if encoded, mErr := json.Marshal(report); mErr == nil {
 					payload = encoded
 				} else {
 					payload = nil
@@ -416,11 +439,31 @@ func (s session) run(ctx context.Context) (registered bool, err error) {
 // is not an object at all — the raw echo fixtures send one — is not an input,
 // which is what keeps the default echo behaviour intact.
 func isInputPayload(payload []byte) bool {
+	return isPayloadType(payload, "input")
+}
+
+// decodeClientHeaders pulls the header map off a `client.headers` payload. An
+// announcement carrying none decodes to nil, which is the clear the broker
+// means by it.
+func decodeClientHeaders(payload []byte) map[string]string {
+	var msg struct {
+		Headers map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return nil
+	}
+	return msg.Headers
+}
+
+// isPayloadType reports whether an IO payload is an object carrying the named
+// `type`. A payload that is not an object at all — the raw echo fixtures send
+// one — matches nothing, which is what keeps the default echo behaviour intact.
+func isPayloadType(payload []byte, want string) bool {
 	var msg ioPayload
 	if err := json.Unmarshal(payload, &msg); err != nil {
 		return false
 	}
-	return msg.Type == "input"
+	return msg.Type == want
 }
 
 // answerTurn plays one complete turn back over the dial-back socket.

@@ -579,7 +579,15 @@ func (g *Gateway) handleClient(w http.ResponseWriter, r *http.Request) {
 	// Stamp last-activity ONLY for real user input (io frames flowing client →
 	// instance) so the idle sweeper resets on genuine activity and not on
 	// instance output, pings, or control frames.
-	g.readPump(ctx, leaseID, wc, g.forwardToInstance, func(f brokerframe.Frame) {
+	//
+	// Each IO frame is preceded by this connection's X-Nexus-* request headers
+	// so the instance reads a turn's out-of-band caller context alongside the
+	// turn — the broker terminates the client request, so this hop is the only
+	// place those headers exist. See clientheaders.go for why they ride a frame
+	// of their own rather than being folded into the client's payload, which is
+	// forwarded verbatim.
+	forward := g.announceClientHeaders(clientRequestHeaders(r), g.forwardToInstance)
+	g.readPump(ctx, leaseID, wc, forward, func(f brokerframe.Frame) {
 		if f.Signal == brokerframe.SignalIO {
 			g.registry.markActivity(leaseID)
 		}

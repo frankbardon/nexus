@@ -211,12 +211,19 @@ func TestGateway_RegisterAndRoundTrip(t *testing.T) {
 	defer client.Close(websocket.StatusNormalClosure, "")
 	waitFor(t, func() bool { return registry.ClientConn(leaseID) != nil })
 
-	// Client -> instance.
+	// Client -> instance. Each client IO frame is preceded by the broker's own
+	// `client.headers` payload reporting that connection's X-Nexus-* request
+	// headers — none here, so it announces an empty set, which is what clears
+	// any previous client's values on the instance. See clientheaders.go.
 	writeFrame(t, client, brokerframe.Frame{
 		LeaseID: leaseID,
 		Signal:  brokerframe.SignalIO,
 		Payload: []byte(`{"from":"client"}`),
 	})
+	announced := readFrame(t, instance)
+	if announced.Signal != brokerframe.SignalIO || string(announced.Payload) != `{"type":"client.headers"}` {
+		t.Fatalf("instance got unexpected header announcement: %+v", announced)
+	}
 	got := readFrame(t, instance)
 	if got.Signal != brokerframe.SignalIO || string(got.Payload) != `{"from":"client"}` {
 		t.Fatalf("instance got unexpected frame: %+v", got)

@@ -220,16 +220,28 @@ out — see [Output is buffered across a reconnect](#output-is-buffered-across-a
 
 This instance never sees the client's HTTP request — `nexus-broker` terminates
 it — so the gateway extracts the request's `X-Nexus-*` headers itself and
-forwards them on the `input` message of the IO envelope. This plugin then
-applies them exactly as an in-process web transport would: onto
-`events.UserInput.Headers` and into the session's reserved `_header.*` labels.
+passes them across the hop. This plugin applies them exactly as an in-process
+web transport would: onto `events.UserInput.Headers` and into the session's
+reserved `_header.*` labels.
 
-That covers the broker's A2A surface, the part of the gateway that parses and
-translates client requests. Traffic outside the `agents:` namespace is
-forwarded unparsed, so it carries no headers through the hop.
+They arrive one of two ways, because the broker relates to its two
+client-facing surfaces differently:
 
-The envelope field is additive and `omitempty`: an older broker in front of a
-newer instance never sets it, and the instance behaves exactly as before. See
+- On the **A2A** surface the broker decodes the request and builds the `input`
+  payload itself, so the headers ride on that message.
+- On the **generic client stream** the broker forwards client frames verbatim
+  and cannot attach anything to them, so it sends a separate `client.headers`
+  payload immediately ahead of each client IO frame, reporting that
+  connection's headers. An empty one clears, which is what stops a second
+  client connection inheriting the first's values.
+
+Where an announcement has been made it **wins** over a `headers` field on the
+client's own `input` envelope: the announcement comes from the HTTP request an
+operator's reverse proxy controls, while the envelope field is whatever the
+client typed on a pipe the broker cannot filter.
+
+Both are additive: an older broker sends neither and this plugin behaves
+exactly as before. See
 [Request Headers](../../guides/request-headers.md).
 
 ## Security

@@ -2322,6 +2322,26 @@ every attached stream closes, the instance is told to cancel the turn, and the
 queue moves. Fifteen minutes is chosen against a human: a question routed to a
 person has to survive being paged, read, thought about and answered.
 
+## Request headers
+
+Request headers named `X-Nexus-*` on a client request are carried across the
+broker hop and delivered to plugins inside the instance, on both client-facing
+surfaces. It is how a caller passes per-request context — a tenant, a locale, a
+timezone, a subject a reverse proxy in front of the broker asserted — to an
+instance that never sees its HTTP request.
+
+- On the **A2A** surface the broker decodes the request and sets the headers on
+  the `input` payload it builds.
+- On the **client stream** (`GET /leases/{lease_id}/stream`) the broker
+  forwards client frames verbatim, so instead it sends its own `client.headers`
+  payload immediately ahead of each client IO frame. That announcement wins
+  over any `headers` a client sets on its own envelope, because it comes from
+  the HTTP hop your proxy controls and the envelope field does not.
+
+Nothing configures this, and nothing authenticates the values — see
+[Request Headers](./request-headers.md) for the bounds, the reserved label
+namespace they land in, and how to surface one to the model.
+
 ## Capacity and queueing
 
 `max_concurrent` caps live instances. Each claim acquires a slot **before**

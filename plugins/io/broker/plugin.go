@@ -23,6 +23,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/brokerframe"
@@ -48,6 +49,17 @@ type Plugin struct {
 	// that never sees io.input. Nil when the engine runs without a session;
 	// every use is guarded.
 	session *engine.SessionWorkspace
+
+	// clientMu guards clientHeaders and clientHeadersKnown, written from the
+	// read pump and read by the input path.
+	clientMu sync.Mutex
+	// clientHeaders are the X-Nexus-* request headers of the client connection
+	// currently attached at the broker, as last reported by a `client.headers`
+	// payload. clientHeadersKnown distinguishes "the broker has told us, and
+	// the answer was none" from "the broker has never told us" — the second is
+	// the A2A path, where the headers ride on the input message itself.
+	clientHeaders      map[string]string
+	clientHeadersKnown bool
 
 	// spawnSecret is the per-spawn second factor the broker handed this process
 	// at exec. It is echoed in the register frame and is NEVER logged: unlike
@@ -336,6 +348,29 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 	})
 }
 
+// inputHeaders resolves which X-Nexus-* headers an inbound `input` belongs to.
+//
+// The broker fills the message's own Headers on the surface it decodes (A2A),
+// and announces them on a separate `client.headers` payload on the surfaces it
+// forwards verbatim. An announcement WINS where one has been made, and that
+// precedence is the security-relevant half of this function rather than a tie
+// break: on the opaque pipe a client can set `headers` on its own envelope and
+// the broker cannot strip it, so if the message field won, a caller could
+// overwrite whatever an operator's reverse proxy asserted about it. The
+// announcement comes from the HTTP request, which is the hop that proxy
+// controls.
+//
+// With no announcement ever made, the message's own field stands — that is the
+// A2A path, where the broker built the message from the request itself.
+func (p *Plugin) inputHeaders(msg ioMessage) map[string]string {
+	p.clientMu.Lock()
+	defer p.clientMu.Unlock()
+	if p.clientHeadersKnown {
+		return p.clientHeaders
+	}
+	return msg.Headers
+}
+
 // --- inbound (broker frames -> bus) ---
 //
 // handleInbound runs on the client's read pump goroutine. Bus dispatch is
@@ -344,6 +379,17 @@ func (p *Plugin) handleCancelComplete(e engine.Event[any]) {
 // pump — mirroring io/browser and io/realtime.
 func (p *Plugin) handleInbound(msg ioMessage) {
 	switch msg.Type {
+	case "client.headers":
+		// Broker-originated: it reports the X-Nexus-* headers of the client
+		// connection whose frames follow. Recorded rather than acted on; the
+		// next input is what consumes it. An absent map clears the record,
+		// which is how a new client connection that sends no header avoids
+		// inheriting the previous one's values.
+		p.clientMu.Lock()
+		p.clientHeaders = msg.Headers
+		p.clientHeadersKnown = true
+		p.clientMu.Unlock()
+
 	case "input":
 		go func(content string, headers map[string]string) {
 			// The headers are the broker's report of the client HTTP request
@@ -366,7 +412,7 @@ func (p *Plugin) handleInbound(msg ioMessage) {
 				return
 			}
 			_ = p.bus.Emit("io.input", input)
-		}(msg.Content, msg.Headers)
+		}(msg.Content, p.inputHeaders(msg))
 
 	case "approval.response":
 		_ = p.bus.Emit("io.approval.response", events.ApprovalResponse{
