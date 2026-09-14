@@ -662,6 +662,17 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 			out[k] = v
 		}
 	}
+	// Gemini requires Schema.items on every array-typed schema and rejects
+	// the request outright when it is absent ("...properties[x].items:
+	// missing field."). JSON Schema treats items as optional, and MCP
+	// servers routinely omit it for free-form arrays (e.g. an RFC 6902
+	// patch ops array). An empty item schema satisfies the proto without
+	// inventing an element type the tool never declared.
+	if t, _ := out["type"].(string); strings.EqualFold(t, "array") {
+		if _, ok := out["items"]; !ok {
+			out["items"] = map[string]any{}
+		}
+	}
 	if nullable {
 		out["nullable"] = true
 	}

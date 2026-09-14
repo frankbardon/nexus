@@ -74,3 +74,55 @@ func TestSanitizeSchemaForGemini_PlainTypeUnaffected(t *testing.T) {
 		t.Errorf("command.type = %#v, want %q", command["type"], "string")
 	}
 }
+
+// Regression: Gemini rejects any array-typed schema without "items"
+// ("GenerateContentRequest.tools[0].function_declarations[13].parameters
+// .properties[patch].items: missing field."). JSON Schema leaves items
+// optional, so MCP servers emit free-form arrays (RFC 6902 patch ops, opaque
+// value lists) with no element schema at all.
+func TestSanitizeSchemaForGemini_FillsMissingArrayItems(t *testing.T) {
+	in := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"patch": map[string]any{
+				"type":        "array",
+				"description": "RFC 6902 ops",
+			},
+			"matrix": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "array"},
+			},
+			"tags": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	out := sanitizeSchemaForGemini(in)
+	props := out["properties"].(map[string]any)
+
+	patchItems, ok := props["patch"].(map[string]any)["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("patch.items not a map: %#v", props["patch"])
+	}
+	if len(patchItems) != 0 {
+		t.Errorf("patch.items = %#v, want empty schema", patchItems)
+	}
+
+	// Nested arrays need items at every level too.
+	outer := props["matrix"].(map[string]any)["items"].(map[string]any)
+	inner, ok := outer["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("matrix.items.items not a map: %#v", outer)
+	}
+	if len(inner) != 0 {
+		t.Errorf("matrix.items.items = %#v, want empty schema", inner)
+	}
+
+	// A declared element schema is left alone.
+	tags := props["tags"].(map[string]any)["items"].(map[string]any)
+	if tags["type"] != "string" {
+		t.Errorf("tags.items.type = %#v, want %q", tags["type"], "string")
+	}
+}
