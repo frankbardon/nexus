@@ -53,6 +53,14 @@ type CaseDelta struct {
 	LatencyP50Diff int     `json:"latency_p50_ms_delta"`
 	LatencyP95Diff int     `json:"latency_p95_ms_delta"`
 	TokensDelta    int     `json:"tokens_delta"`
+	// CustomScoreDeltas holds candidate-minus-baseline for every name
+	// present in either side's CustomScores (the union of both key sets).
+	// A name present on only one side is treated as zero on the missing
+	// side — introducing a new custom score reads as a full gain from 0,
+	// and a custom score that disappears reads as a full drop to 0. This
+	// mirrors how TokensDelta/latency already treat an absent diagnostic
+	// as zero rather than skipping the case.
+	CustomScoreDeltas map[string]float64 `json:"custom_score_deltas,omitempty"`
 	// Notes are short human-readable explanations of state transitions —
 	// "regression" (pass→fail), "recovery" (fail→pass), "" otherwise.
 	Note string `json:"note,omitempty"`
@@ -60,9 +68,10 @@ type CaseDelta struct {
 
 // Breaches signals which thresholds were crossed; populated by Decide.
 type Breaches struct {
-	ScoreDrop      bool `json:"score_drop"`
-	LatencyP95Drop bool `json:"latency_p95_drop"`
-	NewFailures    bool `json:"new_failures"`
+	ScoreDrop       bool `json:"score_drop"`
+	LatencyP95Drop  bool `json:"latency_p95_drop"`
+	NewFailures     bool `json:"new_failures"`
+	CustomScoreDrop bool `json:"custom_score_drop"`
 }
 
 // Thresholds encodes the eval.baseline config block.
@@ -75,6 +84,14 @@ type Thresholds struct {
 	// triggers a failure exit (0.20 = "20% slower fails CI"). Negative
 	// values disable the gate.
 	FailOnLatencyP95Drop float64
+	// FailOnCustomScoreDrop is keyed by the same names used in
+	// runner.Result.CustomScores / report.CaseEntry.CustomScores. Each
+	// name's value is the absolute drop (baseline - candidate) that
+	// triggers a failure exit for that name; a name absent from this map
+	// is not gated at all. Zero or negative for a given name disables its
+	// gate. Each configured name is evaluated independently — any one
+	// name's breach, in any one case, fails the run.
+	FailOnCustomScoreDrop map[string]float64
 }
 
 // Compute builds a Diff from two reports. against is the baseline; fresh is
@@ -151,6 +168,7 @@ func Compute(against, fresh *report.Report) (*Diff, error) {
 			cd.LatencyP50Diff = latF.p50 - latA.p50
 			cd.LatencyP95Diff = latF.p95 - latA.p95
 			cd.TokensDelta = totalTokens(f) - totalTokens(a)
+			cd.CustomScoreDeltas = customScoreDeltas(a, f)
 			switch {
 			case a.Pass && !f.Pass:
 				cd.Note = "regression"
@@ -207,7 +225,30 @@ func (d *Diff) Decide(t Thresholds) bool {
 		}
 	}
 
-	return d.Breached.ScoreDrop || d.Breached.LatencyP95Drop || d.Breached.NewFailures
+	// Custom-score gates: each configured name is checked independently
+	// against every case's CustomScoreDeltas for that name. A drop (negative
+	// delta) whose magnitude is at or above that name's threshold fails the
+	// run, exactly like the latency p95 gate above.
+	for name, threshold := range t.FailOnCustomScoreDrop {
+		if threshold <= 0 {
+			continue
+		}
+		for _, c := range d.Cases {
+			delta, ok := c.CustomScoreDeltas[name]
+			if !ok {
+				continue
+			}
+			if -delta >= threshold {
+				d.Breached.CustomScoreDrop = true
+				break
+			}
+		}
+		if d.Breached.CustomScoreDrop {
+			break
+		}
+	}
+
+	return d.Breached.ScoreDrop || d.Breached.LatencyP95Drop || d.Breached.NewFailures || d.Breached.CustomScoreDrop
 }
 
 // LoadReport reads a report.json from path. path may be a file or a
@@ -295,6 +336,37 @@ func totalTokens(c *report.CaseEntry) int {
 		return in + out
 	}
 	return 0
+}
+
+// customScoreDeltas computes candidate-minus-baseline for the union of both
+// case entries' CustomScores keys. A name missing from one side is treated
+// as zero on that side — see CaseDelta.CustomScoreDeltas's doc comment.
+func customScoreDeltas(against, fresh *report.CaseEntry) map[string]float64 {
+	if against == nil && fresh == nil {
+		return nil
+	}
+	var againstScores, freshScores map[string]float64
+	if against != nil {
+		againstScores = against.CustomScores
+	}
+	if fresh != nil {
+		freshScores = fresh.CustomScores
+	}
+	if len(againstScores) == 0 && len(freshScores) == 0 {
+		return nil
+	}
+	names := make(map[string]struct{}, len(againstScores)+len(freshScores))
+	for name := range againstScores {
+		names[name] = struct{}{}
+	}
+	for name := range freshScores {
+		names[name] = struct{}{}
+	}
+	deltas := make(map[string]float64, len(names))
+	for name := range names {
+		deltas[name] = freshScores[name] - againstScores[name]
+	}
+	return deltas
 }
 
 func anyToInt(v any) int {

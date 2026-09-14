@@ -53,6 +53,14 @@ type turnInput struct {
 	// only, so this task must publish no JSON or inline-file parts. See
 	// runConfig.textOnly.
 	textOnly bool
+	// headers are the X-Nexus-* request headers of the HTTP request carrying
+	// this message (nil when it sent none). They are bound into the session's
+	// reserved "_header.*" labels before the turn's io.input is emitted and
+	// ride on that event too. A2A carries them on the transport rather than in
+	// the message, so a JSON-RPC and a REST caller pass context the same way,
+	// and neither has to smuggle it through message parts the agent would then
+	// read as prose.
+	headers map[string]string
 }
 
 // --- bridge: inbound (server -> bus) and run lifecycle ---
@@ -139,10 +147,22 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 			"the task could not be recorded durably, so the turn was not started")
 	}
 
+	// Bound BEFORE the io.input below, for the reason nexus.io.agui documents
+	// on bindSessionContext: a plugin reading the headers while handling
+	// io.input must never observe the turn ahead of the context it belongs to.
+	// A request with no X-Nexus-* header clears the namespace rather than
+	// leaving the previous turn's values in place.
+	if p.session != nil {
+		if err := p.session.SetRequestHeaders(in.headers); err != nil {
+			p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+		}
+	}
+
 	ui := events.UserInput{
 		SchemaVersion: events.UserInputVersion,
 		Content:       in.text,
 		SessionID:     p.sessionID,
+		Headers:       in.headers,
 	}
 
 	// Emitted from a goroutine, exactly as nexus.io.agui does it: the whole turn
@@ -163,7 +183,7 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 		}
 	}()
 
-	p.logger.Debug("a2a task started",
+	p.logger.Info("a2a task started",
 		"task_id", r.taskID,
 		"context_id", contextID,
 		"message_id", in.messageID,
@@ -182,6 +202,17 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 // CancelTask landed in the same story, and why an unanswered question has a
 // deadline.
 func (p *Plugin) endTurn(r *run) {
+	// The turn's request headers are cleared BEFORE the slot is released, and
+	// that order is load-bearing for the same reason nexus.io.agui's endRun
+	// documents: p.active == nil is what lets the next turn start and bind its
+	// own headers, so clearing afterwards could land on top of the new turn's
+	// bind and wipe it. Clearing first, then releasing, closes that window.
+	if p.session != nil {
+		if err := p.session.SetRequestHeaders(nil); err != nil {
+			p.logger.Warn("clearing X-Nexus-* request header labels failed", "error", err)
+		}
+	}
+
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
@@ -294,6 +325,17 @@ func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal, opts strea
 	}
 	r.recordMessage(messageRef{MessageID: in.messageID, Role: a2a.RoleUser, Text: in.text})
 
+	// The continuing request is a request of its own and carries its own
+	// headers: rebind before the answer reaches the bus, so a plugin that
+	// wakes on hitl.responded reads the headers of the message that answered,
+	// not of the one that asked. Emitted after this for the same
+	// context-before-event reason startTurn applies to io.input.
+	if p.session != nil {
+		if err := p.session.SetRequestHeaders(in.headers); err != nil {
+			p.logger.Warn("binding X-Nexus-* request headers failed", "error", err)
+		}
+	}
+
 	resp := events.HITLResponse{
 		SchemaVersion: events.HITLResponseVersion,
 		RequestID:     parked.requestID,
@@ -310,7 +352,7 @@ func (p *Plugin) resumeTurn(in turnInput, caller nexusauth.Principal, opts strea
 		p.logger.Warn("a2a could not route an answer to the bus", "task_id", in.taskID, "error", err)
 	}
 
-	p.logger.Debug("a2a task resumed",
+	p.logger.Info("a2a task resumed",
 		"task_id", r.taskID, "context_id", r.contextID, "hitl_request_id", parked.requestID)
 	return r, sub, opening, nil
 }
@@ -550,7 +592,7 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 		func() { p.expireInput(r, req.ID) }) {
 		return
 	}
-	p.logger.Debug("a2a task awaiting input",
+	p.logger.Info("a2a task awaiting input",
 		"task_id", r.taskID, "hitl_request_id", req.ID, "timeout", p.cfg.inputTimeout)
 }
 
@@ -575,7 +617,7 @@ func (p *Plugin) handleHITLResponded(e engine.Event[any]) {
 		return
 	}
 	if r.resume(resp.RequestID) {
-		p.logger.Debug("a2a task resumed after input",
+		p.logger.Info("a2a task resumed after input",
 			"task_id", r.taskID, "hitl_request_id", resp.RequestID, "cancelled", resp.Cancelled)
 	}
 }
@@ -638,7 +680,7 @@ func (p *Plugin) handleError(e engine.Event[any]) {
 	if info.Err != nil {
 		reason = info.Err.Error()
 	}
-	p.logger.Warn("a2a task failed", "task_id", r.taskID, "source", info.Source, "error", info.Err)
+	p.logger.Error("a2a task failed", "task_id", r.taskID, "source", info.Source, "error", info.Err)
 	r.fail(reason)
 }
 

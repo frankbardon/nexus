@@ -197,6 +197,7 @@ func (g *authGuard) wrap(next func(http.ResponseWriter, *http.Request)) func(htt
 			g.deny(w, r, err)
 			return
 		}
+		// Deliberately INFO, not DEBUG: this is the broker's security audit trail. See docs/src/operations/logging.md's "Exceptions" section.
 		g.logger.Info("auth allowed", g.recordAttrs(r, p.ID, "")...)
 		next(w, withPrincipal(r, p))
 	}

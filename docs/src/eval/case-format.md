@@ -117,7 +117,7 @@ Top-level shape:
 
 ```yaml
 deterministic:    # list of assertion entries
-  - kind: <one of the 7 deterministic kinds>
+  - kind: <one of the 9 deterministic kinds>
     ...spec fields...
 semantic: []      # reserved for Phase 5
 ```
@@ -230,6 +230,49 @@ wall-clock). A turn = `agent.turn.start` … `agent.turn.end`.
 ```
 
 Reference: `pkg/eval/case/assertions.go:92-95`.
+
+### `response_contains`
+
+Passes when the selected event's text content contains every string in
+`contains` (if given) and at least one string in `contains_any` (if
+given). Matching is ASCII case-insensitive. At least one of
+`contains`/`contains_any` is required. `event_type`, when omitted,
+defaults to the final assistant response — the last `llm.response` event
+with no pending tool calls and non-empty content.
+
+```yaml
+- kind: response_contains
+  contains: ["revenue", "$4.2M"]
+```
+
+```yaml
+- kind: response_contains
+  contains_any: ["chart", "graph", "table"]
+  event_type: io.output
+```
+
+Reference: `pkg/eval/case/assertions.go:103-114`. Worked examples
+including the tolerance-inference behavior of its sibling kind
+(`contains_value`) live at [`embedding.md`](./embedding.md#response_contains-and-contains_value).
+
+### `contains_value`
+
+Passes when the selected event's text content contains at least one
+numeric token within `tolerance` of `value` (inclusive boundary).
+Extraction is word-boundary-aware and strips thousands-separator commas
+and an optional `unit` string before matching. When `tolerance` is
+omitted, it's inferred from `value`'s own decimal precision (half the
+smallest implied unit — `value: 42.3` infers `0.05`).
+
+```yaml
+- kind: contains_value
+  value: 42.3
+  unit: "%"
+```
+
+Reference: `pkg/eval/case/assertions.go:116-161`. See
+[`embedding.md`](./embedding.md#response_contains-and-contains_value)
+for the full tolerance-inference table and worked examples.
 
 ## Generating a case
 

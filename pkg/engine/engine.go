@@ -135,7 +135,7 @@ func NewFromBytes(configBytes []byte) (*Engine, error) {
 // and NewFromBytes. Factored out so the two entry points cannot
 // drift on logger setup, bus creation, or lifecycle wiring.
 func newFromConfig(cfg *Config) *Engine {
-	level := parseLogLevel(cfg.Core.LogLevel)
+	level := ParseLogLevel(cfg.Core.LogLevel)
 
 	// Build the fanout first so every later component (lifecycle, schema
 	// registry, context manager) writes through it from construction time.
@@ -1271,7 +1271,6 @@ func (e *Engine) prepareSession() error {
 	return nil
 }
 
-// parseLogLevel converts a string log level to slog.Level.
 // setTagIfAbsent assigns key=value only when the caller hasn't already set
 // the key. Lets per-plugin tags (set by emitting plugin) override
 // session-level seeds — important for `tenant` overrides in batch jobs and
@@ -1282,8 +1281,24 @@ func setTagIfAbsent(tags map[string]string, key, value string) {
 	}
 }
 
-func parseLogLevel(level string) slog.Level {
+// LevelTrace is a custom slog.Level below slog.LevelDebug, for ultra-verbose
+// per-event output (bus dispatch, every tool-call arg, wire payloads) that
+// should stay off even during normal Debug troubleshooting. stdlib log/slog
+// defines only Debug/Info/Warn/Error, so this is a plain constant, not a new
+// logging dependency (CLAUDE.md forbids adding a logging library).
+//
+// *slog.Logger has no .Trace() convenience method — that only exists for the
+// four standard levels — so emitting at this level uses the generic Log
+// method: logger.Log(ctx, engine.LevelTrace, "msg", "key", val).
+const LevelTrace slog.Level = slog.LevelDebug - 4
+
+// ParseLogLevel converts a string log level ("trace", "debug", "info",
+// "warn", "error") to slog.Level. Unrecognized values default to
+// slog.LevelInfo.
+func ParseLogLevel(level string) slog.Level {
 	switch level {
+	case "trace":
+		return LevelTrace
 	case "debug":
 		return slog.LevelDebug
 	case "info":

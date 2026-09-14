@@ -257,7 +257,7 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 			result.Error = out.err
 		}
 		if veto, vErr := p.bus.EmitVetoable("before:tool.result", &result); vErr == nil && veto.Vetoed {
-			p.logger.Info("agui_remote tool.result vetoed", "reason", veto.Reason)
+			p.logger.Debug("agui_remote tool.result vetoed", "reason", veto.Reason)
 			return
 		}
 		_ = p.bus.Emit("tool.result", result)
@@ -282,7 +282,7 @@ func (p *Plugin) runRemote(ra *remoteAgent, task string, contextMap map[string]a
 	key := p.cacheKey(ra, task, contextMap)
 	if p.cache != nil {
 		if cached, ok := p.cache.get(key); ok {
-			p.logger.Info("agui_remote cache hit", "agent", ra.name, "spawn_id", spawnID)
+			p.logger.Debug("agui_remote cache hit", "agent", ra.name, "spawn_id", spawnID)
 			// Still surface a started/complete pair so observers see the call.
 			p.emitStarted(spawnID, task, parentTurnID)
 			p.emitComplete(spawnID, parentTurnID, cached.result, cached.err)

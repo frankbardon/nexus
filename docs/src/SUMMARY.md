@@ -120,6 +120,7 @@
 - [Quickstart](./eval/quickstart.md)
 - [Case Format](./eval/case-format.md)
 - [Promoting a Session](./eval/promotion.md)
+- [Embedding: Extra Plugins, Live Runs & Custom Scores](./eval/embedding.md)
 - [Inspect-Mode Protocol](./eval/inspect-protocol.md)
 
 # Guides
@@ -134,9 +135,11 @@
 - [Object Storage](./guides/object-storage.md)
 - [Session Broker](./guides/session-broker.md)
 - [A2A Interoperability](./guides/a2a.md)
+- [Request Headers](./guides/request-headers.md)
 - [Creating a Custom Plugin](./skills/custom-plugin.md)
 
 # Operations
 
 - [Object Storage](./operations/object-storage.md)
 - [Human-in-the-Loop and Session Rewind](./operations/hitl.md)
+- [Logging Levels](./operations/logging.md)

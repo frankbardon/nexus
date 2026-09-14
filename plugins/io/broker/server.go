@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/frankbardon/nexus/pkg/brokerframe"
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 // ioMessage is the opaque IO payload carried inside a brokerframe.Frame on
@@ -71,6 +72,29 @@ type ioMessage struct {
 
 	// cancel (client -> server)
 	Source string `json:"source,omitempty"`
+
+	// input (broker -> instance). The X-Nexus-* headers of the client HTTP
+	// request the broker translated into this message, keyed by normalized
+	// name. The broker terminates the client connection and this instance does
+	// not, so the transport hop is the ONLY way per-request caller context
+	// reaches a plugin here — see pkg/nexusheaders.
+	//
+	// Additive and omitempty: an older broker in front of a newer instance
+	// simply never sets it, and the instance behaves exactly as it did before,
+	// so no brokerframe.Version bump is implied.
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// input / client.headers (broker -> instance). The id of the principal the
+	// broker's own credential validator resolved for the client request behind
+	// this message, empty when the broker runs with authentication disabled.
+	//
+	// It is carried SEPARATELY from Headers because it is a different kind of
+	// value: Headers is what the caller asserted about itself and nothing
+	// checked, this is what a pkg/nexusauth Validator verified. The broker
+	// already resolves it to decide lease ownership, and dropping it here would
+	// leave an instance able to read only the unverified half of an identity
+	// the hop in front of it had already established.
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 // ioChoice is one option of a multiple-choice hitl.request, mirroring
@@ -626,7 +650,7 @@ func (c *client) SendIO(msg ioMessage) {
 		// Dormant transport: no broker_addr or no lease_id, so Ready never
 		// dialled and never will. Keep the original drop-at-debug behaviour
 		// rather than pinning memory for a link that is not coming up.
-		c.logger.Debug("dropping broker frame", "type", msg.Type, "reason", "transport not started")
+		c.logger.Log(context.Background(), engine.LevelTrace, "dropping broker frame", "type", msg.Type, "reason", "transport not started")
 		return
 	}
 	c.enqueueOutbound(data)

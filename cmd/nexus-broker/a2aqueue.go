@@ -123,7 +123,7 @@ func (q *a2aContextQueues) enter(key string, task *a2aTask, begin func()) bool {
 		return true
 	}
 	entry.waiting = append(entry.waiting, a2aQueuedTurn{task: task, begin: begin})
-	q.logger.Debug("a2a task queued behind the conversation's active turn",
+	q.logger.Warn("a2a task queued behind the conversation's active turn",
 		"profile", task.profile, "task_id", task.taskID, "context_id", task.contextID,
 		"ahead", len(entry.waiting))
 	return false

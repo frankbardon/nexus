@@ -110,7 +110,7 @@ func (b *Backend) Hydrate(ctx context.Context, keyPrefix string, destDir string)
 
 	// An empty prefix is a brand-new session, not a failure -- log it rather
 	// than treating it as one, because it is the first-run path.
-	b.log.Debug("gcs object store hydrated",
+	b.log.Info("gcs object store hydrated",
 		"prefix", keyPrefix, "dest", dest, "objects", n, "bytes", bytes)
 	return nil
 }

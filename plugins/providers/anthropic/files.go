@@ -273,7 +273,7 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 			}
 
 			filename := fmt.Sprintf("nexus-%s-%d-%d", part.Type, i, j)
-			p.logger.Info("anthropic: uploading oversize part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
+			p.logger.Debug("anthropic: uploading oversize part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
 			id, err := p.uploadFile(ctx, part.Data, part.MimeType, filename)
 			if err != nil {
 				return nil, fmt.Errorf("anthropic: files upload: %w", err)

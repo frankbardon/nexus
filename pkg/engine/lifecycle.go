@@ -139,7 +139,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		if pinned, ok := lm.config.Capabilities[name]; ok && pinned != "" && stringsContain(providers, pinned) {
 			source = "explicit-config"
 		}
-		lm.logger.Info("capability resolved",
+		lm.logger.Debug("capability resolved",
 			"capability", name,
 			"providers", providers,
 			"source", source)
@@ -560,7 +560,7 @@ func (lm *LifecycleManager) expandRequirements(
 			// the base. User-supplied config wins; nothing else to do.
 			if activeSet[resolvedID] || baseActive[PluginBaseID(resolvedID)] {
 				if req.Capability != "" {
-					lm.logger.Info("capability satisfied",
+					lm.logger.Debug("capability satisfied",
 						"capability", req.Capability,
 						"provider", resolvedID,
 						"required_by", src,

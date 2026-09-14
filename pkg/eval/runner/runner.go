@@ -19,6 +19,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/allplugins"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
+	"github.com/frankbardon/nexus/pkg/eval/internal/livedrive"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/events/compat"
 )
@@ -36,6 +37,19 @@ type Result struct {
 	// JournalDir is the case's golden journal dir, echoed back for the
 	// reporter's convenience.
 	JournalDir string `json:"journal_dir,omitempty"`
+	// Transcript is a rendered, legible plain-text rendering of the
+	// session's full, unfiltered observed event stream (see
+	// RenderTranscript). Populated for both Run and RunLive — they share
+	// buildResult's tail — but it exists primarily for RunLive: a
+	// downstream judge call feeds it as protocol.Request.UserInput
+	// alongside a rubric (E2-S3).
+	Transcript string `json:"transcript,omitempty"`
+	// CustomScores is caller-populated — neither Run nor RunLive sets it.
+	// An external caller (e.g. after computing a correctness check or a
+	// judge verdict) sets it on the Result it already holds before
+	// passing the Result to report.Aggregate, which copies it onto the
+	// corresponding CaseEntry.
+	CustomScores map[string]float64 `json:"custom_scores,omitempty"`
 }
 
 // Options tune Run.
@@ -52,6 +66,27 @@ type Options struct {
 	// use as core.sessions.root. Tests pass t.TempDir(); production passes
 	// the empty string and accepts the case-config default.
 	SessionsRoot string
+	// ExtraPlugins registers additional plugin factories onto the engine's
+	// registry, keyed by plugin ID, alongside the built-ins
+	// allplugins.RegisterAll already provides. This is an embedder's seam
+	// for booting cases that reference their own (non-nexus.*) plugins —
+	// e.g. an eval harness embedded in another module, exercising its own
+	// tools or agents.
+	//
+	// Registering an ID here only makes its factory available to the
+	// engine's registry; it does not activate the plugin. The case's own
+	// config (`plugins.active`) must still name the ID for the engine to
+	// construct and Init it during Boot — exactly as for any built-in.
+	//
+	// An ID that collides with a built-in registered by
+	// allplugins.RegisterAll is not guarded against: entries here are
+	// registered after the built-ins, so PluginRegistry.Register's existing
+	// silent-overwrite behavior means an ExtraPlugins entry always wins over
+	// a same-ID built-in. This is deliberate, not an oversight — it lets an
+	// embedder shadow a built-in for testing.
+	//
+	// A nil or empty map changes nothing about existing behavior.
+	ExtraPlugins map[string]engine.PluginFactory
 }
 
 // Run executes one case end-to-end and returns its Result.
@@ -92,19 +127,9 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 		}
 	}
 
-	eng, err := engine.NewFromBytes(cfgBytes)
+	eng, err := bootEngine(ctx, cfgBytes, opts)
 	if err != nil {
-		return nil, fmt.Errorf("engine.NewFromBytes: %w", err)
-	}
-	if opts.Logger != nil {
-		eng.Logger = opts.Logger
-	}
-	allplugins.RegisterAll(eng.Registry)
-
-	bootCtx, bootCancel := context.WithTimeout(ctx, opts.BootTimeout)
-	defer bootCancel()
-	if err := eng.Boot(bootCtx); err != nil {
-		return nil, fmt.Errorf("boot: %w", err)
+		return nil, err
 	}
 
 	// Belt-and-braces shutdown: the explicit Stop below runs first; this
@@ -181,6 +206,148 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 		mu.Unlock()
 	}
 
+	return buildResult(c, finalObserved)
+}
+
+// RunLive executes one case's Inputs end-to-end against a real, live engine
+// boot — no engine.Replay stash, real LLM calls (or, in tests, a case
+// config whose own nexus.io.test plugin mocks the LLM response itself, the
+// same pattern pkg/eval/protocol's own tests use — see
+// plugins/io/test's mock_responses). It is a third execution path,
+// structurally distinct from Run's replay: instead of replaying a journal
+// stash, it overlays the case's config so a live nexus.io.test transport
+// fires c.Inputs and signals natural completion, then waits for that
+// completion via the same "wait to idle" mechanics protocol.Run uses
+// (factored into pkg/eval/internal/livedrive.WaitForIdle so neither package
+// reimplements it).
+//
+// Otherwise RunLive mirrors Run closely: identical Options/Result shapes,
+// identical ExtraPlugins registration, and the same
+// Assertions.Deterministic evaluation against (live-observed, golden) —
+// so EventSequenceDistance/ToolInvocationParity still catch structural
+// drift between a live run and the golden journal even though the LLM call
+// itself isn't replayed from a stash.
+func RunLive(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
+	if c == nil {
+		return nil, fmt.Errorf("nil case")
+	}
+	if opts.BootTimeout == 0 {
+		opts.BootTimeout = 30 * time.Second
+	}
+	if opts.ReplayTimeout == 0 {
+		opts.ReplayTimeout = 60 * time.Second
+	}
+
+	cfgBytes := c.ConfigYAML
+	if opts.SessionsRoot != "" {
+		var err error
+		cfgBytes, err = overrideSessionsRoot(cfgBytes, opts.SessionsRoot)
+		if err != nil {
+			return nil, fmt.Errorf("override sessions root: %w", err)
+		}
+	}
+	cfgBytes, err := overlayLiveInputs(cfgBytes, c.Inputs)
+	if err != nil {
+		return nil, fmt.Errorf("overlay live inputs: %w", err)
+	}
+
+	eng, err := bootEngine(ctx, cfgBytes, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Belt-and-braces shutdown — same rationale as Run's.
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_ = eng.Stop(stopCtx)
+		cancel()
+	}()
+
+	// Side-channel wildcard collector — same fallback rationale as Run's.
+	var (
+		mu       sync.Mutex
+		observed []evalcase.ObservedEvent
+	)
+	unsub := eng.Bus.SubscribeAll(func(ev engine.Event[any]) {
+		mu.Lock()
+		observed = append(observed, evalcase.ObservedEvent{
+			Type:      ev.Type,
+			Timestamp: ev.Timestamp,
+			Payload:   ev.Payload,
+		})
+		mu.Unlock()
+	})
+	defer unsub()
+
+	liveJournalDir := ""
+	if eng.Session != nil {
+		liveJournalDir = filepath.Join(eng.Session.RootDir, "journal")
+	}
+
+	// Drive: nexus.io.test (ensured active by overlayLiveInputs above) fires
+	// c.Inputs itself once booted; here we just wait for it to signal
+	// natural completion (or the ctx deadline to run out — RunLive passes
+	// maxTurns=0, disabling livedrive's turn-cap path entirely, since a
+	// case's Inputs list — not a turn count — is what bounds a live run).
+	driveCtx, driveCancel := context.WithTimeout(ctx, opts.ReplayTimeout)
+	defer driveCancel()
+	if _, err := livedrive.WaitForIdle(driveCtx, eng, 0); err != nil {
+		return nil, fmt.Errorf("live drive: %w", err)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := eng.Stop(stopCtx); err != nil {
+		stopCancel()
+		eng.Logger.Warn("eval runner: engine stop failed", "error", err)
+	} else {
+		stopCancel()
+	}
+
+	var finalObserved []evalcase.ObservedEvent
+	if liveJournalDir != "" {
+		if live, err := loadJournal(liveJournalDir); err == nil {
+			finalObserved = live
+		}
+	}
+	if finalObserved == nil {
+		mu.Lock()
+		finalObserved = append([]evalcase.ObservedEvent(nil), observed...)
+		mu.Unlock()
+	}
+
+	return buildResult(c, finalObserved)
+}
+
+// bootEngine constructs and boots a fresh engine from cfgBytes, applying
+// opts.Logger and opts.ExtraPlugins identically for every eval-execution
+// path — Run's replay and RunLive's live drive both call this, so
+// allplugins.RegisterAll + the ExtraPlugins registration loop has exactly
+// one call site.
+func bootEngine(ctx context.Context, cfgBytes []byte, opts Options) (*engine.Engine, error) {
+	eng, err := engine.NewFromBytes(cfgBytes)
+	if err != nil {
+		return nil, fmt.Errorf("engine.NewFromBytes: %w", err)
+	}
+	if opts.Logger != nil {
+		eng.Logger = opts.Logger
+	}
+	allplugins.RegisterAll(eng.Registry)
+	for id, factory := range opts.ExtraPlugins {
+		eng.Registry.Register(id, factory)
+	}
+
+	bootCtx, bootCancel := context.WithTimeout(ctx, opts.BootTimeout)
+	defer bootCancel()
+	if err := eng.Boot(bootCtx); err != nil {
+		return nil, fmt.Errorf("boot: %w", err)
+	}
+	return eng, nil
+}
+
+// buildResult loads the case's golden journal and evaluates its
+// Assertions.Deterministic against finalObserved — the tail both Run
+// (replayed observed stream) and RunLive (live-observed stream) share.
+func buildResult(c *evalcase.Case, finalObserved []evalcase.ObservedEvent) (*Result, error) {
 	golden, err := loadJournal(c.JournalDir)
 	if err != nil {
 		return nil, fmt.Errorf("load golden journal: %w", err)
@@ -192,6 +359,7 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 		Pass:       true,
 		Counts:     make(map[string]int),
 		JournalDir: c.JournalDir,
+		Transcript: RenderTranscript(finalObserved),
 	}
 	if len(finalObserved) > 0 {
 		res.StartedAt = finalObserved[0].Timestamp

@@ -92,7 +92,7 @@ func (s *server) registerGenericResourceTools() {
 func (s *server) reconcileStaticResources(ctx context.Context, resources []*mcp.Resource) {
 	limit := s.cfg.Resources.AutoRegisterMax
 	if limit <= 0 || len(resources) > limit {
-		s.logger.Info("mcp: skipping static-resource auto-registration above limit",
+		s.logger.Debug("mcp: skipping static-resource auto-registration above limit",
 			"server", s.cfg.Name, "count", len(resources), "limit", limit)
 		s.mu.Lock()
 		for slug := range s.staticResources {

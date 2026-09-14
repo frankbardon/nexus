@@ -205,7 +205,7 @@ func (p *Plugin) handleSessionEnd(_ engine.Event[any]) {
 
 	caseDir, warnings, err := p.snapshot(sessionID, reason, status)
 	if err != nil {
-		p.logger.Error("sampler snapshot failed", "session_id", sessionID, "reason", reason, "error", err)
+		p.logger.Warn("sampler snapshot failed", "session_id", sessionID, "reason", reason, "error", err)
 		return
 	}
 

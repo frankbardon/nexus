@@ -528,7 +528,7 @@ func (p *Plugin) applyDowngrade(req *events.LLMRequest, c ceiling, reason string
 	req.Metadata["_downgraded_by"] = pluginID
 	req.Metadata["_downgraded_from"] = prev
 	req.Metadata["_downgrade_reason"] = reason
-	p.logger.Info("downgraded model after budget exceeded",
+	p.logger.Warn("downgraded model after budget exceeded",
 		"from", prev, "to", cheapest, "reason", reason)
 }
 

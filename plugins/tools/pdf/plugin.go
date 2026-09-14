@@ -321,7 +321,7 @@ func (p *Plugin) handleReadPDF(tc events.ToolCall) {
 		if err := p.session.WriteFile(sessionPath, []byte(text)); err != nil {
 			p.logger.Warn("failed to save PDF text to session", "path", sessionPath, "error", err)
 		} else {
-			p.logger.Info("saved PDF text to session", "path", sessionPath)
+			p.logger.Debug("saved PDF text to session", "path", sessionPath)
 		}
 	}
 
@@ -367,7 +367,7 @@ func (p *Plugin) handleReadPDFDocument(tc events.ToolCall, path, absPath string)
 		TurnID:      tc.TurnID,
 	}
 	if veto, vErr := p.bus.EmitVetoable("before:tool.result", &result); vErr == nil && veto.Vetoed {
-		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)
@@ -413,7 +413,7 @@ func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
 		TurnID: tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
-		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)

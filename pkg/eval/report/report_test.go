@@ -48,6 +48,50 @@ func TestAggregate_Stable(t *testing.T) {
 	}
 }
 
+func TestAggregate_CustomScores(t *testing.T) {
+	results := []*runner.Result{
+		{
+			CaseID:       "alpha",
+			Pass:         true,
+			CustomScores: map[string]float64{"correctness": 0.75, "helpfulness": 1},
+		},
+		{
+			CaseID: "beta",
+			Pass:   true,
+			// No CustomScores set — should leave CaseEntry.CustomScores nil.
+		},
+	}
+
+	r := Aggregate("full", results)
+
+	var alpha, beta *CaseEntry
+	for _, c := range r.Cases {
+		switch c.CaseID {
+		case "alpha":
+			alpha = c
+		case "beta":
+			beta = c
+		}
+	}
+	if alpha == nil || beta == nil {
+		t.Fatalf("missing expected cases: %+v", r.Cases)
+	}
+
+	want := map[string]float64{"correctness": 0.75, "helpfulness": 1}
+	if len(alpha.CustomScores) != len(want) {
+		t.Fatalf("alpha.CustomScores=%v, want %v", alpha.CustomScores, want)
+	}
+	for k, v := range want {
+		if got := alpha.CustomScores[k]; got != v {
+			t.Errorf("alpha.CustomScores[%q]=%v, want %v", k, got, v)
+		}
+	}
+
+	if beta.CustomScores != nil {
+		t.Errorf("beta.CustomScores=%v, want nil (zero-value passthrough)", beta.CustomScores)
+	}
+}
+
 func TestWriteJSON_SchemaShape(t *testing.T) {
 	r := &Report{
 		SchemaVersion: SchemaVersion,

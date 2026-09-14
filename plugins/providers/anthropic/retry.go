@@ -126,7 +126,7 @@ func (p *Plugin) doWithRetry(ctx context.Context, makeFn func() (*http.Request, 
 	for attempt := 0; attempt <= rc.MaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := p.backoffDelay(attempt-1, rc)
-			p.logger.Info("retrying API request",
+			p.logger.Warn("retrying API request",
 				"attempt", attempt,
 				"max_retries", rc.MaxRetries,
 				"delay", delay,
@@ -165,7 +165,7 @@ func (p *Plugin) doWithRetry(ctx context.Context, makeFn func() (*http.Request, 
 					if delay > rc.MaxDelay {
 						delay = rc.MaxDelay
 					}
-					p.logger.Info("respecting Retry-After header",
+					p.logger.Warn("respecting Retry-After header",
 						"delay", delay,
 						"attempt", attempt,
 					)

@@ -216,6 +216,50 @@ it; see [the guide](../../guides/session-broker.md#post-releaselease_id--release
 Anything still in the outbound buffer is flushed on a bound rather than waited
 out — see [Output is buffered across a reconnect](#output-is-buffered-across-a-reconnect).
 
+## Request headers
+
+This instance never sees the client's HTTP request — `nexus-broker` terminates
+it — so the gateway extracts the request's `X-Nexus-*` headers itself and
+passes them across the hop. This plugin applies them exactly as an in-process
+web transport would: onto `events.UserInput.Headers` and into the session's
+reserved `_header.*` labels.
+
+They arrive one of two ways, because the broker relates to its two
+client-facing surfaces differently:
+
+- On the **A2A** surface the broker decodes the request and builds the `input`
+  payload itself, so the headers ride on that message.
+- On the **generic client stream** the broker forwards client frames verbatim
+  and cannot attach anything to them, so it sends a separate `client.headers`
+  payload immediately ahead of each client IO frame, reporting that
+  connection's headers. An empty one clears, which is what stops a second
+  client connection inheriting the first's values.
+
+The two sources **merge**. The announcement carries what is fixed for the
+connection (a WebSocket has headers only at the upgrade); a client may attach
+`headers` to its own `input` payload for values that vary per turn, and those
+fill in around the connection's. Where both name the same header the
+announcement wins — it comes from the HTTP handshake an operator's reverse
+proxy controls, while the envelope field is whatever the client typed on a pipe
+the broker cannot filter. Put fixed values on the handshake, varying values on
+the turn, never the same key on both.
+
+Per-turn headers are normalized and bounded identically to the handshake path.
+Identity is not merged: a `principal_id` on a client's payload is ignored
+whenever an announcement exists.
+
+Both are additive: an older broker sends neither and this plugin behaves
+exactly as before.
+
+The announcement also carries the **principal the broker resolved** for the
+request, which this plugin binds to `_principal_id` — so a plugin inside the
+instance can read the identity the gateway checked (`session.PrincipalID()`)
+rather than only the attributes the caller asserted. It is a separate field
+because only one of the two is verified, and the announcement's copy wins over
+any `principal_id` a client sets on its own envelope. A turn whose connection
+carried no verified identity clears the previous turn's rather than inheriting
+it. See [Request Headers](../../guides/request-headers.md).
+
 ## Security
 
 The plugin makes **no authorization decisions**. It presents the credentials the

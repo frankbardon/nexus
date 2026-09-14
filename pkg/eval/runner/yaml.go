@@ -62,6 +62,94 @@ func getOrCreateMapping(parent *yaml.Node, key string) *yaml.Node {
 	return valNode
 }
 
+// overlayLiveInputs prepares a case's config for RunLive: it ensures
+// nexus.io.test is present in plugins.active — case bundles built for the
+// replay-only Run path have no IO transport in plugins.active at all,
+// since replay fires io.input directly through the journal coordinator,
+// not through any plugin — and sets nexus.io.test's own `inputs:` list to
+// inputs (the case's canonical Inputs field), overwriting whatever, if
+// anything, was already configured there. Any other key already present in
+// nexus.io.test's config block (approval_mode, mock_responses, timeout,
+// ...) is left untouched, so a case bundle authored for RunLive can still
+// configure those directly.
+//
+// Uses the yaml.v3 node API, matching every other config-surgery helper in
+// this file, to keep comments/unrelated keys stable.
+func overlayLiveInputs(in []byte, inputs []string) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(in, &doc); err != nil {
+		return nil, fmt.Errorf("unmarshal yaml: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, fmt.Errorf("yaml document is empty")
+	}
+	rootNode := doc.Content[0]
+	if rootNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("yaml root is not a mapping")
+	}
+
+	plugins := getOrCreateMapping(rootNode, "plugins")
+	active := getOrCreateSequence(plugins, "active")
+	if !sequenceContainsValue(active, "nexus.io.test") {
+		active.Content = append(active.Content, &yaml.Node{
+			Kind: yaml.ScalarNode, Tag: "!!str", Value: "nexus.io.test",
+		})
+	}
+
+	testCfg := getOrCreateMapping(plugins, "nexus.io.test")
+	setStringSeq(testCfg, "inputs", inputs)
+
+	return yaml.Marshal(&doc)
+}
+
+// getOrCreateSequence returns the sequence value of the given key under
+// parent, creating an empty sequence (and the key) if absent — the
+// sequence-node sibling of getOrCreateMapping above.
+func getOrCreateSequence(parent *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		k := parent.Content[i]
+		if k.Value == key && k.Kind == yaml.ScalarNode {
+			v := parent.Content[i+1]
+			if v.Kind == yaml.SequenceNode {
+				return v
+			}
+			// Reset to sequence if the existing value is the wrong shape.
+			v.Kind = yaml.SequenceNode
+			v.Tag = "!!seq"
+			v.Value = ""
+			v.Content = nil
+			return v
+		}
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: key, Tag: "!!str"}
+	valNode := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	parent.Content = append(parent.Content, keyNode, valNode)
+	return valNode
+}
+
+// sequenceContainsValue reports whether seq has a scalar entry equal to
+// value.
+func sequenceContainsValue(seq *yaml.Node, value string) bool {
+	for _, n := range seq.Content {
+		if n.Kind == yaml.ScalarNode && n.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// setStringSeq replaces parent[key] with a sequence of scalar strings,
+// overwriting any existing sequence at that key.
+func setStringSeq(parent *yaml.Node, key string, values []string) {
+	seq := getOrCreateSequence(parent, key)
+	seq.Content = nil
+	for _, s := range values {
+		seq.Content = append(seq.Content, &yaml.Node{
+			Kind: yaml.ScalarNode, Tag: "!!str", Value: s,
+		})
+	}
+}
+
 // setStringKey upserts a scalar string under parent[key].
 func setStringKey(parent *yaml.Node, key, value string) {
 	for i := 0; i+1 < len(parent.Content); i += 2 {

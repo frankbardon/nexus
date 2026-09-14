@@ -10,6 +10,11 @@
     "timezone":    {"type": "boolean", "description": "Inject {{timezone}} (IANA name)."},
     "cwd":         {"type": "boolean", "description": "Inject {{cwd}} (current working directory)."},
     "session_dir": {"type": "boolean", "description": "Inject {{session_dir}} (active session root)."},
-    "os":          {"type": "boolean", "description": "Inject {{os}} (host operating system)."}
+    "os":          {"type": "boolean", "description": "Inject {{os}} (host operating system)."},
+    "request_headers": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Normalized X-Nexus-* request header names to surface in the prompt (e.g. [\"timezone\", \"locale\"]). Empty by default; header values are client-controlled and unauthenticated, so each must be named explicitly."
+    }
   }
 }

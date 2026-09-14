@@ -118,7 +118,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.auth = auth
-	p.logger.Info("anthropic auth resolved", "mode", string(auth.mode))
+	p.logger.Debug("anthropic auth resolved", "mode", string(auth.mode))
 
 	p.client = &http.Client{
 		Timeout: 5 * time.Minute,
@@ -129,7 +129,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.cache = parseCacheConfig(ctx.Config)
 	if p.cache.Enabled {
-		p.logger.Info("prompt caching enabled",
+		p.logger.Debug("prompt caching enabled",
 			"system", p.cache.System,
 			"tools", p.cache.Tools,
 			"message_prefix", p.cache.MessagePrefix,
@@ -139,7 +139,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.thinking = parseThinkingConfig(ctx.Config)
 	if p.thinking.Enabled {
-		p.logger.Info("extended thinking enabled",
+		p.logger.Debug("extended thinking enabled",
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
@@ -147,17 +147,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 	if p.multimodal.PDFBeta {
-		p.logger.Info("multimodal pdf_beta header enabled (pdfs-2024-09-25)")
+		p.logger.Debug("multimodal pdf_beta header enabled (pdfs-2024-09-25)")
 	}
 
 	p.citations = parseCitationsConfig(ctx.Config)
 	if p.citations.Enabled {
-		p.logger.Info("native citations enabled (document blocks will request citations)")
+		p.logger.Debug("native citations enabled (document blocks will request citations)")
 	}
 
 	p.structuredOutputs = parseStructuredOutputsConfig(ctx.Config)
 	if p.structuredOutputs.Mode == "native" {
-		p.logger.Info("structured outputs using native response_format mode",
+		p.logger.Debug("structured outputs using native response_format mode",
 			"beta_header", p.structuredOutputs.BetaHeader,
 		)
 	}
@@ -166,7 +166,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.filesAPIURL = filesAPIBaseURL
 	if p.files.Enabled {
 		p.fileCache = newFileCache()
-		p.logger.Info("files API enabled",
+		p.logger.Debug("files API enabled",
 			"upload_threshold", p.files.UploadThreshold,
 			"cache_uploads", p.files.CacheUploads,
 			"delete_on_shutdown", p.files.DeleteOnShutdown,
@@ -175,7 +175,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.retry = parseRetryConfig(ctx.Config)
 	if p.retry.Enabled {
-		p.logger.Info("retry enabled",
+		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
 			"backoff", string(p.retry.Backoff),
 			"initial_delay", p.retry.InitialDelay,
@@ -344,7 +344,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
-	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	// Files API preflight: when enabled, swap oversize Data parts for file_ids
 	// before serializing the request body. We replace req.Messages locally
@@ -667,7 +667,7 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 		if len(msg.Parts) > 0 {
 			blocks, err := buildContentBlocks(msg, p.citations.Enabled)
 			if err != nil {
-				p.logger.Error("anthropic: dropping tool-result multimodal parts", "error", err)
+				p.logger.Warn("anthropic: dropping tool-result multimodal parts", "error", err)
 			} else {
 				toolResultContent = blocks
 			}
@@ -691,7 +691,7 @@ func (p *Plugin) convertMessage(msg events.Message) map[string]any {
 				// part). Surface the failure via slog and fall back to the
 				// text-only path so the request still goes out — silently
 				// dropping is worse than a partial send the user can debug.
-				p.logger.Error("anthropic: dropping multimodal parts", "error", err)
+				p.logger.Warn("anthropic: dropping multimodal parts", "error", err)
 				return map[string]any{
 					"role":    "user",
 					"content": msg.Content,
@@ -1321,7 +1321,7 @@ func (p *Plugin) debugLog(label string, data []byte) {
 
 	filename := fmt.Sprintf("plugins/%s/%04d_%s.json", pluginID, seq, label)
 	if err := p.session.WriteFile(filename, data); err != nil {
-		p.logger.Error("failed to write debug log", "file", filename, "error", err)
+		p.logger.Warn("failed to write debug log", "file", filename, "error", err)
 	}
 }
 

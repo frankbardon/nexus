@@ -379,6 +379,417 @@ func TestLatency_NoTurns(t *testing.T) {
 	}
 }
 
+// -- response_contains --------------------------------------------------------
+
+func TestResponseContains_AllPresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The total revenue was $4.2M, up 12% year over year.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"REVENUE", "$4.2M"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: %s", r.Message)
+	}
+}
+
+func TestResponseContains_OneMissing(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The total revenue was $4.2M.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"revenue", "profit"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 'profit' is absent")
+	}
+}
+
+func TestResponseContains_ContainsAny_OnePresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Here is the chart you asked for.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{ContainsAny: []string{"CHART", "graph", "table"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: %s", r.Message)
+	}
+}
+
+func TestResponseContains_ContainsAny_NonePresent(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Here is a summary.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{ContainsAny: []string{"chart", "graph", "table"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: none of contains_any present")
+	}
+}
+
+func TestResponseContains_DefaultsToFinalAssistantResponse(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		// A tool-call-only turn must be skipped by the default selection.
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			ToolCalls:     []events.ToolCallRequest{{ID: "1", Name: "search", Arguments: "{}"}},
+		}},
+		{Type: "tool.invoke", Timestamp: t0.Add(time.Millisecond)},
+		{Type: "tool.result", Timestamp: t0.Add(2 * time.Millisecond)},
+		{Type: "llm.response", Timestamp: t0.Add(3 * time.Millisecond), Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The answer is 42.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:             "response_contains",
+		ResponseContains: &ResponseContainsSpec{Contains: []string{"42"}},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass (final assistant response should be the last non-tool-call turn): %s", r.Message)
+	}
+}
+
+func TestResponseContains_NonDefaultEventType(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The final answer is 42.",
+			FinishReason:  "stop",
+		}},
+		{Type: "io.output", Timestamp: t0.Add(time.Millisecond), Payload: map[string]any{
+			"Content": "Rendered card: Revenue Summary",
+		}},
+	}
+	a := Assertion{
+		Kind: "response_contains",
+		ResponseContains: &ResponseContainsSpec{
+			EventType: "io.output",
+			Contains:  []string{"Revenue Summary"},
+		},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass selecting io.output content: %s", r.Message)
+	}
+
+	// The same substring is absent from the default (final assistant
+	// response) selection, proving EventType actually redirected the search.
+	a.ResponseContains = &ResponseContainsSpec{Contains: []string{"Revenue Summary"}}
+	r = a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 'Revenue Summary' is not in the final assistant response")
+	}
+}
+
+// -- contains_value -----------------------------------------------------------
+
+func TestContainsValue_DefaultTolerance_OneDecimalPlace(t *testing.T) {
+	if got, want := defaultValueTolerance(42.3), 0.05; got != want {
+		t.Fatalf("defaultValueTolerance(42.3) = %v, want %v", got, want)
+	}
+}
+
+func TestContainsValue_DefaultTolerance_NoDecimalPlace(t *testing.T) {
+	if got, want := defaultValueTolerance(100), 0.5; got != want {
+		t.Fatalf("defaultValueTolerance(100) = %v, want %v", got, want)
+	}
+}
+
+func TestContainsValue_DefaultTolerance_TwoDecimalPlaces(t *testing.T) {
+	if got, want := defaultValueTolerance(3.14), 0.005; got != want {
+		t.Fatalf("defaultValueTolerance(3.14) = %v, want %v", got, want)
+	}
+}
+
+func TestContainsValue_FormattingVariance_Passes(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Conversion rate held steady at 42.30%.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 42.3, Unit: "%"},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass (42.30%% formats the same value as 42.3): %s", r.Message)
+	}
+}
+
+func TestContainsValue_MaterialDifference_Fails(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Conversion rate held steady at 43.30%.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 42.3, Unit: "%"},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 43.3 is materially different from 42.3, despite matching formatting")
+	}
+}
+
+func TestContainsValue_UnitStripped_Dollar(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Total spend came to $100 this month.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 100, Unit: "$"},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: %s", r.Message)
+	}
+}
+
+func TestContainsValue_ThousandsSeparatorStripped(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Revenue was $1,234.50 for the quarter.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 1234.5, Unit: "$"},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass (comma thousands separator stripped): %s", r.Message)
+	}
+}
+
+// TestContainsValue_WordBoundary_DoesNotMatchEmbeddedNumber is the explicit
+// regression test the story calls for: a search for 4.2 must not match text
+// that only contains 24.2 as a substring.
+func TestContainsValue_WordBoundary_DoesNotMatchEmbeddedNumber(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The measurement was 24.2 units.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 4.2},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: 4.2 must not match inside 24.2")
+	}
+}
+
+func TestContainsValue_WordBoundary_StandaloneNumberStillMatches(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The measurement was 4.2 units, not 24.2.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 4.2},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass: a standalone 4.2 is present alongside 24.2: %s", r.Message)
+	}
+}
+
+// TestContainsValue_ToleranceBoundary covers a value exactly at the
+// tolerance edge, just inside it, and just outside it. The boundary is
+// documented (ContainsValueSpec's doc comment, evalContainsValue) as
+// INCLUSIVE: a candidate exactly Tolerance away from Value passes.
+func TestContainsValue_ToleranceBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"exactly at edge (inclusive)", "reading: 105", true},
+		{"just inside", "reading: 104", true},
+		{"just outside", "reading: 106", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t0 := time.Now()
+			stream := []ObservedEvent{
+				{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+					SchemaVersion: events.LLMResponseVersion,
+					Content:       tt.text,
+					FinishReason:  "stop",
+				}},
+			}
+			a := Assertion{
+				Kind:          "contains_value",
+				ContainsValue: &ContainsValueSpec{Value: 100, Tolerance: 5},
+			}
+			r := a.Evaluate(stream, nil)
+			if r.Pass != tt.want {
+				t.Fatalf("text %q: Pass = %v, want %v (%s)", tt.text, r.Pass, tt.want, r.Message)
+			}
+		})
+	}
+}
+
+func TestContainsValue_ExplicitToleranceOverridesDefault(t *testing.T) {
+	t0 := time.Now()
+	// Default tolerance for Value 42.3 would be ±0.05 — 42.5 would fail
+	// against the default. An explicit wide tolerance should let it pass.
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "Value came in at 42.5.",
+			FinishReason:  "stop",
+		}},
+	}
+	withDefault := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 42.3},
+	}
+	if r := withDefault.Evaluate(stream, nil); r.Pass {
+		t.Fatal("expected fail under the default (narrow) inferred tolerance")
+	}
+
+	withExplicit := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 42.3, Tolerance: 1},
+	}
+	if r := withExplicit.Evaluate(stream, nil); !r.Pass {
+		t.Fatalf("expected pass under an explicit, wider tolerance: %s", r.Message)
+	}
+}
+
+func TestContainsValue_NoNumericTokenFound(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "No numbers here at all.",
+			FinishReason:  "stop",
+		}},
+	}
+	a := Assertion{
+		Kind:          "contains_value",
+		ContainsValue: &ContainsValueSpec{Value: 42.3},
+	}
+	r := a.Evaluate(stream, nil)
+	if r.Pass {
+		t.Fatal("expected fail: no numeric tokens in text")
+	}
+}
+
+func TestContainsValue_NonDefaultEventType(t *testing.T) {
+	t0 := time.Now()
+	stream := []ObservedEvent{
+		{Type: "llm.response", Timestamp: t0, Payload: events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			Content:       "The final answer is 7.",
+			FinishReason:  "stop",
+		}},
+		{Type: "io.output", Timestamp: t0.Add(time.Millisecond), Payload: map[string]any{
+			"Content": "Rendered card total: 42.3%",
+		}},
+	}
+	a := Assertion{
+		Kind: "contains_value",
+		ContainsValue: &ContainsValueSpec{
+			EventType: "io.output",
+			Value:     42.3,
+			Unit:      "%",
+		},
+	}
+	r := a.Evaluate(stream, nil)
+	if !r.Pass {
+		t.Fatalf("expected pass selecting io.output content: %s", r.Message)
+	}
+}
+
+func TestParseAssertions_ContainsValue(t *testing.T) {
+	yamlSrc := `deterministic:
+  - kind: contains_value
+    value: 42.3
+    unit: "%"
+`
+	a, err := ParseAssertions([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("ParseAssertions: %v", err)
+	}
+	if len(a.Deterministic) != 1 {
+		t.Fatalf("got %d entries want 1", len(a.Deterministic))
+	}
+	cv := a.Deterministic[0].ContainsValue
+	if cv == nil {
+		t.Fatal("expected ContainsValue spec to be populated")
+	}
+	if cv.Value != 42.3 {
+		t.Errorf("Value = %v, want 42.3", cv.Value)
+	}
+	if cv.Unit != "%" {
+		t.Errorf("Unit = %q, want \"%%\"", cv.Unit)
+	}
+	if cv.Tolerance != 0 {
+		t.Errorf("Tolerance = %v, want 0 (unset, defaulted at eval time)", cv.Tolerance)
+	}
+}
+
 // -- ParseAssertions round-trip ---------------------------------------------
 
 func TestParseAssertions_AllKinds(t *testing.T) {
@@ -398,13 +809,20 @@ func TestParseAssertions_AllKinds(t *testing.T) {
     max_input_tokens: 8000
   - kind: latency
     p95_ms: 5000
+  - kind: response_contains
+    contains: [hello]
+    contains_any: [world, there]
+  - kind: contains_value
+    value: 42.3
+    tolerance: 0.1
+    unit: "%"
 `
 	a, err := ParseAssertions([]byte(yaml))
 	if err != nil {
 		t.Fatalf("ParseAssertions: %v", err)
 	}
-	if len(a.Deterministic) != 7 {
-		t.Fatalf("got %d kinds want 7", len(a.Deterministic))
+	if len(a.Deterministic) != 9 {
+		t.Fatalf("got %d kinds want 9", len(a.Deterministic))
 	}
 	expectedKinds := []string{
 		"event_emitted",
@@ -414,10 +832,45 @@ func TestParseAssertions_AllKinds(t *testing.T) {
 		"event_sequence_strict",
 		"token_budget",
 		"latency",
+		"response_contains",
+		"contains_value",
 	}
 	for i, k := range expectedKinds {
 		if a.Deterministic[i].Kind != k {
 			t.Errorf("kind[%d]=%q want %q", i, a.Deterministic[i].Kind, k)
 		}
+	}
+	rc := a.Deterministic[7].ResponseContains
+	if rc == nil {
+		t.Fatal("expected ResponseContains spec to be populated")
+	}
+	if len(rc.Contains) != 1 || rc.Contains[0] != "hello" {
+		t.Errorf("Contains = %v, want [hello]", rc.Contains)
+	}
+	if len(rc.ContainsAny) != 2 {
+		t.Errorf("ContainsAny = %v, want 2 entries", rc.ContainsAny)
+	}
+	cv := a.Deterministic[8].ContainsValue
+	if cv == nil {
+		t.Fatal("expected ContainsValue spec to be populated")
+	}
+	if cv.Value != 42.3 {
+		t.Errorf("Value = %v, want 42.3", cv.Value)
+	}
+	if cv.Tolerance != 0.1 {
+		t.Errorf("Tolerance = %v, want 0.1", cv.Tolerance)
+	}
+	if cv.Unit != "%" {
+		t.Errorf("Unit = %q, want \"%%\"", cv.Unit)
+	}
+}
+
+func TestParseAssertions_ResponseContains_RequiresContainsOrContainsAny(t *testing.T) {
+	yaml := `deterministic:
+  - kind: response_contains
+`
+	_, err := ParseAssertions([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error when neither 'contains' nor 'contains_any' is set")
 	}
 }

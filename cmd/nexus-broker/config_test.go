@@ -33,6 +33,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigOverrides(t *testing.T) {
 	yaml := `
 listen_addr: "127.0.0.1:9000"
+log_level: "debug"
 nexus_binary_path: "/opt/nexus/bin/nexus"
 max_concurrent: 32
 idle_timeout: 2m
@@ -47,6 +48,9 @@ reattach_window: 90s
 	}
 	if cfg.ListenAddr != "127.0.0.1:9000" {
 		t.Errorf("ListenAddr = %q", cfg.ListenAddr)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q", cfg.LogLevel)
 	}
 	if cfg.NexusBinaryPath != "/opt/nexus/bin/nexus" {
 		t.Errorf("NexusBinaryPath = %q", cfg.NexusBinaryPath)

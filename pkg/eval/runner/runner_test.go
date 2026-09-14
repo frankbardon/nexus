@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -185,5 +186,183 @@ func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// fakeExtraPlugin is a minimal engine.Plugin standing in for an
+// embedder-authored plugin registered via Options.ExtraPlugins. It has no
+// subscriptions/emissions/requirements — it exists purely to prove the
+// engine boots and Inits it when its ID is registered and named in a case's
+// plugins.active.
+type fakeExtraPlugin struct {
+	id         string
+	initCalled bool
+}
+
+func (p *fakeExtraPlugin) ID() string                          { return p.id }
+func (p *fakeExtraPlugin) Name() string                        { return p.id }
+func (p *fakeExtraPlugin) Version() string                     { return "test" }
+func (p *fakeExtraPlugin) Dependencies() []string              { return nil }
+func (p *fakeExtraPlugin) Requires() []engine.Requirement      { return nil }
+func (p *fakeExtraPlugin) Capabilities() []engine.Capability   { return nil }
+func (p *fakeExtraPlugin) Init(ctx engine.PluginContext) error { p.initCalled = true; return nil }
+func (p *fakeExtraPlugin) Ready() error                        { return nil }
+func (p *fakeExtraPlugin) Shutdown(_ context.Context) error    { return nil }
+func (p *fakeExtraPlugin) Subscriptions() []engine.EventSubscription {
+	return nil
+}
+func (p *fakeExtraPlugin) Emissions() []string { return nil }
+
+// buildExtraPluginCase writes a minimal, self-contained case bundle
+// identical in shape to TestRun_ReplaysSyntheticJournal's, except
+// plugins.active also names extraID — a plugin the engine's built-in
+// registry (allplugins.RegisterAll) knows nothing about. Used by both the
+// positive (ExtraPlugins set) and negative (ExtraPlugins unset) proofs
+// below.
+func buildExtraPluginCase(t *testing.T, extraID string) (*evalcase.Case, string) {
+	t.Helper()
+	caseDir := t.TempDir()
+	sessionsRoot := filepath.Join(caseDir, "_sessions")
+	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	journalDir := filepath.Join(caseDir, "journal")
+	w, err := journal.NewWriter(journalDir, journal.WriterOptions{
+		FsyncMode:  journal.FsyncEveryEvent,
+		BufferSize: 16,
+		SessionID:  "synthetic-extra",
+	})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	envelopes := []journal.Envelope{
+		{Seq: 1, Type: "io.session.start", Payload: map[string]any{"session_id": "synthetic-extra"}},
+		{Seq: 2, Type: "io.input", Payload: events.UserInput{SchemaVersion: events.UserInputVersion, Content: "hi"}},
+		{Seq: 3, Type: "agent.turn.start"},
+		{Seq: 4, Type: "llm.response", Payload: events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: "reply",
+			Model:        "mock",
+			FinishReason: "end_turn",
+		}},
+		{Seq: 5, Type: "agent.turn.end"},
+	}
+	for i := range envelopes {
+		w.Append(&envelopes[i])
+	}
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := w.Close(closeCtx); err != nil {
+		closeCancel()
+		t.Fatalf("Close journal: %v", err)
+	}
+	closeCancel()
+
+	if err := os.MkdirAll(filepath.Join(caseDir, "input"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgYAML := fmt.Sprintf(`core:
+  log_level: warn
+  tick_interval: 1h
+  models:
+    default: mock
+    mock:
+      provider: nexus.llm.anthropic
+      model: mock
+      max_tokens: 1024
+  sessions:
+    root: %s
+    retention: 30d
+    id_format: timestamp
+
+plugins:
+  active:
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.memory.capped
+    - %s
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "Test."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false
+`, sessionsRoot, extraID)
+	mustWrite(t, filepath.Join(caseDir, "input", "config.yaml"), cfgYAML)
+	mustWrite(t, filepath.Join(caseDir, "input", "inputs.yaml"), `inputs: []`)
+	mustWrite(t, filepath.Join(caseDir, "case.yaml"), `name: synthetic-extra
+description: synthetic in-test case with an embedder-authored plugin
+tags: [test]
+owner: test
+freshness_days: 365
+model_baseline: mock
+`)
+	mustWrite(t, filepath.Join(caseDir, "assertions.yaml"), `deterministic:
+  - kind: event_emitted
+    type: io.input
+    count: { min: 1, max: 1 }
+`)
+
+	c, err := evalcase.Load(caseDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return c, sessionsRoot
+}
+
+// TestRun_ExtraPluginBootsAndReplays is the positive-path twin of
+// TestRun_UnregisteredExtraPluginFailsBoot: an embedder-authored plugin
+// (non-nexus.* ID) registered via Options.ExtraPlugins, and named in the
+// case's plugins.active, boots and replays successfully — where an
+// identical case with ExtraPlugins unset fails at Boot with "not found in
+// registry" (proven by the sibling test below).
+func TestRun_ExtraPluginBootsAndReplays(t *testing.T) {
+	const extraID = "acme.tool.echo"
+	c, sessionsRoot := buildExtraPluginCase(t, extraID)
+
+	fake := &fakeExtraPlugin{id: extraID}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := Run(ctx, c, Options{
+		SessionsRoot: sessionsRoot,
+		ExtraPlugins: map[string]engine.PluginFactory{
+			extraID: func() engine.Plugin { return fake },
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Pass {
+		var diag []string
+		for _, a := range res.Assertions {
+			if !a.Pass {
+				diag = append(diag, fmt.Sprintf("%s: %s", a.Kind, a.Message))
+			}
+		}
+		t.Fatalf("expected pass, got fail. failures=%v counts=%v", diag, res.Counts)
+	}
+	if !fake.initCalled {
+		t.Error("expected ExtraPlugins-registered plugin to be Init'd by the engine")
+	}
+}
+
+// TestRun_UnregisteredExtraPluginFailsBoot confirms that naming a plugin ID
+// in plugins.active without registering it via Options.ExtraPlugins still
+// fails exactly as before this story — proving the zero-value (nil)
+// ExtraPlugins case changes nothing about existing behavior.
+func TestRun_UnregisteredExtraPluginFailsBoot(t *testing.T) {
+	const extraID = "acme.tool.echo"
+	c, sessionsRoot := buildExtraPluginCase(t, extraID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := Run(ctx, c, Options{SessionsRoot: sessionsRoot})
+	if err == nil {
+		t.Fatal("expected boot failure for unregistered plugin id")
+	}
+	if !strings.Contains(err.Error(), `plugin "`+extraID+`" not found in registry`) {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

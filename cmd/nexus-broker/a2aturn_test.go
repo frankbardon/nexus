@@ -530,9 +530,31 @@ func TestSendStreamingMessageOverSSE(t *testing.T) {
 		t.Fatalf("NewA2AServer: %v", err)
 	}
 	instance := &conformInstance{}
-	// The turn is scripted from a goroutine as soon as the input lands, which is
-	// what an instance does: it answers on its own schedule while the HTTP
-	// goroutine is already streaming.
+	// The turn is scripted from a goroutine, which is what an instance does: it
+	// answers on its own schedule while the HTTP goroutine is already streaming.
+	//
+	// It is NOT wired through onInput (fired synchronously from beginTurn, on
+	// the request-handling goroutine, before startTask has even decided whether
+	// the streaming response opens on SUBMITTED or gets skipped straight to a
+	// terminal snapshot): startTask attaches the observer and then, once
+	// beginTurn returns, checks task.terminated() to special-case a turn that
+	// was settled synchronously (a classified spawn failure, never reaching an
+	// instance) rather than one actually running. Firing this script from
+	// onInput races that check — the script here does real work (locks a
+	// mutex, folds frames into the snapshot) but no real I/O, so under
+	// scheduling pressure (-race, many cores) it can occasionally complete the
+	// ENTIRE turn before startTask's post-beginTurn code runs, which trips that
+	// same synchronous-failure branch and collapses the whole stream into one
+	// opening frame that is already terminal — the queued WORKING/artifact
+	// frames are never drained. A real instance can never win that race: its
+	// response crosses a real process/socket boundary, which dwarfs the few
+	// local Go statements startTask has left to run. So it is only this
+	// zero-latency in-process double that can trigger it — a test-only timing
+	// gap, not a reachable production race. Starting the script only once the
+	// client has the response headers sidesteps it: pumpStream can only have
+	// written them AFTER startTask's check has already passed and it is
+	// blocked in its frame-consuming loop, so the script's frames are
+	// guaranteed a live reader.
 	scripted := &scriptedInstance{conformInstance: instance, script: func(i *conformInstance) {
 		i.deliver(brokerIOMessage{Type: ioTypeStatus, State: "thinking"})
 		i.deliver(brokerIOMessage{Type: ioTypeStreamDelta, Content: "the answer is 42", TurnID: "t1"})
@@ -540,7 +562,6 @@ func TestSendStreamingMessageOverSSE(t *testing.T) {
 		i.deliver(brokerIOMessage{Type: ioTypeStatus, State: ioStateIdle})
 	}}
 	server.useLeaseProvider(&conformLeaseProvider{instance: instance})
-	instance.onInput = scripted.run
 
 	ts, _ := newBrokerTestServer(t, cfg, server.Register)
 
@@ -559,6 +580,12 @@ func TestSendStreamingMessageOverSSE(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want an SSE stream", ct)
 	}
+
+	// Safe to start now: the response headers are already on the wire, which
+	// pumpStream can only have done after startTask's post-beginTurn
+	// task.terminated() check found the task still running and handed it a
+	// live observer.
+	scripted.run()
 
 	states := readSSEStates(t, resp.Body)
 	want := []string{"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "artifact", "TASK_STATE_COMPLETED"}

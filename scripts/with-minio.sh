@@ -57,7 +57,19 @@ fi
 # TestMinIOCannotRepresentAnObjectAtAPrefix in modules/objectstore-s3 records
 # the one MinIO behaviour this suite has had to accommodate, and it is version-
 # sensitive by design.
-IMAGE="${NEXUS_TEST_MINIO_IMAGE:-minio/minio:RELEASE.2025-09-07T16-13-09Z}"
+#
+# quay.io, not Docker Hub, and that is not a mirror preference. MinIO withdrew
+# this release from docker.io/minio/minio: a tag query there answers "object not
+# found", and a pull answers "pull access denied for minio/minio, repository
+# does not exist or may require 'docker login'" — wording that reads like a
+# credentials problem and is not one. quay.io/minio/minio is MinIO's own
+# registry, still serves this exact release (same multi-arch manifest, unchanged
+# since 2025-09-07), and serves it to an anonymous puller, so the "no cloud
+# account and no repo secret" property this suite is built around survives.
+#
+# The pin is unchanged on purpose: this is a registry move, not a version bump,
+# so it must not smuggle in a different MinIO alongside the fix.
+IMAGE="${NEXUS_TEST_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
 NAME="${NEXUS_TEST_MINIO_NAME:-nexus-test-minio}"
 
 # Empty means "let Docker choose a free host port", which is the default.

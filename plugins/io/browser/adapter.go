@@ -16,7 +16,7 @@ type Adapter struct {
 	sessionID string
 
 	mu              sync.Mutex
-	inputHandler    func(ui.InputMessage)
+	inputHandler    func(clientID string, msg ui.InputMessage)
 	approvalHandler func(ui.ApprovalResponseMessage)
 	cancelHandler   func()
 	resumeHandler   func()
@@ -123,7 +123,14 @@ func (a *Adapter) RequestHumanInput(msg ui.HITLRequestMessage) (ui.HITLResponseM
 }
 
 // OnInput registers the callback for user input messages.
-func (a *Adapter) OnInput(handler func(ui.InputMessage)) {
+//
+// The handler is given the originating client id as well as the message,
+// which the shared ui.UIAdapter shape does not carry. It is needed here and
+// nowhere else: this transport's per-request context (the X-Nexus-* headers of
+// the WebSocket upgrade) is held per connection, and only the client id
+// identifies which connection a message arrived on when several browsers are
+// attached to one session.
+func (a *Adapter) OnInput(handler func(clientID string, msg ui.InputMessage)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.inputHandler = handler
@@ -188,7 +195,7 @@ func (a *Adapter) broadcast(msgType string, payload any) error {
 	return a.hub.BroadcastEnvelope(env)
 }
 
-func (a *Adapter) handleInbound(_ string, env ui.Envelope) {
+func (a *Adapter) handleInbound(clientID string, env ui.Envelope) {
 	switch env.Type {
 	case ui.TypeInput:
 		var msg ui.InputMessage
@@ -199,7 +206,7 @@ func (a *Adapter) handleInbound(_ string, env ui.Envelope) {
 		handler := a.inputHandler
 		a.mu.Unlock()
 		if handler != nil {
-			handler(msg)
+			handler(clientID, msg)
 		}
 
 	case ui.TypeApprovalResponse:

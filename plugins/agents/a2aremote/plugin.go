@@ -444,7 +444,7 @@ func (p *Plugin) respond(tc events.ToolCall, out outcome) {
 		TurnID:        tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
-		p.logger.Info("a2a_remote tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("a2a_remote tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)

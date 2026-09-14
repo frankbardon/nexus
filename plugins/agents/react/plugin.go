@@ -402,7 +402,7 @@ func (p *Plugin) handleToolChoiceEvent(event engine.Event[any]) {
 		},
 		Duration: atc.Duration,
 	}
-	p.logger.Info("tool choice override set", "mode", atc.Mode, "name", atc.ToolName, "duration", atc.Duration)
+	p.logger.Debug("tool choice override set", "mode", atc.Mode, "name", atc.ToolName, "duration", atc.Duration)
 }
 
 // handleGateRetry is called when a gate (rate limiter, context window, etc.)
@@ -415,7 +415,7 @@ func (p *Plugin) handleGateRetry(_ engine.Event[any]) {
 	}
 	p.mu.Unlock()
 
-	p.logger.Info("gate.llm.retry received, re-sending LLM request")
+	p.logger.Debug("gate.llm.retry received, re-sending LLM request")
 	p.sendLLMRequest()
 }
 
@@ -520,14 +520,14 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				}
 
 				if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {
-					p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
+					p.logger.Debug("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
 					syntheticResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
 						Name:   tc.Name,
 						Error:  fmt.Sprintf("Tool call vetoed: %s", veto.Reason),
 						TurnID: turnID,
 					}
 					if rv, rvErr := p.bus.EmitVetoable("before:tool.result", &syntheticResult); rvErr == nil && rv.Vetoed {
-						p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
+						p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", rv.Reason)
 						continue
 					}
 					_ = p.bus.Emit("tool.result", syntheticResult)
@@ -566,7 +566,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 				Sequence:  i,
 			}
 			if veto, err := p.bus.EmitVetoable("before:tool.invoke", &call); err == nil && veto.Vetoed {
-				p.logger.Info("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
+				p.logger.Debug("tool.invoke vetoed", "tool", tc.Name, "reason", veto.Reason)
 				prep[i] = prepared{call: call, vetoed: true, vetoReason: veto.Reason}
 			} else {
 				prep[i] = prepared{call: call}
@@ -649,7 +649,7 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 		Metadata: map[string]any{"streamed": true},
 	}
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {
-		p.logger.Info("io.output vetoed", "reason", veto.Reason)
+		p.logger.Warn("io.output vetoed", "reason", veto.Reason)
 	} else {
 		_ = p.bus.Emit("io.output", output)
 	}
@@ -720,7 +720,7 @@ func (p *Plugin) handleSkillLoaded(content events.SkillContent) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.skillContexts = append(p.skillContexts, engine.XMLWrap("skill", content.Body, "name", content.Name))
-	p.logger.Info("loaded skill context", "name", content.Name)
+	p.logger.Debug("loaded skill context", "name", content.Name)
 }
 
 // sessionContextBody returns the current session's non-reserved Labels as a
@@ -849,7 +849,7 @@ func (p *Plugin) sendLLMRequest() {
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", req)

@@ -238,7 +238,7 @@ func (p *Plugin) partFromBytes(kind, mime string, data []byte) events.MessagePar
 
 func (p *Plugin) emitToolResult(result events.ToolResult) {
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
-		p.logger.Info("mcp tool.result vetoed", "tool", result.Name, "reason", veto.Reason)
+		p.logger.Debug("mcp tool.result vetoed", "tool", result.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)

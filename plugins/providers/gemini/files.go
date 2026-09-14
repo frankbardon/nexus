@@ -42,7 +42,7 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 				if part.MimeType == "" {
 					return nil, fmt.Errorf("gemini: oversize %s part requires mime_type", part.Type)
 				}
-				p.logger.Info("uploading oversize part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
+				p.logger.Debug("uploading oversize part via Files API", "type", part.Type, "bytes", len(part.Data), "mime", part.MimeType)
 				uri, err := p.uploadFile(ctx, part.Data, part.MimeType, fmt.Sprintf("nexus-%s-%d", part.Type, i))
 				if err != nil {
 					return nil, fmt.Errorf("gemini: Files API upload: %w", err)

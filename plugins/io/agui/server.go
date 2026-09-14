@@ -10,6 +10,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 // agentPath is the POST route that accepts a RunAgentInput and responds with an
@@ -233,6 +234,7 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 		state:        input.State,
 		principalID:  principal.ID,
 		contextItems: input.Context,
+		headers:      nexusheaders.Extract(r.Header),
 	}
 
 	var run *run

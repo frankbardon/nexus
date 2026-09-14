@@ -103,7 +103,7 @@ func New(ctx context.Context, cfg objectstore.Config) (objectstore.Backend, erro
 		return nil, fmt.Errorf("gcs object store: creating the Cloud Storage client: %w", err)
 	}
 
-	logger.Debug("gcs object store opened",
+	logger.Info("gcs object store opened",
 		"bucket", cfg.Bucket,
 		"prefix", cfg.Prefix,
 		"endpoint", endpoint,

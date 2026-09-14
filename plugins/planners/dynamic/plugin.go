@@ -124,7 +124,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
-	p.logger.Info("dynamic planner initialized", "approval", p.approval, "model_role", p.modelRole)
+	p.logger.Debug("dynamic planner initialized", "approval", p.approval, "model_role", p.modelRole)
 	return nil
 }
 
@@ -237,7 +237,7 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 	if veto, err := p.bus.EmitVetoable("before:llm.request", &llmReq); err == nil && veto.Vetoed {
-		p.logger.Info("llm.request vetoed", "reason", veto.Reason)
+		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("llm.request", llmReq)

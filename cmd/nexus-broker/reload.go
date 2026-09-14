@@ -220,6 +220,9 @@ var reloadableKeys = []struct {
 //     listener is a restart, the lease journal / spawn key / session index are
 //     already open against the old directory and recovery has already run, and
 //     the broker id is stamped on every record this broker has already written.
+//   - log_level builds the process's own slog handler in main.go before this
+//     reload machinery exists, and slog.NewTextHandler carries no live level
+//     knob to swap once built.
 //   - advertise_addr is stamped into each lease record at registration, so
 //     changing it live would make this process's records disagree with each
 //     other about the same broker.
@@ -235,6 +238,7 @@ var bootOnlyKeys = []struct {
 	same func(prev, next Config) bool
 }{
 	{"listen_addr", func(p, n Config) bool { return p.ListenAddr == n.ListenAddr }},
+	{"log_level", func(p, n Config) bool { return p.LogLevel == n.LogLevel }},
 	{"advertise_addr", func(p, n Config) bool { return p.AdvertiseAddr == n.AdvertiseAddr }},
 	{"state_dir", func(p, n Config) bool { return p.StateDir == n.StateDir }},
 	{"broker_id", func(p, n Config) bool { return p.BrokerID == n.BrokerID }},

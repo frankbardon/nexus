@@ -117,7 +117,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.cache = newCacheState(ctx.Config, p.logger)
 
 	if p.retry.Enabled {
-		p.logger.Info("retry enabled",
+		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
 			"backoff", string(p.retry.Backoff),
 			"initial_delay", p.retry.InitialDelay,
@@ -125,16 +125,16 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 	if p.thinking.Enabled {
-		p.logger.Info("thinking enabled",
+		p.logger.Debug("thinking enabled",
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
 	}
 	if p.codeExecution {
-		p.logger.Info("code_execution tool enabled")
+		p.logger.Debug("code_execution tool enabled")
 	}
 	if p.cache.enabled {
-		p.logger.Info("prompt caching enabled",
+		p.logger.Debug("prompt caching enabled",
 			"min_tokens", p.cache.minTokens,
 			"ttl", p.cache.ttl,
 		)
@@ -283,7 +283,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
-	p.logger.Debug("resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
 	body, err := p.buildRequestBody(model, maxTokens, req)
 	if err != nil {
@@ -609,16 +609,41 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 }
 
 // sanitizeSchemaForGemini strips JSON Schema keywords Gemini's schema dialect
-// doesn't accept (e.g. additionalProperties, $schema, $id). Walks recursively.
+// doesn't accept (e.g. additionalProperties, $schema, $id) and collapses
+// draft 2020-12 "type" unions (e.g. ["string","null"], as commonly emitted by
+// MCP servers built with zod-to-json-schema) into Gemini's singular "type"
+// plus "nullable", since Gemini's Schema.type is a non-repeating enum and
+// rejects an array outright. Walks recursively.
 func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 	if schema == nil {
 		return nil
 	}
 	out := make(map[string]any, len(schema))
+	nullable := false
 	for k, v := range schema {
 		switch k {
 		case "$schema", "$id", "$ref", "additionalProperties", "definitions", "$defs":
 			continue
+		}
+		if k == "type" {
+			if types, ok := v.([]any); ok {
+				resolved := ""
+				for _, t := range types {
+					ts, _ := t.(string)
+					if ts == "null" {
+						nullable = true
+						continue
+					}
+					if ts != "" && resolved == "" {
+						resolved = ts
+					}
+				}
+				if resolved == "" {
+					resolved = "string"
+				}
+				out["type"] = resolved
+				continue
+			}
 		}
 		switch vv := v.(type) {
 		case map[string]any:
@@ -636,6 +661,9 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 		default:
 			out[k] = v
 		}
+	}
+	if nullable {
+		out["nullable"] = true
 	}
 	return out
 }
@@ -1002,7 +1030,7 @@ func (p *Plugin) debugLog(label string, data []byte) {
 
 	filename := fmt.Sprintf("plugins/%s/%04d_%s.json", pluginID, seq, label)
 	if err := p.session.WriteFile(filename, data); err != nil {
-		p.logger.Error("failed to write debug log", "file", filename, "error", err)
+		p.logger.Warn("failed to write debug log", "file", filename, "error", err)
 	}
 }
 

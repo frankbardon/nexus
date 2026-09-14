@@ -250,7 +250,7 @@ func (p *Plugin) emitToolResult(tc events.ToolCall, output, errMsg string) {
 
 func (p *Plugin) discoverSkills() {
 	if len(p.scanPaths) == 0 {
-		p.logger.Info("skills plugin: no scan_paths configured, skipping discovery")
+		p.logger.Debug("skills plugin: no scan_paths configured, skipping discovery")
 		_ = p.bus.Emit("skill.discover", events.SkillCatalog{SchemaVersion: events.SkillCatalogVersion, Skills: nil})
 		return
 	}
@@ -262,7 +262,7 @@ func (p *Plugin) discoverSkills() {
 	for i := range records {
 		r := &records[i]
 		if p.disabledSkills[r.Name] {
-			p.logger.Info("skill disabled by config", "name", r.Name)
+			p.logger.Debug("skill disabled by config", "name", r.Name)
 			continue
 		}
 		p.catalog = append(p.catalog, *r)
@@ -330,7 +330,7 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 		return
 	}
 	if result.Vetoed {
-		p.logger.Info("skill activation vetoed", "name", activation.Name, "reason", result.Reason)
+		p.logger.Debug("skill activation vetoed", "name", activation.Name, "reason", result.Reason)
 		return
 	}
 
@@ -350,7 +350,7 @@ func (p *Plugin) handleActivate(e engine.Event[any]) {
 			Schema: schema,
 			Source: pluginID,
 		})
-		p.logger.Info("registered output schema for skill", "name", record.Name, "schema", schemaName)
+		p.logger.Debug("registered output schema for skill", "name", record.Name, "schema", schemaName)
 	}
 
 	// Build content XML and emit skill.loaded.
@@ -424,7 +424,7 @@ func (p *Plugin) handleDeactivate(e engine.Event[any]) {
 		_ = p.bus.Emit("schema.deregister", events.SchemaDeregistration{SchemaVersion: events.SchemaDeregistrationVersion, Name: schemaName,
 			Source: pluginID,
 		})
-		p.logger.Info("deregistered output schema for skill", "name", ref.Name)
+		p.logger.Debug("deregistered output schema for skill", "name", ref.Name)
 	}
 
 	p.logger.Info("skill deactivated", "name", ref.Name)

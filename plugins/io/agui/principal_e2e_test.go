@@ -430,13 +430,23 @@ func TestE2E_ContextItemsProduceMatchingTagSetAnnouncements(t *testing.T) {
 // design. It has two halves:
 //
 //  1. A structural check independent of any test-constructed input: the
-//     events.UserInput field set is exactly what it was before E2-S1, and no
-//     principal-shaped field exists on it at all.
+//     events.UserInput field set is pinned, and no principal-shaped field
+//     exists on it at all.
 //  2. A real end-to-end capture: a POST authenticated as a real principal
 //     still emits an io.input payload with that exact shape — the principal
 //     never rides UserInput, it rides the session tag store instead.
+//
+// Headers joined the pinned list when the X-Nexus-* convention landed, and it
+// is worth saying why that is not the design this test rejects. Identity is a
+// SERVER-RESOLVED fact: the auth chain decides it, nothing downstream may
+// contradict it, and putting it on a payload any plugin can rewrite before the
+// next handler sees it would make it forgeable. Headers is the opposite — an
+// unverified statement the CALLER made about its own request, useful to a
+// handler precisely as a hint. It rides the payload for the same reason
+// Content does, and it is bound to the reserved label namespace too so a
+// plugin outside the io.input path can still read it.
 func TestE2E_UserInputPayloadUnchangedByPrincipalBinding(t *testing.T) {
-	wantFields := []string{"SchemaVersion", "Content", "Files", "SessionID", "PreloadMessages"}
+	wantFields := []string{"SchemaVersion", "Content", "Files", "SessionID", "PreloadMessages", "Headers"}
 	typ := reflect.TypeFor[events.UserInput]()
 	if typ.NumField() != len(wantFields) {
 		t.Fatalf("events.UserInput has %d fields, want %d (%v) — a field was added or removed", typ.NumField(), len(wantFields), wantFields)

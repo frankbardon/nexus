@@ -290,7 +290,7 @@ func (p *Plugin) runMatch(req MatchRequest) {
 			})
 			return
 		}
-		p.logger.Info("PDF extracted",
+		p.logger.Debug("PDF extracted",
 			"request_id", req.RequestID,
 			"extracted_chars", len(extracted))
 		jobText = extracted
@@ -539,7 +539,7 @@ func (p *Plugin) writeResultFile(result MatchResult, jobText string) {
 		return
 	}
 
-	p.logger.Info("match result written", "path", path)
+	p.logger.Debug("match result written", "path", path)
 	// Announced through the workspace rather than hand-built. The emit that
 	// used to sit here carried the *absolute* path and none of session_id,
 	// size, offset or bytes_added, so a subscriber keyed on the path wrote it

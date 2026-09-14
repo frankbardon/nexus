@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/nexusheaders"
 )
 
 //go:embed static
@@ -145,6 +146,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		done:        make(chan struct{}),
 		userAgent:   r.UserAgent(),
 		connectedAt: time.Now(),
+		headers:     nexusheaders.Extract(r.Header),
 	}
 
 	s.hub.Register(client)

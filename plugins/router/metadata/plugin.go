@@ -152,7 +152,7 @@ func applyDecision(req *events.LLMRequest, model, role string, logger *slog.Logg
 	if prevRole != "" && prevRole != req.Role {
 		req.Metadata["_routed_from_role"] = prevRole
 	}
-	logger.Debug("router rule matched",
+	logger.Log(context.Background(), engine.LevelTrace, "router rule matched",
 		"index", idx,
 		"rule", name,
 		"prev_model", prevModel,

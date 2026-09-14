@@ -97,7 +97,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				p.bus.Subscribe("hitl.requested", p.handleRequest,
 					engine.WithPriority(50), engine.WithSource(pluginID)),
 			)
-			p.logger.Info("hitl registry enabled", "dir", reg.Dir())
+			p.logger.Debug("hitl registry enabled", "dir", reg.Dir())
 		}
 	}
 
@@ -330,7 +330,7 @@ func (p *Plugin) emitResult(tc events.ToolCall, output, errMsg string) {
 		TurnID: tc.TurnID,
 	}
 	if veto, err := p.bus.EmitVetoable("before:tool.result", &result); err == nil && veto.Vetoed {
-		p.logger.Info("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
+		p.logger.Debug("tool.result vetoed", "tool", tc.Name, "reason", veto.Reason)
 		return
 	}
 	_ = p.bus.Emit("tool.result", result)
