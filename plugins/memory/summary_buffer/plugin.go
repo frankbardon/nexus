@@ -22,6 +22,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
+	"github.com/frankbardon/nexus/plugins/memory/internal/roundtrip"
 )
 
 const (
@@ -306,6 +307,11 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 		Role:      "assistant",
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
+		// Carry provider round-trip continuity state (Anthropic
+		// thinking_blocks, Gemini thought signatures) onto the stored
+		// message — without it the next request omits tokens the
+		// provider requires and is rejected with HTTP 400.
+		Metadata: roundtrip.ForwardMessageMetadata(resp.Metadata),
 	})
 }
 
