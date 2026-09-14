@@ -62,6 +62,13 @@ When `llm.request.Stream` is `true`, the provider uses `:streamGenerateContent?a
 
 Nexus tool definitions are translated into Gemini `functionDeclarations`. Because Gemini matches tool calls and tool responses by **function name** (not an opaque ID), the provider synthesises stable IDs (`call_{seq}_{name}`) on outbound responses and resolves trailing `tool` messages back to the function name when serializing `functionResponse` parts.
 
+Tool parameter schemas are run through the same sanitizer as `responseSchema` (see [Structured Output](#structured-output-native)) plus two repairs Gemini's schema dialect demands:
+
+- **`type` unions collapsed.** Draft 2020-12 producers (notably `zod-to-json-schema`, used by most TypeScript MCP servers) emit nullable fields as `"type": ["string", "null"]`. Gemini's `Schema.type` is a singular enum and 400s on a list, so the union is collapsed to its first non-`null` member plus `nullable: true`.
+- **Missing `items` filled.** Gemini requires `items` on every array-typed schema, at every nesting level, and rejects the whole request with `properties[<name>].items: missing field` when it is absent. JSON Schema leaves `items` optional, so free-form arrays (an RFC 6902 patch ops array, an opaque value list) commonly arrive without one. The provider inserts an empty schema `{}`, which leaves the element type unconstrained rather than inventing one — Gemini still emits objects, arrays or scalars as the tool's description directs.
+
+Both repairs are applied recursively and only when needed; a schema that already declares a singular type and an element schema passes through untouched.
+
 ### Tool Choice
 
 `ToolChoice.Mode` maps to `toolConfig.function_calling_config`:
