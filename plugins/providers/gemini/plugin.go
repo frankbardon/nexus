@@ -507,6 +507,17 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	return body, nil
 }
 
+// log returns the plugin logger, falling back to slog.Default() when the
+// plugin was built without one. convertMessages is reachable on a zero-value
+// Plugin (it needs no bus or config), so a warning raised from there must not
+// depend on Init having run.
+func (p *Plugin) log() *slog.Logger {
+	if p.logger != nil {
+		return p.logger
+	}
+	return slog.Default()
+}
+
 // convertMessages walks the message list, extracts the system prompt, and
 // converts the rest into Gemini "contents" entries. Tool results are folded
 // into user-role entries with functionResponse parts.
@@ -541,6 +552,11 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 			if msg.Content != "" {
 				parts = append(parts, map[string]any{"text": msg.Content})
 			}
+			// Signatures captured when this turn was first received, carried
+			// here on the stored message by the memory plugins. Sparse by
+			// design — see storedThoughtSignatures.
+			sigs := storedThoughtSignatures(msg.Metadata)
+			firstCall := true
 			for _, tc := range msg.ToolCalls {
 				var args any
 				if tc.Arguments != "" {
@@ -550,12 +566,34 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 				} else {
 					args = map[string]any{}
 				}
-				parts = append(parts, map[string]any{
+				part := map[string]any{
 					"functionCall": map[string]any{
 						"name": tc.Name,
 						"args": args,
 					},
-				})
+				}
+				// thoughtSignature is a sibling of functionCall on the Part,
+				// not a field inside it. Omit the key entirely when absent:
+				// an empty string is a distinct, invalid wire value.
+				if sig := sigs[tc.ID]; sig != "" {
+					part["thoughtSignature"] = sig
+				} else if firstCall {
+					// Only the FIRST functionCall part of a model turn is
+					// required to carry a signature; in a parallel batch
+					// Gemini issues just one, bound to that first call, so
+					// parts 2..N are legitimately bare and warning on them
+					// would be noise on correct behavior.
+					//
+					// Deliberately non-defensive: the part goes out bare and
+					// the API decides. Dropping the call would orphan its
+					// paired functionResponse (a 400 of its own), and
+					// synthesizing a placeholder signature would rewrite
+					// history with a value the model never issued.
+					p.log().Warn("gemini: replaying functionCall without a thoughtSignature; the API may reject this request with a 400",
+						"call_id", tc.ID, "tool", tc.Name)
+				}
+				firstCall = false
+				parts = append(parts, part)
 				toolCallNames[tc.ID] = tc.Name
 			}
 			if len(parts) == 0 {
@@ -821,6 +859,57 @@ func (s *thoughtSignatures) metadata() map[string]any {
 		return nil
 	}
 	return map[string]any{thoughtSignatureMetaKey: s.byKey}
+}
+
+// storedThoughtSignatures is the read side of thoughtSignatures.metadata(): it
+// pulls the call-ID→signature map back off a stored events.Message so
+// convertMessages can re-attach each signature to the functionCall part it was
+// issued with. Returns nil when the message carries none, or when the value is
+// any shape other than a string-valued map.
+//
+// The dual-shape switch is load-bearing, not defensive padding. The capture
+// path publishes a map[string]string, but events.Message.Metadata is
+// map[string]any and conversation history is persisted as JSONL: after a
+// save/reload cycle encoding/json hands the same value back as a
+// map[string]any with any-boxed strings. A single-shape assertion would work
+// for the live turn and silently return nothing on every resumed session —
+// exactly the case the 400 shows up in. Same reasoning, and same structure, as
+// prependThinkingBlocks in the Anthropic provider.
+//
+// Keys carrying the reserved `_content_<n>` prefix are ignored here: those
+// signatures rode on non-functionCall parts, and echoing them back is
+// "recommended" but not enforced by the API, so this path deliberately emits
+// only the functionCall ones. They are keyed by synthesized call ID
+// (`call_<seq>_<name>`), which cannot collide with the reserved prefix, so a
+// plain lookup by events.ToolCallRequest.ID never returns one.
+func storedThoughtSignatures(meta map[string]any) map[string]string {
+	if meta == nil {
+		return nil
+	}
+	raw, ok := meta[thoughtSignatureMetaKey]
+	if !ok {
+		return nil
+	}
+	switch sigs := raw.(type) {
+	case map[string]string:
+		// In-memory shape, straight off the llm.response of the live turn.
+		return sigs
+	case map[string]any:
+		// Post-JSON-roundtrip shape. Non-string values are skipped rather
+		// than coerced — a signature is an opaque string or it is nothing.
+		out := make(map[string]string, len(sigs))
+		for k, v := range sigs {
+			if s, ok := v.(string); ok && s != "" {
+				out[k] = s
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // mergeMetadata returns a new map holding every key of `into` plus every key of
