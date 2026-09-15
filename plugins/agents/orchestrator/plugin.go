@@ -13,6 +13,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 )
 
 const (
@@ -918,8 +919,9 @@ func (p *Plugin) handleSynthesizeResponse(resp events.LLMResponse) {
 
 	// Add the synthesized response to main history.
 	p.history = append(p.history, events.Message{
-		Role:    "assistant",
-		Content: resp.Content,
+		Role:     "assistant",
+		Content:  resp.Content,
+		Metadata: roundtrip.ForwardMessageMetadata(resp.Metadata),
 	})
 
 	turnID := p.currentTurnID
