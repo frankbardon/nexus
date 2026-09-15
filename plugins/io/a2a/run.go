@@ -640,6 +640,17 @@ func (r *run) onToolResult(res events.ToolResult) {
 // onSubagent reports delegated-work progress as extension telemetry.
 func (r *run) onSubagent(build func() a2a.NexusEvent) { r.emitNexus(build) }
 
+// onStreamHold and onStreamBlocked surface Nexus output-gate activity as
+// extension telemetry. See outputGateBlockEvent for why a block needs no
+// artifact retraction on this transport.
+func (r *run) onStreamHold(h events.StreamHold) {
+	r.emitNexus(func() a2a.NexusEvent { return outputGateHoldEvent(r.taskID, r.contextID, h) })
+}
+
+func (r *run) onStreamBlocked(rt events.StreamRetract) {
+	r.emitNexus(func() a2a.NexusEvent { return outputGateBlockEvent(r.taskID, r.contextID, rt) })
+}
+
 // onOutput records the assistant text the transport layer actually published.
 // It overwrites what llm.response supplied because an output gate may have
 // rewritten, redacted or replaced it between the two events, and the artifact

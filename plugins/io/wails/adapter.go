@@ -76,6 +76,18 @@ func (a *Adapter) SendStreamChunk(msg ui.StreamChunkMessage) error {
 	return a.broadcast(ui.TypeStreamChunk, msg)
 }
 
+// SendStreamHold announces that an output gate suspended the stream, or
+// released it again.
+func (a *Adapter) SendStreamHold(msg ui.StreamHoldMessage) error {
+	return a.broadcast(ui.TypeStreamHold, msg)
+}
+
+// SendStreamRetract tells clients to disown the text rendered for a turn
+// whose stream a gate blocked.
+func (a *Adapter) SendStreamRetract(msg ui.StreamRetractMessage) error {
+	return a.broadcast(ui.TypeStreamRetract, msg)
+}
+
 // SendStreamEnd signals end of a stream to the webview.
 func (a *Adapter) SendStreamEnd(msg ui.StreamEndMessage) error {
 	return a.broadcast(ui.TypeStreamEnd, msg)

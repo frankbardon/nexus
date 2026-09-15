@@ -31,6 +31,11 @@ type chatView struct {
 	status        statusMsg
 	isWorking     bool
 	streamTurnID  string
+	// streamHeld is set while an output gate has the active stream
+	// suspended. Rendered as a distinct marker because a stream that simply
+	// stops producing looks identical to a hung turn, and the two call for
+	// very different reactions from the user.
+	streamHeld bool
 }
 
 func newChatView(styles *Styles) chatView {
@@ -113,6 +118,50 @@ func (c *chatView) AppendToStream(turnID, content string) {
 
 func (c *chatView) EndStream() {
 	c.streamTurnID = ""
+	c.streamHeld = false
+	c.rebuildViewport()
+}
+
+// SetStreamHold records that a gate has suspended (or released) the active
+// stream, so the view can distinguish deliberation from a stall.
+func (c *chatView) SetStreamHold(held bool) {
+	c.streamHeld = held
+	c.rebuildViewport()
+}
+
+// RetractStream erases the partial text rendered for a turn whose stream an
+// output gate blocked, and leaves a note in its place.
+//
+// The TUI owns its scrollback, so this retraction is real rather than
+// advisory — unlike a transport that has already put bytes on a wire. What it
+// cannot undo is a user having read the text before the gate could decide;
+// bounding that window is the job of the gate's hold-back, not of this
+// method.
+func (c *chatView) RetractStream(turnID, reason string) {
+	c.streamHeld = false
+	if c.streamTurnID == turnID {
+		c.streamTurnID = ""
+	}
+
+	filtered := c.messages[:0]
+	for _, msg := range c.messages {
+		if msg.TurnID == turnID && msg.IsStream {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	c.messages = filtered
+
+	note := "Output withheld by a content gate."
+	if reason != "" {
+		note = "Output withheld: " + reason
+	}
+	c.messages = append(c.messages, chatMessage{
+		ID:      "retract-" + turnID,
+		Role:    "system",
+		TurnID:  turnID,
+		Content: note,
+	})
 	c.rebuildViewport()
 }
 
@@ -276,7 +325,10 @@ func (c *chatView) renderMessages() string {
 		}
 	}
 
-	if c.isWorking && c.streamTurnID == "" {
+	switch {
+	case c.streamHeld:
+		b.WriteString(c.styles.Dim.Render("  ··· reviewing output") + "\n")
+	case c.isWorking && c.streamTurnID == "":
 		b.WriteString(c.styles.Dim.Render("  ···") + "\n")
 	}
 

@@ -51,6 +51,8 @@ func (b *testBus) EmitAsync(eventType string, payload any) <-chan error {
 	return ch
 }
 
+func (b *testBus) HasSubscribers(_ string) bool { return false }
+
 func (b *testBus) EmitVetoable(eventType string, payload any) (engine.VetoResult, error) {
 	return engine.VetoResult{}, nil
 }

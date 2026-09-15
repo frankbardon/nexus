@@ -729,6 +729,30 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	r.onToolResult(res)
 }
 
+func (p *Plugin) handleStreamHold(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	h, ok := e.Payload.(events.StreamHold)
+	if !ok {
+		return
+	}
+	r.onStreamHold(h)
+}
+
+func (p *Plugin) handleStreamRetract(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	rt, ok := e.Payload.(events.StreamRetract)
+	if !ok {
+		return
+	}
+	r.onStreamBlocked(rt)
+}
+
 func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {

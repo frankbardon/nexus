@@ -92,6 +92,22 @@ type EventBus interface {
 	// EmitVetoable dispatches a before:* event. Handlers may veto by setting
 	// the VetoResult on the payload. Returns the result.
 	EmitVetoable(eventType string, payload any) (VetoResult, error)
+	// HasSubscribers reports whether anything is currently subscribed to an
+	// exact event type. Wildcard (SubscribeAll) observers do not count: the
+	// question it answers is "would a typed handler see this", not "would
+	// anything".
+	//
+	// It exists so a hot-path emitter can skip work that only matters when
+	// someone is listening. engine.StreamPublisher uses it to avoid running
+	// the before:llm.stream.chunk hook once per token delta when no gate is
+	// subscribed — that hook is journaled like any other event, so emitting
+	// it unconditionally would roughly double journal volume on every
+	// streaming turn for no benefit.
+	//
+	// Advisory, not a lock: a subscription can land immediately after the
+	// call returns. Use it to elide optional work, never to decide whether a
+	// safety check runs.
+	HasSubscribers(eventType string) bool
 	// Drain waits for all in-flight events to complete within the given context.
 	Drain(ctx context.Context) error
 }
@@ -523,6 +539,14 @@ func (b *eventBus) Subscribe(eventType string, handler HandlerFunc, opts ...Subs
 			}
 		}
 	}
+}
+
+// HasSubscribers reports whether any typed handler is registered for an exact
+// event type. Documented on the EventBus interface.
+func (b *eventBus) HasSubscribers(eventType string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.handlers[eventType]) > 0
 }
 
 // WarnVetoableCollisions scans every before:* event in the handler table

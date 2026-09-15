@@ -133,7 +133,37 @@ type CoreConfig struct {
 	// feature. See pkg/engine/objectstore for why this is a lifecycle seam
 	// rather than a filesystem abstraction.
 	ObjectStore objectstore.Config `yaml:"object_store"`
-	ModelsRaw   map[string]any     `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+	// Streaming governs how the engine reconciles token streaming with the
+	// gates that adjudicate model output. See StreamingConfig.
+	Streaming StreamingConfig `yaml:"streaming"`
+	ModelsRaw map[string]any  `yaml:"-"` // Parsed from core.models, used to build ModelRegistry
+}
+
+// StreamingConfig governs the engine's reconciliation of token streaming with
+// output gating.
+//
+// Streaming and gating pull against each other: a gate that judges the whole
+// response cannot run until the response is complete, by which point every
+// token has been rendered. Nexus resolves that two ways. Gates that implement
+// before:llm.stream.chunk adjudicate text before it is released and keep
+// their guarantee with streaming on. Gates that implement only
+// before:llm.response cannot, so by default the engine turns streaming off
+// for them rather than letting their veto look like protection it is not.
+type StreamingConfig struct {
+	// ResponseGatePolicy decides what happens when a plugin gating
+	// before:llm.response, without a before:llm.stream.chunk handler, is
+	// active:
+	//
+	//   "downgrade" (default) — clear Stream on outbound LLM requests, so
+	//   the gate sees the response before any of it is shown. Costs
+	//   time-to-first-token; buys the non-disclosure the gate implies.
+	//
+	//   "allow" — leave Stream alone and log a warning at boot. The gate
+	//   still governs conversation history and tool execution; it no longer
+	//   governs what the user sees.
+	//
+	// Empty means "downgrade".
+	ResponseGatePolicy string `yaml:"response_gate_policy"`
 }
 
 // StorageConfig tunes the per-plugin SQLite storage manager. Defaults match

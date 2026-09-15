@@ -195,6 +195,8 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "agent.turn.start", Priority: 50},
 		{EventType: "agent.turn.end", Priority: 50},
 		{EventType: "llm.stream.chunk", Priority: 50},
+		{EventType: "llm.stream.hold", Priority: 50},
+		{EventType: "llm.stream.retract", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "io.output", Priority: 50},
 		// The agent emits tool.invoke (not tool.call) to run a tool; that is the
@@ -301,6 +303,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.hold", p.handleStreamHold, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.retract", p.handleStreamRetract, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithSource(pluginID)),
@@ -682,6 +686,30 @@ func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
 		return
 	}
 	r.onStreamChunk(c)
+}
+
+func (p *Plugin) handleStreamHold(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	h, ok := e.Payload.(events.StreamHold)
+	if !ok {
+		return
+	}
+	r.onStreamHold(h)
+}
+
+func (p *Plugin) handleStreamRetract(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	rt, ok := e.Payload.(events.StreamRetract)
+	if !ok {
+		return
+	}
+	r.onStreamRetract(rt)
 }
 
 func (p *Plugin) handleStreamEnd(e engine.Event[any]) {

@@ -230,6 +230,9 @@ func (p *Plugin) Emissions() []string {
 		"before:llm.response",
 		"llm.response",
 		"llm.stream.chunk",
+		"before:llm.stream.chunk",
+		"llm.stream.hold",
+		"llm.stream.retract",
 		"llm.stream.end",
 		"thinking.step",
 		"before:core.error",
@@ -970,7 +973,14 @@ type streamState struct {
 	model        string
 	finishReason string
 	turnID       string
-	chunkIndex   int
+	requestID    string
+
+	// pub is the gated path from this stream to the bus. Created at
+	// message_start, once Anthropic has given us the turn ID. Text deltas go
+	// through it rather than to bus.Emit directly so before:llm.stream.chunk
+	// can hold or block them before they are shown; its methods are nil-safe,
+	// so a stream that never reaches message_start simply publishes nothing.
+	pub *engine.StreamPublisher
 }
 
 func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
@@ -978,7 +988,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var currentEvent sseEvent
-	st := &streamState{}
+	st := &streamState{requestID: requestID}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1017,6 +1027,11 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 		TotalTokens: st.usage.InputTokens + st.usage.OutputTokens +
 			st.usage.CacheReadInputTokens + st.usage.CacheCreationInputTokens,
 	}
+
+	// Settle the gated stream before announcing the end of it: Close gives a
+	// handler one last look at any tail it was holding, and releasing that
+	// tail after llm.stream.end would arrive out of order.
+	st.pub.Close()
 
 	// Emit stream end.
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: st.turnID,
@@ -1068,6 +1083,7 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 		}
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
 			st.turnID = data.Message.ID
+			st.pub = engine.NewStreamPublisher(p.bus, st.turnID, st.requestID)
 			st.model = data.Message.Model
 			st.usage.InputTokens = data.Message.Usage.InputTokens
 			st.usage.CacheCreationInputTokens = data.Message.Usage.CacheCreationInputTokens
@@ -1130,12 +1146,12 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 		if json.Unmarshal([]byte(sse.Data), &data) == nil {
 			switch data.Delta.Type {
 			case "text_delta":
+				// fullContent is the model's text verbatim; the publisher
+				// decides what of it reaches a UI. They diverge when a gate
+				// redacts or blocks, and that is the point: the response-level
+				// hook still sees what the model actually said.
 				st.fullContent.WriteString(data.Delta.Text)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: data.Delta.Text,
-					Index:  st.chunkIndex,
-					TurnID: st.turnID,
-				})
-				st.chunkIndex++
+				st.pub.Text(data.Delta.Text)
 
 			case "citations_delta":
 				// Accumulate per-block; flushed into st.citations at
@@ -1168,11 +1184,7 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 					st.currentToolInput.WriteString(data.Delta.PartialJSON)
 					// Stream structured output tool input as content chunks.
 					if st.currentToolCall.Name == "_structured_output" {
-						_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: data.Delta.PartialJSON,
-							Index:  st.chunkIndex,
-							TurnID: st.turnID,
-						})
-						st.chunkIndex++
+						st.pub.Text(data.Delta.PartialJSON)
 					}
 				case st.serverToolBlockType != "":
 					// Best-effort accumulation: Anthropic's exact streaming
@@ -1194,11 +1206,7 @@ func (p *Plugin) processSSEEvent(sse sseEvent, st *streamState) {
 				st.fullContent.WriteString(st.currentToolInput.String())
 			} else {
 				st.toolCalls = append(st.toolCalls, *st.currentToolCall)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: st.currentToolCall,
-					Index:  st.chunkIndex,
-					TurnID: st.turnID,
-				})
-				st.chunkIndex++
+				st.pub.ToolCall(st.currentToolCall)
 			}
 
 			st.currentToolCall = nil

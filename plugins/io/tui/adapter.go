@@ -88,6 +88,23 @@ func (a *Adapter) SendStreamChunk(msg ui.StreamChunkMessage) error {
 	return nil
 }
 
+// SendStreamHold tells the TUI a gate suspended or released the stream.
+func (a *Adapter) SendStreamHold(msg ui.StreamHoldMessage) error {
+	if a.program != nil {
+		a.program.Send(streamHoldMsg{msg})
+	}
+	return nil
+}
+
+// SendStreamRetract tells the TUI to erase the text rendered for a blocked
+// turn.
+func (a *Adapter) SendStreamRetract(msg ui.StreamRetractMessage) error {
+	if a.program != nil {
+		a.program.Send(streamRetractMsg{msg})
+	}
+	return nil
+}
+
 // SendStreamEnd signals the end of a stream.
 func (a *Adapter) SendStreamEnd(msg ui.StreamEndMessage) error {
 	if a.program != nil {

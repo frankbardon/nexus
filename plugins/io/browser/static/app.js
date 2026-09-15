@@ -21,6 +21,10 @@ document.addEventListener('alpine:init', () => {
     // Chat
     messages: [],
     streamTurnId: null,
+    // Set while a Nexus output gate has the active stream suspended pending
+    // review. A stream that simply goes quiet is indistinguishable from a hung
+    // turn, so the UI says which one this is.
+    streamHeld: false,
 
     // Status
     status: { state: 'idle', detail: '' },
@@ -134,8 +138,17 @@ document.addEventListener('alpine:init', () => {
           this._handleStreamChunk(payload, env);
           break;
 
+        case 'stream_hold':
+          this.streamHeld = !payload.resumed;
+          break;
+
+        case 'stream_retract':
+          this._handleStreamRetract(payload, env);
+          break;
+
         case 'stream_end':
           this.streamTurnId = null;
+          this.streamHeld = false;
           break;
 
         case 'status':
@@ -291,6 +304,31 @@ document.addEventListener('alpine:init', () => {
       if (msg) {
         msg.content += payload.content;
       }
+    },
+
+    // Erase the partial text rendered for a turn whose stream an output gate
+    // blocked, and say so in its place. This browser owns its render buffer,
+    // so the retraction is real rather than advisory — but it cannot unread
+    // what the user already saw, which is why the gate holds text back rather
+    // than relying on this.
+    _handleStreamRetract(payload, env) {
+      this.streamHeld = false;
+      if (this.streamTurnId === payload.turn_id) {
+        this.streamTurnId = null;
+      }
+      this.messages = this.messages.filter(
+        m => !(m.turnId === payload.turn_id && m.type === 'stream')
+      );
+      this.messages.push({
+        id: 'retract-' + payload.turn_id,
+        role: 'system',
+        content: payload.reason
+          ? 'Output withheld: ' + payload.reason
+          : 'Output withheld by a content gate.',
+        turnId: payload.turn_id,
+        type: 'output',
+        timestamp: env.timestamp,
+      });
     },
 
     // ── User Actions ──────────────────────────────────────────────────

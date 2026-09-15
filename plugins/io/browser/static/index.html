@@ -275,8 +275,16 @@
               </div>
             </template>
 
+            <!-- Output gate holding the stream for review -->
+            <div x-show="$store.app.streamHeld" class="chat chat-start">
+              <div class="chat-bubble chat-bubble-neutral py-2 text-xs opacity-70">
+                <span class="loading loading-spinner loading-xs mr-2"></span>
+                <span>Reviewing output…</span>
+              </div>
+            </div>
+
             <!-- Typing indicator -->
-            <div x-show="$store.app.isWorking && !$store.app.streamTurnId" class="chat chat-start">
+            <div x-show="$store.app.isWorking && !$store.app.streamTurnId && !$store.app.streamHeld" class="chat chat-start">
               <div class="chat-bubble chat-bubble-neutral py-3">
                 <div class="flex gap-1">
                   <span class="typing-dot w-2 h-2 rounded-full bg-current inline-block"></span>

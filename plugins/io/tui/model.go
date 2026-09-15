@@ -240,6 +240,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamChunkMsg:
 		m.chat.AppendToStream(msg.TurnID, msg.Content)
 
+	case streamHoldMsg:
+		m.chat.SetStreamHold(!msg.Resumed)
+
+	case streamRetractMsg:
+		m.chat.RetractStream(msg.TurnID, msg.Reason)
+
 	case outputClearMsg:
 		m.chat.ClearStream()
 
