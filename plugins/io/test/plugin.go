@@ -128,6 +128,7 @@ func (p *Plugin) Emissions() []string {
 		"io.ask.response",
 		"io.session.start",
 		"io.session.end",
+		"before:llm.response",
 		"llm.response",
 	}
 }
@@ -404,7 +405,7 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 	go func() {
 		resp := p.buildMockResponse(mock, meta)
 		resp.RequestID = requestID
-		_ = p.bus.Emit("llm.response", resp)
+		engine.PublishLLMResponse(p.bus, resp)
 	}()
 }
 
@@ -422,7 +423,7 @@ func (p *Plugin) handleMockLLMRequest(e engine.Event[any]) {
 
 	// Propagate full request metadata so downstream plugins (fanout, retrier)
 	// can correlate the response. Matches real provider behavior.
-	_ = p.bus.Emit("llm.response", p.buildMockResponse(mock, req.Metadata))
+	engine.PublishLLMResponse(p.bus, p.buildMockResponse(mock, req.Metadata))
 }
 
 func (p *Plugin) nextMockResponse() MockResponse {

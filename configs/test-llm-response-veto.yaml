@@ -1,0 +1,74 @@
+# Test: before:llm.response veto-and-replace.
+#
+# Validates: a gate vetoing the model's raw response substitutes a replacement
+# AND drops the tool calls that response asked for, so the tool never runs.
+# This is the capability before:io.output cannot provide — by the time
+# io.output fires, the agent loop has already executed the tool calls.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestLLMResponseVeto -v
+#
+# Mock-mode only — no API key required.
+#
+# The single mock response names a banned term AND requests a shell tool call.
+# nexus.gate.stop_words has scan_llm_responses enabled, so it vetoes at
+# before:llm.response; engine.PublishLLMResponse then publishes the gate's
+# message with ToolCalls cleared. The `echo` command is on the shell sandbox
+# allowlist, so if the veto failed to drop the call the tool would happily
+# run and emit a tool.result — which is exactly what the test asserts against.
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.gate.stop_words
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Run the diagnostic."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Running the forbidden diagnostic now."
+        tool_calls:
+          - name: shell
+            arguments: '{"command":"echo veto-escaped"}'
+
+  nexus.llm.anthropic:
+    api_key: sk-mock-not-used
+
+  nexus.agent.react:
+    system_prompt: "You are a diagnostic assistant."
+
+  nexus.tool.shell:
+    timeout: 15s
+    sandbox:
+      allowed_commands: [echo]
+      env_restrict: true
+
+  nexus.gate.stop_words:
+    words: ["forbidden"]
+    scan_llm_responses: true
+    message: "Content blocked: contains prohibited terms."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

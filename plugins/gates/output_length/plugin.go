@@ -111,6 +111,14 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		return
 	}
 
+	// A gate-authored refusal from a before:llm.response veto has already been
+	// adjudicated; re-judging it here would at best duplicate work and at worst
+	// veto it into a blank, which is the outcome the substitution contract
+	// exists to prevent.
+	if engine.IsVetoSubstituted(output.Metadata) {
+		return
+	}
+
 	if output.Role != "assistant" {
 		return
 	}

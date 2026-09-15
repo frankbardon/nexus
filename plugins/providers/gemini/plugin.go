@@ -173,6 +173,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.response",
 		"llm.response",
 		"llm.stream.chunk",
 		"llm.stream.end",
@@ -216,6 +217,11 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
+	// Replay publishes journaled responses directly rather than through
+	// engine.PublishLLMResponse: these are re-published history, not fresh
+	// model output, and the recorded response is already the post-gate one
+	// subscribers saw on the original run. Re-running before:llm.response
+	// here would re-gate an already-gated response and break replay fidelity.
 	if p.replay != nil && p.replay.Active() {
 		raw, ok := p.replay.Pop("llm.response")
 		if !ok {
@@ -947,9 +953,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[s
 	resp.Metadata = mergeMetadata(resp.Metadata, meta)
 	resp.Tags = tags
 
-	if err := p.bus.Emit("llm.response", resp); err != nil {
-		p.logger.Error("failed to emit llm.response", "error", err)
-	}
+	engine.PublishLLMResponse(p.bus, resp)
 }
 
 // convertAPIResponse normalizes a Gemini response into events.LLMResponse.
@@ -1195,7 +1199,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 		Usage:        finalUsage,
 	})
 
-	_ = p.bus.Emit("llm.response", events.LLMResponse{
+	engine.PublishLLMResponse(p.bus, events.LLMResponse{
 		SchemaVersion: events.LLMResponseVersion,
 		RequestID:     requestID,
 		Content:       fullContent.String(),

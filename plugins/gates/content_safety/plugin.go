@@ -63,10 +63,11 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	checks          []check
-	action          string // "block" or "redact"
-	message         string
-	scanToolResults bool
+	checks           []check
+	action           string // "block" or "redact"
+	message          string
+	scanToolResults  bool
+	scanLLMResponses bool
 
 	unsubs []func()
 }
@@ -90,6 +91,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["scan_tool_results"].(bool); ok {
 		p.scanToolResults = v
+	}
+	if v, ok := ctx.Config["scan_llm_responses"].(bool); ok {
+		p.scanLLMResponses = v
 	}
 
 	// Enable builtin checks (all on by default).
@@ -124,6 +128,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				engine.WithPriority(10), engine.WithSource(pluginID)),
 		)
 	}
+	if p.scanLLMResponses {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe("before:llm.response", p.handleBeforeLLMResponse,
+				engine.WithPriority(8), engine.WithSource(pluginID)),
+		)
+	}
 
 	checkNames := make([]string, len(p.checks))
 	for i, c := range p.checks {
@@ -132,7 +142,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger.Info("content safety gate initialized",
 		"checks", strings.Join(checkNames, ","),
 		"action", p.action,
-		"scan_tool_results", p.scanToolResults)
+		"scan_tool_results", p.scanToolResults,
+		"scan_llm_responses", p.scanLLMResponses)
 	return nil
 }
 
@@ -157,6 +168,9 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	if p.scanToolResults {
 		subs = append(subs, engine.EventSubscription{EventType: "before:tool.result", Priority: 8})
 	}
+	if p.scanLLMResponses {
+		subs = append(subs, engine.EventSubscription{EventType: "before:llm.response", Priority: 8})
+	}
 	return subs
 }
 
@@ -171,6 +185,14 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 	}
 	output, ok := vp.Original.(*events.AgentOutput)
 	if !ok {
+		return
+	}
+
+	// A gate-authored refusal from a before:llm.response veto has already been
+	// adjudicated; re-judging it here would at best duplicate work and at worst
+	// veto it into a blank, which is the outcome the substitution contract
+	// exists to prevent.
+	if engine.IsVetoSubstituted(output.Metadata) {
 		return
 	}
 
@@ -288,6 +310,86 @@ func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
 			}
 		}
 		result.Output = content
+	}
+}
+
+// handleBeforeLLMResponse mirrors handleBeforeOutput against the model's raw
+// response, before the agent loop consumes it. Only active when
+// scan_llm_responses is enabled.
+//
+// This catches what before:io.output cannot: io.output fires after the loop
+// has already executed the response's tool calls, so it can scrub the prose
+// the user finally reads but cannot stop sensitive content from reaching a
+// tool. Gating here does both — in block mode the substituted response
+// carries no tool calls at all (see engine.PublishLLMResponse).
+//
+// Only the textual Content is scanned. Tool-call arguments are not: they are
+// provider-shaped JSON, and regex over them is unreliable. A deployment that
+// needs argument scanning should gate before:tool.invoke, which sees parsed
+// arguments.
+//
+// Streaming caveat: a provider with stream: true has already emitted this
+// text as llm.stream.chunk events. Redaction and blocking here keep the
+// content out of conversation history and out of tool arguments, but cannot
+// retract what a UI already rendered. Use stream: false where non-disclosure
+// is the requirement.
+func (p *Plugin) handleBeforeLLMResponse(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	resp, ok := vp.Original.(*events.LLMResponse)
+	if !ok {
+		return
+	}
+	if resp.Content == "" {
+		return
+	}
+
+	var matched []string
+	for _, c := range p.checks {
+		if c.pattern.MatchString(resp.Content) {
+			matched = append(matched, c.name)
+		}
+	}
+	if len(matched) == 0 {
+		return
+	}
+
+	checkList := strings.Join(matched, ", ")
+
+	switch p.action {
+	case "block":
+		p.logger.Info("content safety checks triggered on llm.response",
+			"model", resp.Model, "request_id", resp.RequestID,
+			"checks", checkList, "action", p.action,
+			"tool_calls_dropped", len(resp.ToolCalls))
+		// Dictate the replacement text, then veto. PublishLLMResponse keeps
+		// the Content set here and clears ToolCalls, so the agent loop
+		// receives the operator's message rather than the flagged output and
+		// never executes what the flagged response asked for.
+		resp.Content = strings.ReplaceAll(p.message, "{checks}", checkList)
+		vp.Veto = engine.VetoResult{
+			Vetoed: true,
+			Reason: fmt.Sprintf("Content safety (llm.response): %s", checkList),
+		}
+
+	case "redact":
+		// Degraded-but-recovered: the response proceeds with matches redacted
+		// and its tool calls intact. Mutation without veto is the replace
+		// path — no substitution, no dropped tool calls.
+		p.logger.Warn("content safety checks triggered on llm.response",
+			"model", resp.Model, "request_id", resp.RequestID,
+			"checks", checkList, "action", p.action)
+		content := resp.Content
+		for _, c := range p.checks {
+			for _, name := range matched {
+				if c.name == name {
+					content = c.pattern.ReplaceAllString(content, "[REDACTED]")
+				}
+			}
+		}
+		resp.Content = content
 	}
 }
 

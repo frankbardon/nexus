@@ -162,6 +162,90 @@ func (p *MyPlugin) handleBeforeToolInvoke(event engine.Event[any]) {
 }
 ```
 
+### Mutating instead of vetoing
+
+The payload is a pointer, so a handler can **rewrite it in place** and return
+without vetoing. The emitter then publishes the edited payload. This is the
+replace path, and it composes: a handler at a lower priority sees the previous
+handler's edits. The shipped `before:io.output` pipeline relies on it —
+`content_safety` redacts at priority 8, then `stop_words` ban-checks the
+already-redacted text at 10.
+
+Mutate to change *what* happens; veto to stop it happening at all.
+
+### `before:llm.response`: veto means substitute
+
+`before:llm.response` is the one vetoable event where a veto does **not** block
+the action. Agent loops (react, planexec, orchestrator) subscribe to
+`llm.response` and block their turn waiting for it, so suppressing the event
+would hang the turn rather than block anything. A veto therefore changes *which*
+response is published, and exactly one `llm.response` is always emitted.
+
+Producers must publish through `engine.PublishLLMResponse` rather than calling
+`bus.Emit("llm.response", …)` directly:
+
+```go
+// In a provider plugin, replacing a bare bus.Emit:
+engine.PublishLLMResponse(p.bus, resp)
+```
+
+It runs the hook, applies the rules below, and emits. Handlers have two moves:
+
+| Handler does | Result |
+|---|---|
+| Mutates `Content`, no veto | The edit is published as the model's response. Tool calls intact. |
+| Vetoes, leaves `Content` alone | Substitute whose `Content` is the veto reason. |
+| Mutates `Content`, then vetoes | Substitute keeping the handler's text — the handler dictates the replacement. |
+
+**A vetoed response never carries tool calls.** `ToolCalls` is cleared on the
+substitute, so a blocked response cannot drive tool execution. This is the
+security value of the hook and the reason the logic lives in one helper rather
+than at each provider's emit site. The substitute also sets
+`FinishReason: "vetoed"` and stamps `Metadata["_vetoed"] = true` plus
+`Metadata["_veto_reason"]`.
+
+`RequestID`, `Model`, `Tags`, `Usage` and `CostUSD` survive substitution:
+correlation must still work, and the tokens were spent whether or not the
+answer ships, so `nexus.gate.token_budget` still sees them.
+
+A response already stamped `_vetoed` skips the hook. Without that guard, a gate
+that vetoes and then drives a corrective LLM request could veto its own
+replacement indefinitely.
+
+**Why not `before:io.output`?** That hook fires *after* the agent loop has
+executed the response's tool calls. It can scrub the prose the user finally
+reads; it cannot stop an action. `before:llm.response` sits between the provider
+and the loop, so it governs tool calls, intermediate iterations, and reasoning —
+not just final answers.
+
+**Streaming caveat.** Providers emit `llm.stream.chunk` as tokens arrive and
+`llm.response` only at the end. A veto here cannot unsay text a UI has already
+rendered. Gates that must prevent *disclosure* need `stream: false`; gates that
+steer the loop (blocking tool calls, replacing what enters conversation history)
+work unchanged under streaming.
+
+**Never interpolate model output into a veto reason.** The reason becomes the
+substitute's `Content` whenever the handler doesn't dictate its own, and
+output-side gates (`content_safety`, `stop_words`, `json_schema`,
+`output_length`) deliberately skip a substituted response rather than
+re-judging operator-authored text. A reason built as
+`fmt.Sprintf("blocked: %s", resp.Content)` would therefore hand the user the
+exact content the gate just blocked, past every gate that would have caught
+it. Describe what tripped; log the offending text separately.
+
+**Provider-side execution already happened.** Some providers run tools on
+their own servers and surface the results while converting the response —
+Gemini's code execution emits `tool.invoke` / `tool.result` before
+`PublishLLMResponse` is reached, and Anthropic's server-side `web_search`
+lands in the response metadata. A veto stops the *client-side* tool calls the
+response asked for; it cannot un-run what the provider already executed. Gate
+`before:llm.request` to stop those from being offered in the first place.
+
+**Replay bypasses the hook.** During journal replay, providers publish the
+recorded `llm.response` directly. Those are re-published history — already
+post-gate on the original run — so re-gating them would double-apply and break
+replay fidelity.
+
 ## Event Filters
 
 Filters are predicate functions that gate handler execution:

@@ -644,9 +644,12 @@ func (p *Plugin) handleLLMResponse(resp events.LLMResponse) {
 	// Emit vetoable before:io.output. Content came from llm.response and was
 	// already recorded by nexus.memory.capped at priority 10.
 	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: resp.Content,
-		Role:     "assistant",
-		TurnID:   turnID,
-		Metadata: map[string]any{"streamed": true},
+		Role:   "assistant",
+		TurnID: turnID,
+		// Carry the before:llm.response substitution marker onto the output so
+		// output-side gates pass an operator-authored refusal through instead
+		// of re-judging it (and possibly vetoing it into a blank).
+		Metadata: engine.CarryVetoMarker(map[string]any{"streamed": true}, resp.Metadata),
 	}
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {
 		p.logger.Warn("io.output vetoed", "reason", veto.Reason)

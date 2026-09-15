@@ -15,6 +15,8 @@
     "check_secrets_password":   {"type": "boolean", "description": "Detect inline password assignments."},
     "check_credit_card":        {"type": "boolean", "description": "Detect credit-card-like 16-digit sequences."},
     "check_ip_internal":        {"type": "boolean", "description": "Detect internal IPv4 addresses."},
+    "scan_tool_results":        {"type": "boolean", "description": "Also scan tool.result output via before:tool.result. Default false."},
+    "scan_llm_responses":       {"type": "boolean", "description": "Also scan raw model output via before:llm.response, before the agent loop consumes it. In block mode the substituted response carries no tool calls. Default false."},
     "custom_patterns": {
       "type": "array",
       "items": {"type": "string"},

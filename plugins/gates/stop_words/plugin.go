@@ -28,9 +28,10 @@ type Plugin struct {
 	bus    engine.EventBus
 	logger *slog.Logger
 
-	words         map[string]bool
-	caseSensitive bool
-	message       string
+	words            map[string]bool
+	caseSensitive    bool
+	message          string
+	scanLLMResponses bool
 
 	unsubs []func()
 }
@@ -51,6 +52,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["message"].(string); ok && v != "" {
 		p.message = v
+	}
+	if v, ok := ctx.Config["scan_llm_responses"].(bool); ok {
+		p.scanLLMResponses = v
 	}
 
 	// Load inline words.
@@ -73,10 +77,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("before:io.output", p.handleBeforeOutput,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 	)
+	if p.scanLLMResponses {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe("before:llm.response", p.handleBeforeLLMResponse,
+				engine.WithPriority(10), engine.WithSource(pluginID)),
+		)
+	}
 
 	p.logger.Info("stop words gate initialized",
 		"word_count", len(p.words),
-		"case_sensitive", p.caseSensitive)
+		"case_sensitive", p.caseSensitive,
+		"scan_llm_responses", p.scanLLMResponses)
 	return nil
 }
 
@@ -96,10 +107,17 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// (=13) which may trigger HITL. before:io.output priority 10 keeps
 	// stop_words as the final ban check after content_safety (=8) redaction
 	// and json_schema (=9) format-retry. See #121.
-	return []engine.EventSubscription{
+	subs := []engine.EventSubscription{
 		{EventType: "before:llm.request", Priority: 12},
 		{EventType: "before:io.output", Priority: 10},
 	}
+	// before:llm.response priority 10 keeps the same relative order as the
+	// output pipeline: content_safety (=8) redacts first, stop_words does the
+	// final ban check on the text that will actually ship.
+	if p.scanLLMResponses {
+		subs = append(subs, engine.EventSubscription{EventType: "before:llm.response", Priority: 10})
+	}
+	return subs
 }
 
 func (p *Plugin) Emissions() []string {
@@ -145,6 +163,14 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		return
 	}
 
+	// A gate-authored refusal from a before:llm.response veto has already been
+	// adjudicated; re-judging it here would at best duplicate work and at worst
+	// veto it into a blank, which is the outcome the substitution contract
+	// exists to prevent.
+	if engine.IsVetoSubstituted(output.Metadata) {
+		return
+	}
+
 	if found := p.findStopWord(output.Content); found != "" {
 		p.logger.Info("stop word found in output", "word", found)
 		vp.Veto = engine.VetoResult{
@@ -154,6 +180,42 @@ func (p *Plugin) handleBeforeOutput(event engine.Event[any]) {
 		_ = p.bus.Emit("io.output", events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: p.message,
 			Role: "system",
 		})
+	}
+}
+
+// handleBeforeLLMResponse mirrors handleBeforeOutput against the model's raw
+// response, before the agent loop consumes it. Only active when
+// scan_llm_responses is enabled.
+//
+// Unlike before:io.output, a veto here also drops the response's tool calls
+// (see engine.PublishLLMResponse), so a response that names a banned term
+// while requesting a tool cannot execute that tool. Only Content is scanned;
+// tool-call arguments belong to before:tool.invoke, which sees them parsed.
+func (p *Plugin) handleBeforeLLMResponse(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	resp, ok := vp.Original.(*events.LLMResponse)
+	if !ok {
+		return
+	}
+
+	found := p.findStopWord(resp.Content)
+	if found == "" {
+		return
+	}
+
+	p.logger.Info("stop word found in llm.response",
+		"word", found, "model", resp.Model, "request_id", resp.RequestID,
+		"tool_calls_dropped", len(resp.ToolCalls))
+	// Dictate the replacement text, then veto: PublishLLMResponse keeps the
+	// Content set here, so the agent loop sees the operator's message rather
+	// than the banned text or a bare veto reason.
+	resp.Content = p.message
+	vp.Veto = engine.VetoResult{
+		Vetoed: true,
+		Reason: fmt.Sprintf("Response contains prohibited term: %q", found),
 	}
 }
 

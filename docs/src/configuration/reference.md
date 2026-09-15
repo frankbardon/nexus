@@ -3466,6 +3466,28 @@ authoritative pipeline; treat them as a contract when adding a new gate.
 | 13 | `nexus.gate.approval_policy` | May trigger HITL — most expensive |
 | 15 | `nexus.gate.context_window` | Compaction trigger |
 
+`before:llm.response` — mutate-then-veto on the model's raw output, mirroring
+the `before:io.output` ordering. Both gates below are **opt-in**
+(`scan_llm_responses: true`); with neither enabled the hook still fires and
+does nothing.
+
+| Priority | Gate | Role |
+|---|---|---|
+| 8 | `nexus.gate.content_safety` | Redact (mutate) first, or veto if `action=block` |
+| 10 | `nexus.gate.stop_words` | Final ban check on the content that will reach the agent loop |
+
+Unlike every other `before:*` event, a veto here **substitutes** rather than
+blocks — see [Event Bus](../architecture/event-bus.md#beforellmresponse-veto-means-substitute).
+
+A substituted response is marked, and the agent loop carries that mark onto the
+`AgentOutput` it derives from it. Every gate in the `before:io.output` table
+above skips a marked output rather than re-judging operator-authored text —
+without that, a blocking output gate could veto the refusal and leave the user
+with nothing, which is the outcome substitution exists to prevent. The
+corollary: **a veto reason must never interpolate raw model output**, because
+the reason becomes user-visible content and those gates will no longer scan
+it.
+
 ### `nexus.gate.endless_loop`
 
 Source: `plugins/gates/endless_loop/plugin.go`.
@@ -3486,6 +3508,7 @@ Source: `plugins/gates/stop_words/plugin.go`. Gates both `before:llm.request`
 | `word_files`     | list | *(empty)*                                        | Files of newline-separated words. |
 | `case_sensitive` | bool | `false`                                          | Case-sensitive matching. |
 | `message`        | string | `Content blocked: contains prohibited terms.`  | Veto message. |
+| `scan_llm_responses` | bool | `false`                                      | Also subscribe to `before:llm.response` and ban-check the model's raw output. A match substitutes `message` as the response content and **drops the response's tool calls**, so a response naming a banned term cannot execute the tool it asked for. Only `Content` is scanned. |
 
 ### `nexus.gate.token_budget`
 
@@ -3610,6 +3633,7 @@ to enabled.
 | `action`                     | string | `block`                                                     | `block` or `redact`. |
 | `message`                    | string | `Content blocked: contains sensitive information ({checks}).` | Block/redact message; `{checks}` lists triggered checks. |
 | `scan_tool_results`          | bool | `false`                                                       | Also subscribe to `before:tool.result` and apply checks to tool output. Required to cover sub-agent / delegate output (which reaches the parent via `tool.result`, not `io.output`). Off by default because legitimate external tools (`web_fetch`, `knowledge_search`) often surface phone numbers / addresses that aren't leaks; enable for orchestrator-style topologies. |
+| `scan_llm_responses`         | bool | `false`                                                       | Also subscribe to `before:llm.response` and apply checks to the model's raw output, before the agent loop consumes it. This is the only placement that can stop flagged content from reaching a tool: `before:io.output` fires after the loop has already executed the response's tool calls. In `block` mode the substituted response carries **no tool calls** (see [Event Bus](../architecture/event-bus.md#beforellmresponse-veto-means-substitute)); in `redact` mode the response proceeds with matches scrubbed and its tool calls intact. Only `Content` is scanned — tool-call arguments belong to `before:tool.invoke`. Under `stream: true` the text has already gone out as `llm.stream.chunk`; see the streaming caveat. |
 | `check_pii_email`            | bool | `true`                                                        | Detect email addresses. |
 | `check_pii_phone`            | bool | `true`                                                        | Detect phone numbers. |
 | `check_pii_ssn`              | bool | `true`                                                        | Detect US SSNs. |

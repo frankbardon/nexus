@@ -931,9 +931,12 @@ func (p *Plugin) handleSynthesizeResponse(resp events.LLMResponse) {
 	p.emitStatus("idle", "")
 
 	output := events.AgentOutput{SchemaVersion: events.AgentOutputVersion, Content: resp.Content,
-		Role:     "assistant",
-		TurnID:   turnID,
-		Metadata: map[string]any{"streamed": streamed},
+		Role:   "assistant",
+		TurnID: turnID,
+		// Carry the before:llm.response substitution marker onto the output so
+		// output-side gates pass an operator-authored refusal through instead
+		// of re-judging it (and possibly vetoing it into a blank).
+		Metadata: engine.CarryVetoMarker(map[string]any{"streamed": streamed}, resp.Metadata),
 	}
 
 	if veto, err := p.bus.EmitVetoable("before:io.output", &output); err == nil && veto.Vetoed {

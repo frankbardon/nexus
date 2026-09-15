@@ -1,0 +1,75 @@
+# Test: a before:llm.response refusal survives a blocking output-side gate.
+#
+# Validates the marker propagation: the substituted response carries
+# Metadata["_vetoed"], the agent loop copies it onto the AgentOutput, and
+# output-side gates skip it rather than re-judging operator-authored text.
+#
+# Without that, this configuration blanks the user. stop_words vetoes at
+# before:llm.response and its refusal message deliberately contains an
+# internal IP; content_safety runs at before:io.output in block mode with
+# check_ip_internal on, so it would veto the refusal and the ReAct loop would
+# emit no assistant output at all — the fabricated-vs-blank dilemma the
+# substitution contract exists to avoid, just one hop downstream.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestLLMResponseVetoPassthrough -v
+#
+# Mock-mode only — no API key required.
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-sonnet-4-20250514
+      max_tokens: 8192
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.gate.stop_words
+    - nexus.gate.content_safety
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Run the diagnostic."
+    input_delay: 200ms
+    approval_mode: approve
+    timeout: 20s
+    mock_responses:
+      - content: "Here is the forbidden answer."
+
+  nexus.llm.anthropic:
+    api_key: sk-mock-not-used
+
+  nexus.agent.react:
+    system_prompt: "You are a diagnostic assistant."
+
+  nexus.gate.stop_words:
+    words: ["forbidden"]
+    scan_llm_responses: true
+    message: "Blocked by policy. Contact your administrator at 10.0.0.1 for details."
+
+  nexus.gate.content_safety:
+    action: block
+    check_ip_internal: true
+    check_pii_email: false
+    check_pii_phone: false
+    check_pii_ssn: false
+    check_secrets_api_key: false
+    check_secrets_private_key: false
+    check_secrets_password: false
+    check_credit_card: false
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

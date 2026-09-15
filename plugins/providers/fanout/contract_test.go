@@ -17,7 +17,7 @@ func TestContract(t *testing.T) {
 		declared[e] = true
 	}
 	for _, want := range []string{
-		"llm.request", "llm.response",
+		"llm.request", "before:llm.response", "llm.response",
 		"provider.fanout.start", "provider.fanout.response",
 		"provider.fanout.complete", "provider.fanout.choose",
 	} {
