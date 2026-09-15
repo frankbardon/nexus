@@ -10,8 +10,8 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 	"github.com/frankbardon/nexus/plugins/memory/internal/internalflow"
-	"github.com/frankbardon/nexus/plugins/memory/internal/roundtrip"
 )
 
 const pluginID = "nexus.memory.capped"

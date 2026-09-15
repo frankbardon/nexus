@@ -3,6 +3,7 @@ package subagent
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -160,5 +161,104 @@ func TestContract_DeclaredEmissions(t *testing.T) {
 		if !declared[want] {
 			t.Errorf("Emissions() missing %q", want)
 		}
+	}
+}
+
+// TestSubagent_ReplaysProviderContinuityMetadata pins the same rule pkg/delegate
+// carries: a worker's private history is not persisted by a memory plugin, so
+// the loop itself has to put the provider's continuity tokens back on the
+// assistant message that replays its tool calls. Without that, Gemini rejects
+// the second request with "400 INVALID_ARGUMENT: Function call is missing a
+// thought_signature in functionCall parts" and the worker dies on iteration 2.
+func TestSubagent_ReplaysProviderContinuityMetadata(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithSession(), contract.WithPluginConfig(map[string]any{
+		"name":          "researcher",
+		"system_prompt": "You are a researcher.",
+	}))
+
+	var replayed []events.Message
+	calls := 0
+	h.Bus().Subscribe("llm.request", func(ev engine.Event[any]) {
+		req, ok := ev.Payload.(events.LLMRequest)
+		if !ok {
+			return
+		}
+		calls++
+		if calls == 1 {
+			_ = h.Bus().Emit("llm.response", events.LLMResponse{
+				SchemaVersion: events.LLMResponseVersion,
+				RequestID:     req.RequestID,
+				ToolCalls: []events.ToolCallRequest{
+					{ID: "call_0_lookup", Name: "lookup", Arguments: `{}`},
+				},
+				Metadata: map[string]any{
+					"gemini_thought_signatures": map[string]any{"call_0_lookup": "sig-abc"},
+				},
+			})
+			return
+		}
+		replayed = append([]events.Message(nil), req.Messages...)
+		_ = h.Bus().Emit("llm.response", events.LLMResponse{
+			SchemaVersion: events.LLMResponseVersion,
+			RequestID:     req.RequestID,
+			Content:       "done",
+		})
+	}, engine.WithPriority(1))
+
+	h.Bus().Subscribe("tool.invoke", func(ev engine.Event[any]) {
+		call, ok := ev.Payload.(events.ToolCall)
+		if !ok || call.Name != "lookup" {
+			return
+		}
+		_ = h.Bus().Emit("tool.result", events.ToolResult{
+			SchemaVersion: events.ToolResultVersion,
+			ID:            call.ID,
+			Name:          call.Name,
+			Output:        `{"rows":[]}`,
+			TurnID:        call.TurnID,
+		})
+	}, engine.WithPriority(1))
+
+	done := make(chan struct{})
+	h.Bus().Subscribe("subagent.complete", func(engine.Event[any]) {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}, engine.WithPriority(1))
+
+	_ = h.Bus().Emit("subagent.spawn", events.SubagentSpawn{
+		SchemaVersion: events.SubagentSpawnVersion,
+		SpawnID:       "spawn-1",
+		Task:          "Read a metric.",
+		SystemPrompt:  "You are a researcher.",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("subagent never completed; llm requests = %d", calls)
+	}
+
+	if calls != 2 {
+		t.Fatalf("llm requests = %d, want 2", calls)
+	}
+
+	var assistant *events.Message
+	for i := range replayed {
+		if replayed[i].Role == "assistant" && len(replayed[i].ToolCalls) > 0 {
+			assistant = &replayed[i]
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("second request replayed no tool-calling assistant message: %+v", replayed)
+	}
+	sigs, ok := assistant.Metadata["gemini_thought_signatures"].(map[string]any)
+	if !ok {
+		t.Fatalf("assistant.Metadata = %v, want the captured gemini_thought_signatures", assistant.Metadata)
+	}
+	if sigs["call_0_lookup"] != "sig-abc" {
+		t.Errorf("signature for call_0_lookup = %v, want sig-abc", sigs["call_0_lookup"])
 	}
 }

@@ -1,6 +1,6 @@
 // Package roundtrip centralises the allowlist of LLMResponse.Metadata keys
-// that must travel with a stored conversation Message so the NEXT request can
-// echo them back to the provider verbatim.
+// that must travel with a conversation Message so the NEXT request can echo
+// them back to the provider verbatim.
 //
 // Conversation history is provider-neutral, but some providers hand back
 // opaque continuity tokens on an assistant turn and then reject the following
@@ -18,11 +18,15 @@
 // an internal sub-flow. Only keys a provider identifies as required for
 // round-trip continuity are preserved.
 //
-// It was extracted because the same allowlist had been copy-pasted into
-// memory/capped and memory/simple and forgotten entirely in
-// memory/summary_buffer — which silently dropped Anthropic thinking blocks.
-// A per-plugin copy means every new continuity key has to be remembered in
-// three places; this package is the one place.
+// It applies to EVERY history a response is replayed from, not only a
+// persisted one. It was extracted because the same allowlist had been
+// copy-pasted into memory/capped and memory/simple and forgotten entirely in
+// memory/summary_buffer — which silently dropped Anthropic thinking blocks —
+// and it lives under pkg/ because the agent loops that keep their own
+// in-process history (pkg/delegate, plugins/agents/subagent,
+// plugins/agents/planexec, plugins/agents/orchestrator) had forgotten it too:
+// a delegated posture that called one tool and then asked again sent Gemini a
+// functionCall with no thoughtSignature, and every such turn 400'd.
 package roundtrip
 
 // forwardedKeys enumerates the LLMResponse.Metadata keys copied onto a stored
@@ -32,7 +36,7 @@ package roundtrip
 // NOTE: "gemini_thought_signatures" is duplicated here as a string literal
 // because the Gemini provider declares it as an unexported constant in its own
 // package (`thoughtSignatureMetaKey` in plugins/providers/gemini/plugin.go).
-// Memory plugins must not import a provider, so the two spellings are coupled
+// Nothing outside a provider may import one, so the two spellings are coupled
 // by convention only — change one and you must change the other.
 var forwardedKeys = []string{
 	"thinking_blocks",
@@ -40,7 +44,8 @@ var forwardedKeys = []string{
 }
 
 // ForwardMessageMetadata returns the allowlisted subset of an LLMResponse
-// metadata map, suitable for assigning to events.Message.Metadata.
+// metadata map, suitable for assigning to events.Message.Metadata. Call it
+// wherever an llm.response becomes a history message a later request replays.
 //
 // Returns nil — not an empty map — when src is nil or carries none of the
 // allowlisted keys, so a message that needs no continuity state serialises

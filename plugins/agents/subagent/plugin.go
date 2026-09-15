@@ -14,6 +14,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/delegate"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 )
 
 const (
@@ -453,6 +454,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			Role:      "assistant",
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
+			Metadata:  roundtrip.ForwardMessageMetadata(resp.Metadata),
 		})
 
 		// Emit iteration event for observability. ParentTurnID is set

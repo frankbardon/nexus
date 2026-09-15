@@ -26,6 +26,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/posture"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 )
 
 // Status classifies a delegate outcome. Replay tools and the parent agent's
@@ -272,6 +273,11 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 			Role:      "assistant",
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
+			// A provider's own continuity tokens ride the response metadata and
+			// must come back on the message that replays this turn's tool calls,
+			// or the next request is rejected outright. This history is private
+			// to the sub-session, so no memory plugin forwards them for it.
+			Metadata: roundtrip.ForwardMessageMetadata(resp.Metadata),
 		})
 
 		if opts.budget.MaxTokens > 0 && totalTokens >= opts.budget.MaxTokens {
