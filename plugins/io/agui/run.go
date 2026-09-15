@@ -6,6 +6,7 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/events"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 )
 
 // run holds the state of a single in-flight AG-UI run. Bus-event handlers push
@@ -62,6 +63,17 @@ type run struct {
 	// message so it can be finalized into messages on stream/turn end. Empty
 	// when no streamed text is in flight.
 	streamBuf string
+	// turnMeta holds the allowlisted provider continuity metadata published by
+	// the llm.response this iteration is acting on, so the tool calls and the
+	// text it produces can carry it out to the client.
+	//
+	// AG-UI is a CLIENT-OWNED-HISTORY protocol: the client replays the whole
+	// thread on the next run, so a token the provider will demand back has to
+	// survive the round trip through the browser. Nothing else here can hand it
+	// back -- the engine's own in-process histories do this with
+	// roundtrip.ForwardMessageMetadata, and this is the one history that leaves
+	// the process. Guarded by mu; replaced wholesale per iteration.
+	turnMeta map[string]any
 
 	// clientTools holds the ToolDefs the client advertised for this run via
 	// RunAgentInput.tools. They are appended to the catalog snapshot the agent
@@ -475,9 +487,15 @@ func (r *run) onOutput(o events.AgentOutput) {
 func (r *run) onToolCall(tc events.ToolCall) {
 	r.mu.Lock()
 	r.openTools[tc.ID] = true
+	callMeta := roundtrip.ForCall(r.turnMeta, tc.ID)
 	r.mu.Unlock()
 
-	r.queue(agui.NewToolCallStart(tc.ID, tc.Name))
+	start := agui.NewToolCallStart(tc.ID, tc.Name)
+	// Per the spec a TOOL_CALL_* event's metadata merges into the tool call
+	// object rather than into the parent assistant message, which is exactly the
+	// grain the signature was issued at.
+	start.Metadata = callMeta
+	r.queue(start)
 	if len(tc.Arguments) > 0 {
 		if args, err := json.Marshal(tc.Arguments); err == nil {
 			r.queue(agui.NewToolCallArgs(tc.ID, string(args)))

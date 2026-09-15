@@ -38,6 +38,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
+	"github.com/frankbardon/nexus/pkg/roundtrip"
 )
 
 const pluginID = "nexus.io.agui"
@@ -200,6 +201,12 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "llm.stream.retract", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "io.output", Priority: 50},
+		// llm.response is consumed for its Metadata alone -- the provider
+		// continuity tokens a later request has to echo back. It runs at 20
+		// because nexus.agent.react dispatches tool.invoke from INSIDE its own
+		// llm.response handler at 50: read after it and the stash would be empty
+		// for exactly the calls it exists to annotate.
+		{EventType: "llm.response", Priority: 20},
 		// The agent emits tool.invoke (not tool.call) to run a tool; that is the
 		// event that carries the resolved arguments and drives ToolCallStart/
 		// Args/End. A client-executed tool (advertised via RunAgentInput.tools)
@@ -308,6 +315,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("llm.stream.retract", p.handleStreamRetract, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.response", p.handleLLMResponse,
+			engine.WithPriority(20), engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.invoke", p.handleToolInvoke, engine.WithSource(pluginID)),
 		p.bus.Subscribe("tool.result", p.handleToolResult, engine.WithSource(pluginID)),
 		p.bus.Subscribe("thinking.step", p.handleThinkingStep, engine.WithSource(pluginID)),
@@ -629,6 +638,7 @@ func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
 			ToolCalls:  preloadToolCalls(m.ToolCalls),
+			Metadata:   preloadMessageMetadata(m),
 		})
 	}
 	if last == -1 && len(msgs) > 0 {
@@ -639,6 +649,43 @@ func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 		}
 	}
 	return ui
+}
+
+// preloadMessageMetadata rebuilds a replayed message's provider continuity
+// metadata from the AG-UI fields that carried it out to the client.
+//
+// WHAT THIS IS FOR. A reasoning model hands back an opaque continuity token
+// beside the tool calls of a turn -- Gemini's thoughtSignature, Anthropic's
+// thinking blocks -- and rejects the next request that replays those calls
+// without it. AG-UI is a client-owned-history protocol: the client replays the
+// whole thread, so the only party able to hand the token back is the client,
+// and it therefore has to survive a round trip through a browser.
+//
+// IT ARRIVES IN TWO PLACES BECAUSE IT LEFT IN TWO PLACES. A per-message payload
+// rides `message.metadata`; a per-call one rides `toolCalls[i].metadata`,
+// because the spec merges a TOOL_CALL_* event's metadata into the call rather
+// than the message, and because Gemini signs one call of a parallel batch and
+// not the rest. roundtrip.MergeCall folds the calls back into the message-level
+// map its own ForCall split them out of.
+//
+// BOTH HALVES ARE ALLOWLISTED, and on this path that is a trust boundary rather
+// than tidiness: the map is authored by a client, and without the filter a
+// replayed message could name an engine-internal routing hint (`_source`,
+// `_target_*`) and have it applied as though an internal sub-flow had produced
+// the message.
+//
+// It is read leniently and never fails a turn. A client that preserves neither
+// field leaves the message exactly as it arrives today, so the worst case of an
+// unaware client is the status quo rather than a new failure.
+func preloadMessageMetadata(m agui.Message) map[string]any {
+	meta := roundtrip.Allowed(m.Metadata)
+	for _, c := range m.ToolCalls {
+		meta = roundtrip.MergeCall(meta, c.Metadata)
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
 }
 
 // preloadToolCalls carries a replayed assistant turn's tool calls across the
@@ -799,6 +846,28 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 		return
 	}
 	p.suspendForClientTool(r, tc)
+}
+
+// handleLLMResponse records the iteration's provider continuity metadata on the
+// active run, so the tool calls and text that follow can carry it to the client.
+//
+// It translates nothing and emits nothing. The plugin is a transport, and this
+// is the one bus event it reads purely as state: AG-UI replays history from the
+// client, so a token the provider will demand back on the next request has to
+// leave through this stream or be lost.
+func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
+	r := p.currentRun()
+	if r == nil {
+		return
+	}
+	resp, ok := e.Payload.(events.LLMResponse)
+	if !ok {
+		return
+	}
+	meta := roundtrip.ForwardMessageMetadata(resp.Metadata)
+	r.mu.Lock()
+	r.turnMeta = meta
+	r.mu.Unlock()
 }
 
 func (p *Plugin) handleToolResult(e engine.Event[any]) {
