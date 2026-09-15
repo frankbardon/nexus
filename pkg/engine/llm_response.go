@@ -66,6 +66,14 @@ const FinishReasonVetoed = "vetoed"
 // spent whether or not the answer ships, so nexus.gate.token_budget must
 // still see them.
 //
+// A veto Reason can become user-visible text — it is published as the
+// substitute's Content whenever the handler does not dictate its own — and
+// output-side gates deliberately do not re-scan a substituted response (see
+// IsVetoSubstituted). So a handler must NOT interpolate raw model output into
+// its Reason: doing so would route the very content it just blocked to the
+// user, past the gates that would otherwise catch it. Put the model's text in
+// the log, and a description of what tripped in the Reason.
+//
 // Streaming caveat: providers emit llm.stream.chunk as tokens arrive and
 // llm.response only at the end of the stream. A veto here cannot unsay text
 // already streamed to a UI. Gates that must prevent disclosure require
@@ -136,4 +144,49 @@ func substituteLLMResponse(resp events.LLMResponse, modelContent, reason string)
 		sub.SchemaVersion = events.LLMResponseVersion
 	}
 	return sub
+}
+
+// IsVetoSubstituted reports whether a payload's metadata carries the marker
+// stamped by PublishLLMResponse on a substituted response. It reads the
+// metadata map directly so it serves both events.LLMResponse.Metadata and the
+// events.AgentOutput.Metadata that agent loops derive from it.
+//
+// Output-side gates use this to recognize text that a before:llm.response
+// handler already authored and adjudicated, and pass it through rather than
+// judging it a second time. Without that, a gate vetoing the refusal at
+// before:io.output would leave the user with nothing — the blank outcome the
+// substitution contract exists to avoid.
+//
+// The marker is not model- or user-controllable: it is set only by
+// PublishLLMResponse, and the request metadata providers echo onto a response
+// is authored by plugins with fixed keys.
+func IsVetoSubstituted(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	v, _ := meta[MetaVetoed].(bool)
+	return v
+}
+
+// CarryVetoMarker copies the substitution marker (and its reason) from an
+// llm.response's metadata onto the metadata of a payload derived from it —
+// typically the events.AgentOutput an agent loop builds from the response.
+// It returns dst so it can be used inline in a struct literal. Nothing is
+// copied when the response was not substituted.
+//
+// Agent loops must call this when deriving user-facing output from a
+// response, or the refusal loses its provenance at the io.output boundary and
+// output-side gates re-judge operator-authored text.
+func CarryVetoMarker(dst, respMeta map[string]any) map[string]any {
+	if !IsVetoSubstituted(respMeta) {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]any, 2)
+	}
+	dst[MetaVetoed] = true
+	if reason, ok := respMeta[MetaVetoReason].(string); ok {
+		dst[MetaVetoReason] = reason
+	}
+	return dst
 }

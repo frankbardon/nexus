@@ -147,3 +147,43 @@ func TestStopWords_LLMResponse_SeesEarlierGateMutation(t *testing.T) {
 		t.Fatalf("content = %q", out.Content)
 	}
 }
+
+// A gate-authored refusal must pass through the output-side gate untouched.
+func TestStopWords_Output_SkipsVetoSubstitutedRefusal(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	p.bus = bus
+	p.logger = slog.Default()
+	p.addWord("forbidden")
+	bus.Subscribe("before:io.output", p.handleBeforeOutput, engine.WithPriority(10))
+
+	output := events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       "Blocked: the response used a forbidden term.",
+		Role:          "assistant",
+		Metadata:      map[string]any{engine.MetaVetoed: true},
+	}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+	if result.Vetoed {
+		t.Fatalf("re-judged a gate-authored refusal: %q", result.Reason)
+	}
+}
+
+func TestStopWords_Output_StillJudgesUnmarkedOutput(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	p.bus = bus
+	p.logger = slog.Default()
+	p.addWord("forbidden")
+	bus.Subscribe("before:io.output", p.handleBeforeOutput, engine.WithPriority(10))
+
+	output := events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       "Here is the forbidden answer.",
+		Role:          "assistant",
+	}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+	if !result.Vetoed {
+		t.Fatal("unmarked output containing a banned word must still be vetoed")
+	}
+}

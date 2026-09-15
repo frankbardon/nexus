@@ -3479,6 +3479,15 @@ does nothing.
 Unlike every other `before:*` event, a veto here **substitutes** rather than
 blocks — see [Event Bus](../architecture/event-bus.md#beforellmresponse-veto-means-substitute).
 
+A substituted response is marked, and the agent loop carries that mark onto the
+`AgentOutput` it derives from it. Every gate in the `before:io.output` table
+above skips a marked output rather than re-judging operator-authored text —
+without that, a blocking output gate could veto the refusal and leave the user
+with nothing, which is the outcome substitution exists to prevent. The
+corollary: **a veto reason must never interpolate raw model output**, because
+the reason becomes user-visible content and those gates will no longer scan
+it.
+
 ### `nexus.gate.endless_loop`
 
 Source: `plugins/gates/endless_loop/plugin.go`.

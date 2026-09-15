@@ -224,6 +224,15 @@ rendered. Gates that must prevent *disclosure* need `stream: false`; gates that
 steer the loop (blocking tool calls, replacing what enters conversation history)
 work unchanged under streaming.
 
+**Never interpolate model output into a veto reason.** The reason becomes the
+substitute's `Content` whenever the handler doesn't dictate its own, and
+output-side gates (`content_safety`, `stop_words`, `json_schema`,
+`output_length`) deliberately skip a substituted response rather than
+re-judging operator-authored text. A reason built as
+`fmt.Sprintf("blocked: %s", resp.Content)` would therefore hand the user the
+exact content the gate just blocked, past every gate that would have caught
+it. Describe what tripped; log the offending text separately.
+
 **Provider-side execution already happened.** Some providers run tools on
 their own servers and surface the results while converting the response —
 Gemini's code execution emits `tool.invoke` / `tool.result` before

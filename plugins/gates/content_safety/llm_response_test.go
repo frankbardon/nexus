@@ -166,3 +166,36 @@ func TestContentSafety_LLMResponse_DeclaredWhenEnabled(t *testing.T) {
 		t.Fatal("enabled gate must declare before:llm.response in Subscriptions()")
 	}
 }
+
+// A gate-authored refusal must pass through the output-side gate untouched,
+// even when the refusal text itself would trip a check. Re-judging it would
+// veto it into a blank, leaving the user with nothing.
+func TestContentSafety_Output_SkipsVetoSubstitutedRefusal(t *testing.T) {
+	_, bus := newTestPlugin("block", "internal_ip")
+
+	output := events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       "Blocked by policy. Contact your administrator at 10.0.0.1.",
+		Role:          "assistant",
+		Metadata:      map[string]any{engine.MetaVetoed: true, engine.MetaVetoReason: "banned term"},
+	}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+	if result.Vetoed {
+		t.Fatalf("re-judged a gate-authored refusal and vetoed it into a blank: %q", result.Reason)
+	}
+}
+
+// The same text without the marker is model-authored and must still be caught.
+func TestContentSafety_Output_StillJudgesUnmarkedOutput(t *testing.T) {
+	_, bus := newTestPlugin("block", "internal_ip")
+
+	output := events.AgentOutput{
+		SchemaVersion: events.AgentOutputVersion,
+		Content:       "Blocked by policy. Contact your administrator at 10.0.0.1.",
+		Role:          "assistant",
+	}
+	result, _ := bus.EmitVetoable("before:io.output", &output)
+	if !result.Vetoed {
+		t.Fatal("unmarked output containing an internal IP must still be vetoed")
+	}
+}

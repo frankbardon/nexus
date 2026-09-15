@@ -322,3 +322,71 @@ func TestPublishLLMResponse_NilBus_IsSafe(t *testing.T) {
 		t.Fatal("nil bus must return the response untouched")
 	}
 }
+
+func TestIsVetoSubstituted(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]any
+		want bool
+	}{
+		{"nil metadata", nil, false},
+		{"empty metadata", map[string]any{}, false},
+		{"unrelated keys", map[string]any{"_source": "x"}, false},
+		{"marked", map[string]any{MetaVetoed: true}, true},
+		{"explicitly false", map[string]any{MetaVetoed: false}, false},
+		{"wrong type is not a marker", map[string]any{MetaVetoed: "true"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsVetoSubstituted(tc.meta); got != tc.want {
+				t.Fatalf("IsVetoSubstituted(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
+
+// The marker PublishLLMResponse stamps must be the one CarryVetoMarker
+// recognizes — if these ever drift apart the passthrough silently stops
+// working and refusals start getting re-judged at io.output.
+func TestCarryVetoMarker_RoundTripsFromPublish(t *testing.T) {
+	bus := NewEventBus()
+	beforeResponse(bus, func(_ *events.LLMResponse, vp *VetoablePayload) {
+		vp.Veto = VetoResult{Vetoed: true, Reason: "policy: blocked"}
+	})
+
+	sub, _ := PublishLLMResponse(bus, events.LLMResponse{
+		SchemaVersion: events.LLMResponseVersion,
+		Content:       "the blocked answer",
+	})
+
+	out := CarryVetoMarker(map[string]any{"streamed": true}, sub.Metadata)
+
+	if !IsVetoSubstituted(out) {
+		t.Fatal("marker did not survive PublishLLMResponse -> CarryVetoMarker")
+	}
+	if out["streamed"] != true {
+		t.Error("CarryVetoMarker dropped the caller's existing metadata")
+	}
+	if got, _ := out[MetaVetoReason].(string); got != "policy: blocked" {
+		t.Errorf("veto reason = %q, want it carried alongside the marker", got)
+	}
+}
+
+func TestCarryVetoMarker_UnmarkedResponseIsUntouched(t *testing.T) {
+	dst := map[string]any{"streamed": true}
+	got := CarryVetoMarker(dst, map[string]any{"_source": "provider"})
+
+	if IsVetoSubstituted(got) {
+		t.Fatal("marked an output derived from a response that was never substituted")
+	}
+	if len(got) != 1 {
+		t.Errorf("metadata = %v, want it unchanged", got)
+	}
+}
+
+func TestCarryVetoMarker_NilDestination(t *testing.T) {
+	got := CarryVetoMarker(nil, map[string]any{MetaVetoed: true, MetaVetoReason: "r"})
+	if !IsVetoSubstituted(got) {
+		t.Fatal("nil destination must be allocated and marked")
+	}
+}

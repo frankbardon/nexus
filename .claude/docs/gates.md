@@ -8,6 +8,8 @@ Gates use `EmitVetoable()` which wraps payloads in `VetoablePayload{Original, Ve
 
 Hook points: `before:llm.request` (input-side), `before:llm.response` (model output, loop-facing), `before:io.output` (user-facing output), `before:tool.invoke`, `before:tool.result`, `before:skill.activate`.
 
+Output-side gates (`content_safety`, `stop_words`, `json_schema`, `output_length`) skip any `AgentOutput` marked by a `before:llm.response` substitution — `engine.IsVetoSubstituted(output.Metadata)`. Re-judging a gate-authored refusal could veto it into a blank. Corollary: never interpolate raw model output into a veto reason; it becomes user-visible content that those gates no longer scan.
+
 `before:llm.response` is the exception to the veto contract: a veto **substitutes** rather than blocks, because agent loops block waiting for `llm.response`. The substitute always has `ToolCalls` cleared, so a blocked response can't drive tool execution — which is what `before:io.output` can't do, since the loop has already run the tools by then. Producers publish via `engine.PublishLLMResponse`, never a bare `bus.Emit("llm.response", ...)`. See `docs/src/architecture/event-bus.md`.
 
 Resume mechanism: Gates that veto `before:llm.request` temporarily (rate limiter, context window) emit `gate.llm.retry` when the condition clears. All agent plugins (react, planexec, orchestrator) subscribe to this event and re-invoke `sendLLMRequest()` if they have an active turn — no user re-submission needed.
