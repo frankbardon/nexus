@@ -68,6 +68,12 @@ type BaseEvent struct {
 	Timestamp *int64 `json:"timestamp,omitempty"`
 	// RawEvent optionally carries the provider-native event this was derived from.
 	RawEvent json.RawMessage `json:"rawEvent,omitempty"`
+	// Metadata is AG-UI's open-by-key extension slot, declared once here because
+	// the spec declares it once on the base event. A consumer merges an event's
+	// metadata into the object that event builds -- for the TOOL_CALL_* family
+	// that is the tool call itself rather than the parent message, which is what
+	// keeps the merge independent of how calls interleave on the stream.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // EventType returns the discriminator carried by the event.
@@ -297,13 +303,16 @@ type MetaEvent struct {
 // Message is a single conversation message as carried in MessagesSnapshot and
 // RunAgentInput.
 type Message struct {
-	ID         string          `json:"id"`
-	Role       string          `json:"role"`
-	Content    string          `json:"content,omitempty"`
-	Name       string          `json:"name,omitempty"`
-	ToolCallID string          `json:"toolCallId,omitempty"`
-	ToolCalls  []ToolCall      `json:"toolCalls,omitempty"`
-	RawContent json.RawMessage `json:"rawContent,omitempty"`
+	ID         string     `json:"id"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"toolCallId,omitempty"`
+	ToolCalls  []ToolCall `json:"toolCalls,omitempty"`
+	// Metadata is the per-message half of the extension slot above. It is the
+	// vehicle for provider continuity state that a later request has to echo
+	// back verbatim; see pkg/roundtrip for which keys those are and why.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // ToolCall describes a tool invocation attached to an assistant message.
@@ -311,6 +320,11 @@ type ToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type,omitempty"`
 	Function ToolCallFunction `json:"function"`
+	// Metadata is the per-call extension slot. A reasoning provider issues its
+	// continuity token against ONE call -- Gemini signs the first functionCall
+	// of a parallel batch and no other -- so the token belongs here rather than
+	// on the message the calls happen to share.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // ToolCallFunction is the function payload of a ToolCall.

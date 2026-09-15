@@ -67,3 +67,148 @@ func ForwardMessageMetadata(src map[string]any) map[string]any {
 	}
 	return out
 }
+
+// perCallKeys enumerates the forwarded keys whose value is a map keyed by
+// tool-call ID, as opposed to a single per-message payload.
+//
+// The distinction exists because the two providers issue their continuity
+// token at different grains. Anthropic's `thinking_blocks` describes the whole
+// assistant turn; Gemini's `gemini_thought_signatures` is a
+// call-ID -> signature map, and Gemini signs only the FIRST functionCall of a
+// parallel batch, so the value is sparse across the calls of one turn.
+//
+// A transport that carries metadata per tool call rather than per message --
+// AG-UI is one -- has to split a turn's metadata across its calls on the way
+// out and reassemble it on the way back. Splitting is the only operation that
+// needs to know which grain a key is at, so the knowledge lives here beside the
+// allowlist rather than in the transport.
+var perCallKeys = map[string]bool{
+	"gemini_thought_signatures": true,
+}
+
+// ForCall returns the slice of an allowlisted metadata map that belongs to one
+// tool call, suitable for attaching to that call on a transport whose metadata
+// slot is per-call.
+//
+// A per-call key is narrowed to the single entry for callID, re-wrapped in a
+// map of the same shape so the value a reader sees is indistinguishable from
+// the unsplit one. A per-message key is carried whole on every call of the
+// turn: MergeCall folds them back with last-write-wins, so repeating the value
+// costs wire bytes and reassembles exactly.
+//
+// Returns nil when the call has nothing to carry, so a call needing no
+// continuity state serialises without an empty metadata object.
+func ForCall(src map[string]any, callID string) map[string]any {
+	if src == nil || callID == "" {
+		return nil
+	}
+	var out map[string]any
+	for _, k := range forwardedKeys {
+		v, ok := src[k]
+		if !ok {
+			continue
+		}
+		if perCallKeys[k] {
+			sig, found := lookupCall(v, callID)
+			if !found {
+				continue
+			}
+			v = map[string]any{callID: sig}
+		}
+		if out == nil {
+			out = make(map[string]any, len(forwardedKeys))
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// MergeCall folds one tool call's metadata back into the message-level map
+// ForCall split it out of, and returns the result.
+//
+// A per-call key is merged ENTRY BY ENTRY, because each call carries only its
+// own and the turn needs all of them; a per-message key is assigned whole,
+// which is the spec's last-write-wins rule and is why ForCall may repeat it.
+// Keys outside the allowlist are dropped: the map arrives from a client on the
+// inbound path, and a replayed message must not be able to introduce
+// engine-internal routing hints by naming them.
+func MergeCall(dst map[string]any, callMeta map[string]any) map[string]any {
+	if len(callMeta) == 0 {
+		return dst
+	}
+	for _, k := range forwardedKeys {
+		v, ok := callMeta[k]
+		if !ok {
+			continue
+		}
+		if dst == nil {
+			dst = make(map[string]any, len(forwardedKeys))
+		}
+		if !perCallKeys[k] {
+			dst[k] = v
+			continue
+		}
+		entries, ok := asStringMap(v)
+		if !ok {
+			continue
+		}
+		existing, _ := dst[k].(map[string]any)
+		if existing == nil {
+			existing = make(map[string]any, len(entries))
+		}
+		for id, sig := range entries {
+			existing[id] = sig
+		}
+		dst[k] = existing
+	}
+	return dst
+}
+
+// Allowed returns the allowlisted subset of a metadata map that arrived from
+// outside the engine. It is ForwardMessageMetadata's inbound twin: same
+// allowlist, applied to a map a client authored rather than one a provider
+// published.
+func Allowed(src map[string]any) map[string]any {
+	return ForwardMessageMetadata(src)
+}
+
+// lookupCall reads one call's entry out of a per-call metadata value.
+//
+// The dual-shape switch is load-bearing rather than defensive: the capture path
+// publishes map[string]string, and the same value comes back as map[string]any
+// with any-boxed strings once it has been through JSON -- which is every
+// replayed and every persisted turn. A single-shape assertion would work live
+// and silently return nothing on exactly the path the 400 appears on.
+func lookupCall(v any, callID string) (string, bool) {
+	switch m := v.(type) {
+	case map[string]string:
+		s, ok := m[callID]
+		return s, ok && s != ""
+	case map[string]any:
+		s, ok := m[callID].(string)
+		return s, ok && s != ""
+	default:
+		return "", false
+	}
+}
+
+// asStringMap normalises either shape of a per-call metadata value into a
+// string map, for the same reason lookupCall switches on both.
+func asStringMap(v any) (map[string]string, bool) {
+	switch m := v.(type) {
+	case map[string]string:
+		return m, true
+	case map[string]any:
+		out := make(map[string]string, len(m))
+		for k, raw := range m {
+			s, ok := raw.(string)
+			if !ok || s == "" {
+				continue
+			}
+			out[k] = s
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
