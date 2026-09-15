@@ -293,8 +293,11 @@ func (p *Plugin) handleBeforeStreamChunk(event engine.Event[any]) {
 retraction.** Withheld bytes are never emitted, so a block prevents disclosure
 outright — for every transport, including third-party clients whose protocol
 offers no way to take text back. Held text is re-offered, prepended to the
-next delta, so a handler may keep holding across arbitrarily many segments;
-that is also how a gate awaiting a slow reviewer keeps a stream paused.
+next delta, so a handler may keep holding across arbitrarily many segments —
+but only while segments keep arriving. The final flush at end of stream ignores
+`Hold` and offers the tail once more, so a handler still undecided there must
+release or veto rather than defer. A gate consulting a slow reviewer has the
+model's generation time to answer, and must block if it has not.
 
 **Detection is independent of the hold.** Because handlers scan the cumulative
 turn and act on where a match *ends*, a match is caught on the segment that

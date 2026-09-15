@@ -111,9 +111,6 @@ func TestStreamPublisher_HoldDefersUntilResolved(t *testing.T) {
 	if got := sink.text(); got != "call " {
 		t.Fatalf("after first delta text = %q, want %q (digits must be held)", got, "call ")
 	}
-	if len(sink.holds) != 1 || sink.holds[0].Held != 3 || sink.holds[0].Resumed {
-		t.Fatalf("holds = %+v, want one entry edge holding 3 bytes", sink.holds)
-	}
 
 	// Still digit-shaped at the tail, so the hold persists and grows across
 	// deltas rather than resetting each time.
@@ -121,17 +118,11 @@ func TestStreamPublisher_HoldDefersUntilResolved(t *testing.T) {
 	if got := sink.text(); got != "call " {
 		t.Fatalf("after second delta text = %q, want the hold to persist", got)
 	}
-	if last := sink.holds[len(sink.holds)-1]; last.Held != len("555-1234") {
-		t.Fatalf("hold = %d bytes, want the whole accumulated run (%d)", last.Held, len("555-1234"))
-	}
 
 	// A separator ends the run, so the held text is now judgeable and ships.
 	sp.Text(" now")
 	if got := sink.text(); got != "call 555-1234 now" {
 		t.Fatalf("after the separator text = %q, want the held run released", got)
-	}
-	if last := sink.holds[len(sink.holds)-1]; !last.Resumed {
-		t.Error("releasing a held run must emit the resume edge")
 	}
 
 	sp.Close()
@@ -156,7 +147,10 @@ func TestStreamPublisher_HoldAnnouncesBothEdges(t *testing.T) {
 	})
 
 	sp := NewStreamPublisher(bus, "turn-1", "req-1")
-	sp.Text("secret?")
+	// Enough quiet segments to clear holdAnnounceAfter — a genuine stall, not
+	// the one-token lag a scanning gate imposes on every delta.
+	sp.Text("secret")
+	sp.Text("?")
 	if len(sink.chunks) != 0 {
 		t.Fatalf("held stream emitted %v, want nothing", sink.chunks)
 	}
@@ -178,6 +172,52 @@ func TestStreamPublisher_HoldAnnouncesBothEdges(t *testing.T) {
 	}
 }
 
+// TestStreamPublisher_OrdinaryLagIsNotASuspension is a regression test for a
+// bug the original implementation shipped with, and the reason the hold edges
+// are gated on holdAnnounceAfter rather than on "are bytes withheld".
+//
+// A scanning gate holds the trailing partial token on essentially every delta;
+// that is its normal operation, not a stall, and it releases the previous
+// token in the same segment. Announcing it fired llm.stream.hold once per
+// delta — tripling the journal volume of a gated turn and leaving every UI
+// showing a review indicator for the whole of a perfectly ordinary response.
+//
+// The stream must look, to a transport, exactly as unremarkable as it is.
+func TestStreamPublisher_OrdinaryLagIsNotASuspension(t *testing.T) {
+	bus := NewEventBus()
+	sink := collectStream(t, bus)
+
+	// The trailing-token rule both shipped gates use.
+	gateStream(bus, func(seg *events.StreamSegment, _ *VetoablePayload) {
+		i := len(seg.Content)
+		for i > 0 && seg.Content[i-1] != ' ' {
+			i--
+		}
+		seg.HoldFrom(i)
+	})
+
+	// Realistic provider chunking: leading-space tokens, rarely ending on
+	// whitespace, so the gate holds something on nearly every delta.
+	deltas := []string{"The", " quick", " brown", " fox", " jumps", " over",
+		" the", " lazy", " dog", "."}
+	sp := NewStreamPublisher(bus, "turn-1", "req-1")
+	for _, d := range deltas {
+		sp.Text(d)
+	}
+	sp.Close()
+
+	if got := sink.text(); got != "The quick brown fox jumps over the lazy dog." {
+		t.Fatalf("text = %q, want the whole sentence", got)
+	}
+	if len(sink.holds) != 0 {
+		t.Errorf("a clean stream emitted %d hold events (%+v); the ordinary "+
+			"one-token lag must not read as a suspension", len(sink.holds), sink.holds)
+	}
+	if len(sink.retracts) != 0 {
+		t.Errorf("a clean stream emitted %d retracts", len(sink.retracts))
+	}
+}
+
 // TestStreamPublisher_HoldSurvivesToClose checks that a hold still standing
 // when the stream ends is released rather than silently dropped. Close ignores
 // Hold precisely because "wait for more context" is no longer an option.
@@ -190,7 +230,8 @@ func TestStreamPublisher_HoldSurvivesToClose(t *testing.T) {
 	})
 
 	sp := NewStreamPublisher(bus, "turn-1", "req-1")
-	sp.Text("all of it")
+	sp.Text("all ")
+	sp.Text("of it")
 	if len(sink.chunks) != 0 {
 		t.Fatalf("expected nothing released mid-stream, got %v", sink.chunks)
 	}
@@ -198,6 +239,49 @@ func TestStreamPublisher_HoldSurvivesToClose(t *testing.T) {
 
 	if got := sink.text(); got != "all of it" {
 		t.Fatalf("text after Close = %q, want the held tail flushed", got)
+	}
+	// A suspension that ends at Close still has to be closed out, or a UI is
+	// left showing a review indicator over a finished turn.
+	if n := len(sink.holds); n == 0 || !sink.holds[n-1].Resumed {
+		t.Errorf("holds = %+v, want the last edge to be a resume", sink.holds)
+	}
+}
+
+// TestStreamPublisher_CloseSettlesAHoldThatReleasesNothing covers the way a
+// suspension can outlive its turn: the final flush does not always emit, so
+// tying the resume edge to "something was released" leaves an announced hold
+// standing forever and a UI showing a review indicator over a finished turn.
+//
+// Here the handler suspends long enough to announce, then redacts the whole
+// remaining tail away at the flush, so there is nothing to release.
+func TestStreamPublisher_CloseSettlesAHoldThatReleasesNothing(t *testing.T) {
+	bus := NewEventBus()
+	sink := collectStream(t, bus)
+
+	seen := 0
+	gateStream(bus, func(seg *events.StreamSegment, _ *VetoablePayload) {
+		seen++
+		if seen <= holdAnnounceAfter {
+			seg.HoldFrom(0)
+			return
+		}
+		seg.Content = "" // redact the tail away entirely
+	})
+
+	sp := NewStreamPublisher(bus, "turn-1", "req-1")
+	for i := 0; i < holdAnnounceAfter; i++ {
+		sp.Text("pending")
+	}
+	if len(sink.holds) != 1 {
+		t.Fatalf("holds = %+v, want one entry edge", sink.holds)
+	}
+	sp.Close()
+
+	if sink.text() != "" {
+		t.Errorf("text = %q, want nothing — the tail was redacted away", sink.text())
+	}
+	if len(sink.holds) != 2 || !sink.holds[1].Resumed {
+		t.Fatalf("holds = %+v, want the suspension settled by Close", sink.holds)
 	}
 }
 
@@ -249,10 +333,12 @@ func TestStreamPublisher_VetoClearsAStandingHold(t *testing.T) {
 	bus := NewEventBus()
 	sink := collectStream(t, bus)
 
+	// Hold long enough to actually announce a suspension, then block. The
+	// announce threshold is why this takes more than one segment.
 	seen := 0
 	gateStream(bus, func(seg *events.StreamSegment, vp *VetoablePayload) {
 		seen++
-		if seen == 1 {
+		if seen <= holdAnnounceAfter {
 			seg.HoldFrom(0)
 			return
 		}
@@ -260,7 +346,13 @@ func TestStreamPublisher_VetoClearsAStandingHold(t *testing.T) {
 	})
 
 	sp := NewStreamPublisher(bus, "turn-1", "req-1")
-	sp.Text("hold me")
+	for i := 0; i < holdAnnounceAfter; i++ {
+		sp.Text("hold me")
+	}
+	if len(sink.holds) != 1 || sink.holds[0].Resumed {
+		t.Fatalf("holds = %+v, want a single entry edge before the block", sink.holds)
+	}
+
 	sp.Text(" then block")
 
 	if len(sink.holds) != 2 {

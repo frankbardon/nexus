@@ -248,8 +248,9 @@ type StreamChunk struct {
 //     handler defers a decision it cannot yet make — a trailing "123-45-"
 //     that may or may not become a credit card number — without either
 //     leaking it or blocking the whole turn. A handler may hold the same
-//     text across arbitrarily many segments, which is also how a gate that
-//     consults a slow reviewer keeps the stream paused while it waits.
+//     text across arbitrarily many segments, but only while segments keep
+//     arriving: the publisher's final flush ignores Hold, so a handler still
+//     undecided at end of stream must release or block, not defer.
 //
 //   - Block. Set VetoablePayload.Veto. Nothing more is emitted for this
 //     turn: the publisher drops the held text, emits llm.stream.retract, and

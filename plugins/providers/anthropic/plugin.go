@@ -989,6 +989,10 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 
 	var currentEvent sseEvent
 	st := &streamState{requestID: requestID}
+	// Error-path backstop: a stream abandoned before the explicit Close below
+	// would otherwise leave a gate's hold outstanding and every UI showing a
+	// review indicator nothing ever clears. Close is idempotent.
+	defer func() { st.pub.Close() }()
 
 	for scanner.Scan() {
 		line := scanner.Text()

@@ -251,9 +251,14 @@ The payload is `*events.StreamSegment`. Handlers have four moves:
 judge a trailing fragment — a `123-45-` that may or may not become an SSN —
 withholds it instead of gambling. The stream visibly pauses at a safe point,
 and the bytes surface only once the handler stops asking for them. Since
-withheld text is never emitted, a subsequent block leaks nothing. A handler may
-hold the same text across arbitrarily many segments, which is also how a gate
-awaiting a slow reviewer keeps a stream paused while it waits.
+withheld text is never emitted, a subsequent block leaks nothing.
+
+A handler may hold the same text across arbitrarily many segments, but only
+while segments keep arriving. The publisher's final flush at end of stream
+ignores `Hold` and offers the tail one last time, so a handler that is still
+undecided there must choose — release it, or veto. It cannot defer past the end
+of the stream. A gate consulting a slow reviewer therefore has the model's own
+generation time to get an answer, and must block if it has not.
 
 **Detection does not depend on the hold**, which is worth stating because the
 opposite is a natural assumption. Handlers scan `seg.Full()` — the cumulative

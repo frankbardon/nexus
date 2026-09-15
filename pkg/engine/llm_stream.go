@@ -89,15 +89,19 @@ type StreamPublisher struct {
 	// index is the next llm.stream.chunk sequence number. Shared with
 	// tool-call chunks so a consumer ordering by Index sees one sequence.
 	index int
-	// holding tracks whether the last segment left bytes withheld, so the
-	// resume edge of llm.stream.hold is emitted exactly once.
-	holding bool
+	// announced tracks whether this stream's suspension has been announced on
+	// llm.stream.hold, so exactly one entry edge and one resume edge are
+	// emitted per suspension.
+	announced bool
+	// quiet counts consecutive segments that released nothing while holding.
+	// It is what separates a real suspension from the ordinary one-token lag
+	// a scanning gate imposes on every delta — see holdAnnounceAfter.
+	quiet int
 	// blocked latches on a veto. Terminal for the turn.
 	blocked bool
 	reason  string
-	// gated caches whether anything subscribes to the hook. Sampled per
-	// segment rather than once per turn so a gate that subscribes mid-turn
-	// still takes effect; the check is a read-locked map lookup.
+	// closed latches on Close so the final flush runs exactly once, whether
+	// it arrives from a provider's defer or its explicit call.
 	closed bool
 }
 
@@ -173,6 +177,11 @@ func (sp *StreamPublisher) Close() {
 		return
 	}
 	sp.offer("", true)
+	// Unconditional, because the flush does not always release something: a
+	// handler that redacts the whole remaining tail away leaves nothing to
+	// emit, and an announced suspension would otherwise outlive the turn as a
+	// review indicator no later event clears.
+	sp.resumeLocked()
 }
 
 // Blocked reports whether a handler cut this stream short, and why. Providers
@@ -251,7 +260,7 @@ func (sp *StreamPublisher) offer(delta string, final bool) {
 	if release != "" {
 		sp.emit(release)
 	}
-	sp.noteHold(hold, veto.Reason)
+	sp.noteHold(hold, release != "", veto.Reason)
 }
 
 // emit publishes one llm.stream.chunk and records the text as released.
@@ -267,32 +276,70 @@ func (sp *StreamPublisher) emit(text string) {
 	sp.index++
 }
 
+// holdAnnounceAfter is how many consecutive segments must release nothing
+// before a hold is reported as a suspension.
+//
+// It exists because "bytes are being withheld" is not the same question as
+// "is this stream stalled". A scanning gate holds the trailing partial token
+// on essentially every delta — that is its normal operation, and it releases
+// the previous token in the same breath. Announcing that would fire
+// llm.stream.hold once per delta, triple the journal volume of a gated turn,
+// and leave every UI showing a review indicator for the whole of an ordinary
+// response. What a UI actually needs to know is that the text has stopped
+// advancing, which is exactly what consecutive segments releasing nothing
+// means. Two rather than one so a stream whose opening delta is a bare
+// fragment does not announce and immediately retract.
+const holdAnnounceAfter = 2
+
 // noteHold emits the hold edges. A stream that goes quiet because a gate is
-// deliberating looks exactly like a hung turn from a UI's side, so both the
-// entry and the exit are announced rather than left to be inferred.
+// deliberating looks exactly like a hung turn from a UI's side, so a genuine
+// suspension is announced rather than left to be inferred — but only a
+// genuine one. See holdAnnounceAfter.
+//
+// Exactly one entry edge and one resume edge are emitted per suspension.
+// StreamHold.Held is therefore a snapshot taken when the suspension was
+// announced, not a running total; a hold that keeps growing does not re-emit.
 // Caller holds the mutex.
-func (sp *StreamPublisher) noteHold(hold int, reason string) {
-	switch {
-	case hold > 0:
-		// Re-announce on every segment while the hold grows or persists, so
-		// a UI that missed the first edge still learns the stream is paused.
-		sp.holding = true
-		_ = sp.bus.Emit(EventStreamHold, events.StreamHold{
-			SchemaVersion: events.StreamHoldVersion,
-			TurnID:        sp.turnID,
-			RequestID:     sp.requestID,
-			Held:          hold,
-			Reason:        reason,
-		})
-	case sp.holding:
-		sp.holding = false
-		_ = sp.bus.Emit(EventStreamHold, events.StreamHold{
-			SchemaVersion: events.StreamHoldVersion,
-			TurnID:        sp.turnID,
-			RequestID:     sp.requestID,
-			Resumed:       true,
-		})
+func (sp *StreamPublisher) noteHold(hold int, released bool, reason string) {
+	if released {
+		sp.quiet = 0
+		sp.resumeLocked()
+		return
 	}
+	if hold == 0 {
+		// Nothing held and nothing released: an empty or fully-redacted
+		// segment, which says nothing either way about a suspension.
+		return
+	}
+
+	sp.quiet++
+	if sp.announced || sp.quiet < holdAnnounceAfter {
+		return
+	}
+	sp.announced = true
+	_ = sp.bus.Emit(EventStreamHold, events.StreamHold{
+		SchemaVersion: events.StreamHoldVersion,
+		TurnID:        sp.turnID,
+		RequestID:     sp.requestID,
+		Held:          hold,
+		Reason:        reason,
+	})
+}
+
+// resumeLocked emits the resume edge if a suspension was announced. Idempotent,
+// so the block and close paths can call it without tracking whether the hold
+// was ever announced. Caller holds the mutex.
+func (sp *StreamPublisher) resumeLocked() {
+	if !sp.announced {
+		return
+	}
+	sp.announced = false
+	_ = sp.bus.Emit(EventStreamHold, events.StreamHold{
+		SchemaVersion: events.StreamHoldVersion,
+		TurnID:        sp.turnID,
+		RequestID:     sp.requestID,
+		Resumed:       true,
+	})
 }
 
 // block latches the terminal blocked state and tells transports to disown the
@@ -303,17 +350,9 @@ func (sp *StreamPublisher) block(reason string) {
 	sp.pending = ""
 	released := sp.released.Len()
 
-	// A stream that was suspended when the block landed leaves a UI showing
-	// a "reviewing" state that nothing else would ever clear.
-	if sp.holding {
-		sp.holding = false
-		_ = sp.bus.Emit(EventStreamHold, events.StreamHold{
-			SchemaVersion: events.StreamHoldVersion,
-			TurnID:        sp.turnID,
-			RequestID:     sp.requestID,
-			Resumed:       true,
-		})
-	}
+	// A stream suspended when the block landed would otherwise leave a UI
+	// showing a review indicator that nothing ever clears.
+	sp.resumeLocked()
 
 	_ = sp.bus.Emit(EventStreamRetract, events.StreamRetract{
 		SchemaVersion: events.StreamRetractVersion,
