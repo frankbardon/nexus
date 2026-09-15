@@ -20,9 +20,48 @@ Providers are low-level plugins that:
 2. Resolve the requested model role via the Model Registry
 3. Apply prompt registry sections to the system prompt
 4. Make the API call (with streaming support)
-5. Publish the response via `engine.PublishLLMResponse` (**not** a bare `bus.Emit("llm.response", ...)`), or emit `llm.stream.chunk` / `llm.stream.end` while streaming
+5. Publish the response via `engine.PublishLLMResponse` (**not** a bare `bus.Emit("llm.response", ...)`), and while streaming publish text deltas through an `engine.StreamPublisher` (**not** a bare `bus.Emit("llm.stream.chunk", ...)`)
 
 Providers don't know about agents, tools, or conversations — they only translate between the Nexus event model and the external API.
+
+### Publishing stream chunks
+
+A streaming provider does not emit `llm.stream.chunk` itself. It creates one
+`engine.StreamPublisher` per turn and feeds deltas to it:
+
+```go
+pub := engine.NewStreamPublisher(p.bus, turnID, requestID)
+defer pub.Close()
+
+for /* each SSE frame */ {
+    fullContent.WriteString(delta)  // the model's text, verbatim
+    pub.Text(delta)                 // what a UI is allowed to see
+}
+
+pub.Close()  // flush any held tail before llm.stream.end
+```
+
+The publisher runs the vetoable `before:llm.stream.chunk` hook before releasing
+anything, so a gate can redact a delta, suspend the stream while it decides, or
+block it outright — see
+[Event Bus → `before:llm.stream.chunk`](../../architecture/event-bus.md#beforellmstreamchunk-gate-the-stream-itself).
+Three things a provider author needs to know:
+
+- **Keep accumulating the model's real text.** `fullContent` and what the
+  publisher releases diverge whenever a gate redacts or blocks, and that is
+  intended: `PublishLLMResponse` must still see what the model actually said,
+  so the response-level gate adjudicates the real thing.
+- **`Close()` on every path**, including error returns — `defer` it. A stream
+  abandoned mid-flight would otherwise leave a gate's hold outstanding and a UI
+  showing a review indicator nothing ever clears. `Close` is idempotent, so
+  calling it explicitly before `llm.stream.end` (to order the final flush
+  correctly) is fine.
+- **Tool-call chunks go through `pub.ToolCall`**, which bypasses the text gate
+  by design. Whether a tool may run is decided by `before:llm.response` and
+  `before:tool.invoke`, both of which see more than a partial JSON fragment.
+
+With no gate subscribed the publisher is a pass-through: the same text, the
+same chunk boundaries, no buffering.
 
 ### Publishing responses
 

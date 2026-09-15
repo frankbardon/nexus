@@ -12,6 +12,10 @@ Output-side gates (`content_safety`, `stop_words`, `json_schema`, `output_length
 
 `before:llm.response` is the exception to the veto contract: a veto **substitutes** rather than blocks, because agent loops block waiting for `llm.response`. The substitute always has `ToolCalls` cleared, so a blocked response can't drive tool execution — which is what `before:io.output` can't do, since the loop has already run the tools by then. Producers publish via `engine.PublishLLMResponse`, never a bare `bus.Emit("llm.response", ...)`. See `docs/src/architecture/event-bus.md`.
 
+`before:llm.stream.chunk` is the streaming counterpart, and the hook a disclosure-preventing gate needs. It fires once per candidate text release, before any of it reaches the bus, with an `*events.StreamSegment`: handlers pass, rewrite `Content` to redact, **suspend** via `HoldFrom` (withhold a trailing fragment; the publisher re-offers it with the next delta), or veto to block the rest of the turn. Withheld text is never emitted, so a block prevents disclosure rather than retracting it. Scan `seg.Full()` and act on matches ending at or after `seg.PendingOffset()` — that makes detection independent of provider chunking, and stops a gate cutting a stream over bytes it already released. A cut stream carries no replacement text; the user-facing message comes from the same gate's `before:llm.response` handler. Producers publish deltas via `engine.StreamPublisher`, never a bare `bus.Emit("llm.stream.chunk", ...)`.
+
+A gate that holds `before:llm.response` without `before:llm.stream.chunk` costs the whole deployment streaming: the engine reads declared `Subscriptions()` at boot and clears `Stream` on outbound requests, rather than letting a veto that cannot prevent disclosure look like one that can. Override with `core.streaming.response_gate_policy: allow`.
+
 Resume mechanism: Gates that veto `before:llm.request` temporarily (rate limiter, context window) emit `gate.llm.retry` when the condition clears. All agent plugins (react, planexec, orchestrator) subscribe to this event and re-invoke `sendLLMRequest()` if they have an active turn — no user re-submission needed.
 
 ## Gate Config Reference
@@ -28,6 +32,7 @@ nexus.gate.endless_loop:
 nexus.gate.stop_words:
   words: ["forbidden"]  # inline word list
   scan_llm_responses: false  # also gate before:llm.response (a match drops tool calls)
+  scan_stream: <follows scan_llm_responses>  # also gate before:llm.stream.chunk (blocks before the text is shown)
   word_files: [/path/to/banned.txt]  # one word per line, # comments
   case_sensitive: false  # default false
   message: "Content blocked: contains prohibited terms."
@@ -68,6 +73,8 @@ nexus.gate.output_length:
 nexus.gate.content_safety:
   action: block          # "block" or "redact"
   scan_llm_responses: false  # also gate before:llm.response (block mode drops tool calls)
+  scan_stream: <follows scan_llm_responses>  # also gate before:llm.stream.chunk (blocks before the text is shown)
+  stream_hold_back: 0        # extra trailing bytes to withhold; only for whitespace-spanning custom patterns
   scan_tool_results: false   # also gate before:tool.result
   check_pii_email: true
   check_pii_phone: true

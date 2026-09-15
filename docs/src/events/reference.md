@@ -197,7 +197,10 @@ Complete reference for all event types in Nexus, organized by domain.
 | `llm.request` | `LLMRequest` | Request to an LLM provider |
 | `before:llm.response` | `LLMResponse` | Before the agent loop sees the model's response (vetoable; **veto substitutes rather than blocks** — see below) |
 | `llm.response` | `LLMResponse` | Complete LLM response |
+| `before:llm.stream.chunk` | `StreamSegment` | Before any text delta is released (vetoable; **handlers may also suspend or redact** — see below) |
 | `llm.stream.chunk` | `StreamChunk` | Streaming response chunk |
+| `llm.stream.hold` | `StreamHold` | A handler suspended the stream pending review, or released it |
+| `llm.stream.retract` | `StreamRetract` | A handler blocked the stream mid-flight; the text already rendered for the turn is disowned |
 | `llm.stream.end` | `StreamEnd` | Streaming complete |
 
 ### `before:llm.response`
@@ -221,6 +224,74 @@ replay caveats, in
 Two shipped gates can use it, both opt-in via `scan_llm_responses`:
 `nexus.gate.content_safety` and `nexus.gate.stop_words`.
 
+A gate that handles *only* this hook cannot prevent disclosure under
+streaming, and the engine will turn streaming off rather than let its veto look
+like protection it is not — see
+[`core.streaming`](../configuration/reference.md#corestreaming).
+
+### `before:llm.stream.chunk`
+
+The streaming counterpart of `before:llm.response`, and the hook that lets a
+disclosure-preventing gate keep streaming on. It fires once per candidate text
+release, *before* any of that text reaches the bus, so a handler here
+adjudicates text that has not left the engine. Blocking is therefore
+prevention rather than retraction — which matters most for transports whose
+wire protocol has no retraction verb at all.
+
+The payload is `*events.StreamSegment`. Handlers have four moves:
+
+| Move | How | Effect |
+|------|-----|--------|
+| Pass | return | `Content` is emitted verbatim |
+| Redact | rewrite `Content` | the rewrite is what every UI sees; the stream continues |
+| Suspend | set `Hold` (or call `HoldFrom`) | the trailing `Hold` bytes are withheld and re-offered with the next delta |
+| Block | set `Veto` | nothing more is emitted this turn; `llm.stream.retract` fires |
+
+**Suspend is the move that makes streaming safe.** A handler that cannot yet
+judge a trailing fragment — a `123-45-` that may or may not become an SSN —
+withholds it instead of gambling. The stream visibly pauses at a safe point,
+and the bytes surface only once the handler stops asking for them. Since
+withheld text is never emitted, a subsequent block leaks nothing. A handler may
+hold the same text across arbitrarily many segments, which is also how a gate
+awaiting a slow reviewer keeps a stream paused while it waits.
+
+**Detection does not depend on the hold**, which is worth stating because the
+opposite is a natural assumption. Handlers scan `seg.Full()` — the cumulative
+turn, not the delta — and act on matches ending at or after
+`seg.PendingOffset()`. A match's final character is by definition new on the
+segment that completes it, so every match is seen regardless of how the
+provider chunked it. What the hold bounds is the **residue**: how much of a
+match's leading text had already shipped when the block landed. Hold the
+trailing token and a token-shaped pattern is still entirely unreleased at the
+moment it completes, so blocking it leaks nothing rather than all-but-one
+character.
+
+Anything released before a handler could possibly know is unrecoverable. That
+is information-theoretic, not a gap in the design, and `Hold` is the knob that
+shrinks the window to nothing.
+
+A vetoing handler must **not** quote the text it blocked into its reason, for
+the same reason that applies to `before:llm.response`: the reason is
+user-visible.
+
+### `llm.stream.hold` and `llm.stream.retract`
+
+A stream that simply goes quiet while a gate deliberates is indistinguishable
+from a hung turn, so suspension is announced rather than inferred.
+`llm.stream.hold` carries both edges — `Resumed: false` entering a hold,
+`true` leaving one — and every hold is followed by exactly one of a resume, an
+`llm.stream.retract`, or the turn's `llm.stream.end`.
+
+`llm.stream.retract` asks transports to disown the prefix a block left
+rendered. What each can honestly do differs:
+
+| Transport | On retract |
+|-----------|-----------|
+| `nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails` | erase the partial text and replace it with a note — these own their render buffer |
+| `nexus.io.realtime` | forwards a `stream.retract` envelope; a text client can erase, a client that already spoke the audio cannot |
+| `nexus.io.agui` | closes the text message, **drops it from the run's messages** so it never reaches a `MESSAGES_SNAPSHOT`, and emits a `nexus.stream.retract` Custom event |
+| `nexus.io.a2a` | nothing to retract — it publishes one post-gate artifact at turn end rather than streaming deltas. Reports a `output_gate` Nexus extension event so a client can tell a policy substitution from a model that chose to refuse |
+
 ### Payloads
 
 **LLMRequest**
@@ -237,6 +308,35 @@ Two shipped gates can use it, both opt-in via `scan_llm_responses`:
 | `Temperature` | *float64 | Sampling temperature (nil = provider default) |
 | `Stream` | bool | Enable streaming |
 | `Metadata` | map[string]any | Additional context (e.g., `_source` for planner tagging) |
+
+**StreamSegment** (payload of `before:llm.stream.chunk`)
+| Field | Type | Description |
+|-------|------|-------------|
+| `TurnID` | string | The streaming turn |
+| `RequestID` | string | Correlates with the originating `LLMRequest` |
+| `Index` | int | Sequence number the resulting chunk will carry |
+| `Released` | string | Text already emitted this turn, post-redaction. Lookbehind only — mutating it does nothing |
+| `Content` | string | The candidate release. Rewrite to redact |
+| `Hold` | int | Trailing bytes of `Content` to withhold. Publisher takes the max across handlers |
+
+Helpers: `Full()` returns `Released + Content`; `PendingOffset()` is the index
+into `Full()` where `Content` begins; `HoldFrom(i)` defers `Content` from
+offset `i` onward, keeping whichever hold is largest across handlers.
+
+**StreamHold**
+| Field | Type | Description |
+|-------|------|-------------|
+| `TurnID` / `RequestID` | string | Correlation |
+| `Held` | int | Bytes currently withheld; zero on the resume edge |
+| `Reason` | string | The handler's explanation. Never the withheld text |
+| `Resumed` | bool | `false` entering a hold, `true` leaving one |
+
+**StreamRetract**
+| Field | Type | Description |
+|-------|------|-------------|
+| `TurnID` / `RequestID` | string | Correlation |
+| `ReleasedLen` | int | Bytes already emitted when the block landed — the size of the residue |
+| `Reason` | string | The vetoing handler's reason. Never the blocked text |
 
 **Message**
 | Field | Type | Description |

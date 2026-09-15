@@ -218,11 +218,20 @@ reads; it cannot stop an action. `before:llm.response` sits between the provider
 and the loop, so it governs tool calls, intermediate iterations, and reasoning —
 not just final answers.
 
-**Streaming caveat.** Providers emit `llm.stream.chunk` as tokens arrive and
-`llm.response` only at the end. A veto here cannot unsay text a UI has already
-rendered. Gates that must prevent *disclosure* need `stream: false`; gates that
-steer the loop (blocking tool calls, replacing what enters conversation history)
-work unchanged under streaming.
+**Streaming.** Providers emit `llm.stream.chunk` as tokens arrive and
+`llm.response` only at the end, so a veto *here* cannot unsay text a UI has
+already rendered. Gates that steer the loop — blocking tool calls, replacing
+what enters conversation history — work unchanged under streaming regardless.
+
+Gates that must prevent **disclosure** handle
+[`before:llm.stream.chunk`](#beforellmstreamchunk-gate-the-stream-itself) as
+well, which adjudicates each delta before it is released. A gate that does not
+does not silently lose its guarantee: the engine reads the active plugins'
+declared `Subscriptions()` at boot and clears `Stream` on outbound requests
+when any plugin gates `before:llm.response` without gating
+`before:llm.stream.chunk`, logging which plugin cost the deployment its
+streaming. See [`core.streaming`](../configuration/reference.md#corestreaming)
+for the opt-out.
 
 **Never interpolate model output into a veto reason.** The reason becomes the
 substitute's `Content` whenever the handler doesn't dictate its own, and
@@ -245,6 +254,73 @@ response asked for; it cannot un-run what the provider already executed. Gate
 recorded `llm.response` directly. Those are re-published history — already
 post-gate on the original run — so re-gating them would double-apply and break
 replay fidelity.
+
+### `before:llm.stream.chunk`: gate the stream itself
+
+`before:llm.response` governs what the loop consumes, and it does that well —
+but it fires once, at end of stream, after every token has been rendered. A
+gate whose purpose is non-disclosure needs to act earlier than that, and the
+alternative (turn streaming off) costs every turn its time-to-first-token.
+
+So providers do not emit `llm.stream.chunk` directly. Every text delta goes
+through `engine.StreamPublisher`, which offers it to `before:llm.stream.chunk`
+as an `*events.StreamSegment` before any of it reaches the bus. The invariant
+lives in one helper, for the same reason `PublishLLMResponse` does: so it
+cannot be forgotten at one provider's emit site.
+
+Handlers pass, redact, suspend, or block:
+
+```go
+func (p *Plugin) handleBeforeStreamChunk(event engine.Event[any]) {
+    vp, _ := event.Payload.(*engine.VetoablePayload)
+    seg, _ := vp.Original.(*events.StreamSegment)
+
+    // Defer the trailing token: it may still be growing into a match.
+    seg.HoldFrom(trailingTokenStart(seg.Content))
+
+    // Scan the cumulative turn, act on matches that have not shipped yet.
+    for _, loc := range p.pattern.FindAllStringIndex(seg.Full(), -1) {
+        if loc[1] <= seg.PendingOffset() {
+            continue // adjudicated on an earlier segment
+        }
+        vp.Veto = engine.VetoResult{Vetoed: true, Reason: "prohibited content"}
+        return
+    }
+}
+```
+
+**Suspension is what makes this a real guarantee rather than a faster
+retraction.** Withheld bytes are never emitted, so a block prevents disclosure
+outright — for every transport, including third-party clients whose protocol
+offers no way to take text back. Held text is re-offered, prepended to the
+next delta, so a handler may keep holding across arbitrarily many segments;
+that is also how a gate awaiting a slow reviewer keeps a stream paused.
+
+**Detection is independent of the hold.** Because handlers scan the cumulative
+turn and act on where a match *ends*, a match is caught on the segment that
+completes it however the provider chunked it. The hold bounds the *residue* —
+how much of a match's leading text had already shipped when the block landed.
+
+**A block is terminal for the turn.** The publisher drops what it held, emits
+`llm.stream.retract`, and swallows every later delta including tool-call
+chunks. The provider still accumulates the model's real text and still
+publishes it through `PublishLLMResponse`, so the response-level gate
+substitutes exactly as it does without streaming.
+
+**The ungated path is unchanged.** With nothing subscribed, the publisher
+emits each delta verbatim — same text, same chunk boundaries, no buffering,
+and no hook dispatch at all. That last part is deliberate: `before:*` events
+are journaled like any other, so firing one per token delta unconditionally
+would roughly double journal volume on every streaming turn.
+
+**Tool-call chunks bypass the text gate.** They are not disclosure, and
+authority over whether they may run belongs to `before:llm.response` (which
+clears `ToolCalls` on every substitution) and `before:tool.invoke` (which sees
+parsed arguments). Gating a partial JSON fragment here would duplicate that
+with strictly less information.
+
+**Never quote blocked text into a veto reason** — the same rule as
+`before:llm.response`, and for the same reason: the reason is user-visible.
 
 ## Event Filters
 

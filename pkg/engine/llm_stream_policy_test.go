@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/events"
@@ -201,5 +202,58 @@ func TestInstallStreamPolicy_WinsOverEarlierHandlers(t *testing.T) {
 
 	if emitRequest(bus, false) {
 		t.Error("the engine's downgrade must be the final word on Stream")
+	}
+}
+
+// TestStreamPolicy_WiredThroughLifecycleBoot covers the seam the unit tests
+// above cannot: that the policy is actually installed from the plugins the
+// lifecycle manager booted, using their real declared subscriptions, rather
+// than only working when a test hands installStreamPolicy a list directly.
+//
+// It boots through LifecycleManager and then installs the policy the way
+// Engine.Boot does, from lm.Plugins().
+func TestStreamPolicy_WiredThroughLifecycleBoot(t *testing.T) {
+	tests := []struct {
+		name       string
+		subs       []string
+		wantStream bool
+	}{
+		{
+			name:       "response-only gate costs the deployment streaming",
+			subs:       []string{"before:llm.response"},
+			wantStream: false,
+		},
+		{
+			name:       "a gate that also handles the stream keeps it",
+			subs:       []string{"before:llm.response", EventBeforeStreamChunk},
+			wantStream: true,
+		},
+		{
+			name:       "a plugin gating neither is irrelevant",
+			subs:       []string{"before:tool.invoke"},
+			wantStream: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := newSubsPlugin("gate", tt.subs...)
+			lm, _, _ := newTestLifecycle(t, []string{"gate"},
+				map[string]func() Plugin{"gate": func() Plugin { return gate }},
+				nil,
+			)
+			if err := lm.Boot(context.Background()); err != nil {
+				t.Fatalf("Boot failed: %v", err)
+			}
+
+			bus := lm.bus
+			if unsub := installStreamPolicy(bus, lm.Plugins(), "", nil); unsub != nil {
+				defer unsub()
+			}
+
+			if got := emitRequest(bus, true); got != tt.wantStream {
+				t.Errorf("Stream after before:llm.request = %v, want %v", got, tt.wantStream)
+			}
+		})
 	}
 }

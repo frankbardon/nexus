@@ -162,7 +162,44 @@ plugins:
 | `object_store.endpoint`         | string | *(empty)*   | Overrides the default service endpoint. This is what makes S3-compatible stores (MinIO, R2, Ceph) and local emulators reachable. Each backend documents exactly what it means: for `s3` it also selects path-style addressing, for `gcs` it is an emulator switch that also turns authentication off when no credentials are available. |
 | `object_store.credentials_file` | string | *(empty)*   | Path to a static credentials file. Empty means ambient credentials — workload identity, instance role, environment — which is the preferred production path. Expanded through `engine.ExpandPath`. |
 | `object_store.failure_policy`   | string | `degrade`   | What happens when state cannot be persisted. `degrade` (the default) keeps the session running against the local working copy and retries in the background; `strict` additionally refuses further input until the state is stored. Both retry with backoff and both recover on their own. Any other value **fails the boot**. See [Failure policy](#failure-policy) below. |
+| `streaming.response_gate_policy` | string | `downgrade`          | What to do when a plugin gates `before:llm.response` without gating `before:llm.stream.chunk` — see `core.streaming` below. `downgrade` clears `Stream` on outbound requests; `allow` leaves it and warns. Any other value fails schema validation. |
 | `models`                       | map      | *(empty)*              | Model role registry — see `core.models` below. |
+
+### `core.streaming`
+
+Reconciles token streaming with the gates that adjudicate model output. The two
+pull against each other: a gate that judges the whole response cannot run until
+the response is complete, by which point every token has been rendered.
+
+Nexus resolves that in two places. Gates that implement
+[`before:llm.stream.chunk`](../architecture/event-bus.md#beforellmstreamchunk-gate-the-stream-itself)
+adjudicate each delta *before* it is released and keep their guarantee with
+streaming on — both shipped output gates do, so most deployments never reach
+this block. For a gate that implements only `before:llm.response`, this setting
+decides.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `response_gate_policy` | string | `downgrade` | `downgrade`: clear `Stream` on outbound LLM requests, so the gate sees the response before any of it is shown. `allow`: leave `Stream` alone and log a warning at boot. |
+
+The engine computes this at boot from the active plugins' declared
+`Subscriptions()` — there is no new declaration API, and a gate that grows a
+`before:llm.stream.chunk` handler gets streaming back automatically. The
+downgrade handler runs on `before:llm.request` at a priority above every
+plugin, so it is the final word on `Stream`, and it never vetoes: downgrading a
+request is not a reason to refuse it.
+
+> **Why the default is `downgrade`.** The response-veto contract told operators
+> that a gate needing non-disclosure "requires `stream: false`". No such knob
+> was ever reachable — the ReAct, plan-execute and orchestrator loops all build
+> their requests with `Stream: true` hardcoded — so an operator running
+> `nexus.gate.content_safety` in block mode was protected against tool
+> execution and poisoned history, but not against the disclosure they had most
+> likely deployed it for, with nothing in the logs saying so. The engine now
+> decides instead of the operator.
+
+`allow` keeps the latency and accepts that such a gate's veto no longer governs
+what the user sees. It still governs conversation history and tool execution.
 
 ### `core.object_store`
 
@@ -3509,6 +3546,14 @@ Source: `plugins/gates/stop_words/plugin.go`. Gates both `before:llm.request`
 | `case_sensitive` | bool | `false`                                          | Case-sensitive matching. |
 | `message`        | string | `Content blocked: contains prohibited terms.`  | Veto message. |
 | `scan_llm_responses` | bool | `false`                                      | Also subscribe to `before:llm.response` and ban-check the model's raw output. A match substitutes `message` as the response content and **drops the response's tool calls**, so a response naming a banned term cannot execute the tool it asked for. Only `Content` is scanned. |
+| `scan_stream`        | bool | *(follows `scan_llm_responses`)*             | Also subscribe to `before:llm.stream.chunk` and ban-check each delta **before it is released**, so a banned word under `stream: true` is never shown rather than being retracted afterwards. Defaults to whatever `scan_llm_responses` is set to, because an operator who asked for response gating wants it to survive streaming — and without it the engine would turn streaming off for this plugin instead (see [`core.streaming`](#corestreaming)). Set `false` to keep response gating while opting out of stream gating. |
+
+The stream handler withholds the trailing run of word characters on every
+segment, because a trailing `FORBID` may yet become `FORBIDDEN` — so no word is
+ruled on before the model has finished writing it, and none is released after
+it is judged. The lag is one partial word. A cut stream carries no replacement
+text; `message` reaches the user from the `before:llm.response` handler when the
+provider publishes the completed response.
 
 ### `nexus.gate.token_budget`
 
@@ -3633,7 +3678,9 @@ to enabled.
 | `action`                     | string | `block`                                                     | `block` or `redact`. |
 | `message`                    | string | `Content blocked: contains sensitive information ({checks}).` | Block/redact message; `{checks}` lists triggered checks. |
 | `scan_tool_results`          | bool | `false`                                                       | Also subscribe to `before:tool.result` and apply checks to tool output. Required to cover sub-agent / delegate output (which reaches the parent via `tool.result`, not `io.output`). Off by default because legitimate external tools (`web_fetch`, `knowledge_search`) often surface phone numbers / addresses that aren't leaks; enable for orchestrator-style topologies. |
-| `scan_llm_responses`         | bool | `false`                                                       | Also subscribe to `before:llm.response` and apply checks to the model's raw output, before the agent loop consumes it. This is the only placement that can stop flagged content from reaching a tool: `before:io.output` fires after the loop has already executed the response's tool calls. In `block` mode the substituted response carries **no tool calls** (see [Event Bus](../architecture/event-bus.md#beforellmresponse-veto-means-substitute)); in `redact` mode the response proceeds with matches scrubbed and its tool calls intact. Only `Content` is scanned — tool-call arguments belong to `before:tool.invoke`. Under `stream: true` the text has already gone out as `llm.stream.chunk`; see the streaming caveat. |
+| `scan_llm_responses`         | bool | `false`                                                       | Also subscribe to `before:llm.response` and apply checks to the model's raw output, before the agent loop consumes it. This is the only placement that can stop flagged content from reaching a tool: `before:io.output` fires after the loop has already executed the response's tool calls. In `block` mode the substituted response carries **no tool calls** (see [Event Bus](../architecture/event-bus.md#beforellmresponse-veto-means-substitute)); in `redact` mode the response proceeds with matches scrubbed and its tool calls intact. Only `Content` is scanned — tool-call arguments belong to `before:tool.invoke`. Governs history and tool execution; for disclosure under `stream: true` see `scan_stream` below. |
+| `scan_stream`                | bool | *(follows `scan_llm_responses`)*                              | Also subscribe to `before:llm.stream.chunk` and apply checks to each delta **before it is released**, so flagged text under `stream: true` is never shown rather than being retracted afterwards. Defaults to whatever `scan_llm_responses` is set to; without it the engine turns streaming off for this plugin instead (see [`core.streaming`](#corestreaming)). |
+| `stream_hold_back`           | int  | `0`                                                           | Minimum trailing bytes of each candidate release to withhold, on top of the always-on trailing-token rule. Only needed for a `custom_patterns` entry that spans whitespace — see below. Costs that many bytes of streaming lag. |
 | `check_pii_email`            | bool | `true`                                                        | Detect email addresses. |
 | `check_pii_phone`            | bool | `true`                                                        | Detect phone numbers. |
 | `check_pii_ssn`              | bool | `true`                                                        | Detect US SSNs. |
@@ -3643,6 +3690,33 @@ to enabled.
 | `check_credit_card`          | bool | `true`                                                        | Detect credit-card numbers. |
 | `check_ip_internal`          | bool | `true`                                                        | Detect RFC1918 / internal IPs. |
 | `custom_patterns`            | list | *(empty)*                                                     | Each `{name, pattern}`. |
+
+#### Stream gating and `stream_hold_back`
+
+The stream handler withholds the trailing non-whitespace run of each candidate
+release. Every builtin check here is token-shaped — an SSN, a card number, an
+API key, an email, an internal IP — and a token-shaped value cannot contain
+whitespace, so deferring that run means such a value is still entirely
+unreleased at the moment it completes. Blocking it then leaks nothing. The cost
+is a lag of one partial word, not a fixed buffer.
+
+Detection itself does not depend on the hold: the handler scans the cumulative
+turn and acts on matches ending at or after the release boundary, so a pattern
+split across deltas is caught however the provider chunked it. What the hold
+bounds is how much of a match's *leading* text had already shipped when the
+block landed.
+
+A `custom_patterns` entry that spans whitespace — a prose phrase rather than a
+token — is the case the trailing-run rule cannot keep clean on its own, because
+a space is exactly where it decides text is settled. Detection still fires, but
+part of the phrase may already have been released. Two consequences:
+
+- In `redact` mode such a match **escalates to a block**. Rewriting only the
+  half still in hand would hand the user a partly-leaked value labelled as
+  redacted, so the gate stops the stream instead.
+- Set `stream_hold_back` to a byte floor wide enough to cover the phrase to
+  move those matches back into the clean case, at the cost of that many bytes
+  of lag.
 
 ### `nexus.gate.context_window`
 
