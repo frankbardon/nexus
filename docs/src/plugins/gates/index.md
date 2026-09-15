@@ -11,13 +11,13 @@ providers.
 | Plugin                            | Vetoes                  | Purpose |
 |-----------------------------------|-------------------------|---------|
 | `nexus.gate.endless_loop`         | `before:llm.request`    | Cap LLM calls per turn (replaces agent `max_iterations`). |
-| `nexus.gate.stop_words`           | `before:llm.request`, `before:io.output` | Block messages containing banned terms. |
+| `nexus.gate.stop_words`           | `before:llm.request`, `before:io.output`, `before:llm.response` *(opt-in)* | Block messages containing banned terms. |
 | `nexus.gate.token_budget`         | `before:llm.request`    | Cap session token usage. |
 | `nexus.gate.rate_limiter`         | `before:llm.request`    | Throttle LLM call frequency (pause via `gate.llm.retry`, not reject). |
 | `nexus.gate.prompt_injection`     | `before:llm.request`    | Detect and block prompt-injection patterns in user input. |
 | `nexus.gate.json_schema`          | `before:io.output`      | Validate output against JSON Schema; LLM-retry on failure. |
 | `nexus.gate.output_length`        | `before:io.output`      | Cap response length; LLM-retry to compress. |
-| `nexus.gate.content_safety`       | `before:io.output`      | Block or redact PII / secrets / sensitive content. |
+| `nexus.gate.content_safety`       | `before:io.output`, `before:tool.result` *(opt-in)*, `before:llm.response` *(opt-in)* | Block or redact PII / secrets / sensitive content. |
 | `nexus.gate.context_window`       | `before:llm.request`    | Estimate context size; trigger compaction when approaching the limit. |
 | `nexus.gate.tool_filter`          | `before:llm.request`    | Modify the tool list (allowlist / blocklist). |
 | `nexus.gate.approval_policy`      | `before:tool.invoke`, `before:llm.request` | Policy-driven HITL approvals; emits `before:hitl.requested` then `hitl.requested` and applies the operator's allow/reject/edit. |

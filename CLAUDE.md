@@ -80,7 +80,9 @@ Every plugin implements `engine.Plugin` (`pkg/engine/plugin.go`):
 
 ### Event Flow
 
-Plugins subscribe with optional priority ordering + filtering. Dispatched synchronously. Vetoable events (`before:*` prefix) let handlers block actions.
+Plugins subscribe with optional priority ordering + filtering. Dispatched synchronously. Vetoable events (`before:*` prefix) let handlers block actions, or replace them by mutating the payload in place without vetoing.
+
+`before:llm.response` is the one exception to that contract: a veto **substitutes** rather than blocks, because agent loops block waiting for `llm.response` and suppressing it would hang the turn. The substitute always has `ToolCalls` cleared, so a blocked response can't drive tool execution — which `before:io.output` cannot prevent, since the loop has already run the tools by the time it fires. **Every producer of an `llm.response` must publish via `engine.PublishLLMResponse` rather than `bus.Emit("llm.response", ...)`** (journal replay excepted — it re-publishes recorded history directly). See `docs/src/architecture/event-bus.md`.
 
 ### Plugin Directory Layout
 

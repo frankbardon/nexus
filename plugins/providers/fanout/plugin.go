@@ -116,6 +116,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		"llm.request",
+		"before:llm.response",
 		"llm.response",
 		"provider.fanout.start",
 		"provider.fanout.response",
@@ -578,6 +579,15 @@ func (p *Plugin) emitFinalResponse(fanoutID string, state *fanoutState, response
 		Succeeded: len(responses),
 	})
 
-	// Emit combined response. This goes to the agent as a normal llm.response.
-	_ = p.bus.Emit("llm.response", primary)
+	// Emit combined response. This goes to the agent as a normal llm.response
+	// and runs the before:llm.response hook like any other.
+	//
+	// Each per-provider response was already gated by its own provider's
+	// PublishLLMResponse before it reached handleResponse, so gates see them
+	// too; they carry _fanout_id in Metadata, which is how a gate that only
+	// wants to judge the merged result can tell them apart. When the chosen
+	// primary was itself substituted, its _vetoed stamp survives into
+	// cleanMeta above and PublishLLMResponse's re-entrancy guard skips the
+	// hook here rather than gating the same content twice.
+	engine.PublishLLMResponse(p.bus, primary)
 }

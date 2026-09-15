@@ -20,9 +20,30 @@ Providers are low-level plugins that:
 2. Resolve the requested model role via the Model Registry
 3. Apply prompt registry sections to the system prompt
 4. Make the API call (with streaming support)
-5. Emit `llm.response` or `llm.stream.chunk` / `llm.stream.end`
+5. Publish the response via `engine.PublishLLMResponse` (**not** a bare `bus.Emit("llm.response", ...)`), or emit `llm.stream.chunk` / `llm.stream.end` while streaming
 
 Providers don't know about agents, tools, or conversations — they only translate between the Nexus event model and the external API.
+
+### Publishing responses
+
+Every `llm.response` a provider produces must go through
+`engine.PublishLLMResponse(bus, resp)`. It runs the vetoable
+`before:llm.response` hook, lets gates replace or block the response, clears
+`ToolCalls` on a vetoed one, and then emits `llm.response` exactly once:
+
+```go
+engine.PublishLLMResponse(p.bus, resp)
+```
+
+Declare `"before:llm.response"` in the plugin's `Emissions()` alongside
+`"llm.response"`; the contract harness checks declared emissions against
+runtime behaviour.
+
+The one exception is journal replay, which publishes the recorded response
+directly — that is re-published history and re-gating it would break replay
+fidelity.
+
+Full contract: [Event Bus → `before:llm.response`](../../architecture/event-bus.md#beforellmresponse-veto-means-substitute).
 
 ## Structured Output
 

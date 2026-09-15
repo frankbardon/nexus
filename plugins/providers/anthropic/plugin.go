@@ -227,6 +227,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.response",
 		"llm.response",
 		"llm.stream.chunk",
 		"llm.stream.end",
@@ -275,6 +276,12 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// journal queue and emit it instead of calling the API. The
 	// coordinator seeded these from the source journal in seq order, so
 	// the Nth live llm.request consumes the Nth journaled llm.response.
+	//
+	// Replay publishes directly rather than through
+	// engine.PublishLLMResponse: these are re-published history, not fresh
+	// model output, and the recorded response is already the post-gate one
+	// subscribers saw on the original run. Re-running before:llm.response
+	// here would re-gate an already-gated response and break replay fidelity.
 	if p.replay != nil && p.replay.Active() {
 		raw, ok := p.replay.Pop("llm.response")
 		if !ok {
@@ -800,9 +807,7 @@ func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[s
 	}
 	resp.Tags = tags
 
-	if err := p.bus.Emit("llm.response", resp); err != nil {
-		p.logger.Error("failed to emit llm.response", "error", err)
-	}
+	engine.PublishLLMResponse(p.bus, resp)
 }
 
 func (p *Plugin) convertAPIResponse(apiResp apiResponse) events.LLMResponse {
@@ -1036,7 +1041,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 		}
 	}
 
-	_ = p.bus.Emit("llm.response", events.LLMResponse{
+	engine.PublishLLMResponse(p.bus, events.LLMResponse{
 		SchemaVersion: events.LLMResponseVersion,
 		RequestID:     requestID,
 		Content:       st.fullContent.String(),

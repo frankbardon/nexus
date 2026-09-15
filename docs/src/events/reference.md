@@ -195,9 +195,31 @@ Complete reference for all event types in Nexus, organized by domain.
 | Event Type | Payload | Description |
 |------------|---------|-------------|
 | `llm.request` | `LLMRequest` | Request to an LLM provider |
+| `before:llm.response` | `LLMResponse` | Before the agent loop sees the model's response (vetoable; **veto substitutes rather than blocks** — see below) |
 | `llm.response` | `LLMResponse` | Complete LLM response |
 | `llm.stream.chunk` | `StreamChunk` | Streaming response chunk |
 | `llm.stream.end` | `StreamEnd` | Streaming complete |
+
+### `before:llm.response`
+
+The hook that governs what the **agent loop** consumes, as opposed to
+`before:io.output`, which governs what the **user** finally reads. By the time
+`io.output` fires, the loop has already executed the response's tool calls;
+`before:llm.response` sits between the provider and the loop, so it can stop an
+action rather than only scrub prose.
+
+Handlers mutate the `*LLMResponse` in place to replace it, and/or veto. A veto
+does not suppress the event — agent loops block waiting for `llm.response`, so
+suppressing it would hang the turn. Instead the emitter publishes a substitute,
+and **a vetoed response never carries tool calls**.
+
+Producers publish via `engine.PublishLLMResponse`, never a bare
+`bus.Emit("llm.response", …)`. Full contract, including the streaming and
+replay caveats, in
+[Event Bus → `before:llm.response`](../architecture/event-bus.md#beforellmresponse-veto-means-substitute).
+
+Two shipped gates can use it, both opt-in via `scan_llm_responses`:
+`nexus.gate.content_safety` and `nexus.gate.stop_words`.
 
 ### Payloads
 
