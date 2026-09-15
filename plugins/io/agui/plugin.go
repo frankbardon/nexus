@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
@@ -624,8 +625,10 @@ func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 			continue
 		}
 		ui.PreloadMessages = append(ui.PreloadMessages, events.Message{
-			Role:    normalizeRole(m.Role),
-			Content: m.Content,
+			Role:       normalizeRole(m.Role),
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  preloadToolCalls(m.ToolCalls),
 		})
 	}
 	if last == -1 && len(msgs) > 0 {
@@ -636,6 +639,28 @@ func (p *Plugin) buildUserInput(input runInput) events.UserInput {
 		}
 	}
 	return ui
+}
+
+// preloadToolCalls carries a replayed assistant turn's tool calls across the
+// wire boundary.
+//
+// A tool result is only addressable BY ITS CALL: every provider pairs the two,
+// and Gemini pairs them by the call's NAME, which it reads off the matching
+// functionCall rather than off the response. Dropping either half leaves the
+// other unpaired, so they are carried together or not at all.
+func preloadToolCalls(calls []agui.ToolCall) []events.ToolCallRequest {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]events.ToolCallRequest, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, events.ToolCallRequest{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	return out
 }
 
 // normalizeRole maps AG-UI message roles onto Nexus roles.
