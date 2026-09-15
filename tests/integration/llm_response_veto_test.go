@@ -89,18 +89,38 @@ func TestLLMResponseVeto_DropsToolCalls(t *testing.T) {
 		t.Error("published response is not stamped with the vetoed metadata flag")
 	}
 
-	// --- The turn still completed. A veto substitutes; it must not hang the
-	// agent loop waiting for a response that never arrives.
-	sawOutput := false
+	// --- The refusal must actually reach the user.
+	//
+	// This is the half a veto-that-only-drops cannot deliver: the caller
+	// would be left choosing between a fabricated answer and a blank one.
+	// The substitute's Content rides through the agent loop onto io.output,
+	// so the operator's message is what the user sees.
+	var assistantOutputs []string
 	for _, e := range collected {
 		if e.Type != "io.output" {
 			continue
 		}
-		if out, ok := e.Payload.(events.AgentOutput); ok && out.Content != "" {
-			sawOutput = true
+		out, ok := e.Payload.(events.AgentOutput)
+		if !ok || out.Role != "assistant" {
+			continue
+		}
+		assistantOutputs = append(assistantOutputs, out.Content)
+	}
+	if len(assistantOutputs) == 0 {
+		t.Fatal("no assistant io.output produced — the vetoed turn appears to have stalled")
+	}
+	for _, got := range assistantOutputs {
+		if strings.Contains(got, "forbidden") {
+			t.Errorf("banned text reached the user: %q", got)
 		}
 	}
-	if !sawOutput {
-		t.Error("no io.output produced — the vetoed turn appears to have stalled")
+	sawReason := false
+	for _, got := range assistantOutputs {
+		if strings.Contains(got, "Content blocked") {
+			sawReason = true
+		}
+	}
+	if !sawReason {
+		t.Errorf("refusal never reached the user; assistant outputs = %q", assistantOutputs)
 	}
 }
