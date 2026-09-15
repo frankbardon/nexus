@@ -73,6 +73,13 @@ const (
 	NexusEventKindToolResult NexusEventKind = "tool_result"
 	NexusEventKindSubagent   NexusEventKind = "subagent"
 	NexusEventKindUsage      NexusEventKind = "usage"
+	// NexusEventKindOutputGate reports that a Nexus output gate suspended or
+	// blocked the model's stream. A2A publishes one post-gate artifact at turn
+	// end rather than streaming text deltas, so a blocked turn is already safe
+	// here — but without this a client sees only the refusal that replaced the
+	// answer, with nothing to distinguish it from a model that chose to
+	// refuse. This says policy intervened, and why.
+	NexusEventKindOutputGate NexusEventKind = "output_gate"
 )
 
 // nexusEventKinds is every addressable event kind, in declaration order.
@@ -82,6 +89,7 @@ var nexusEventKinds = []NexusEventKind{
 	NexusEventKindToolResult,
 	NexusEventKindSubagent,
 	NexusEventKindUsage,
+	NexusEventKindOutputGate,
 }
 
 // NexusEventKinds returns the event kinds the extension defines. The returned
@@ -131,6 +139,39 @@ type NexusEvent struct {
 	Subagent *NexusSubagentProgress `json:"subagent,omitempty"`
 	// Usage is set when Kind is NexusEventKindUsage.
 	Usage *NexusTokenUsage `json:"usage,omitempty"`
+	// OutputGate is set when Kind is NexusEventKindOutputGate.
+	OutputGate *NexusOutputGate `json:"outputGate,omitempty"`
+}
+
+// NexusOutputGateState names what an output gate did to the model's stream.
+type NexusOutputGateState string
+
+// Output-gate states.
+const (
+	// NexusOutputGateHeld reports that the gate is withholding text while it
+	// decides — a deliberate pause, not a stall.
+	NexusOutputGateHeld NexusOutputGateState = "held"
+	// NexusOutputGateReleased reports that withheld text was cleared and sent.
+	NexusOutputGateReleased NexusOutputGateState = "released"
+	// NexusOutputGateBlocked reports that the gate ended the stream. The task's
+	// answer is the substitute the gate authored, not the model's text.
+	NexusOutputGateBlocked NexusOutputGateState = "blocked"
+)
+
+// NexusOutputGate reports a Nexus output gate acting on the model's stream.
+type NexusOutputGate struct {
+	// State is what the gate did. Required.
+	State NexusOutputGateState `json:"state"`
+	// Held is the number of bytes currently withheld. Meaningful when State is
+	// held.
+	Held int `json:"held,omitempty"`
+	// ReleasedLen is how much text had already been published when a block
+	// landed. Meaningful when State is blocked.
+	ReleasedLen int `json:"releasedLen,omitempty"`
+	// Reason is the gate's explanation. It never quotes the text the gate
+	// withheld — routing blocked content through a reason string would defeat
+	// the gate that produced it.
+	Reason string `json:"reason,omitempty"`
 }
 
 // NexusThinking is one reasoning step emitted by the agent loop.
@@ -317,6 +358,13 @@ func UsageEvent(taskID, contextID string, usage NexusTokenUsage) NexusEvent {
 	return e
 }
 
+// OutputGateEvent builds an output-gate event.
+func OutputGateEvent(taskID, contextID string, gate NexusOutputGate) NexusEvent {
+	e := NewNexusEvent(NexusEventKindOutputGate, taskID, contextID)
+	e.OutputGate = &gate
+	return e
+}
+
 // At stamps a specific observation time onto the event and returns it, for
 // deterministic tests and replayed histories.
 func (e NexusEvent) At(t time.Time) NexusEvent {
@@ -355,6 +403,7 @@ func (e NexusEvent) Validate() *Error {
 		NexusEventKindToolResult: e.ToolResult != nil,
 		NexusEventKindSubagent:   e.Subagent != nil,
 		NexusEventKindUsage:      e.Usage != nil,
+		NexusEventKindOutputGate: e.OutputGate != nil,
 	}
 	for kind, present := range arms {
 		if present != (kind == e.Kind) {

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -68,6 +70,8 @@ type Plugin struct {
 	message          string
 	scanToolResults  bool
 	scanLLMResponses bool
+	scanStream       bool
+	streamHoldBack   int
 
 	unsubs []func()
 }
@@ -94,6 +98,23 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["scan_llm_responses"].(bool); ok {
 		p.scanLLMResponses = v
+	}
+	// Streaming defaults to following scan_llm_responses. An operator who
+	// asked for responses to be gated wants that guarantee to survive
+	// streaming; without this the engine would quietly turn streaming off for
+	// them instead (see engine.StreamUnsafePlugins), which is safe but slow.
+	p.scanStream = p.scanLLMResponses
+	if v, ok := ctx.Config["scan_stream"].(bool); ok {
+		p.scanStream = v
+	}
+	switch v := ctx.Config["stream_hold_back"].(type) {
+	case int:
+		p.streamHoldBack = v
+	case float64:
+		p.streamHoldBack = int(v)
+	}
+	if p.streamHoldBack < 0 {
+		p.streamHoldBack = 0
 	}
 
 	// Enable builtin checks (all on by default).
@@ -134,6 +155,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				engine.WithPriority(8), engine.WithSource(pluginID)),
 		)
 	}
+	if p.scanStream {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe(engine.EventBeforeStreamChunk, p.handleBeforeStreamChunk,
+				engine.WithPriority(8), engine.WithSource(pluginID)),
+		)
+	}
 
 	checkNames := make([]string, len(p.checks))
 	for i, c := range p.checks {
@@ -143,7 +170,9 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"checks", strings.Join(checkNames, ","),
 		"action", p.action,
 		"scan_tool_results", p.scanToolResults,
-		"scan_llm_responses", p.scanLLMResponses)
+		"scan_llm_responses", p.scanLLMResponses,
+		"scan_stream", p.scanStream,
+		"stream_hold_back", p.streamHoldBack)
 	return nil
 }
 
@@ -170,6 +199,9 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	}
 	if p.scanLLMResponses {
 		subs = append(subs, engine.EventSubscription{EventType: "before:llm.response", Priority: 8})
+	}
+	if p.scanStream {
+		subs = append(subs, engine.EventSubscription{EventType: engine.EventBeforeStreamChunk, Priority: 8})
 	}
 	return subs
 }
@@ -391,6 +423,207 @@ func (p *Plugin) handleBeforeLLMResponse(event engine.Event[any]) {
 		}
 		resp.Content = content
 	}
+}
+
+// streamScanLookbehind bounds how far back of the already-released text each
+// segment is rescanned. A match that can still be acted on must end at or
+// after the release boundary, so it cannot begin more than one match-length
+// before it; 4 KiB is far longer than any credential, identifier or phrase
+// these patterns describe. The bound is what keeps per-segment work constant
+// instead of growing with the length of the response.
+const streamScanLookbehind = 4096
+
+// handleBeforeStreamChunk is the streaming counterpart of
+// handleBeforeLLMResponse, and the reason this gate keeps its guarantee with
+// streaming on.
+//
+// before:llm.response fires once the stream has finished, so a veto there
+// governs history and tool execution but arrives after every token has been
+// rendered. This hook runs before any text is released, so a block here is
+// prevention rather than regret — and it holds for every transport, including
+// ones whose protocol has no way to retract what they already sent.
+//
+// # Why detection is complete, and what the hold is actually for
+//
+// The scan runs over the turn's cumulative text, not over the delta, and acts
+// on any match ending at or after the release boundary. That combination is
+// what makes detection independent of how a provider happens to chunk: a
+// match's final character is, by definition, new on the segment where the
+// match first completes, so every match is seen on the segment that completes
+// it however many deltas its earlier characters were spread across.
+//
+// The hold does something different and worth stating plainly, because it is
+// easy to assume it is what does the detecting. It bounds the RESIDUE — how
+// much of a match's leading text was already released when the block lands.
+// Withholding the trailing non-whitespace run means a token-shaped pattern
+// (an SSN, a card number, an API key, an email: every builtin here) is still
+// entirely unreleased at the moment it completes, so blocking it leaks
+// nothing at all rather than leaking all but its last character.
+//
+// # The one case that is not clean
+//
+// A pattern that spans whitespace can begin in text already released, because
+// a space is precisely where the trailing-run rule decides text is settled.
+// Detection still fires, but redaction cannot honor its contract — half the
+// value has shipped and no rewrite of the remaining half unsays it. Redact
+// mode therefore escalates such a match to a block rather than emitting a
+// half-scrubbed value and calling it redacted. Operators with a
+// whitespace-spanning custom pattern set stream_hold_back to a byte floor
+// wide enough to cover it, which moves those matches back into the clean case
+// at the cost of that many bytes of lag.
+func (p *Plugin) handleBeforeStreamChunk(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	seg, ok := vp.Original.(*events.StreamSegment)
+	if !ok || seg.Content == "" {
+		return
+	}
+	// The hold is set on the way out, from whatever Content ends up being:
+	// redaction rewrites it, and a hold counted against the pre-redaction
+	// text would slice the rewritten text in the wrong place.
+	defer func() { seg.HoldFrom(streamHoldFrom(seg.Content, p.streamHoldBack)) }()
+
+	matched, spans, straddled := p.scanSegment(seg)
+	if len(matched) == 0 {
+		return
+	}
+
+	checkList := strings.Join(matched, ", ")
+	action := p.action
+	if action == "redact" && straddled {
+		// Redaction cannot reach text that has already left the engine, so
+		// the honest move is to stop the stream rather than to ship a value
+		// with only its tail scrubbed.
+		action = "block"
+	}
+
+	switch action {
+	case "block":
+		p.logger.Info("content safety checks triggered on llm.stream.chunk",
+			"turn_id", seg.TurnID, "request_id", seg.RequestID,
+			"checks", checkList, "action", action,
+			"configured_action", p.action,
+			"straddled_release_boundary", straddled,
+			"released_bytes", seg.PendingOffset())
+		// No replacement text here: a stream has no substitute, only an end.
+		// The user-facing message arrives from handleBeforeLLMResponse when
+		// the provider publishes the completed response.
+		vp.Veto = engine.VetoResult{
+			Vetoed: true,
+			Reason: fmt.Sprintf("Content safety (llm.stream.chunk): %s", checkList),
+		}
+
+	case "redact":
+		p.logger.Warn("content safety checks triggered on llm.stream.chunk",
+			"turn_id", seg.TurnID, "request_id", seg.RequestID,
+			"checks", checkList, "action", action)
+		seg.Content = redactSpans(seg.Content, spans)
+	}
+}
+
+// scanSegment finds the matches in a segment that can still be acted on.
+//
+// It returns the names of the checks that tripped, the byte ranges within
+// seg.Content covering matches that lie wholly in unreleased text, and
+// whether any match began in text already released. A match ending at or
+// before the release boundary is ignored: it was adjudicated on an earlier
+// segment, and re-reporting it would cut a stream over bytes this handler
+// itself let through.
+func (p *Plugin) scanSegment(seg *events.StreamSegment) (matched []string, spans [][2]int, straddled bool) {
+	full := seg.Full()
+	pending := seg.PendingOffset()
+
+	from := pending - streamScanLookbehind
+	if from < 0 {
+		from = 0
+	}
+	for from > 0 && !utf8.RuneStart(full[from]) {
+		from--
+	}
+	window := full[from:]
+	boundary := pending - from
+
+	for _, c := range p.checks {
+		// Every match, not just the leftmost: an earlier one sitting wholly
+		// in released text would otherwise mask a live one behind it.
+		hit := false
+		for _, loc := range c.pattern.FindAllStringIndex(window, -1) {
+			if loc[1] <= boundary {
+				continue
+			}
+			hit = true
+			if loc[0] < boundary {
+				straddled = true
+				continue
+			}
+			spans = append(spans, [2]int{loc[0] - boundary, loc[1] - boundary})
+		}
+		if hit {
+			matched = append(matched, c.name)
+		}
+	}
+	return matched, spans, straddled
+}
+
+// redactSpans replaces the given byte ranges of content with a marker.
+// Ranges are replaced back-to-front so earlier offsets stay valid, and
+// overlapping ranges (two checks matching the same text) collapse into one
+// marker rather than nesting.
+func redactSpans(content string, spans [][2]int) string {
+	if len(spans) == 0 {
+		return content
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+
+	merged := make([][2]int, 0, len(spans))
+	for _, sp := range spans {
+		if n := len(merged); n > 0 && sp[0] <= merged[n-1][1] {
+			if sp[1] > merged[n-1][1] {
+				merged[n-1][1] = sp[1]
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+
+	out := content
+	for i := len(merged) - 1; i >= 0; i-- {
+		lo, hi := merged[i][0], merged[i][1]
+		if lo < 0 || hi > len(out) || lo > hi {
+			continue
+		}
+		out = out[:lo] + "[REDACTED]" + out[hi:]
+	}
+	return out
+}
+
+// streamHoldFrom returns the offset in content from which a gate should defer
+// release: the start of the trailing non-whitespace run, pulled back further
+// if a configured floor demands it.
+//
+// The trailing run is the load-bearing half. Token-shaped patterns cannot
+// contain whitespace, so once a whitespace character has arrived after a run,
+// that run is complete and safe to judge; everything after it might still be
+// growing. floor exists for patterns that do span whitespace, where no
+// boundary in the text is a safe place to stop.
+func streamHoldFrom(content string, floor int) int {
+	from := len(content)
+	for from > 0 {
+		r := content[from-1]
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			break
+		}
+		from--
+	}
+	if floor > 0 && len(content)-floor < from {
+		from = len(content) - floor
+		if from < 0 {
+			from = 0
+		}
+	}
+	return from
 }
 
 func (p *Plugin) loadCustomPatterns(v any) {

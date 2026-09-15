@@ -199,6 +199,9 @@ func (p *Plugin) Emissions() []string {
 		"before:llm.response",
 		"llm.response",
 		"llm.stream.chunk",
+		"before:llm.stream.chunk",
+		"llm.stream.hold",
+		"llm.stream.retract",
 		"llm.stream.end",
 		"before:core.error",
 		"core.error",
@@ -790,7 +793,13 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestM
 	var model string
 	var finishReason string
 	turnID := ""
-	chunkIndex := 0
+	// pub is the gated path from this stream to the bus, created once the
+	// first chunk gives us a turn ID. Text goes through it rather than to
+	// bus.Emit directly so before:llm.stream.chunk can hold or block a delta
+	// before any UI sees it. Nil-safe, so a stream that yields no parsable
+	// chunk publishes nothing.
+	var pub *engine.StreamPublisher
+	defer func() { pub.Close() }()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -812,6 +821,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestM
 
 		if turnID == "" {
 			turnID = chunk.ID
+			pub = engine.NewStreamPublisher(p.bus, turnID, requestID)
 		}
 		if chunk.Model != "" {
 			model = chunk.Model
@@ -835,12 +845,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestM
 		// Text content delta.
 		if choice.Delta.Content != nil && *choice.Delta.Content != "" {
 			text := *choice.Delta.Content
+			// fullContent is the model's text verbatim; the publisher decides
+			// what of it reaches a UI. They diverge when a gate redacts or
+			// blocks, which is what lets the response-level hook still see
+			// what the model actually said.
 			fullContent.WriteString(text)
-			_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: text,
-				Index:  chunkIndex,
-				TurnID: turnID,
-			})
-			chunkIndex++
+			pub.Text(text)
 		}
 
 		// Tool call deltas.
@@ -886,12 +896,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestM
 			tc.Arguments = args.String()
 		}
 		toolCalls = append(toolCalls, *tc)
-
-		_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: tc,
-			Index:  chunkIndex,
-			TurnID: turnID,
-		})
-		chunkIndex++
+		pub.ToolCall(tc)
 	}
 
 	// Build final usage. Reasoning tokens arrive in the final usage chunk
@@ -907,6 +912,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, requestM
 	if mb := openaiModalityBreakdown(usage); len(mb) > 0 {
 		finalUsage.ModalityBreakdown = mb
 	}
+
+	// Settle the gated stream before announcing the end of it: Close gives a
+	// handler one last look at any tail it was holding, and releasing that
+	// tail after llm.stream.end would arrive out of order. The deferred Close
+	// above is the error-path backstop; this one fixes the ordering.
+	pub.Close()
 
 	// Emit stream end.
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: turnID,

@@ -36,6 +36,16 @@
             "id_format": {"type": "string", "description": "Session ID format: timestamp | datetime_short | uuid."}
           }
         },
+        "streaming": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "response_gate_policy": {
+              "type": "string",
+              "enum": ["downgrade", "allow"]
+            }
+          }
+        },
         "storage": {
           "type": "object",
           "additionalProperties": false,

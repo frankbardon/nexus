@@ -352,6 +352,73 @@ func (r *run) onStreamChunk(c events.StreamChunk) {
 	r.queue(agui.NewTextMessageContent(id, c.Content))
 }
 
+// onStreamHold reports that an output gate has suspended the stream, and its
+// release. AG-UI has no canonical verb for "paused for review", so this rides
+// the protocol's sanctioned escape hatch — a Custom event — rather than being
+// forced into a status or error frame that would mean something else. A client
+// that ignores it sees a stream that pauses and resumes, which is exactly what
+// happened.
+func (r *run) onStreamHold(h events.StreamHold) {
+	payload, err := json.Marshal(map[string]any{
+		"turnId":  h.TurnID,
+		"held":    h.Held,
+		"reason":  h.Reason,
+		"resumed": h.Resumed,
+	})
+	if err != nil {
+		return
+	}
+	r.queue(agui.NewCustom("nexus.stream.hold", payload))
+}
+
+// onStreamRetract disowns the text streamed for a turn an output gate blocked
+// mid-flight.
+//
+// AG-UI cannot un-send a TEXT_MESSAGE_CONTENT frame, so the retraction works
+// on the two things that can still be changed. The open text message is closed
+// and dropped from the run's accumulated messages, so it never reaches a
+// MESSAGES_SNAPSHOT: a client that re-syncs its conversation state — on
+// interrupt, on resume — sees a turn without the retracted text, which is the
+// state the gate intended. And a Custom event names what happened for clients
+// rendering the live stream, so they can strike the text themselves.
+//
+// textStreamed is cleared deliberately. It is the flag onOutput uses to
+// suppress a final output it believes was already rendered incrementally;
+// leaving it set would make onOutput swallow the substituted refusal and hand
+// the client a turn with nothing in it at all.
+func (r *run) onStreamRetract(rt events.StreamRetract) {
+	r.mu.Lock()
+	id := r.activeText
+	r.activeText = ""
+	r.streamBuf = ""
+	r.textStreamed = false
+	if id != "" {
+		kept := r.messages[:0]
+		for _, m := range r.messages {
+			if m.ID == id {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		r.messages = kept
+	}
+	r.mu.Unlock()
+
+	if id != "" {
+		r.queue(agui.NewTextMessageEnd(id))
+	}
+	payload, err := json.Marshal(map[string]any{
+		"turnId":      rt.TurnID,
+		"messageId":   id,
+		"releasedLen": rt.ReleasedLen,
+		"reason":      rt.Reason,
+	})
+	if err != nil {
+		return
+	}
+	r.queue(agui.NewCustom("nexus.stream.retract", payload))
+}
+
 // onStreamEnd closes any open streamed text message at the end of a single LLM
 // stream (one iteration may stream multiple times across turns).
 func (r *run) onStreamEnd(_ events.StreamEnd) {

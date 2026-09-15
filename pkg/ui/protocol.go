@@ -13,8 +13,18 @@ const (
 	TypeHITLResponse     = "hitl_response"
 
 	// Outbound (server -> client)
-	TypeOutput          = "output"
-	TypeStreamChunk     = "stream_chunk"
+	TypeOutput      = "output"
+	TypeStreamChunk = "stream_chunk"
+	// TypeStreamHold announces that an output gate has suspended the stream
+	// pending review, and (with resumed set) that it has released it again. A
+	// stream that simply goes quiet is indistinguishable from a hung turn, so
+	// a client renders a reviewing indicator rather than a stalled cursor.
+	TypeStreamHold = "stream_hold"
+	// TypeStreamRetract tells a client that an output gate blocked the stream
+	// mid-flight and the text rendered for that turn is disowned. A client
+	// that owns its render buffer should erase it; the replacement arrives as
+	// an ordinary output message.
+	TypeStreamRetract   = "stream_retract"
 	TypeStreamEnd       = "stream_end"
 	TypeStatus          = "status"
 	TypeApprovalRequest = "approval_request"

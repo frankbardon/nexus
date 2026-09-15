@@ -682,6 +682,8 @@ func (b *captureBus) Subscribe(_ string, _ engine.HandlerFunc, _ ...engine.Subsc
 }
 func (b *captureBus) SubscribeAll(_ engine.HandlerFunc) func()       { return func() {} }
 func (b *captureBus) SubscribeAllReplay(_ engine.HandlerFunc) func() { return func() {} }
+func (b *captureBus) HasSubscribers(_ string) bool                   { return false }
+
 func (b *captureBus) EmitVetoable(_ string, _ any) (engine.VetoResult, error) {
 	return engine.VetoResult{}, nil
 }

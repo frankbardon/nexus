@@ -67,6 +67,8 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "llm.stream.chunk", Priority: 50},
+		{EventType: "llm.stream.hold", Priority: 50},
+		{EventType: "llm.stream.retract", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "before:tool.invoke", Priority: 100}, // read-only, low priority
 		{EventType: "voice.audio.output.chunk", Priority: 50},
@@ -108,6 +110,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.hold", p.handleStreamHold, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.retract", p.handleStreamRetract, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:tool.invoke", p.handleBeforeToolInvoke,
 			engine.WithSource(pluginID), engine.WithPriority(100)),
@@ -153,6 +157,40 @@ func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
 		Type:    "stream.delta",
 		TurnID:  chunk.TurnID,
 		Content: chunk.Content,
+	})
+}
+
+// handleStreamHold tells voice and low-latency clients that an output gate
+// has suspended the stream, and when it releases. These clients react to
+// silence more aggressively than a chat UI does — a voice front-end may start
+// filling the gap — so an explicit pause signal matters more here, not less.
+func (p *Plugin) handleStreamHold(e engine.Event[any]) {
+	hold, ok := e.Payload.(events.StreamHold)
+	if !ok {
+		return
+	}
+	p.server.Broadcast(envelope{
+		Type:    "stream.hold",
+		TurnID:  hold.TurnID,
+		Held:    hold.Held,
+		Reason:  hold.Reason,
+		Resumed: hold.Resumed,
+	})
+}
+
+// handleStreamRetract disowns the deltas already sent for a turn whose stream
+// a gate blocked. What a client does with that is its own business: a text
+// client can erase, while a client that has already spoken the audio cannot.
+func (p *Plugin) handleStreamRetract(e engine.Event[any]) {
+	retract, ok := e.Payload.(events.StreamRetract)
+	if !ok {
+		return
+	}
+	p.server.Broadcast(envelope{
+		Type:        "stream.retract",
+		TurnID:      retract.TurnID,
+		ReleasedLen: retract.ReleasedLen,
+		Reason:      retract.Reason,
 	})
 }
 

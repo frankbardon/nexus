@@ -44,6 +44,15 @@ type envelope struct {
 	// "not set" from "explicit false" — Resumable=false matters to clients.
 	Resumable *bool `json:"resumable,omitempty"`
 
+	// stream.hold / stream.retract (server -> client). Held is the number of
+	// bytes an output gate is currently withholding; Resumed marks the edge
+	// out of a hold; ReleasedLen is how much text got out before a block.
+	// Reason carries the gate's explanation and never the withheld text.
+	Held        int    `json:"held,omitempty"`
+	Resumed     bool   `json:"resumed,omitempty"`
+	ReleasedLen int    `json:"released_len,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+
 	// hitl.request (server -> client) and approval (client -> server).
 	Prompt    string `json:"prompt,omitempty"`
 	RequestID string `json:"request_id,omitempty"`

@@ -473,6 +473,14 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// mean an event that neither the journal nor any IO surface ever sees.
 	e.publishSessionOwnerConflict()
 
+	// Reconcile streaming with whatever output gates the operator activated.
+	// Has to run after Lifecycle.Boot, because the decision is read off the
+	// active plugins' declared subscriptions. A no-op unless a plugin gates
+	// before:llm.response without gating before:llm.stream.chunk.
+	if unsub := installStreamPolicy(e.Bus, e.Lifecycle.Plugins(), e.Config.Core.Streaming.ResponseGatePolicy, e.Logger); unsub != nil {
+		e.runUnsubs = append(e.runUnsubs, unsub)
+	}
+
 	// Surface errors to the UI.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("core.error", func(event Event[any]) {
 		errInfo, ok := event.Payload.(events.ErrorInfo)

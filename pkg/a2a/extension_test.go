@@ -74,8 +74,8 @@ func TestNexusExtensionDeclaration(t *testing.T) {
 
 func TestNexusEventKinds(t *testing.T) {
 	kinds := NexusEventKinds()
-	if len(kinds) != 5 {
-		t.Fatalf("got %d kinds, want 5", len(kinds))
+	if len(kinds) != 6 {
+		t.Fatalf("got %d kinds, want 6", len(kinds))
 	}
 	kinds[0] = "mutated"
 	if NexusEventKinds()[0] != NexusEventKindThinking {
@@ -115,6 +115,10 @@ func TestNexusEventRoundTrip(t *testing.T) {
 			Model: "claude", InputTokens: 100, OutputTokens: 40,
 			CachedInputTokens: 60, ReasoningTokens: 10, TotalTokens: 140,
 		}).At(at).From("llm.response").Seq(5),
+		OutputGateEvent(testTaskID, testCtxID, NexusOutputGate{
+			State: NexusOutputGateBlocked, ReleasedLen: 42,
+			Reason: "Content safety (llm.stream.chunk): ssn",
+		}).At(at).From("llm.stream.retract").Seq(6),
 	}
 
 	for _, e := range events {

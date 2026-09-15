@@ -6,6 +6,8 @@ import "github.com/frankbardon/nexus/pkg/ui"
 
 type outputMsg struct{ ui.OutputMessage }
 type streamChunkMsg struct{ ui.StreamChunkMessage }
+type streamHoldMsg struct{ ui.StreamHoldMessage }
+type streamRetractMsg struct{ ui.StreamRetractMessage }
 type streamEndMsg struct{ ui.StreamEndMessage }
 type statusMsg struct{ ui.StatusMessage }
 type thinkingMsg struct{ ui.ThinkingMessage }

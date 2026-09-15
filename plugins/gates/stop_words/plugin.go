@@ -32,6 +32,7 @@ type Plugin struct {
 	caseSensitive    bool
 	message          string
 	scanLLMResponses bool
+	scanStream       bool
 
 	unsubs []func()
 }
@@ -55,6 +56,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	if v, ok := ctx.Config["scan_llm_responses"].(bool); ok {
 		p.scanLLMResponses = v
+	}
+	// Streaming follows scan_llm_responses by default. An operator who asked
+	// for responses to be gated wants that to survive streaming; without it
+	// the engine turns streaming off for this plugin instead (see
+	// engine.StreamUnsafePlugins), which is safe but costs every turn its
+	// time-to-first-token.
+	p.scanStream = p.scanLLMResponses
+	if v, ok := ctx.Config["scan_stream"].(bool); ok {
+		p.scanStream = v
 	}
 
 	// Load inline words.
@@ -83,11 +93,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				engine.WithPriority(10), engine.WithSource(pluginID)),
 		)
 	}
+	if p.scanStream {
+		p.unsubs = append(p.unsubs,
+			p.bus.Subscribe(engine.EventBeforeStreamChunk, p.handleBeforeStreamChunk,
+				engine.WithPriority(10), engine.WithSource(pluginID)),
+		)
+	}
 
 	p.logger.Info("stop words gate initialized",
 		"word_count", len(p.words),
 		"case_sensitive", p.caseSensitive,
-		"scan_llm_responses", p.scanLLMResponses)
+		"scan_llm_responses", p.scanLLMResponses,
+		"scan_stream", p.scanStream)
 	return nil
 }
 
@@ -116,6 +133,9 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// final ban check on the text that will actually ship.
 	if p.scanLLMResponses {
 		subs = append(subs, engine.EventSubscription{EventType: "before:llm.response", Priority: 10})
+	}
+	if p.scanStream {
+		subs = append(subs, engine.EventSubscription{EventType: engine.EventBeforeStreamChunk, Priority: 10})
 	}
 	return subs
 }
@@ -217,6 +237,84 @@ func (p *Plugin) handleBeforeLLMResponse(event engine.Event[any]) {
 		Vetoed: true,
 		Reason: fmt.Sprintf("Response contains prohibited term: %q", found),
 	}
+}
+
+// handleBeforeStreamChunk is the streaming counterpart of
+// handleBeforeLLMResponse. Without it, a veto at before:llm.response would
+// land after every token of the banned text had already been rendered; here
+// the text has not left the engine yet, so a block actually blocks.
+//
+// The gate matches whole tokens, which makes its hold rule exact rather than
+// heuristic: the trailing run of word characters is withheld on every
+// segment, because a trailing "FORBID" may yet become "FORBIDDEN". Once a
+// separator arrives the run is complete, can be judged, and is released. The
+// lag is one partial word.
+//
+// A stream cut here gets no replacement text. A stream has no substitute,
+// only an end; the operator's message reaches the user from
+// handleBeforeLLMResponse when the provider publishes the completed response.
+func (p *Plugin) handleBeforeStreamChunk(event engine.Event[any]) {
+	vp, ok := event.Payload.(*engine.VetoablePayload)
+	if !ok {
+		return
+	}
+	seg, ok := vp.Original.(*events.StreamSegment)
+	if !ok || seg.Content == "" {
+		return
+	}
+
+	// Hold the incomplete trailing token before judging anything, so no word
+	// is ever ruled on before the model has finished writing it.
+	seg.HoldFrom(trailingWordStart(seg.Content))
+
+	// Scan only the text that has not shipped, plus enough lookbehind for a
+	// word that straddles the boundary. findStopWord tokenizes, so feeding it
+	// the whole turn would re-report a word from an earlier segment that this
+	// handler has already let through — and cutting the stream over bytes
+	// already released helps nobody.
+	full := seg.Full()
+	from := seg.PendingOffset()
+	for from > 0 && isWordByte(full[from-1]) {
+		from--
+	}
+	found := p.findStopWord(full[from:])
+	if found == "" {
+		return
+	}
+
+	p.logger.Info("stop word found in llm.stream.chunk",
+		"word", found, "turn_id", seg.TurnID, "request_id", seg.RequestID,
+		"released_bytes", seg.PendingOffset())
+	vp.Veto = engine.VetoResult{
+		Vetoed: true,
+		Reason: fmt.Sprintf("Response contains prohibited term: %q", found),
+	}
+}
+
+// trailingWordStart returns the offset at which the trailing run of word
+// characters begins, or len(s) when s ends on a separator. It mirrors the
+// tokenizer in findStopWord: the run it identifies is exactly the token that
+// findStopWord would form if the stream stopped here, and that token is the
+// one that may still be incomplete.
+func trailingWordStart(s string) int {
+	i := len(s)
+	for i > 0 && isWordByte(s[i-1]) {
+		i--
+	}
+	return i
+}
+
+// isWordByte reports whether b continues a token under findStopWord's
+// splitting rule. ASCII-only, matching that tokenizer: a multi-byte rune is
+// a separator to both, so the two stay consistent.
+func isWordByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	case b == '\'' || b == '-' || b == '_':
+		return true
+	}
+	return false
 }
 
 // findStopWord scans text for any banned word. Returns the matched word or "".

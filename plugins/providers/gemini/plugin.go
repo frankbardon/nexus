@@ -176,6 +176,9 @@ func (p *Plugin) Emissions() []string {
 		"before:llm.response",
 		"llm.response",
 		"llm.stream.chunk",
+		"before:llm.stream.chunk",
+		"llm.stream.hold",
+		"llm.stream.retract",
 		"llm.stream.end",
 		"thinking.step",
 		"tool.invoke",
@@ -1066,7 +1069,11 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 	// per stream. TUI keys streaming bubbles on TurnID; an empty value would
 	// collapse all turns into a single bubble.
 	turnID := generateTurnID()
-	chunkIndex := 0
+	// pub is the gated path from this stream to the bus. Text goes through it
+	// rather than to bus.Emit directly so before:llm.stream.chunk can hold or
+	// block a delta before any UI sees it.
+	pub := engine.NewStreamPublisher(p.bus, turnID, requestID)
+	defer pub.Close()
 	toolCallSeq := 0
 	// Signatures accumulate across chunks alongside toolCallSeq, so a signature
 	// is keyed by the same call ID the ToolCallRequest ends up with even when
@@ -1122,12 +1129,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 				})
 
 			case part.Text != "":
+				// fullContent is the model's text verbatim; the publisher
+				// decides what of it reaches a UI. They diverge when a gate
+				// redacts or blocks, which is what lets the response-level
+				// hook still see what the model actually said.
 				fullContent.WriteString(part.Text)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: part.Text,
-					Index:  chunkIndex,
-					TurnID: turnID,
-				})
-				chunkIndex++
+				pub.Text(part.Text)
 
 			case part.FunctionCall != nil:
 				args, _ := json.Marshal(part.FunctionCall.Args)
@@ -1137,11 +1144,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 					Arguments: string(args),
 				}
 				toolCalls = append(toolCalls, tc)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, ToolCall: &tc,
-					Index:  chunkIndex,
-					TurnID: turnID,
-				})
-				chunkIndex++
+				pub.ToolCall(&tc)
 				toolCallSeq++
 
 			case part.ExecutableCode != nil:
@@ -1149,11 +1152,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 				lang := part.ExecutableCode.Language
 				snippet := fmt.Sprintf("\n```%s\n%s\n```\n", strings.ToLower(lang), code)
 				fullContent.WriteString(snippet)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: snippet,
-					Index:  chunkIndex,
-					TurnID: turnID,
-				})
-				chunkIndex++
+				pub.Text(snippet)
 				_ = p.bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, Name: "_gemini_code_execution",
 					Arguments: map[string]any{"language": lang, "code": code},
 				})
@@ -1163,11 +1162,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 				outcome := part.CodeExecutionResult.Outcome
 				snippet := fmt.Sprintf("\n```output\n%s\n```\n", out)
 				fullContent.WriteString(snippet)
-				_ = p.bus.Emit("llm.stream.chunk", events.StreamChunk{SchemaVersion: events.StreamChunkVersion, Content: snippet,
-					Index:  chunkIndex,
-					TurnID: turnID,
-				})
-				chunkIndex++
+				pub.Text(snippet)
 				toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, Name: "_gemini_code_execution",
 					Output: out,
 				}
@@ -1193,6 +1188,12 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 	if mb := geminiModalityBreakdown(&totalUsage); len(mb) > 0 {
 		finalUsage.ModalityBreakdown = mb
 	}
+
+	// Settle the gated stream before announcing the end of it: Close gives a
+	// handler one last look at any tail it was holding, and releasing that
+	// tail after llm.stream.end would arrive out of order. The deferred Close
+	// above is the error-path backstop; this one fixes the ordering.
+	pub.Close()
 
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{SchemaVersion: events.StreamEndVersion, TurnID: turnID,
 		FinishReason: finishReason,

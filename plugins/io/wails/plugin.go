@@ -94,6 +94,8 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.output", Priority: 50},
 		{EventType: "llm.stream.chunk", Priority: 50},
+		{EventType: "llm.stream.hold", Priority: 50},
+		{EventType: "llm.stream.retract", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "io.output.clear", Priority: 50},
 		{EventType: "io.status", Priority: 50},
@@ -272,6 +274,8 @@ func (p *Plugin) initLegacy() {
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.output", p.handleOutput, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.chunk", p.handleStreamChunk, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.hold", p.handleStreamHold, engine.WithSource(pluginID)),
+		p.bus.Subscribe("llm.stream.retract", p.handleStreamRetract, engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.stream.end", p.handleStreamEnd, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.output.clear", p.handleOutputClear, engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.status", p.handleStatus, engine.WithSource(pluginID)),
@@ -350,6 +354,38 @@ func (p *Plugin) handleStreamChunk(e engine.Event[any]) {
 		Content: chunk.Content,
 		TurnID:  chunk.TurnID,
 		Index:   chunk.Index,
+	})
+}
+
+// handleStreamHold surfaces a stream an output gate has suspended pending
+// review, and its release. Without it a gate deliberating over a held tail
+// looks exactly like a hung turn from the user's side.
+func (p *Plugin) handleStreamHold(e engine.Event[any]) {
+	hold, ok := e.Payload.(events.StreamHold)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendStreamHold(ui.StreamHoldMessage{
+		TurnID:  hold.TurnID,
+		Held:    hold.Held,
+		Reason:  hold.Reason,
+		Resumed: hold.Resumed,
+	})
+}
+
+// handleStreamRetract disowns the text rendered for a turn whose stream a
+// gate blocked mid-flight. This transport owns its render buffer, so the
+// retraction is real rather than advisory: the partial text is erased and the
+// substituted response arrives afterwards as an ordinary io.output.
+func (p *Plugin) handleStreamRetract(e engine.Event[any]) {
+	retract, ok := e.Payload.(events.StreamRetract)
+	if !ok {
+		return
+	}
+	_ = p.adapter.SendStreamRetract(ui.StreamRetractMessage{
+		TurnID:      retract.TurnID,
+		ReleasedLen: retract.ReleasedLen,
+		Reason:      retract.Reason,
 	})
 }
 

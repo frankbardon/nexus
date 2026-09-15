@@ -155,6 +155,36 @@ func usageEvent(taskID, contextID string, resp events.LLMResponse) a2a.NexusEven
 	}).From("llm.response")
 }
 
+// outputGateHoldEvent renders an output gate suspending or releasing the
+// model's stream.
+func outputGateHoldEvent(taskID, contextID string, h events.StreamHold) a2a.NexusEvent {
+	state := a2a.NexusOutputGateHeld
+	if h.Resumed {
+		state = a2a.NexusOutputGateReleased
+	}
+	return a2a.OutputGateEvent(taskID, contextID, a2a.NexusOutputGate{
+		State:  state,
+		Held:   h.Held,
+		Reason: h.Reason,
+	}).From("llm.stream.hold")
+}
+
+// outputGateBlockEvent renders an output gate ending the model's stream.
+//
+// Nothing is retracted from the task itself, and nothing needs to be: this
+// transport publishes one response artifact at turn end, built from the text
+// that survived the output gates, so a blocked stream never reached the client
+// in the first place. What the client would otherwise lack is the knowledge
+// that the answer it receives is a substitution — indistinguishable, without
+// this, from a model that simply chose to refuse.
+func outputGateBlockEvent(taskID, contextID string, r events.StreamRetract) a2a.NexusEvent {
+	return a2a.OutputGateEvent(taskID, contextID, a2a.NexusOutputGate{
+		State:       a2a.NexusOutputGateBlocked,
+		ReleasedLen: r.ReleasedLen,
+		Reason:      r.Reason,
+	}).From("llm.stream.retract")
+}
+
 // hasUsage reports whether a response carries token accounting worth reporting.
 // A provider that reported nothing produces no usage event, rather than a frame
 // full of zeros a client would have to special-case.

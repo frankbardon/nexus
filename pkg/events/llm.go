@@ -2,13 +2,16 @@ package events
 
 // Schema-version constants for llm.* payloads. See doc.go.
 const (
-	LLMRequestVersion   = 1
-	LLMResponseVersion  = 1
-	StreamChunkVersion  = 1
-	StreamEndVersion    = 1
-	BatchSubmitVersion  = 1
-	BatchStatusVersion  = 1
-	BatchResultsVersion = 1
+	LLMRequestVersion    = 1
+	LLMResponseVersion   = 1
+	StreamChunkVersion   = 1
+	StreamEndVersion     = 1
+	StreamSegmentVersion = 1
+	StreamHoldVersion    = 1
+	StreamRetractVersion = 1
+	BatchSubmitVersion   = 1
+	BatchStatusVersion   = 1
+	BatchResultsVersion  = 1
 )
 
 // ToolChoice controls which tools the LLM is allowed or required to use.
@@ -218,6 +221,152 @@ type StreamChunk struct {
 	ToolCall *ToolCallRequest // partial tool call
 	Index    int
 	TurnID   string
+}
+
+// StreamSegment is the vetoable payload of "before:llm.stream.chunk". It is
+// offered to handlers by engine.StreamPublisher once per candidate text
+// release, before any of that text reaches the bus as an llm.stream.chunk.
+//
+// This is the streaming counterpart of before:llm.response, and it exists
+// because a veto at end-of-stream cannot unsay text a UI has already
+// rendered. A handler here adjudicates text that has not left the engine
+// yet, so a block is real prevention rather than a retraction — including
+// for transports whose wire protocol has no retraction verb.
+//
+// Handlers have four moves, in increasing severity:
+//
+//   - Pass. Return without touching the payload. Content is emitted
+//     verbatim; with no handler subscribed this is byte-for-byte the
+//     chunking the provider produced.
+//
+//   - Redact. Rewrite Content in place. The rewritten text is what the bus
+//     (and every UI) sees; the stream continues.
+//
+//   - Suspend. Set Hold to the number of trailing bytes of Content that must
+//     not be released yet. The publisher withholds them and re-offers them,
+//     prepended to the next delta, on the following segment. This is how a
+//     handler defers a decision it cannot yet make — a trailing "123-45-"
+//     that may or may not become a credit card number — without either
+//     leaking it or blocking the whole turn. A handler may hold the same
+//     text across arbitrarily many segments, but only while segments keep
+//     arriving: the publisher's final flush ignores Hold, so a handler still
+//     undecided at end of stream must release or block, not defer.
+//
+//   - Block. Set VetoablePayload.Veto. Nothing more is emitted for this
+//     turn: the publisher drops the held text, emits llm.stream.retract, and
+//     swallows every later delta. The provider still accumulates the real
+//     text and still publishes it through engine.PublishLLMResponse, so the
+//     response-level gate substitutes as it does today.
+//
+// Because Hold is honored before anything is emitted, a handler that holds a
+// window at least as long as its longest pattern can never be defeated by a
+// pattern straddling a delta boundary: the publisher only releases a byte
+// once the handler has seen that byte plus its full hold window.
+type StreamSegment struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	TurnID    string
+	RequestID string
+	// Index is the sequence number the resulting llm.stream.chunk will carry.
+	Index int
+
+	// Released is every byte of this turn's text already emitted as
+	// llm.stream.chunk, post-redaction. It is lookbehind only: it has left
+	// the engine and mutating it does nothing. Handlers scan Full() rather
+	// than Content so a pattern spanning the boundary is still visible.
+	Released string
+
+	// Content is the candidate release. Handlers may rewrite it to redact.
+	Content string
+
+	// Hold is the number of trailing bytes of Content to withhold. The
+	// publisher takes the maximum across handlers and clamps it to
+	// len(Content). Bytes held are re-offered on the next segment.
+	Hold int
+}
+
+// Full returns the turn's text as it would read if Content were released:
+// everything already emitted, plus the candidate. Handlers scan this so a
+// pattern straddling a delta boundary is matched whole, and use
+// PendingOffset to tell which matches they can still act on.
+func (s *StreamSegment) Full() string { return s.Released + s.Content }
+
+// PendingOffset is the index into Full() at which Content begins. A match
+// ending at or after this offset is still preventable; one ending before it
+// has already been emitted and only a block (plus a best-effort
+// llm.stream.retract) can address it.
+func (s *StreamSegment) PendingOffset() int { return len(s.Released) }
+
+// HoldFrom asks the publisher to withhold Content from byte offset i to the
+// end. It is the form handlers actually want — "defer everything from where
+// the suspicious run starts" — and it composes, since the publisher keeps
+// the largest hold any handler asked for. Offsets are into Content, not
+// Full(); out-of-range values are clamped.
+func (s *StreamSegment) HoldFrom(i int) {
+	if i < 0 {
+		i = 0
+	}
+	if i > len(s.Content) {
+		return
+	}
+	if h := len(s.Content) - i; h > s.Hold {
+		s.Hold = h
+	}
+}
+
+// StreamHold announces both edges of a suspended stream on
+// "llm.stream.hold". A UI that renders nothing while a gate is deliberating
+// is indistinguishable from a hung turn, so the publisher says so rather
+// than simply going quiet.
+//
+// Resumed is false on the edge into a hold and true on the edge out of one.
+// Every hold is followed by exactly one of: a resume, an llm.stream.retract,
+// or the turn's llm.stream.end (a hold still standing when the stream closes
+// is released by the publisher's final flush, which emits the resume edge).
+type StreamHold struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	TurnID    string
+	RequestID string
+	// Held is the number of bytes currently withheld. Zero on the resume
+	// edge.
+	Held int
+	// Reason is the handler-supplied explanation, when one was given. Never
+	// contains the withheld text — see the warning on
+	// engine.PublishLLMResponse about routing blocked content through a
+	// reason string.
+	Reason string
+	// Resumed distinguishes the edge out of a hold from the edge into one.
+	Resumed bool
+}
+
+// StreamRetract is published on "llm.stream.retract" when a
+// before:llm.stream.chunk handler blocks a stream mid-flight. It tells
+// transports that the text they have rendered for this turn is disowned.
+//
+// What a transport can do with it varies, and the difference is worth being
+// honest about. A transport that owns its render buffer (TUI, browser,
+// Wails) can erase the released prefix outright. A transport speaking a
+// protocol with no retraction verb can only signal: nexus.io.agui emits an
+// AG-UI CustomEvent and closes the text message; nexus.io.a2a replaces the
+// streamed artifact in place, which the A2A artifact-update semantics
+// permit. None of them can recall what a human already read.
+//
+// That residue is bounded, not eliminated, and bounding it is what
+// StreamSegment.Hold is for: text a handler held was never released, so a
+// gate that holds its full pattern window has nothing to retract.
+type StreamRetract struct {
+	SchemaVersion int `json:"_schema_version"`
+
+	TurnID    string
+	RequestID string
+	// ReleasedLen is how many bytes of this turn's text had already been
+	// emitted when the block landed — the size of the residue a transport is
+	// being asked to disown.
+	ReleasedLen int
+	// Reason is the vetoing handler's VetoResult.Reason. Like every veto
+	// reason it must not quote the blocked text.
+	Reason string
 }
 
 // StreamEnd signals the completion of a streaming LLM response.

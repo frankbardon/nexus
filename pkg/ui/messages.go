@@ -29,6 +29,26 @@ type StreamChunkMessage struct {
 	Index   int    `json:"index"`
 }
 
+// StreamHoldMessage carries both edges of a suspended stream: Resumed is
+// false when a gate starts withholding text and true when it releases it.
+// Held is the number of bytes currently withheld, and is zero on the resume
+// edge.
+type StreamHoldMessage struct {
+	TurnID  string `json:"turn_id"`
+	Held    int    `json:"held"`
+	Reason  string `json:"reason,omitempty"`
+	Resumed bool   `json:"resumed"`
+}
+
+// StreamRetractMessage disowns the text already rendered for a turn whose
+// stream an output gate blocked. ReleasedLen is how many bytes got out before
+// the block landed — the size of what the client is being asked to erase.
+type StreamRetractMessage struct {
+	TurnID      string `json:"turn_id"`
+	ReleasedLen int    `json:"released_len"`
+	Reason      string `json:"reason,omitempty"`
+}
+
 // StreamEndMessage signals the end of a streaming response.
 type StreamEndMessage struct {
 	TurnID   string         `json:"turn_id"`

@@ -8,6 +8,7 @@
     "case_sensitive": {"type": "boolean", "description": "Match words case-sensitively."},
     "message":        {"type": "string",  "description": "Message returned/logged on a match."},
     "scan_llm_responses": {"type": "boolean", "description": "Also scan raw model output via before:llm.response, before the agent loop consumes it. A match drops the response's tool calls. Default false."},
+    "scan_stream": {"type": "boolean", "description": "Also scan each text delta via before:llm.stream.chunk, before it is released, so a banned word under streaming is never shown rather than retracted afterwards. Defaults to scan_llm_responses; without it the engine turns streaming off for this plugin (core.streaming.response_gate_policy)."},
     "words": {
       "description": "Inline word list; either []string or a single string.",
       "oneOf": [

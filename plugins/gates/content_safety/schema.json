@@ -17,6 +17,8 @@
     "check_ip_internal":        {"type": "boolean", "description": "Detect internal IPv4 addresses."},
     "scan_tool_results":        {"type": "boolean", "description": "Also scan tool.result output via before:tool.result. Default false."},
     "scan_llm_responses":       {"type": "boolean", "description": "Also scan raw model output via before:llm.response, before the agent loop consumes it. In block mode the substituted response carries no tool calls. Default false."},
+    "scan_stream":              {"type": "boolean", "description": "Also scan each text delta via before:llm.stream.chunk, before it is released, so flagged text under streaming is never shown rather than retracted afterwards. Defaults to scan_llm_responses; without it the engine turns streaming off for this plugin (core.streaming.response_gate_policy)."},
+    "stream_hold_back":         {"type": "integer", "minimum": 0, "description": "Minimum trailing bytes of each candidate release to withhold, on top of the always-on trailing-token rule. Only needed for a custom_patterns entry that spans whitespace. Costs that many bytes of streaming lag. Default 0."},
     "custom_patterns": {
       "type": "array",
       "items": {"type": "string"},

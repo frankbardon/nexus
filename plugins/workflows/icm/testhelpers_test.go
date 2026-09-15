@@ -68,6 +68,7 @@ func (b *recordingBus) Subscribe(eventType string, handler engine.HandlerFunc, _
 	}
 }
 
+func (b *recordingBus) HasSubscribers(_ string) bool                   { return false }
 func (b *recordingBus) SubscribeAll(_ engine.HandlerFunc) func()       { return func() {} }
 func (b *recordingBus) SubscribeAllReplay(_ engine.HandlerFunc) func() { return func() {} }
 
