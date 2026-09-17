@@ -336,7 +336,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if err := p.auth.applyAuth(reqCtx, httpReq, p.client); err != nil {
+		if err := p.auth.applyAuth(reqCtx, httpReq); err != nil {
 			return nil, fmt.Errorf("apply auth: %w", err)
 		}
 		return httpReq, nil

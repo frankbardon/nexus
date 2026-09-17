@@ -2,22 +2,11 @@ package gemini
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
-	"sync"
-	"time"
+
+	"github.com/frankbardon/nexus/pkg/nexuscreds"
 )
 
 // authMode determines how requests are authenticated and routed.
@@ -28,7 +17,19 @@ const (
 	authModeVertex authMode = "vertex"  // Vertex AI on Google Cloud
 )
 
-// authState holds resolved auth configuration and cached credentials.
+// defaultCredentialSource is the nexuscreds source used when the config names
+// none. It is google-adc so a GKE deployment running under Workload Identity
+// needs no credential config at all: no key file exists on such a pod, and the
+// whole point of the default is that the operator does not have to say so.
+const defaultCredentialSource = "google-adc"
+
+// authState holds resolved auth configuration and, in Vertex mode, the
+// credential source requests are signed with.
+//
+// It deliberately holds no token, no expiry and no mutex. Minting, caching and
+// refreshing an access token all belong to the nexuscreds.Source — which for
+// google-adc is an oauth2.TokenSource that already does each of them, for every
+// Google credential type rather than only for a service-account key file.
 type authState struct {
 	mode authMode
 
@@ -36,17 +37,17 @@ type authState struct {
 	apiKey string
 
 	// Vertex path.
-	saEmail   string
-	saKey     *rsa.PrivateKey
 	projectID string
 	location  string // e.g. "us-central1"
-
-	mu          sync.Mutex
-	tokenCache  string
-	tokenExpiry time.Time
+	creds     nexuscreds.Source
 }
 
 // resolveAuth reads auth config and returns a configured authState.
+//
+// Vertex credentials are resolved here, at plugin Init, so a misconfigured
+// deployment fails at boot with a clear error rather than on its first LLM
+// call. Resolution is construction only: nexuscreds.Factory forbids network
+// I/O, which matters because this runs before the plugin's HTTP client exists.
 func resolveAuth(cfg map[string]any) (*authState, error) {
 	mode := authModeAPIKey
 	if v, ok := cfg["auth"].(string); ok {
@@ -96,39 +97,61 @@ func resolveAuth(cfg map[string]any) (*authState, error) {
 		}
 		a.location = loc
 
-		var saJSON []byte
-		if path, ok := cfg["service_account_json"].(string); ok && path != "" {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return nil, fmt.Errorf("gemini: read service_account_json: %w", err)
-			}
-			saJSON = data
-		} else {
-			envVar, _ := cfg["service_account_json_env"].(string)
-			if envVar == "" {
-				envVar = "GOOGLE_APPLICATION_CREDENTIALS"
-			}
-			if path := os.Getenv(envVar); path != "" {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					return nil, fmt.Errorf("gemini: read %s=%s: %w", envVar, path, err)
-				}
-				saJSON = data
-			}
-		}
-		if saJSON == nil {
-			return nil, fmt.Errorf("gemini: vertex auth requires service_account_json or service_account_json_env")
-		}
-
-		email, key, err := parseServiceAccountJSON(saJSON)
+		source, err := resolveCredentials(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("gemini: parse service account: %w", err)
+			return nil, err
 		}
-		a.saEmail = email
-		a.saKey = key
+		a.creds = source
 	}
 
 	return a, nil
+}
+
+// resolveCredentials opens the nexuscreds source named by the credentials key.
+//
+// The error from an unknown name is passed through rather than reworded:
+// nexuscreds.Open already says that the binary must blank-import the package
+// registering the source, and lists what this build does have, which is the
+// actionable half of the message.
+func resolveCredentials(cfg map[string]any) (nexuscreds.Source, error) {
+	name := defaultCredentialSource
+	if raw, ok := cfg["credentials"]; ok {
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("gemini: credentials must be a string naming a credential source, got %T", raw)
+		}
+		if s != "" {
+			name = s
+		}
+	}
+
+	source, err := nexuscreds.Open(name, credentialSourceConfig(cfg))
+	if err != nil {
+		return nil, fmt.Errorf("gemini: vertex auth: %w", err)
+	}
+	return source, nil
+}
+
+// credentialSourceConfig builds the config block handed to the credential
+// source.
+//
+// The two key-file keys predate the nexuscreds seam and are kept verbatim so no
+// existing deployment has to edit its YAML: they are simply forwarded to the
+// source, which owns what they mean. They are forwarded individually rather
+// than by passing the plugin's whole config map, so a source can never observe
+// — or collide with — an unrelated gemini key such as api_key.
+//
+// A key absent from the config is left absent rather than forwarded empty:
+// google-adc distinguishes "not configured" (run the full ADC chain, the
+// keyless-pod case) from "configured to something empty".
+func credentialSourceConfig(cfg map[string]any) map[string]any {
+	out := make(map[string]any, 2)
+	for _, key := range []string{"service_account_json", "service_account_json_env"} {
+		if v, ok := cfg[key]; ok {
+			out[key] = v
+		}
+	}
+	return out
 }
 
 // apiURL builds the request URL for a model + operation.
@@ -152,17 +175,21 @@ func (a *authState) apiURL(model, op string) string {
 	}
 }
 
-// applyAuth attaches credentials to an outgoing request. For Vertex it may
-// fetch and cache a fresh OAuth2 token.
-func (a *authState) applyAuth(ctx context.Context, req *http.Request, httpClient *http.Client) error {
+// applyAuth attaches credentials to an outgoing request. In Vertex mode it asks
+// the credential source for a token on every request and does not cache the
+// answer: caching is the source's contract, not the caller's.
+func (a *authState) applyAuth(ctx context.Context, req *http.Request) error {
 	switch a.mode {
 	case authModeAPIKey:
 		req.Header.Set("x-goog-api-key", a.apiKey)
 		return nil
 	case authModeVertex:
-		token, err := a.vertexToken(ctx, httpClient)
+		if a.creds == nil {
+			return fmt.Errorf("gemini: vertex auth has no credential source")
+		}
+		token, err := a.creds.Token(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("gemini: vertex credentials: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		return nil
@@ -189,119 +216,4 @@ func (a *authState) cachedContentsURL() string {
 	default:
 		return "https://generativelanguage.googleapis.com/v1beta/cachedContents"
 	}
-}
-
-// vertexToken returns a valid OAuth2 access token, minting a new one if
-// needed. Tokens are cached in-memory until expiry minus 60s skew.
-func (a *authState) vertexToken(ctx context.Context, client *http.Client) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.tokenCache != "" && time.Now().Before(a.tokenExpiry) {
-		return a.tokenCache, nil
-	}
-
-	jwt, err := a.signJWT()
-	if err != nil {
-		return "", fmt.Errorf("sign JWT: %w", err)
-	}
-
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
-	form.Set("assertion", jwt)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token exchange failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var tr struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("parse token response: %w", err)
-	}
-	if tr.AccessToken == "" {
-		return "", fmt.Errorf("empty access_token in response: %s", string(body))
-	}
-
-	a.tokenCache = tr.AccessToken
-	expiresIn := time.Duration(tr.ExpiresIn) * time.Second
-	if expiresIn <= 0 {
-		expiresIn = 1 * time.Hour
-	}
-	a.tokenExpiry = time.Now().Add(expiresIn - 60*time.Second)
-
-	return a.tokenCache, nil
-}
-
-// signJWT mints an RS256-signed JWT bearer assertion for Google's token endpoint.
-func (a *authState) signJWT() (string, error) {
-	header := map[string]string{"alg": "RS256", "typ": "JWT"}
-	headerJSON, _ := json.Marshal(header)
-
-	now := time.Now().Unix()
-	claims := map[string]any{
-		"iss":   a.saEmail,
-		"scope": "https://www.googleapis.com/auth/cloud-platform",
-		"aud":   "https://oauth2.googleapis.com/token",
-		"exp":   now + 3600,
-		"iat":   now,
-	}
-	claimsJSON, _ := json.Marshal(claims)
-
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." +
-		base64.RawURLEncoding.EncodeToString(claimsJSON)
-
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, a.saKey, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", err
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
-}
-
-// parseServiceAccountJSON extracts client_email and the private RSA key.
-func parseServiceAccountJSON(data []byte) (string, *rsa.PrivateKey, error) {
-	var sa struct {
-		ClientEmail string `json:"client_email"`
-		PrivateKey  string `json:"private_key"`
-	}
-	if err := json.Unmarshal(data, &sa); err != nil {
-		return "", nil, fmt.Errorf("decode JSON: %w", err)
-	}
-	if sa.ClientEmail == "" || sa.PrivateKey == "" {
-		return "", nil, fmt.Errorf("missing client_email or private_key")
-	}
-
-	block, _ := pem.Decode([]byte(sa.PrivateKey))
-	if block == nil {
-		return "", nil, fmt.Errorf("invalid PEM in private_key")
-	}
-
-	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return sa.ClientEmail, k, nil
-	}
-	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse private_key: %w", err)
-	}
-	rsaKey, ok := k.(*rsa.PrivateKey)
-	if !ok {
-		return "", nil, fmt.Errorf("private_key is not RSA")
-	}
-	return sa.ClientEmail, rsaKey, nil
 }

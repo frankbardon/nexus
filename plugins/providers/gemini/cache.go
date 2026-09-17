@@ -276,7 +276,7 @@ func (p *Plugin) createCachedContentAt(ctx context.Context, url, model, system s
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if err := p.auth.applyAuth(ctx, req, p.client); err != nil {
+	if err := p.auth.applyAuth(ctx, req); err != nil {
 		return "", err
 	}
 
