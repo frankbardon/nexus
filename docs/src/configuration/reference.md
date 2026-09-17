@@ -1372,10 +1372,12 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `debug`                      | bool   | `false`                                          | Persist request/response bodies. |
 | `api_key`                    | string | *(env `GEMINI_API_KEY` or `GOOGLE_API_KEY`)*     | Public Generative Language API key. |
 | `api_key_env`                | string | *(tries both env vars above)*                    | Override the env var name. |
-| `vertex.project`             | string | *(env `GOOGLE_CLOUD_PROJECT`)*                   | Project ID for Vertex AI. |
-| `vertex.region` / `location` | string | `us-central1`                                    | Vertex region. |
-| `vertex.sa_key_file`         | string | *(env `GOOGLE_APPLICATION_CREDENTIALS`)*         | Service-account JSON path. |
-| `vertex.sa_key_file_env`     | string | `GOOGLE_APPLICATION_CREDENTIALS`                 | Override the env var name. |
+| `auth`                       | string | `api_key`                                        | `api_key` (public Generative Language API) or `vertex` (Vertex AI). |
+| `credentials`                | string | `google-adc`                                     | Vertex only: name of a registered `nexuscreds` credential source. Ignored under `auth: api_key`. |
+| `project_id`                 | string | *(env `GOOGLE_CLOUD_PROJECT`, then metadata)*    | Vertex project. Resolved config → `GOOGLE_CLOUD_PROJECT` → metadata server; fails at `Init` only if all three miss. |
+| `location`                   | string | *(GCE zone-derived region, then `us-central1`)*  | Vertex region. Resolved config → region derived from this process's GCE zone → `us-central1`. |
+| `service_account_json`       | string | *(unset — full ADC chain)*                       | Vertex only: path to a credentials JSON file. Forwarded to the credential source, not parsed by the provider. |
+| `service_account_json_env`   | string | *(unset — full ADC chain)*                       | Vertex only: env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through. |
 | `thinking.enabled`           | bool   | `false`                                          | Enable thinking on Gemini 2.5+. |
 | `thinking.budget_tokens`     | int    | `8000`                                           | Thinking token budget. |
 | `thinking.include_thoughts`  | bool   | `true`                                           | Surface thinking via `thinking.step`. |
@@ -1385,6 +1387,27 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `cache.ttl`                  | string | `5m`                                             | Cache TTL: `5m` or `1h`. |
 | `retry.*`                    | —      | *(shared Retry block)*                           | Backoff configuration. |
 | `pricing.<model>.*`          | map    | *(embedded table)*                               | Override per-model pricing. |
+
+On GKE with Workload Identity, `auth: vertex` alone is a complete Vertex
+configuration — no project, no location, no key. `project_id` and `location` come
+from the pod's own GCE metadata, and `credentials` defaults to `google-adc`, which
+runs the full Application Default Credentials chain
+(`GOOGLE_APPLICATION_CREDENTIALS`, the well-known `gcloud` file, then the metadata
+server) when neither `service_account_json` nor `service_account_json_env` is set.
+The provider mints one token during `Init`, so a broken binding fails the boot
+rather than the first turn.
+
+`credentials` names a source registered with `pkg/nexuscreds`, not an auth mode.
+`bin/nexus`, `bin/nexus-broker` and the reference desktop app blank-import
+`google-adc`; a custom binary must blank-import the package that registers whichever
+source it names, or boot fails with an error naming the source and listing the
+sources the build actually carries.
+
+Vertex model availability is per-region. A pod that derives its region from its own
+zone can therefore land in a region where the configured model is not served, and
+that fails at first inference with a 404 — not at boot, because there is no
+boot-time availability probe by design. Set `location` explicitly wherever the model
+choice matters.
 
 ### `nexus.provider.fallback`
 
