@@ -3,6 +3,7 @@ module github.com/frankbardon/nexus
 go 1.26.0
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	codeberg.org/readeck/go-readability/v2 v2.1.2
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -34,7 +35,6 @@ require (
 )
 
 require (
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
