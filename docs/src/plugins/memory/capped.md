@@ -42,6 +42,15 @@ Maintains a sliding window of conversation messages and persists them to the ses
 - Oldest messages are dropped when the buffer is full
 - If `persist: true`, each message is appended to `context/conversation.jsonl` as it arrives
 - On `memory.compacted`, the buffer is replaced with the compacted messages
+- An `llm.response` produced by an internal sub-flow is **not** recorded. The
+  filter reads `task_kind` off the response metadata, and the skipped set is
+  `plan`, `classify`, `summarise`, `compact`, `subagent` and `delegate` — each
+  of those loops keeps a history of its own. The main agent loops
+  (`react_main`, `planexec_step`, `orchestrator_decompose`,
+  `orchestrator_synthesize`) are deliberately absent because they *are* the
+  conversation. Recording a sub-flow's tool-calling response leaves two
+  consecutive assistant turns in the user-facing history, which Gemini rejects
+  with `400 INVALID_ARGUMENT`.
 
 ## Querying History
 

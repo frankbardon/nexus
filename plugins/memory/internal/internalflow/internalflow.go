@@ -1,6 +1,6 @@
 // Package internalflow centralises the predicate every memory plugin
 // uses to skip recording assistant messages produced by internal sub-flows
-// (planner, classifier router, summariser, compaction, subagent).
+// (planner, classifier router, summariser, compaction, subagent, delegate).
 //
 // The earlier predicate — "skip when LLMResponse.Metadata[\"_source\"] is
 // non-empty" — was correct until Idea 09 (#83) made every agent main
@@ -25,7 +25,18 @@ var internalTaskKinds = map[string]bool{
 	"summarise": true, // summary_buffer / compaction summary call
 	"compact":   true, // explicit compaction
 	"subagent":  true, // subagent has its own scratch history
+	"delegate":  true, // delegated sub-session keeps its own history
 }
+
+// The delegate entry was missing until a topology of
+// parent -> delegate -> sub-agent shipped: pkg/delegate runs its own
+// in-process history and stamps task_kind "delegate", but the capped
+// memory recorded those responses into the TOP-LEVEL history anyway. The
+// parent's history then read user -> assistant(delegate call) ->
+// assistant(sub-agent tool call), and Gemini rejects a model turn carrying
+// a functionCall that immediately follows another model turn with
+// 400 INVALID_ARGUMENT. nexus.agent.react never saw it because react
+// filters on _source instead; this set is the asymmetry.
 
 // SkipForHistory returns true when the response metadata indicates an
 // internal sub-flow whose output must not be recorded as part of the

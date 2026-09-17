@@ -18,6 +18,11 @@ func TestSkipForHistory(t *testing.T) {
 		{"classify_skipped", map[string]any{"task_kind": "classify"}, true},
 		{"compact_skipped", map[string]any{"task_kind": "compact"}, true},
 		{"subagent_skipped", map[string]any{"task_kind": "subagent"}, true},
+		// pkg/delegate stamps this on every LLM request it makes inside a
+		// sub-session (pkg/delegate/runtime.go, requestLLM). The sub-session
+		// keeps its own history; recording it in the parent's produced two
+		// consecutive assistant turns and a Gemini 400.
+		{"delegate_skipped", map[string]any{"task_kind": "delegate", "_source": "delegate.sub-1", "posture": "data"}, true},
 		{"unknown_kind_records", map[string]any{"task_kind": "future_agent"}, false},
 		{"source_alone_records", map[string]any{"_source": "nexus.agent.react"}, false},
 	}

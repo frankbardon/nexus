@@ -108,6 +108,22 @@ plugins:
       (analyst, summarizer, auditor, ...).
 ```
 
+## History isolation
+
+A sub-session runs its own in-process history and contributes nothing to the
+parent's conversation. Every `llm.request` the runtime makes is stamped
+`_source: "delegate.<sub_session_id>"` and `task_kind: "delegate"`, and the two
+consumers filter on different halves of that: `nexus.agent.react` ignores a
+response whose `_source` is not its own, and the memory plugins skip
+`task_kind: "delegate"` (`plugins/memory/internal/internalflow`).
+
+Both halves are load-bearing. The `task_kind` entry was missing until this
+predicate gained it, so a sub-agent's tool-calling response was recorded into
+the top-level history and the parent's next request carried two consecutive
+assistant turns — which Gemini rejects with `400 INVALID_ARGUMENT` ("function
+call turn comes immediately after a user turn"). A memory plugin added outside
+this repository must apply the same predicate.
+
 ## Causation
 
 Every event emitted from inside a sub-session carries the sub-agent's
