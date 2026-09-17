@@ -537,9 +537,17 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 			})
 
 		case "assistant":
+			// Echo Gemini 3.x thought signatures back on the parts they were
+			// captured from — required for multi-turn function calling (HTTP
+			// 400 otherwise); absent for 2.5-era turns, which carry none.
+			sigs := messageThoughtSignatures(msg)
 			var parts []map[string]any
 			if msg.Content != "" {
-				parts = append(parts, map[string]any{"text": msg.Content})
+				part := map[string]any{"text": msg.Content}
+				if sig := sigs[textSigKey]; sig != "" {
+					part["thoughtSignature"] = sig
+				}
+				parts = append(parts, part)
 			}
 			for _, tc := range msg.ToolCalls {
 				var args any
@@ -550,12 +558,16 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 				} else {
 					args = map[string]any{}
 				}
-				parts = append(parts, map[string]any{
+				part := map[string]any{
 					"functionCall": map[string]any{
 						"name": tc.Name,
 						"args": args,
 					},
-				})
+				}
+				if sig := sigs[tc.ID]; sig != "" {
+					part["thoughtSignature"] = sig
+				}
+				parts = append(parts, part)
 				toolCallNames[tc.ID] = tc.Name
 			}
 			if len(parts) == 0 {
@@ -688,8 +700,16 @@ type apiContent struct {
 }
 
 type apiPart struct {
-	Text                string             `json:"text,omitempty"`
-	Thought             bool               `json:"thought,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Thought bool   `json:"thought,omitempty"`
+	// ThoughtSignature is Gemini 3.x's opaque reasoning signature. When a
+	// model turn carries one (on a functionCall part, or on the final text
+	// part), it MUST be echoed back verbatim on that same part in every
+	// subsequent request of the exchange — otherwise generateContent rejects
+	// the request with HTTP 400 "Function call is missing a thought_signature"
+	// (see https://ai.google.dev/gemini-api/docs/thought-signatures). 2.5-era
+	// models neither emit nor require it, so round-tripping is version-safe.
+	ThoughtSignature    string             `json:"thoughtSignature,omitempty"`
 	FunctionCall        *apiFunctionCall   `json:"functionCall,omitempty"`
 	ExecutableCode      *apiExecutableCode `json:"executableCode,omitempty"`
 	CodeExecutionResult *apiCodeExecResult `json:"codeExecutionResult,omitempty"`
@@ -745,7 +765,10 @@ func (p *Plugin) handleSyncResponse(body io.Reader, requestID string, meta map[s
 
 	resp := p.convertAPIResponse(apiResp, generateTurnID())
 	resp.RequestID = requestID
-	resp.Metadata = meta
+	// Merge the passthrough request metadata instead of overwriting: convert
+	// may have stashed provider round-trip data (gemini_thought_signatures).
+	// Passthrough wins on key collision, matching the Anthropic provider.
+	resp.Metadata = mergeMetadata(resp.Metadata, meta)
 	resp.Tags = tags
 
 	if err := p.bus.Emit("llm.response", resp); err != nil {
@@ -761,6 +784,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 	var content strings.Builder
 	var toolCalls []events.ToolCallRequest
 	var finishReason string
+	sigs := map[string]string{}
 	model := apiResp.ModelVersion
 
 	if len(apiResp.Candidates) > 0 {
@@ -769,6 +793,7 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 
 		toolCallSeq := 0
 		for _, part := range cand.Content.Parts {
+			recordThoughtSignature(sigs, part, toolCallSeq)
 			switch {
 			case part.Thought && part.Text != "":
 				_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
@@ -832,7 +857,84 @@ func (p *Plugin) convertAPIResponse(apiResp apiResponse, turnID string) events.L
 		CostUSD:      p.costForModel(model, usage),
 		Model:        model,
 		FinishReason: finishReason,
+		Metadata:     thoughtSignatureMetadata(sigs),
 	}
+}
+
+// thoughtSigMetaKey is the Message/LLMResponse Metadata key carrying Gemini
+// 3.x thought signatures across a turn boundary: a map of tool-call ID (or
+// "_text" for a signature on a plain text part) -> opaque signature. Memory
+// plugins forward it onto the stored assistant Message (like Anthropic's
+// thinking_blocks) so convertMessages can echo each signature back.
+const thoughtSigMetaKey = "gemini_thought_signatures"
+
+// textSigKey indexes a signature carried on a non-functionCall part.
+const textSigKey = "_text"
+
+// recordThoughtSignature captures part's thought signature into sigs, keyed
+// by the tool-call ID the part is about to be assigned (functionCall parts)
+// or textSigKey otherwise. seq must be the toolCallSeq BEFORE the part is
+// processed, mirroring the ID synthesis in the callers.
+func recordThoughtSignature(sigs map[string]string, part apiPart, seq int) {
+	if part.ThoughtSignature == "" {
+		return
+	}
+	if part.FunctionCall != nil {
+		sigs[fmt.Sprintf("call_%d_%s", seq, part.FunctionCall.Name)] = part.ThoughtSignature
+		return
+	}
+	sigs[textSigKey] = part.ThoughtSignature
+}
+
+// thoughtSignatureMetadata wraps a non-empty signature map for LLMResponse
+// Metadata; nil when there is nothing to carry.
+func thoughtSignatureMetadata(sigs map[string]string) map[string]any {
+	if len(sigs) == 0 {
+		return nil
+	}
+	return map[string]any{thoughtSigMetaKey: sigs}
+}
+
+// mergeMetadata lays overlay's keys over base (overlay wins on collision),
+// treating nil maps as empty. Returns nil when both are empty.
+func mergeMetadata(base, overlay map[string]any) map[string]any {
+	if len(overlay) == 0 {
+		return base
+	}
+	if len(base) == 0 {
+		return overlay
+	}
+	out := make(map[string]any, len(base)+len(overlay))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
+}
+
+// messageThoughtSignatures reads the signature map back off a stored assistant
+// Message. Session persistence round-trips Metadata through JSON, so the map
+// may come back as map[string]any — both shapes are accepted.
+func messageThoughtSignatures(msg events.Message) map[string]string {
+	raw, ok := msg.Metadata[thoughtSigMetaKey]
+	if !ok {
+		return nil
+	}
+	switch m := raw.(type) {
+	case map[string]string:
+		return m
+	case map[string]any:
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			if s, ok := v.(string); ok && s != "" {
+				out[k] = s
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // generateTurnID returns a synthetic per-stream identifier. Gemini's API does
@@ -853,6 +955,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 	var finishReason string
 	var model string
 	var totalUsage apiUsageMetadata
+	sigs := map[string]string{}
 	// Gemini's stream payloads have no native turn ID, so we synthesize one
 	// per stream. TUI keys streaming bubbles on TurnID; an empty value would
 	// collapse all turns into a single bubble.
@@ -893,6 +996,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 		}
 
 		for _, part := range cand.Content.Parts {
+			recordThoughtSignature(sigs, part, toolCallSeq)
 			switch {
 			case part.Thought && part.Text != "":
 				_ = p.bus.Emit("thinking.step", events.ThinkingStep{SchemaVersion: events.ThinkingStepVersion, TurnID: turnID,
@@ -989,7 +1093,7 @@ func (p *Plugin) handleStreamResponse(body io.Reader, requestID string, meta map
 		CostUSD:       p.costForModel(model, finalUsage),
 		Model:         model,
 		FinishReason:  finishReason,
-		Metadata:      meta,
+		Metadata:      mergeMetadata(thoughtSignatureMetadata(sigs), meta),
 		Tags:          tags,
 	})
 }

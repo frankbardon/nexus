@@ -89,6 +89,10 @@ nexus.llm.gemini:
 
 Response parts with `thought: true` are emitted as `thinking.step` events (`Source: nexus.llm.gemini`, `Phase: reasoning`) and are excluded from `LLMResponse.Content`. Every `thinking.step` event lands in the per-session journal automatically — read it via `journal.Writer.SubscribeProjection` (live) or `journal.ProjectFile` (post-mortem). `usageMetadata.thoughtsTokenCount` is mirrored into `events.Usage.ReasoningTokens`.
 
+### Thought signatures (Gemini 3.x)
+
+Gemini 3.x models attach an opaque `thoughtSignature` to model parts in a function-calling exchange and reject any follow-up request that does not echo each signature back on the part it arrived with (HTTP 400 `Function call is missing a thought_signature`). The provider round-trips them automatically: signatures are captured per part in both the sync and streaming paths, carried as `LLMResponse.Metadata["gemini_thought_signatures"]` (a map of tool-call ID → signature; `"_text"` keys a signature on a plain text part), forwarded onto the stored assistant `Message` by the memory plugins (the same vehicle as Anthropic's `thinking_blocks`), and re-attached to the matching parts on the next request. No configuration is involved; 2.5-era models emit no signatures and are unaffected.
+
 ### Multimodal
 
 `events.Message.Parts` (text, image, audio, video, file) is serialized into Gemini parts. Inline payloads up to 18 MB use `inlineData` with base64 bytes; larger payloads must be uploaded via the Files API and referenced by URI (`fileData.fileUri`). Provider falls back to `Content` only when `Parts` is empty, so existing text-only callers are unaffected.

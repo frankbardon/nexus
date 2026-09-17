@@ -226,8 +226,16 @@ func forwardMessageMetadata(src map[string]any) map[string]any {
 		return nil
 	}
 	var out map[string]any
-	if v, ok := src["thinking_blocks"]; ok {
-		out = map[string]any{"thinking_blocks": v}
+	// Provider round-trip keys: Anthropic extended-thinking blocks and Gemini
+	// 3.x thought signatures — both must be echoed back on the assistant turn
+	// that follows a tool result or the provider rejects the request (400).
+	for _, key := range []string{"thinking_blocks", "gemini_thought_signatures"} {
+		if v, ok := src[key]; ok {
+			if out == nil {
+				out = map[string]any{}
+			}
+			out[key] = v
+		}
 	}
 	return out
 }
