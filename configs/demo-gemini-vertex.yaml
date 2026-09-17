@@ -1,16 +1,30 @@
-# Demo: Gemini provider via Vertex AI (service-account auth)
+# Demo: Gemini provider via Vertex AI (Application Default Credentials)
 #
 # Run:
 #   bin/nexus -config configs/demo-gemini-vertex.yaml
 #
-# Prerequisites:
-#   - GOOGLE_CLOUD_PROJECT set, or override project_id below.
-#   - GOOGLE_APPLICATION_CREDENTIALS pointing to a service-account JSON key,
-#     or override service_account_json below. The key must have roles/aiplatform.user.
+# Credentials come from the "google-adc" source, which runs Google's ADC chain:
+# an explicitly configured key file, then GOOGLE_APPLICATION_CREDENTIALS, then
+# the well-known gcloud file, then the GCE metadata server. Whichever identity
+# wins needs roles/aiplatform.user.
+#
+# Two ways to run this:
+#
+#   A. Keyless (GKE Workload Identity, GCE, Cloud Run). Configure nothing but
+#      auth: vertex — project_id and location come from the pod's own metadata,
+#      and the metadata server mints the token. `location` is pinned below
+#      anyway, because Vertex model availability is per-region and a derived
+#      region can 404 on a model served only elsewhere.
+#
+#   B. Key file (a laptop, or anywhere off GCP). Set GOOGLE_CLOUD_PROJECT, and
+#      either export GOOGLE_APPLICATION_CREDENTIALS or uncomment the
+#      service_account_json line below.
 #
 # What to test:
-#   1. Boot: provider mints OAuth2 token via signed JWT exchange. Watch logs
-#      for the first request — token cache should keep subsequent calls fast.
+#   1. Boot: the provider mints one token during Init and logs a single INFO
+#      line, "vertex credentials confirmed", carrying credential_source,
+#      project, location and location_source. A broken credential fails the
+#      boot, not the first turn.
 #   2. URL routing: requests go to {location}-aiplatform.googleapis.com, NOT
 #      generativelanguage.googleapis.com.
 core:
@@ -33,10 +47,13 @@ plugins:
     - nexus.memory.capped
 
   nexus.llm.gemini:
+    # Case A needs nothing beyond these two lines.
     auth: vertex
     location: us-central1
-    # project_id: your-project        # falls back to GOOGLE_CLOUD_PROJECT
-    # service_account_json: /path/to/sa.json  # falls back to GOOGLE_APPLICATION_CREDENTIALS
+
+    # Case B: uncomment either or both.
+    # project_id: your-project                # else GOOGLE_CLOUD_PROJECT, else GCE metadata
+    # service_account_json: /path/to/sa.json  # else the rest of the ADC chain
 
   nexus.agent.react:
     system_prompt: You are a conversationalist, always respond in a helpful manner.
