@@ -37,6 +37,17 @@ type Plugin struct {
 	// tool_use_ids it didn't generate.
 	internalCallIDs map[string]struct{}
 
+	// conversationTurnID is the TurnID of the turn this buffer belongs to,
+	// learned from a tool.invoke whose ID a recorded assistant message
+	// declared — the only calls the conversation itself made. Every other
+	// TurnID on the bus belongs to a sub-flow with a history of its own
+	// (pkg/delegate stamps "delegate_<sub_session>"; the subagent plugin
+	// mints its own), and a result carrying one is filtered out below.
+	// Empty until learned, and the filter is inert while it is: a buffer
+	// that has never recorded a tool-calling assistant turn cannot tell
+	// whose turn anything is, and guessing would drop real results.
+	conversationTurnID string
+
 	maxMessages int
 	persist     bool
 }
@@ -217,19 +228,46 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	})
 }
 
-// handleToolInvoke only tracks the internal-call filter; the invocation
-// itself is already represented on the prior assistant message's ToolCalls
-// field, so we don't append anything here.
+// handleToolInvoke tracks the internal-call filter and learns which turn the
+// conversation is on; the invocation itself is already represented on the
+// prior assistant message's ToolCalls field, so we don't append anything here.
 func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	tc, ok := e.Payload.(events.ToolCall)
 	if !ok {
 		return
+	}
+	// A call whose ID a recorded assistant message declared is one the
+	// conversation itself asked for, so its TurnID is the conversation's.
+	// Read before the write so the RLock inside declaresToolCall is not
+	// taken under p.mu.
+	if tc.TurnID != "" && p.declaresToolCall(tc.ID) {
+		p.mu.Lock()
+		p.conversationTurnID = tc.TurnID
+		p.mu.Unlock()
 	}
 	if tc.ParentCallID != "" {
 		p.mu.Lock()
 		p.internalCallIDs[tc.ID] = struct{}{}
 		p.mu.Unlock()
 	}
+}
+
+// declaresToolCall reports whether some assistant message already in the
+// buffer asked for this tool call by ID.
+func (p *Plugin) declaresToolCall(id string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, msg := range p.messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			if tc.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Plugin) handleToolResult(e engine.Event[any]) {
@@ -243,7 +281,20 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 		p.mu.Unlock()
 		return
 	}
+	conversationTurn := p.conversationTurnID
 	p.mu.Unlock()
+
+	// A result from another turn came from a sub-flow that keeps its own
+	// history — a delegated sub-agent, a subagent run, an ICM stage. Its
+	// ToolCallID was never declared by any assistant message in THIS
+	// conversation, so recording it leaves a tool-role message the provider
+	// cannot pair with a tool call and the model never asked for. This is
+	// the same guard nexus.agent.react applies to its pending-call count,
+	// and it is deliberately inert on an empty TurnID, exactly as that one
+	// is: an engine caller may drive the tool bus with no turn at all.
+	if conversationTurn != "" && result.TurnID != "" && result.TurnID != conversationTurn {
+		return
+	}
 
 	content := result.Output
 	if result.Error != "" {

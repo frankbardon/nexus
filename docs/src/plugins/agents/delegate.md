@@ -124,6 +124,19 @@ assistant turns — which Gemini rejects with `400 INVALID_ARGUMENT` ("function
 call turn comes immediately after a user turn"). A memory plugin added outside
 this repository must apply the same predicate.
 
+The sub-agent's **tool calls** need a second, separate guard, because they are
+dispatched on the shared bus and carry no LLM metadata to filter on. Every
+`tool.invoke` and `tool.result` inside a sub-session carries
+`TurnID: "delegate_<sub_session_id>"`, and `nexus.memory.capped` records a
+result only when its `TurnID` is the conversation's own — otherwise the parent's
+history grows a `tool` message whose `ToolCallID` no assistant turn ever
+declared, which Gemini maps to a `functionResponse` naming a function the
+request never called. The filter is on the turn rather than on
+`ToolCall.ParentCallID` deliberately: `pkg/delegate` is also entered from
+`plugins/workflows/icm` with no parent tool call in scope, so stamping a parent
+call id at the `delegate` tool would have closed one entry point and left the
+others open.
+
 ## Causation
 
 Every event emitted from inside a sub-session carries the sub-agent's

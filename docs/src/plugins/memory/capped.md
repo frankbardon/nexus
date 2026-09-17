@@ -51,6 +51,16 @@ Maintains a sliding window of conversation messages and persists them to the ses
   conversation. Recording a sub-flow's tool-calling response leaves two
   consecutive assistant turns in the user-facing history, which Gemini rejects
   with `400 INVALID_ARGUMENT`.
+- A `tool.result` is recorded only when it belongs to the conversation's own
+  turn. Sub-flows dispatch their tools on the same bus, so the buffer learns
+  the conversation's `TurnID` from a `tool.invoke` whose ID a recorded
+  assistant message declared, and drops a result carrying any other. Without
+  it the history grew a `tool` message whose `ToolCallID` no assistant turn
+  had asked for. The filter is **inert** until that turn is known and on a
+  result with an empty `TurnID` — an engine caller may drive the tool bus with
+  no turn at all — which is the same posture `nexus.agent.react` takes on its
+  pending-call count. The existing `ParentCallID` filter still applies
+  independently, for sub-calls fired from inside another tool.
 
 ## Querying History
 
