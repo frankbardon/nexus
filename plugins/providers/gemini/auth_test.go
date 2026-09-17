@@ -17,13 +17,11 @@ import (
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/nexuscreds"
-
-	// Side-effect import: registers the "google-adc" credential source so the
-	// Vertex tests below can open it by name. Only the test binary imports it —
-	// the shipped gemini code opens sources through the nexuscreds registry and
-	// must never depend on a particular one.
-	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
+
+// The "google-adc" credential source the Vertex tests below open by name is
+// registered as a side effect of auth.go's own import of googleadc, which it
+// needs for the GCE metadata helpers — so no blank import is required here.
 
 func TestResolveAuth_APIKey(t *testing.T) {
 	a, err := resolveAuth(map[string]any{"api_key": "test-key"})
@@ -95,6 +93,8 @@ func TestAPIURL_VertexEndpoint(t *testing.T) {
 // --- Vertex credential wiring -------------------------------------------------
 
 func TestResolveAuth_Vertex_DefaultsToGoogleADC(t *testing.T) {
+	pinNotOnGCE(t)
+
 	a, err := resolveAuth(map[string]any{"auth": "vertex", "project_id": "myproj"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
@@ -111,13 +111,151 @@ func TestResolveAuth_Vertex_DefaultsToGoogleADC(t *testing.T) {
 }
 
 func TestResolveAuth_Vertex_RequiresProjectID(t *testing.T) {
+	pinNotOnGCE(t)
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
 	_, err := resolveAuth(map[string]any{"auth": "vertex"})
 	if err == nil {
 		t.Fatal("expected an error when no project is configured")
 	}
 	if !strings.Contains(err.Error(), "project_id") {
 		t.Fatalf("error should name project_id, got %v", err)
+	}
+}
+
+// TestResolveAuth_Vertex_BootsFromMetadataAlone is the pod-identity case: a
+// config saying nothing GCP-specific beyond the auth mode must boot, with both
+// the project and the location coming off the metadata server. It is the one
+// test here that runs the real googleadc + metadata-library path rather than
+// pinning it.
+func TestResolveAuth_Vertex_BootsFromMetadataAlone(t *testing.T) {
+	newFakeMetadata(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	a, err := resolveAuth(map[string]any{"auth": "vertex"})
+	if err != nil {
+		t.Fatalf("resolveAuth with only auth: vertex should boot on GCE, got %v", err)
+	}
+	if a.projectID != testMetadataProjectID {
+		t.Fatalf("projectID = %q, want %q from the metadata server", a.projectID, testMetadataProjectID)
+	}
+	if a.location != testMetadataRegion {
+		t.Fatalf("location = %q, want %q derived from zone %q", a.location, testMetadataRegion, testMetadataZone)
+	}
+	if a.creds == nil {
+		t.Fatal("vertex mode resolved without a credential source")
+	}
+}
+
+// --- project_id resolution chain ----------------------------------------------
+
+func TestResolveProjectID_PrefersConfigOverEnvAndMetadata(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+
+	got, err := resolveProjectID(map[string]any{"project_id": "config-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "config-project" {
+		t.Fatalf("project = %q, want the configured value to win", got)
+	}
+}
+
+func TestResolveProjectID_FallsBackToTheEnvVar(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+
+	got, err := resolveProjectID(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "env-project" {
+		t.Fatalf("project = %q, want the env var to win over metadata", got)
+	}
+}
+
+func TestResolveProjectID_FallsBackToTheMetadataServer(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	got, err := resolveProjectID(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "metadata-project" {
+		t.Fatalf("project = %q, want the metadata server's answer", got)
+	}
+}
+
+func TestResolveProjectID_FailsOnlyWhenEveryStepFails(t *testing.T) {
+	pinNotOnGCE(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	_, err := resolveProjectID(map[string]any{})
+	if err == nil {
+		t.Fatal("expected an error when config, env and metadata all fail")
+	}
+	if !strings.Contains(err.Error(), "project_id") {
+		t.Fatalf("error should name project_id, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "GOOGLE_CLOUD_PROJECT") {
+		t.Fatalf("error should name the env var, got %v", err)
+	}
+}
+
+// A metadata server that answers with an error is a different situation from
+// one that does not exist, and the reason must survive into the boot failure.
+func TestResolveProjectID_SurfacesAMetadataServerError(t *testing.T) {
+	pinMetadataProjectID(t, "", errors.New("metadata server returned 500"))
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	_, err := resolveProjectID(map[string]any{})
+	if err == nil {
+		t.Fatal("expected an error when the metadata server fails")
+	}
+	if !strings.Contains(err.Error(), "metadata server returned 500") {
+		t.Fatalf("underlying error should survive wrapping, got %v", err)
+	}
+}
+
+// --- location resolution chain ------------------------------------------------
+
+func TestResolveLocation_PrefersConfigOverMetadata(t *testing.T) {
+	pinMetadataRegion(t, "europe-west4", nil)
+
+	got := resolveLocation(map[string]any{"location": "asia-northeast1"})
+	if got != "asia-northeast1" {
+		t.Fatalf("location = %q, want the configured value to win", got)
+	}
+}
+
+func TestResolveLocation_DerivesTheRegionFromTheMetadataServer(t *testing.T) {
+	pinMetadataRegion(t, "europe-west4", nil)
+
+	got := resolveLocation(map[string]any{})
+	if got != "europe-west4" {
+		t.Fatalf("location = %q, want the region derived from this pod's zone", got)
+	}
+}
+
+func TestResolveLocation_FallsBackToTheDefaultWhenNotOnGCE(t *testing.T) {
+	pinNotOnGCE(t)
+
+	got := resolveLocation(map[string]any{})
+	if got != "us-central1" {
+		t.Fatalf("location = %q, want the us-central1 default off GCE", got)
+	}
+}
+
+// A metadata server that exists but cannot answer must not fail the boot: the
+// location has a usable default, unlike the project.
+func TestResolveLocation_FallsBackToTheDefaultOnAMetadataError(t *testing.T) {
+	pinMetadataRegion(t, "", errors.New("metadata server returned 500"))
+
+	got := resolveLocation(map[string]any{})
+	if got != "us-central1" {
+		t.Fatalf("location = %q, want the us-central1 default, got a failure instead", got)
 	}
 }
 

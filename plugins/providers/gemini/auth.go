@@ -2,11 +2,23 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/nexuscreds"
+
+	// googleadc is imported for its GCE metadata helpers only — the project and
+	// region this pod runs in. Those are facts about the environment, not about
+	// credentials, which is why reaching for them here does not undo the
+	// registry seam below: the token this plugin signs with is still opened by
+	// name through nexuscreds, so no particular credential implementation is
+	// compiled in by the signing path. The cost of the import is that a binary
+	// containing this plugin now links google-adc — and therefore registers it
+	// — whether or not it blank-imports the package itself.
+	"github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
 
 // authMode determines how requests are authenticated and routed.
@@ -22,6 +34,31 @@ const (
 // needs no credential config at all: no key file exists on such a pod, and the
 // whole point of the default is that the operator does not have to say so.
 const defaultCredentialSource = "google-adc"
+
+// defaultVertexLocation is the location used when neither the config nor the
+// GCE metadata server can say where this process runs.
+const defaultVertexLocation = "us-central1"
+
+// metadataTimeout bounds each GCE metadata lookup made while resolving auth.
+// These run during plugin Init, so an unreachable metadata server must not be
+// able to hang boot indefinitely — on a host that is not on GCE the helpers
+// return without any request at all, so this only bites where the metadata
+// server exists but is wedged.
+const metadataTimeout = 5 * time.Second
+
+// The GCE metadata lookups are reached through variables rather than called
+// directly so tests can pin them.
+//
+// The reason is memoisation, not style: metadata.OnGCE — which googleadc
+// consults before every lookup — fixes its answer in a package-level sync.Once
+// on the first call in a process, and with GCE_METADATA_HOST unset that call
+// probes the real 169.254.169.254. A test that needs "not on GCE" therefore
+// cannot get there by clearing an environment variable. googleadc pins its own
+// onGCE for exactly this reason; this package pins one level up.
+var (
+	metadataProjectID = googleadc.ProjectID
+	metadataRegion    = googleadc.Region
+)
 
 // authState holds resolved auth configuration and, in Vertex mode, the
 // credential source requests are signed with.
@@ -82,20 +119,12 @@ func resolveAuth(cfg map[string]any) (*authState, error) {
 		}
 
 	case authModeVertex:
-		project, _ := cfg["project_id"].(string)
-		if project == "" {
-			project = os.Getenv("GOOGLE_CLOUD_PROJECT")
-		}
-		if project == "" {
-			return nil, fmt.Errorf("gemini: vertex auth requires project_id config or GOOGLE_CLOUD_PROJECT env var")
+		project, err := resolveProjectID(cfg)
+		if err != nil {
+			return nil, err
 		}
 		a.projectID = project
-
-		loc, _ := cfg["location"].(string)
-		if loc == "" {
-			loc = "us-central1"
-		}
-		a.location = loc
+		a.location = resolveLocation(cfg)
 
 		source, err := resolveCredentials(cfg)
 		if err != nil {
@@ -105,6 +134,67 @@ func resolveAuth(cfg map[string]any) (*authState, error) {
 	}
 
 	return a, nil
+}
+
+// resolveProjectID resolves the Vertex project through three steps, in order:
+// the project_id config key, the GOOGLE_CLOUD_PROJECT environment variable,
+// and the GCE metadata server.
+//
+// The last step is what lets a GKE deployment configure nothing GCP-specific
+// beyond auth: vertex. A pod already knows which project it belongs to, and
+// making an operator repeat that in YAML is a chance to get it wrong. It comes
+// last so an explicit setting always wins over the environment it happens to
+// run in, and googleadc.ProjectID answers ErrNotOnGCE without a request when
+// this process is not on GCE, so a non-GCP host pays no network probe.
+//
+// Failure is still fatal at Init, because a Vertex URL cannot be built without
+// a project — but now only when every step has failed, rather than whenever
+// the config key was absent.
+func resolveProjectID(cfg map[string]any) (string, error) {
+	if v, _ := cfg["project_id"].(string); v != "" {
+		return v, nil
+	}
+	if v := os.Getenv("GOOGLE_CLOUD_PROJECT"); v != "" {
+		return v, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
+	defer cancel()
+
+	project, err := metadataProjectID(ctx)
+	switch {
+	case err == nil:
+		return project, nil
+	case errors.Is(err, googleadc.ErrNotOnGCE):
+		return "", fmt.Errorf("gemini: vertex auth requires project_id config or GOOGLE_CLOUD_PROJECT env var (this process is not on GCE, so the metadata server could not supply one)")
+	default:
+		return "", fmt.Errorf("gemini: vertex auth has no project_id config and no GOOGLE_CLOUD_PROJECT env var, and the GCE metadata server could not supply one: %w", err)
+	}
+}
+
+// resolveLocation resolves the Vertex location through the location config
+// key, then the region this process runs in as derived from the GCE metadata
+// server's zone, then defaultVertexLocation.
+//
+// Unlike the project, an unresolvable location is not fatal: there is a usable
+// default, and the deployment is better served by booting than by refusing to.
+// Note the accepted risk that follows from deriving it: Vertex model
+// availability is per-region, so a pod in a quiet region may resolve its own
+// region and then 404 on a model served only elsewhere — at first inference,
+// not at boot. The mitigation is documentation, deliberately not a boot-time
+// availability probe.
+func resolveLocation(cfg map[string]any) string {
+	if v, _ := cfg["location"].(string); v != "" {
+		return v
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
+	defer cancel()
+
+	if region, err := metadataRegion(ctx); err == nil {
+		return region
+	}
+	return defaultVertexLocation
 }
 
 // resolveCredentials opens the nexuscreds source named by the credentials key.
