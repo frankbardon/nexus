@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -51,6 +52,28 @@ const defaultVertexLocation = "us-central1"
 // server exists but is wedged.
 const metadataTimeout = 5 * time.Second
 
+// credentialProbeTimeout bounds the single token mint made at Init to prove
+// the Vertex credential actually works. It is looser than metadataTimeout
+// because the mint may be a full OAuth2 exchange with a public Google endpoint
+// — DNS, TLS and a round trip — rather than a link-local metadata read, but it
+// is bounded all the same: this runs on the boot path, and a wedged token
+// endpoint must fail the boot rather than hang it.
+const credentialProbeTimeout = 20 * time.Second
+
+// locationOrigin names which rung of the location chain answered.
+//
+// It exists for the boot log alone. resolveLocation falls back silently, so
+// without this an operator reading "us-central1" cannot tell a deliberate
+// configuration from a metadata server that failed and left the default
+// standing — two very different deployments that produce the same word.
+type locationOrigin string
+
+const (
+	locationFromConfig   locationOrigin = "config"
+	locationFromMetadata locationOrigin = "metadata"
+	locationFromDefault  locationOrigin = "default"
+)
+
 // The GCE metadata lookups are reached through variables rather than called
 // directly so tests can pin them.
 //
@@ -82,6 +105,13 @@ type authState struct {
 	projectID string
 	location  string // e.g. "us-central1"
 	creds     nexuscreds.Source
+
+	// credsName is the nexuscreds source name that was opened, and
+	// locationSource which rung of the location chain answered. Neither
+	// affects a request; both exist so confirmCredentials can say at boot
+	// where this process's auth came from.
+	credsName      string
+	locationSource locationOrigin
 }
 
 // resolveAuth reads auth config and returns a configured authState.
@@ -90,6 +120,10 @@ type authState struct {
 // deployment fails at boot with a clear error rather than on its first LLM
 // call. Resolution is construction only: nexuscreds.Factory forbids network
 // I/O, which matters because this runs before the plugin's HTTP client exists.
+//
+// Construction alone therefore only catches an unknown source name or an
+// unreadable key file. Proving that the credential can actually mint a token
+// is confirmCredentials' job, which Init calls straight after this.
 func resolveAuth(cfg map[string]any) (*authState, error) {
 	mode := authModeAPIKey
 	if v, ok := cfg["auth"].(string); ok {
@@ -129,13 +163,14 @@ func resolveAuth(cfg map[string]any) (*authState, error) {
 			return nil, err
 		}
 		a.projectID = project
-		a.location = resolveLocation(cfg)
+		a.location, a.locationSource = resolveLocation(cfg)
 
-		source, err := resolveCredentials(cfg)
+		source, name, err := resolveCredentials(cfg)
 		if err != nil {
 			return nil, err
 		}
 		a.creds = source
+		a.credsName = name
 	}
 
 	return a, nil
@@ -188,32 +223,37 @@ func resolveProjectID(cfg map[string]any) (string, error) {
 // region and then 404 on a model served only elsewhere — at first inference,
 // not at boot. The mitigation is documentation, deliberately not a boot-time
 // availability probe.
-func resolveLocation(cfg map[string]any) string {
+//
+// The origin returned alongside the location is not used to build any request
+// — it is reported in the boot log so the silence of that fallback is at least
+// visible once per process.
+func resolveLocation(cfg map[string]any) (string, locationOrigin) {
 	if v, _ := cfg["location"].(string); v != "" {
-		return v
+		return v, locationFromConfig
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
 	defer cancel()
 
 	if region, err := metadataRegion(ctx); err == nil {
-		return region
+		return region, locationFromMetadata
 	}
-	return defaultVertexLocation
+	return defaultVertexLocation, locationFromDefault
 }
 
-// resolveCredentials opens the nexuscreds source named by the credentials key.
+// resolveCredentials opens the nexuscreds source named by the credentials key
+// and returns it along with the name that won, which the boot log reports.
 //
 // The error from an unknown name is passed through rather than reworded:
 // nexuscreds.Open already says that the binary must blank-import the package
 // registering the source, and lists what this build does have, which is the
 // actionable half of the message.
-func resolveCredentials(cfg map[string]any) (nexuscreds.Source, error) {
+func resolveCredentials(cfg map[string]any) (nexuscreds.Source, string, error) {
 	name := defaultCredentialSource
 	if raw, ok := cfg["credentials"]; ok {
 		s, ok := raw.(string)
 		if !ok {
-			return nil, fmt.Errorf("gemini: credentials must be a string naming a credential source, got %T", raw)
+			return nil, "", fmt.Errorf("gemini: credentials must be a string naming a credential source, got %T", raw)
 		}
 		if s != "" {
 			name = s
@@ -222,9 +262,62 @@ func resolveCredentials(cfg map[string]any) (nexuscreds.Source, error) {
 
 	source, err := nexuscreds.Open(name, credentialSourceConfig(cfg))
 	if err != nil {
-		return nil, fmt.Errorf("gemini: vertex auth: %w", err)
+		return nil, "", fmt.Errorf("gemini: vertex auth: %w", err)
 	}
-	return source, nil
+	return source, name, nil
+}
+
+// confirmCredentials proves at boot that the resolved Vertex credential can
+// actually mint a token, and emits the one line that says so.
+//
+// The mint is the point. nexuscreds.Factory forbids network I/O at
+// construction, so resolveAuth on its own only catches an unknown source name
+// or an unreadable key file: a pod whose Workload Identity binding is broken —
+// the Kubernetes service account not annotated, or the Google service account
+// missing the workloadIdentityUser role — resolves perfectly cleanly and then
+// fails on the first user message, which is the worst possible place to learn
+// it. Asking the source for a token once here is what makes "fail fast at
+// Init" true rather than aspirational.
+//
+// It is a no-op in api_key mode: there is no credential to connect with, and
+// whether a key is accepted is not knowable without spending a real request.
+func (a *authState) confirmCredentials(ctx context.Context, logger *slog.Logger) error {
+	if a.mode != authModeVertex {
+		return nil
+	}
+	if a.creds == nil {
+		return fmt.Errorf("gemini: vertex auth has no credential source")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, credentialProbeTimeout)
+	defer cancel()
+
+	if _, err := a.creds.Token(ctx); err != nil {
+		return fmt.Errorf("gemini: vertex credential source %q could not obtain a token: %w", a.credsName, err)
+	}
+
+	// DELIBERATE LOGGING-RUBRIC EXCEPTION — do not demote this to DEBUG.
+	//
+	// docs/src/operations/logging.md places "config resolution / which branch
+	// was taken" at DEBUG and reserves INFO for lifecycle. This line reads
+	// like the former and is at INFO anyway, for two reasons: it fires exactly
+	// once per process, so it cannot become chatter, and it is the primary ops
+	// diagnostic for a pod that cannot authenticate. "Did a credential connect
+	// at all, and against which project and region" has to be answerable from
+	// default-level logs, because the deployment that needs the answer is the
+	// one nobody can turn DEBUG on for.
+	//
+	// What it deliberately does NOT say: the token, any key material, the
+	// credential type, or the principal the credential belongs to. It reports
+	// that a credential connected and which configured source supplied it —
+	// nothing about who. See the story note on the diagnostic given up there.
+	logger.Info("vertex credentials confirmed",
+		"credential_source", a.credsName,
+		"project", a.projectID,
+		"location", a.location,
+		"location_source", string(a.locationSource),
+	)
+	return nil
 }
 
 // credentialSourceConfig builds the config block handed to the credential

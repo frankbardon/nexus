@@ -2,11 +2,13 @@ package gemini
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"cloud.google.com/go/compute/metadata"
@@ -25,6 +27,8 @@ const (
 	testMetadataProjectID = "nexus-gemini-test-project"
 	testMetadataZone      = "europe-west4-b"
 	testMetadataRegion    = "europe-west4"
+	testMetadataSAEmail   = "nexus-agent@nexus-gemini-test-project.iam.gserviceaccount.com"
+	testMetadataToken     = "ya29.fake-metadata-token"
 )
 
 // TestMain pins the one piece of library state that cannot be un-set once it
@@ -77,13 +81,23 @@ func pinNotOnGCE(t *testing.T) {
 	pinMetadataRegion(t, "", gcemeta.ErrNotOnGCE)
 }
 
-// newFakeMetadata starts an httptest stand-in for the GCE metadata server and
-// points the process at it for the duration of the test. Nothing is pinned
-// here on purpose: this is the one path that exercises gcemeta and the
-// metadata library for real, which is what makes a pod-identity boot testable
-// with no cloud account, container or emulator.
-func newFakeMetadata(t *testing.T) {
+// fakeMetadata is the httptest stand-in for the GCE metadata server. Beyond
+// the project and zone the location chain reads, it serves the access-token
+// endpoint a keyless pod mints from, so the whole Workload Identity boot — ADC
+// resolution included — runs without a cloud account, container or emulator.
+type fakeMetadata struct {
+	mu          sync.Mutex
+	tokenHits   int
+	tokenStatus int // 0 => mint a token; otherwise refuse with this status
+}
+
+// newFakeMetadata starts a fake metadata server and points the process at it
+// for the duration of the test. Nothing is pinned here on purpose: this is the
+// one path that exercises gcemeta and the metadata library for real.
+func newFakeMetadata(t *testing.T) *fakeMetadata {
 	t.Helper()
+
+	f := &fakeMetadata{}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/computeMetadata/v1/project/project-id", func(w http.ResponseWriter, r *http.Request) {
@@ -94,10 +108,61 @@ func newFakeMetadata(t *testing.T) {
 		// library trims it to the bare zone.
 		plainMetadata(w, "projects/123456789/zones/"+testMetadataZone)
 	})
+	mux.HandleFunc("/computeMetadata/v1/instance/service-accounts/default/email", func(w http.ResponseWriter, r *http.Request) {
+		plainMetadata(w, testMetadataSAEmail)
+	})
+	mux.HandleFunc("/computeMetadata/v1/instance/service-accounts/default/token", f.serveToken)
 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	t.Setenv("GCE_METADATA_HOST", strings.TrimPrefix(srv.URL, "http://"))
+	return f
+}
+
+func (f *fakeMetadata) serveToken(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.tokenHits++
+	status := f.tokenStatus
+	f.mu.Unlock()
+
+	w.Header().Set("Metadata-Flavor", "Google")
+	if status != 0 {
+		http.Error(w, "the instance service account is not bound to a Google service account", status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"access_token": testMetadataToken,
+		"expires_in":   3600,
+		"token_type":   "Bearer",
+	})
+}
+
+// failToken makes the token endpoint refuse, which is what a pod whose
+// Workload Identity binding is broken actually sees.
+func (f *fakeMetadata) failToken(status int) {
+	f.mu.Lock()
+	f.tokenStatus = status
+	f.mu.Unlock()
+}
+
+// hits reports how many times a token was asked for.
+func (f *fakeMetadata) hits() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokenHits
+}
+
+// isolateADC points the Application Default Credentials chain away from
+// whatever Google credentials the developer's machine happens to carry: ADC
+// reads GOOGLE_APPLICATION_CREDENTIALS, then a well-known file under $HOME,
+// and only then the metadata server. Without this a `make test` on a laptop
+// with a live `gcloud auth application-default login` would resolve those and
+// leave the process.
+func isolateADC(t *testing.T) {
+	t.Helper()
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("HOME", t.TempDir())
 }
 
 func plainMetadata(w http.ResponseWriter, body string) {

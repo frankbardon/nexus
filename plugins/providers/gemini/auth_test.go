@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/nexuscreds"
 
 	// Side-effect import: registers the "google-adc" credential source the
@@ -228,27 +231,36 @@ func TestResolveProjectID_SurfacesAMetadataServerError(t *testing.T) {
 func TestResolveLocation_PrefersConfigOverMetadata(t *testing.T) {
 	pinMetadataRegion(t, "europe-west4", nil)
 
-	got := resolveLocation(map[string]any{"location": "asia-northeast1"})
+	got, origin := resolveLocation(map[string]any{"location": "asia-northeast1"})
 	if got != "asia-northeast1" {
 		t.Fatalf("location = %q, want the configured value to win", got)
+	}
+	if origin != locationFromConfig {
+		t.Fatalf("origin = %q, want %q", origin, locationFromConfig)
 	}
 }
 
 func TestResolveLocation_DerivesTheRegionFromTheMetadataServer(t *testing.T) {
 	pinMetadataRegion(t, "europe-west4", nil)
 
-	got := resolveLocation(map[string]any{})
+	got, origin := resolveLocation(map[string]any{})
 	if got != "europe-west4" {
 		t.Fatalf("location = %q, want the region derived from this pod's zone", got)
+	}
+	if origin != locationFromMetadata {
+		t.Fatalf("origin = %q, want %q", origin, locationFromMetadata)
 	}
 }
 
 func TestResolveLocation_FallsBackToTheDefaultWhenNotOnGCE(t *testing.T) {
 	pinNotOnGCE(t)
 
-	got := resolveLocation(map[string]any{})
+	got, origin := resolveLocation(map[string]any{})
 	if got != "us-central1" {
 		t.Fatalf("location = %q, want the us-central1 default off GCE", got)
+	}
+	if origin != locationFromDefault {
+		t.Fatalf("origin = %q, want %q", origin, locationFromDefault)
 	}
 }
 
@@ -257,9 +269,14 @@ func TestResolveLocation_FallsBackToTheDefaultWhenNotOnGCE(t *testing.T) {
 func TestResolveLocation_FallsBackToTheDefaultOnAMetadataError(t *testing.T) {
 	pinMetadataRegion(t, "", errors.New("metadata server returned 500"))
 
-	got := resolveLocation(map[string]any{})
+	got, origin := resolveLocation(map[string]any{})
 	if got != "us-central1" {
 		t.Fatalf("location = %q, want the us-central1 default, got a failure instead", got)
+	}
+	// The whole reason the origin exists: "us-central1" here means the
+	// metadata server failed, not that anybody chose it.
+	if origin != locationFromDefault {
+		t.Fatalf("origin = %q, want %q", origin, locationFromDefault)
 	}
 }
 
@@ -518,4 +535,231 @@ func writeServiceAccountKey(t *testing.T, tokenURI string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// --- boot-time credential confirmation ----------------------------------------
+
+// TestInit_VertexConfirmsAMetadataCredentialWithOneInfoLine is the pod-identity
+// case end to end: a config saying nothing but auth: vertex resolves its
+// project and region off the metadata server, mints a token from it, and says
+// so exactly once.
+func TestInit_VertexConfirmsAMetadataCredentialWithOneInfoLine(t *testing.T) {
+	fake := newFakeMetadata(t)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	records, err := initWithCapturedLog(t, map[string]any{"auth": "vertex"})
+	if err != nil {
+		t.Fatalf("Init on a pod with a working metadata server should boot, got %v", err)
+	}
+
+	rec := onlyConfirmationRecord(t, records)
+	if got := rec["level"]; got != "INFO" {
+		t.Errorf("level = %v, want INFO", got)
+	}
+	if got := rec["credential_source"]; got != defaultCredentialSource {
+		t.Errorf("credential_source = %v, want %q", got, defaultCredentialSource)
+	}
+	if got := rec["project"]; got != testMetadataProjectID {
+		t.Errorf("project = %v, want %q", got, testMetadataProjectID)
+	}
+	if got := rec["location"]; got != testMetadataRegion {
+		t.Errorf("location = %v, want %q", got, testMetadataRegion)
+	}
+	if got := rec["location_source"]; got != string(locationFromMetadata) {
+		t.Errorf("location_source = %v, want %q", got, locationFromMetadata)
+	}
+
+	if got := fake.hits(); got != 1 {
+		t.Errorf("token endpoint hit %d times during Init, want exactly 1", got)
+	}
+}
+
+// The other half of the same guarantee: a key-file credential is confirmed the
+// same way, and the location's origin says "default" rather than leaving an
+// operator to wonder whether us-central1 was chosen or merely left standing.
+func TestInit_VertexConfirmsAKeyFileCredentialWithOneInfoLine(t *testing.T) {
+	pinNotOnGCE(t)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "ya29.from-key-file",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer srv.Close()
+
+	records, err := initWithCapturedLog(t, map[string]any{
+		"auth":                 "vertex",
+		"project_id":           "myproj",
+		"service_account_json": writeServiceAccountKey(t, srv.URL),
+	})
+	if err != nil {
+		t.Fatalf("Init with a usable key file should boot, got %v", err)
+	}
+
+	rec := onlyConfirmationRecord(t, records)
+	if got := rec["level"]; got != "INFO" {
+		t.Errorf("level = %v, want INFO", got)
+	}
+	if got := rec["credential_source"]; got != defaultCredentialSource {
+		t.Errorf("credential_source = %v, want %q", got, defaultCredentialSource)
+	}
+	if got := rec["project"]; got != "myproj" {
+		t.Errorf("project = %v, want myproj", got)
+	}
+	if got := rec["location_source"]; got != string(locationFromDefault) {
+		t.Errorf("location_source = %v, want %q", got, locationFromDefault)
+	}
+
+	if got := hits.Load(); got != 1 {
+		t.Errorf("token endpoint hit %d times during Init, want exactly 1", got)
+	}
+}
+
+// The line must never carry the token it just minted, nor anything else that
+// would be unsafe to ship to a log aggregator.
+func TestInit_VertexConfirmationCarriesNoTokenMaterial(t *testing.T) {
+	newFakeMetadata(t)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	records, err := initWithCapturedLog(t, map[string]any{"auth": "vertex"})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	for _, rec := range records {
+		for key, val := range rec {
+			s, ok := val.(string)
+			if !ok {
+				continue
+			}
+			if strings.Contains(s, testMetadataToken) {
+				t.Fatalf("log field %q leaked the access token", key)
+			}
+			if strings.Contains(s, testMetadataSAEmail) {
+				t.Fatalf("log field %q leaked the acting principal", key)
+			}
+		}
+	}
+}
+
+// TestInit_VertexFailsBootWhenTheMetadataServerRefusesAToken is the whole
+// reason Init mints at all. Construction of the credential source succeeds on
+// a pod whose Workload Identity binding is broken — nothing is unreadable, no
+// name is unknown — so without the mint this deployment boots clean and 403s
+// on its first user message.
+func TestInit_VertexFailsBootWhenTheMetadataServerRefusesAToken(t *testing.T) {
+	fake := newFakeMetadata(t)
+	fake.failToken(http.StatusForbidden)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	records, err := initWithCapturedLog(t, map[string]any{"auth": "vertex"})
+	if err == nil {
+		t.Fatal("Init must fail when no token can be obtained")
+	}
+	if !strings.Contains(err.Error(), defaultCredentialSource) {
+		t.Errorf("error should name the credential source, got %v", err)
+	}
+	for _, rec := range records {
+		if rec["msg"] == credentialConfirmedMsg {
+			t.Fatal("a failed boot must not claim credentials were confirmed")
+		}
+	}
+}
+
+func TestInit_VertexFailsBootWhenTheCredentialSourceCannotMint(t *testing.T) {
+	pinNotOnGCE(t)
+	registerFakeSource(t, "gemini-test-unmintable", stubSource{err: errors.New("metadata server unreachable")})
+
+	_, err := initWithCapturedLog(t, map[string]any{
+		"auth":        "vertex",
+		"project_id":  "myproj",
+		"credentials": "gemini-test-unmintable",
+	})
+	if err == nil {
+		t.Fatal("Init must fail when the credential source cannot mint a token")
+	}
+	if !strings.Contains(err.Error(), "metadata server unreachable") {
+		t.Errorf("underlying error should survive wrapping, got %v", err)
+	}
+}
+
+// api_key mode has no credential to connect with, so it gains no log line —
+// and Init stays free of INFO-level output entirely.
+func TestInit_APIKeyModeLogsNothingNew(t *testing.T) {
+	records, err := initWithCapturedLog(t, map[string]any{"api_key": "test-key-not-real"})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	for _, rec := range records {
+		if rec["level"] == "INFO" {
+			t.Errorf("api_key Init emitted an INFO record: %v", rec)
+		}
+	}
+}
+
+// --- boot-log helpers ---------------------------------------------------------
+
+// credentialConfirmedMsg is the message confirmCredentials logs. Spelled out
+// here rather than shared with the source so a silent rename of the operator-
+// facing string is a test failure.
+const credentialConfirmedMsg = "vertex credentials confirmed"
+
+// initWithCapturedLog runs a real Init against a real bus with a logger
+// writing JSON into a buffer, and returns the decoded records along with
+// Init's error.
+func initWithCapturedLog(t *testing.T, cfg map[string]any) ([]map[string]any, error) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	// Well below DEBUG, so nothing Init emits at any level can escape the
+	// assertions below by being filtered out.
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.Level(-16)}))
+
+	p := &Plugin{}
+	err := p.Init(engine.PluginContext{
+		Config: cfg,
+		Bus:    engine.NewEventBus(),
+		Logger: logger,
+	})
+	if err == nil {
+		t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	}
+
+	var records []map[string]any
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec map[string]any
+		if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
+			t.Fatalf("log line is not JSON: %q", line)
+		}
+		records = append(records, rec)
+	}
+	return records, err
+}
+
+// onlyConfirmationRecord asserts the confirmation line was emitted exactly
+// once and returns it.
+func onlyConfirmationRecord(t *testing.T, records []map[string]any) map[string]any {
+	t.Helper()
+
+	var found []map[string]any
+	for _, rec := range records {
+		if rec["msg"] == credentialConfirmedMsg {
+			found = append(found, rec)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d %q log lines, want exactly 1", len(found), credentialConfirmedMsg)
+	}
+	return found[0]
 }
