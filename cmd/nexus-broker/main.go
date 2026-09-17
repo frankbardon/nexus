@@ -22,6 +22,14 @@ import (
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+
+	// Side-effect import: registers the "google-adc" credential source with
+	// pkg/nexuscreds. Nothing here references the package by name, and the
+	// broker makes no LLM calls of its own today — the nexus instances it
+	// spawns carry their own import. It is kept deliberately so every shipped
+	// binary registers the same credential sources, rather than leaving a
+	// future broker-side outbound call to fail on a missing registration.
+	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
 
 func main() {

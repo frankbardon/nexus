@@ -13,6 +13,13 @@ import (
 	"github.com/frankbardon/nexus/plugins/apps/helloworld"
 	wailsio "github.com/frankbardon/nexus/plugins/io/wails"
 	"github.com/frankbardon/nexus/plugins/providers/anthropic"
+
+	// Side-effect import: registers the "google-adc" credential source with
+	// pkg/nexuscreds. Nothing here references the package by name — the
+	// per-agent engines build real provider plugins, so a developer who has run
+	// `gcloud auth application-default login` expects `credentials: google-adc`
+	// to work in this shell exactly as it does in bin/nexus.
+	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
 
 //go:embed all:frontend/dist

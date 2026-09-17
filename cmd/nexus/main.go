@@ -12,6 +12,14 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/allplugins"
 	"github.com/frankbardon/nexus/pkg/engine/configwatch"
 	"github.com/frankbardon/nexus/pkg/events"
+
+	// Side-effect import: registers the "google-adc" credential source with
+	// pkg/nexuscreds, so a config naming `credentials: google-adc` (Vertex AI
+	// under pod identity, or a developer's gcloud ADC) resolves in the stock
+	// binary. Nothing here references the package by name — which credential
+	// sources a binary carries is deliberately visible in main, the way
+	// object-store backends are wired.
+	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
 
 func main() {
