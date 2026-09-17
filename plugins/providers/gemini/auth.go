@@ -10,15 +10,20 @@ import (
 
 	"github.com/frankbardon/nexus/pkg/nexuscreds"
 
-	// googleadc is imported for its GCE metadata helpers only — the project and
+	// gcemeta is imported for its GCE metadata helpers only — the project and
 	// region this pod runs in. Those are facts about the environment, not about
-	// credentials, which is why reaching for them here does not undo the
-	// registry seam below: the token this plugin signs with is still opened by
-	// name through nexuscreds, so no particular credential implementation is
-	// compiled in by the signing path. The cost of the import is that a binary
-	// containing this plugin now links google-adc — and therefore registers it
-	// — whether or not it blank-imports the package itself.
-	"github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
+	// credentials, and gcemeta registers nothing: this plugin is in
+	// pkg/engine/allplugins, so an import that registered a credential source
+	// from init would put that source in the registry of every binary carrying
+	// the plugin, and gemini's credentials key defaults to google-adc. An
+	// embedder shipping their own Vault or SPIFFE source would then get Google
+	// ADC silently selected by a config that merely omitted the key, instead of
+	// an error naming the sources their binary actually has.
+	//
+	// The token this plugin signs with is still opened by NAME through
+	// nexuscreds, so no credential implementation is compiled in by the signing
+	// path either.
+	"github.com/frankbardon/nexus/pkg/nexuscreds/gcemeta"
 )
 
 // authMode determines how requests are authenticated and routed.
@@ -49,15 +54,15 @@ const metadataTimeout = 5 * time.Second
 // The GCE metadata lookups are reached through variables rather than called
 // directly so tests can pin them.
 //
-// The reason is memoisation, not style: metadata.OnGCE — which googleadc
+// The reason is memoisation, not style: metadata.OnGCE — which gcemeta
 // consults before every lookup — fixes its answer in a package-level sync.Once
 // on the first call in a process, and with GCE_METADATA_HOST unset that call
 // probes the real 169.254.169.254. A test that needs "not on GCE" therefore
-// cannot get there by clearing an environment variable. googleadc pins its own
+// cannot get there by clearing an environment variable. gcemeta pins its own
 // onGCE for exactly this reason; this package pins one level up.
 var (
-	metadataProjectID = googleadc.ProjectID
-	metadataRegion    = googleadc.Region
+	metadataProjectID = gcemeta.ProjectID
+	metadataRegion    = gcemeta.Region
 )
 
 // authState holds resolved auth configuration and, in Vertex mode, the
@@ -144,7 +149,7 @@ func resolveAuth(cfg map[string]any) (*authState, error) {
 // beyond auth: vertex. A pod already knows which project it belongs to, and
 // making an operator repeat that in YAML is a chance to get it wrong. It comes
 // last so an explicit setting always wins over the environment it happens to
-// run in, and googleadc.ProjectID answers ErrNotOnGCE without a request when
+// run in, and gcemeta.ProjectID answers ErrNotOnGCE without a request when
 // this process is not on GCE, so a non-GCP host pays no network probe.
 //
 // Failure is still fatal at Init, because a Vertex URL cannot be built without
@@ -165,7 +170,7 @@ func resolveProjectID(cfg map[string]any) (string, error) {
 	switch {
 	case err == nil:
 		return project, nil
-	case errors.Is(err, googleadc.ErrNotOnGCE):
+	case errors.Is(err, gcemeta.ErrNotOnGCE):
 		return "", fmt.Errorf("gemini: vertex auth requires project_id config or GOOGLE_CLOUD_PROJECT env var (this process is not on GCE, so the metadata server could not supply one)")
 	default:
 		return "", fmt.Errorf("gemini: vertex auth has no project_id config and no GOOGLE_CLOUD_PROJECT env var, and the GCE metadata server could not supply one: %w", err)

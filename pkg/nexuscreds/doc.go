@@ -47,4 +47,16 @@
 // root module's defended direct-dependency list. Keep it that way: a
 // provider-specific import here would undo the separation the subpackage exists
 // to create.
+//
+// # Facts are not credentials
+//
+// The sibling subpackage gcemeta answers where a process runs — on GCE or not,
+// and if so its project, zone and region. It deliberately registers NOTHING and
+// has no init function, because those facts are wanted by code that has no
+// opinion about credentials: nexus.llm.gemini resolves a Vertex project and
+// location from them whichever source signs its requests. Keeping them out of
+// googleadc is what stops merely linking that plugin from putting "google-adc"
+// into the registry of every build, which would make the default selection of a
+// credential source an accident of the import graph rather than the embedder's
+// choice.
 package nexuscreds

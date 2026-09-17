@@ -11,7 +11,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 
-	"github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
+	"github.com/frankbardon/nexus/pkg/nexuscreds/gcemeta"
 )
 
 // The values the fake metadata server answers with.
@@ -73,13 +73,13 @@ func pinMetadataRegion(t *testing.T, region string, err error) {
 // observed.
 func pinNotOnGCE(t *testing.T) {
 	t.Helper()
-	pinMetadataProjectID(t, "", googleadc.ErrNotOnGCE)
-	pinMetadataRegion(t, "", googleadc.ErrNotOnGCE)
+	pinMetadataProjectID(t, "", gcemeta.ErrNotOnGCE)
+	pinMetadataRegion(t, "", gcemeta.ErrNotOnGCE)
 }
 
 // newFakeMetadata starts an httptest stand-in for the GCE metadata server and
 // points the process at it for the duration of the test. Nothing is pinned
-// here on purpose: this is the one path that exercises googleadc and the
+// here on purpose: this is the one path that exercises gcemeta and the
 // metadata library for real, which is what makes a pod-identity boot testable
 // with no cloud account, container or emulator.
 func newFakeMetadata(t *testing.T) {

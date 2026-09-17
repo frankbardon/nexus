@@ -39,10 +39,21 @@
 //
 // # Dependency placement
 //
-// The Google dependency is confined to this subpackage on purpose. The parent
-// nexuscreds package is stdlib-only, so a build that does not blank-import
-// this one pays nothing for golang.org/x/oauth2/google or
-// cloud.google.com/go/compute/metadata. See pkg/nexuscreds/doc.go.
+// The Google dependency is confined to this subpackage and its sibling
+// pkg/nexuscreds/gcemeta on purpose. The parent nexuscreds package is
+// stdlib-only, so a build that blank-imports neither pays nothing for
+// golang.org/x/oauth2/google or cloud.google.com/go/compute/metadata. See
+// pkg/nexuscreds/doc.go.
+//
+// # Where you are, versus how you sign
+//
+// The GCE metadata helpers this package once owned — ProjectID, Zone, Region,
+// RegionFromZone, ErrNotOnGCE — now live in pkg/nexuscreds/gcemeta and are
+// re-exported here by delegation. They moved because importing THIS package
+// registers "google-adc" from init, so a caller that wanted only to know which
+// project it runs in was silently choosing a credential source for the whole
+// binary. gcemeta registers nothing; import it for the facts, and import this
+// package — deliberately, with a blank import — for the credential.
 //
 // Unlike its parent, this package imports pkg/engine — for ExpandPath, the
 // single canonical tilde-expansion helper every config-supplied path in Nexus

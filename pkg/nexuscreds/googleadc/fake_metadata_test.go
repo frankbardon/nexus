@@ -46,22 +46,16 @@ func TestMain(m *testing.M) {
 	// short-circuit to true; making the call here fixes it before any test
 	// runs, so no test can poison another through ordering and nothing in this
 	// binary ever touches the network. The address is never dialled — every
-	// test replaces it with its own httptest server.
+	// test replaces it with its own httptest server. It is also what stands in
+	// for the onGCE pin that lived here before the metadata helpers moved to
+	// pkg/nexuscreds/gcemeta: nothing in THIS package consults onGCE, so the
+	// library's memoised answer is the only thing left to fix.
 	os.Setenv("GCE_METADATA_HOST", "169.254.169.254")
 	_ = metadata.OnGCE()
 
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)
-}
-
-// pinOnGCE fixes what the package's metadata helpers believe about their
-// environment, and restores it afterwards. See the onGCE variable.
-func pinOnGCE(t *testing.T, on bool) {
-	t.Helper()
-	prev := onGCE
-	onGCE = func() bool { return on }
-	t.Cleanup(func() { onGCE = prev })
 }
 
 // fakeMetadata is an httptest stand-in for the GCE metadata server, wired in
@@ -117,7 +111,6 @@ func newFakeMetadata(t *testing.T) *fakeMetadata {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	t.Setenv("GCE_METADATA_HOST", strings.TrimPrefix(f.srv.URL, "http://"))
-	pinOnGCE(t, true)
 	return f
 }
 

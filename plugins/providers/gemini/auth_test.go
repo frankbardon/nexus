@@ -17,11 +17,15 @@ import (
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/nexuscreds"
-)
 
-// The "google-adc" credential source the Vertex tests below open by name is
-// registered as a side effect of auth.go's own import of googleadc, which it
-// needs for the GCE metadata helpers — so no blank import is required here.
+	// Side-effect import: registers the "google-adc" credential source the
+	// Vertex tests below open by name. It belongs in a TEST file and only in a
+	// test file — non-test gemini code deliberately does not import googleadc,
+	// because this plugin is in pkg/engine/allplugins and would otherwise
+	// register a credential source into every binary carrying it. The canary
+	// that holds that line lives in internal/optincheck.
+	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
+)
 
 func TestResolveAuth_APIKey(t *testing.T) {
 	a, err := resolveAuth(map[string]any{"api_key": "test-key"})
@@ -126,7 +130,7 @@ func TestResolveAuth_Vertex_RequiresProjectID(t *testing.T) {
 // TestResolveAuth_Vertex_BootsFromMetadataAlone is the pod-identity case: a
 // config saying nothing GCP-specific beyond the auth mode must boot, with both
 // the project and the location coming off the metadata server. It is the one
-// test here that runs the real googleadc + metadata-library path rather than
+// test here that runs the real gcemeta + metadata-library path rather than
 // pinning it.
 func TestResolveAuth_Vertex_BootsFromMetadataAlone(t *testing.T) {
 	newFakeMetadata(t)

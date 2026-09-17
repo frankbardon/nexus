@@ -490,7 +490,6 @@ func TestSource_RequestsTheCloudPlatformScopeFromTheMetadataServer(t *testing.T)
 	}))
 	defer srv.Close()
 	t.Setenv("GCE_METADATA_HOST", strings.TrimPrefix(srv.URL, "http://"))
-	pinOnGCE(t, true)
 
 	src, err := New(nil)
 	if err != nil {
