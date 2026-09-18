@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/engine/sandbox"
@@ -295,6 +296,41 @@ func (h *ContractHarness) AssertEmitted(eventType string) {
 	}
 	h.t.Errorf("expected emission %q from plugin %q; observed %s",
 		eventType, h.plugin.ID(), h.summary())
+}
+
+// WaitForEmitted blocks until a plugin-origin event of the given type has been
+// captured, or the timeout expires. It is the assertion to use when the test
+// learned about the event from its OWN bus subscription rather than from the
+// harness.
+//
+// That distinction is not a nicety. The harness captures through SubscribeAll,
+// and pkg/engine dispatches every typed subscriber BEFORE any wildcard one —
+// deliberately, so a wildcard journal handler observes the final veto state. A
+// test that wakes on its own typed handler is therefore guaranteed to run while
+// the harness's recorder has not yet been reached, and a bare AssertEmitted at
+// that moment reads state that has provably not been written. It passes only
+// because the emitting goroutine usually finishes its wildcard loop before the
+// woken test goroutine is rescheduled; under -race that ordering shifts and the
+// assertion fails for no reason the test author would recognise.
+//
+// Use AssertEmitted when nothing ran between the trigger and the assertion.
+// Use this when a channel, callback or other goroutine handoff did.
+func (h *ContractHarness) WaitForEmitted(eventType string, timeout time.Duration) {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, e := range h.PluginEmissions() {
+			if e.Type == eventType {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			h.t.Errorf("timed out after %s waiting for emission %q from plugin %q; observed %s",
+				timeout, eventType, h.plugin.ID(), h.summary())
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // AssertNotEmitted fails when any plugin-origin event of the given type
