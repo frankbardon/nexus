@@ -26,6 +26,69 @@ backend lives in its own module with its own dependency graph, and an embedder
 who wants it blank-imports it into their own `main`. The root module's
 dependency list does not move.
 
+## The one root-module exception: `golang.org/x/oauth2/google`
+
+The rule above is a rule, not an absolute, and it has exactly one recorded
+exception. Read this before citing it as precedent — the grounds are narrow and
+most cloud dependencies do not meet them.
+
+The Gemini provider's Vertex AI mode has to obtain an access token. Under GKE
+Workload Identity there is no key file to read: the token comes from Google
+Application Default Credentials, which fall back to the instance metadata
+server. So `plugins/providers/gemini` depends on `golang.org/x/oauth2/google`,
+and that dependency is in the **root** `go.mod`.
+
+It has to be in the root module, because the value of the feature *is* that the
+shipped `bin/nexus` authenticates on a keyless pod. Putting the credential
+source in `modules/` would mean every operator running Nexus on GKE has to
+write and maintain their own `main` package — which is precisely the cost a
+submodule exists to avoid imposing on people who do not need the dependency,
+and precisely the wrong trade when the people who need it are the default
+deployment.
+
+The grounds are **size**, measured rather than assumed. Two libraries can serve
+ADC. Built into a throwaway module and resolved with `go mod tidy`:
+
+| Candidate | Modules in build list |
+|---|---|
+| `cloud.google.com/go/auth/credentials` | **35** |
+| `golang.org/x/oauth2/google` | **2** |
+
+The 35-module option transitively pulls `google.golang.org/grpc`,
+`google.golang.org/protobuf`, three `google.golang.org/genproto/*` modules, five
+OpenTelemetry modules, `s2a-go`, `go-pkcs11`, `enterprise-certificate-proxy`,
+`google.golang.org/api` and `gax-go` — most of a gRPC stack, into a binary that
+speaks only `net/http`. It was rejected on that basis alone; it buys nothing
+this feature needs (its extras are the enterprise certificate proxy and S2A,
+neither of which applies to Vertex over HTTPS).
+
+`golang.org/x/oauth2/google` resolves to `golang.org/x/oauth2` and
+`cloud.google.com/go/compute/metadata`, and in *this* repository both were
+already in the build list before the change — `x/oauth2` as an indirect
+requirement, `compute/metadata` reachable through gRPC via the OTLP trace
+exporter. Adopting it promoted `golang.org/x/oauth2` from the indirect block to
+the direct one and added `compute/metadata` as a root; `go list -m all` is
+byte-for-byte identical either side of that commit. Net new modules in the
+build list: **zero**.
+
+Two further points, so the precedent is not read wider than it is:
+
+- **It is a credential library, not a provider SDK.** The "no vendor SDKs" rule
+  is about the API surface: every Vertex call Nexus makes is still hand-written
+  `net/http` against a URL it builds itself. `oauth2/google` mints a bearer
+  token and does nothing else. `cloud.google.com/go/aiplatform` remains out of
+  the question.
+- **The seam it feeds is still submodule-shaped.** Outbound credential sources
+  are registered by name, the way object-store backends are, so a heavier one —
+  Azure, Vault, an in-house STS — belongs in `modules/` and gets blank-imported
+  by an embedder. Only the ADC source ships in the root module, and only because
+  it is two modules wide and the default deployment needs it.
+
+The bar for the next exception is that whole list: root-module residence is
+required for the stock binary to work at all, the dependency is credentials or
+similar plumbing rather than a service SDK, and the measured build-list cost is
+in single digits. Anything that fails one of those three goes under `modules/`.
+
 ## Layout
 
 ```

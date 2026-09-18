@@ -104,6 +104,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.auth = auth
 
+	// Vertex only: mint one token now so a broken pod identity fails the boot
+	// instead of the first user message, and log the single INFO line that
+	// records which credential source answered. See confirmCredentials in
+	// auth.go, including the logging-rubric exception documented there.
+	if err := p.auth.confirmCredentials(context.Background(), p.log()); err != nil {
+		return err
+	}
+
 	p.client = &http.Client{Timeout: 5 * time.Minute}
 
 	p.pricing = parsePricingConfig(ctx.Config)
@@ -336,7 +344,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if err := p.auth.applyAuth(reqCtx, httpReq, p.client); err != nil {
+		if err := p.auth.applyAuth(reqCtx, httpReq); err != nil {
 			return nil, fmt.Errorf("apply auth: %w", err)
 		}
 		return httpReq, nil

@@ -1,6 +1,6 @@
 # Gemini Provider
 
-The Gemini provider calls Google's Gemini API via direct HTTP — no SDK dependency. It supports both the public Generative Language API (api-key auth) and Vertex AI (service-account JWT auth) and ships feature parity with the OpenAI and Anthropic providers (sync + streaming, tool use, structured output, retry, cancellation, debug logs, fallback hooks). On top of that it adds Gemini-only features: thinking ("reasoning") parts, multimodal inputs, the built-in code execution tool, and prompt caching via the `cachedContents` API.
+The Gemini provider calls Google's Gemini API via direct HTTP — no SDK dependency. It supports both the public Generative Language API (api-key auth) and Vertex AI (Google Application Default Credentials) and ships feature parity with the OpenAI and Anthropic providers (sync + streaming, tool use, structured output, retry, cancellation, debug logs, fallback hooks). On top of that it adds Gemini-only features: thinking ("reasoning") parts, multimodal inputs, the built-in code execution tool, and prompt caching via the `cachedContents` API.
 
 ## Details
 
@@ -16,10 +16,11 @@ The Gemini provider calls Google's Gemini API via direct HTTP — no SDK depende
 | `auth` | string | `api_key` | `api_key` for the public endpoint, `vertex` for Vertex AI |
 | `api_key` | string | — | Direct API key (overrides `api_key_env`) |
 | `api_key_env` | string | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | Env var holding the API key |
-| `project_id` | string | `$GOOGLE_CLOUD_PROJECT` | (Vertex) GCP project id |
-| `location` | string | `us-central1` | (Vertex) GCP region for the AI Platform endpoint |
-| `service_account_json` | string | — | (Vertex) Path to a service-account JSON key |
-| `service_account_json_env` | string | `GOOGLE_APPLICATION_CREDENTIALS` | (Vertex) Env var holding the service-account path |
+| `credentials` | string | `google-adc` | (Vertex) Name of a registered `nexuscreds` credential source. Ignored under `auth: api_key` |
+| `project_id` | string | *(env `GOOGLE_CLOUD_PROJECT`, then metadata)* | (Vertex) GCP project. Config → `GOOGLE_CLOUD_PROJECT` → GCE metadata server; fails at `Init` only if all three miss |
+| `location` | string | *(GCE zone-derived region, then `us-central1`)* | (Vertex) GCP region for the AI Platform endpoint. Config → region derived from this process's GCE zone → `us-central1` |
+| `service_account_json` | string | *(unset — full ADC chain)* | (Vertex) Path to a credentials JSON file. Forwarded to the credential source, not parsed by the provider |
+| `service_account_json_env` | string | *(unset — full ADC chain)* | (Vertex) Env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through |
 | `debug` | bool | `false` | Log raw request/response bodies into the session plugin directory |
 | `pricing` | map | embedded defaults | Per-model pricing overrides; see **Cost Tracking** below |
 | `retry` | map | disabled | Retry/backoff config; see **Retry Logic** |
@@ -52,7 +53,84 @@ The Gemini provider calls Google's Gemini API via direct HTTP — no SDK depende
 ### Auth Modes
 
 - **`api_key`** (default) — Sends `x-goog-api-key` header. URL: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`.
-- **`vertex`** — Mints an OAuth2 access token via signed JWT exchange against `https://oauth2.googleapis.com/token`, caches the token until expiry minus 60s, and routes requests to `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`. JWT signing uses RS256 from the stdlib `crypto/rsa`; no third-party dependencies are added.
+- **`vertex`** — Signs every request with a Google OAuth2 access token obtained from a `nexuscreds` credential source (`credentials`, default `google-adc`), and routes requests to `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`. Minting, caching and refreshing the token belong to the source, not to this provider.
+
+The headline for Vertex: **on GKE with Workload Identity, `auth: vertex` alone is a complete Vertex configuration.**
+
+```yaml
+plugins:
+  nexus.llm.gemini:
+    auth: vertex
+```
+
+`project_id` and `location` come from the pod's own GCE metadata, and `google-adc` picks up the token the metadata server hands out for the Google service account the pod's Kubernetes service account is bound to. No key file, no project id, no region. (Setting up the binding itself — GSA creation, KSA annotation, the `roles/iam.workloadIdentityUser` grant — is Google's documentation, not ours.)
+
+#### Credential precedence
+
+`google-adc` runs Google's Application Default Credentials chain. The first rung that answers wins:
+
+1. **An explicitly configured key file** — `service_account_json`, or the path held in the environment variable named by `service_account_json_env`. Nexus reads this file at `Init`, so a bad path fails at boot.
+2. **`GOOGLE_APPLICATION_CREDENTIALS`** — the standard ADC environment variable. Nexus never reads it itself; it is step one of the library's own chain, which is why it behaves identically whether or not any Nexus config key is set.
+3. **The well-known `gcloud` file** — `~/.config/gcloud/application_default_credentials.json`, written by `gcloud auth application-default login`. This is the developer-laptop rung.
+4. **The GCE metadata server** — the keyless rung: GKE Workload Identity, GCE, Cloud Run.
+
+Rung 1 is the only one Nexus itself decides. Rungs 2–4 are the library's, in that order.
+
+The scope is fixed at `https://www.googleapis.com/auth/cloud-platform` and is not configurable — Vertex AI accepts nothing narrower.
+
+#### The boot log line
+
+Vertex credentials are resolved *and exercised* during `Init`: the provider asks the source for one token before the plugin is ready. A pod whose Workload Identity binding is broken therefore fails at **boot**, not on its first user message. On success there is exactly one INFO line per process:
+
+```
+INFO vertex credentials confirmed credential_source=google-adc project=my-project location=us-central1 location_source=metadata
+```
+
+| Field | What it tells you |
+|---|---|
+| `credential_source` | The `credentials` name that was opened — which registered source minted the token. |
+| `project` | The project every request URL will be built from. |
+| `location` | The region every request URL will be built from. |
+| `location_source` | Which rung of the location chain answered: `config` (you set `location`), `metadata` (derived from this process's GCE zone), or `default` (nothing answered and `us-central1` is standing in). |
+
+`location_source` exists because the location chain falls back silently: without it, `location=us-central1` cannot be told apart from a deliberate setting and a metadata lookup that failed.
+
+The line deliberately carries no token, no key material, no credential type and no principal.
+
+#### The stale-key-in-image trap
+
+A key file baked into a container image — or a `GOOGLE_APPLICATION_CREDENTIALS` left behind in a Deployment's env — **silently wins over the metadata server**, because it sits earlier in the chain above. The pod authenticates and nothing looks wrong; it simply acts as the wrong identity, and keeps doing so long after that key should have been retired.
+
+Be aware that the boot line does **not** report which credential type won. That diagnostic was given up on purpose to keep the credential seam narrow — the provider asks its source for a token and learns nothing else about it. So the way to catch this is to know the precedence and check the image: on a pod you believe is keyless, confirm that no `service_account_json` / `service_account_json_env` is configured, that `GOOGLE_APPLICATION_CREDENTIALS` is unset in the pod environment, and that no credentials JSON was baked into the image layer.
+
+#### Workload Identity Federation
+
+`external_account` credential files — Workload Identity Federation from AWS, Azure or any OIDC provider — now work when pointed at by `service_account_json`. They previously failed with `missing client_email or private_key`, because the hand-rolled parser understood only `service_account`. The accepted file types are now `service_account`, `authorized_user`, `external_account`, `external_account_authorized_user`, `impersonated_service_account` and `gdch_service_account`; anything else is rejected at boot with its type named.
+
+#### Regional model availability
+
+Vertex model availability is per-region. A pod that derives its region from its own zone can land in a region where the configured model is not served, and that fails at **first inference with a 404**, not at boot — there is no boot-time availability probe by design. Set `location` explicitly wherever the model choice matters.
+
+#### Migrating from a service-account key file
+
+**No YAML edit is required.** `service_account_json` and `service_account_json_env` mean exactly what they meant before, and a config that sets either keeps working unchanged. What changed is underneath: the hand-rolled RS256 JWT exchange is gone, and the credential is now built by `golang.org/x/oauth2/google`. Three things may look different:
+
+- **Error strings.** Failures to load or exchange a credential now surface the library's wording, wrapped by Nexus. Anything matching on the old messages needs updating.
+- **Scope handling.** Fixed at `cloud-platform`, granted by the library rather than encoded into a JWT assertion by the provider.
+- **Universe domain.** A key file's `universe_domain` is now honoured by the library. Behaviour against non-default universes may differ from the old code, which ignored the field entirely.
+
+One behaviour change is deliberate and can break a working config: **`service_account_json_env` naming an unset or empty environment variable is now an error**, where the old code fell through to the next candidate. A typo in a variable name used to become a silently different identity; it now fails at boot.
+
+#### Release note: new direct dependencies
+
+Nexus's root direct-dependency list is deliberately defended, so this one is called out explicitly. Vertex auth promotes two modules to direct requirements of the root module:
+
+- `golang.org/x/oauth2` — previously an indirect dependency.
+- `cloud.google.com/go/compute/metadata` — previously reached indirectly via gRPC, which arrives with the OTLP trace exporter.
+
+The measured cost was **zero new modules in the build graph**: both were already present transitively, and the change is a promotion, not an addition. Both are confined to `pkg/nexuscreds/googleadc` and `pkg/nexuscreds/gcemeta`; the parent `pkg/nexuscreds` package is stdlib-only, so a binary that blank-imports neither pays nothing for them.
+
+`bin/nexus`, `bin/nexus-broker` and the reference desktop app all blank-import `google-adc`. A custom binary must blank-import the package registering whichever source it names in `credentials`, or boot fails with an error naming that source and listing the sources the build actually carries.
 
 ### Streaming
 
@@ -167,6 +245,17 @@ plugins:
 
 ## Example: Vertex AI
 
+Keyless — a GKE pod under Workload Identity, or any GCE/Cloud Run instance with an attached service account. `location` is pinned anyway, because model availability is per-region:
+
+```yaml
+plugins:
+  nexus.llm.gemini:
+    auth: vertex
+    location: us-central1
+```
+
+With an explicit key file — a laptop, or anywhere outside GCP:
+
 ```yaml
 plugins:
   nexus.llm.gemini:
@@ -175,6 +264,8 @@ plugins:
     project_id: my-gcp-project
     service_account_json: ~/.config/gcloud/keys/nexus-sa.json
 ```
+
+A runnable version of both is in `configs/demo-gemini-vertex.yaml`.
 
 ## HTTP Configuration
 
