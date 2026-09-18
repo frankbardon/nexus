@@ -2,27 +2,31 @@ package anthropic
 
 import (
 	"context"
-	"crypto"
 	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
+	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/nexuscreds"
+
+	// gcemeta supplies GCE metadata facts only — the project and region this
+	// process runs in — and registers nothing. This plugin is in
+	// pkg/engine/allplugins, so an import that registered a credential source
+	// from init would put that source in the registry of every binary carrying
+	// the plugin, and vertex.credentials defaults to google-adc: an embedder
+	// shipping their own Vault or SPIFFE source would get Google ADC silently
+	// selected by a config that merely omitted the key. The token itself is
+	// opened by NAME through nexuscreds, so no credential implementation is
+	// compiled in by the signing path either.
+	"github.com/frankbardon/nexus/pkg/nexuscreds/gcemeta"
 )
 
 // authMode determines how requests are authenticated and routed.
@@ -35,8 +39,8 @@ const (
 	// authModeBedrock routes requests through AWS Bedrock with SigV4-signed
 	// requests against bedrock-runtime.<region>.amazonaws.com.
 	authModeBedrock authMode = "bedrock"
-	// authModeVertex routes requests through GCP Vertex AI with an OAuth2
-	// service-account JWT bearer token.
+	// authModeVertex routes requests through GCP Vertex AI with a bearer
+	// token obtained from a nexuscreds source (google-adc by default).
 	authModeVertex authMode = "vertex"
 )
 
@@ -51,8 +55,13 @@ const (
 // authState holds resolved auth configuration and any cached credentials.
 //
 // One authState is constructed at Init time and reused for every request.
-// Token caching for Vertex is guarded by mu; the API-key and Bedrock paths
-// don't need locking.
+//
+// The Vertex path deliberately holds no token, no expiry and no mutex:
+// minting, caching and refreshing an access token all belong to the
+// nexuscreds.Source, which for google-adc is an oauth2.TokenSource that
+// already does each of them for every Google credential type rather than only
+// for a service-account key file. Bedrock signs per request, so it needs no
+// cache either; the API-key path has nothing to cache.
 type authState struct {
 	mode authMode
 
@@ -68,21 +77,74 @@ type authState struct {
 	bedrockSecretKey    string
 	bedrockSessionToken string
 
-	// Vertex path (GCP OAuth2 JWT).
+	// Vertex path (GCP, via a nexuscreds source).
 	vertexProject string
 	vertexRegion  string
-	saEmail       string
-	saKey         *rsa.PrivateKey
+	vertexCreds   nexuscreds.Source
 
-	mu        sync.Mutex
-	token     string
-	tokExpiry time.Time
-
-	// tokenEndpointOverride redirects the OAuth2 token exchange to a test
-	// server. Production code leaves this empty; tests set it to an
-	// httptest.Server URL.
-	tokenEndpointOverride string
+	// vertexCredsName is the nexuscreds source name that was opened, and
+	// vertexRegionSource which rung of the region chain answered. Neither
+	// affects a request; both exist so confirmCredentials can say at boot
+	// where this process's auth came from.
+	vertexCredsName    string
+	vertexRegionOrigin regionOrigin
 }
+
+// regionOrigin names which rung of the Vertex region chain answered.
+//
+// It exists for the boot log alone. resolveVertexRegion falls back silently,
+// so without this an operator reading "us-east5" cannot tell a deliberate
+// configuration from a metadata server that failed and left the default
+// standing — two very different deployments that produce the same word.
+type regionOrigin string
+
+const (
+	regionFromConfig   regionOrigin = "config"
+	regionFromMetadata regionOrigin = "metadata"
+	regionFromDefault  regionOrigin = "default"
+)
+
+// defaultVertexCredentialSource is the nexuscreds source used when the config
+// names none. It is google-adc so a GKE deployment running under Workload
+// Identity needs no credential config at all: no key file exists on such a
+// pod, and the whole point of the default is that the operator does not have
+// to say so.
+const defaultVertexCredentialSource = "google-adc"
+
+// defaultVertexRegion is the region used when neither the config nor the GCE
+// metadata server can say where this process runs. Claude models on Vertex are
+// served from us-east5, which is why this differs from the Gemini provider's
+// us-central1.
+const defaultVertexRegion = "us-east5"
+
+// vertexMetadataTimeout bounds each GCE metadata lookup made while resolving
+// auth. These run during plugin Init, so an unreachable metadata server must
+// not be able to hang boot indefinitely — on a host that is not on GCE the
+// helpers return without any request at all, so this only bites where the
+// metadata server exists but is wedged.
+const vertexMetadataTimeout = 5 * time.Second
+
+// vertexCredentialProbeTimeout bounds the single token mint made at Init to
+// prove the Vertex credential actually works. It is looser than
+// vertexMetadataTimeout because the mint may be a full OAuth2 exchange with a
+// public Google endpoint — DNS, TLS and a round trip — rather than a
+// link-local metadata read, but it is bounded all the same: this runs on the
+// boot path, and a wedged token endpoint must fail the boot rather than hang
+// it.
+const vertexCredentialProbeTimeout = 20 * time.Second
+
+// The GCE metadata lookups are reached through variables rather than called
+// directly so tests can pin them.
+//
+// The reason is memoisation, not style: metadata.OnGCE — which gcemeta
+// consults before every lookup — fixes its answer in a package-level sync.Once
+// on the first call in a process, and with GCE_METADATA_HOST unset that call
+// probes the real 169.254.169.254. A test that needs "not on GCE" therefore
+// cannot get there by clearing an environment variable.
+var (
+	metadataProjectID = gcemeta.ProjectID
+	metadataRegion    = gcemeta.Region
+)
 
 // parseAuthConfig builds an authState from the raw plugin config map.
 //
@@ -161,66 +223,19 @@ func parseAuthConfig(cfg map[string]any) (*authState, error) {
 			raw = map[string]any{}
 		}
 
-		project, _ := raw["project"].(string)
-		if project == "" {
-			project, _ = raw["project_id"].(string)
-		}
-		if project == "" {
-			project = os.Getenv("GOOGLE_CLOUD_PROJECT")
-		}
-		if project == "" {
-			return nil, fmt.Errorf("anthropic: vertex auth requires vertex.project (or GOOGLE_CLOUD_PROJECT env var)")
+		project, err := resolveVertexProject(raw)
+		if err != nil {
+			return nil, err
 		}
 		a.vertexProject = project
+		a.vertexRegion, a.vertexRegionOrigin = resolveVertexRegion(raw)
 
-		region, _ := raw["region"].(string)
-		if region == "" {
-			region, _ = raw["location"].(string)
-		}
-		if region == "" {
-			region = "us-east5"
-		}
-		a.vertexRegion = region
-
-		var saJSON []byte
-		if path, ok := raw["sa_key_file"].(string); ok && path != "" {
-			data, err := os.ReadFile(engine.ExpandPath(path))
-			if err != nil {
-				return nil, fmt.Errorf("anthropic: read sa_key_file: %w", err)
-			}
-			saJSON = data
-		} else if path, ok := raw["service_account_json"].(string); ok && path != "" {
-			data, err := os.ReadFile(engine.ExpandPath(path))
-			if err != nil {
-				return nil, fmt.Errorf("anthropic: read service_account_json: %w", err)
-			}
-			saJSON = data
-		} else {
-			envVar, _ := raw["sa_key_file_env"].(string)
-			if envVar == "" {
-				envVar, _ = raw["service_account_json_env"].(string)
-			}
-			if envVar == "" {
-				envVar = "GOOGLE_APPLICATION_CREDENTIALS"
-			}
-			if path := os.Getenv(envVar); path != "" {
-				data, err := os.ReadFile(engine.ExpandPath(path))
-				if err != nil {
-					return nil, fmt.Errorf("anthropic: read %s=%s: %w", envVar, path, err)
-				}
-				saJSON = data
-			}
-		}
-		if saJSON == nil {
-			return nil, fmt.Errorf("anthropic: vertex auth requires sa_key_file (or GOOGLE_APPLICATION_CREDENTIALS env var)")
-		}
-
-		email, key, err := parseAnthropicVertexServiceAccount(saJSON)
+		source, name, err := resolveVertexCredentials(raw)
 		if err != nil {
-			return nil, fmt.Errorf("anthropic: parse service account: %w", err)
+			return nil, err
 		}
-		a.saEmail = email
-		a.saKey = key
+		a.vertexCreds = source
+		a.vertexCredsName = name
 	}
 
 	return a, nil
@@ -308,7 +323,7 @@ func (a *authState) stripModelFromBody() bool {
 // Bedrock SigV4 must be recomputed on every retry because the timestamp is
 // part of the signature — callers funnel this through the doWithRetry
 // closure so each attempt gets a fresh signature.
-func (a *authState) applyAuth(ctx context.Context, req *http.Request, body []byte, client *http.Client) error {
+func (a *authState) applyAuth(ctx context.Context, req *http.Request, body []byte) error {
 	switch a.mode {
 	case authModeAPIKey:
 		req.Header.Set("x-api-key", a.apiKey)
@@ -319,9 +334,12 @@ func (a *authState) applyAuth(ctx context.Context, req *http.Request, body []byt
 		return a.signBedrockSigV4(req, body, time.Now().UTC())
 
 	case authModeVertex:
-		token, err := a.vertexAccessToken(ctx, client)
+		if a.vertexCreds == nil {
+			return fmt.Errorf("anthropic: vertex auth has no credential source")
+		}
+		token, err := a.vertexCreds.Token(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("anthropic: vertex credentials: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		return nil
@@ -539,131 +557,188 @@ func sha256Sum(data []byte) []byte {
 }
 
 // =====================================================================
-// Vertex JWT bearer
+// Vertex credentials
 // =====================================================================
 
-// vertexAccessToken returns a valid OAuth2 access token, minting a new one
-// when the cached token is empty or within 60s of expiry.
-func (a *authState) vertexAccessToken(ctx context.Context, client *http.Client) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.token != "" && time.Now().Before(a.tokExpiry) {
-		return a.token, nil
+// resolveVertexProject resolves the Vertex project through three steps, in
+// order: the project (or project_id) config key, the GOOGLE_CLOUD_PROJECT
+// environment variable, and the GCE metadata server.
+//
+// The last step is what lets a GKE deployment configure nothing GCP-specific
+// beyond auth_mode: vertex. A pod already knows which project it belongs to,
+// and making an operator repeat that in YAML is a chance to get it wrong. It
+// comes last so an explicit setting always wins over the environment it
+// happens to run in, and gcemeta.ProjectID answers ErrNotOnGCE without a
+// request when this process is not on GCE, so a non-GCP host pays no network
+// probe.
+//
+// Failure is still fatal at Init, because a Vertex URL cannot be built without
+// a project — but now only when every step has failed, rather than whenever
+// the config key was absent.
+func resolveVertexProject(raw map[string]any) (string, error) {
+	project, _ := raw["project"].(string)
+	if project == "" {
+		project, _ = raw["project_id"].(string)
+	}
+	if project != "" {
+		return project, nil
+	}
+	if v := os.Getenv("GOOGLE_CLOUD_PROJECT"); v != "" {
+		return v, nil
 	}
 
-	jwt, err := a.signVertexJWT()
-	if err != nil {
-		return "", fmt.Errorf("sign JWT: %w", err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), vertexMetadataTimeout)
+	defer cancel()
 
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
-	form.Set("assertion", jwt)
-
-	endpoint := vertexTokenEndpoint
-	if a.tokenEndpointOverride != "" {
-		endpoint = a.tokenEndpointOverride
+	project, err := metadataProjectID(ctx)
+	switch {
+	case err == nil:
+		return project, nil
+	case errors.Is(err, gcemeta.ErrNotOnGCE):
+		return "", fmt.Errorf("anthropic: vertex auth requires vertex.project config or GOOGLE_CLOUD_PROJECT env var (this process is not on GCE, so the metadata server could not supply one)")
+	default:
+		return "", fmt.Errorf("anthropic: vertex auth has no vertex.project config and no GOOGLE_CLOUD_PROJECT env var, and the GCE metadata server could not supply one: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token exchange failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var tr struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("parse token response: %w", err)
-	}
-	if tr.AccessToken == "" {
-		return "", fmt.Errorf("empty access_token in response: %s", string(body))
-	}
-
-	a.token = tr.AccessToken
-	expiresIn := time.Duration(tr.ExpiresIn) * time.Second
-	if expiresIn <= 0 {
-		expiresIn = 1 * time.Hour
-	}
-	a.tokExpiry = time.Now().Add(expiresIn - 60*time.Second)
-	return a.token, nil
 }
 
-// signVertexJWT mints an RS256-signed JWT bearer assertion suitable for
-// Google's OAuth2 token endpoint.
-func (a *authState) signVertexJWT() (string, error) {
-	header := map[string]string{"alg": "RS256", "typ": "JWT"}
-	headerJSON, _ := json.Marshal(header)
-
-	now := time.Now().Unix()
-	claims := map[string]any{
-		"iss":   a.saEmail,
-		"scope": "https://www.googleapis.com/auth/cloud-platform",
-		"aud":   "https://oauth2.googleapis.com/token",
-		"exp":   now + 3600,
-		"iat":   now,
+// resolveVertexRegion resolves the Vertex region through the region (or
+// location) config key, then the region this process runs in as derived from
+// the GCE metadata server's zone, then defaultVertexRegion.
+//
+// Unlike the project, an unresolvable region is not fatal: there is a usable
+// default, and the deployment is better served by booting than by refusing to.
+// Note the accepted risk that follows from deriving it: Vertex model
+// availability is per-region and Claude models are served from a short list of
+// them, so a pod in a quiet region may resolve its own region and then 404 at
+// first inference rather than at boot. The mitigation is documentation,
+// deliberately not a boot-time availability probe.
+func resolveVertexRegion(raw map[string]any) (string, regionOrigin) {
+	region, _ := raw["region"].(string)
+	if region == "" {
+		region, _ = raw["location"].(string)
 	}
-	claimsJSON, _ := json.Marshal(claims)
-
-	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." +
-		base64.RawURLEncoding.EncodeToString(claimsJSON)
-
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, a.saKey, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", err
+	if region != "" {
+		return region, regionFromConfig
 	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), vertexMetadataTimeout)
+	defer cancel()
+
+	if r, err := metadataRegion(ctx); err == nil {
+		return r, regionFromMetadata
+	}
+	return defaultVertexRegion, regionFromDefault
 }
 
-// parseAnthropicVertexServiceAccount extracts client_email + RSA private key
-// from a GCP service-account JSON blob. Mirrors the Gemini provider's helper
-// — kept package-local to avoid cross-plugin imports.
-func parseAnthropicVertexServiceAccount(data []byte) (string, *rsa.PrivateKey, error) {
-	var sa struct {
-		ClientEmail string `json:"client_email"`
-		PrivateKey  string `json:"private_key"`
-	}
-	if err := json.Unmarshal(data, &sa); err != nil {
-		return "", nil, fmt.Errorf("decode JSON: %w", err)
-	}
-	if sa.ClientEmail == "" || sa.PrivateKey == "" {
-		return "", nil, fmt.Errorf("missing client_email or private_key")
+// resolveVertexCredentials opens the nexuscreds source named by the
+// credentials key and returns it along with the name that won, which the boot
+// log reports.
+//
+// The error from an unknown name is passed through rather than reworded:
+// nexuscreds.Open already says that the binary must blank-import the package
+// registering the source, and lists what this build does have, which is the
+// actionable half of the message.
+func resolveVertexCredentials(raw map[string]any) (nexuscreds.Source, string, error) {
+	name := defaultVertexCredentialSource
+	if v, ok := raw["credentials"]; ok {
+		str, ok := v.(string)
+		if !ok {
+			return nil, "", fmt.Errorf("anthropic: vertex.credentials must be a string naming a credential source, got %T", v)
+		}
+		if str != "" {
+			name = str
+		}
 	}
 
-	block, _ := pem.Decode([]byte(sa.PrivateKey))
-	if block == nil {
-		return "", nil, fmt.Errorf("invalid PEM in private_key")
-	}
-
-	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return sa.ClientEmail, k, nil
-	}
-	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	source, err := nexuscreds.Open(name, vertexCredentialSourceConfig(raw))
 	if err != nil {
-		return "", nil, fmt.Errorf("parse private_key: %w", err)
+		return nil, "", fmt.Errorf("anthropic: vertex auth: %w", err)
 	}
-	rsaKey, ok := k.(*rsa.PrivateKey)
-	if !ok {
-		return "", nil, fmt.Errorf("private_key is not RSA")
-	}
-	return sa.ClientEmail, rsaKey, nil
+	return source, name, nil
 }
 
-// vertexTokenEndpoint is Google's public OAuth2 token exchange URL. Tests
-// override authState.tokenEndpointOverride to point at an httptest server.
-const vertexTokenEndpoint = "https://oauth2.googleapis.com/token"
+// vertexCredentialSourceConfig builds the config block handed to the
+// credential source.
+//
+// The four key-file spellings predate the nexuscreds seam and are kept
+// verbatim so no existing deployment has to edit its YAML. They are normalised
+// onto the two names the source understands and forwarded individually rather
+// than by passing the whole vertex block, so a source can never observe — or
+// collide with — an unrelated key such as project or region.
+//
+// A key absent from the config is left absent rather than forwarded empty:
+// google-adc distinguishes "not configured" (run the full ADC chain, the
+// keyless-pod case) from "configured to something empty". That is also why the
+// old GOOGLE_APPLICATION_CREDENTIALS fallback is gone rather than ported — the
+// ADC chain reads that variable itself, one rung down from an explicitly
+// configured path, which is exactly where it belonged all along.
+func vertexCredentialSourceConfig(raw map[string]any) map[string]any {
+	out := make(map[string]any, 2)
+	for _, pair := range [][2]string{
+		{"sa_key_file", "service_account_json"},
+		{"service_account_json", "service_account_json"},
+		{"sa_key_file_env", "service_account_json_env"},
+		{"service_account_json_env", "service_account_json_env"},
+	} {
+		if _, taken := out[pair[1]]; taken {
+			continue
+		}
+		if v, ok := raw[pair[0]]; ok {
+			out[pair[1]] = v
+		}
+	}
+	return out
+}
+
+// confirmCredentials proves at boot that the resolved Vertex credential can
+// actually mint a token, and emits the one line that says so.
+//
+// The mint is the point. nexuscreds.Factory forbids network I/O at
+// construction, so parseAuthConfig on its own only catches an unknown source
+// name or an unreadable key file: a pod whose Workload Identity binding is
+// broken — the Kubernetes service account not annotated, or the Google service
+// account missing the workloadIdentityUser role — resolves perfectly cleanly
+// and then fails on the first user message, which is the worst possible place
+// to learn it.
+//
+// It is a no-op outside Vertex mode: an API key's validity is not knowable
+// without spending a real request, and Bedrock SigV4 mints nothing to probe.
+func (a *authState) confirmCredentials(ctx context.Context, logger *slog.Logger) error {
+	if a.mode != authModeVertex {
+		return nil
+	}
+	if a.vertexCreds == nil {
+		return fmt.Errorf("anthropic: vertex auth has no credential source")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, vertexCredentialProbeTimeout)
+	defer cancel()
+
+	if _, err := a.vertexCreds.Token(ctx); err != nil {
+		return fmt.Errorf("anthropic: vertex credential source %q could not obtain a token: %w", a.vertexCredsName, err)
+	}
+
+	// DELIBERATE LOGGING-RUBRIC EXCEPTION — do not demote this to DEBUG.
+	//
+	// docs/src/operations/logging.md places "config resolution / which branch
+	// was taken" at DEBUG and reserves INFO for lifecycle. This line reads
+	// like the former and is at INFO anyway, for two reasons: it fires exactly
+	// once per process, so it cannot become chatter, and it is the primary ops
+	// diagnostic for a pod that cannot authenticate. "Did a credential connect
+	// at all, and against which project and region" has to be answerable from
+	// default-level logs, because the deployment that needs the answer is the
+	// one nobody can turn DEBUG on for.
+	//
+	// What it deliberately does NOT say: the token, any key material, the
+	// credential type, or the principal the credential belongs to. It reports
+	// that a credential connected and which configured source supplied it —
+	// nothing about who.
+	logger.Info("vertex credentials confirmed",
+		"provider", "anthropic",
+		"credential_source", a.vertexCredsName,
+		"project", a.vertexProject,
+		"region", a.vertexRegion,
+		"region_source", string(a.vertexRegionOrigin),
+	)
+	return nil
+}

@@ -1290,10 +1290,11 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `bedrock.secret_access_key_env`    | string | `AWS_SECRET_ACCESS_KEY` | Override the env var name. |
 | `bedrock.session_token`            | string | *(env `AWS_SESSION_TOKEN`)*     | Optional STS session token. |
 | `bedrock.session_token_env`        | string | `AWS_SESSION_TOKEN` | Override the env var name. |
-| `vertex.project` / `project_id`    | string | *(env `GOOGLE_CLOUD_PROJECT`)*  | GCP project. |
-| `vertex.region` / `location`       | string | `us-east5`          | Vertex region. |
-| `vertex.sa_key_file` / `service_account_json` | string | *(env `GOOGLE_APPLICATION_CREDENTIALS`)* | Path to the service-account JSON. |
-| `vertex.sa_key_file_env` / `service_account_json_env` | string | `GOOGLE_APPLICATION_CREDENTIALS` | Override the env var name. |
+| `vertex.credentials`               | string | `google-adc`        | Name of a registered `nexuscreds` credential source. |
+| `vertex.project` / `project_id`    | string | *(env `GOOGLE_CLOUD_PROJECT`, then metadata)* | GCP project. Resolved config → `GOOGLE_CLOUD_PROJECT` → GCE metadata server; fails at `Init` only if all three miss. |
+| `vertex.region` / `location`       | string | *(GCE zone-derived region, then `us-east5`)* | Vertex region. Resolved config → region derived from this process's GCE zone → `us-east5`. |
+| `vertex.sa_key_file` / `service_account_json` | string | *(unset — full ADC chain)* | Path to a credentials JSON file. Forwarded to the credential source, not parsed by the provider. |
+| `vertex.sa_key_file_env` / `service_account_json_env` | string | *(unset — full ADC chain)* | Env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through. |
 | `cache.enabled`                    | bool   | `false`             | Enable prompt caching. |
 | `cache.system`                     | bool   | `true`              | Mark the system prompt for caching when enabled. |
 | `cache.tools`                      | bool   | `true`              | Mark the tools array for caching when enabled. |
@@ -1312,6 +1313,26 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `files.delete_on_shutdown`         | bool   | `false`             | Delete uploaded files when the engine shuts down. |
 | `retry.*`                          | —      | *(see Retry block)* | Backoff configuration. |
 | `pricing.<model>.*`                | map    | *(embedded table)*  | Override per-model token pricing — see "Pricing override". |
+
+On GKE with Workload Identity, `auth_mode: vertex` alone is a complete Vertex
+configuration — no project, no region, no key. `vertex.project` and `vertex.region`
+come from the pod's own GCE metadata, and `vertex.credentials` defaults to
+`google-adc`, which runs the full Application Default Credentials chain
+(`GOOGLE_APPLICATION_CREDENTIALS`, the well-known `gcloud` file, then the metadata
+server) when neither key-file key is set. The provider mints one token during
+`Init`, so a broken binding fails the boot rather than the first turn.
+
+`vertex.credentials` names a source registered with `pkg/nexuscreds`, not an auth
+mode. `bin/nexus`, `bin/nexus-broker` and the reference desktop app blank-import
+`google-adc`; a custom binary must blank-import the package that registers whichever
+source it names, or boot fails with an error naming the source and listing the
+sources the build actually carries.
+
+Vertex model availability is per-region, and Claude models are served from a short
+list of regions. A pod that derives its region from its own zone can therefore land
+where the configured model is not served, and that fails at first inference with a
+404 — not at boot, because there is no boot-time availability probe by design. Set
+`vertex.region` explicitly wherever the model choice matters.
 
 #### Retry block (shared by all providers)
 

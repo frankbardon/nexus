@@ -93,7 +93,16 @@ func TestContract_EmitsInputOnRun(t *testing.T) {
 
 	// Declared emissions actually fired (before:io.input rides the veto path;
 	// io.input is a plain emit captured by the harness).
-	h.AssertEmitted("io.input")
+	//
+	// WaitForEmitted, not AssertEmitted: the select above woke this goroutine
+	// from the test's OWN typed subscriber, and pkg/engine dispatches every
+	// typed subscriber before any wildcard one — which is how the harness
+	// captures. The recorder therefore has not necessarily run yet at this
+	// point, and a bare AssertEmitted was reading state that had provably not
+	// been written. It passed only because the emitting goroutine usually
+	// finished its wildcard loop first; under -race that ordering shifted and
+	// CI failed here.
+	h.WaitForEmitted("io.input", 2*time.Second)
 	h.AssertNoUndeclaredEmissions()
 }
 
