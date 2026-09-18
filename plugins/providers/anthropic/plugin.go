@@ -120,6 +120,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.auth = auth
 	p.logger.Debug("anthropic auth resolved", "mode", string(auth.mode))
 
+	// Vertex only: mint one token now so a broken pod identity fails the boot
+	// instead of the first user message, and log the single INFO line that
+	// records which credential source answered. See confirmCredentials in
+	// auth.go, including the logging-rubric exception documented there.
+	if err := p.auth.confirmCredentials(context.Background(), p.logger); err != nil {
+		return err
+	}
+
 	p.client = &http.Client{
 		Timeout: 5 * time.Minute,
 	}
@@ -411,7 +419,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		// applyAuth attaches the right credential headers per mode (and signs
 		// the body for Bedrock SigV4). Bedrock signatures depend on the
 		// timestamp, so the closure recomputes them on every retry.
-		if err := p.auth.applyAuth(reqCtx, httpReq, jsonBody, p.client); err != nil {
+		if err := p.auth.applyAuth(reqCtx, httpReq, jsonBody); err != nil {
 			return nil, err
 		}
 		// Beta-flag aggregation merges the plugin's standing flags (cache 1h,

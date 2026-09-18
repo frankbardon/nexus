@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,14 +9,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/frankbardon/nexus/pkg/nexuscreds"
+
+	// Side-effect import: registers the "google-adc" credential source the
+	// Vertex tests below open by name. It belongs in a TEST file and only in a
+	// test file — non-test anthropic code deliberately does not import
+	// googleadc, because this plugin is in pkg/engine/allplugins and would
+	// otherwise register a credential source into every binary carrying it.
+	_ "github.com/frankbardon/nexus/pkg/nexuscreds/googleadc"
 )
 
 // =====================================================================
@@ -147,6 +158,7 @@ func TestParseAuthConfig_Bedrock_MissingCredsErrors(t *testing.T) {
 }
 
 func TestParseAuthConfig_Vertex_Full(t *testing.T) {
+	pinNotOnGCE(t)
 	dir := t.TempDir()
 	saPath := filepath.Join(dir, "sa.json")
 	writeFakeServiceAccount(t, saPath, "test-sa@example.iam.gserviceaccount.com")
@@ -171,15 +183,19 @@ func TestParseAuthConfig_Vertex_Full(t *testing.T) {
 	if a.vertexRegion != "us-east5" {
 		t.Fatalf("region = %q", a.vertexRegion)
 	}
-	if a.saEmail != "test-sa@example.iam.gserviceaccount.com" {
-		t.Fatalf("saEmail = %q", a.saEmail)
+	if a.vertexRegionOrigin != regionFromConfig {
+		t.Fatalf("region origin = %q, want config", a.vertexRegionOrigin)
 	}
-	if a.saKey == nil {
-		t.Fatal("saKey not parsed")
+	if a.vertexCreds == nil {
+		t.Fatal("vertex mode resolved without a credential source")
+	}
+	if a.vertexCredsName != defaultVertexCredentialSource {
+		t.Fatalf("credential source = %q, want %q", a.vertexCredsName, defaultVertexCredentialSource)
 	}
 }
 
 func TestParseAuthConfig_Vertex_MissingProjectErrors(t *testing.T) {
+	pinNotOnGCE(t)
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
 
 	_, err := parseAuthConfig(map[string]any{
@@ -188,17 +204,240 @@ func TestParseAuthConfig_Vertex_MissingProjectErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing project")
 	}
+	if !strings.Contains(err.Error(), "vertex.project") {
+		t.Fatalf("error should name vertex.project, got %v", err)
+	}
 }
 
-func TestParseAuthConfig_Vertex_MissingSAErrors(t *testing.T) {
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+// TestParseAuthConfig_Vertex_BootsFromMetadataAlone is the pod-identity case:
+// a config saying nothing GCP-specific beyond the auth mode must boot, with
+// the project and the region both coming off the metadata server and no key
+// file anywhere. Before the nexuscreds port this configuration was a hard
+// error — "vertex auth requires sa_key_file" — which is exactly what made
+// Anthropic-on-Vertex unusable under GKE Workload Identity.
+func TestParseAuthConfig_Vertex_BootsFromMetadataAlone(t *testing.T) {
+	newFakeMetadata(t)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	a, err := parseAuthConfig(map[string]any{"auth_mode": "vertex"})
+	if err != nil {
+		t.Fatalf("auth_mode: vertex alone should boot on GCE, got %v", err)
+	}
+	if a.vertexProject != testMetadataProjectID {
+		t.Fatalf("project = %q, want %q from the metadata server", a.vertexProject, testMetadataProjectID)
+	}
+	if a.vertexRegion != testMetadataRegion {
+		t.Fatalf("region = %q, want %q derived from zone %q", a.vertexRegion, testMetadataRegion, testMetadataZone)
+	}
+	if a.vertexRegionOrigin != regionFromMetadata {
+		t.Fatalf("region origin = %q, want metadata", a.vertexRegionOrigin)
+	}
+	if a.vertexCreds == nil {
+		t.Fatal("vertex mode resolved without a credential source")
+	}
+}
+
+// =====================================================================
+// Vertex project / region / credential chains
+// =====================================================================
+
+func TestResolveVertexProject_PrefersConfigOverEnvAndMetadata(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+
+	got, err := resolveVertexProject(map[string]any{"project": "config-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "config-project" {
+		t.Fatalf("project = %q, want the configured one", got)
+	}
+}
+
+// project_id is the older spelling and must keep working.
+func TestResolveVertexProject_AcceptsTheProjectIDSpelling(t *testing.T) {
+	pinNotOnGCE(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	got, err := resolveVertexProject(map[string]any{"project_id": "legacy-spelling"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "legacy-spelling" {
+		t.Fatalf("project = %q, want legacy-spelling", got)
+	}
+}
+
+func TestResolveVertexProject_FallsBackToTheEnvVar(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "env-project")
+
+	got, err := resolveVertexProject(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "env-project" {
+		t.Fatalf("project = %q, want the env var", got)
+	}
+}
+
+func TestResolveVertexProject_FallsBackToTheMetadataServer(t *testing.T) {
+	pinMetadataProjectID(t, "metadata-project", nil)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	got, err := resolveVertexProject(map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "metadata-project" {
+		t.Fatalf("project = %q, want the metadata server's", got)
+	}
+}
+
+func TestResolveVertexProject_SurfacesAMetadataServerError(t *testing.T) {
+	pinMetadataProjectID(t, "", errors.New("metadata server timed out"))
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	_, err := resolveVertexProject(map[string]any{})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	// A wedged metadata server and a laptop are different problems; the
+	// message has to distinguish them.
+	if !strings.Contains(err.Error(), "metadata server timed out") {
+		t.Fatalf("error should carry the metadata failure, got %v", err)
+	}
+}
+
+func TestResolveVertexRegion_PrefersConfigOverMetadata(t *testing.T) {
+	pinMetadataRegion(t, "europe-west4", nil)
+
+	region, origin := resolveVertexRegion(map[string]any{"region": "us-east5"})
+	if region != "us-east5" || origin != regionFromConfig {
+		t.Fatalf("region = %q (%s), want us-east5 (config)", region, origin)
+	}
+}
+
+// location is the older spelling and must keep working.
+func TestResolveVertexRegion_AcceptsTheLocationSpelling(t *testing.T) {
+	pinMetadataRegion(t, "europe-west4", nil)
+
+	region, origin := resolveVertexRegion(map[string]any{"location": "us-central1"})
+	if region != "us-central1" || origin != regionFromConfig {
+		t.Fatalf("region = %q (%s), want us-central1 (config)", region, origin)
+	}
+}
+
+func TestResolveVertexRegion_DerivesTheRegionFromTheMetadataServer(t *testing.T) {
+	pinMetadataRegion(t, "europe-west4", nil)
+
+	region, origin := resolveVertexRegion(map[string]any{})
+	if region != "europe-west4" || origin != regionFromMetadata {
+		t.Fatalf("region = %q (%s), want europe-west4 (metadata)", region, origin)
+	}
+}
+
+func TestResolveVertexRegion_FallsBackToTheDefaultWhenNotOnGCE(t *testing.T) {
+	pinNotOnGCE(t)
+
+	region, origin := resolveVertexRegion(map[string]any{})
+	if region != defaultVertexRegion || origin != regionFromDefault {
+		t.Fatalf("region = %q (%s), want %s (default)", region, origin, defaultVertexRegion)
+	}
+}
+
+func TestParseAuthConfig_Vertex_UnknownCredentialSource(t *testing.T) {
+	pinNotOnGCE(t)
 
 	_, err := parseAuthConfig(map[string]any{
 		"auth_mode": "vertex",
-		"vertex":    map[string]any{"project": "p"},
+		"vertex": map[string]any{
+			"project":     "my-proj",
+			"credentials": "no-such-source",
+		},
 	})
 	if err == nil {
-		t.Fatal("expected error for missing sa_key_file")
+		t.Fatal("expected an error for an unregistered credential source")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no-such-source") {
+		t.Fatalf("error should name the source, got %v", err)
+	}
+	// The actionable half of nexuscreds.Open's message must survive wrapping:
+	// the overwhelmingly likely cause is a missing blank import, not a typo.
+	if !strings.Contains(msg, "blank-import") {
+		t.Fatalf("error should explain the missing blank import, got %v", err)
+	}
+}
+
+func TestParseAuthConfig_Vertex_CredentialsMustBeAString(t *testing.T) {
+	pinNotOnGCE(t)
+
+	_, err := parseAuthConfig(map[string]any{
+		"auth_mode": "vertex",
+		"vertex": map[string]any{
+			"project":     "my-proj",
+			"credentials": 42,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error for a non-string credentials key")
+	}
+	if !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("error should name the credentials key, got %v", err)
+	}
+}
+
+// TestVertexCredentialSourceConfig_NormalisesEveryKeyFileSpelling pins the
+// backwards-compatibility contract: four accepted spellings collapse onto the
+// two names the credential source understands, and a key that was never
+// configured stays absent rather than being forwarded empty — google-adc
+// distinguishes "not configured" (run the whole ADC chain, the keyless-pod
+// case) from "configured to something empty".
+func TestVertexCredentialSourceConfig_NormalisesEveryKeyFileSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   map[string]any
+		want map[string]any
+	}{
+		{"nothing configured", map[string]any{"project": "p"}, map[string]any{}},
+		{"sa_key_file", map[string]any{"sa_key_file": "/k.json"}, map[string]any{"service_account_json": "/k.json"}},
+		{"service_account_json", map[string]any{"service_account_json": "/k.json"}, map[string]any{"service_account_json": "/k.json"}},
+		{"sa_key_file_env", map[string]any{"sa_key_file_env": "KEY"}, map[string]any{"service_account_json_env": "KEY"}},
+		{"service_account_json_env", map[string]any{"service_account_json_env": "KEY"}, map[string]any{"service_account_json_env": "KEY"}},
+		{"sa_key_file wins over the alias", map[string]any{"sa_key_file": "/a.json", "service_account_json": "/b.json"}, map[string]any{"service_account_json": "/a.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := vertexCredentialSourceConfig(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("forwarded %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Fatalf("forwarded[%q] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+// A bad key-file path must fail boot, not the first LLM call.
+func TestParseAuthConfig_Vertex_MissingKeyFileFailsAtInit(t *testing.T) {
+	pinNotOnGCE(t)
+
+	_, err := parseAuthConfig(map[string]any{
+		"auth_mode": "vertex",
+		"vertex": map[string]any{
+			"project":     "my-proj",
+			"sa_key_file": filepath.Join(t.TempDir(), "absent.json"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error for a missing key file")
+	}
+	if !strings.Contains(err.Error(), "service_account_json") {
+		t.Fatalf("error should name the forwarded config key, got %v", err)
 	}
 }
 
@@ -415,94 +654,167 @@ func TestSignSigV4_SessionTokenIncluded(t *testing.T) {
 }
 
 // =====================================================================
-// Vertex JWT bearer
+// Vertex bearer token
 // =====================================================================
 
-// TestVertexAccessToken_FetchAndCache hits a fake OAuth2 endpoint with a
-// freshly-minted JWT, then asserts the cached token is reused on the second
-// call (no second HTTP roundtrip).
-func TestVertexAccessToken_FetchAndCache(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		_ = r.ParseForm()
-		if r.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:jwt-bearer" {
-			t.Errorf("grant_type = %q", r.Form.Get("grant_type"))
-		}
-		if r.Form.Get("assertion") == "" {
-			t.Error("assertion missing")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"fake-token","expires_in":3600}`))
-	}))
-	defer srv.Close()
+// TestApplyAuth_VertexSetsBearerFromSource asserts the whole of what applyAuth
+// now does in Vertex mode: ask the source, attach the answer. There is no
+// cache to test here any more — minting, caching and refreshing all belong to
+// the nexuscreds.Source, and for google-adc that is an oauth2.TokenSource
+// which has its own coverage.
+func TestApplyAuth_VertexSetsBearerFromSource(t *testing.T) {
+	a := &authState{mode: authModeVertex, vertexCreds: stubSource{token: "tok-123"}}
+	req, _ := http.NewRequest("POST", "https://us-east5-aiplatform.googleapis.com/v1/x", nil)
 
-	a := &authState{
-		mode:                  authModeVertex,
-		saEmail:               "test@example.iam.gserviceaccount.com",
-		saKey:                 mustGenerateRSAKey(t),
-		tokenEndpointOverride: srv.URL,
+	if err := a.applyAuth(context.Background(), req, nil); err != nil {
+		t.Fatal(err)
 	}
-
-	token, err := a.vertexAccessToken(context.Background(), srv.Client())
-	if err != nil {
-		t.Fatalf("vertexAccessToken: %v", err)
-	}
-	if token != "fake-token" {
-		t.Errorf("token = %q, want fake-token", token)
-	}
-	if hits.Load() != 1 {
-		t.Errorf("expected 1 token-endpoint hit, got %d", hits.Load())
-	}
-
-	// Second call: should return the cached token without re-hitting endpoint.
-	token2, err := a.vertexAccessToken(context.Background(), srv.Client())
-	if err != nil {
-		t.Fatalf("second vertexAccessToken: %v", err)
-	}
-	if token2 != "fake-token" {
-		t.Errorf("cached token = %q, want fake-token", token2)
-	}
-	if hits.Load() != 1 {
-		t.Errorf("expected token caching; saw %d hits to endpoint", hits.Load())
+	if got := req.Header.Get("Authorization"); got != "Bearer tok-123" {
+		t.Errorf("Authorization = %q, want Bearer tok-123", got)
 	}
 }
 
-func TestVertexAccessToken_RefreshOnExpiry(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"refreshed","expires_in":3600}`))
-	}))
-	defer srv.Close()
+func TestApplyAuth_VertexPropagatesSourceError(t *testing.T) {
+	a := &authState{mode: authModeVertex, vertexCreds: stubSource{err: errors.New("the pod is not bound to a service account")}}
+	req, _ := http.NewRequest("POST", "https://us-east5-aiplatform.googleapis.com/v1/x", nil)
+
+	err := a.applyAuth(context.Background(), req, nil)
+	if err == nil {
+		t.Fatal("expected the source error to reach the caller")
+	}
+	if !strings.Contains(err.Error(), "not bound to a service account") {
+		t.Fatalf("error should carry the source's message, got %v", err)
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Error("a failed mint must not leave an Authorization header behind")
+	}
+}
+
+func TestApplyAuth_VertexWithoutASourceIsAnError(t *testing.T) {
+	a := &authState{mode: authModeVertex}
+	req, _ := http.NewRequest("POST", "https://us-east5-aiplatform.googleapis.com/v1/x", nil)
+
+	if err := a.applyAuth(context.Background(), req, nil); err == nil {
+		t.Fatal("expected an error when no credential source was resolved")
+	}
+}
+
+// TestApplyAuth_VertexMintsFromTheMetadataServer is the end-to-end keyless
+// path: no key material anywhere, ADC resolving through the fake metadata
+// server, and the token it mints arriving on the request.
+func TestApplyAuth_VertexMintsFromTheMetadataServer(t *testing.T) {
+	fake := newFakeMetadata(t)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	a, err := parseAuthConfig(map[string]any{"auth_mode": "vertex"})
+	if err != nil {
+		t.Fatalf("parseAuthConfig: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", "https://europe-west4-aiplatform.googleapis.com/v1/x", nil)
+	if err := a.applyAuth(context.Background(), req, nil); err != nil {
+		t.Fatalf("applyAuth: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer "+testMetadataToken {
+		t.Errorf("Authorization = %q, want the metadata server's token", got)
+	}
+	if fake.hits() == 0 {
+		t.Error("the metadata token endpoint was never asked for a token")
+	}
+}
+
+// =====================================================================
+// confirmCredentials
+// =====================================================================
+
+// A pod whose Workload Identity binding is broken resolves cleanly and then
+// cannot mint. That has to fail the boot, not the first user message.
+func TestConfirmCredentials_FailsWhenTheSourceCannotMint(t *testing.T) {
+	a := &authState{
+		mode:            authModeVertex,
+		vertexCredsName: "google-adc",
+		vertexCreds:     stubSource{err: errors.New("403 Forbidden")},
+	}
+
+	err := a.confirmCredentials(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("expected the boot probe to fail")
+	}
+	if !strings.Contains(err.Error(), "google-adc") {
+		t.Fatalf("error should name the credential source, got %v", err)
+	}
+}
+
+// The one INFO line must say where auth came from and nothing about who it
+// belongs to — no token, no key material, no principal.
+func TestConfirmCredentials_LogsOneLineCarryingNoTokenMaterial(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	a := &authState{
-		mode:                  authModeVertex,
-		saEmail:               "test@example.iam.gserviceaccount.com",
-		saKey:                 mustGenerateRSAKey(t),
-		tokenEndpointOverride: srv.URL,
-		// Pre-seed an expired token; should trigger a refresh.
-		token:     "stale",
-		tokExpiry: time.Now().Add(-1 * time.Minute),
+		mode:               authModeVertex,
+		vertexProject:      "my-proj",
+		vertexRegion:       "us-east5",
+		vertexRegionOrigin: regionFromConfig,
+		vertexCredsName:    "google-adc",
+		vertexCreds:        stubSource{token: "ya29.super-secret"},
 	}
 
-	token, err := a.vertexAccessToken(context.Background(), srv.Client())
+	if err := a.confirmCredentials(context.Background(), logger); err != nil {
+		t.Fatalf("confirmCredentials: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"vertex credentials confirmed", "google-adc", "my-proj", "us-east5", "config"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log line should mention %q, got %s", want, out)
+		}
+	}
+	if strings.Contains(out, "ya29.super-secret") {
+		t.Errorf("the token must never be logged, got %s", out)
+	}
+}
+
+// TestConfirmCredentials_FailsWhenTheMetadataServerRefusesAToken is the broken
+// Workload Identity binding as a pod actually experiences it: resolution
+// succeeds, and the metadata server then refuses to mint. Nothing before the
+// probe can catch this, which is why the probe exists.
+func TestConfirmCredentials_FailsWhenTheMetadataServerRefusesAToken(t *testing.T) {
+	fake := newFakeMetadata(t)
+	isolateADC(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "")
+
+	a, err := parseAuthConfig(map[string]any{"auth_mode": "vertex"})
 	if err != nil {
-		t.Fatalf("vertexAccessToken: %v", err)
+		t.Fatalf("parseAuthConfig should still succeed — construction does no I/O: %v", err)
 	}
-	if token != "refreshed" {
-		t.Errorf("token = %q, want refreshed", token)
+
+	fake.failToken(http.StatusForbidden)
+
+	if err := a.confirmCredentials(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("a pod that cannot mint a token must fail the boot")
 	}
-	if hits.Load() != 1 {
-		t.Errorf("expected refresh, got %d hits", hits.Load())
+}
+
+// Nothing to probe outside Vertex mode, and nothing to say about it.
+func TestConfirmCredentials_IsANoOpOutsideVertex(t *testing.T) {
+	for _, mode := range []authMode{authModeAPIKey, authModeBedrock} {
+		var buf bytes.Buffer
+		a := &authState{mode: mode}
+		if err := a.confirmCredentials(context.Background(), slog.New(slog.NewTextHandler(&buf, nil))); err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		if buf.Len() != 0 {
+			t.Errorf("%s mode logged %q", mode, buf.String())
+		}
 	}
 }
 
 func TestApplyAuth_APIKey(t *testing.T) {
 	a := &authState{mode: authModeAPIKey, apiKey: "k"}
 	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", nil)
-	if err := a.applyAuth(context.Background(), req, nil, http.DefaultClient); err != nil {
+	if err := a.applyAuth(context.Background(), req, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := req.Header.Get("x-api-key"); got != "k" {
@@ -525,7 +837,7 @@ func TestApplyAuth_Bedrock_SetsAuthorization(t *testing.T) {
 		strings.NewReader(string(body)))
 	req.Header.Set("content-type", "application/json")
 
-	if err := a.applyAuth(context.Background(), req, body, http.DefaultClient); err != nil {
+	if err := a.applyAuth(context.Background(), req, body); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(req.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
@@ -536,6 +848,18 @@ func TestApplyAuth_Bedrock_SetsAuthorization(t *testing.T) {
 // =====================================================================
 // Test helpers
 // =====================================================================
+
+// stubSource is a nexuscreds.Source that answers from fixed values, so the
+// applyAuth and confirmCredentials tests exercise the plugin's wiring without
+// any credential library in the way.
+type stubSource struct {
+	token string
+	err   error
+}
+
+func (s stubSource) Token(context.Context) (string, error) { return s.token, s.err }
+
+var _ nexuscreds.Source = stubSource{}
 
 // mustGenerateRSAKey generates a 2048-bit RSA key for test signing. 2048 is
 // fast enough (~50ms) and matches what GCP service-accounts use.
