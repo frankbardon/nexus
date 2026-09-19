@@ -61,8 +61,12 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	// interrupted run, but the work that remains is this request's, so its
 	// agent.turn.end is what releases this bind. All items on one resume
 	// address the same parked turn.
+	// The continuation run adopts it too, for the same reason on the other
+	// axis: the parked turn is the turn a disconnect on THIS stream would
+	// orphan, and no fresh agent.turn.start will arrive to stamp it.
 	for _, m := range items {
 		p.adoptIdentityTurn(m.pending.TurnID)
+		r.adoptTurn(m.pending.TurnID)
 	}
 
 	r.markStarted()

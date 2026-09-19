@@ -54,6 +54,24 @@ type run struct {
 	// reasoningOpen tracks whether a ReasoningStart is unmatched by a
 	// ReasoningEnd.
 	reasoningOpen bool
+	// suspended records that this run's stream ended because the run was
+	// deliberately SUSPENDED — a HITL park or a client-executed tool call,
+	// both of which go through interrupt() — rather than because the stream
+	// died.
+	//
+	// It is the discriminator the disconnect path needs. A park ends the SSE
+	// stream, so the HTTP handler returns, so the request context is cancelled
+	// and the disconnect watcher fires — exactly as a real disconnect does.
+	// Without this flag every parked turn would cancel itself. Set once, and
+	// set BEFORE interrupt's one-shot close rather than inside it, so a
+	// disconnect that wins the race to terminate the run still reads
+	// "suspended" and leaves the parked agent alone. See (*Plugin).streamDied.
+	suspended bool
+	// turnID is the TurnID of the most recent agent.turn.start observed under
+	// this run: the turn a cancellation would name. Empty until an agent
+	// actually starts a turn, which is what makes "there is nothing to cancel"
+	// distinguishable from "a turn is in flight for a client that is gone".
+	turnID string
 	// messages accumulates the finalized conversation messages this run has
 	// rendered (assistant text, tool results). It backs the MessagesSnapshot
 	// emitted on interrupt so a resuming client has the conversation state.
@@ -200,14 +218,56 @@ func (r *run) finish() {
 }
 
 // fail queues a terminal RunError event and closes the run exactly once.
-func (r *run) fail(msg string) {
+//
+// It reports whether THIS call performed the close. Every terminal verb shares
+// one sync.Once, so a false return means the run had already ended — normally
+// (finish), by suspension (interrupt) or with a retracted question
+// (cancelTerminal) — and this failure is a no-op racing in behind it. The
+// disconnect path keys off that return: the request context is cancelled when
+// the HTTP handler returns for ANY reason, so "did my fail actually end the
+// run?" is what separates a client that went away mid-turn from a handler that
+// simply finished. See (*Plugin).streamDied.
+func (r *run) fail(msg string) bool {
+	closed := false
 	r.closeOne.Do(func() {
 		select {
 		case r.out <- agui.NewRunError(msg):
 		default:
 		}
 		close(r.done)
+		closed = true
 	})
+	return closed
+}
+
+// isSuspended reports whether the run ended — or is in the act of ending — by
+// deliberate suspension rather than stream death.
+func (r *run) isSuspended() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.suspended
+}
+
+// adoptTurn records turnID as the turn this run is carrying when the run did
+// not start it: a continuation run resumes a turn that began under the
+// interrupted run and will emit no fresh agent.turn.start (the agent never
+// left the turn, it was parked inside it), so without this a client that
+// disconnects mid-continuation would look like a run with nothing to cancel.
+func (r *run) adoptTurn(turnID string) {
+	if turnID == "" {
+		return
+	}
+	r.mu.Lock()
+	r.turnID = turnID
+	r.mu.Unlock()
+}
+
+// boundTurn returns the TurnID of the turn in flight under this run, empty when
+// no agent.turn.start has been observed for it.
+func (r *run) boundTurn() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.turnID
 }
 
 // snapshotMessages returns a copy of the conversation messages this run has
@@ -234,6 +294,14 @@ func (r *run) snapshotMessages() []agui.Message {
 // Both are emitted unconditionally so the client always has a resume anchor,
 // even when empty.
 func (r *run) interrupt(snapshot []byte, messages []agui.Message, payload agui.Interrupt) {
+	// Mark the suspension BEFORE the one-shot close, not inside it: a client
+	// disconnect racing this park can win the close, and the disconnect path
+	// must still see that the agent was parked on purpose and leave it alone
+	// rather than cancelling a turn a human is expected to answer.
+	r.mu.Lock()
+	r.suspended = true
+	r.mu.Unlock()
+
 	r.closeOne.Do(func() {
 		if snapshot == nil {
 			snapshot = []byte("{}")
@@ -305,6 +373,12 @@ func (r *run) onTurnStart(t events.TurnInfo) {
 	name := stepName(t)
 	r.stepOpen = true
 	r.stepName = name
+	// Record the turn this run is carrying so a cancellation can name it. Last
+	// start wins, matching nexus.control.cancel's own notion of the active
+	// turn; an empty TurnID is ignored rather than erasing a real one.
+	if t.TurnID != "" {
+		r.turnID = t.TurnID
+	}
 	r.mu.Unlock()
 	r.queue(agui.NewStepStarted(name))
 }

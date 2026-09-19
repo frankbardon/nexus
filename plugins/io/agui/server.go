@@ -34,10 +34,15 @@ const legacyBearerPrincipal = "bearer_token"
 // which validates the resume against the pending interrupts, emits the matching
 // hitl.responded events to unblock the in-process agent, and registers a fresh
 // run for the continuation stream. It is satisfied by *Plugin.
+//
+// streamDied is the stream-death half of endRun: endRun says "this run's slot
+// is free", streamDied says "and nobody is listening any more", which is a
+// different thing and only true on two of the handler's exits.
 type bridge interface {
 	startRun(input runInput) (*run, bool)
 	resumeRun(input runInput) (*run, error)
 	endRun(r *run)
+	streamDied(r *run)
 }
 
 // serverConfig carries the resolved settings for the embedded HTTP server.
@@ -281,10 +286,21 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Client disconnect: fail the run so the drain loop stops promptly and the
 	// active-run slot is released for the next request.
+	//
+	// This watcher fires on EVERY exit, not just a disconnect: the request
+	// context is cancelled as soon as this handler returns, including after a
+	// completed run and after a HITL or client-tool park. fail is what tells
+	// them apart — it returns true only when this call actually terminated the
+	// run, which means no terminal event had ended it first, which means the
+	// stream died under a turn that was still going. streamDied applies the
+	// remaining checks (deliberate suspension, no turn started) and asks the
+	// control.cancel capability to stop the orphaned turn.
 	ctx := r.Context()
 	go func() {
 		<-ctx.Done()
-		run.fail("client disconnected")
+		if run.fail("client disconnected") {
+			s.cfg.bridge.streamDied(run)
+		}
 	}()
 
 	// Drain translated AG-UI events until the terminal event closes the run.
@@ -293,7 +309,12 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 		case ev := <-run.out:
 			if err := sse.Write(ev); err != nil {
 				s.cfg.logger.Debug("agui sse write failed; ending run", "error", err)
-				run.fail("sse write failed")
+				// The other stream-death exit: the socket is broken, so the
+				// turn has no reader even though the client never formally
+				// went away.
+				if run.fail("sse write failed") {
+					s.cfg.bridge.streamDied(run)
+				}
 				return
 			}
 			if isTerminal(ev) {

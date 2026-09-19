@@ -43,6 +43,11 @@ import (
 
 const pluginID = "nexus.io.agui"
 
+// cancelSource names this transport on the cancel.request emitted when a run's
+// stream dies under a live turn. The field is a transport name ("tui",
+// "browser", "broker", "a2a"), not a reason.
+const cancelSource = "agui"
+
 // Config keys this plugin reads for authentication. bearer_token /
 // bearer_token_env are the original single-shared-secret form; auth is the
 // full validator-chain block shared with cmd/nexus-broker.
@@ -278,6 +283,11 @@ func (p *Plugin) Emissions() []string {
 		// scene_create tool.invoke per client-authored scene, so the agent
 		// observes the client's state via scene_get/scene_list.
 		"tool.invoke",
+		// A run whose SSE stream dies under a live turn asks the
+		// control.cancel capability to stop that turn, so an agent does not
+		// keep spending the session's budget for a client that is gone. See
+		// streamDied.
+		"cancel.request",
 	}
 }
 
@@ -459,7 +469,10 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	}
 	p.unsubs = nil
 
-	// Fail any in-flight run so its HTTP handler returns promptly.
+	// Fail any in-flight run so its HTTP handler returns promptly. The return
+	// is deliberately ignored: teardown is not stream death, and a
+	// cancel.request emitted into a bus that is already stopping would reach
+	// an agent that is going away regardless.
 	if r := p.currentRun(); r != nil {
 		r.fail("agui server shutting down")
 	}
@@ -571,6 +584,66 @@ func (p *Plugin) endRun(r *run) {
 		p.active = nil
 	}
 	p.mu.Unlock()
+}
+
+// streamDied reports that r's SSE stream died — the client went away, or a
+// write to it failed — and asks the control.cancel capability to stop the turn
+// that was running for it.
+//
+// Without this an orphaned turn runs to completion for nobody: the agent keeps
+// iterating, calling tools and spending tokens against the session's budget
+// with no reader on the other end. r.fail alone only closes the channel this
+// side of the bus; it never reaches the agent.
+//
+// It is deliberately NOT a "the handler returned" hook. Returning is how a run
+// ends normally, and it is also how a HITL park and a client-executed-tool
+// suspend end — both of which leave the agent alive and parked ON PURPOSE.
+// Wired without the two guards below, every parked turn would cancel itself:
+//
+//   - The caller only reaches here when its own r.fail performed the run's
+//     one-shot close. A completed run (finish), a parked one (interrupt) or a
+//     retracted question (cancelTerminal) closed the run first, so the fail
+//     behind it returns false and never calls in.
+//   - r.suspended is set before interrupt's close, so a disconnect that wins
+//     the race against a park still reads the park and stays out of it.
+//
+// A run that never saw an agent.turn.start has no turn to name and nothing to
+// cancel — an input vetoed before any agent ran, for instance — and emits
+// nothing.
+//
+// This asks rather than reaching into the agent: nexus.control.cancel owns turn
+// cancellation for every transport (the TUI, the browser and nexus.io.a2a all
+// enter the same way) and answers with cancel.active, which the agent loop
+// turns into a cancel.complete{Resumable: true} and a final agent.turn.end. The
+// work is therefore suspended and resumable, not destroyed — and that
+// agent.turn.end is also what releases the identity this run bound (see
+// handleTurnEnd), so a cancelled turn closes its identity lifetime through the
+// ordinary path with no second mechanism.
+func (p *Plugin) streamDied(r *run) {
+	if r == nil || p.bus == nil {
+		return
+	}
+	if r.isSuspended() {
+		return
+	}
+	turnID := r.boundTurn()
+	if turnID == "" {
+		return
+	}
+
+	p.logger.Info("agui stream died under a live turn; cancelling it",
+		"thread_id", r.threadID,
+		"run_id", r.runID,
+		"turn_id", turnID,
+	)
+	if err := p.bus.Emit("cancel.request", events.CancelRequest{
+		SchemaVersion: events.CancelRequestVersion,
+		TurnID:        turnID,
+		Source:        cancelSource,
+	}); err != nil {
+		p.logger.Warn("emitting cancel.request for a dead agui stream failed",
+			"error", err, "turn_id", turnID)
+	}
 }
 
 // clearSessionIdentity drops the reserved labels bindSessionContext wrote:
