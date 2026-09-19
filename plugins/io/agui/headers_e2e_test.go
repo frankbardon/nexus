@@ -104,14 +104,18 @@ func TestE2E_RequestHeadersReachInputAndSession(t *testing.T) {
 		t.Errorf("session.tag.set for the header label = %q, want Europe/Amsterdam", bound)
 	}
 
-	// endRun clears the namespace as the handler returns.
+	// The namespace is NOT cleared as the handler returns: the headers belong
+	// to the turn, and this turn ended while its run still held the active
+	// slot, so the live run keeps them (see handleTurnEnd). The next run's
+	// bind reclaims the namespace wholesale, which is what a caller actually
+	// depends on (TestE2E_RequestHeadersDoNotLeakBetweenRuns).
 	waitFor(t, func() bool { return p.currentRun() == nil })
 	left, err := session.RequestHeaders()
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
-	if len(left) != 0 {
-		t.Errorf("headers still bound after the run ended: %v", left)
+	if left["tenant-id"] != "acme" || left["timezone"] != "Europe/Amsterdam" {
+		t.Errorf("headers = %v after the run ended, want the run's own still bound", left)
 	}
 }
 

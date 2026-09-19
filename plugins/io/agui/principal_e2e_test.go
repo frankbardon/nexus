@@ -91,12 +91,13 @@ func staticAuthConfig(tokenToPrincipal map[string]string) map[string]any {
 	}
 }
 
-// TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnEnd is
+// TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent is
 // the core E2-S2 acceptance test: a real POST RunAgentInput, authenticated as
 // a real principal through the real auth chain, must announce
 // session.tag.set{Key: "_principal_id"} before the run's first agent-turn
-// event, and session.tag.deleted{Key: "_principal_id"} once the run ends.
-func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnEnd(t *testing.T) {
+// event. The matching clear follows the TURN rather than the run, so it is
+// deliberately NOT asserted here — see handleTurnEnd.
+func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent(t *testing.T) {
 	p, bus, session, url := newSessionTestPlugin(t, staticAuthConfig(map[string]string{
 		"tok-e2e": "principal-e2e",
 	}))
@@ -163,7 +164,7 @@ func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnEnd(t *t
 
 	// handleRunAgent's endRun runs in a defer as the handler returns; the SSE
 	// read completing races that defer, so wait for the slot to actually free
-	// before asserting the post-run clear.
+	// before asserting on the post-run state.
 	waitFor(t, func() bool { return p.currentRun() == nil })
 
 	mu.Lock()
@@ -192,16 +193,22 @@ func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnEnd(t *t
 		t.Fatalf("session.tag.set(%d) did not precede agent.turn.start(%d); order=%v", setIdx, turnIdx, order)
 	}
 
-	if !slices.Contains(deletedKeys, reservedPrincipalIDKey) {
-		t.Errorf("session.tag.deleted never fired for %q after run end", reservedPrincipalIDKey)
+	// This turn ended while its own run still held the active slot, so the
+	// identity is NOT cleared: the live run owns it, and the next run's
+	// unconditional bind reclaims it. The clear fires for a turn that ends
+	// after its run was released — see identity_lifetime coverage (E1-S2) and
+	// TestContract_TurnEndClearsPrincipalIDLabel.
+	if slices.Contains(deletedKeys, reservedPrincipalIDKey) {
+		t.Errorf("session.tag.deleted fired for %q while the run still owned it", reservedPrincipalIDKey)
 	}
 
 	meta, err := session.SessionMetadata()
 	if err != nil {
 		t.Fatalf("session metadata: %v", err)
 	}
-	if _, ok := meta.Labels[reservedPrincipalIDKey]; ok {
-		t.Errorf("_principal_id still present in session metadata after run end: %v", meta.Labels)
+	if meta.Labels[reservedPrincipalIDKey] != "principal-e2e" {
+		t.Errorf("_principal_id = %q after run end, want it still bound: %v",
+			meta.Labels[reservedPrincipalIDKey], meta.Labels)
 	}
 }
 
@@ -250,9 +257,8 @@ func TestE2E_ResumeRebindsToNewPrincipalNotOriginal(t *testing.T) {
 	// boundDuringResume captures Labels["_principal_id"] the instant
 	// hitl.responded unblocks this goroutine — resumeRun's bindSessionContext
 	// runs synchronously BEFORE it emits hitl.responded (see resume.go), and
-	// the run cannot finish (and endRun cannot clear the label) until
-	// agent.turn.end fires below, so this read is guaranteed to observe the
-	// resume's own bind, not the cleared post-run state.
+	// nothing clears the label until agent.turn.end fires below, so this read
+	// is guaranteed to observe the resume's own bind.
 	boundDuringResume := make(chan string, 1)
 
 	go func() {
@@ -314,17 +320,17 @@ func TestE2E_ResumeRebindsToNewPrincipalNotOriginal(t *testing.T) {
 	waitFor(t, func() bool { return p.currentRun() == nil })
 
 	// Run 1's own endRun (deferred in handleRunAgent) fires as soon as its HTTP
-	// handler returns, whether or not the outcome was an interrupt — clearing
-	// _principal_id exactly as TestContract_EndRunClearsPrincipalIDLabel
-	// asserts at the bus level. The bind is proven by principalBindOrder
-	// (captured live via session.tag.set) below, not by inspecting Labels
-	// between the two runs.
+	// handler returns, and it releases the run slot ONLY: the agent is still
+	// parked in-process on the HITL question, so alice's identity must survive
+	// the park — that is the bug this lifetime split fixes. The resume below
+	// rebinds it to bob rather than inheriting it.
 	meta, err := session.SessionMetadata()
 	if err != nil {
 		t.Fatalf("session metadata after run1: %v", err)
 	}
-	if _, ok := meta.Labels[reservedPrincipalIDKey]; ok {
-		t.Errorf("_principal_id still present after run1's endRun: %v", meta.Labels)
+	if meta.Labels[reservedPrincipalIDKey] != "alice" {
+		t.Errorf("_principal_id = %q across the hitl park, want alice: %v",
+			meta.Labels[reservedPrincipalIDKey], meta.Labels)
 	}
 
 	// --- Run 2, authenticated as bob: resume the SAME thread's interrupt. ---

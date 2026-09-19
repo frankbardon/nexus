@@ -105,7 +105,9 @@ type runInput struct {
 	// principalID is the caller identity s.authorize(r) already resolved for
 	// this request (empty when auth is disabled). startRun/resumeRun bind it
 	// into the session's reserved "_principal_id" tag before the run's
-	// io.input/hitl.responded unblocks anything downstream; endRun clears it.
+	// io.input/hitl.responded unblocks anything downstream; handleTurnEnd
+	// clears it when the turn that identity belongs to ends, not when this
+	// run does.
 	// Every call re-binds fresh from this field — a resumed thread under a
 	// different principal gets a new bind, never a stale one.
 	principalID string

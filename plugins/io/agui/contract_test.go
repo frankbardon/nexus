@@ -163,10 +163,12 @@ func TestContract_StartRunBindsPrincipalAndContextBeforeInput(t *testing.T) {
 	}
 }
 
-// TestContract_EndRunClearsPrincipalIDLabel asserts endRun clears
-// _principal_id so a subsequent unrelated run on the same listener starts
-// with no stale identity.
-func TestContract_EndRunClearsPrincipalIDLabel(t *testing.T) {
+// TestContract_TurnEndClearsPrincipalIDLabel asserts the identity clear
+// follows the TURN, not the run: endRun leaves _principal_id bound (the work
+// may still be in flight — a HITL park frees the slot with the agent still
+// blocked), and agent.turn.end for a run that has already been released is
+// what clears it. E1-S2 owns the full lifetime matrix.
+func TestContract_TurnEndClearsPrincipalIDLabel(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
 		"bind": freeAddr(t),
 	}), contract.WithSession())
@@ -191,8 +193,26 @@ func TestContract_EndRunClearsPrincipalIDLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session metadata: %v", err)
 	}
+	if meta.Labels["_principal_id"] != "principal-end" {
+		t.Errorf("_principal_id = %q after endRun, want it still bound: %v",
+			meta.Labels["_principal_id"], meta.Labels)
+	}
+
+	// The turn the identity belongs to ends; the run slot is already free, so
+	// nothing newer owns the identity and it goes.
+	if err := h.Bus().Emit("agent.turn.end", events.TurnInfo{
+		SchemaVersion: events.TurnInfoVersion,
+		TurnID:        "turn-end",
+	}); err != nil {
+		t.Fatalf("emit agent.turn.end: %v", err)
+	}
+
+	meta, err = p.session.SessionMetadata()
+	if err != nil {
+		t.Fatalf("session metadata: %v", err)
+	}
 	if _, ok := meta.Labels["_principal_id"]; ok {
-		t.Errorf("_principal_id still present after endRun: %v", meta.Labels)
+		t.Errorf("_principal_id still present after agent.turn.end: %v", meta.Labels)
 	}
 }
 
@@ -295,9 +315,9 @@ func TestContract_ContextItemCannotSpoofReservedKey(t *testing.T) {
 }
 
 // TestContract_BindAndClearAnnounceTagEvents asserts session.tag.set/
-// session.tag.deleted fire for the identity bind, the identity clear, and
-// each context item — the announce channel Arc's own registry is expected to
-// subscribe to.
+// session.tag.deleted fire for the identity bind, the identity clear (at the
+// turn's end, not the run's) and each context item — the announce channel
+// Arc's own registry is expected to subscribe to.
 func TestContract_BindAndClearAnnounceTagEvents(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
 		"bind": freeAddr(t),
@@ -338,6 +358,13 @@ func TestContract_BindAndClearAnnounceTagEvents(t *testing.T) {
 	}
 	run.finish()
 	p.endRun(run)
+	// The clear rides agent.turn.end now, so the announce does too.
+	if err := h.Bus().Emit("agent.turn.end", events.TurnInfo{
+		SchemaVersion: events.TurnInfoVersion,
+		TurnID:        "turn-announce",
+	}); err != nil {
+		t.Fatalf("emit agent.turn.end: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
