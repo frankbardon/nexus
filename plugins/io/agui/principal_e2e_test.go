@@ -91,13 +91,15 @@ func staticAuthConfig(tokenToPrincipal map[string]string) map[string]any {
 	}
 }
 
-// TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent is
-// the core E2-S2 acceptance test: a real POST RunAgentInput, authenticated as
-// a real principal through the real auth chain, must announce
+// TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnTurnEnd
+// is the core E2-S2 acceptance test: a real POST RunAgentInput, authenticated
+// as a real principal through the real auth chain, must announce
 // session.tag.set{Key: "_principal_id"} before the run's first agent-turn
-// event. The matching clear follows the TURN rather than the run, so it is
-// deliberately NOT asserted here — see handleTurnEnd.
-func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent(t *testing.T) {
+// event, and session.tag.deleted{Key: "_principal_id"} once the turn that
+// identity belongs to ends. The clear follows agent.turn.end rather than the
+// handler return (see handleTurnEnd); here the two coincide, because the turn
+// ends while its own run is still draining.
+func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEventAndClearsOnTurnEnd(t *testing.T) {
 	p, bus, session, url := newSessionTestPlugin(t, staticAuthConfig(map[string]string{
 		"tok-e2e": "principal-e2e",
 	}))
@@ -164,7 +166,7 @@ func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent(t *testing.T) {
 
 	// handleRunAgent's endRun runs in a defer as the handler returns; the SSE
 	// read completing races that defer, so wait for the slot to actually free
-	// before asserting on the post-run state.
+	// before asserting on the post-turn state.
 	waitFor(t, func() bool { return p.currentRun() == nil })
 
 	mu.Lock()
@@ -193,22 +195,16 @@ func TestE2E_RunAgentInputBindsPrincipalBeforeFirstAgentEvent(t *testing.T) {
 		t.Fatalf("session.tag.set(%d) did not precede agent.turn.start(%d); order=%v", setIdx, turnIdx, order)
 	}
 
-	// This turn ended while its own run still held the active slot, so the
-	// identity is NOT cleared: the live run owns it, and the next run's
-	// unconditional bind reclaims it. The clear fires for a turn that ends
-	// after its run was released — see identity_lifetime coverage (E1-S2) and
-	// TestContract_TurnEndClearsPrincipalIDLabel.
-	if slices.Contains(deletedKeys, reservedPrincipalIDKey) {
-		t.Errorf("session.tag.deleted fired for %q while the run still owned it", reservedPrincipalIDKey)
+	if !slices.Contains(deletedKeys, reservedPrincipalIDKey) {
+		t.Errorf("session.tag.deleted never fired for %q after the turn ended", reservedPrincipalIDKey)
 	}
 
 	meta, err := session.SessionMetadata()
 	if err != nil {
 		t.Fatalf("session metadata: %v", err)
 	}
-	if meta.Labels[reservedPrincipalIDKey] != "principal-e2e" {
-		t.Errorf("_principal_id = %q after run end, want it still bound: %v",
-			meta.Labels[reservedPrincipalIDKey], meta.Labels)
+	if _, ok := meta.Labels[reservedPrincipalIDKey]; ok {
+		t.Errorf("_principal_id still present after the turn ended: %v", meta.Labels)
 	}
 }
 
@@ -375,6 +371,17 @@ func TestE2E_ResumeRebindsToNewPrincipalNotOriginal(t *testing.T) {
 	}
 	if last := principalBindOrder[len(principalBindOrder)-1]; last != "bob" {
 		t.Errorf("last _principal_id bind = %q, want bob (the resume's own resolved principal)", last)
+	}
+
+	// The resumed turn ended under run 2, so run 2's bind is released with it:
+	// the continuation adopts the parked turn precisely so a resumed turn is
+	// not left holding an identity forever (see adoptIdentityTurn).
+	meta, err = session.SessionMetadata()
+	if err != nil {
+		t.Fatalf("session metadata after run2: %v", err)
+	}
+	if _, ok := meta.Labels[reservedPrincipalIDKey]; ok {
+		t.Errorf("_principal_id still present after the resumed turn ended: %v", meta.Labels)
 	}
 }
 

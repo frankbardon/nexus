@@ -163,11 +163,25 @@ func TestContract_StartRunBindsPrincipalAndContextBeforeInput(t *testing.T) {
 	}
 }
 
+// emitTurn is the agent stand-in these contract tests use for a turn
+// boundary: the real emitters (react, planexec, orchestrator) always announce
+// agent.turn.start before the matching agent.turn.end, and the identity
+// lifetime correlates on exactly that pair.
+func emitTurn(t *testing.T, h *contract.ContractHarness, eventType, turnID string) {
+	t.Helper()
+	if err := h.Bus().Emit(eventType, events.TurnInfo{
+		SchemaVersion: events.TurnInfoVersion,
+		TurnID:        turnID,
+	}); err != nil {
+		t.Fatalf("emit %s: %v", eventType, err)
+	}
+}
+
 // TestContract_TurnEndClearsPrincipalIDLabel asserts the identity clear
 // follows the TURN, not the run: endRun leaves _principal_id bound (the work
 // may still be in flight — a HITL park frees the slot with the agent still
-// blocked), and agent.turn.end for a run that has already been released is
-// what clears it. E1-S2 owns the full lifetime matrix.
+// blocked), and the turn's own agent.turn.end is what clears it. E1-S2 owns
+// the full lifetime matrix.
 func TestContract_TurnEndClearsPrincipalIDLabel(t *testing.T) {
 	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
 		"bind": freeAddr(t),
@@ -186,6 +200,7 @@ func TestContract_TurnEndClearsPrincipalIDLabel(t *testing.T) {
 	if !started {
 		t.Fatal("startRun rejected on a fresh plugin")
 	}
+	emitTurn(t, h, "agent.turn.start", "turn-end")
 	run.finish()
 	p.endRun(run)
 
@@ -198,14 +213,8 @@ func TestContract_TurnEndClearsPrincipalIDLabel(t *testing.T) {
 			meta.Labels["_principal_id"], meta.Labels)
 	}
 
-	// The turn the identity belongs to ends; the run slot is already free, so
-	// nothing newer owns the identity and it goes.
-	if err := h.Bus().Emit("agent.turn.end", events.TurnInfo{
-		SchemaVersion: events.TurnInfoVersion,
-		TurnID:        "turn-end",
-	}); err != nil {
-		t.Fatalf("emit agent.turn.end: %v", err)
-	}
+	// The turn the identity belongs to ends; the identity goes with it.
+	emitTurn(t, h, "agent.turn.end", "turn-end")
 
 	meta, err = p.session.SessionMetadata()
 	if err != nil {
@@ -213,6 +222,92 @@ func TestContract_TurnEndClearsPrincipalIDLabel(t *testing.T) {
 	}
 	if _, ok := meta.Labels["_principal_id"]; ok {
 		t.Errorf("_principal_id still present after agent.turn.end: %v", meta.Labels)
+	}
+}
+
+// TestContract_TurnEndClearsPrincipalIDWhileRunStillActive is the happy path:
+// the turn ends while its own run is still draining SSE, which is when a
+// completed AG-UI turn normally ends. The identity must go there too — a
+// guard that skipped whenever a run held the slot would never fire at all.
+func TestContract_TurnEndClearsPrincipalIDWhileRunStillActive(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"bind": freeAddr(t),
+	}), contract.WithSession())
+
+	p, ok := h.Plugin().(*Plugin)
+	if !ok {
+		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
+	}
+
+	if _, started := p.startRun(runInput{
+		threadID:    "thread-live",
+		runID:       "run-live",
+		principalID: "principal-live",
+	}); !started {
+		t.Fatal("startRun rejected on a fresh plugin")
+	}
+	emitTurn(t, h, "agent.turn.start", "turn-live")
+
+	if p.currentRun() == nil {
+		t.Fatal("run released before the turn ended; this test needs it live")
+	}
+	emitTurn(t, h, "agent.turn.end", "turn-live")
+
+	meta, err := p.session.SessionMetadata()
+	if err != nil {
+		t.Fatalf("session metadata: %v", err)
+	}
+	if _, ok := meta.Labels["_principal_id"]; ok {
+		t.Errorf("_principal_id still present after the turn ended on a live run: %v", meta.Labels)
+	}
+}
+
+// TestContract_TurnEndOfAbandonedRunKeepsNewerRunsIdentity is the late-turn
+// race: run A binds and its handler returns early (disconnect), run B POSTs
+// and binds its own principal, and only then does A's turn end. B's identity
+// must survive — the ending turn is not the one B's bind was made for.
+func TestContract_TurnEndOfAbandonedRunKeepsNewerRunsIdentity(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"bind": freeAddr(t),
+	}), contract.WithSession())
+
+	p, ok := h.Plugin().(*Plugin)
+	if !ok {
+		t.Fatalf("plugin type = %T, want *Plugin", h.Plugin())
+	}
+
+	runA, started := p.startRun(runInput{
+		threadID:    "thread-race",
+		runID:       "run-a",
+		principalID: "principal-a",
+	})
+	if !started {
+		t.Fatal("startRun rejected on a fresh plugin")
+	}
+	emitTurn(t, h, "agent.turn.start", "turn-a")
+	// Run A's handler returns without its turn ending: the slot frees, the
+	// agent keeps working.
+	p.endRun(runA)
+
+	if _, started := p.startRun(runInput{
+		threadID:    "thread-race",
+		runID:       "run-b",
+		principalID: "principal-b",
+	}); !started {
+		t.Fatal("startRun rejected after run A was released")
+	}
+	emitTurn(t, h, "agent.turn.start", "turn-b")
+
+	// Turn A finally ends, long after B took over.
+	emitTurn(t, h, "agent.turn.end", "turn-a")
+
+	meta, err := p.session.SessionMetadata()
+	if err != nil {
+		t.Fatalf("session metadata: %v", err)
+	}
+	if meta.Labels["_principal_id"] != "principal-b" {
+		t.Errorf("_principal_id = %q after an abandoned turn ended, want principal-b: %v",
+			meta.Labels["_principal_id"], meta.Labels)
 	}
 }
 
@@ -356,15 +451,11 @@ func TestContract_BindAndClearAnnounceTagEvents(t *testing.T) {
 	if !started {
 		t.Fatal("startRun rejected on a fresh plugin")
 	}
+	emitTurn(t, h, "agent.turn.start", "turn-announce")
 	run.finish()
 	p.endRun(run)
 	// The clear rides agent.turn.end now, so the announce does too.
-	if err := h.Bus().Emit("agent.turn.end", events.TurnInfo{
-		SchemaVersion: events.TurnInfoVersion,
-		TurnID:        "turn-announce",
-	}); err != nil {
-		t.Fatalf("emit agent.turn.end: %v", err)
-	}
+	emitTurn(t, h, "agent.turn.end", "turn-announce")
 
 	mu.Lock()
 	defer mu.Unlock()

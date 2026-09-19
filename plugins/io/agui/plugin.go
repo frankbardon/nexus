@@ -120,10 +120,26 @@ type Plugin struct {
 	// because scenes are session-scoped and persist across runs on this listener.
 	sharedState map[string]json.RawMessage
 
-	// mu guards active: at most one run is in flight per listener for this
-	// scope (single engine/session per listener, mirroring io/browser).
+	// mu guards active, identityRun and identityTurn: at most one run is in
+	// flight per listener for this scope (single engine/session per listener,
+	// mirroring io/browser).
 	mu     sync.Mutex
 	active *run
+	// identityRun is the run whose bind currently owns the session identity
+	// (_principal_id + _header.*). It is NOT the active run: the identity
+	// outlives the run that bound it (a HITL park, a client-tool suspend or a
+	// disconnect releases the slot with the turn still in flight). Set by
+	// bindSessionContext, cleared by the turn-end clear and by Shutdown.
+	identityRun *run
+	// identityTurn is the TurnID of the work that identity was bound for: the
+	// first turn to start under identityRun, or the parked turn a continuation
+	// run adopts on resume. It is what lets handleTurnEnd tell "the turn this
+	// identity belongs to has ended" from "an older, abandoned turn ended
+	// while a newer run already holds its own identity" — a run pointer alone
+	// cannot, because on the happy path the turn ends while its OWN run is
+	// still draining, and after a late-turn race the newer run is both active
+	// AND the identity owner. Empty when no turn has been correlated yet.
+	identityTurn string
 
 	// pendingMu guards pending. A virtual-run interrupt records the mapping
 	// from the AG-UI interruptId to the underlying HITL request so the resume
@@ -456,6 +472,10 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	// Shutdown runs, no turn can still legitimately own an identity. There is
 	// deliberately no TTL, lease or timer anywhere on this path: a deadline
 	// would re-create the original bug for any legitimately long turn.
+	p.mu.Lock()
+	p.identityRun = nil
+	p.identityTurn = ""
+	p.mu.Unlock()
 	p.clearSessionIdentity()
 
 	if p.server == nil {
@@ -490,7 +510,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	// Bind the per-run identity and context tags BEFORE the run's io.input is
 	// emitted below (ordering matters — see bindSessionContext), mirroring
 	// this package's existing "register before unblocking" discipline.
-	p.bindSessionContext(input)
+	p.bindSessionContext(input, r)
 
 	// RunStarted is emitted eagerly so even a run with no agent produces a
 	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
@@ -590,7 +610,7 @@ func (p *Plugin) clearSessionIdentity() {
 // under a different principal always gets a new bind, never a stale one
 // carried over from the run it continues. No-op when the plugin was
 // constructed without a session (some unit tests).
-func (p *Plugin) bindSessionContext(input runInput) {
+func (p *Plugin) bindSessionContext(input runInput, r *run) {
 	if p.session == nil {
 		return
 	}
@@ -623,6 +643,34 @@ func (p *Plugin) bindSessionContext(input runInput) {
 				"error", err, "key", item.Description)
 		}
 	}
+
+	// Record which run now owns the identity, AFTER the writes rather than
+	// alongside the p.active registration: between registering a run and
+	// binding it, the labels still hold the previous run's identity, and a
+	// late agent.turn.end arriving in that window must not be told the new run
+	// owns them. See handleTurnEnd.
+	p.mu.Lock()
+	p.identityRun = r
+	// A fresh bind owns no turn yet: the next turn to start under this run is
+	// the work it belongs to (see handleTurnStart), and a resume adopts the
+	// parked turn explicitly (see adoptIdentityTurn). Until then an ending
+	// turn belongs to an older bind and must not clear this one.
+	p.identityTurn = ""
+	p.mu.Unlock()
+}
+
+// adoptIdentityTurn records turnID as the turn the currently bound identity
+// belongs to. resumeRun calls it for the parked turn its continuation is
+// unblocking: that turn started under the interrupted run, but its remaining
+// work is the resuming request's, so its agent.turn.end is what releases this
+// bind. Without it a resumed turn would never clear the identity it ran under.
+func (p *Plugin) adoptIdentityTurn(turnID string) {
+	if turnID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.identityTurn = turnID
+	p.mu.Unlock()
 }
 
 // currentRun returns the active run or nil.
@@ -760,6 +808,19 @@ func (p *Plugin) handleTurnStart(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+
+	// Correlate the identity with the work it was bound for: the first turn to
+	// start under the run that bound it. Only that run's turn counts — a turn
+	// starting under some other run belongs to a bind this one has already
+	// replaced. react, planexec and orchestrator all emit agent.turn.start
+	// before any agent.turn.end for the same TurnID, so every turn that can
+	// end here has been stamped. See handleTurnEnd.
+	p.mu.Lock()
+	if p.active == p.identityRun && p.identityTurn == "" {
+		p.identityTurn = t.TurnID
+	}
+	p.mu.Unlock()
+
 	r.onTurnStart(t)
 }
 
@@ -770,26 +831,49 @@ func (p *Plugin) handleTurnStart(e engine.Event[any]) {
 // top-level turn, on every exit including cancel, so a turn that ends at all
 // ends here.
 //
-// The clear is skipped while a run holds the active slot: whatever is bound
-// then belongs to that live run, which did its own bind at startRun. That is
-// the late-turn race guard — run A's handler returns on a disconnect, run B
-// POSTs and binds principal B, and only then does turn A reach here; without
-// the skip, A's clear would wipe B's identity. The cost is that a completed
-// turn's identity can outlive it until the next run's (now unconditional)
-// bind reclaims it, which is the deliberately safer direction: stale-but-
-// owned beats a silently de-authenticated turn.
+// The clear fires for the turn the current identity was bound for, and only
+// that turn — identityTurn, stamped at agent.turn.start (or adopted on
+// resume). Two cases force that precision:
+//
+//   - The happy path ends the turn while its OWN run is still draining SSE,
+//     so "skip whenever a run is active" would never clear anything.
+//   - The late-turn race ends an older turn after a newer run has bound: run
+//     A's handler returns on a disconnect, run B POSTs and binds principal B,
+//     and only then does turn A reach here. B is then both the active run and
+//     the identity owner, so a run-pointer comparison cannot tell the two
+//     apart either. The TurnID can: turn A is not B's turn, so B keeps its
+//     identity.
 func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
 	t, ok := e.Payload.(events.TurnInfo)
 	if !ok {
 		return
 	}
-	r := p.currentRun()
-	if r == nil {
-		// The run that started this turn is already gone — a HITL park, a
-		// client-tool suspend, a disconnect or an early handler return freed
-		// the slot while the agent kept working. The turn it was carrying has
-		// now ended, so the identity it was carrying can go.
+
+	p.mu.Lock()
+	r := p.active
+	// The identity goes iff the turn that just ended is the one it was bound
+	// for. That holds whether the run that bound it is still draining (happy
+	// path), was released at a HITL park or client-tool suspend, or died on a
+	// disconnect — all of which are exactly the cases where the request's
+	// lifetime and the turn's diverge.
+	clear := p.identityTurn != "" && p.identityTurn == t.TurnID
+	if clear {
+		p.identityRun = nil
+		p.identityTurn = ""
+	}
+	p.mu.Unlock()
+
+	if clear {
+		// Cleared BEFORE r.finish() below, and that order is load-bearing:
+		// finish ends the SSE drain, the handler returns, endRun frees the
+		// slot, and the next POST binds its own identity. A clear landing
+		// after that sequence would delete the new run's bind. Note the
+		// session I/O happens outside p.mu — the tag store announces
+		// session.tag.deleted on the bus, and a handler of that re-entering
+		// this plugin must not meet a held lock.
 		p.clearSessionIdentity()
+	}
+	if r == nil {
 		return
 	}
 	r.onTurnEnd(t)
