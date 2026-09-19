@@ -146,8 +146,53 @@ Headers describe **one request**, not the session. Every turn replaces the
 whole bound set, including when the request carried none — a second turn that
 drops `X-Nexus-Tenant` leaves nothing behind for a plugin to misread as still
 current. They are bound before the turn's `io.input` is emitted, so a handler
-never observes a turn ahead of the context it belongs to, and cleared when the
-run ends.
+never observes a turn ahead of the context it belongs to.
+
+When the set is *released* is per transport, because the transports disagree
+about when the request is over:
+
+| Transport | Bound | Released |
+|---|---|---|
+| `nexus.io.agui` | at run start and at every resume | by the `agent.turn.end` of the turn the bind was made for (below) |
+| `nexus.io.a2a` | at the start of each turn, including the one that resumes a task parked at `INPUT_REQUIRED` | when that turn's run reaches its terminal sequence — the task outlives its HTTP request, so the request returning is not the end |
+| `nexus.io.browser`, `nexus.io.realtime` | per inbound message, from the connection's upgrade request | replaced by the next message's set; there is no separate clear |
+| `nexus.io.broker` | on every `input` frame the broker forwards | replaced by the next frame's set; there is no separate clear |
+
+In every row, "replaced" is a whole-set replacement — a turn that carries no
+headers clears the namespace rather than leaving the previous turn's values
+standing.
+
+Which transports bind `_principal_id` at all is a separate question with a
+separate answer: `nexus.io.agui` and `nexus.io.broker` bind it beside the
+headers, while `nexus.io.a2a` forwards headers but binds no principal today.
+Read each transport's page rather than generalizing from one.
+
+### `nexus.io.agui`: the turn, not the request
+
+`nexus.io.agui` is the one transport where the HTTP request is visibly the
+wrong boundary, because the AG-UI terminal-run model lets **one Nexus turn span
+several runs**: a HITL park ends the run and its request while the agent stays
+parked in-process, and a continuation `POST` resumes the same turn.
+
+So the `_header.*` labels — and `_principal_id` alongside them, since they
+describe one caller and a half-cleared identity is worse than either whole
+state — are bound per run and cleared by the `agent.turn.end` of **the turn
+they were bound for**. A HITL park, a client-executed-tool suspend, a client
+disconnect or an early handler return does **not** clear them: the work is
+still in flight, and a plugin that reads identity fresh off the session for
+every tool call would start failing closed mid-turn. The plugin's `Shutdown` is
+the only backstop, for a turn that never emits `agent.turn.end` at all; there
+is no TTL and no timer, because a deadline would break any legitimately long
+turn. See
+[Identity lifetime](../plugins/io-agui.md#identity-lifetime-the-turn-not-the-request)
+for the correlation rule that makes the clear precise.
+
+A client that disconnects mid-turn additionally has its orphaned turn cancelled
+via the `control.cancel` capability — resumably, not destructively — so the
+turn ends, and with it the bind. That is `nexus.io.agui` only, and it has no
+configuration key.
+
+### WebSocket transports: the connection, not the turn
 
 For a WebSocket transport (`nexus.io.browser`, `nexus.io.realtime`) the
 headers come from the **upgrade** request, because that is the only request a
