@@ -203,10 +203,13 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 // deadline.
 func (p *Plugin) endTurn(r *run) {
 	// The turn's request headers are cleared BEFORE the slot is released, and
-	// that order is load-bearing for the same reason nexus.io.agui's endRun
-	// documents: p.active == nil is what lets the next turn start and bind its
-	// own headers, so clearing afterwards could land on top of the new turn's
-	// bind and wipe it. Clearing first, then releasing, closes that window.
+	// that order is load-bearing: p.active == nil is what lets the next turn
+	// start and bind its own headers, so clearing afterwards could land on top
+	// of the new turn's bind and wipe it. Clearing first, then releasing,
+	// closes that window. Clearing here at all is safe because endTurn runs
+	// from the run's terminal sequence, so the turn really is over — unlike
+	// nexus.io.agui, whose run ends at a HITL park while the work continues,
+	// and which therefore clears from its agent.turn.end handler instead.
 	if p.session != nil {
 		if err := p.session.SetRequestHeaders(nil); err != nil {
 			p.logger.Warn("clearing X-Nexus-* request header labels failed", "error", err)
