@@ -222,7 +222,46 @@ One in-flight run per listener (single engine/session per listener, mirroring
 `nexus.io.browser`). A second `POST` while a run is active receives a terminal
 `RUN_STARTED` + `RUN_ERROR` stream rather than interleaving into the live run. On
 client disconnect or engine shutdown, the active run fails with `RUN_ERROR` and
-its handler returns promptly, releasing the slot.
+its handler returns promptly, releasing the slot — and a disconnect that lands
+while a turn is still running also stops that turn, below.
+
+### A dead stream cancels the turn behind it
+
+Releasing the slot is not enough on a disconnect: failing the run only closes a
+channel on this side of the bus, and the agent never hears about it. So a run
+whose SSE stream dies **while a turn is still running** also asks the
+`control.cancel` capability to stop that turn — the plugin emits
+`cancel.request` (declared in its `Emissions()`) naming the turn the vanished
+client orphaned. Both stream-death exits are wired: the request-context watcher
+that fires when the client goes away, and a failed SSE write on a broken
+socket. Without it the orphaned turn runs to completion for nobody, iterating,
+calling tools and spending the session's token budget with no reader on the
+other end.
+
+The cancel is **resumable, not destructive**. `nexus.control.cancel` owns turn
+cancellation for every transport (the TUI, the browser and `nexus.io.a2a` all
+enter the same way) and answers with `cancel.active`; the agent loop turns that
+into `cancel.complete` with `Resumable: true` and then its final
+`agent.turn.end` — which is also what releases the identity the run bound, so a
+cancelled turn closes its
+[identity lifetime](#identity-lifetime-the-turn-not-the-request) through the
+ordinary path with no second mechanism.
+
+A **deliberate** suspension is never cancelled. A HITL park and a
+client-executed-tool suspend both end the run with the agent alive and parked
+on purpose, and two independent guards keep them out of this path: only the
+caller whose own failure performed the run's one-shot close reaches it (a
+completed, parked or retracted run was closed by something else first), and a
+park marks the run suspended *before* that close, so a disconnect racing a park
+still reads as a park. A run that never saw an `agent.turn.start` — an input
+vetoed before any agent ran, say — has no turn to name and emits nothing. Nor
+is engine teardown stream death: `Shutdown` fails the in-flight run without
+calling in, since a cancel emitted into a stopping bus would reach an agent
+that is going away regardless.
+
+**There is no configuration key for any of this — it is always on.** Cancelling
+an orphaned turn is a correctness property of the transport, not a policy
+choice; the work is suspended and resumable, so nothing is lost by it.
 
 ## Exposure, auth, and CORS
 
@@ -328,9 +367,13 @@ outage must not read to a client as "re-authenticate". See the
 record as `principal_id` (empty when auth is disabled). It is also bound into
 the session's tag store: `startRun`/`resumeRun` write it as the reserved
 `_principal_id` session label before the run's `io.input` (or, on resume,
-`hitl.responded`) is emitted, and `endRun` clears it. Every run/resume re-binds
-fresh from that request's own resolved principal — a resumed thread under a
-different principal gets a new bind, never a stale one. This is a pure
+`hitl.responded`) is emitted, and released by the `agent.turn.end` of the turn
+it was bound for — not by the HTTP request returning (see
+[Identity lifetime](#identity-lifetime-the-turn-not-the-request) below). Every
+run/resume re-binds fresh from that request's own resolved principal — a
+resumed thread under a different principal gets a new bind, never a stale one,
+and a run that resolved no principal clears the label rather than inheriting
+the previous run's. This is a pure
 observability seam: one listener still serves a single session and one run at
 a time, so nothing in this transport itself keys behaviour on the bound
 identity. An external consumer (e.g. an embedder's own authorization layer)
@@ -346,6 +389,50 @@ this to write the reserved `_principal_id` key: the reserved prefix (`_`) is
 enforced at the tag store regardless of caller, so a `context` item whose
 `description` starts with `_` is rejected rather than silently overwriting
 the bound identity.
+
+#### Identity lifetime: the turn, not the request
+
+`_principal_id` and the `_header.*` labels are bound **per run** and cleared by
+the `agent.turn.end` of **the turn they were bound for**. Neither the HTTP
+request nor the AG-UI run is the boundary, because one Nexus turn can span
+several runs (see [Interrupts](#interrupts-hitl-and-client-executed-tools)):
+
+- **Bound** in `startRun` / `resumeRun`, before that run's `io.input` (or, on a
+  continuation, its `hitl.responded` / `tool.result`), so a subscriber of
+  `session.tag.set` never sees the turn's first downstream event ahead of the
+  identity it belongs to.
+- **Correlated** with the first `agent.turn.start` observed under the run that
+  bound them. A continuation run adopts the parked turn instead, because a
+  resumed turn emits no fresh `agent.turn.start` — the agent never left it.
+- **Cleared** when `agent.turn.end` arrives for that same turn. `react`,
+  `planexec` and `orchestrator` each emit it exactly once per top-level turn on
+  every exit — normal completion, cancel, plan-not-approved — so a turn that
+  ends at all ends its identity with it.
+- **Held** across anything that ends the run while the work continues: a HITL
+  park, a client-executed-tool suspend, a client disconnect, or the handler
+  simply returning early. De-authenticating a turn that is still running is
+  strictly worse than holding the bind — an embedder whose tools read identity
+  fresh off the session and fail closed turns one dropped label into a refusal
+  loop that burns the turn's whole budget.
+- **`Shutdown` is the only backstop**, and it clears unconditionally, for a
+  turn that never emits `agent.turn.end` at all (a wedged provider, a killed
+  sub-process). There is deliberately no TTL, lease or timer on this path: a
+  deadline would re-create the original bug for any legitimately long turn.
+
+Correlating on the *turn*, not just on the binding run, is what makes the clear
+precise. On the happy path the turn ends while its own run is still draining
+SSE, so "skip the clear whenever a run is active" would never clear anything;
+and after a late-turn race the newer run is both the active run and the
+identity owner, so a run-pointer comparison cannot tell an abandoned older
+turn's end from its own. The `TurnID` can, so an older turn ending never wipes
+a newer run's bind.
+
+This is `nexus.io.agui`'s rule, not a shared one. `nexus.io.a2a` clears the
+request headers from its own terminal sequence and binds no principal at all;
+`nexus.io.broker` binds identity on every forwarded `input` frame and has no
+separate clear. See
+[Request Headers — Lifetime](../guides/request-headers.md#lifetime) for the
+per-transport table.
 
 ### Shared state
 

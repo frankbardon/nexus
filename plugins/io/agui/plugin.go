@@ -43,6 +43,11 @@ import (
 
 const pluginID = "nexus.io.agui"
 
+// cancelSource names this transport on the cancel.request emitted when a run's
+// stream dies under a live turn. The field is a transport name ("tui",
+// "browser", "broker", "a2a"), not a reason.
+const cancelSource = "agui"
+
 // Config keys this plugin reads for authentication. bearer_token /
 // bearer_token_env are the original single-shared-secret form; auth is the
 // full validator-chain block shared with cmd/nexus-broker.
@@ -57,8 +62,8 @@ const (
 const defaultBindAddr = "127.0.0.1:8090"
 
 // reservedPrincipalIDKey is the reserved-namespace session label startRun/
-// resumeRun bind the request's resolved principal into, and endRun clears.
-// See bindSessionContext.
+// resumeRun bind the request's resolved principal into, and handleTurnEnd
+// clears once the turn it belongs to has ended. See bindSessionContext.
 //
 // Aliased from the engine rather than spelled again here: nexus.io.broker
 // binds the same label from the principal the broker resolved, and two
@@ -89,10 +94,11 @@ type Plugin struct {
 	server *Server
 
 	sessionID string
-	// session is the SessionWorkspace startRun/resumeRun/endRun bind/clear the
-	// per-run identity and context tags on (see bindSessionContext). Nil when
-	// the plugin is constructed without a session (some unit tests); every
-	// tag write is a no-op in that case.
+	// session is the SessionWorkspace startRun/resumeRun bind the per-run
+	// identity and context tags on, and handleTurnEnd/Shutdown clear them from
+	// (see bindSessionContext and clearSessionIdentity). Nil when the plugin is
+	// constructed without a session (some unit tests); every tag write is a
+	// no-op in that case.
 	session *engine.SessionWorkspace
 
 	bindAddr string
@@ -119,10 +125,26 @@ type Plugin struct {
 	// because scenes are session-scoped and persist across runs on this listener.
 	sharedState map[string]json.RawMessage
 
-	// mu guards active: at most one run is in flight per listener for this
-	// scope (single engine/session per listener, mirroring io/browser).
+	// mu guards active, identityRun and identityTurn: at most one run is in
+	// flight per listener for this scope (single engine/session per listener,
+	// mirroring io/browser).
 	mu     sync.Mutex
 	active *run
+	// identityRun is the run whose bind currently owns the session identity
+	// (_principal_id + _header.*). It is NOT the active run: the identity
+	// outlives the run that bound it (a HITL park, a client-tool suspend or a
+	// disconnect releases the slot with the turn still in flight). Set by
+	// bindSessionContext, cleared by the turn-end clear and by Shutdown.
+	identityRun *run
+	// identityTurn is the TurnID of the work that identity was bound for: the
+	// first turn to start under identityRun, or the parked turn a continuation
+	// run adopts on resume. It is what lets handleTurnEnd tell "the turn this
+	// identity belongs to has ended" from "an older, abandoned turn ended
+	// while a newer run already holds its own identity" — a run pointer alone
+	// cannot, because on the happy path the turn ends while its OWN run is
+	// still draining, and after a late-turn race the newer run is both active
+	// AND the identity owner. Empty when no turn has been correlated yet.
+	identityTurn string
 
 	// pendingMu guards pending. A virtual-run interrupt records the mapping
 	// from the AG-UI interruptId to the underlying HITL request so the resume
@@ -261,6 +283,11 @@ func (p *Plugin) Emissions() []string {
 		// scene_create tool.invoke per client-authored scene, so the agent
 		// observes the client's state via scene_get/scene_list.
 		"tool.invoke",
+		// A run whose SSE stream dies under a live turn asks the
+		// control.cancel capability to stop that turn, so an agent does not
+		// keep spending the session's budget for a client that is gone. See
+		// streamDied.
+		"cancel.request",
 	}
 }
 
@@ -442,10 +469,27 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 	}
 	p.unsubs = nil
 
-	// Fail any in-flight run so its HTTP handler returns promptly.
+	// Fail any in-flight run so its HTTP handler returns promptly. The return
+	// is deliberately ignored: teardown is not stream death, and a
+	// cancel.request emitted into a bus that is already stopping would reach
+	// an agent that is going away regardless.
 	if r := p.currentRun(); r != nil {
 		r.fail("agui server shutting down")
 	}
+
+	// Backstop, and the only one: handleTurnEnd releases the bound identity
+	// when the turn it belongs to ends, so a turn that never emits
+	// agent.turn.end (wedged provider, killed sub-process, a run failed here)
+	// would otherwise leave _principal_id and _header.* bound in the session
+	// metadata for whoever reads it next. Unconditional — by the time
+	// Shutdown runs, no turn can still legitimately own an identity. There is
+	// deliberately no TTL, lease or timer anywhere on this path: a deadline
+	// would re-create the original bug for any legitimately long turn.
+	p.mu.Lock()
+	p.identityRun = nil
+	p.identityTurn = ""
+	p.mu.Unlock()
+	p.clearSessionIdentity()
 
 	if p.server == nil {
 		return nil
@@ -479,7 +523,7 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	// Bind the per-run identity and context tags BEFORE the run's io.input is
 	// emitted below (ordering matters — see bindSessionContext), mirroring
 	// this package's existing "register before unblocking" discipline.
-	p.bindSessionContext(input)
+	p.bindSessionContext(input, r)
 
 	// RunStarted is emitted eagerly so even a run with no agent produces a
 	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
@@ -512,36 +556,110 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	return r, true
 }
 
-// endRun clears the identity bound at startRun/resumeRun, then clears the
-// active run pointer if it still points at r.
+// endRun releases the active-run slot if it still points at r. That is its
+// whole job: it does NOT touch the identity bound at startRun/resumeRun.
 //
-// That order is deliberate, not incidental: p.active == nil is what unblocks
+// The two used to be one function, and that was the bug. They have different
+// lifetimes. The slot is transport-scoped — p.active == nil is what unblocks
 // startRun for the NEXT run on this listener (see startRun's "another run
-// already in flight" check). Clearing it before the reserved-label delete
-// finishes its read-modify-write round trip to metadata/session.json would
-// open a window where a new run's own SetReservedLabel bind could land, and
-// then this call's delayed write silently clobbers it back to absent — a
-// real lost-update race, not just a timing nuisance for a test polling
-// p.currentRun(). Deleting first, then releasing the slot, closes it.
+// already in flight" check), so it must be freed the moment this run's SSE
+// stream is done. The identity (_principal_id plus the _header.* namespace)
+// is turn-scoped: it belongs to the work, which runs detached on engine
+// goroutines and routinely outlives the HTTP request that started it.
+//
+// A HITL park is the case that proves the two differ, and it needs no error
+// path to reach: handleHITLRequested ends the stream and calls endRun while
+// the agent is still blocked in-process on the pending question (see
+// interrupt.go), as does a client-executed tool suspend (clienttools.go). A
+// client disconnect mid-turn is the same shape. Clearing identity here would
+// de-authenticate a turn that is still running, for as long as a human takes
+// to answer.
+//
+// The identity clear lives in handleTurnEnd instead, on the turn's own
+// agent.turn.end, with Shutdown as the only backstop for a turn that never
+// ends. See clearSessionIdentity.
 func (p *Plugin) endRun(r *run) {
-	if p.session != nil {
-		if err := p.session.SetPrincipalID(""); err != nil {
-			p.logger.Warn("clearing _principal_id session label failed", "error", err)
-		}
-		// The request headers are cleared here for the same reason and with
-		// the same ordering constraint as the identity above: they describe
-		// the run that is ending, and leaving them bound would let the next
-		// caller's plugins read a header this listener was never sent.
-		if err := p.session.SetRequestHeaders(nil); err != nil {
-			p.logger.Warn("clearing X-Nexus-* request header labels failed", "error", err)
-		}
-	}
-
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
 	}
 	p.mu.Unlock()
+}
+
+// streamDied reports that r's SSE stream died — the client went away, or a
+// write to it failed — and asks the control.cancel capability to stop the turn
+// that was running for it.
+//
+// Without this an orphaned turn runs to completion for nobody: the agent keeps
+// iterating, calling tools and spending tokens against the session's budget
+// with no reader on the other end. r.fail alone only closes the channel this
+// side of the bus; it never reaches the agent.
+//
+// It is deliberately NOT a "the handler returned" hook. Returning is how a run
+// ends normally, and it is also how a HITL park and a client-executed-tool
+// suspend end — both of which leave the agent alive and parked ON PURPOSE.
+// Wired without the two guards below, every parked turn would cancel itself:
+//
+//   - The caller only reaches here when its own r.fail performed the run's
+//     one-shot close. A completed run (finish), a parked one (interrupt) or a
+//     retracted question (cancelTerminal) closed the run first, so the fail
+//     behind it returns false and never calls in.
+//   - r.suspended is set before interrupt's close, so a disconnect that wins
+//     the race against a park still reads the park and stays out of it.
+//
+// A run that never saw an agent.turn.start has no turn to name and nothing to
+// cancel — an input vetoed before any agent ran, for instance — and emits
+// nothing.
+//
+// This asks rather than reaching into the agent: nexus.control.cancel owns turn
+// cancellation for every transport (the TUI, the browser and nexus.io.a2a all
+// enter the same way) and answers with cancel.active, which the agent loop
+// turns into a cancel.complete{Resumable: true} and a final agent.turn.end. The
+// work is therefore suspended and resumable, not destroyed — and that
+// agent.turn.end is also what releases the identity this run bound (see
+// handleTurnEnd), so a cancelled turn closes its identity lifetime through the
+// ordinary path with no second mechanism.
+func (p *Plugin) streamDied(r *run) {
+	if r == nil || p.bus == nil {
+		return
+	}
+	if r.isSuspended() {
+		return
+	}
+	turnID := r.boundTurn()
+	if turnID == "" {
+		return
+	}
+
+	p.logger.Info("agui stream died under a live turn; cancelling it",
+		"thread_id", r.threadID,
+		"run_id", r.runID,
+		"turn_id", turnID,
+	)
+	if err := p.bus.Emit("cancel.request", events.CancelRequest{
+		SchemaVersion: events.CancelRequestVersion,
+		TurnID:        turnID,
+		Source:        cancelSource,
+	}); err != nil {
+		p.logger.Warn("emitting cancel.request for a dead agui stream failed",
+			"error", err, "turn_id", turnID)
+	}
+}
+
+// clearSessionIdentity drops the reserved labels bindSessionContext wrote:
+// _principal_id and the whole _header.* namespace, always together, because
+// they describe one caller and a half-cleared identity is worse than either
+// whole state. No-op when the plugin was constructed without a session.
+func (p *Plugin) clearSessionIdentity() {
+	if p.session == nil {
+		return
+	}
+	if err := p.session.SetPrincipalID(""); err != nil {
+		p.logger.Warn("clearing _principal_id session label failed", "error", err)
+	}
+	if err := p.session.SetRequestHeaders(nil); err != nil {
+		p.logger.Warn("clearing X-Nexus-* request header labels failed", "error", err)
+	}
 }
 
 // bindSessionContext writes the per-run identity and business-context
@@ -565,15 +683,19 @@ func (p *Plugin) endRun(r *run) {
 // under a different principal always gets a new bind, never a stale one
 // carried over from the run it continues. No-op when the plugin was
 // constructed without a session (some unit tests).
-func (p *Plugin) bindSessionContext(input runInput) {
+func (p *Plugin) bindSessionContext(input runInput, r *run) {
 	if p.session == nil {
 		return
 	}
-	if input.principalID != "" {
-		if err := p.session.SetPrincipalID(input.principalID); err != nil {
-			p.logger.Warn("binding _principal_id session label failed",
-				"error", err, "principal_id", input.principalID)
-		}
+	// Bound unconditionally, including when this run resolved no principal:
+	// SetPrincipalID("") clears the label, so an unauthenticated run reads
+	// empty rather than inheriting the last authenticated run's identity.
+	// Same rule nexus.io.broker documents for the same label, and the same
+	// one SetRequestHeaders already followed below. It is a no-op when auth
+	// is disabled, since every run then resolves empty.
+	if err := p.session.SetPrincipalID(input.principalID); err != nil {
+		p.logger.Warn("binding _principal_id session label failed",
+			"error", err, "principal_id", input.principalID)
 	}
 	// The request's X-Nexus-* headers REPLACE whatever the previous run bound,
 	// including when this run carried none — SetRequestHeaders clears the
@@ -594,6 +716,34 @@ func (p *Plugin) bindSessionContext(input runInput) {
 				"error", err, "key", item.Description)
 		}
 	}
+
+	// Record which run now owns the identity, AFTER the writes rather than
+	// alongside the p.active registration: between registering a run and
+	// binding it, the labels still hold the previous run's identity, and a
+	// late agent.turn.end arriving in that window must not be told the new run
+	// owns them. See handleTurnEnd.
+	p.mu.Lock()
+	p.identityRun = r
+	// A fresh bind owns no turn yet: the next turn to start under this run is
+	// the work it belongs to (see handleTurnStart), and a resume adopts the
+	// parked turn explicitly (see adoptIdentityTurn). Until then an ending
+	// turn belongs to an older bind and must not clear this one.
+	p.identityTurn = ""
+	p.mu.Unlock()
+}
+
+// adoptIdentityTurn records turnID as the turn the currently bound identity
+// belongs to. resumeRun calls it for the parked turn its continuation is
+// unblocking: that turn started under the interrupted run, but its remaining
+// work is the resuming request's, so its agent.turn.end is what releases this
+// bind. Without it a resumed turn would never clear the identity it ran under.
+func (p *Plugin) adoptIdentityTurn(turnID string) {
+	if turnID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.identityTurn = turnID
+	p.mu.Unlock()
 }
 
 // currentRun returns the active run or nil.
@@ -731,16 +881,72 @@ func (p *Plugin) handleTurnStart(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+
+	// Correlate the identity with the work it was bound for: the first turn to
+	// start under the run that bound it. Only that run's turn counts — a turn
+	// starting under some other run belongs to a bind this one has already
+	// replaced. react, planexec and orchestrator all emit agent.turn.start
+	// before any agent.turn.end for the same TurnID, so every turn that can
+	// end here has been stamped. See handleTurnEnd.
+	p.mu.Lock()
+	if p.active == p.identityRun && p.identityTurn == "" {
+		p.identityTurn = t.TurnID
+	}
+	p.mu.Unlock()
+
 	r.onTurnStart(t)
 }
 
+// handleTurnEnd closes out a top-level turn. It is also where the identity
+// bound at startRun/resumeRun is released, because agent.turn.end — not the
+// HTTP request, and not endRun — is the end of the work that identity belongs
+// to. react, planexec and orchestrator each emit it exactly once per
+// top-level turn, on every exit including cancel, so a turn that ends at all
+// ends here.
+//
+// The clear fires for the turn the current identity was bound for, and only
+// that turn — identityTurn, stamped at agent.turn.start (or adopted on
+// resume). Two cases force that precision:
+//
+//   - The happy path ends the turn while its OWN run is still draining SSE,
+//     so "skip whenever a run is active" would never clear anything.
+//   - The late-turn race ends an older turn after a newer run has bound: run
+//     A's handler returns on a disconnect, run B POSTs and binds principal B,
+//     and only then does turn A reach here. B is then both the active run and
+//     the identity owner, so a run-pointer comparison cannot tell the two
+//     apart either. The TurnID can: turn A is not B's turn, so B keeps its
+//     identity.
 func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
-	r := p.currentRun()
-	if r == nil {
-		return
-	}
 	t, ok := e.Payload.(events.TurnInfo)
 	if !ok {
+		return
+	}
+
+	p.mu.Lock()
+	r := p.active
+	// The identity goes iff the turn that just ended is the one it was bound
+	// for. That holds whether the run that bound it is still draining (happy
+	// path), was released at a HITL park or client-tool suspend, or died on a
+	// disconnect — all of which are exactly the cases where the request's
+	// lifetime and the turn's diverge.
+	clear := p.identityTurn != "" && p.identityTurn == t.TurnID
+	if clear {
+		p.identityRun = nil
+		p.identityTurn = ""
+	}
+	p.mu.Unlock()
+
+	if clear {
+		// Cleared BEFORE r.finish() below, and that order is load-bearing:
+		// finish ends the SSE drain, the handler returns, endRun frees the
+		// slot, and the next POST binds its own identity. A clear landing
+		// after that sequence would delete the new run's bind. Note the
+		// session I/O happens outside p.mu — the tag store announces
+		// session.tag.deleted on the bus, and a handler of that re-entering
+		// this plugin must not meet a held lock.
+		p.clearSessionIdentity()
+	}
+	if r == nil {
 		return
 	}
 	r.onTurnEnd(t)

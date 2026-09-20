@@ -153,7 +153,7 @@ the bus keeps it out of every prompt too.
 
 | Writer | Namespace | Mechanism |
 |--------|-----------|-----------|
-| `nexus.io.agui` | Reserved (`_principal_id`) | Direct `SetReservedLabel` at run start/resume, `DeleteReservedLabel` at run end — see [AG-UI Serve Transport](../plugins/io-agui.md) |
+| `nexus.io.agui` | Reserved (`_principal_id`, `_header.*`) | Direct `SetReservedLabel` at run start/resume, cleared at the `agent.turn.end` of the turn the bind was made for — not when the run ends, since one turn can span several runs; see [AG-UI Serve Transport](../plugins/io-agui.md#identity-lifetime-the-turn-not-the-request) |
 | `nexus.io.agui` | General (each `RunAgentInput.context` item) | Direct `SetLabel`, no veto hop, since the input already arrived over an authenticated transport |
 | `nexus.tool.session_tags` (opt-in) | General only | `before:session.tag.set` / `before:session.tag.delete`, the same vetoable path any other bus caller uses — see [Session Tags Tool](../plugins/tools/session_tags.md) |
 | Any other plugin | General only | `before:session.tag.set` / `before:session.tag.delete` |

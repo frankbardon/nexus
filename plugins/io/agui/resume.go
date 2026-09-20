@@ -55,7 +55,19 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	// discipline as the run registration above. This request's own resolved
 	// principal replaces whatever was bound at the interrupted run; a resume
 	// under a different principal is never left with the stale bind.
-	p.bindSessionContext(input)
+	p.bindSessionContext(input, r)
+
+	// The continuation adopts the parked turn: it started under the
+	// interrupted run, but the work that remains is this request's, so its
+	// agent.turn.end is what releases this bind. All items on one resume
+	// address the same parked turn.
+	// The continuation run adopts it too, for the same reason on the other
+	// axis: the parked turn is the turn a disconnect on THIS stream would
+	// orphan, and no fresh agent.turn.start will arrive to stamp it.
+	for _, m := range items {
+		p.adoptIdentityTurn(m.pending.TurnID)
+		r.adoptTurn(m.pending.TurnID)
+	}
 
 	r.markStarted()
 	r.queue(newRunStarted(input.threadID, input.runID))

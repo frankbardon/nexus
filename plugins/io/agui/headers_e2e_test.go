@@ -104,14 +104,17 @@ func TestE2E_RequestHeadersReachInputAndSession(t *testing.T) {
 		t.Errorf("session.tag.set for the header label = %q, want Europe/Amsterdam", bound)
 	}
 
-	// endRun clears the namespace as the handler returns.
+	// The namespace is cleared by the turn that owns it — agent.turn.end, not
+	// the handler return (see handleTurnEnd). Here the two coincide because
+	// the turn ended while its own run was still draining; the park and
+	// disconnect cases, where they do not, are E1-S2's.
 	waitFor(t, func() bool { return p.currentRun() == nil })
 	left, err := session.RequestHeaders()
 	if err != nil {
 		t.Fatalf("RequestHeaders: %v", err)
 	}
 	if len(left) != 0 {
-		t.Errorf("headers still bound after the run ended: %v", left)
+		t.Errorf("headers still bound after the turn ended: %v", left)
 	}
 }
 
