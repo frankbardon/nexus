@@ -201,6 +201,14 @@ func (p *Plugin) startTurn(in turnInput, caller nexusauth.Principal, opts stream
 // that a wedged turn holds the slot until something ends it — which is why
 // CancelTask landed in the same story, and why an unanswered question has a
 // deadline.
+//
+// It also records the turn the released run was carrying, as p.retiredTurn.
+// Every door that settles a task early leaves that turn ALIVE on an engine
+// goroutine: CancelTask settles then emits cancel.request, expireInput fails
+// then emits hitl.cancel, and a fatal core.error fails a task whose agent loop
+// still has a tail to emit. So the trailing events of a departed turn keep
+// arriving after the NEXT task has taken the slot, carrying a turn id that task
+// never saw start. See runAcceptsTurnEvent.
 func (p *Plugin) endTurn(r *run) {
 	// The turn's request headers are cleared BEFORE the slot is released, and
 	// that order is load-bearing: p.active == nil is what lets the next turn
@@ -216,11 +224,81 @@ func (p *Plugin) endTurn(r *run) {
 		}
 	}
 
+	// Read the run's turn before taking p.mu: boundTurn takes the run's own
+	// lock, and this package never nests the two.
+	var retired string
+	if r != nil {
+		retired = r.boundTurn()
+	}
+
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
 	}
+	// Only a run that actually bound a turn overwrites the record. A run
+	// released without one — a task whose io.input was vetoed before any agent
+	// ran, or one refused at creation — has no trailing events to disown, and
+	// letting it clear the field would forget a predecessor whose turn is still
+	// live.
+	if retired != "" {
+		p.retiredTurn = retired
+	}
 	p.mu.Unlock()
+}
+
+// runAcceptsTurnEvent reports whether a turn-scoped event naming turnID should
+// be rendered onto r's task.
+//
+// It is the CONTENT-path counterpart of the rule run.onTurnEnd already states
+// for the task lifetime, and it is deliberately more permissive, because the
+// two questions differ and so do the vocabularies they range over. Only three
+// plugins emit agent.turn.end and each carries the top-level turn's own id, so
+// there a mismatch is always foreign and refusing it is safe. The events this
+// guards are emitted by an OPEN set, and two kinds of legitimate event would be
+// deleted by a strict equality match:
+//
+//   - Most gates emit io.output carrying no TurnID at all — a budget warning, a
+//     stop-word refusal, an endless-loop notice, the context-window compaction
+//     note. Uncorrelatable, and they must still reach the client.
+//   - nexus.agent.aguiremote and nexus.agent.a2aremote republish a delegated
+//     remote's narration under a SYNTHETIC sub-turn id ("agui_remote_<spawn>",
+//     "a2a_remote_<spawn>") precisely so a transport can group it apart from the
+//     local turn that asked for it. No agent.turn.start ever announces one, so
+//     it can never match the bound turn, and dropping it would silently remove a
+//     built feature.
+//
+// So it refuses exactly what it can prove is foreign:
+//
+//   - a named turn arriving at a run that has bound none. A run is registered
+//     before its io.input is emitted and the agent loop opens every turn with
+//     agent.turn.start, so a run cannot miss its own turn's start; anything
+//     named that reaches it first belongs to somebody else.
+//   - a named turn belonging to the run this one replaced, which endTurn
+//     recorded. That is the cancelled turn whose trailing io.output was being
+//     published as the answer to the next question.
+//
+// Its refusals are therefore a strict subset of onTurnEnd's, which is the right
+// direction: publishing the wrong content is bad, and terminating the wrong
+// task is worse.
+func (p *Plugin) runAcceptsTurnEvent(r *run, turnID string) bool {
+	if turnID == "" {
+		return true
+	}
+	bound := r.boundTurn()
+	if bound == turnID {
+		// Its own turn always wins, including when that turn is also the
+		// retired one. Nothing guarantees an agent loop mints a turn id no
+		// earlier turn used, and a run must never be made to disown its own
+		// events by a collision it cannot see.
+		return true
+	}
+	if bound == "" {
+		return false
+	}
+	p.mu.Lock()
+	retired := p.retiredTurn
+	p.mu.Unlock()
+	return turnID != retired
 }
 
 // currentRun returns the active run, or nil.
@@ -521,6 +599,18 @@ func (p *Plugin) defaultContextID() string {
 
 // --- bus handlers (engine -> run channel). Never touch the response writer. ---
 
+// handleTurnStart is the one handler that must NOT be turn-scoped, because it
+// is what ESTABLISHES the scope: run.onTurnStart binds the first turn id it
+// sees and every other handler's check is read against that binding.
+//
+// Refusing a start whose id matches p.retiredTurn was considered and rejected.
+// Nothing guarantees an agent loop mints an id no earlier turn used — a2a sees
+// only what reaches the bus — and a task refusing its own start would never go
+// WORKING, never bind, and never complete. A wrong picture beats a task that
+// cannot run. The residual hazard is recorded on runAcceptsTurnEvent: a
+// departed turn that RE-emits agent.turn.start (nexus.agent.react does, when a
+// cancelled turn resumes) can be bound by a successor that has not yet seen its
+// own, and the content rule then reads that mis-binding as this task's turn.
 func (p *Plugin) handleTurnStart(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -545,6 +635,20 @@ func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
 	r.onTurnEnd(t)
 }
 
+// handleLLMResponse is deliberately NOT turn-scoped, and CANNOT be:
+// events.LLMResponse carries no TurnID field at all — only a RequestID, which
+// correlates a response with its request and with nothing this task holds. So a
+// departed turn's final llm.response can still overwrite r.finalText, and only
+// the io.output that follows it puts the right text back. That is a narrower
+// hole than it reads (a response carrying tool calls, or no content, is ignored
+// outright, and every real turn publishes io.output after its last response)
+// but it is a hole, and it is stated here rather than implied by the absence of
+// a check. Closing it means a turn id on the payload, which is an events change
+// and not this transport's to make.
+//
+// events.LLMRequest is in exactly the same position — no TurnID — so
+// handleLLMRequest below is unscoped for the same reason. The most it can
+// mislabel is the response artifact's schema name.
 func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -557,6 +661,14 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 	r.onLLMResponse(resp)
 }
 
+// handleOutput records the text the output gates published, as this task's
+// answer.
+//
+// It is turn-scoped because the text it records BECOMES the task's response
+// artifact, on a last-write-wins field. A departed turn's trailing io.output —
+// a cancellation notice, the tail of a turn whose task was failed on a deadline
+// — was overwriting the successor's answer with it, which is the A2A shape of
+// showing one question's reply to another.
 func (p *Plugin) handleOutput(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -564,6 +676,11 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 	}
 	o, ok := e.Payload.(events.AgentOutput)
 	if !ok {
+		return
+	}
+	if !p.runAcceptsTurnEvent(r, o.TurnID) {
+		p.logger.Debug("a2a dropping output from a turn this task does not carry",
+			"turn_id", o.TurnID, "task_turn_id", r.boundTurn(), "task_id", r.taskID)
 		return
 	}
 	r.onOutput(o)
@@ -585,6 +702,18 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	}
 	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
+		return
+	}
+	// A question belonging to a turn this task does not carry must not be
+	// rendered onto it, and must certainly not PARK it: the successor would sit
+	// at INPUT_REQUIRED awaiting an answer its client has no call to produce,
+	// and would then be failed by the input deadline. HITLRequest.TurnID is the
+	// asking tool call's own turn (nexus.control.hitl copies it verbatim), so it
+	// is the agent loop's turn and comparable to the one this task bound.
+	if !p.runAcceptsTurnEvent(r, req.TurnID) {
+		p.logger.Debug("a2a dropping a question from a turn this task does not carry",
+			"turn_id", req.TurnID, "task_turn_id", r.boundTurn(),
+			"hitl_request_id", req.ID, "task_id", r.taskID)
 		return
 	}
 	in := parkedInput{requestID: req.ID}
@@ -667,6 +796,15 @@ func (p *Plugin) expireInput(r *run, requestID string) {
 // exhausted, has no further Nexus event coming: no llm.response, no
 // agent.turn.end. Left alone it would park the client on an open stream
 // forever, so it becomes a FAILED status and the stream closes.
+//
+// It is NOT turn-scoped, and cannot be: events.ErrorInfo names its Source
+// plugin and the RequestID it came from and carries no turn id of any kind. It
+// is also the most severe unscoped handler here, since it ENDS the task — so
+// the honest statement is that a fatal error raised by a departed turn fails
+// whichever task holds the slot. The filter above is what keeps that narrow: a
+// fatal error means this process's one agent loop is not going to answer
+// anybody, so failing the live task is very nearly right even when it is
+// attributed to the wrong turn.
 func (p *Plugin) handleError(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -695,6 +833,18 @@ func (p *Plugin) handleError(e engine.Event[any]) {
 // signal); everything else — reasoning, the decision to call a tool, delegated
 // progress, token counts — is telemetry only, and rides the Nexus extension on a
 // status update. See telemetry.go for why that split is the honest one.
+//
+// handleThinking is the one of them that is NOT turn-scoped, and it cannot be:
+// ThinkingStep.TurnID is whatever its emitter had to hand, and for the
+// providers — which emit most of them — that is the provider's own per-CALL
+// identifier rather than the agent loop's turn (Gemini synthesizes
+// "gemini_<nanos>" per request, Anthropic uses the API response id). Only the
+// planners stamp the loop's turn. So no equality test against a task's bound
+// turn could hold for a provider step, and applying one would delete every
+// reasoning step the model actually produced while catching nothing. The two
+// llm.stream.* handlers below are unscoped for the identical reason: their
+// TurnID is the StreamPublisher's, which the provider constructs with that same
+// per-call id.
 
 func (p *Plugin) handleThinking(e engine.Event[any]) {
 	r := p.currentRun()
@@ -717,9 +867,20 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if !p.runAcceptsTurnEvent(r, call.TurnID) {
+		p.logger.Debug("a2a dropping tool invoke from a turn this task does not carry",
+			"turn_id", call.TurnID, "task_turn_id", r.boundTurn(), "tool", call.Name, "task_id", r.taskID)
+		return
+	}
 	r.onToolCall(call)
 }
 
+// handleToolResult publishes a tool outcome as an ARTIFACT of this task.
+//
+// It is turn-scoped because an artifact is not transient: it is written through
+// to the durable store, spends this task's artifact budget, and is read back by
+// GetTask long after the stream is gone. A departed turn's tool result attached
+// to the successor is a permanent record of work that task never did.
 func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -727,6 +888,11 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	}
 	res, ok := e.Payload.(events.ToolResult)
 	if !ok {
+		return
+	}
+	if !p.runAcceptsTurnEvent(r, res.TurnID) {
+		p.logger.Debug("a2a dropping tool result from a turn this task does not carry",
+			"turn_id", res.TurnID, "task_turn_id", r.boundTurn(), "tool", res.Name, "task_id", r.taskID)
 		return
 	}
 	r.onToolResult(res)
@@ -756,6 +922,16 @@ func (p *Plugin) handleStreamRetract(e engine.Event[any]) {
 	r.onStreamBlocked(rt)
 }
 
+// The three subagent handlers are turn-scoped on ParentTurnID rather than on a
+// TurnID of their own, and that field is exactly the right one: every producer
+// sets it to the SPAWNING agent loop's turn — the delegating tool call's
+// TurnID in nexus.agent.subagent, the caller's turn in the two remote-delegate
+// plugins, the orchestrator's own turn in nexus.agent.orchestrator — so it is
+// the top-level turn a task binds, never a synthetic sub-turn. Their frames
+// consume this task's Nexus-extension sequence numbers, which are a
+// client-visible ordering, so a departed turn's delegated progress does not
+// merely appear on the successor, it renumbers it.
+
 func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
 	r := p.currentRun()
 	if r == nil {
@@ -763,6 +939,9 @@ func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
 	}
 	s, ok := e.Payload.(events.SubagentStarted)
 	if !ok {
+		return
+	}
+	if !p.acceptsSubagentEvent(r, s.ParentTurnID, "subagent.started", s.SpawnID) {
 		return
 	}
 	r.onSubagent(func() a2a.NexusEvent { return subagentStartedEvent(r.taskID, r.contextID, s) })
@@ -777,6 +956,9 @@ func (p *Plugin) handleSubagentIteration(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if !p.acceptsSubagentEvent(r, s.ParentTurnID, "subagent.iteration", s.SpawnID) {
+		return
+	}
 	r.onSubagent(func() a2a.NexusEvent { return subagentIterationEvent(r.taskID, r.contextID, s) })
 }
 
@@ -789,7 +971,23 @@ func (p *Plugin) handleSubagentComplete(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if !p.acceptsSubagentEvent(r, s.ParentTurnID, "subagent.complete", s.SpawnID) {
+		return
+	}
 	r.onSubagent(func() a2a.NexusEvent { return subagentCompleteEvent(r.taskID, r.contextID, s) })
+}
+
+// acceptsSubagentEvent applies runAcceptsTurnEvent to a delegated-progress
+// event and logs the refusal once, so the three handlers above say the same
+// thing in one place.
+func (p *Plugin) acceptsSubagentEvent(r *run, parentTurnID, eventType, spawnID string) bool {
+	if p.runAcceptsTurnEvent(r, parentTurnID) {
+		return true
+	}
+	p.logger.Debug("a2a dropping delegated progress from a turn this task does not carry",
+		"event", eventType, "parent_turn_id", parentTurnID,
+		"task_turn_id", r.boundTurn(), "spawn_id", spawnID, "task_id", r.taskID)
+	return false
 }
 
 // handleLLMRequest records the output schema a turn was constrained to, so the
