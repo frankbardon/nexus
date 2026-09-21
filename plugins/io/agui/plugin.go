@@ -145,6 +145,14 @@ type Plugin struct {
 	// still draining, and after a late-turn race the newer run is both active
 	// AND the identity owner. Empty when no turn has been correlated yet.
 	identityTurn string
+	// retiredTurn is the TurnID the most recently released run was carrying,
+	// recorded by endRun. Releasing the slot does not stop the turn — a
+	// disconnect frees it and only then asks the agent to cancel, a HITL park
+	// frees it with the agent still blocked — so that turn's trailing events
+	// keep arriving after the NEXT run has taken the slot. This is what lets
+	// the content handlers tell those apart from the synthetic sub-turn ids a
+	// delegated remote legitimately publishes under. See runAcceptsTurnEvent.
+	retiredTurn string
 
 	// pendingMu guards pending. A virtual-run interrupt records the mapping
 	// from the AG-UI interruptId to the underlying HITL request so the resume
@@ -511,12 +519,29 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 // another run is already in flight (one run per listener for this scope), in
 // which case the caller must reject with a RunError.
 func (p *Plugin) startRun(input runInput) (*run, bool) {
+	r := newRun(input.threadID, input.runID, input.tools)
+
+	// RunStarted is emitted eagerly so even a run with no agent produces a
+	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
+	//
+	// It is queued BEFORE the run is published as p.active, and that ordering
+	// is load-bearing rather than tidy: every terminal verb (finish, fail,
+	// interrupt, cancelTerminal) closes r.done, and queue DROPS silently once
+	// done is closed. A run published first and queued second is reachable by
+	// a bus handler in between — which is exactly the window a turn ending
+	// under the PREVIOUS run lands in — so the client got HTTP 200 and a
+	// stream whose RunStarted had been discarded. Nothing can reach a run that
+	// has not been published, so queueing first closes that window
+	// structurally. The turn-end scoping in handleTurnEnd is the other half;
+	// neither substitutes for the other.
+	r.markStarted()
+	r.queue(newRunStarted(input.threadID, input.runID))
+
 	p.mu.Lock()
 	if p.active != nil {
 		p.mu.Unlock()
 		return nil, false
 	}
-	r := newRun(input.threadID, input.runID, input.tools)
 	p.active = r
 	p.mu.Unlock()
 
@@ -524,11 +549,6 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 	// emitted below (ordering matters — see bindSessionContext), mirroring
 	// this package's existing "register before unblocking" discipline.
 	p.bindSessionContext(input, r)
-
-	// RunStarted is emitted eagerly so even a run with no agent produces a
-	// well-formed lifecycle. The first agent.turn.start will not duplicate it.
-	r.markStarted()
-	r.queue(newRunStarted(input.threadID, input.runID))
 
 	// Inbound shared state (E3-S2): a client-authored RunAgentInput.state is
 	// reconciled into the scene store and the mirror BEFORE the initial snapshot
@@ -578,12 +598,110 @@ func (p *Plugin) startRun(input runInput) (*run, bool) {
 // The identity clear lives in handleTurnEnd instead, on the turn's own
 // agent.turn.end, with Shutdown as the only backstop for a turn that never
 // ends. See clearSessionIdentity.
+//
+// It also records the turn the released run was carrying, as p.retiredTurn.
+// That is the one fact a SUCCESSOR run needs and cannot otherwise know: the
+// released run's turn may still be alive on an engine goroutine (a disconnect,
+// a park), and the trailing events it emits carry a turn id the next run never
+// saw start. See runAcceptsTurnEvent.
 func (p *Plugin) endRun(r *run) {
+	// Read the run's turn before taking p.mu: r.boundTurn takes r's own lock,
+	// and this package never nests the two.
+	var retired string
+	if r != nil {
+		retired = r.boundTurn()
+	}
+
 	p.mu.Lock()
 	if p.active == r {
 		p.active = nil
 	}
+	// Only a run that actually bound a turn overwrites the record. A run
+	// released without one (an input vetoed before any agent ran, a refused
+	// resume) has no trailing events to disown, and letting it clear the field
+	// would forget a predecessor whose turn is still live.
+	if retired != "" {
+		p.retiredTurn = retired
+	}
 	p.mu.Unlock()
+}
+
+// runOwnsTurnEnd reports whether an agent.turn.end naming turnID is r's own
+// turn ending, and therefore whether it may terminate r's stream.
+//
+// This is the same discriminator the identity clear in handleTurnEnd already
+// uses, applied to the other half of that handler, and it is the rule
+// nexus.io.a2a states for its own task lifetime (see that plugin's
+// run.onTurnEnd). Both halves of it matter:
+//
+//   - A DIFFERENT id is somebody else's turn, and always was.
+//   - An id when this run has bound NONE is also somebody else's: a run is
+//     published before its io.input is emitted and a continuation adopts its
+//     parked turn before it is published, so a run cannot miss its own turn
+//     start. This case is the reported defect — a client disconnect releases
+//     the slot and only then asks the agent to stop, so the cancelled turn's
+//     agent.turn.end arrives after the next POST has already taken the slot,
+//     and finished a run that had not started working.
+//
+// An EMPTY id on the event is not correlatable at all, and the run takes it:
+// ignoring it would leave the client on a stream that never terminates, which
+// is worse.
+func (p *Plugin) runOwnsTurnEnd(r *run, turnID string) bool {
+	if turnID == "" {
+		return true
+	}
+	return r.boundTurn() == turnID
+}
+
+// runAcceptsTurnEvent reports whether a turn-scoped CONTENT event (io.output,
+// tool.invoke, tool.result) naming turnID should be rendered onto r's stream.
+//
+// It is deliberately more permissive than runOwnsTurnEnd, because the two
+// questions are different and so are the vocabularies they range over.
+// Terminating a run is severe and only three plugins emit agent.turn.end, each
+// carrying the top-level turn's own id, so there a mismatch is always foreign.
+// io.output's emitters are an OPEN set, and two kinds of legitimate event
+// would be deleted by a strict match:
+//
+//   - Most gates emit io.output carrying no TurnID at all (a budget warning, a
+//     stop-word refusal, the engine's own error output). Uncorrelatable, and
+//     they must still reach the client.
+//   - nexus.agent.aguiremote and nexus.agent.a2aremote republish a delegated
+//     remote's narration under a SYNTHETIC sub-turn id ("agui_remote_<spawn>",
+//     "a2a_remote_<spawn>") precisely so a transport can group it apart from
+//     the local turn that asked for it. No agent.turn.start ever announces
+//     one, so it can never match, and dropping it would silently remove a
+//     built feature.
+//
+// So it refuses exactly what it can prove is foreign:
+//
+//   - a named turn arriving at a run that has bound none (runOwnsTurnEnd's
+//     second bullet, for the same reason), and
+//   - a named turn belonging to the run this one replaced, which endRun
+//     recorded. That is the cancelled turn whose trailing io.output was being
+//     rendered as the answer to the next question.
+//
+// Its refusals are therefore a strict subset of runOwnsTurnEnd's, which is the
+// right direction: mis-delivering content is bad, and terminating the wrong
+// stream is worse.
+func (p *Plugin) runAcceptsTurnEvent(r *run, turnID string) bool {
+	if turnID == "" {
+		return true
+	}
+	bound := r.boundTurn()
+	if bound == turnID {
+		// Its own turn always wins, including when that turn is also the
+		// retired one — a continuation run adopts the parked turn it is
+		// resuming, and those events are its own.
+		return true
+	}
+	if bound == "" {
+		return false
+	}
+	p.mu.Lock()
+	retired := p.retiredTurn
+	p.mu.Unlock()
+	return turnID != retired
 }
 
 // streamDied reports that r's SSE stream died — the client went away, or a
@@ -949,6 +1067,22 @@ func (p *Plugin) handleTurnEnd(e engine.Event[any]) {
 	if r == nil {
 		return
 	}
+	// The run this turn end terminates is the run that OWNS the turn, not
+	// whichever run happens to hold the slot. Same discriminator as the
+	// identity clear above, and for the same race: A's handler returns on a
+	// disconnect, B POSTs and takes the slot, and only then does turn A end
+	// here. Before this, B's stream was closed by A's turn — RunFinished with
+	// no RunStarted, HTTP 200 and silence, or A's cancellation notice read as
+	// the answer to B's question.
+	if !p.runOwnsTurnEnd(r, t.TurnID) {
+		p.logger.Debug("agui ignoring a turn end that belongs to another run",
+			"turn_id", t.TurnID,
+			"run_turn_id", r.boundTurn(),
+			"thread_id", r.threadID,
+			"run_id", r.runID,
+		)
+		return
+	}
 	r.onTurnEnd(t)
 	// A top-level turn end terminates the run and the SSE stream.
 	r.finish()
@@ -1011,6 +1145,15 @@ func (p *Plugin) handleOutput(e engine.Event[any]) {
 	if !ok {
 		return
 	}
+	if !p.runAcceptsTurnEvent(r, o.TurnID) {
+		p.logger.Debug("agui dropping output from a turn this run does not carry",
+			"turn_id", o.TurnID,
+			"run_turn_id", r.boundTurn(),
+			"thread_id", r.threadID,
+			"run_id", r.runID,
+		)
+		return
+	}
 	r.onOutput(o)
 }
 
@@ -1034,6 +1177,19 @@ func (p *Plugin) handleToolInvoke(e engine.Event[any]) {
 	}
 	tc, ok := e.Payload.(events.ToolCall)
 	if !ok {
+		return
+	}
+	// A tool call belonging to a turn this run does not carry must not be
+	// rendered onto it, and must certainly not SUSPEND it: a client-executed
+	// tool invoked by the previous turn would park a run that had asked for
+	// nothing, awaiting a result its client has no call to produce.
+	if !p.runAcceptsTurnEvent(r, tc.TurnID) {
+		p.logger.Debug("agui dropping tool invoke from a turn this run does not carry",
+			"turn_id", tc.TurnID,
+			"run_turn_id", r.boundTurn(),
+			"tool", tc.Name,
+			"run_id", r.runID,
+		)
 		return
 	}
 	// Internal sub-calls (dispatched by another tool, e.g. run_code) are not part
@@ -1083,6 +1239,15 @@ func (p *Plugin) handleToolResult(e engine.Event[any]) {
 	}
 	tr, ok := e.Payload.(events.ToolResult)
 	if !ok {
+		return
+	}
+	if !p.runAcceptsTurnEvent(r, tr.TurnID) {
+		p.logger.Debug("agui dropping tool result from a turn this run does not carry",
+			"turn_id", tr.TurnID,
+			"run_turn_id", r.boundTurn(),
+			"tool", tr.Name,
+			"run_id", r.runID,
+		)
 		return
 	}
 	r.onToolResult(tr)

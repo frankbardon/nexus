@@ -65,7 +65,7 @@ the values below are the exact strings emitted on the SSE stream:
 |---|---|---|
 | *(run accepted)* | `RUN_STARTED` | Emitted eagerly on accept so even an agent-less run is well-formed. `threadId` / `runId` echoed. |
 | `agent.turn.start` | `STEP_STARTED` | Each turn/iteration opens a step; the step name derives from `TurnID`. |
-| `agent.turn.end` | `STEP_FINISHED`, then `RUN_FINISHED` | A top-level turn end closes the open step **and** terminates the run/stream. |
+| `agent.turn.end` | `STEP_FINISHED`, then `RUN_FINISHED` | A top-level turn end closes the open step **and** terminates the run/stream — the run that *carries* that turn, never whichever run holds the slot. See [A turn's events belong to its own run](#a-turns-events-belong-to-its-own-run-not-to-the-slot). |
 | `llm.stream.chunk` | `TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` | `TEXT_MESSAGE_START` (role `assistant`) is emitted lazily on the first non-empty delta; subsequent deltas append content. |
 | `llm.stream.end` | `TEXT_MESSAGE_END` | Closes the open streamed text message. |
 | `io.output` | `TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` → `TEXT_MESSAGE_END` | Self-contained triple. Skipped when the same content was already streamed via `llm.stream.chunk`; still rendered when a non-streaming provider (mock / batch) flags output `streamed` but emitted no chunks, so text is never dropped. |
@@ -262,6 +262,43 @@ that is going away regardless.
 **There is no configuration key for any of this — it is always on.** Cancelling
 an orphaned turn is a correctness property of the transport, not a policy
 choice; the work is suspended and resumable, so nothing is lost by it.
+
+### A turn's events belong to its own run, not to the slot
+
+The slot and the turn have different lifetimes, and a cancelled turn does not
+go quiet the instant the slot is freed: the disconnect frees the slot and only
+*then* asks the agent to stop, so the cancellation's own `io.output` and
+`agent.turn.end` arrive on the bus after the next `POST` has already taken the
+slot. Those events are scoped by `TurnID`, so they reach the run that carries
+that turn and no other. Without that scoping the successor's stream was
+terminated by a turn it never ran — `RUN_FINISHED` with no `RUN_STARTED`, an
+HTTP 200 on a stream that never starts — and the departed turn's cancellation
+notice was rendered as the answer to the next question.
+
+Two rules, because the two questions differ:
+
+- **Terminating.** An `agent.turn.end` finishes the run only when that run
+  bound that turn. A different id is another turn's; an id arriving at a run
+  that has bound none is too, since a run is published only after its
+  `RUN_STARTED` is queued and a continuation adopts its parked turn before
+  publication, so a run cannot miss its own turn start. An event naming **no**
+  turn is uncorrelatable and is taken — leaving a client on a stream that never
+  terminates is worse. This is the rule `nexus.io.a2a` already states for its
+  own task lifetime.
+- **Delivering.** `io.output`, `tool.invoke` and `tool.result` are refused only
+  when they can be *proved* foreign: a named turn at a run that bound none, or
+  the turn the previous run was carrying. Their emitters are an open set — most
+  gates emit `io.output` with no `TurnID` at all, and `nexus.agent.aguiremote` /
+  `nexus.agent.a2aremote` republish a delegated remote's narration under a
+  synthetic sub-turn id on purpose — so a strict match would delete legitimate
+  events. `tool.invoke` matters most here: a client-executed tool call from a
+  departed turn would not merely render onto the successor's stream, it would
+  suspend it.
+
+`llm.stream.*`, `thinking.step` and `llm.response` are **not** scoped this way
+and cannot be: their `TurnID` is the *provider's* per-call identifier (Gemini
+synthesises one per request, Anthropic uses the API response id), not the agent
+loop's turn, so no equality test against the run's turn would ever hold.
 
 ## Exposure, auth, and CORS
 
