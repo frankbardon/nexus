@@ -295,6 +295,34 @@ Two rules, because the two questions differ:
   departed turn would not merely render onto the successor's stream, it would
   suspend it.
 
+The two **HITL** handlers take the delivering rule, because a park is not a
+termination:
+
+- `hitl.requested` carries a real agent-loop turn wherever it carries one at
+  all — `nexus.control.hitl` copies the asking tool call's own `TurnID`
+  verbatim, and `nexus.agent.a2aremote` and the ICM workflow both set the
+  spawning loop's turn — so it is comparable to the turn the run bound. A
+  question from a turn this run does not carry would **park** it: an interrupt
+  outcome for a question the client never asked, the run's own turn left
+  running with no stream, and the `interruptId` → request mapping recorded
+  against the wrong thread and run, so the resume `POST` that follows answers
+  the departed turn's question. Two of the five emitters set **no** `TurnID` at
+  all (`nexus.gate.approval_policy` carries the turn in its `ActionRef`
+  metadata; `plugins/memory`'s approval helper names none), which is why the
+  permissive rule is the right one here: a strict match would drop a question
+  the agent is blocked on and park that turn forever.
+- `hitl.cancel` carries **no turn id at all** — `events.HITLCancel` is a
+  `RequestID` and a `Reason` — so its discriminator is *recovered* rather than
+  read: every request this plugin rendered was recorded in `p.pending` with the
+  turn it suspended, so a retraction naming one of those is scoped exactly as a
+  turn-carrying event is. That matters because `cancelTerminal` closes the SSE
+  of whatever holds the slot. The mapping is dropped **unconditionally** — the
+  request is retracted whoever holds the slot — while only the *termination* is
+  gated. A retraction this plugin cannot correlate (no mapping, or a mapping
+  whose request named no turn) terminates the current run exactly as it always
+  did, on the same asymmetry: leaving a client on a stream that never ends is
+  worse than ending one early.
+
 `llm.stream.*`, `thinking.step` and `llm.response` are **not** scoped this way
 and cannot be: their `TurnID` is the *provider's* per-call identifier (Gemini
 synthesises one per request, Anthropic uses the API response id), not the agent

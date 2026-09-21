@@ -47,6 +47,15 @@ func drainAll(r *run) []agui.Event {
 func TestHITLRequested_EmitsInterruptSequence(t *testing.T) {
 	p, r := newInterruptTestPlugin(t, "thread-1", "run-1")
 
+	// The run carries the turn that asks the question, because that is the only
+	// order a real one can happen in: an ask_user tool call is made INSIDE a
+	// turn, so agent.turn.start has already bound turn-7 here by the time
+	// nexus.control.hitl copies that id onto the request. handleHITLRequested is
+	// turn-scoped now, and a fixture that skipped the start was asserting
+	// against a shape no emitter produces — a named question at a run carrying
+	// no turn is exactly what the scoping refuses.
+	r.onTurnStart(events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: "turn-7"})
+
 	// Give the run some rendered conversation so MessagesSnapshot is non-trivial.
 	r.onOutput(events.AgentOutput{Content: "working on it", Role: "assistant"})
 
