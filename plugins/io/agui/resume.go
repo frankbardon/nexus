@@ -38,6 +38,25 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 		return nil, err
 	}
 
+	r := newRun(input.threadID, input.runID, input.tools)
+
+	// The continuation RUN adopts the parked turn BEFORE it is published as
+	// p.active: the parked turn is the turn a disconnect on THIS stream would
+	// orphan, and no fresh agent.turn.start will arrive to stamp it. Adopting
+	// first also means the run is never visible to a bus handler while
+	// carrying no turn at all, which is the state the turn-scoping predicates
+	// read as "this event belongs to some other run". All items on one resume
+	// address the same parked turn.
+	for _, m := range items {
+		r.adoptTurn(m.pending.TurnID)
+	}
+
+	// RunStarted is queued before publication for startRun's reason: a run
+	// nothing can reach yet cannot have its first event dropped by a terminal
+	// verb racing in from the previous turn.
+	r.markStarted()
+	r.queue(newRunStarted(input.threadID, input.runID))
+
 	// Register the continuation run BEFORE unblocking the agent: the agent's
 	// first bus event after hitl.responded must land on this run, not be dropped
 	// for want of an active slot.
@@ -46,7 +65,6 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("a run is already in flight on this listener")
 	}
-	r := newRun(input.threadID, input.runID, input.tools)
 	p.active = r
 	p.mu.Unlock()
 
@@ -57,20 +75,14 @@ func (p *Plugin) resumeRun(input runInput) (*run, error) {
 	// under a different principal is never left with the stale bind.
 	p.bindSessionContext(input, r)
 
-	// The continuation adopts the parked turn: it started under the
+	// The IDENTITY adopts the same parked turn: it started under the
 	// interrupted run, but the work that remains is this request's, so its
-	// agent.turn.end is what releases this bind. All items on one resume
-	// address the same parked turn.
-	// The continuation run adopts it too, for the same reason on the other
-	// axis: the parked turn is the turn a disconnect on THIS stream would
-	// orphan, and no fresh agent.turn.start will arrive to stamp it.
+	// agent.turn.end is what releases this bind. It must come AFTER
+	// bindSessionContext, which resets identityTurn to empty on every fresh
+	// bind.
 	for _, m := range items {
 		p.adoptIdentityTurn(m.pending.TurnID)
-		r.adoptTurn(m.pending.TurnID)
 	}
-
-	r.markStarted()
-	r.queue(newRunStarted(input.threadID, input.runID))
 
 	// Inbound shared state (E3-S2): a resuming client may also carry an edited
 	// RunAgentInput.state; reconcile it before re-anchoring so the continuation
