@@ -23,6 +23,27 @@ import (
 //
 // If no run is in flight the request is ignored here — it will be surfaced by a
 // browser/TUI transport or resolved out-of-band; there is no SSE stream to end.
+//
+// It is TURN-SCOPED, by the content rule rather than the terminating one. A
+// question belonging to a turn this run does not carry must not be rendered
+// onto it, and must certainly not PARK it: the successor would be handed an
+// interrupt for a question its client never asked, its own turn would be left
+// running with no stream, and the p.pending mapping would be recorded against
+// the wrong thread/run so a resume POST would answer the departed turn's
+// question. That is reachable on exactly the window handleTurnEnd guards — a
+// disconnect frees the slot and only then asks the agent to stop, so the
+// abandoned turn is still alive and still hitting gates when the next POST
+// takes the slot.
+//
+// runAcceptsTurnEvent rather than runOwnsTurnEnd, because a park is not a
+// termination and the vocabularies differ. HITLRequest.TurnID is a genuine
+// agent-loop turn where it is set at all — nexus.control.hitl copies the
+// asking tool call's own TurnID verbatim, and nexus.agent.a2aremote and the
+// ICM workflow both set the spawning loop's turn — but two of the five
+// emitters set NO TurnID at all (nexus.gate.approval_policy carries the turn
+// in its ActionRef metadata instead, and plugins/memory's approval helper
+// names none), so a strict equality match would silently drop a question the
+// agent is blocked on and park it forever with nobody able to answer.
 func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {
@@ -30,6 +51,16 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	}
 	r := p.currentRun()
 	if r == nil {
+		return
+	}
+	if !p.runAcceptsTurnEvent(r, req.TurnID) {
+		p.logger.Debug("agui dropping a question from a turn this run does not carry",
+			"turn_id", req.TurnID,
+			"run_turn_id", r.boundTurn(),
+			"request_id", req.ID,
+			"thread_id", r.threadID,
+			"run_id", r.runID,
+		)
 		return
 	}
 
@@ -69,16 +100,50 @@ func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 // outcome on the active run (if any) and drops any recorded pending interrupt
 // for that request. It does not emit hitl.responded — the control/hitl plugin
 // owns synthesizing the cancellation response for the blocked in-process agent.
+//
+// ⚠ events.HITLCancel carries NO TurnID — only a RequestID and a Reason — so
+// the discriminator its sibling handler reads off the payload does not exist
+// here and had to be RECOVERED. p.pending is the recovery: every request this
+// plugin actually rendered was recorded there with the turn it suspended, so a
+// cancel naming one of those can be scoped exactly as a turn-carrying event
+// is. That matters because cancelTerminal is the most destructive verb on this
+// path — it closes the SSE of whatever holds the slot — and a retracted
+// question from a departed turn was terminating the successor's stream with a
+// cancelled outcome it had no part in.
+//
+// The two halves are deliberately independent:
+//
+//   - The mapping is dropped UNCONDITIONALLY. The request is retracted
+//     whoever holds the slot, so leaving the correlation behind would let a
+//     resume POST answer a question that no longer exists.
+//   - The TERMINATION is gated on runAcceptsTurnEvent, against the turn
+//     recovered from the dropped mapping. Its own turn still wins, which is
+//     what keeps a continuation run that adopted the parked turn terminable by
+//     the retraction of its own question.
+//
+// A cancel this plugin cannot correlate at all — no pending mapping (the
+// retraction arrived before the request ever reached a run, which is the case
+// the original comment names) or a mapping whose request carried no turn —
+// terminates the current run exactly as it always did. That is the same
+// asymmetry runOwnsTurnEnd sits on: leaving a client on a stream that never
+// ends is worse than ending one early.
 func (p *Plugin) handleHITLCancel(e engine.Event[any]) {
 	c, ok := e.Payload.(events.HITLCancel)
 	if !ok {
 		return
 	}
 
-	// Drop any pending interrupt mapping recorded for this request.
+	// Drop any pending interrupt mapping recorded for this request, and recover
+	// the turn it suspended on the way past. RequestID is unique, so at most one
+	// entry matches in practice; the first turn found is taken, and an entry
+	// recorded for a request that named no turn recovers nothing.
+	var cancelledTurn string
 	p.pendingMu.Lock()
 	for id, pi := range p.pending {
 		if pi.RequestID == c.RequestID {
+			if cancelledTurn == "" {
+				cancelledTurn = pi.TurnID
+			}
 			delete(p.pending, id)
 		}
 	}
@@ -86,11 +151,23 @@ func (p *Plugin) handleHITLCancel(e engine.Event[any]) {
 
 	// If a run is still in flight (cancel arrived before the request), end it
 	// cleanly with a cancelled outcome so the client's SSE terminates.
-	if r := p.currentRun(); r != nil {
-		r.cancelTerminal()
-		p.endRun(r)
-		p.logger.Info("agui run cancelled for hitl", "request_id", c.RequestID, "reason", c.Reason)
+	r := p.currentRun()
+	if r == nil {
+		return
 	}
+	if !p.runAcceptsTurnEvent(r, cancelledTurn) {
+		p.logger.Debug("agui ignoring a hitl cancel for a turn this run does not carry",
+			"turn_id", cancelledTurn,
+			"run_turn_id", r.boundTurn(),
+			"request_id", c.RequestID,
+			"thread_id", r.threadID,
+			"run_id", r.runID,
+		)
+		return
+	}
+	r.cancelTerminal()
+	p.endRun(r)
+	p.logger.Info("agui run cancelled for hitl", "request_id", c.RequestID, "reason", c.Reason)
 }
 
 // buildStateSnapshot assembles the JSON state handed to the client on interrupt.
