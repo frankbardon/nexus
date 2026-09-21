@@ -209,9 +209,9 @@ type Plugin struct {
 	// session; every use is guarded.
 	session *engine.SessionWorkspace
 
-	// mu guards active and contextID: both are read by net/http goroutines and
-	// written by them, while bus handlers read active from arbitrary engine
-	// goroutines.
+	// mu guards active, contextID and retiredTurn: all three are read by
+	// net/http goroutines and written by them, while bus handlers read active
+	// and retiredTurn from arbitrary engine goroutines.
 	mu sync.Mutex
 	// active is the single in-flight task. At most one runs at a time: the
 	// listener fronts one agent loop, and two turns would interleave on the bus.
@@ -220,6 +220,15 @@ type Plugin struct {
 	// be ACCEPTED claims it, in the same lock hold that takes active — a
 	// refused request never binds. See resolveContextLocked and startTurn.
 	contextID string
+	// retiredTurn is the Nexus turn the most recently released run was
+	// carrying, recorded by endTurn. Settling a TASK does not stop the TURN:
+	// CancelTask moves the task to CANCELED — which releases the slot through
+	// the run's own terminal sequence — and only THEN emits cancel.request, so
+	// the agent loop is still running when the next task takes the slot, and
+	// that departed turn's trailing events keep arriving. This is the one fact
+	// a successor run needs and cannot learn for itself, because it never saw
+	// that turn start. See runAcceptsTurnEvent.
+	retiredTurn string
 
 	unsubs []func()
 }

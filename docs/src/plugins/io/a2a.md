@@ -136,6 +136,11 @@ SendMessage / SendStreamingMessage
         Task FAILED     ◀── core.error (fatal or retries exhausted)
 ```
 
+Every arrow above lands on the task that *carries* that turn, never on whichever
+task happens to hold the in-flight slot — see [A turn's events belong to its own
+task](#a-turns-events-belong-to-its-own-task-not-to-the-slot) for the rule and
+for the four events that cannot be scoped that way.
+
 One call is one Task is one turn. `SendMessage` **blocks** until that task is
 terminal and returns the finished Task — A2A's default (§3.2.2) —
 while `SendStreamingMessage` writes the same frames as SSE and closes the stream
@@ -285,6 +290,48 @@ event will name it — and retention only evicts terminal tasks, so leaving it a
 found would mean an immortal row reporting `WORKING` for ever and counting
 against the per-context cap.
 
+### A turn's events belong to its own task, not to the slot
+
+Detaching the task lifetime from the request is also what opens a window in the
+other direction: settling a **task** does not stop its **turn**. `CancelTask`
+moves the task to `CANCELED` — which releases the slot from the run's own
+terminal sequence — and only *then* emits `cancel.request`; the input deadline
+fails the task and only then retracts the question; a fatal `core.error` fails a
+task whose agent loop still has a tail to emit. In each case the turn is alive on
+an engine goroutine after the next task has taken the slot, so its trailing
+events keep arriving.
+
+Those events are scoped by turn id, so they reach the task that *carries* that
+turn and no other. The task lifetime has always been scoped that way — an
+`agent.turn.end` completes a task only when that task saw that turn start. The
+task's **content** was not, so a departed turn's trailing `io.output` was
+published as the next task's response artifact, its `tool.result` became an
+artifact of work that task never did, and its `hitl.requested` parked a task
+whose client had no question to answer.
+
+The content rule is deliberately **more permissive** than the lifetime one, and
+refuses only what it can *prove* foreign: a named turn arriving at a task that
+has bound none, or the turn the task this one replaced was carrying. A strict
+equality match was rejected because these emitters are an open set — most gates
+publish `io.output` with no turn id at all (a budget warning, a stop-word
+refusal), and `nexus.agent.aguiremote` / `nexus.agent.a2aremote` republish a
+delegated remote's narration under a synthetic sub-turn id on purpose — so it
+would have deleted legitimate events silently. Publishing the wrong content is
+bad; terminating the wrong task is worse, so the content refusals are a strict
+subset of the lifetime ones.
+
+Four handlers are **not** scoped this way, and none of them can be:
+
+| Event | Why not |
+|---|---|
+| `llm.response`, `llm.request` | `events.LLMResponse` and `events.LLMRequest` carry no turn id at all — only a `RequestID`, which correlates a response with its request and with nothing a task holds. So a departed turn's last response can still overwrite the answer text, and only the `io.output` that follows puts the right one back. |
+| `thinking.step`, `llm.stream.*` | Their turn id is the **provider's** per-call identifier (Gemini synthesises one per request, Anthropic uses the API response id), not the agent loop's turn, so no equality test against a task's bound turn would ever hold. |
+| `core.error` | `events.ErrorInfo` names its source plugin and the request it came from and carries no turn id of any kind. It is the most severe of the four, since it *ends* the task — kept narrow by the filter that already gates it: a fatal error means this process's one agent loop is not going to answer anybody. |
+| `agent.turn.start` | It is what *establishes* the scope. Refusing a start matching the retired turn was considered and rejected: nothing guarantees an agent loop mints an id no earlier turn used, and a task refusing its own start would never go `WORKING` and never complete. |
+
+`hitl.responded` needs none of this: it is matched against the request id the
+task is actually parked on, so a foreign turn's answer cannot resume it.
+
 ## Human-in-the-loop is `INPUT_REQUIRED`
 
 When a Nexus agent asks a human something — `nexus.control.hitl`'s `ask_user`
@@ -347,6 +394,11 @@ binding is equally fine: it returns the parked Task as soon as it parks.
 Settling first is what keeps the stream contract intact: once the task is
 terminal every later frame is dropped, so nothing produced by the teardown can
 arrive after the frame that closed the stream.
+
+It also means the cancelled turn is still running when the **next** task takes
+the slot, which is why that turn's trailing events are scoped to the task that
+carries them — see [A turn's events belong to its own
+task](#a-turns-events-belong-to-its-own-task-not-to-the-slot).
 
 Cancelling an **already-terminal** task is refused with `TaskNotCancelableError`
 (HTTP 400 / `FAILED_PRECONDITION`) and writes nothing. Reporting success would
