@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -16,11 +19,12 @@ import (
 // as a plugin key, as a `core.models` per-entry key, and as the one input to
 // the endpoint choice.
 //
-// The Responses path itself does not exist yet, so an explicit `api: responses`
-// is an Init error rather than a request shaped for one API and posted to
-// another. The narrowing that keeps declared-compat endpoints on
-// chat_completions is written and tested here so it is already correct when the
-// default flips.
+// Both surfaces are reachable: an explicit `api: responses` resolves an endpoint
+// and posts a Responses request to it. What has NOT flipped is the default — a
+// deployment that declares nothing still speaks chat_completions, because
+// encrypted-reasoning-item replay is not wired yet. The narrowing that keeps
+// declared-compat endpoints on chat_completions is written and tested here so it
+// is already correct when the default does flip.
 
 // initAPI runs a real Init with the given plugin config and model registry
 // against a real bus, capturing every log record Init emits.
@@ -147,15 +151,15 @@ func TestParseAPIConfig_ExplicitChatCompletions(t *testing.T) {
 	}
 }
 
-// The honest failure: `api: responses` is recognised, and refused by name,
-// until the path that speaks it exists.
-func TestParseAPIConfig_ResponsesIsNotImplementedYet(t *testing.T) {
-	_, err := parseAPIConfig(map[string]any{"api": "responses"}, &authState{mode: authModeOpenAI})
-	if err == nil {
-		t.Fatal("expected api: responses to fail Init while the path is unimplemented")
+// The half-flip: an explicit `api: responses` is now honoured as written. The
+// *default* is unchanged — see TestDefaultAPI_StaysOnChatCompletions.
+func TestParseAPIConfig_ExplicitResponsesIsHonoured(t *testing.T) {
+	got, err := parseAPIConfig(map[string]any{"api": "responses"}, &authState{mode: authModeOpenAI})
+	if err != nil {
+		t.Fatalf("parseAPIConfig: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not implemented yet") || !strings.Contains(err.Error(), "v0.29.0") {
-		t.Errorf("error must name the gap and the release: %v", err)
+	if got != apiResponses {
+		t.Errorf("api = %q, want responses", got)
 	}
 }
 
@@ -187,17 +191,15 @@ func TestValidateRoleAPI_UnknownValueFailsBootNamingTheRole(t *testing.T) {
 	}
 }
 
-func TestValidateRoleAPI_ResponsesFailsBootNamingTheRole(t *testing.T) {
+// A role may declare `api: responses` and is taken at its word — the same
+// half-flip as the plugin key.
+func TestValidateRoleAPI_ResponsesIsAccepted(t *testing.T) {
 	models := apiModels(map[string]map[string]any{
 		"balanced": {},
 		"deep":     {"api": "responses"},
 	})
-	err := validateRoleAPI(models)
-	if err == nil {
-		t.Fatal("expected a role's api: responses to fail the boot")
-	}
-	if !strings.Contains(err.Error(), `"deep"`) || !strings.Contains(err.Error(), "not implemented yet") {
-		t.Errorf("error must name the role and the gap: %v", err)
+	if err := validateRoleAPI(models); err != nil {
+		t.Errorf("a role's api: responses is a supported surface: %v", err)
 	}
 }
 
@@ -310,16 +312,141 @@ func TestApplyEntryOverrides_StampWins(t *testing.T) {
 
 // --- the endpoint -----------------------------------------------------------
 
-// Responses has no URL yet on any auth mode; refusing by name beats guessing a
-// route shape nothing exercises.
-func TestResolveEndpoint_ResponsesIsRefused(t *testing.T) {
-	for _, a := range []*authState{
-		{mode: authModeOpenAI},
-		{mode: authModeAzureKey, resource: "r", deployment: "d", apiVersion: "v"},
-	} {
-		if _, err := a.resolveEndpoint(apiResponses); err == nil {
-			t.Errorf("auth_mode %q: expected resolveEndpoint(responses) to error", a.mode)
+// Every (auth_mode × api) pair, which is the whole of what resolveEndpoint
+// decides. The Azure rows are the reason the function takes an api at all:
+// Azure's Responses route is the versionless `/openai/v1/responses`, with no
+// deployment in the path and no `api-version` query, which is a different URL
+// shape from the deployment-scoped chat one rather than a suffix swap.
+func TestResolveEndpoint_EveryAuthModeAndSurface(t *testing.T) {
+	azure := func(mode authMode) *authState {
+		return &authState{
+			mode:       mode,
+			resource:   "my-resource",
+			deployment: "gpt-5-deploy",
+			apiVersion: "2024-10-21",
 		}
+	}
+	const azureChat = "https://my-resource.openai.azure.com/openai/deployments/gpt-5-deploy/chat/completions?api-version=2024-10-21"
+	const azureResponses = "https://my-resource.openai.azure.com/openai/v1/responses"
+
+	cases := []struct {
+		name string
+		auth *authState
+		api  apiSurface
+		want string
+	}{
+		{"openai/chat", &authState{mode: authModeOpenAI}, apiChatCompletions, apiURL},
+		{"openai/responses", &authState{mode: authModeOpenAI}, apiResponses, "https://api.openai.com/v1/responses"},
+
+		// base_url is the whole chat endpoint, so the Responses route is its
+		// sibling: the /chat/completions tail comes off, /responses goes on.
+		{
+			"base_url chat endpoint/chat",
+			&authState{mode: authModeOpenAI, baseURL: "https://proxy.example.com/v1/chat/completions"},
+			apiChatCompletions, "https://proxy.example.com/v1/chat/completions",
+		},
+		{
+			"base_url chat endpoint/responses",
+			&authState{mode: authModeOpenAI, baseURL: "https://proxy.example.com/v1/chat/completions"},
+			apiResponses, "https://proxy.example.com/v1/responses",
+		},
+		{
+			"base_url API root/responses",
+			&authState{mode: authModeOpenAI, baseURL: "https://proxy.example.com/v1"},
+			apiResponses, "https://proxy.example.com/v1/responses",
+		},
+		{
+			"base_url trailing slash/responses",
+			&authState{mode: authModeOpenAI, baseURL: "https://proxy.example.com/v1/"},
+			apiResponses, "https://proxy.example.com/v1/responses",
+		},
+		{
+			"base_url already the responses route",
+			&authState{mode: authModeOpenAI, baseURL: "https://proxy.example.com/v1/responses"},
+			apiResponses, "https://proxy.example.com/v1/responses",
+		},
+
+		{"azure_key/chat", azure(authModeAzureKey), apiChatCompletions, azureChat},
+		{"azure_key/responses", azure(authModeAzureKey), apiResponses, azureResponses},
+		{"azure_aad/chat", azure(authModeAzureAAD), apiChatCompletions, azureChat},
+		{"azure_aad/responses", azure(authModeAzureAAD), apiResponses, azureResponses},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.auth.resolveEndpoint(tc.api)
+			if err != nil {
+				t.Fatalf("resolveEndpoint(%q): %v", tc.api, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveEndpoint(%q) = %q, want %q", tc.api, got, tc.want)
+			}
+		})
+	}
+}
+
+// The two things about the Azure Responses route that are easy to get wrong and
+// silent when you do: the deployment must NOT be in the path (it rides the
+// body's `model`), and the GA /openai/v1/ route is implicitly versioned, so no
+// api-version query is sent even though azure.api_version is configured.
+func TestResolveEndpoint_AzureResponsesCarriesNeitherDeploymentNorVersion(t *testing.T) {
+	for _, mode := range []authMode{authModeAzureKey, authModeAzureAAD} {
+		a := &authState{mode: mode, resource: "r", deployment: "my-deployment", apiVersion: "2024-10-21"}
+		got := mustEndpoint(t, a, apiResponses)
+		if strings.Contains(got, "my-deployment") || strings.Contains(got, "/deployments/") {
+			t.Errorf("auth_mode %q: deployment must travel in the body, not the URL: %q", mode, got)
+		}
+		if strings.Contains(got, "api-version") {
+			t.Errorf("auth_mode %q: the GA /openai/v1/ route takes no api-version: %q", mode, got)
+		}
+	}
+}
+
+// Azure AAD/MSI auth is orthogonal to the surface: the bearer token is attached
+// to a Responses request exactly as it is to a chat one.
+func TestResolveEndpoint_AzureAADAuthAppliesOnTheResponsesPath(t *testing.T) {
+	srv := newAADTokenServer(t, "responses-token", 3600)
+	defer srv.Close()
+
+	a := &authState{
+		mode:         authModeAzureAAD,
+		resource:     "r",
+		deployment:   "d",
+		apiVersion:   "2024-10-21",
+		tenantID:     "t",
+		clientID:     "c",
+		clientSecret: "s",
+		aadTokenURL:  srv.URL,
+	}
+	endpoint := mustEndpoint(t, a, apiResponses)
+
+	httpReq, err := http.NewRequest("POST", endpoint, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := a.applyAuth(context.Background(), httpReq, srv.Client()); err != nil {
+		t.Fatalf("applyAuth: %v", err)
+	}
+	if got := httpReq.Header.Get("Authorization"); got != "Bearer responses-token" {
+		t.Errorf("Authorization = %q, want the AAD bearer token", got)
+	}
+}
+
+// api_key auth keeps its Azure spelling on the Responses route too.
+func TestResolveEndpoint_AzureKeyAuthAppliesOnTheResponsesPath(t *testing.T) {
+	a := &authState{mode: authModeAzureKey, resource: "r", deployment: "d", apiVersion: "v", apiKey: "k"}
+	httpReq, err := http.NewRequest("POST", mustEndpoint(t, a, apiResponses), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := a.applyAuth(context.Background(), httpReq, http.DefaultClient); err != nil {
+		t.Fatalf("applyAuth: %v", err)
+	}
+	if got := httpReq.Header.Get("api-key"); got != "k" {
+		t.Errorf("api-key = %q, want k", got)
+	}
+	if got := httpReq.Header.Get("Authorization"); got != "" {
+		t.Errorf("Azure key mode must not set Authorization, got %q", got)
 	}
 }
 
@@ -344,20 +471,40 @@ func TestInit_PlainDeploymentBoots(t *testing.T) {
 	}
 }
 
-func TestInit_ExplicitResponsesFailsBoot(t *testing.T) {
-	_, _, err := initAPI(t, map[string]any{"api": "responses"}, nil)
-	if err == nil {
-		t.Fatal("expected Init to refuse api: responses")
+func TestInit_ExplicitResponsesBoots(t *testing.T) {
+	p, _, err := initAPI(t, map[string]any{"api": "responses"}, nil)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.api != apiResponses {
+		t.Errorf("api = %q, want responses", p.api)
 	}
 }
 
-func TestInit_RoleResponsesFailsBoot(t *testing.T) {
+func TestInit_RoleResponsesBoots(t *testing.T) {
 	models := apiModels(map[string]map[string]any{
 		"balanced": {},
 		"deep":     {"api": "responses"},
 	})
-	if _, _, err := initAPI(t, map[string]any{}, models); err == nil {
-		t.Fatal("expected Init to refuse a role's api: responses")
+	if _, _, err := initAPI(t, map[string]any{}, models); err != nil {
+		t.Fatalf("a role's api: responses must boot: %v", err)
+	}
+}
+
+// The other half of the flip, pinned so nobody makes it by accident: the
+// Responses path works when asked for, and is still not what a deployment that
+// asks for nothing gets. Encrypted-reasoning-item replay (E5-S2) is what has to
+// land before this changes — see unnarrowedDefaultAPI.
+func TestDefaultAPI_StaysOnChatCompletions(t *testing.T) {
+	if unnarrowedDefaultAPI != apiChatCompletions {
+		t.Fatalf("unnarrowedDefaultAPI = %q — do not flip it before encrypted reasoning replay lands (E5-S2)", unnarrowedDefaultAPI)
+	}
+	p, _, err := initAPI(t, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.api != apiChatCompletions {
+		t.Errorf("a deployment that declares no api gets %q, want chat_completions", p.api)
 	}
 }
 
@@ -368,6 +515,76 @@ func TestInit_BaseURLNarrowsTheDefault(t *testing.T) {
 	}
 	if p.api != apiChatCompletions {
 		t.Errorf("api = %q, want chat_completions", p.api)
+	}
+}
+
+// --- the whole path, end to end ---------------------------------------------
+
+// The story this file has been pinning open since E3-S4: a deployment that
+// declares `api: responses` posts a Responses request to the Responses route
+// and gets an llm.response back. Every earlier piece — serializer, reply parser,
+// SSE reader, multimodal shapes — was reachable only from its own unit test
+// until the endpoint existed.
+//
+// base_url points at the test server, which also exercises the rule that an
+// explicit `api:` lifts the narrowing a base_url imposes.
+func TestResponsesPath_ReachableEndToEnd(t *testing.T) {
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id": "resp_1",
+		  "model": "gpt-5.1",
+		  "status": "completed",
+		  "output": [
+		    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"pong"}]}
+		  ],
+		  "usage": {"input_tokens": 3, "output_tokens": 1}
+		}`))
+	}))
+	defer srv.Close()
+
+	bus := engine.NewEventBus()
+	p := &Plugin{}
+	if err := p.Init(engine.PluginContext{
+		Config: map[string]any{
+			"api_key":  "sk-not-used",
+			"api":      "responses",
+			"base_url": srv.URL + "/v1/chat/completions",
+		},
+		Bus:    bus,
+		Logger: silentLogger(),
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+
+	var got events.LLMResponse
+	unsub := bus.Subscribe("llm.response", func(ev engine.Event[any]) {
+		got, _ = ev.Payload.(events.LLMResponse)
+	})
+	defer unsub()
+
+	if err := bus.Emit("llm.request", events.LLMRequest{
+		SchemaVersion: events.LLMRequestVersion,
+		Model:         "gpt-5.1",
+		Messages:      []events.Message{{Role: "user", Content: "ping"}},
+	}); err != nil {
+		t.Fatalf("emit llm.request: %v", err)
+	}
+
+	if gotPath != "/v1/responses" {
+		t.Errorf("posted to %q, want /v1/responses", gotPath)
+	}
+	// The Responses serializer, not the chat one: `input`, not `messages`.
+	if !strings.Contains(gotBody, `"input"`) || strings.Contains(gotBody, `"messages"`) {
+		t.Errorf("body is not a Responses request: %s", gotBody)
+	}
+	if got.Content != "pong" {
+		t.Errorf("llm.response Content = %q, want pong", got.Content)
 	}
 }
 

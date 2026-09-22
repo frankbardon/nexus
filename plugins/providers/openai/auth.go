@@ -51,10 +51,12 @@ type authState struct {
 	apiKey string
 
 	// baseURL overrides the default https://api.openai.com/v1/chat/completions
-	// for openai-mode (e.g. local proxies or OpenAI-compatible endpoints).
-	// Ignored in Azure modes — resolveEndpoint constructs Azure URLs from the
-	// resource/deployment/api-version triple. Setting it also narrows the
-	// default `api:` to chat_completions — see narrowsToChatCompletions.
+	// for openai-mode (e.g. local proxies or OpenAI-compatible endpoints). On
+	// `api: responses` the sibling route beneath it is used instead — see
+	// responsesEndpointUnder. Ignored in Azure modes, where resolveEndpoint
+	// constructs both URLs from the resource/deployment/api-version triple.
+	// Setting it also narrows the default `api:` to chat_completions — see
+	// narrowsToChatCompletions.
 	baseURL string
 
 	// Azure (used by both azure_key and azure_aad).
@@ -219,16 +221,25 @@ func readAzureField(raw map[string]any, literalKey, envKey, fallbackEnv string) 
 //
 // chat_completions:
 //
-//	openai:    <baseURL or default>/chat/completions
+//	openai:    <baseURL or default>   (base_url is the whole endpoint)
 //	azure_key: https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=<v>
 //	azure_aad: same as azure_key
 //
-// responses has no URL yet, deliberately. Its route shapes differ from the chat
-// ones on every auth mode — Azure's is /openai/v1/responses with the deployment
-// in the request body rather than the path — and building them before the path
-// that speaks them exists would be a guess nothing exercises. Init already
-// refuses an explicit `api: responses`; this is the second line of defence, for
-// a surface that reached a request some other way.
+// responses:
+//
+//	openai:    https://api.openai.com/v1/responses, or the Responses route
+//	           beneath a configured base_url — see responsesEndpointUnder
+//	azure_key: https://<resource>.openai.azure.com/openai/v1/responses
+//	azure_aad: same as azure_key
+//
+// The Azure pair is the reason this takes an api at all rather than swapping a
+// suffix. Azure's Responses surface is the versionless `/openai/v1/` route: the
+// deployment is **not** in the path — it travels in the body's `model` field,
+// which is why buildResponsesBody writes `model` even in Azure modes — and the
+// route is implicitly versioned, so no `api-version` query is sent. (Preview
+// features want `api-version=preview`; Nexus sends none and stays on GA.) The
+// configured `azure.api_version` is therefore unused on this surface, and still
+// required, because the chat surface on the same instance needs it.
 func (a *authState) resolveEndpoint(api apiSurface) (string, error) {
 	switch api {
 	case apiChatCompletions:
@@ -248,16 +259,55 @@ func (a *authState) resolveEndpoint(api apiSurface) (string, error) {
 			return apiURL, nil
 		}
 	case apiResponses:
-		return "", errResponsesUnimplemented("")
+		switch a.mode {
+		case authModeAzureKey, authModeAzureAAD:
+			return fmt.Sprintf(
+				"https://%s.openai.azure.com/openai/v1/responses",
+				a.resource,
+			), nil
+		default:
+			if a.baseURL != "" {
+				return responsesEndpointUnder(a.baseURL), nil
+			}
+			return responsesURL, nil
+		}
 	default:
 		return "", fmt.Errorf("openai: unknown api surface %q", string(api))
 	}
 }
 
+// responsesEndpointUnder turns a configured base_url into the Responses URL
+// beneath it.
+//
+// base_url is documented as the whole chat endpoint (the default it overrides
+// is `https://api.openai.com/v1/chat/completions`), so the Responses route is
+// its sibling rather than its child: the `/chat/completions` tail comes off and
+// `/responses` goes on. A base_url written as the bare API root works too, and
+// one already pointing at `/responses` is left alone — an operator who declared
+// `api: responses` and wrote the matching URL means it.
+//
+// Whether the endpoint on the other end actually implements `/responses` is the
+// operator's to know: that is exactly what declaring `api:` asserts, and it is
+// why a base_url narrows the default away from this surface.
+func responsesEndpointUnder(base string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/responses") {
+		return base
+	}
+	base = strings.TrimSuffix(base, "/chat/completions")
+	return base + "/responses"
+}
+
 // stripModelFromBody reports whether the model field should be omitted from
-// the JSON request body. Azure encodes the deployment in the URL path (and
-// rejects bodies that carry "model" — or rather, the deployment name there
-// must match), so the cleanest path is to omit the field entirely.
+// the JSON request body. Azure's *chat* route encodes the deployment in the URL
+// path (and rejects bodies whose "model" disagrees with it), so the cleanest
+// path is to omit the field entirely.
+//
+// This is a fact about one surface, and buildRequestBody is its only caller.
+// The Responses path deliberately never consults it: Azure's
+// `/openai/v1/responses` route carries no deployment in the path, so
+// buildResponsesBody writes `model` unconditionally — stripping it there would
+// send a request naming no model at all.
 func (a *authState) stripModelFromBody() bool {
 	return a.mode == authModeAzureKey || a.mode == authModeAzureAAD
 }

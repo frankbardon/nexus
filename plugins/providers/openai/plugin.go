@@ -25,6 +25,10 @@ const (
 	pluginName = "OpenAI LLM Provider"
 	version    = "0.1.0"
 	apiURL     = "https://api.openai.com/v1/chat/completions"
+	// responsesURL is the public Responses endpoint — the `api: responses`
+	// counterpart of apiURL. Both are only defaults; resolveEndpoint owns the
+	// choice and the Azure and base_url variants.
+	responsesURL = "https://api.openai.com/v1/responses"
 
 	// defaultMaxTokens is the floor max_tokens applied when neither the
 	// request, the request's role, nor the default role specifies one.

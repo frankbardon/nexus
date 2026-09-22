@@ -1,6 +1,6 @@
 # OpenAI Provider
 
-The OpenAI provider calls the Chat Completions API via direct HTTP requests — no SDK dependency. It supports streaming, tool use, request cancellation, and automatic retries. Compatible with any OpenAI-compatible API endpoint (Azure OpenAI, local proxies, etc.) via `base_url`.
+The OpenAI provider calls the Chat Completions API or the Responses API via direct HTTP requests — no SDK dependency. Which one it speaks is declared with [`api`](#which-api-api). It supports streaming, tool use, request cancellation, and automatic retries, on Azure OpenAI (`auth_mode`) and on any OpenAI-compatible endpoint (`base_url`).
 
 ## Details
 
@@ -14,8 +14,8 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `api_key_env` | string | `OPENAI_API_KEY` | Name of the environment variable containing the API key |
-| `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for Azure, local proxies, etc.). Setting it narrows the default `api` to `chat_completions` |
-| `api` | string | `chat_completions` | Which OpenAI API to speak: `chat_completions` or `responses`. `responses` is not implemented yet and fails `Init`. Also settable per `core.models` entry, which wins |
+| `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for local proxies and OpenAI-compatible endpoints) — the whole chat endpoint, not a prefix. Setting it narrows the default `api` to `chat_completions`; under an explicit `api: responses` the sibling `/responses` route beneath it is used |
+| `api` | string | `chat_completions` | Which OpenAI API to speak: `chat_completions` or `responses`. Both work; `responses` is opt-in rather than the default (see below). Also settable per `core.models` entry, which wins |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
 | `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
 
@@ -244,11 +244,33 @@ which wins over the plugin key; being a provider-native axis it does not fall
 through from the `default` role to a named one. Exactly one endpoint is chosen
 per request, from those two and nothing else.
 
-`api: responses` is **not usable yet**: the selector, the request serializer,
-the non-streaming reply parser, the SSE reader and the multimodal Item shapes
-ship ahead of the endpoint builder, so declaring it — on the plugin or on a
-role — still fails `Init` naming the release it lands in. A surface with no
-endpoint builder has no URL to post to.
+`api: responses` **works end to end** — serializer, reply parser, SSE reader,
+multimodal Item shapes and the endpoint builder on every `auth_mode` — but it is
+**opt-in rather than the default**. The reason is encrypted reasoning replay: a
+Responses turn under `store: false` returns `reasoning` Items carrying
+`encrypted_content`, and the next request must replay them verbatim or the model
+loses its reasoning across a tool round. That replay is not wired yet, so a
+multi-turn tool loop on this surface silently drops reasoning context between
+rounds. An operator who declares `api: responses` has chosen that knowingly; a
+default would choose it for every deployment that merely upgraded. When the
+replay lands, the plain `api.openai.com` default moves to `responses` and the
+two narrowed cases stay where they are.
+
+**The endpoint.** On `auth_mode: openai` the surfaces are
+`https://api.openai.com/v1/chat/completions` and
+`https://api.openai.com/v1/responses`; with a `base_url` the chat one is used
+verbatim and the Responses one is its sibling (`https://proxy/v1/chat/completions`
+→ `https://proxy/v1/responses`, a bare root appended, an already-`/responses`
+URL left alone). On Azure the two routes are genuinely different shapes rather
+than a suffix swap: chat stays
+`https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=<v>`,
+while Responses is the versionless
+`https://<resource>.openai.azure.com/openai/v1/responses` — **no deployment in
+the path** (it travels in the body's `model` field) and **no `api-version`
+query**, because the GA `/openai/v1/` route is implicitly versioned.
+`azure.api_version` is still required, for the chat surface on the same
+instance. Auth is orthogonal: the `api-key` header and the `azure_aad` bearer
+token apply on both routes identically.
 
 The two surfaces carry genuinely different requests, which is why this is a
 declared axis rather than a URL suffix: `messages` becomes a flat `input` list
@@ -316,14 +338,15 @@ See [Which OpenAI API: `api`](../../configuration/reference.md#which-openai-api-
 
 The `base_url` config allows pointing at any OpenAI-compatible API:
 
-- **Azure OpenAI** — Set `base_url` to your Azure endpoint
+- **Azure OpenAI** — Use `auth_mode: azure_key` / `azure_aad` with the `azure:`
+  block; the provider builds the route itself on both API surfaces
 - **Local proxies** — LM Studio, Ollama (with OpenAI-compatible mode), vLLM, etc.
 - **Other providers** — Any service implementing the Chat Completions API
 
 ## HTTP Configuration
 
 - **Timeout**: 5 minutes per request
-- **API endpoint**: Configurable via `base_url`, defaults to `https://api.openai.com/v1/chat/completions`
+- **API endpoint**: chosen per request from `auth_mode` and [`api`](#which-api-api); `base_url` overrides the `auth_mode: openai` default of `https://api.openai.com/v1/chat/completions`
 
 ## Example Configuration
 

@@ -855,7 +855,7 @@ to read it:
 | `effort` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below. Unclamped on OpenAI, whose vocabulary is a superset of the other two's; only sent there where a reasoning `mode` is declared |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
 | `reasoning` | `nexus.llm.openai` — the only provider with a `reasoning:` block. A role's merges over the plugin-level one **key by key**, and the merged block goes through the same parser; see [Per-role reasoning](#per-role-reasoning-openai). |
-| `api` | `nexus.llm.openai` — the only provider with more than one API surface. `chat_completions` or `responses`; the per-entry value wins over the plugin-level `api:`, and **does not fall through** from the default role to a named one. `responses` is declared and validated but **not implemented yet**, so it fails the boot naming the role; see [Which OpenAI API: `api`](#which-openai-api-api). The other two providers ignore a role's `api:` in silence |
+| `api` | `nexus.llm.openai` — the only provider with more than one API surface. `chat_completions` or `responses`; the per-entry value wins over the plugin-level `api:`, and **does not fall through** from the default role to a named one. Both surfaces work end to end; `responses` is opt-in rather than the default — see [Which OpenAI API: `api`](#which-openai-api-api). The other two providers ignore a role's `api:` in silence |
 | `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
 An axis with no consumer is inert, not an error: the key parses, validates
@@ -2155,8 +2155,8 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `auth_mode`                  | string | `openai`                             | `openai`, `azure_key`, or `azure_aad`. |
 | `api_key`                    | string | *(env)*                              | Direct API key (`auth_mode: openai`, also fallback for Azure Files API). |
 | `api_key_env`                | string | `OPENAI_API_KEY`                     | Environment variable for the key. |
-| `base_url`                   | string | `https://api.openai.com/v1`          | Override for proxies / OpenAI-compatible endpoints. Setting it **narrows the default `api:`** to `chat_completions`, because those endpoints implement `/chat/completions` and mostly not `/responses`. |
-| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. **`responses` is not implemented yet and fails `Init`** naming the release it lands in (`v0.29.0`); the key exists now so the endpoint is an operator-declared axis rather than a later migration. An unknown value also fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
+| `base_url`                   | string | `https://api.openai.com/v1/chat/completions` | Override for proxies / OpenAI-compatible endpoints — the whole chat endpoint, not a prefix. Setting it **narrows the default `api:`** to `chat_completions`, because those endpoints implement `/chat/completions` and mostly not `/responses`. Under an explicit `api: responses` the **sibling** route is used instead: the `/chat/completions` tail comes off and `/responses` goes on (`https://proxy/v1/chat/completions` → `https://proxy/v1/responses`), a bare API root works the same way, and a `base_url` already pointing at `/responses` is left alone. Whether that endpoint implements the Responses API is the operator's to know — declaring `api:` is exactly that assertion. |
+| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. Both surfaces are implemented end to end on every `auth_mode`; `responses` is **opt-in**, because [encrypted reasoning replay](#which-openai-api-api) is not wired yet and a default must not choose that trade for a deployment that merely upgraded. An unknown value fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
 | `azure.endpoint`             | string | *(required for Azure)*               | Azure OpenAI endpoint URL. |
 | `azure.api_key`              | string | *(env `AZURE_OPENAI_API_KEY`)*       | Azure key (when `auth_mode: azure_key`). |
 | `azure.api_key_env`          | string | `AZURE_OPENAI_API_KEY`               | Override the env var name. |
@@ -2181,7 +2181,7 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | *(role `effort`)*            | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `reasoning_effort` when the block that role resolves to is on `mode: effort` and named no `effort` of its own. It **wins over** the plugin-level `reasoning.effort`: a plugin key is a default, a per-role key the more specific statement. **Nothing is clamped and nothing is warned** — OpenAI's vocabulary is a superset of the union of what the other two providers accept, so every word an operator can write for either of them passes through verbatim. A value in no provider's vocabulary fails `Init` for any role whose depth could actually reach the wire, naming the role and the accepted set. **Ignored entirely under `mode: off`** — including the absent `reasoning:` block that resolves to it — so a role's `effort:` on a deployment that declares no reasoning mode anywhere sends nothing at all; that is deliberate, see [Per-role reasoning](#per-role-reasoning-openai). Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` without touching the rest — so a plain single-entry role's `effort:` reaches the wire with no coordinator involved. An effort already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the registry, because a registry lookup always returns the role's first entry. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
 | *(role `reasoning`)*         | map    | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.reasoning` block, which **merges over** the plugin-level `reasoning:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a deeper `effort` does not have to restate the `mode`. A set-but-empty `reasoning: {}` is a statement rather than a gap — the merged block is present, which declares `mode: effort` on a deployment whose plugin block is absent entirely. The merged block goes through the same parser as the plugin one, so it gets the same validation, the same `mode` inference and the same deprecation handling of `enabled`/`budget_tokens`. Every role this provider could serve is swept at **`Init`** and an invalid merged block **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on every path that resolves a role, and a block already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the role's. An `effort` the role's own block names outranks that same role's `effort:`. See [Per-role reasoning](#per-role-reasoning-openai). |
 | *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. One of the five per-entry axes this provider reads, alongside `effort`, `api` and the `reasoning:` and `retry:` blocks (see the rows above and below); the `thinking` and `cache` entries still have no consumer here. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever the **resolved** `reasoning.mode` — plugin block merged with the role's — is anything but `off`; a model id alone never strips it. |
-| *(role `api`)*               | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.api` value, which selects the endpoint for the entry being served and **wins over** the plugin-level `api:`. A provider-native axis, so unlike the shared ones it **does not fall through** from the `default` role to a named one: a named role that sets none takes the plugin key, not the default role's. Picked up on **every** path that resolves a role — the role the request names, the `default` role when the request names none, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. A per-entry `api:` bypasses `schema.json` entirely, so every role this provider could serve is swept at **`Init`**: an unknown value **fails the boot naming the role**, and so does `responses`, which is not implemented yet. Exactly one endpoint is chosen per request and nothing else influences it. See [Which OpenAI API: `api`](#which-openai-api-api). |
+| *(role `api`)*               | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.api` value, which selects the endpoint for the entry being served and **wins over** the plugin-level `api:`. A provider-native axis, so unlike the shared ones it **does not fall through** from the `default` role to a named one: a named role that sets none takes the plugin key, not the default role's. Picked up on **every** path that resolves a role — the role the request names, the `default` role when the request names none, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. A per-entry `api:` bypasses `schema.json` entirely, so every role this provider could serve is swept at **`Init`**: an unknown value **fails the boot naming the role**. `responses` is accepted and served. Exactly one endpoint is chosen per request and nothing else influences it. See [Which OpenAI API: `api`](#which-openai-api-api). |
 
 #### Which OpenAI API: `api`
 
@@ -2219,16 +2219,47 @@ was written.
 An operator on a declared-compat or Azure endpoint who wants the Responses API
 says so with an explicit `api:`.
 
-> **`api: responses` is not usable yet.** The selector, its defaulting, its
-> validation, the **request serializer**, the **non-streaming reply parser** and
-> now the **SSE reader** ship ahead of the multimodal Item shapes and the
-> endpoint builder, so an explicit `api: responses` — on the plugin or on a
-> `core.models` entry — still **fails `Init`** naming the release it lands in
-> (`v0.29.0`). A surface with no endpoint builder has no URL to post to, so an
-> honest boot failure beats a request shaped for one API and posted to another.
-> When the rest of the path lands, the unnarrowed default becomes `responses`:
-> plain `api.openai.com` deployments move, and the two narrowed rows above stay
-> on `chat_completions`.
+> **`api: responses` works; it is not the default.** The whole path ships — the
+> selector, its defaulting and validation, the request serializer, the
+> non-streaming reply parser, the SSE reader, the multimodal Item shapes and the
+> endpoint builder for every `auth_mode`. An explicit `api: responses`, on the
+> plugin or on a `core.models` entry, is honoured as written.
+>
+> What has **not** moved is the unnarrowed default in the table above, and the
+> reason is **encrypted reasoning replay**. A Responses turn under `store: false`
+> returns `reasoning` Items carrying `encrypted_content`, and the next request
+> has to replay them verbatim or the model loses its reasoning across a tool
+> round. That replay is not wired yet, so a multi-turn tool loop on this surface
+> silently drops reasoning context between rounds. An operator who writes
+> `api: responses` has chosen that trade knowingly; making it the default would
+> choose it for every OpenAI deployment that merely upgrades Nexus, with nothing
+> in their config changed and nothing visible when it goes wrong. When the replay
+> lands, the unnarrowed default becomes `responses`: plain `api.openai.com`
+> deployments move, and the two narrowed rows above stay on `chat_completions`.
+
+**The endpoint each pair resolves to.** One URL per (`auth_mode`, `api`), chosen
+in one place and reconsidered nowhere:
+
+| `auth_mode` | `api: chat_completions` | `api: responses` |
+|---|---|---|
+| `openai` | `https://api.openai.com/v1/chat/completions` | `https://api.openai.com/v1/responses` |
+| `openai` + `base_url` | the `base_url` verbatim | the sibling route beneath it — see [`base_url`](#nexusllmopenai) |
+| `azure_key` / `azure_aad` | `https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=<v>` | `https://<resource>.openai.azure.com/openai/v1/responses` |
+
+The Azure pair is why this is an endpoint *builder* with an `api` dimension
+rather than a suffix swap. Azure's Responses surface is the versionless
+`/openai/v1/` route: the deployment is **not** in the path — it travels in the
+body's `model` field, which is the one place the two surfaces disagree about
+that field — and the GA route is implicitly versioned, so **no `api-version`
+query is sent** even though `azure.api_version` is configured and still required
+(the chat surface on the same instance needs it). Preview features on that route
+want `api-version=preview`; Nexus sends none and stays on GA. Regional
+availability of the route is Azure's, not this provider's.
+
+`auth_mode` is orthogonal to `api`: the Azure `api-key` header and the
+`azure_aad` bearer token (including the cached-and-refreshed MSI/service-
+principal exchange) apply on the Responses route exactly as they do on the chat
+one.
 
 **What changes on the wire.** The two surfaces do not carry the same request,
 which is why the selector exists at all rather than a URL suffix. No
@@ -2246,7 +2277,7 @@ the body does:
 | `reasoning_effort: "high"` | `reasoning: {effort: "high", summary: "auto"}` — the only surface that can carry [`reasoning.summary`](#nexusllmopenai) |
 | — | `store: false`, always (see below) |
 | `prediction` | *(no counterpart — the field is dropped)* |
-| Azure: deployment in the URL, `model` stripped from the body | Azure: deployment **in** the body's `model` field |
+| Azure: `…/openai/deployments/<deployment>/chat/completions?api-version=<v>`, `model` stripped from the body | Azure: `…/openai/v1/responses` — no deployment in the path, no `api-version`, deployment **in** the body's `model` field |
 
 Two of those rows are deliberate choices rather than transcription:
 

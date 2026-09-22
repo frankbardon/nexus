@@ -23,8 +23,9 @@ import (
 //   - `base_url` exists for proxies and OpenAI-compatible endpoints (vLLM,
 //     Ollama, OpenRouter, LM Studio and friends), which implement
 //     `/chat/completions` and mostly not `/responses`. Azure's Responses
-//     surface is a different route shape again — not the deployment-scoped chat
-//     one this provider builds today.
+//     surface is a different route shape again — the versionless
+//     `/openai/v1/responses`, with the deployment in the body rather than the
+//     path, alongside the deployment-scoped chat route.
 //
 // So neither value can be right for everyone, and the endpoint is declared.
 type apiSurface string
@@ -35,10 +36,10 @@ const (
 	// implements.
 	apiChatCompletions apiSurface = "chat_completions"
 
-	// apiResponses is `/v1/responses`. Declared and validated here; the
-	// request, reply and streaming path that speaks it is not implemented yet,
-	// so Init refuses it rather than letting it fail on the wire. See
-	// errResponsesUnimplemented.
+	// apiResponses is `/v1/responses` — the only surface on which a current
+	// reasoning model can reason while tools are on the turn. Opt in with an
+	// explicit `api:`; it is not the default yet, and unnarrowedDefaultAPI
+	// says what has to land first.
 	apiResponses apiSurface = "responses"
 )
 
@@ -56,27 +57,24 @@ func validAPISurface(v string) bool {
 // unnarrowedDefaultAPI is the effective `api` for a deployment that declares
 // none and whose endpoint is plain `api.openai.com`.
 //
-// It is `chat_completions` **today only because the Responses path does not
-// exist yet** — every explicit `api: responses` is an Init error (see
-// errResponsesUnimplemented), so defaulting to it would mean a plain
-// `api.openai.com` deployment with no `api:` key could not boot. When the
-// Responses path lands this constant flips to apiResponses, which is the
-// intended default: it is the only surface on which a current reasoning model
-// can reason while tools are on the turn. The narrowing in
+// It stays `chat_completions` even though the Responses path now works end to
+// end — request, reply, stream, multimodal and endpoint — and the reason is
+// **encrypted-reasoning-item replay**.
+//
+// A Responses turn under `store: false` returns `reasoning` Items carrying
+// `encrypted_content`, and the next request has to replay them verbatim or the
+// model loses its reasoning across a tool round. That replay is not wired yet
+// (E5-S2). Until it is, a multi-turn tool loop on this surface silently drops
+// reasoning context between rounds. An operator who writes `api: responses`
+// explicitly has chosen that trade; a *default* would choose it for every
+// OpenAI deployment that merely upgrades Nexus, with nothing in their config
+// changed and nothing visible when it goes wrong.
+//
+// So: **do not flip this constant early.** E5-S2, or a story after it, flips it
+// together with the docs that describe the default. The narrowing in
 // narrowsToChatCompletions is already written for that flip and is what keeps
 // declared-compat endpoints on the surface they actually implement.
 const unnarrowedDefaultAPI = apiChatCompletions
-
-// errResponsesUnimplemented is what an explicit `api: responses` gets until the
-// Responses request/response/stream path exists. An honest boot failure naming
-// the release beats a request shaped for one API and posted to another.
-func errResponsesUnimplemented(where string) error {
-	prefix := "openai: "
-	if where != "" {
-		prefix = fmt.Sprintf("openai: %s: ", where)
-	}
-	return fmt.Errorf("%sapi: responses is not implemented yet — the /v1/responses path lands in v0.29.0; use api: chat_completions (or omit the key) until then", prefix)
-}
 
 // narrowsToChatCompletions reports whether this deployment has declared an
 // endpoint that cannot be assumed to speak the Responses API, which is what
@@ -113,8 +111,7 @@ func defaultAPI(a *authState) apiSurface {
 }
 
 // parseAPIConfig resolves the plugin-level `api:` key against the narrowed
-// default. An unknown word and the not-yet-implemented `responses` both fail
-// Init rather than the first request.
+// default. An unknown word fails Init rather than the first request.
 func parseAPIConfig(cfg map[string]any, auth *authState) (apiSurface, error) {
 	raw, ok := cfg["api"].(string)
 	if !ok || raw == "" {
@@ -122,9 +119,6 @@ func parseAPIConfig(cfg map[string]any, auth *authState) (apiSurface, error) {
 	}
 	if !validAPISurface(raw) {
 		return "", fmt.Errorf("openai: api %q is not one of %s", raw, strings.Join(apiSurfaces, ", "))
-	}
-	if apiSurface(raw) == apiResponses {
-		return "", errResponsesUnimplemented("")
 	}
 	return apiSurface(raw), nil
 }
@@ -146,9 +140,6 @@ func validateRoleAPI(models *engine.ModelRegistry) error {
 			return fmt.Errorf("core.models role %q: api %q is not one of %s",
 				role, cfg.API, strings.Join(apiSurfaces, ", "))
 		}
-		if apiSurface(cfg.API) == apiResponses {
-			return errResponsesUnimplemented(fmt.Sprintf("core.models role %q", role))
-		}
 		return nil
 	})
 }
@@ -168,9 +159,8 @@ func validateRoleAPI(models *engine.ModelRegistry) error {
 //
 // An unrecognised override is a value nothing on this provider can honour, so
 // it is warned about and dropped back to the plugin's — the same degradation
-// resolveReasoning and resolveRetry make. `responses` is *not* dropped: it is
-// recognised, and resolveEndpoint refuses it by name, which is the honest
-// failure while the path is unimplemented.
+// resolveReasoning and resolveRetry make. Both recognised surfaces are honoured
+// as written; resolveEndpoint has a URL for each on every auth mode.
 func (p *Plugin) resolveAPI(req events.LLMRequest) apiSurface {
 	if v := req.Overrides.API; v != "" {
 		if validAPISurface(v) {
