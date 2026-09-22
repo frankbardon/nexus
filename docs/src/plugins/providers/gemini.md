@@ -238,6 +238,23 @@ A [`core.models`](../../configuration/reference.md#coremodels) role may carry it
 ```yaml
 core:
   models:
+    worker:
+      provider: nexus.llm.gemini
+      model: gemini-3-flash
+      effort: low              # → "thinkingConfig": {"thinkingLevel": "low"}
+
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+```
+
+The same key works on a `fanout` role spanning both providers, which is where the
+clamp earns its keep:
+
+```yaml
+core:
+  models:
     panel:
       fanout: true
       providers:
@@ -283,14 +300,18 @@ Under `mode: budget` and `mode: off`, a role's `effort` is **ignored entirely an
 without warning**: there is no `thinkingLevel` on those paths for it to become, and
 2.5's depth control is `budget_tokens`.
 
-**How the value gets here matters.** Unlike the Anthropic provider, this one does not
-read the `core.models` registry at request time — it reads only the `effort` carried on
-the request, which the `fallback` coordinator stamps when it retries onto a **later**
-chain entry and the `fanout` coordinator stamps on **every** leg. So a role's `effort:`
-reaches this provider on a fanout leg or a fallback entry beyond the first, and a plain
-single-entry role's `effort:` does not reach it at all — set `thinking.level` for that
-case. `Init` validates every role's `effort` either way, so a typo is caught whether or
-not the value can be delivered.
+**How the value gets here.** Like the Anthropic provider, this one reads the
+`core.models` registry itself, on every path that resolves a role: the role the request
+names, the `default` role, and the late recovery after a router rewrote `model` without
+touching the rest. A plain single-entry role's `effort:` therefore reaches the wire on
+its own, with no coordinator involved.
+
+An `effort` already carried **on the request** still wins over the registry, and that
+ordering matters. The `fallback` coordinator stamps one when it retries onto a **later**
+chain entry, and the `fanout` coordinator stamps one on **every** leg; a registry lookup
+here always returns the role's **first** entry, which is the wrong entry in both cases.
+So the registry is consulted only when the request arrived carrying no `effort` at all,
+which is exactly the ordinary single-entry role.
 
 The cross-provider account — the union vocabulary, both clamp directions, and the fact
 that `nexus.llm.openai` ignores `effort` entirely — is in the configuration reference

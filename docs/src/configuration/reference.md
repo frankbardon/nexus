@@ -755,16 +755,14 @@ Anthropic both keys are already spelled in Anthropic's own vocabulary, so nothin
 is lost in translation and the more specific setting — the role — wins instead.
 It is an inversion to know about, not a bug to report.
 
-**Step 2 does not reach the two providers by the same route, and today that is
-visible.** The Anthropic provider reads the `core.models` registry itself, so a
-role's `effort:` reaches it however the role was resolved. The Gemini provider reads
-only the `effort` that arrives *on the request* — which the `fallback` coordinator
-stamps when it retries onto a **later** chain entry, and the `fanout` coordinator
-stamps on **every** leg. So a role's `effort:` reaches Gemini on a fanout leg or a
-fallback entry beyond the first, and a **plain single-entry Gemini role's `effort:`
-does not reach the provider at all**. For such a role, set `thinking.level` on the
-plugin instead. (Gemini still validates every role's `effort` at `Init` either way,
-so a typo is caught whether or not the value can be delivered.)
+**Step 2 reaches both providers by the same route.** Each reads the `core.models`
+registry itself, on every path that resolves a role, so a plain single-entry role's
+`effort:` is delivered without help from any coordinator. Step 1 still wins when it
+applies, and that ordering is what makes a chain correct: a registry lookup always
+returns the role's **first** entry, which is the wrong entry for a fallback retry or
+a non-first fanout leg, so the value the coordinator stamped for the entry actually
+being served must not be overwritten by it. The registry is consulted only when the
+request arrived carrying no `effort` at all.
 
 **A `fanout` role across both providers.** `effort` belongs on each entry of the
 `providers:` list; a fanout role map has no role-level `effort` of its own.
@@ -799,9 +797,11 @@ plugins:
 | `nexus.llm.openai` | nothing; the key is ignored entirely | no |
 
 Give **every** leg its own `effort`. A leg that omits it does not fall back to
-"unset" on the Anthropic provider: the role's first entry is consulted as the
-role-level default, so an Anthropic leg with no `effort` of its own inherits
-whatever `providers[0]` carries.
+"unset" on either consuming provider: the coordinator stamps an empty value, the
+provider then consults the registry, and a registry lookup returns the role's
+**first** entry. So a leg with no `effort` of its own inherits whatever
+`providers[0]` carries — including the Gemini leg, which clamps that inherited
+value like any other.
 
 **`nexus.llm.openai` does not consume `effort` at all.** It is not clamped, not
 warned, and never reaches OpenAI — an entry carrying `effort:` behaves exactly like
@@ -1730,7 +1730,7 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `service_account_json_env`   | string | *(unset — full ADC chain)*                       | Vertex only: env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through. |
 | `thinking.mode`              | string | `off` *(no block)* / `level` *(block present)*   | Which thinking parameter goes on the wire: `level` → `thinkingConfig.thinkingLevel` (Gemini 3.x), `budget` → `thinkingConfig.thinkingBudget` (Gemini 2.5), `off` → no `thinkingConfig` at all. The provider never inspects the model id; a mode that mismatches the target model is a Gemini 400 by design. |
 | `thinking.level`             | string | *(unset — the model's own default level)*        | `minimal`, `low`, `medium` or `high`. **Optional** under `mode: level`: unset, the provider falls back to the role's [`effort`](#coremodels), and with neither set it sends no `thinkingLevel` at all, leaving the model's own default (3.1 Pro `high`, 3.x Flash `medium`, Flash-Lite `minimal`). Set, it **wins over** the role's `effort` — `level` is Gemini's native vocabulary and `effort` the translated one. An invalid value still fails at `Init`. Mutually exclusive with `thinking.budget_tokens`; setting both fails at `Init`. |
-| *(role `effort`)*            | string | *(unset)*                                        | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `thinkingLevel` when `mode: level` and `thinking.level` is unset. Gemini's own four pass through unchanged; Anthropic's `xhigh` and `max` **clamp to `high`** (so a `fanout` role spanning both providers stays configurable), warned **once at `Init`** naming the role, the configured value and the effective one. A value in neither vocabulary fails `Init` for any role this provider could serve, and fails the request if it arrives some other way. Ignored entirely, without warning, under `mode: budget` and `mode: off`. Unlike Anthropic, this provider does not read the registry at request time: the value reaches it only as stamped on the request by the `fallback` coordinator (retrying onto a **later** chain entry) or the `fanout` coordinator (**every** leg), so a plain single-entry role's `effort` never arrives and `thinking.level` is the key to use there. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
+| *(role `effort`)*            | string | *(unset)*                                        | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `thinkingLevel` when `mode: level` and `thinking.level` is unset. Gemini's own four pass through unchanged; Anthropic's `xhigh` and `max` **clamp to `high`** (so a `fanout` role spanning both providers stays configurable), warned **once at `Init`** naming the role, the configured value and the effective one. A value in neither vocabulary fails `Init` for any role this provider could serve, and fails the request if it arrives some other way. Ignored entirely, without warning, under `mode: budget` and `mode: off`. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` without touching the rest — so a plain single-entry role's `effort:` reaches the wire with no coordinator involved. An effort already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the registry, because a registry lookup always returns the role's first entry. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
 | `thinking.budget_tokens`     | int    | *(unset — required under `mode: budget`)*        | Thinking token budget on Gemini 2.5. `-1` dynamic, `0` disable, otherwise a token ceiling. Mutually exclusive with `thinking.level`. Present with `mode` unset, it infers `mode: budget` and warns. |
 | `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
 | `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
