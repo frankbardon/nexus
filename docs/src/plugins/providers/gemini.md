@@ -195,6 +195,12 @@ a `mode` the target model does not accept is a Gemini HTTP 400 by design.
 `level` accepts exactly four values, lowercase: `minimal`, `low`, `medium`, `high`.
 Anything else fails at `Init` with the accepted set named.
 
+`level` is **optional** under `mode: level`. Omitted, the provider falls back to the
+role's [`effort`](#reasoning-depth-from-a-role-effort); with neither set it sends a
+`thinkingConfig` carrying no `thinkingLevel` key at all, and the model's own default —
+the right-hand column above — applies. Omitting `level` is therefore a valid way to say
+"whatever this model does by default", not a misconfiguration.
+
 Two asymmetries are worth keeping in mind:
 
 - **2.5 will *accept* a `thinkingLevel`** for backward compatibility, but it degrades
@@ -222,6 +228,73 @@ plugins:
       budget_tokens: 8192
       include_thoughts: true
 ```
+
+#### Reasoning depth from a role: `effort`
+
+A [`core.models`](../../configuration/reference.md#coremodels) role may carry its own
+`effort:`, and this provider reads it as a `thinkingLevel` — but only under
+`mode: level`, and only when the plugin-level `thinking.level` is unset:
+
+```yaml
+core:
+  models:
+    panel:
+      fanout: true
+      providers:
+        - provider: nexus.llm.gemini
+          model: gemini-3.1-pro
+          effort: max            # Anthropic's word — clamped on this leg
+        - provider: nexus.llm.anthropic
+          model: claude-opus-4-7
+          effort: max            # native there
+
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+      # no `level:` here — a plugin-level level would beat the role's effort
+```
+
+**`thinking.level` wins over a role's `effort`**, which is deliberately the inverse of
+the Anthropic provider, where a role's `effort` beats the plugin-level
+`output_config.effort`. The reason is which key speaks this provider's own language:
+`level` is the native `thinkingLevel` vocabulary and `effort` the translated,
+cross-provider one, so here the native setting wins. On Anthropic both keys are already
+spelled in Anthropic's vocabulary, so nothing is lost in translation and the more
+specific setting — the role — wins there instead. It is an inversion to know about, not
+a bug to report.
+
+Anthropic's vocabulary reaches higher than Gemini's, so two of its words clamp:
+
+| Role `effort:` | `thinkingLevel` sent |
+|---|---|
+| `minimal`, `low`, `medium`, `high` | as written |
+| `xhigh`, `max` | `high` — **clamped**: "as deep as this model goes" |
+
+Clamping rather than rejecting is what keeps a role shared with the Anthropic provider
+configurable whichever provider's word the operator reaches for; ignoring the value
+would instead make `effort:` a silent no-op on this leg. The clamp is announced **once
+at `Init`** — the provider walks every `core.models` role it could serve and logs the
+role, the configured value and the effective one. A word in neither provider's
+vocabulary fails `Init` for any such role, and fails the request if it arrives some
+other way.
+
+Under `mode: budget` and `mode: off`, a role's `effort` is **ignored entirely and
+without warning**: there is no `thinkingLevel` on those paths for it to become, and
+2.5's depth control is `budget_tokens`.
+
+**How the value gets here matters.** Unlike the Anthropic provider, this one does not
+read the `core.models` registry at request time — it reads only the `effort` carried on
+the request, which the `fallback` coordinator stamps when it retries onto a **later**
+chain entry and the `fanout` coordinator stamps on **every** leg. So a role's `effort:`
+reaches this provider on a fanout leg or a fallback entry beyond the first, and a plain
+single-entry role's `effort:` does not reach it at all — set `thinking.level` for that
+case. `Init` validates every role's `effort` either way, so a typo is caught whether or
+not the value can be delivered.
+
+The cross-provider account — the union vocabulary, both clamp directions, and the fact
+that `nexus.llm.openai` ignores `effort` entirely — is in the configuration reference
+under [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
 
 #### `-1` and `0` on the budget path
 
@@ -253,8 +326,11 @@ that writes one key, so **no configuration can put both on the wire**. What is l
 is caught at boot rather than at first inference —
 
 - `level` and `budget_tokens` both set in the block → `Init` error naming both keys.
-- `mode: level` with no `level` → `Init` error.
-- `mode: budget` with no `budget_tokens` → `Init` error.
+- `mode: budget` with no `budget_tokens` → `Init` error. A budget is a number only the
+  operator can pick, so there is no default to fall back on.
+- `mode: level` with no `level` → **not** an error. Every Gemini 3.x model carries its
+  own default thinking level, so the provider falls back to the role's `effort` and,
+  failing that, omits `thinkingLevel` and lets the model default stand.
 
 A misconfigured thinking block fails the process at boot, not the user's first turn.
 
@@ -266,7 +342,7 @@ inventory of configs still to migrate.
 
 | Old block | Resolves to | Write instead |
 |---|---|---|
-| `enabled: true` and nothing else | `mode: level` — which then fails `Init`, because `level` is required | `mode: level` + `level: medium` (3.x), or `mode: budget` + `budget_tokens` (2.5) |
+| `enabled: true` and nothing else | `mode: level` with no level — `thinkingLevel` is omitted and the model's own default applies | `mode: level` + an explicit `level` (3.x), or `mode: budget` + `budget_tokens` (2.5) |
 | `enabled: true` + `budget_tokens: N` | `mode: budget` — **the budget wins over the `enabled` alias** | `mode: budget` + `budget_tokens: N`, drop `enabled` |
 | `budget_tokens: N` alone | `mode: budget`, inferred | `mode: budget` + `budget_tokens: N` |
 | `enabled: false` | `mode: off` | `mode: off` |
