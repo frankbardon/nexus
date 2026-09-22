@@ -254,3 +254,156 @@ func TestModelRegistry_FanoutEmptyProviders(t *testing.T) {
 		t.Fatal("expected empty fanout to not register")
 	}
 }
+
+func TestModelRegistry_Effort(t *testing.T) {
+	raw := map[string]any{
+		"default": "reasoning",
+		"reasoning": map[string]any{
+			"provider": "nexus.llm.anthropic",
+			"model":    "claude-opus-4-7",
+			"effort":   "xhigh",
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	cfg, ok := r.Resolve("reasoning")
+	if !ok {
+		t.Fatal("expected reasoning role to exist")
+	}
+	if cfg.Effort != "xhigh" {
+		t.Fatalf("expected effort xhigh, got %q", cfg.Effort)
+	}
+}
+
+func TestModelRegistry_EffortAbsent(t *testing.T) {
+	raw := map[string]any{
+		"balanced": map[string]any{
+			"provider":   "nexus.llm.anthropic",
+			"model":      "claude-sonnet-4-6",
+			"max_tokens": 8192,
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	cfg, ok := r.Resolve("balanced")
+	if !ok {
+		t.Fatal("expected balanced role to exist")
+	}
+	if cfg.Effort != "" {
+		t.Fatalf("expected empty effort when the key is absent, got %q", cfg.Effort)
+	}
+}
+
+// Core must not validate the effort string: the vocabularies differ per
+// provider, so an unrecognised value parses fine and reaches the provider
+// untouched.
+func TestModelRegistry_EffortUnrecognisedValuePassesThrough(t *testing.T) {
+	raw := map[string]any{
+		"weird": map[string]any{
+			"provider": "nexus.llm.anthropic",
+			"model":    "claude-sonnet-4-6",
+			"effort":   "ludicrous",
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	cfg, ok := r.Resolve("weird")
+	if !ok {
+		t.Fatal("expected weird role to exist")
+	}
+	if cfg.Effort != "ludicrous" {
+		t.Fatalf("expected effort passed through verbatim, got %q", cfg.Effort)
+	}
+}
+
+func TestModelRegistry_EffortNonStringIgnored(t *testing.T) {
+	raw := map[string]any{
+		"odd": map[string]any{
+			"provider": "nexus.llm.anthropic",
+			"model":    "claude-sonnet-4-6",
+			"effort":   42,
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	cfg, ok := r.Resolve("odd")
+	if !ok {
+		t.Fatal("expected odd role to exist")
+	}
+	if cfg.Effort != "" {
+		t.Fatalf("expected non-string effort to be ignored, got %q", cfg.Effort)
+	}
+}
+
+func TestModelRegistry_EffortInFallbackChain(t *testing.T) {
+	raw := map[string]any{
+		"balanced": []any{
+			map[string]any{
+				"provider": "nexus.llm.anthropic",
+				"model":    "claude-sonnet-4-6",
+				"effort":   "high",
+			},
+			map[string]any{
+				"provider": "nexus.llm.gemini",
+				"model":    "gemini-2.5-pro",
+				"effort":   "minimal",
+			},
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	primary, ok := r.Fallback("balanced", 0)
+	if !ok || primary.Effort != "high" {
+		t.Fatalf("expected primary effort high, got %+v", primary)
+	}
+
+	secondary, ok := r.Fallback("balanced", 1)
+	if !ok || secondary.Effort != "minimal" {
+		t.Fatalf("expected fallback effort minimal, got %+v", secondary)
+	}
+}
+
+func TestModelRegistry_EffortOnFanoutRole(t *testing.T) {
+	raw := map[string]any{
+		"panel": map[string]any{
+			"fanout": true,
+			"providers": []any{
+				map[string]any{
+					"provider": "nexus.llm.anthropic",
+					"model":    "claude-sonnet-4-6",
+					"effort":   "medium",
+				},
+				map[string]any{
+					"provider": "nexus.llm.gemini",
+					"model":    "gemini-2.5-pro",
+					"effort":   "low",
+				},
+				map[string]any{
+					"provider": "nexus.llm.openai",
+					"model":    "gpt-4o",
+				},
+			},
+		},
+	}
+
+	r := NewModelRegistry(raw)
+
+	providers := r.FanoutProviders("panel")
+	if len(providers) != 3 {
+		t.Fatalf("expected 3 fanout providers, got %d", len(providers))
+	}
+	if providers[0].Effort != "medium" {
+		t.Fatalf("expected first fanout effort medium, got %q", providers[0].Effort)
+	}
+	if providers[1].Effort != "low" {
+		t.Fatalf("expected second fanout effort low, got %q", providers[1].Effort)
+	}
+	if providers[2].Effort != "" {
+		t.Fatalf("expected third fanout effort empty, got %q", providers[2].Effort)
+	}
+}

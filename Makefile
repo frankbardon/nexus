@@ -269,6 +269,7 @@ check-modules:
 	    -not -path './go.mod' \
 	    -not -path './modules/*/go.mod' \
 	    -not -path './.git/*' \
+	    -not -path './.claude/*' \
 	    -not -path '*/testdata/*'); \
 	if [ -n "$$stray" ]; then \
 	  echo "check-modules: go.mod outside modules/<name>/ -- these packages are invisible to every ./... sweep:"; \

@@ -1,6 +1,6 @@
 # Anthropic (Claude) Provider
 
-The Anthropic provider calls the Claude API via direct HTTP requests — no SDK dependency. It supports streaming, tool use, request cancellation, and automatic retries.
+The Anthropic provider calls the Claude API via direct HTTP requests — no SDK dependency. It supports streaming, tool use, request cancellation, automatic retries, extended thinking and Anthropic's named reasoning-depth control, `effort`.
 
 ## Details
 
@@ -15,7 +15,13 @@ The Anthropic provider calls the Claude API via direct HTTP requests — no SDK 
 |-----|------|---------|-------------|
 | `api_key_env` | string | `ANTHROPIC_API_KEY` | Name of the environment variable containing the API key |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
+| `thinking` | map | `off` *(no block)* | Extended thinking: `mode`, `budget_tokens`, `display`, `include_thoughts`; see **Thinking** |
+| `output_config` | map | *(unset)* | Mirrors the wire object of the same name; carries `effort`. See **Effort** |
 | `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
+
+This table is a summary. Every key this plugin accepts, with its exact default,
+lives in the [configuration reference](../../configuration/reference.md#nexusllmanthropic),
+which is canonical wherever the two disagree.
 
 ## Events
 
@@ -33,6 +39,7 @@ The Anthropic provider calls the Claude API via direct HTTP requests — no SDK 
 | `llm.response` | Non-streaming response received |
 | `llm.stream.chunk` | Each chunk of a streaming response |
 | `llm.stream.end` | Streaming response complete |
+| `thinking.step` | A `thinking` block carries text and `thinking.include_thoughts` is on |
 | `core.error` | API errors |
 
 ## Features
@@ -73,16 +80,310 @@ Anthropic does not natively support `response_format`. When `ResponseFormat` is 
 
 During streaming, the synthetic tool's `input_json_delta` chunks are emitted as `llm.stream.chunk` content events, so the UI can stream structured output in real time.
 
+### Thinking
+
+Anthropic's extended thinking is one config block with one deciding key. `thinking.mode`
+names the shape of the request's `thinking` field, and nothing else chooses it:
+
+| `mode`     | What goes in the request body |
+|------------|-------------------------------|
+| `adaptive` | `"thinking": {"type": "adaptive"}` — the model sizes its own thinking |
+| `budget`   | `"thinking": {"type": "enabled", "budget_tokens": N}` — the legacy fixed budget |
+| `disabled` | `"thinking": {"type": "disabled"}` — an explicit opt out |
+| `off`      | *(no `thinking` field at all)* |
+
+An absent `thinking` block resolves to `off`. A block that is present with no `mode`
+resolves to `adaptive`.
+
+**The provider never inspects the model id.** There is no model-capability table in
+this plugin and no inference from the model string — deliberately, so the provider
+cannot go stale the week Anthropic ships a family it has never heard of. The price is
+that a `mode` the target model does not accept is an Anthropic **HTTP 400** with no
+local diagnosis: nothing fails at boot, nothing warns, the first request just comes
+back rejected. The table below is the entire mitigation. Read it before you pick a
+`mode`.
+
+#### Which mode for which model
+
+| Model family | `mode` | Notes |
+|---|---|---|
+| Fable 5 / 5.1 (and the Mythos counterparts) | `adaptive` | Thinking is always on. `budget_tokens` is a 400, and so is an explicit `disabled` |
+| Opus 5 | `adaptive` | Thinks by default. `disabled` is accepted only at effort `high` or below |
+| Sonnet 5 | `adaptive` | Thinks by default. `disabled` is accepted |
+| Opus 4.8 / 4.7 | `adaptive` | Does **not** think unless asked. `disabled` is accepted |
+| Opus 4.6 / Sonnet 4.6 | `adaptive` *(recommended)* | Also auto-enables interleaved thinking with no beta header. `budget` still works here, deprecated |
+| Sonnet 4.5, Haiku 4.5 and older | `budget` | `adaptive` is a 400. `budget_tokens` is required, at least `1024` and below `max_tokens` |
+
+Two asymmetries carry most of the real-world breakage:
+
+- **`budget_tokens` is a 400 on every current family** — Fable 5/5.1, Opus 5, Opus 4.8,
+  Opus 4.7 and Sonnet 5 all reject it. A config that has been quietly working since
+  Sonnet 4.5 stops working the moment the role's model is bumped.
+- **`adaptive` is a 400 on Haiku 4.5 and Sonnet 4.5.** The two modes are not a
+  compatibility ladder; they are two disjoint eras, and `budget` remains the only
+  correct mode on the older families.
+
+Opus 4.6 and Sonnet 4.6 are the one overlap, which is why they are the place to
+migrate from rather than the place to stay.
+
+```yaml
+# Current families
+plugins:
+  nexus.llm.anthropic:
+    thinking:
+      mode: adaptive
+      include_thoughts: true
+```
+
+```yaml
+# Sonnet 4.5 / Haiku 4.5 and older
+plugins:
+  nexus.llm.anthropic:
+    thinking:
+      mode: budget
+      budget_tokens: 8192
+      include_thoughts: true
+```
+
+`budget_tokens` has **no default** and is **required** under `mode: budget` — a
+`budget` block without it fails at `Init`, naming the key, rather than at the user's
+first turn. In every other mode it is ignored.
+
+#### `off` and `disabled` are different requests
+
+They are not two spellings of the same thing, and neither is a superset of the other:
+
+- `off` sends **no `thinking` field**, leaving the model's own default standing.
+- `disabled` sends **`{"type":"disabled"}`**, an explicit instruction not to think.
+
+Which one turns thinking off depends on what the model does when the field is absent,
+and the current families changed that answer:
+
+| Model family | How to turn thinking off |
+|---|---|
+| Fable 5 / 5.1 | **Not possible.** Omitting still runs adaptive, and `disabled` is a 400 |
+| Opus 5 | `mode: disabled` — and only at effort `high` or below; `xhigh` and `max` reject it |
+| Sonnet 5 | `mode: disabled` |
+| Opus 4.8 / 4.7 | `mode: off` — these do not think unless asked. `mode: disabled` also works |
+| Opus 4.6 / Sonnet 4.6 and older | `mode: off` |
+
+So on Opus 5, `mode: off` does **not** turn thinking off: the field is simply absent
+and the model thinks anyway. `disabled` is the only way off, and that is the whole
+reason the two values exist separately.
+
+#### `display`, and why `include_thoughts` alone is not enough
+
+`thinking.display` controls whether the API returns *readable* reasoning text. It is a
+visibility control only — the model thinks, and is billed, identically under every
+value, and the raw chain of thought is never exposed on any model.
+
+| `display`    | What comes back |
+|--------------|-----------------|
+| `summarized` | `thinking` blocks carry a readable summary of the model's reasoning |
+| `omitted`    | `thinking` blocks are still streamed, but with **empty text** |
+| *(unset)*    | No `display` key is sent; the target model's own default applies |
+
+The API default is model-dependent, and it changed quietly: it is **`omitted`** on
+Fable 5/5.1, Mythos 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5, where it was
+`summarized` on Opus 4.6 / Sonnet 4.6.
+
+That default is a trap for `include_thoughts`, because `omitted` is not "no blocks" —
+it is blocks with nothing in them. A reader that counts blocks sees thinking happening;
+a reader that renders their text sees a long silent pause and no error anywhere. So
+Nexus infers one key from the other:
+
+> When `display` is unset and `include_thoughts` resolves true, the provider sends
+> `display: "summarized"` under `mode: adaptive` and `mode: budget`.
+
+Without it, `include_thoughts: true` would emit contentless `thinking.step` events on
+every current model and look like a broken UI rather than a config mistake. The
+inference is limited to the two modes that actually think — there is no reasoning to
+display under `disabled`, and `off` sends no `thinking` object for `display` to ride
+in. **An explicit `display` always wins, in both directions**, including the
+deliberate `include_thoughts: true` with `display: omitted`.
+
+#### Migrating from `enabled` and a bare `budget_tokens`
+
+`thinking.enabled` is a **deprecated** alias for `mode` and is still honoured. Every
+path below logs a warning at boot naming the mode it resolved to, so boot logs are the
+inventory of configs still to migrate.
+
+| Old block | Resolves to | Write instead |
+|---|---|---|
+| `enabled: true` | `mode: adaptive` | `mode: adaptive` |
+| `enabled: false` | `mode: off` | `mode: off` — or `mode: disabled` on a model that thinks by default |
+| `budget_tokens: N` alone (non-zero) | `mode: budget`, inferred, with a warning | `mode: budget` + `budget_tokens: N` |
+| `budget_tokens: 0` alone | `mode: off`, with a warning | `mode: off` |
+| `mode:` and `enabled:` together | the `mode`; `enabled` is ignored and warned | drop `enabled` |
+
+`budget_tokens: 0` is the one exception to the budget inference, and it is preserved on
+purpose: `0` has always meant "disable thinking" on this provider. Inferring `budget`
+there would put `{"type":"enabled","budget_tokens":0}` on the wire, which every model
+rejects — turning a documented way to switch thinking off into an unconditional 400.
+Under an *explicit* `mode: budget` the `0` is passed through unchanged and the API owns
+the rejection, because an explicit mode is the operator naming the wire shape.
+
+`-1` has no special meaning here. It is Gemini's dynamic-thinking literal; on this
+provider `adaptive` is what hands sizing back to the model, and a `-1` copied out of a
+Gemini block is just an invalid budget.
+
+#### Thinking on the bus, and round-tripping
+
+`thinking` blocks that carry text are emitted as `thinking.step` events (`Source:
+nexus.llm.anthropic`, `Phase: reasoning`) when `include_thoughts` is on — on the
+streaming path one per `thinking_delta`, on the sync path one per block — and every one
+of them lands in the per-session journal. `redacted_thinking` blocks are passed through
+opaquely and never emitted.
+
+Those blocks must also be **echoed back unchanged**, signatures intact, on the next
+assistant turn — the API rejects the follow-up request with a 400 otherwise. That
+forwarding is handled for you: the provider stashes them on
+`LLMResponse.Metadata["thinking_blocks"]`, which `pkg/roundtrip` carries onto the
+assistant message a later request replays. Nothing in the thinking config turns it on
+or off.
+
+#### Temperature
+
+When thinking is actually on (`adaptive` or `budget`), the provider **strips
+`temperature`** from the request body, warning when it drops a user-set value that is
+not `1.0` — Anthropic requires `temperature: 1` with thinking, and omitting the field
+is the cleanest way to satisfy that.
+
+Be aware the newer families go further than the provider does: `temperature`, `top_p`
+and `top_k` are rejected outright on Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and
+Sonnet 5 **regardless of thinking**, including under `mode: disabled` and `mode: off`,
+where the provider does not strip them. On those models, do not set sampling
+parameters at all.
+
+### Effort
+
+`output_config.effort` is Anthropic's named reasoning-depth control, and the
+replacement for `thinking.budget_tokens` on the current families. Anthropic's own
+vocabulary is five values, and the key goes on the wire **nested inside
+`output_config`** — never as a top-level request field:
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: xhigh          # low | medium | high | xhigh | max
+```
+
+```json
+{"model": "...", "output_config": {"effort": "xhigh"}}
+```
+
+The YAML block is spelled to mirror that wire object, which also carries `format`
+(structured outputs) and, in beta, `task_budget`. Nexus **merges** into the object
+rather than assigning over it, so effort and a future `format` emission coexist.
+
+**`effort` is independent of `thinking.mode`.** It is emitted whatever the thinking
+configuration is, `mode: off` included: depth governs how hard the model works on the
+answer, `mode` governs whether thinking blocks come back. Setting one never implies the
+other.
+
+Unset is not the same as `high`. Unset sends no `effort` key and no `output_config`
+object at all, and the API then applies its own default, which is currently `high`. The
+distinction matters only in that an absent key stays correct if Anthropic changes that
+default.
+
+**A sixth word is accepted: `minimal`.** It is Gemini's floor, not an Anthropic level,
+and it never reaches the wire — the provider **clamps it to `low`** and warns once at
+`Init` naming the configured and the effective value. The Gemini provider does the
+mirror image, clamping Anthropic's `xhigh` and `max` down to its own `high`:
+
+| Value | This provider sends | `nexus.llm.gemini` sends |
+|---|---|---|
+| `minimal` | `low` — **clamped** | `minimal` |
+| `low` / `medium` / `high` | as written | as written |
+| `xhigh` / `max` | as written | `high` — **clamped** |
+
+So all six words configure either provider, and a
+[`core.models`](../../configuration/reference.md#reasoning-depth-effort) role shared
+between them — a `fanout` role dispatching to both at once, say — stays configurable
+whichever provider's word the operator reaches for. Neither leg silently ignores the
+setting, and neither rejects the other's vocabulary. `low` is already this provider's
+floor, so clamping `minimal` onto it loses nothing there is a word for.
+
+Clamping is about cross-*provider* vocabulary, never cross-*model* capability. No clamp
+— and no code path in this provider — inspects the model id; the table below is advice
+for the operator, not something the provider enforces.
+
+As with `thinking.mode`, the provider never inspects the model id, and not every model
+accepts every level:
+
+| Model family | Accepted levels |
+|---|---|
+| Fable 5 / 5.1, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5 | `low`, `medium`, `high`, `xhigh`, `max` |
+| Opus 4.6 / Sonnet 4.6 | `low`, `medium`, `high`, `max` — **no `xhigh`** |
+| Opus 4.5 | `low`, `medium`, `high` |
+| Sonnet 4.5, Haiku 4.5 | none — `effort` is rejected outright |
+
+`xhigh` arrived with Opus 4.7, so it is the level most likely to 400 on an older model.
+A level the target model does not accept is an Anthropic HTTP 400 the operator owns. A
+value outside the accepted six is a different matter and *is* caught locally: it fails
+at `Init`, naming the accepted set.
+
+#### Per-role effort
+
+A [`core.models`](../../configuration/reference.md#coremodels) role may carry its own
+`effort:`, in the same vocabulary, and it reaches this provider per request:
+
+```yaml
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+      effort: max            # this role thinks hard
+
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: low            # every other role's default
+```
+
+**The role wins** over the plugin-level `output_config.effort`. A request on `deep`
+sends `{"effort": "max"}`; a request on any role without its own `effort` sends
+`{"effort": "low"}`; with neither set, nothing is emitted.
+
+That precedence is the **inverse of Gemini's**, where the plugin-level `thinking.level`
+beats a role's `effort`. The inversion is deliberate: on Gemini `level` is the native
+`thinkingLevel` vocabulary and `effort` the translated cross-provider one, so the native
+key wins; here `effort` is already this provider's own word in both places, so nothing is
+lost in translation and the more specific setting — the role — wins instead.
+
+An `effort` **already on the request** beats both. The fallback and fanout coordinators
+stamp the chain entry they are actually serving onto the outgoing request, so a fallback
+entry's or a non-first fanout leg's own `effort` is what this provider answers with,
+rather than the role's first entry's. Beyond that, the role's effort is found on every
+path that resolves a role — the named role, the `default` role, and the late recovery
+after a router rewrote `model` without touching the rest.
+
+A role's `effort` cannot fail at `Init`, because it only exists per request: an
+unusable value **fails that request** with a `core.error` naming the role and the
+accepted set. A clamp warns at request time instead, once per (role, value) — warning
+every turn would flood a busy role's log.
+
+The full cross-provider account, including a worked `fanout` role and the fact that
+`nexus.llm.openai` ignores `effort` entirely, is in the configuration reference under
+[Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
+
 ### Cost Tracking
 
 The provider computes `CostUSD` on every `llm.response` using per-model pricing rates. Embedded defaults cover common Claude models. Override via config for enterprise pricing tiers or new models:
 
 ```yaml
-nexus.llm.anthropic:
-  pricing:
-    claude-sonnet-4-6-20250514:
-      input_per_million: 3.0
-      output_per_million: 15.0
+plugins:
+  nexus.llm.anthropic:
+    pricing:
+      claude-sonnet-4-6-20250514:
+        input_per_million: 3.0
+        output_per_million: 15.0
 ```
 
 Config overrides are merged with embedded defaults — only override the models you need to change. Cost is accumulated into `SessionMeta.CostUSD` by the engine.
@@ -99,14 +400,30 @@ When `debug: true`, raw request and response JSON bodies are written to the sess
 ## Example Configuration
 
 ```yaml
-nexus.llm.anthropic:
-  api_key_env: ANTHROPIC_API_KEY
-  debug: false
+plugins:
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    debug: false
 ```
 
 To use a different environment variable for the API key:
 
 ```yaml
-nexus.llm.anthropic:
-  api_key_env: MY_CLAUDE_KEY
+plugins:
+  nexus.llm.anthropic:
+    api_key_env: MY_CLAUDE_KEY
+```
+
+A current-family model with thinking on, reasoning text surfaced, and reasoning
+depth raised:
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    thinking:
+      mode: adaptive
+      include_thoughts: true
+    output_config:
+      effort: xhigh
 ```

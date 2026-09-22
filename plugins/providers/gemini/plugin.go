@@ -116,7 +116,18 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.pricing = parsePricingConfig(ctx.Config)
 	p.retry = parseRetryConfig(ctx.Config)
-	p.thinking = parseThinkingConfig(ctx.Config)
+	thinking, err := parseThinkingConfig(ctx.Config, p.log())
+	if err != nil {
+		return err
+	}
+	p.thinking = thinking
+
+	// Role efforts are a configuration fact, so they are validated — and the
+	// clamp of Anthropic's xhigh/max onto Gemini's high warned — once here,
+	// never per request.
+	if err := validateRoleEfforts(p.models, p.thinking, p.log()); err != nil {
+		return err
+	}
 
 	if v, ok := ctx.Config["code_execution"].(bool); ok {
 		p.codeExecution = v
@@ -132,8 +143,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"max_delay", p.retry.MaxDelay,
 		)
 	}
-	if p.thinking.Enabled {
+	if p.thinking.Mode != thinkingModeOff {
 		p.logger.Debug("thinking enabled",
+			"mode", string(p.thinking.Mode),
+			"level", p.thinking.Level,
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
@@ -223,6 +236,112 @@ func (p *Plugin) handleCancel(_ engine.Event[any]) {
 	}
 }
 
+// resolvedTarget is what one llm.request resolves to before the body is built:
+// the concrete model, the max_tokens and the reasoning-depth hint the call will
+// carry.
+type resolvedTarget struct {
+	model     string
+	maxTokens int
+
+	// effort is the core.models reasoning-depth hint. Core does no validation
+	// of it by design — the vocabularies differ per provider — so this
+	// provider owns its own, in thinking.go.
+	effort string
+
+	// skip is set when the resolved role names some other provider, in which
+	// case this plugin must not answer the request at all.
+	skip bool
+}
+
+// resolveTarget turns a request's Model/Role into the concrete model,
+// max_tokens and effort the API call will carry. It mirrors the Anthropic
+// provider's method of the same name, including its effort precedence.
+func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
+	t := resolvedTarget{
+		model:     req.Model,
+		maxTokens: req.MaxTokens,
+
+		// An effort already on the request wins over anything the registry
+		// says. The fallback and fanout coordinators copy the chain entry they
+		// are actually serving onto the outgoing request, and only that field
+		// is correct for a fallback entry or a non-first fanout entry — a
+		// Resolve() here always reads chain[0]. The branches below therefore
+		// only fill in a value the request arrived without, which is the
+		// ordinary single-entry role: nothing stamps req.Effort for one, so
+		// without them a role's `effort:` would never reach the wire.
+		effort: req.Effort,
+	}
+
+	// Resolve model role if no explicit model is set.
+	if t.model == "" && p.models != nil {
+		if cfg, ok := p.models.Resolve(req.Role); ok {
+			// If the resolved config targets a different provider, skip this request.
+			if cfg.Provider != "" && cfg.Provider != pluginID {
+				t.skip = true
+				return t
+			}
+			if cfg.Model != "" {
+				t.model = cfg.Model
+			}
+			if t.maxTokens == 0 && cfg.MaxTokens > 0 {
+				t.maxTokens = cfg.MaxTokens
+			}
+			if t.effort == "" {
+				t.effort = cfg.Effort
+			}
+		}
+	}
+
+	// Fall back to default model role.
+	if t.model == "" && p.models != nil {
+		def := p.models.Default()
+		if def.Provider == "" || def.Provider == pluginID {
+			t.model = def.Model
+			if t.maxTokens == 0 {
+				t.maxTokens = def.MaxTokens
+			}
+			if t.effort == "" && def.Effort != "" {
+				t.effort = def.Effort
+			}
+		}
+	}
+
+	// max_tokens may still be 0 — common when a router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped.
+	//
+	// Effort needs the same recovery for the same reason: a rewritten
+	// req.Model skips the branches above, and an effort dropped there would be
+	// dropped silently. It has no equivalent of defaultMaxTokens — an unset
+	// effort is a valid state that emits no thinkingLevel at all, leaving the
+	// model's own default level to stand.
+	if t.maxTokens == 0 && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			t.maxTokens = cfg.MaxTokens
+		}
+	}
+	if t.effort == "" && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.Effort != "" {
+			t.effort = cfg.Effort
+		}
+	}
+	if t.maxTokens == 0 && p.models != nil {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			t.maxTokens = def.MaxTokens
+		}
+	}
+	if t.effort == "" && p.models != nil {
+		if def := p.models.Default(); def.Effort != "" {
+			t.effort = def.Effort
+		}
+	}
+	if t.maxTokens == 0 {
+		t.maxTokens = defaultMaxTokens
+	}
+
+	return t
+}
+
 func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if target, ok := req.Metadata["_target_provider"].(string); ok && target != pluginID {
 		return
@@ -251,58 +370,22 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	p.liveCalls.Add(1)
 
-	model := req.Model
-	maxTokens := req.MaxTokens
-
-	if model == "" && p.models != nil {
-		if cfg, ok := p.models.Resolve(req.Role); ok {
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				return
-			}
-			if cfg.Model != "" {
-				model = cfg.Model
-			}
-			if maxTokens == 0 && cfg.MaxTokens > 0 {
-				maxTokens = cfg.MaxTokens
-			}
-		}
+	target := p.resolveTarget(req)
+	if target.skip {
+		return
 	}
-
-	if model == "" && p.models != nil {
-		def := p.models.Default()
-		if def.Provider == "" || def.Provider == pluginID {
-			model = def.Model
-			if maxTokens == 0 {
-				maxTokens = def.MaxTokens
-			}
-		}
-	}
+	model := target.model
+	maxTokens := target.maxTokens
+	effort := target.effort
 
 	if model == "" {
 		p.emitError(fmt.Errorf("gemini: no model resolved for role %q", req.Role))
 		return
 	}
 
-	// max_tokens may still be 0 — common when a router (idea 09) rewrote
-	// req.Model to a concrete id without touching MaxTokens, so the
-	// model-resolution branches above were skipped.
-	if maxTokens == 0 && req.Role != "" {
-		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
-			maxTokens = cfg.MaxTokens
-		}
-	}
-	if maxTokens == 0 {
-		if def := p.models.Default(); def.MaxTokens > 0 {
-			maxTokens = def.MaxTokens
-		}
-	}
-	if maxTokens == 0 {
-		maxTokens = defaultMaxTokens
-	}
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", effort)
 
-	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
-
-	body, err := p.buildRequestBody(model, maxTokens, req)
+	body, err := p.buildRequestBody(model, maxTokens, effort, req)
 	if err != nil {
 		p.emitError(fmt.Errorf("gemini: build request: %w", err))
 		return
@@ -412,7 +495,12 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 }
 
 // buildRequestBody constructs a Gemini generateContent request body.
-func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) (map[string]any, error) {
+//
+// effort is the reasoning-depth hint the caller resolved for this request —
+// events.LLMRequest.Effort when something stamped it, otherwise the
+// core.models role's `effort:`. It is not read off req, because req.Effort
+// alone is only ever set by the fallback and fanout coordinators.
+func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, req events.LLMRequest) (map[string]any, error) {
 	body := map[string]any{}
 
 	// generationConfig.
@@ -437,18 +525,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		}
 	}
 
-	// Thinking config.
-	if p.thinking.Enabled {
-		tc := map[string]any{}
-		if p.thinking.IncludeThoughts {
-			tc["includeThoughts"] = true
-		}
-		if p.thinking.BudgetTokens > 0 {
-			tc["thinkingBudget"] = p.thinking.BudgetTokens
-		}
-		if len(tc) > 0 {
-			gen["thinkingConfig"] = tc
-		}
+	// Thinking config: exactly one of thinkingLevel / thinkingBudget, or
+	// nothing at all under mode: off. effort is the role's reasoning-depth
+	// hint, read only under mode: level and only behind thinking.level.
+	if err := applyThinking(gen, p.thinking, effort); err != nil {
+		return nil, err
 	}
 
 	if len(gen) > 0 {

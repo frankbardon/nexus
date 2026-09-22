@@ -42,7 +42,7 @@ plugins:
   nexus.llm.gemini:
     api_key_env: GEMINI_API_KEY
     thinking:
-      enabled: true
+      mode: budget          # gemini-2.5-flash takes thinkingBudget, not thinkingLevel
       budget_tokens: 4096
       include_thoughts: true
 

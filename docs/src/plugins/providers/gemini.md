@@ -24,7 +24,7 @@ The Gemini provider calls Google's Gemini API via direct HTTP — no SDK depende
 | `debug` | bool | `false` | Log raw request/response bodies into the session plugin directory |
 | `pricing` | map | embedded defaults | Per-model pricing overrides; see **Cost Tracking** below |
 | `retry` | map | disabled | Retry/backoff config; see **Retry Logic** |
-| `thinking` | map | disabled | Reasoning config for Gemini 2.5; see **Thinking** |
+| `thinking` | map | `off` | Reasoning config: `mode: level` (Gemini 3.x) or `mode: budget` (Gemini 2.5); see **Thinking** |
 | `code_execution` | bool | `false` | Enable Gemini's built-in code execution tool |
 | `cache` | map | disabled | Prompt cache config; see **Prompt Caching** |
 
@@ -160,19 +160,251 @@ Both repairs are applied recursively and only when needed; a schema that already
 
 When `ResponseFormat.Type` is `json_object` or `json_schema`, the provider sets `generationConfig.responseMimeType: application/json` and (for `json_schema`) `generationConfig.responseSchema`. JSON Schema fields Gemini doesn't accept (`$schema`, `$id`, `additionalProperties`, `$ref`, `definitions`, `$defs`) are stripped recursively. `LLMResponse.Metadata["_structured_output"]` is set to `true`.
 
-### Thinking (Gemini 2.5)
+### Thinking
 
-When `thinking.enabled: true`, the provider sends `generationConfig.thinkingConfig`:
+Gemini expresses reasoning through `generationConfig.thinkingConfig`, and *which*
+field inside that object is correct depends entirely on the model family. Gemini 3.x
+takes `thinkingLevel` and does not support `thinkingBudget`; Gemini 2.5 is the
+inverse. `thinking.mode` is the axis that picks one:
+
+| `mode`   | What goes into `generationConfig.thinkingConfig` | Family |
+|----------|--------------------------------------------------|--------|
+| `level`  | `thinkingLevel: "<level>"`                        | Gemini 3.x |
+| `budget` | `thinkingBudget: N`                               | Gemini 2.5 |
+| `off`    | *(no `thinkingConfig` object at all)*             | — |
+
+`include_thoughts: true` adds `includeThoughts: true` next to whichever of the two
+was chosen. Under `mode: off` there is no `thinkingConfig` for it to attach to, so
+it is ignored.
+
+**The provider never inspects the model id.** There is no capability table and no
+inference from the model string — the operator declares which family they mean, and
+a `mode` the target model does not accept is a Gemini HTTP 400 by design.
+
+#### Which mode for which model
+
+| Model family | `mode` | Google's default when the field is absent |
+|---|---|---|
+| Gemini 3.8 / 3.7 Flash | `level` | `medium` |
+| Gemini 3.6 / 3.5 Flash | `level` | `medium` |
+| Gemini 3.1 Pro | `level` | `high` — thinking cannot be turned off |
+| Gemini 3.5 / 3.1 Flash-Lite (including the Image variants) | `level` | `minimal` |
+| Gemini 3 Flash | `level` | `high` |
+| Gemini 2.5 (Pro, Flash, Flash Preview, Flash-Lite) | `budget` | dynamic (`-1`) on 2.5 Pro and 2.5 Flash |
+
+`level` accepts exactly four values, lowercase: `minimal`, `low`, `medium`, `high`.
+Anything else fails at `Init` with the accepted set named.
+
+`level` is **optional** under `mode: level`. Omitted, the provider falls back to the
+role's [`effort`](#reasoning-depth-from-a-role-effort); with neither set it sends a
+`thinkingConfig` carrying no `thinkingLevel` key at all, and the model's own default —
+the right-hand column above — applies. Omitting `level` is therefore a valid way to say
+"whatever this model does by default", not a misconfiguration.
+
+Two asymmetries are worth keeping in mind:
+
+- **2.5 will *accept* a `thinkingLevel`** for backward compatibility, but it degrades
+  2.5 Pro. Accepted is not the same as correct: on 2.5, use `mode: budget`.
+- **3.x will not accept a `thinkingBudget` at all.** `thinkingBudget` is superseded
+  rather than formally deprecated — it remains the only correct parameter on 2.5,
+  which is why both modes ship.
 
 ```yaml
-nexus.llm.gemini:
-  thinking:
-    enabled: true
-    budget_tokens: 8192      # 0 = disabled, -1 = dynamic budget
-    include_thoughts: true   # surface thought parts to the bus
+# Gemini 3.x
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+      level: medium
+      include_thoughts: true
 ```
 
-Response parts with `thought: true` are emitted as `thinking.step` events (`Source: nexus.llm.gemini`, `Phase: reasoning`) and are excluded from `LLMResponse.Content`. Every `thinking.step` event lands in the per-session journal automatically — read it via `journal.Writer.SubscribeProjection` (live) or `journal.ProjectFile` (post-mortem). `usageMetadata.thoughtsTokenCount` is mirrored into `events.Usage.ReasoningTokens`.
+```yaml
+# Gemini 2.5
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: budget
+      budget_tokens: 8192
+      include_thoughts: true
+```
+
+#### Reasoning depth from a role: `effort`
+
+A [`core.models`](../../configuration/reference.md#coremodels) role may carry its own
+`effort:`, and this provider reads it as a `thinkingLevel` — but only under
+`mode: level`, and only when the plugin-level `thinking.level` is unset:
+
+```yaml
+core:
+  models:
+    worker:
+      provider: nexus.llm.gemini
+      model: gemini-3-flash
+      effort: low              # → "thinkingConfig": {"thinkingLevel": "low"}
+
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+```
+
+The same key works on a `fanout` role spanning both providers, which is where the
+clamp earns its keep:
+
+```yaml
+core:
+  models:
+    panel:
+      fanout: true
+      providers:
+        - provider: nexus.llm.gemini
+          model: gemini-3.1-pro
+          effort: max            # Anthropic's word — clamped on this leg
+        - provider: nexus.llm.anthropic
+          model: claude-opus-4-7
+          effort: max            # native there
+
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+      # no `level:` here — a plugin-level level would beat the role's effort
+```
+
+**`thinking.level` wins over a role's `effort`**, which is deliberately the inverse of
+the Anthropic provider, where a role's `effort` beats the plugin-level
+`output_config.effort`. The reason is which key speaks this provider's own language:
+`level` is the native `thinkingLevel` vocabulary and `effort` the translated,
+cross-provider one, so here the native setting wins. On Anthropic both keys are already
+spelled in Anthropic's vocabulary, so nothing is lost in translation and the more
+specific setting — the role — wins there instead. It is an inversion to know about, not
+a bug to report.
+
+Anthropic's vocabulary reaches higher than Gemini's, so two of its words clamp:
+
+| Role `effort:` | `thinkingLevel` sent |
+|---|---|
+| `minimal`, `low`, `medium`, `high` | as written |
+| `xhigh`, `max` | `high` — **clamped**: "as deep as this model goes" |
+
+Clamping rather than rejecting is what keeps a role shared with the Anthropic provider
+configurable whichever provider's word the operator reaches for; ignoring the value
+would instead make `effort:` a silent no-op on this leg. The clamp is announced **once
+at `Init`** — the provider walks every `core.models` role it could serve and logs the
+role, the configured value and the effective one. A word in neither provider's
+vocabulary fails `Init` for any such role, and fails the request if it arrives some
+other way.
+
+Under `mode: budget` and `mode: off`, a role's `effort` is **ignored entirely and
+without warning**: there is no `thinkingLevel` on those paths for it to become, and
+2.5's depth control is `budget_tokens`.
+
+**How the value gets here.** Like the Anthropic provider, this one reads the
+`core.models` registry itself, on every path that resolves a role: the role the request
+names, the `default` role, and the late recovery after a router rewrote `model` without
+touching the rest. A plain single-entry role's `effort:` therefore reaches the wire on
+its own, with no coordinator involved.
+
+An `effort` already carried **on the request** still wins over the registry, and that
+ordering matters. The `fallback` coordinator stamps one when it retries onto a **later**
+chain entry, and the `fanout` coordinator stamps one on **every** leg; a registry lookup
+here always returns the role's **first** entry, which is the wrong entry in both cases.
+So the registry is consulted only when the request arrived carrying no `effort` at all,
+which is exactly the ordinary single-entry role.
+
+The cross-provider account — the union vocabulary, both clamp directions, and the fact
+that `nexus.llm.openai` ignores `effort` entirely — is in the configuration reference
+under [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
+
+#### `-1` and `0` on the budget path
+
+Both are meaningful on 2.5 and both are sent. The budget goes on the wire because
+the key is *present*, not because it is positive — so a configured `0` is not
+silently dropped the way an unset key is.
+
+- **`-1` — dynamic thinking.** The model sizes its own thinking. It is the default
+  on 2.5 Pro, 2.5 Flash and 2.5 Flash Preview, and is supported but not the default
+  on 2.5 Flash-Lite.
+- **`0` — thinking disabled.** Works on 2.5 Flash, 2.5 Flash Preview and 2.5
+  Flash-Lite. **2.5 Pro cannot disable thinking** and rejects it.
+
+`budget_tokens: 0` and `mode: off` are different requests, and both are reachable on
+purpose: `0` sends an explicit "do not think" that Gemini validates against the
+model, while `off` sends no `thinkingConfig` at all and leaves the model's own
+default standing.
+
+**`-1` does not travel between providers.** On the Anthropic provider `-1` has no
+special meaning — there is no dynamic-budget literal there, and `adaptive` is the
+mode that hands sizing back to the model. The same integer copied from a Gemini
+block into an Anthropic one means something else entirely.
+
+#### Exactly one parameter, by construction
+
+Gemini rejects a request that carries both `thinkingLevel` and `thinkingBudget`.
+Nexus does not build such a body and then check it: `mode` selects the single branch
+that writes one key, so **no configuration can put both on the wire**. What is left
+is caught at boot rather than at first inference —
+
+- `level` and `budget_tokens` both set in the block → `Init` error naming both keys.
+- `mode: budget` with no `budget_tokens` → `Init` error. A budget is a number only the
+  operator can pick, so there is no default to fall back on.
+- `mode: level` with no `level` → **not** an error. Every Gemini 3.x model carries its
+  own default thinking level, so the provider falls back to the role's `effort` and,
+  failing that, omits `thinkingLevel` and lets the model default stand.
+
+A misconfigured thinking block fails the process at boot, not the user's first turn.
+
+#### Migrating from `enabled` / a bare `budget_tokens`
+
+`thinking.enabled` is a deprecated alias for `mode` and is still honoured. Every path
+below logs a warning at boot naming the mode it resolved to, so boot logs are the
+inventory of configs still to migrate.
+
+| Old block | Resolves to | Write instead |
+|---|---|---|
+| `enabled: true` and nothing else | `mode: level` with no level — `thinkingLevel` is omitted and the model's own default applies | `mode: level` + an explicit `level` (3.x), or `mode: budget` + `budget_tokens` (2.5) |
+| `enabled: true` + `budget_tokens: N` | `mode: budget` — **the budget wins over the `enabled` alias** | `mode: budget` + `budget_tokens: N`, drop `enabled` |
+| `budget_tokens: N` alone | `mode: budget`, inferred | `mode: budget` + `budget_tokens: N` |
+| `enabled: false` | `mode: off` | `mode: off` |
+| `mode:` and `enabled:` together | the `mode`; `enabled` is ignored | drop `enabled` |
+
+The inference in row two matters because it is the shape most existing 2.5 configs
+are already in — `enabled: true` beside a `budget_tokens` keeps behaving as a 2.5
+budget config rather than flipping to a level it has no value for. The inference is
+also the one place the resolved mode is *not* what the `enabled` alias alone would
+give, which is why it warns.
+
+#### Read the right Google page
+
+Nexus speaks the **generateContent** API (`:generateContent` and
+`:streamGenerateContent`), not the newer Interactions API. Google documents thinking
+for both under near-identical titles, and the field names differ:
+
+| Surface | Doc page | Fields |
+|---|---|---|
+| generateContent — **what this provider uses** | `ai.google.dev/gemini-api/docs/generate-content/thinking` | `thinkingConfig.thinkingLevel`, `thinkingConfig.thinkingBudget`, `thinkingConfig.includeThoughts` |
+| Interactions API — *not* this provider | `ai.google.dev/gemini-api/docs/thinking` | a different shape, e.g. `thinking_summaries: "auto"` in place of `includeThoughts` |
+
+The two URLs differ only by `/generate-content/`. If a field you are reading about
+has no counterpart among this plugin's keys, check which page you landed on before
+concluding the key is missing.
+
+#### Thought parts on the bus
+
+Response parts with `thought: true` are emitted as `thinking.step` events
+(`Source: nexus.llm.gemini`, `Phase: reasoning`) and are excluded from
+`LLMResponse.Content`. Every `thinking.step` event lands in the per-session journal
+automatically — read it via `journal.Writer.SubscribeProjection` (live) or
+`journal.ProjectFile` (post-mortem). `usageMetadata.thoughtsTokenCount` is mirrored
+into `events.Usage.ReasoningTokens`.
+
+Gemini's **thought signatures** are separate from all of this and are handled for
+you: they ride back on replayed assistant messages via `pkg/roundtrip`
+(`gemini_thought_signatures` on `LLMResponse.Metadata`). They are mandatory once
+function calls are in play — a replayed `functionCall` that lost its signature is a
+`400 INVALID_ARGUMENT` on the next turn — and nothing in the thinking config turns
+that forwarding on or off.
 
 ### Multimodal
 

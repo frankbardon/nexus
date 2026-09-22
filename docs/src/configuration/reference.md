@@ -638,7 +638,7 @@ special-casing the second attempt.
 
 Maps role names → model configurations. Roles can be:
 
-- **single model** — map with `provider`, `model`, `max_tokens`,
+- **single model** — map with `provider`, `model`, `max_tokens`, `effort`,
 - **fallback chain** — list of single-model maps (tried in order on
   non-retryable error or exhausted retries; coordinated by
   `nexus.provider.fallback`),
@@ -651,6 +651,7 @@ Maps role names → model configurations. Roles can be:
 | `<role>.provider`      | string | *(required)* | Plugin ID of the LLM provider (e.g. `nexus.llm.anthropic`). |
 | `<role>.model`         | string | *(required)* | Model identifier as understood by the provider. |
 | `<role>.max_tokens`    | int    | *(provider default)* | Maximum response tokens. |
+| `<role>.effort`        | string | *(unset)* | Reasoning-depth hint passed verbatim to the provider. The engine performs **no** validation — each provider owns its own vocabulary. Both consuming providers accept the **union** of the two, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and clamp what they cannot express to their own nearest level: Anthropic (native `low`…`max`) clamps `minimal` → `low`; Gemini (native `minimal`…`high`) clamps `xhigh`/`max` → `high`. So **any** of the six works on a role shared between them, including a `fanout` role dispatching to both at once, and a clamp is warned once rather than dropped in silence. A word outside the union is a typo: it is forwarded, and each provider rejects it. **Precedence**, highest first: an `effort` already on the request wins outright — the [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout) coordinators stamp the chain entry they are actually serving onto the outgoing request, so a fallback entry's or a non-first fanout leg's own `effort` reaches the provider serving *that* entry rather than the role's first one. Below that sits the role's own `effort`, and below that the provider-level key — but which of those last two wins is **inverted between the two providers**. Unset means "not set": the provider leaves its own reasoning configuration untouched. **Not consumed by `nexus.llm.openai` at all** — that provider configures reasoning depth on the plugin and has no per-role form. See [Reasoning depth: `effort`](#reasoning-depth-effort) below. |
 | `<role>.fanout`        | bool   | `false` | If `true`, treat as fanout role; `providers:` list is dispatched in parallel. |
 | `<role>.providers`     | list   | *(required if `fanout: true`)* | List of model configs for fanout dispatch. |
 
@@ -664,6 +665,7 @@ core:
       provider: nexus.llm.anthropic
       model: claude-opus-4-7
       max_tokens: 16384
+      effort: xhigh            # provider-interpreted; not validated by core
     balanced:
       - provider: nexus.llm.anthropic
         model: claude-sonnet-4-6
@@ -682,6 +684,133 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+#### Reasoning depth: `effort`
+
+`effort` is the one key in this section core does not interpret. It is stored as a
+plain string on the chain entry and handed to whichever provider serves that entry;
+the vocabulary, the clamping and the failure mode all belong to the provider. This
+is the canonical account of what the consumers do with it — the
+[Anthropic](../plugins/providers/anthropic.md#effort) and
+[Gemini](../plugins/providers/gemini.md#thinking) pages add narrative.
+
+**The two vocabularies are different sets, and neither contains the other.**
+
+| Provider | Native vocabulary | Where it lands on the wire |
+|---|---|---|
+| `nexus.llm.anthropic` | `low`, `medium`, `high`, `xhigh`, `max` | `output_config.effort` |
+| `nexus.llm.gemini` | `minimal`, `low`, `medium`, `high` | `generationConfig.thinkingConfig.thinkingLevel` — and **only** under `thinking.mode: level` with no `thinking.level` set |
+| `nexus.llm.openai` | *(none — `effort` is not consumed)* | — |
+
+**Both consumers accept the union of the two and clamp inward**, so one role's
+value is meaningful on either:
+
+| Role `effort:`            | Anthropic leg       | Gemini leg           |
+|---------------------------|---------------------|----------------------|
+| `minimal`                 | **clamps** to `low` | native               |
+| `low` / `medium` / `high` | native              | native               |
+| `xhigh` / `max`           | native              | **clamps** to `high` |
+
+Rejecting the other provider's word would make a shared or `fanout` role
+unconfigurable; ignoring it would make `effort:` a silent no-op on one leg.
+Clamping is the third option, and it is announced rather than hidden:
+
+| What clamped | When it is warned |
+|---|---|
+| A role `effort` on Gemini | once at **`Init`** — the provider walks every role it could serve and logs the role, the configured value and the effective one |
+| A role `effort` on Anthropic | at **request time**, once per (role, value) — a role's effort only exists per request, and repeating it every turn would flood a busy role's log |
+| The plugin-level `output_config.effort` on Anthropic | once at **`Init`** — a plugin-level key is a boot-time fact |
+
+A word in **neither** vocabulary is a typo, not a depth. Core forwards it
+unchanged, and the provider catches it: Anthropic fails **that request** with a
+`core.error` naming the role and the accepted set, Gemini fails **`Init`** for any
+role it could serve. Clamping widens what is accepted; it does not make either
+provider permissive.
+
+Note that this is cross-*provider* vocabulary translation, never cross-*model*
+capability. No clamp — and no code path in either provider — inspects the model
+id. `xhigh` is a valid Anthropic word that Opus 4.6, Sonnet 4.6 and older reject
+with an HTTP 400, and that stays the operator's problem to size per role.
+
+**Precedence**, highest first:
+
+1. An `effort` **already on the request**. The `fallback` and `fanout`
+   coordinators stamp the chain entry they are actually serving onto the outgoing
+   request, so a fallback entry's or a non-first fanout leg's own `effort` is what
+   reaches the provider answering for it — not the role's first entry's.
+2. The **role's own `effort:`**, picked up on every path that resolves a role: the
+   role the request names, the `default` role, and the late recovery after a
+   router rewrote `model` without touching the rest.
+3. The **provider-level key** — `output_config.effort` on Anthropic,
+   `thinking.level` on Gemini.
+4. Nothing: no depth field is emitted at all and the model's or API's own default
+   stands.
+
+**Steps 2 and 3 swap between the providers, deliberately.** On Anthropic a role's
+`effort` beats `output_config.effort`. On Gemini the plugin-level `thinking.level`
+beats a role's `effort`. The reason is which key speaks the provider's own
+language: on Gemini, `level` is the native `thinkingLevel` vocabulary and role
+`effort` is the translated cross-provider one, so the native setting wins; on
+Anthropic both keys are already spelled in Anthropic's own vocabulary, so nothing
+is lost in translation and the more specific setting — the role — wins instead.
+It is an inversion to know about, not a bug to report.
+
+**Step 2 reaches both providers by the same route.** Each reads the `core.models`
+registry itself, on every path that resolves a role, so a plain single-entry role's
+`effort:` is delivered without help from any coordinator. Step 1 still wins when it
+applies, and that ordering is what makes a chain correct: a registry lookup always
+returns the role's **first** entry, which is the wrong entry for a fallback retry or
+a non-first fanout leg, so the value the coordinator stamped for the entry actually
+being served must not be overwritten by it. The registry is consulted only when the
+request arrived carrying no `effort` at all.
+
+**A `fanout` role across both providers.** `effort` belongs on each entry of the
+`providers:` list; a fanout role map has no role-level `effort` of its own.
+
+```yaml
+core:
+  models:
+    panel:
+      fanout: true
+      providers:
+        - provider: nexus.llm.anthropic
+          model: claude-opus-4-7
+          effort: max            # Anthropic's own word
+        - provider: nexus.llm.gemini
+          model: gemini-3.1-pro
+          effort: max            # the same word, clamped on this leg
+        - provider: nexus.llm.openai
+          model: gpt-5.1
+          effort: max            # read by nobody
+
+plugins:
+  nexus.llm.gemini:
+    thinking:
+      mode: level                # effort is only read under mode: level
+      # no `level:` here — a plugin-level level would beat the role's effort
+```
+
+| Leg | What it sends | Warned |
+|---|---|---|
+| `nexus.llm.anthropic` | `"output_config": {"effort": "max"}` | no — `max` is native |
+| `nexus.llm.gemini` | `"thinkingConfig": {"thinkingLevel": "high"}` | yes — clamp logged once at `Init` naming role `panel` |
+| `nexus.llm.openai` | nothing; the key is ignored entirely | no |
+
+Give **every** leg its own `effort`. A leg that omits it does not fall back to
+"unset" on either consuming provider: the coordinator stamps an empty value, the
+provider then consults the registry, and a registry lookup returns the role's
+**first** entry. So a leg with no `effort` of its own inherits whatever
+`providers[0]` carries — including the Gemini leg, which clamps that inherited
+value like any other.
+
+**`nexus.llm.openai` does not consume `effort` at all.** It is not clamped, not
+warned, and never reaches OpenAI — an entry carrying `effort:` behaves exactly like
+one without it. OpenAI's reasoning depth is configured on the **plugin**, in its own
+[`reasoning`](#nexusllmopenai) block, and has no per-role form at all. This is a
+known, accepted gap rather than an oversight: a third role-level vocabulary was not
+invented for it. On a mixed `fanout` role, size the OpenAI leg on the plugin and
+expect that one setting to apply to every OpenAI request in the process.
+
 
 ## Engine
 
@@ -1274,7 +1403,7 @@ All providers share the same retry block schema (see "Retry" subtable below).
 ### `nexus.llm.anthropic`
 
 Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
-`cache.go`, `thinking.go`, `multimodal.go`, `citations.go`,
+`cache.go`, `thinking.go`, `effort.go`, `multimodal.go`, `citations.go`,
 `structured_outputs.go`, `files.go`, `retry.go`.
 
 | Key                                | Type   | Default             | Description |
@@ -1300,9 +1429,13 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `cache.tools`                      | bool   | `true`              | Mark the tools array for caching when enabled. |
 | `cache.message_prefix`             | int    | `0`                 | Number of leading user messages to mark for caching. |
 | `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). |
-| `thinking.enabled`                 | bool   | `false`             | Enable extended thinking (Sonnet 4+, Opus 4+). |
-| `thinking.budget_tokens`           | int    | `8192`              | Thinking token budget; `-1` for dynamic, `0` to disable, `1024+` fixed. |
+| `thinking.mode`                    | string | `off` when the `thinking` block is absent, `adaptive` when it is present | Wire shape for the request's `thinking` field: `adaptive`, `budget`, `disabled` or `off`. See "Thinking modes" below. |
+| `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. Set with no `mode`, a non-zero value infers `mode: budget`; `0` keeps its long-standing meaning of "disable thinking" and infers `mode: off`. Under an explicit `mode: budget` a `0` is passed through and the API rejects it. |
+| `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
+| `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
 | `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
+| `output_config.effort`             | string | *(unset — the API default, `high`)* | Reasoning depth. Anthropic's own levels are `low`, `medium`, `high`, `xhigh` and `max`; Gemini's `minimal` is also **accepted and clamped to `low`**, warned once at `Init`, so the same word configures either provider. Emitted as `output_config: {"effort": "..."}` — **nested, never a top-level request field**, and always the clamped native level. Unset adds no `output_config` key at all. **Independent of `thinking.mode`**: emitted whatever the thinking configuration is, including `mode: off`. A value in neither vocabulary fails at `Init`. This is the **default**, not the last word: a [`core.models`](#coremodels) role's `effort` overrides it per request — see the row below. See "Effort" below. |
+| *(role `effort`)*                  | string | *(unset)*           | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `output_config.effort`. Anthropic's five pass through unchanged and Gemini's `minimal` **clamps to `low`**, warned once per (role, value) at request time, so a role shared with Gemini stays configurable with either provider's word. It **wins over** the plugin-level `output_config.effort` above. That is deliberately the **inverse** of Gemini, where `thinking.level` beats a role's effort: there `level` is the native vocabulary and effort the translated one, whereas here `effort` is already this provider's own vocabulary, so the more specific setting wins. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` without touching the rest — and an effort already on the request (stamped by the fallback or fanout coordinator for the chain entry actually being served) wins over both. A value outside the **union** vocabulary **fails the request**, emitting `core.error` naming the role and the accepted set; unlike the plugin key it cannot fail at `Init`, because a role's value only exists per request. See "Per-role effort" below, and [Reasoning depth: `effort`](#reasoning-depth-effort) for the cross-provider picture. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
 | `citations.enabled`                | bool   | `false`             | Enable citations on document blocks. |
 | `structured_outputs.mode`          | string | `tool`              | `tool` (synthetic tool) or `native` (`response_format`). |
@@ -1333,6 +1466,202 @@ list of regions. A pod that derives its region from its own zone can therefore l
 where the configured model is not served, and that fails at first inference with a
 404 — not at boot, because there is no boot-time availability probe by design. Set
 `vertex.region` explicitly wherever the model choice matters.
+
+#### Thinking modes
+
+`thinking.mode` is the whole axis. Each value maps to exactly one wire shape:
+
+| `mode`     | What goes in the request body |
+|------------|-------------------------------|
+| `adaptive` | `"thinking": {"type": "adaptive"}` |
+| `budget`   | `"thinking": {"type": "enabled", "budget_tokens": N}` |
+| `disabled` | `"thinking": {"type": "disabled"}` |
+| `off`      | no `thinking` field at all |
+
+`off` and `disabled` are genuinely different requests, and both are reachable
+on purpose. Omitting the field is how thinking is turned off on models that do
+not think unless asked (Opus 4.8, Opus 4.7 and older); an explicit
+`{"type":"disabled"}` is the only way off on models that think by default
+(Opus 5, Sonnet 5), where it is also rejected on the highest effort levels.
+
+**The provider never inspects the model id to pick a shape.** A `mode` the
+target model does not accept is an Anthropic HTTP 400, and the operator owns
+that mismatch. As a guide:
+
+- `adaptive` — Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5, and the
+  recommended setting on Opus 4.6 / Sonnet 4.6. `budget_tokens` is a 400 on all
+  of these.
+- `budget` — Sonnet 4.5, Haiku 4.5 and older, where `budget_tokens` is required
+  and must be at least 1024 and below `max_tokens`. Still functional but
+  deprecated on Opus 4.6 / Sonnet 4.6.
+- `disabled` — models that think by default and need an explicit opt out.
+- `off` — the default when no `thinking` block is present.
+
+`budget_tokens` has no default. Setting a non-zero value with no `mode` infers
+`mode: budget` and logs a warning, which preserves the one legacy configuration
+that still works on the wire. `budget_tokens: 0` is the exception: it has always
+meant "disable thinking" on this provider and still does, so with no `mode` it
+infers `mode: off` and warns. Inferring `budget` there would put
+`{"type":"enabled","budget_tokens":0}` on the wire, which every model rejects.
+Under an explicit `mode: budget` the `0` is passed through unchanged and the API
+owns the rejection — an explicit mode is the operator naming the wire shape.
+`-1` has no special meaning on this provider.
+
+#### Thinking display
+
+`thinking.display` controls whether the API returns *readable* reasoning text:
+
+| `display`     | What comes back |
+|---------------|-----------------|
+| `summarized`  | `thinking` blocks carry a readable summary of the model's reasoning. |
+| `omitted`     | `thinking` blocks are still streamed, but with **empty text**. |
+| *(unset)*     | No `display` key is sent; the target model's own default applies. |
+
+Whether the model thinks, and how that is billed, is identical under every
+value — this is a visibility control only, and the raw chain of thought is never
+exposed on any model.
+
+The default is model-dependent and changed silently: it is `omitted` on
+Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5, where it used to be
+`summarized` on Opus 4.6 / Sonnet 4.6. Nexus does **not** inspect the model id to
+compensate. Instead, one key infers the other:
+
+> When `display` is unset and `include_thoughts` resolves true, Nexus sends
+> `display: "summarized"` under `mode: adaptive` and `mode: budget`.
+
+That inference is deliberate. `include_thoughts` reads the thinking text to emit
+`thinking.step` events; under `omitted` that text is empty, so without the
+inference the feature would keep running and emit nothing — a long silent pause
+in the UI with no error anywhere. An explicit `display` always wins, in both
+directions, including `include_thoughts: true` with `display: omitted`.
+
+`display` rides inside the `thinking` object next to `type`, so it is emitted
+under `adaptive`, `budget` and `disabled`, and never under `off`, which sends no
+`thinking` object at all. The inference is limited to the two modes that
+actually think; under `disabled` there is no reasoning to display, so only an
+explicit `display` reaches the wire there.
+
+#### Effort
+
+`output_config.effort` is the named reasoning-depth control that replaced
+`thinking.budget_tokens` on the current model families. It accepts `low`,
+`medium`, `high`, `xhigh` and `max`, and goes on the wire nested inside
+`output_config`:
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: xhigh
+```
+
+```json
+{"model": "...", "output_config": {"effort": "xhigh"}}
+```
+
+The block is spelled to mirror the wire object, which also carries `format`
+(structured outputs) and, in beta, `task_budget`. Nexus **merges** into that
+object rather than assigning over it, so effort and a future `format` emission
+coexist.
+
+**`effort` is independent of `thinking.mode`.** It is emitted whatever the
+thinking configuration is, `mode: off` included — depth governs how hard the
+model works on the answer, `mode` governs whether thinking blocks come back.
+The two are set separately and neither implies the other.
+
+Unset is not `high`: unset sends no `effort` key and no `output_config` object,
+which the API then defaults to `high`. The distinction matters only in that an
+absent key is forward-compatible with a default Anthropic may change.
+
+As with `thinking.mode`, **the provider never inspects the model id**, and not
+every model accepts every level. Opus 4.6 and Sonnet 4.6 accept
+`low`/`medium`/`high`/`max` but **not** `xhigh`; Opus 4.5 accepts
+`low`/`medium`/`high` only; Sonnet 4.5 and Haiku 4.5 reject `effort` outright.
+A level the target model does not accept is an Anthropic HTTP 400 that the
+operator owns.
+
+The **accepted** vocabulary is wider than the five that reach the wire: Gemini's
+`minimal` is accepted too and clamped to `low` — Anthropic's floor, so there is
+no shallower target to lose — with a warning at `Init` naming the configured and
+the effective value. That makes one word usable on both providers; it does
+**not** make the key permissive. A value in neither provider's vocabulary is
+still caught locally and fails at `Init` naming the accepted set.
+
+Note that clamping is about cross-*provider* vocabulary, never cross-*model*
+capability. The two are separate problems: `xhigh` is a perfectly valid
+Anthropic word that some Claude models reject, and no clamp — and no code path
+in the provider — inspects the model id to soften that.
+
+#### Per-role effort
+
+A [`core.models`](#coremodels) role may carry its own `effort:`, and it reaches
+this provider in the same vocabulary — Anthropic's own five unchanged, Gemini's
+`minimal` clamped to `low`:
+
+```yaml
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+      effort: max            # this role thinks hard
+
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: low            # every other role's default
+```
+
+**The role wins.** A request on `deep` sends `{"effort": "max"}`; a request on
+any role without its own `effort` sends `{"effort": "low"}`; with neither set
+nothing is emitted and the API default applies.
+
+That precedence is the **inverse of Gemini's**, where the plugin-level
+`thinking.level` beats a role's `effort`. The inversion is deliberate, not an
+oversight: on Gemini `level` is the native vocabulary and `effort` a translated
+one, so the native setting wins; here `effort` is already this provider's own
+vocabulary, so the more specific setting does.
+
+Resolution follows the same branches as `max_tokens`, so the role's effort is
+found whether the role is named directly, comes from the default role, or has
+to be recovered late because a router rewrote `model` without touching the
+rest. An effort **already on the request** wins over all of them: the fallback
+and fanout coordinators stamp the chain entry they are actually serving onto
+the outgoing request, and only that value is correct for a fallback entry or a
+non-first fanout leg.
+
+Because `core.models` deliberately performs no validation — the vocabularies
+differ per provider — this provider validates per request, and an unusable
+value **fails that request** with a `core.error` naming the role and the
+accepted set rather than being silently dropped.
+
+**A shared role works with any of the six words.** Both consuming providers
+accept the **union** vocabulary — `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max` — and clamp whatever they cannot express to their own nearest level:
+
+| Role `effort:`            | Anthropic leg  | Gemini leg       |
+|---------------------------|----------------|------------------|
+| `minimal`                 | **clamps** to `low` | native      |
+| `low` / `medium` / `high` | native         | native           |
+| `xhigh` / `max`           | native         | **clamps** to `high` |
+
+So a `fanout` role spanning both providers is configurable whichever
+provider's word the operator reaches for, and neither leg silently ignores the
+setting. A clamp is announced rather than hidden: this provider logs it at
+`WARN` with the role, the configured value and the effective one, once per
+(role, value) — a role's effort arrives per request, so repeating it every turn
+would flood a busy role's logs. (The provider-level `output_config.effort` key
+is a boot-time fact and warns at `Init` instead.)
+
+Only a word in **neither** vocabulary fails the request — the clamp widens what
+is accepted, it does not make the provider permissive, so `xhig` or `ludicrous`
+is still a `core.error`. And the clamp is about cross-*provider* vocabulary
+only: `xhigh` and `max` remain valid words here that some Claude models reject
+with an HTTP 400, which stays the operator's problem to size per role.
 
 #### Retry block (shared by all providers)
 
@@ -1399,9 +1728,12 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `location`                   | string | *(GCE zone-derived region, then `us-central1`)*  | Vertex region. Resolved config → region derived from this process's GCE zone → `us-central1`. |
 | `service_account_json`       | string | *(unset — full ADC chain)*                       | Vertex only: path to a credentials JSON file. Forwarded to the credential source, not parsed by the provider. |
 | `service_account_json_env`   | string | *(unset — full ADC chain)*                       | Vertex only: env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through. |
-| `thinking.enabled`           | bool   | `false`                                          | Enable thinking on Gemini 2.5+. |
-| `thinking.budget_tokens`     | int    | `8000`                                           | Thinking token budget. |
-| `thinking.include_thoughts`  | bool   | `true`                                           | Surface thinking via `thinking.step`. |
+| `thinking.mode`              | string | `off` *(no block)* / `level` *(block present)*   | Which thinking parameter goes on the wire: `level` → `thinkingConfig.thinkingLevel` (Gemini 3.x), `budget` → `thinkingConfig.thinkingBudget` (Gemini 2.5), `off` → no `thinkingConfig` at all. The provider never inspects the model id; a mode that mismatches the target model is a Gemini 400 by design. |
+| `thinking.level`             | string | *(unset — the model's own default level)*        | `minimal`, `low`, `medium` or `high`. **Optional** under `mode: level`: unset, the provider falls back to the role's [`effort`](#coremodels), and with neither set it sends no `thinkingLevel` at all, leaving the model's own default (3.1 Pro `high`, 3.x Flash `medium`, Flash-Lite `minimal`). Set, it **wins over** the role's `effort` — `level` is Gemini's native vocabulary and `effort` the translated one. An invalid value still fails at `Init`. Mutually exclusive with `thinking.budget_tokens`; setting both fails at `Init`. |
+| *(role `effort`)*            | string | *(unset)*                                        | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `thinkingLevel` when `mode: level` and `thinking.level` is unset. Gemini's own four pass through unchanged; Anthropic's `xhigh` and `max` **clamp to `high`** (so a `fanout` role spanning both providers stays configurable), warned **once at `Init`** naming the role, the configured value and the effective one. A value in neither vocabulary fails `Init` for any role this provider could serve, and fails the request if it arrives some other way. Ignored entirely, without warning, under `mode: budget` and `mode: off`. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` without touching the rest — so a plain single-entry role's `effort:` reaches the wire with no coordinator involved. An effort already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the registry, because a registry lookup always returns the role's first entry. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
+| `thinking.budget_tokens`     | int    | *(unset — required under `mode: budget`)*        | Thinking token budget on Gemini 2.5. `-1` dynamic, `0` disable, otherwise a token ceiling. Mutually exclusive with `thinking.level`. Present with `mode` unset, it infers `mode: budget` and warns. |
+| `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
+| `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
 | `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
 | `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). |
 | `cache.min_tokens`           | int    | `1000`                                           | Minimum tokens required for caching. |
