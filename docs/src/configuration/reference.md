@@ -853,7 +853,8 @@ to read it:
 | `temperature` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai`, on every path — see below |
 | `effort` | `nexus.llm.anthropic` and `nexus.llm.gemini` (not read by `nexus.llm.openai` at all) |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
-| `reasoning`, `api` | no provider yet; `nexus.llm.openai`'s are a later release |
+| `reasoning` | no provider yet — the per-entry axis is still inert. The **plugin-level** `reasoning:` block on [`nexus.llm.openai`](#nexusllmopenai) is real and wired (`mode`/`effort`/`summary`); hoisting it onto a `core.models` entry is a later release. |
+| `api` | no provider yet; `nexus.llm.openai`'s is a later release |
 | `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
 An axis with no consumer is inert, not an error: the key parses, validates
@@ -2103,7 +2104,8 @@ and the *(role `retry`)* row in each provider's table.
 
 ### `nexus.llm.openai`
 
-Source: `plugins/providers/openai/plugin.go`.
+Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
+`multimodal.go`, `modality.go`, `files.go`, `tool_choice.go`, `retry.go`.
 
 | Key                          | Type   | Default                              | Description |
 |------------------------------|--------|--------------------------------------|-------------|
@@ -2122,8 +2124,11 @@ Source: `plugins/providers/openai/plugin.go`.
 | `files.upload_threshold`     | int    | `40960`                              | Minimum bytes to upload. |
 | `files.cache_uploads`        | bool   | `true`                               | Deduplicate within a session. |
 | `files.delete_on_shutdown`   | bool   | `false`                              | Delete on shutdown. |
-| `reasoning.enabled`          | bool   | `false`                              | Enable o-series reasoning. |
-| `reasoning.budget_tokens`    | int    | `10000`                              | Reasoning token budget. |
+| `reasoning.mode`             | string | `off` *(absent block)* / `effort` *(present block)* | Whether reasoning controls go on the wire. `effort` sends `reasoning_effort`; `off` sends no reasoning configuration at all. An **absent** `reasoning:` block is `off`; a **present** block with no `mode` is `effort`. Mirrors the `mode` axis on [`nexus.llm.anthropic`](#nexusllmanthropic) and [`nexus.llm.gemini`](#nexusllmgemini): the operator declares the shape, the provider obeys, and a mode the target model rejects is an OpenAI HTTP 400 the operator owns. |
+| `reasoning.effort`           | string | *(unset)*                            | Reasoning depth: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**, because it is a superset of the union of what the other two providers accept. Unset under `mode: effort` sends no `reasoning_effort` key, so the model's own default applies. An unrecognised value **fails `Init`** naming the accepted set. |
+| `reasoning.summary`          | string | *(unset)*                            | Reasoning-summary verbosity: `auto`, `concise`, `detailed`. Parsed and validated, but **does not reach the wire**: `/v1/chat/completions` returns no reasoning summaries — only the Responses API does, and this provider does not speak it. Setting it logs a warning at boot. Replaces the removed `reasoning.include_summary`. |
+| `reasoning.enabled`          | bool   | *(unset)*                            | **Deprecated** alias for `reasoning.mode`: `true` → `effort`, `false` → `off`. Ignored (with a warning) when `mode` is set. Does not fail boot. |
+| `reasoning.budget_tokens`    | int    | *(unset)*                            | **Deprecated and ignored.** OpenAI has no reasoning token budget — depth is `reasoning.effort`. Accepted with a warning rather than failing boot. |
 | `force_reasoning`            | bool   | `false`                              | Force reasoning even for non-o-series models (experimental). |
 | `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
 | `retry.*`                    | —      | *(shared Retry block)*               | Backoff configuration. |

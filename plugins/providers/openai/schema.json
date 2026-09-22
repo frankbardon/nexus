@@ -36,8 +36,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled":       {"type": "boolean"},
-        "budget_tokens": {"type": "integer", "minimum": 0}
+        "mode":          {"type": "string", "enum": ["effort", "off"], "description": "Whether reasoning controls go on the wire. effort -> send reasoning_effort; off -> send no reasoning configuration at all."},
+        "effort":        {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning depth. Unset under mode: effort sends no reasoning_effort, so the model's own default applies."},
+        "summary":       {"type": "string", "enum": ["auto", "concise", "detailed"], "description": "Reasoning-summary verbosity. Accepted and validated, but /v1/chat/completions returns no summaries, so it does not reach the wire yet."},
+        "enabled":       {"type": "boolean", "description": "Deprecated alias for mode: true -> effort, false -> off. Ignored when mode is set."},
+        "budget_tokens": {"type": "integer", "minimum": 0, "description": "Deprecated and ignored: OpenAI has no reasoning token budget. Use effort."}
       }
     },
     "force_reasoning": {"type": "boolean", "description": "Force reasoning even on non-o-series models (experimental)."},

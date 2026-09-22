@@ -44,9 +44,35 @@ The provider uses the Model Registry to resolve role names. When an `llm.request
 
 Two per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out for a reasoning model whatever its origin — see [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
 
-The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning.effort` key — and neither do the `thinking`, `reasoning`, `cache`, `retry` or `api` entries.
+A role's `retry:` block is read too, merging over the plugin-level one. The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning:` block — and neither do the `thinking`, `reasoning`, `cache` or `api` entries.
 
 There is no `cache:` block on this provider at all, so a role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](../../configuration/reference.md#prompt-caching-cache).
+
+### Reasoning
+
+Reasoning depth is declared on the plugin:
+
+```yaml
+nexus.llm.openai:
+  reasoning:
+    mode: effort      # effort | off
+    effort: medium    # none | minimal | low | medium | high | xhigh | max
+```
+
+`mode` is the operator's declaration that the target is a reasoning model; it
+is not inferred from the model id. An **absent** `reasoning:` block means `off`
+and sends no reasoning configuration at all; a **present** block with no `mode`
+means `effort`. `effort` is OpenAI's full vocabulary and is **not clamped** — it
+is a superset of what `nexus.llm.anthropic` and `nexus.llm.gemini` accept, so a
+role word written for either of those passes through verbatim. An unrecognised
+`effort` fails `Init` naming the accepted set.
+
+`reasoning.summary` (`auto` / `concise` / `detailed`) is accepted and validated
+but does not reach the wire: `/v1/chat/completions` returns no reasoning
+summaries. `reasoning.enabled` and `reasoning.budget_tokens` are deprecated —
+`enabled` maps onto `mode`, `budget_tokens` is ignored — and neither fails boot.
+
+See the [configuration reference](../../configuration/reference.md#nexusllmopenai).
 
 ### Streaming
 

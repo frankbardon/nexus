@@ -128,7 +128,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.pricing = parsePricingConfig(ctx.Config)
 
-	p.reasoning = parseReasoningConfig(ctx.Config)
+	reasoning, err := parseReasoningConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.reasoning = reasoning
 	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
 		p.forceReasoning = v
 	}
