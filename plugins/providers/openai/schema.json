@@ -10,7 +10,7 @@
     "api_key":          {"type": "string", "description": "Direct API key."},
     "api_key_env":      {"type": "string", "description": "Environment variable for the key."},
     "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints. Setting it narrows the default api to chat_completions."},
-    "api":              {"type": "string", "enum": ["chat_completions", "responses"], "description": "Which OpenAI API to speak. Default chat_completions, narrowed further by base_url and the Azure auth modes. Both surfaces are implemented; responses is opt-in rather than the default until encrypted reasoning replay lands."},
+    "api":              {"type": "string", "enum": ["chat_completions", "responses"], "description": "Which OpenAI API to speak. Default responses, because from GPT-5.4 onward Chat Completions refuses tool calling with any reasoning_effort other than none and Nexus puts tools on every turn; narrowed to chat_completions when base_url or an Azure auth mode is set. Both surfaces are implemented end to end. Changed in v0.29.0: a plain api.openai.com deployment that names no api: used to speak chat_completions."},
     "azure": {
       "type": "object",
       "additionalProperties": false,

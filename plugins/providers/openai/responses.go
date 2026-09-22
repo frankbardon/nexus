@@ -271,8 +271,10 @@ func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 // within a model family, so a fallback chain that swaps families mid-conversation
 // replays Items the next model cannot verify. Detecting that would require a
 // model-family table, which this provider does not have and will not grow one
-// for; the rejection it causes is a request failure, which is the same failure
-// class E5-S3 owns for blobs that stop verifying on a long loop.
+// for. The rejection it causes is a request failure — the same failure class as
+// a blob that stops verifying on a long loop, and the one responses_degrade.go
+// names: the error message covers the cross-family cause precisely because
+// nothing here detects it.
 func replayReasoningItems(meta map[string]any) []map[string]any {
 	if meta == nil {
 		return nil

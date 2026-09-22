@@ -460,14 +460,14 @@ func TestResolveEndpoint_UnknownSurfaceErrors(t *testing.T) {
 // --- Init -------------------------------------------------------------------
 
 // The tree must be shippable at every commit: an ordinary deployment that names
-// no `api:` boots, and lands on the chat surface.
+// no `api:` boots, and lands on the Responses surface.
 func TestInit_PlainDeploymentBoots(t *testing.T) {
 	p, _, err := initAPI(t, map[string]any{}, nil)
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if p.api != apiChatCompletions {
-		t.Errorf("api = %q, want chat_completions", p.api)
+	if p.api != apiResponses {
+		t.Errorf("api = %q, want responses", p.api)
 	}
 }
 
@@ -491,21 +491,35 @@ func TestInit_RoleResponsesBoots(t *testing.T) {
 	}
 }
 
-// The other half of the flip, pinned so nobody makes it by accident: the
-// Responses path works when asked for, and is still not what a deployment that
-// asks for nothing gets. Encrypted-reasoning-item replay has landed (E5-S2);
-// what has not is the behaviour when a replayed blob is rejected mid-loop
-// (E5-S3) — see unnarrowedDefaultAPI.
-func TestDefaultAPI_StaysOnChatCompletions(t *testing.T) {
-	if unnarrowedDefaultAPI != apiChatCompletions {
-		t.Fatalf("unnarrowedDefaultAPI = %q — do not flip it before the reasoning-replay rejection path lands (E5-S3)", unnarrowedDefaultAPI)
+// The flip, pinned so nobody reverses it by accident: a deployment that
+// declares nothing narrowing gets the Responses surface, because on current
+// OpenAI models the chat surface cannot reason while tools are on the turn —
+// which is every Nexus turn. Chat Completions remains one `api:` away.
+//
+// The two narrowed cases are the compensating half and are pinned separately
+// (TestInit_BaseURLNarrowsTheDefault and the Azure ones): a declared-compat
+// endpoint or an Azure auth mode does not move.
+func TestDefaultAPI_IsResponses(t *testing.T) {
+	if unnarrowedDefaultAPI != apiResponses {
+		t.Fatalf("unnarrowedDefaultAPI = %q — a plain deployment must default to the surface that can reason with tools", unnarrowedDefaultAPI)
 	}
 	p, _, err := initAPI(t, map[string]any{}, nil)
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	if p.api != apiResponses {
+		t.Errorf("a deployment that declares no api gets %q, want responses", p.api)
+	}
+}
+
+// And an operator who wants the older surface still gets it by saying so.
+func TestDefaultAPI_ChatCompletionsIsOneKeyAway(t *testing.T) {
+	p, _, err := initAPI(t, map[string]any{"api": "chat_completions"}, nil)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
 	if p.api != apiChatCompletions {
-		t.Errorf("a deployment that declares no api gets %q, want chat_completions", p.api)
+		t.Errorf("api = %q, want chat_completions", p.api)
 	}
 }
 
@@ -594,9 +608,12 @@ func TestResponsesPath_ReachableEndToEnd(t *testing.T) {
 const restrictionPhrase = "refuses tool calling"
 
 // Reasoning configured on the chat surface is reasoning a current model will
-// not give you, and Init says so once.
+// not give you, and Init says so once. The surface has to be declared now that
+// it is no longer the default — which is the point of the warning: reaching
+// this configuration takes a deliberate `api: chat_completions`.
 func TestInit_WarnsOnceWhenReasoningMeetsChatCompletions(t *testing.T) {
 	_, records, err := initAPI(t, map[string]any{
+		"api":       "chat_completions",
 		"reasoning": map[string]any{"mode": "effort", "effort": "high"},
 	}, nil)
 	if err != nil {
@@ -615,7 +632,7 @@ func TestInit_WarnsForARoleThatReasons(t *testing.T) {
 		"deep":     {"reasoning": map[string]any{"mode": "effort", "effort": "high"}},
 		"deeper":   {"reasoning": map[string]any{"mode": "effort", "effort": "max"}},
 	})
-	_, records, err := initAPI(t, map[string]any{}, models)
+	_, records, err := initAPI(t, map[string]any{"api": "chat_completions"}, models)
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}

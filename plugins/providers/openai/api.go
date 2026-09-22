@@ -37,9 +37,9 @@ const (
 	apiChatCompletions apiSurface = "chat_completions"
 
 	// apiResponses is `/v1/responses` — the only surface on which a current
-	// reasoning model can reason while tools are on the turn. Opt in with an
-	// explicit `api:`; it is not the default yet, and unnarrowedDefaultAPI
-	// says what has to land first.
+	// reasoning model can reason while tools are on the turn, and the default
+	// for a deployment that declares nothing narrowing. See
+	// unnarrowedDefaultAPI.
 	apiResponses apiSurface = "responses"
 )
 
@@ -57,23 +57,35 @@ func validAPISurface(v string) bool {
 // unnarrowedDefaultAPI is the effective `api` for a deployment that declares
 // none and whose endpoint is plain `api.openai.com`.
 //
-// It stays `chat_completions` even though the Responses path now works end to
-// end — request, reply, stream, multimodal, endpoint, and as of E5-S2 the
-// replay of encrypted reasoning Items across a tool loop.
+// It is `responses`, and the reason is the one on apiSurface: from GPT-5.4
+// onward Chat Completions refuses tool calling with any `reasoning_effort`
+// other than `none`, and Nexus puts tools on every turn. A default that cannot
+// reason on the provider's current models is not a conservative default, it is
+// a broken one — so the surface a plain deployment gets is the one that works,
+// and an operator who wants the older surface says `api: chat_completions`.
 //
-// What is still outstanding is what happens when that replay is *rejected*. The
-// field reports of `encrypted_content` failing verification after three or four
-// tool rounds under `store: false` are real, and the agreed behaviour is to
-// fail the request naming the cause rather than silently retrying without
-// reasoning — E5-S3 owns it. Until that exists, a deployment that never asked
-// for this surface should not be moved onto a failure mode nobody has written
-// the message for.
+// This moves the endpoint under a plain `api.openai.com` deployment that merely
+// upgrades Nexus, which is a real cost and was weighed rather than waved past:
 //
-// So: **do not flip this constant early.** E5-S3, or a story after it, flips it
-// together with the docs that describe the default. The narrowing in
-// narrowsToChatCompletions is already written for that flip and is what keeps
-// declared-compat endpoints on the surface they actually implement.
-const unnarrowedDefaultAPI = apiChatCompletions
+//   - The whole path ships and is exercised end to end — request serializer,
+//     reply parser, SSE reader, multimodal Item shapes, the endpoint builder on
+//     every auth mode, the replay of encrypted reasoning Items across a tool
+//     loop, and the behaviour when that replay is *rejected*, which is what was
+//     outstanding until responses_degrade.go.
+//   - The two serializers carry the same request. The only field the chat body
+//     writes that this one cannot is `prediction`, which now degrades with a
+//     warning rather than in silence; `stream_options` is unnecessary here
+//     because usage always rides `response.completed`.
+//   - narrowsToChatCompletions keeps every deployment that declared something
+//     about its endpoint — a `base_url` proxy or compat endpoint, either Azure
+//     auth mode — exactly where it was. Those are the endpoints that may not
+//     implement `/responses` at all; a plain `api.openai.com` one demonstrably
+//     does, across the whole current model lineup.
+//
+// What is NOT covered by this constant: `plugins/llm/batch` keeps its own
+// hardcoded chat endpoint and its own body builder, so batch does not follow
+// the flip.
+const unnarrowedDefaultAPI = apiResponses
 
 // narrowsToChatCompletions reports whether this deployment has declared an
 // endpoint that cannot be assumed to speak the Responses API, which is what

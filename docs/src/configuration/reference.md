@@ -855,7 +855,7 @@ to read it:
 | `effort` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below. Unclamped on OpenAI, whose vocabulary is a superset of the other two's; only sent there where a reasoning `mode` is declared |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
 | `reasoning` | `nexus.llm.openai` — the only provider with a `reasoning:` block. A role's merges over the plugin-level one **key by key**, and the merged block goes through the same parser; see [Per-role reasoning](#per-role-reasoning-openai). |
-| `api` | `nexus.llm.openai` — the only provider with more than one API surface. `chat_completions` or `responses`; the per-entry value wins over the plugin-level `api:`, and **does not fall through** from the default role to a named one. Both surfaces work end to end; `responses` is opt-in rather than the default — see [Which OpenAI API: `api`](#which-openai-api-api). The other two providers ignore a role's `api:` in silence |
+| `api` | `nexus.llm.openai` — the only provider with more than one API surface. `chat_completions` or `responses`; the per-entry value wins over the plugin-level `api:`, and **does not fall through** from the default role to a named one. Both surfaces work end to end; `responses` is the default on a plain `api.openai.com` deployment and `chat_completions` on a `base_url` or Azure one — see [Which OpenAI API: `api`](#which-openai-api-api). The other two providers ignore a role's `api:` in silence |
 | `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
 An axis with no consumer is inert, not an error: the key parses, validates
@@ -2156,7 +2156,7 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `api_key`                    | string | *(env)*                              | Direct API key (`auth_mode: openai`, also fallback for Azure Files API). |
 | `api_key_env`                | string | `OPENAI_API_KEY`                     | Environment variable for the key. |
 | `base_url`                   | string | `https://api.openai.com/v1/chat/completions` | Override for proxies / OpenAI-compatible endpoints — the whole chat endpoint, not a prefix. Setting it **narrows the default `api:`** to `chat_completions`, because those endpoints implement `/chat/completions` and mostly not `/responses`. Under an explicit `api: responses` the **sibling** route is used instead: the `/chat/completions` tail comes off and `/responses` goes on (`https://proxy/v1/chat/completions` → `https://proxy/v1/responses`), a bare API root works the same way, and a `base_url` already pointing at `/responses` is left alone. Whether that endpoint implements the Responses API is the operator's to know — declaring `api:` is exactly that assertion. |
-| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. Both surfaces are implemented end to end on every `auth_mode` — [encrypted reasoning replay](#which-openai-api-api) included; `responses` stays **opt-in** while the behaviour on a *rejected* replay is still outstanding, because a default must not choose that trade for a deployment that merely upgraded. An unknown value fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
+| `api`                        | string | `responses` *(narrowed — see below)* | Which OpenAI API this instance speaks: `responses` (`/v1/responses`) or `chat_completions` (`/v1/chat/completions`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. Both surfaces are implemented end to end on every `auth_mode`, [encrypted reasoning replay](#which-openai-api-api) and its rejection path included. The default is `responses` because from GPT-5.4 onward Chat Completions refuses tool calling with any `reasoning_effort` other than `none` and Nexus puts tools on every turn; it **narrows to `chat_completions`** whenever `base_url` or an Azure `auth_mode` is set. **This changed in v0.29.0** — a plain `api.openai.com` deployment that named no `api:` spoke `chat_completions` before. An unknown value fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
 | `azure.endpoint`             | string | *(required for Azure)*               | Azure OpenAI endpoint URL. |
 | `azure.api_key`              | string | *(env `AZURE_OPENAI_API_KEY`)*       | Azure key (when `auth_mode: azure_key`). |
 | `azure.api_key_env`          | string | `AZURE_OPENAI_API_KEY`               | Override the env var name. |
@@ -2191,7 +2191,7 @@ one it speaks is **declared** rather than detected:
 ```yaml
 plugins:
   nexus.llm.openai:
-    api: chat_completions     # chat_completions | responses
+    api: responses            # responses | chat_completions
 ```
 
 **Why it is an operator's axis and not a migration.** From GPT-5.4 onward,
@@ -2212,29 +2212,41 @@ was written.
 
 | Deployment | Effective `api` |
 |---|---|
-| plain `api.openai.com` | `chat_completions` |
+| plain `api.openai.com` | **`responses`** |
 | `base_url` set | `chat_completions` |
 | `auth_mode: azure_key` or `azure_aad` | `chat_completions` |
 
-An operator on a declared-compat or Azure endpoint who wants the Responses API
-says so with an explicit `api:`.
+A plain deployment gets the surface that can actually reason while tools are on
+the turn. A deployment that has *declared something about its endpoint* — a
+`base_url` proxy or compat endpoint, either Azure auth mode — does not move,
+because those are the endpoints that may not implement `/responses` at all. An
+operator on one of them who wants the Responses API says so with an explicit
+`api:`; an operator on a plain endpoint who wants the older surface says
+`api: chat_completions`.
 
-> **`api: responses` works; it is not the default.** The whole path ships — the
-> selector, its defaulting and validation, the request serializer, the
-> non-streaming reply parser, the SSE reader, the multimodal Item shapes, the
-> endpoint builder for every `auth_mode`, and the replay of encrypted reasoning
-> Items across a tool loop. An explicit `api: responses`, on the plugin or on a
-> `core.models` entry, is honoured as written.
+> **Upgrading changes the endpoint for plain `api.openai.com` deployments.**
+> This default was `chat_completions` in v0.28.x. A deployment that names no
+> `api:` and sets no `base_url` or Azure auth mode now speaks `/v1/responses`.
 >
-> What has **not** moved is the unnarrowed default in the table above, and the
-> reason is what happens when a replayed blob is **rejected**. There are field
-> reports of `encrypted_content` failing verification after three or four tool
-> rounds under `store: false`, and the agreed behaviour is to fail the request
-> naming the cause rather than silently retrying without reasoning. Until that
-> message exists, a deployment that merely upgrades Nexus should not be moved
-> onto a failure mode nobody has written for it. When it lands, the unnarrowed
-> default becomes `responses`: plain `api.openai.com` deployments move, and the
-> two narrowed rows above stay on `chat_completions`.
+> That is deliberate rather than incidental: on OpenAI's current models the chat
+> surface cannot reason while tools are on the turn, and Nexus puts tools on
+> every turn, so leaving the default there would mean shipping a default that
+> cannot reason. The whole Responses path ships — selector, request serializer,
+> reply parser, SSE reader, multimodal Item shapes, the endpoint builder on
+> every `auth_mode`, the replay of encrypted reasoning Items across a tool loop,
+> and the behaviour when that replay is rejected (below) — and the two
+> serializers carry the same request, the only exception being `prediction`,
+> which has no counterpart here and now degrades with a warning.
+>
+> **To stay where you were**, set `api: chat_completions` on the plugin, or on
+> the `core.models` entries that should stay. Nothing else changes: no config
+> key changes shape between the surfaces, and `llm.response` carries the same
+> fields either way.
+>
+> Two things the flip does **not** touch: `base_url` and Azure deployments,
+> which the narrowing keeps on `chat_completions`; and the
+> [batch coordinator](#nexusllmbatch), which keeps its own chat endpoint and its
+> own body builder.
 
 **The endpoint each pair resolves to.** One URL per (`auth_mode`, `api`), chosen
 in one place and reconsidered nowhere:

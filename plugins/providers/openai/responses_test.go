@@ -409,7 +409,7 @@ func TestInit_WarnsOnceForARoleThatNamesASummary(t *testing.T) {
 		"deep":     {"reasoning": map[string]any{"mode": "effort", "summary": "auto"}},
 		"deeper":   {"reasoning": map[string]any{"mode": "effort", "summary": "concise"}},
 	})
-	_, records, err := initAPI(t, map[string]any{}, models)
+	_, records, err := initAPI(t, map[string]any{"api": "chat_completions"}, models)
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
