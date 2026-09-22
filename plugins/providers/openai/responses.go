@@ -116,6 +116,7 @@ func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.
 // message and each result as a `role: tool` message, Responses flattens all
 // three into sibling Items in one list, and the pairing is by `call_id` alone:
 //
+//	{"type":"reasoning","id":"rs_1","encrypted_content":"…","summary":[…]}
 //	{"role":"assistant","content":"I'll look that up"}
 //	{"type":"function_call","call_id":"call_1","name":"search","arguments":"{}"}
 //	{"type":"function_call_output","call_id":"call_1","output":"..."}
@@ -123,6 +124,10 @@ func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.
 // So an assistant message with both text and tool calls becomes several Items,
 // and one with tool calls and no text becomes only the `function_call` ones —
 // an empty message Item is not a thing the API accepts.
+//
+// The leading `reasoning` Items are the previous turn's own, replayed verbatim
+// out of the message's metadata; see replayReasoningItems for why they must be
+// and why they sit at the head.
 //
 // Content is a plain string on every Item that carries no events.MessagePart,
 // and only becomes a typed content-parts array when parts are present. That is
@@ -156,6 +161,11 @@ func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 			items = append(items, item)
 
 		case "assistant":
+			// Reasoning Items first, ahead of everything else this assistant
+			// turn contributes — see replayReasoningItems for why the head of
+			// the turn is the right position and the only reconstructable one.
+			items = append(items, replayReasoningItems(msg.Metadata)...)
+
 			if parts := p.responsesParts(msg); parts != nil {
 				items = append(items, map[string]any{
 					"role":    "assistant",
@@ -215,6 +225,79 @@ func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 		}
 	}
 	return items
+}
+
+// replayReasoningItems pulls a previous turn's `reasoning` Items back out of an
+// assistant message's metadata, ready to be spliced into the `input` array
+// ahead of the rest of that turn.
+//
+// This is the second half of the continuity contract responses_reply.go opens.
+// buildResponsesBody always sends `store: false`, so OpenAI holds no
+// server-side state for the conversation and each returned reasoning Item
+// carries an opaque `encrypted_content` blob. Every Item of a turn must come
+// back verbatim on the next request, or the model starts the following round
+// with no reasoning context — which on a tool loop is precisely the round it
+// needed it for. The Items reach here because "openai_reasoning_items" is on
+// the pkg/roundtrip allowlist, so every history builder — the memory plugins
+// and the in-process agent loops alike — copies them from the llm.response onto
+// the stored assistant Message without knowing what they are.
+//
+// **Verbatim** is meant literally: the Item is passed through as decoded, whole.
+// Nothing is narrowed, re-keyed or rebuilt from named fields, because the blob
+// is verified server-side and a field this file does not know about is exactly
+// the field that would be dropped. That is also the documented failure of
+// several other SDKs, which drop `encrypted_content` specifically when a
+// `summary` array is present alongside it — a whole-Item copy cannot express
+// that bug.
+//
+// **Position.** The Items go at the head of the assistant turn, before its text
+// Item and before its `function_call` Items. The original interleaving is not
+// recoverable — llm.response keeps the Items as an ordered list, not as
+// positions within the output array — and the head is both the shape the API
+// documents for a replayed turn and the one that keeps each turn's reasoning
+// with the turn it belongs to. Relative order *among* the Items is preserved,
+// which is the part that matters.
+//
+// Both shapes of the stored value are accepted, for the reason
+// prependThinkingBlocks accepts both on the Anthropic side: the capture path
+// produces []map[string]any, and the same value comes back as []any once it has
+// been through JSON — which is every persisted and every replayed turn. A
+// single-shape assertion would work live and silently replay nothing on exactly
+// the path a long session takes.
+//
+// KNOWN HAZARD, deliberately not handled here: reasoning is reusable only
+// within a model family, so a fallback chain that swaps families mid-conversation
+// replays Items the next model cannot verify. Detecting that would require a
+// model-family table, which this provider does not have and will not grow one
+// for; the rejection it causes is a request failure, which is the same failure
+// class E5-S3 owns for blobs that stop verifying on a long loop.
+func replayReasoningItems(meta map[string]any) []map[string]any {
+	if meta == nil {
+		return nil
+	}
+	raw, ok := meta[reasoningItemsMetaKey]
+	if !ok {
+		return nil
+	}
+	switch stored := raw.(type) {
+	case []map[string]any:
+		// Defensive copy: the caller appends to the slice it gets back, and
+		// the stored one belongs to a Message that may be replayed again.
+		return append([]map[string]any(nil), stored...)
+	case []any:
+		out := make([]map[string]any, 0, len(stored))
+		for _, v := range stored {
+			if item, ok := v.(map[string]any); ok {
+				out = append(out, item)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // responsesParts serializes a message's multimodal parts, or returns nil when

@@ -245,15 +245,15 @@ through from the `default` role to a named one. Exactly one endpoint is chosen
 per request, from those two and nothing else.
 
 `api: responses` **works end to end** — serializer, reply parser, SSE reader,
-multimodal Item shapes and the endpoint builder on every `auth_mode` — but it is
-**opt-in rather than the default**. The reason is encrypted reasoning replay: a
-Responses turn under `store: false` returns `reasoning` Items carrying
-`encrypted_content`, and the next request must replay them verbatim or the model
-loses its reasoning across a tool round. That replay is not wired yet, so a
-multi-turn tool loop on this surface silently drops reasoning context between
-rounds. An operator who declares `api: responses` has chosen that knowingly; a
-default would choose it for every deployment that merely upgraded. When the
-replay lands, the plain `api.openai.com` default moves to `responses` and the
+multimodal Item shapes, the endpoint builder on every `auth_mode`, and
+encrypted reasoning replay across a tool loop — but it is **opt-in rather than
+the default**. What is still outstanding is the behaviour when a replayed blob
+is *rejected*: there are field reports of `encrypted_content` failing
+verification after three or four tool rounds under `store: false`, and the
+agreed answer is to fail the request naming the cause rather than silently
+retrying without reasoning. Until that exists, a deployment that never asked for
+this surface is not moved onto a failure mode with no message written for it.
+When it lands, the plain `api.openai.com` default moves to `responses` and the
 two narrowed cases stay where they are.
 
 **The endpoint.** On `auth_mode: openai` the surfaces are
@@ -309,7 +309,8 @@ reasoning tokens included, and the run `status` is translated back into the
 chat surface's finish-reason words. `reasoning` Items are captured whole onto
 `llm.response.Metadata["openai_reasoning_items"]` — under `store: false` they
 carry `encrypted_content`, which the next request must replay verbatim or the
-model loses its reasoning across a tool round.
+model loses its reasoning across a tool round. See [Reasoning across a tool
+loop](#reasoning-across-a-tool-loop) for the replay half.
 
 Streaming is a third implementation rather than a branch: Responses sends about
 forty typed SSE events where Chat Completions sends one chunk shape. Text
@@ -326,6 +327,48 @@ delta stream; reasoning *summary* text is accumulated separately onto
 `llm.response.Metadata["openai_reasoning_summary"]` and never released as output
 text. All three tables are in the [configuration
 reference](../../configuration/reference.md#which-openai-api-api).
+
+#### Reasoning across a tool loop
+
+Nexus sends `store: false`, so OpenAI keeps no server-side state for the
+conversation and every `reasoning` Item comes back carrying an opaque
+`encrypted_content` blob. **Every Item of a turn must be replayed verbatim on
+the next request**, or the model starts the following round with no reasoning
+context — which on a tool loop is exactly the round that needed it. Nothing in
+the response text can substitute: the blob is the state.
+
+This is structurally the same problem as Anthropic's thinking blocks and
+Gemini's thought signatures, and it is solved the same way. The Items ride the
+assistant turn under the `openai_reasoning_items` key on the
+`pkg/roundtrip` allowlist, so every history
+builder carries them onto the stored assistant message without knowing what they
+are — the memory plugins for persisted history, and the in-process loops in
+`delegate`, `subagent`, `planexec` and `orchestrator` that keep their own. The
+serializer then splices them back into `input` at the head of the assistant turn
+they belong to, ahead of that turn's text Item and its `function_call` Items,
+in the order they arrived.
+
+Three things about that replay are deliberate:
+
+- **Whole Items, never rebuilt.** The Item goes back exactly as decoded —
+  `id`, `encrypted_content`, `summary`, `status` and any field added later.
+  Narrowing it to the fields Nexus names is how several other SDKs came to drop
+  `encrypted_content` specifically when a `summary` was present alongside it.
+- **The streamed turn is the same turn.** `encrypted_content` appears only on
+  the `response.completed` snapshot and nowhere in the deltas, so a streamed
+  round replays identically to a non-streamed one.
+- **Reasoning summary text is not replayed.** `openai_reasoning_summary` is
+  display material; it is deliberately absent from the allowlist, so history
+  does not carry a second copy of every summary.
+
+Two limits worth knowing before running a long loop. Encrypted reasoning is
+reusable **only within a model family**, so a
+[`fallback`](../../configuration/reference.md#nexusproviderfallback) chain that
+swaps families mid-conversation replays Items the next model cannot verify;
+Nexus does not detect that, because detecting it would mean shipping a
+model-family table. And there are field reports of blobs failing verification
+after three or four tool rounds even within one family. Both surface as a
+request failure rather than a silent quality drop.
 
 #### Reasoning in the UI
 

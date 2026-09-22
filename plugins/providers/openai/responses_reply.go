@@ -39,11 +39,11 @@ import (
 // one carries `encrypted_content`, and the NEXT request must replay every Item
 // of the previous turn verbatim or the model loses its reasoning across a tool
 // round. That is structurally the Anthropic `thinking_blocks` and Gemini
-// `gemini_thought_signatures` problem, so this key belongs in the
-// pkg/roundtrip allowlist that carries those onto the stored assistant
-// Message — E5-S2 adds it there and writes the replay half. Until then the
-// data survives the parser and goes no further, which is why dropping it here
-// would be the expensive mistake: nothing downstream can reconstruct it.
+// `gemini_thought_signatures` problem, so this key is on the pkg/roundtrip
+// allowlist that carries those onto the stored assistant Message, and
+// replayReasoningItems (responses.go) splices them back into the next request's
+// `input` array. Dropping them here would be the expensive mistake: nothing
+// downstream can reconstruct an encrypted blob.
 //
 // The shape is []map[string]any — the decoded Item, not a narrowed struct — so
 // that every field the API puts on a reasoning Item (`id`, `encrypted_content`,
@@ -51,8 +51,8 @@ import (
 // persisted history without this file needing to know about it.
 //
 // NOTE: like the Gemini key, this constant is duplicated as a bare string
-// literal in pkg/roundtrip once E5-S2 lands — nothing outside a provider may
-// import one. Change one spelling and you must change the other.
+// literal in pkg/roundtrip — nothing outside a provider may import one. Change
+// one spelling and you must change the other.
 const reasoningItemsMetaKey = "openai_reasoning_items"
 
 // Responses API reply types.
@@ -184,8 +184,8 @@ func (p *Plugin) handleResponsesSyncResponse(body io.Reader, requestID string, m
 //
 // So this reads back out of the Items the parser already captured rather than
 // asking convertResponsesReply to fork. The Items themselves are left exactly
-// as they were — they are replay state that must survive verbatim (E5-S2), and
-// this function only looks.
+// as they were — they are replay state that must survive verbatim, and this
+// function only looks.
 //
 // Index is the part's position in its Item's summary array, which is the
 // non-streaming counterpart of summary_index. A turn carrying several reasoning

@@ -116,7 +116,7 @@ func TestResponsesReply_UnknownItemTypeIsIgnored(t *testing.T) {
 
 // The load-bearing one: reasoning Items must survive the parser whole,
 // encrypted_content included, because nothing downstream can reconstruct them
-// and E5-S2 replays them verbatim on the next request.
+// and replayReasoningItems sends them back verbatim on the next request.
 func TestResponsesReply_CapturesReasoningItemsVerbatim(t *testing.T) {
 	reply := decodeReply(t, `{
 	  "model": "gpt-5.1",

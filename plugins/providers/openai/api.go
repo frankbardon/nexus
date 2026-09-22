@@ -58,19 +58,18 @@ func validAPISurface(v string) bool {
 // none and whose endpoint is plain `api.openai.com`.
 //
 // It stays `chat_completions` even though the Responses path now works end to
-// end — request, reply, stream, multimodal and endpoint — and the reason is
-// **encrypted-reasoning-item replay**.
+// end — request, reply, stream, multimodal, endpoint, and as of E5-S2 the
+// replay of encrypted reasoning Items across a tool loop.
 //
-// A Responses turn under `store: false` returns `reasoning` Items carrying
-// `encrypted_content`, and the next request has to replay them verbatim or the
-// model loses its reasoning across a tool round. That replay is not wired yet
-// (E5-S2). Until it is, a multi-turn tool loop on this surface silently drops
-// reasoning context between rounds. An operator who writes `api: responses`
-// explicitly has chosen that trade; a *default* would choose it for every
-// OpenAI deployment that merely upgrades Nexus, with nothing in their config
-// changed and nothing visible when it goes wrong.
+// What is still outstanding is what happens when that replay is *rejected*. The
+// field reports of `encrypted_content` failing verification after three or four
+// tool rounds under `store: false` are real, and the agreed behaviour is to
+// fail the request naming the cause rather than silently retrying without
+// reasoning — E5-S3 owns it. Until that exists, a deployment that never asked
+// for this surface should not be moved onto a failure mode nobody has written
+// the message for.
 //
-// So: **do not flip this constant early.** E5-S2, or a story after it, flips it
+// So: **do not flip this constant early.** E5-S3, or a story after it, flips it
 // together with the docs that describe the default. The narrowing in
 // narrowsToChatCompletions is already written for that flip and is what keeps
 // declared-compat endpoints on the surface they actually implement.

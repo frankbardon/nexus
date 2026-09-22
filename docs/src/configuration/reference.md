@@ -2156,7 +2156,7 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `api_key`                    | string | *(env)*                              | Direct API key (`auth_mode: openai`, also fallback for Azure Files API). |
 | `api_key_env`                | string | `OPENAI_API_KEY`                     | Environment variable for the key. |
 | `base_url`                   | string | `https://api.openai.com/v1/chat/completions` | Override for proxies / OpenAI-compatible endpoints — the whole chat endpoint, not a prefix. Setting it **narrows the default `api:`** to `chat_completions`, because those endpoints implement `/chat/completions` and mostly not `/responses`. Under an explicit `api: responses` the **sibling** route is used instead: the `/chat/completions` tail comes off and `/responses` goes on (`https://proxy/v1/chat/completions` → `https://proxy/v1/responses`), a bare API root works the same way, and a `base_url` already pointing at `/responses` is left alone. Whether that endpoint implements the Responses API is the operator's to know — declaring `api:` is exactly that assertion. |
-| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. Both surfaces are implemented end to end on every `auth_mode`; `responses` is **opt-in**, because [encrypted reasoning replay](#which-openai-api-api) is not wired yet and a default must not choose that trade for a deployment that merely upgraded. An unknown value fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
+| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. Both surfaces are implemented end to end on every `auth_mode` — [encrypted reasoning replay](#which-openai-api-api) included; `responses` stays **opt-in** while the behaviour on a *rejected* replay is still outstanding, because a default must not choose that trade for a deployment that merely upgraded. An unknown value fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
 | `azure.endpoint`             | string | *(required for Azure)*               | Azure OpenAI endpoint URL. |
 | `azure.api_key`              | string | *(env `AZURE_OPENAI_API_KEY`)*       | Azure key (when `auth_mode: azure_key`). |
 | `azure.api_key_env`          | string | `AZURE_OPENAI_API_KEY`               | Override the env var name. |
@@ -2221,21 +2221,20 @@ says so with an explicit `api:`.
 
 > **`api: responses` works; it is not the default.** The whole path ships — the
 > selector, its defaulting and validation, the request serializer, the
-> non-streaming reply parser, the SSE reader, the multimodal Item shapes and the
-> endpoint builder for every `auth_mode`. An explicit `api: responses`, on the
-> plugin or on a `core.models` entry, is honoured as written.
+> non-streaming reply parser, the SSE reader, the multimodal Item shapes, the
+> endpoint builder for every `auth_mode`, and the replay of encrypted reasoning
+> Items across a tool loop. An explicit `api: responses`, on the plugin or on a
+> `core.models` entry, is honoured as written.
 >
 > What has **not** moved is the unnarrowed default in the table above, and the
-> reason is **encrypted reasoning replay**. A Responses turn under `store: false`
-> returns `reasoning` Items carrying `encrypted_content`, and the next request
-> has to replay them verbatim or the model loses its reasoning across a tool
-> round. That replay is not wired yet, so a multi-turn tool loop on this surface
-> silently drops reasoning context between rounds. An operator who writes
-> `api: responses` has chosen that trade knowingly; making it the default would
-> choose it for every OpenAI deployment that merely upgrades Nexus, with nothing
-> in their config changed and nothing visible when it goes wrong. When the replay
-> lands, the unnarrowed default becomes `responses`: plain `api.openai.com`
-> deployments move, and the two narrowed rows above stay on `chat_completions`.
+> reason is what happens when a replayed blob is **rejected**. There are field
+> reports of `encrypted_content` failing verification after three or four tool
+> rounds under `store: false`, and the agreed behaviour is to fail the request
+> naming the cause rather than silently retrying without reasoning. Until that
+> message exists, a deployment that merely upgrades Nexus should not be moved
+> onto a failure mode nobody has written for it. When it lands, the unnarrowed
+> default becomes `responses`: plain `api.openai.com` deployments move, and the
+> two narrowed rows above stay on `chat_completions`.
 
 **The endpoint each pair resolves to.** One URL per (`auth_mode`, `api`), chosen
 in one place and reconsidered nowhere:
@@ -2328,6 +2327,27 @@ round — structurally the same problem as Anthropic's thinking blocks and
 Gemini's thought signatures. They are captured whole onto
 `llm.response.Metadata` under `openai_reasoning_items` and never rendered into
 the response text.
+
+**The replay half** is `openai_reasoning_items` on the `pkg/roundtrip`
+allowlist: every history builder — the memory plugins for persisted history, and
+the in-process loops in `delegate`, `subagent`, `planexec` and `orchestrator` —
+copies the Items onto the stored assistant message, and the serializer splices
+them back into `input` at the head of that assistant turn, ahead of its text
+Item and its `function_call` Items, in arrival order. The Item goes back exactly
+as decoded, never rebuilt from named fields: narrowing it is how other SDKs came
+to drop `encrypted_content` when a `summary` was present beside it. A streamed
+turn replays identically, because the Items come from the `response.completed`
+snapshot rather than the deltas. The summary *text* under
+`openai_reasoning_summary` is deliberately **not** on the allowlist — it is
+display material, and history should not carry a second copy of it.
+
+Two limits apply to a long loop. Encrypted reasoning is reusable only **within a
+model family**, so a [`fallback`](#nexusproviderfallback) chain that swaps
+families mid-conversation replays Items the next model cannot verify — Nexus
+does not detect this, because detecting it would mean shipping a model-family
+table. And blobs have been reported to stop verifying after three or four tool
+rounds even within one family. Both surface as a request failure rather than a
+silent drop in quality.
 
 **What changes while it streams.** Chat Completions sends one chunk shape whose
 meaning depends on which delta field is populated; Responses sends about forty

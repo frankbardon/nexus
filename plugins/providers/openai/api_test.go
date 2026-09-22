@@ -493,11 +493,12 @@ func TestInit_RoleResponsesBoots(t *testing.T) {
 
 // The other half of the flip, pinned so nobody makes it by accident: the
 // Responses path works when asked for, and is still not what a deployment that
-// asks for nothing gets. Encrypted-reasoning-item replay (E5-S2) is what has to
-// land before this changes — see unnarrowedDefaultAPI.
+// asks for nothing gets. Encrypted-reasoning-item replay has landed (E5-S2);
+// what has not is the behaviour when a replayed blob is rejected mid-loop
+// (E5-S3) — see unnarrowedDefaultAPI.
 func TestDefaultAPI_StaysOnChatCompletions(t *testing.T) {
 	if unnarrowedDefaultAPI != apiChatCompletions {
-		t.Fatalf("unnarrowedDefaultAPI = %q — do not flip it before encrypted reasoning replay lands (E5-S2)", unnarrowedDefaultAPI)
+		t.Fatalf("unnarrowedDefaultAPI = %q — do not flip it before the reasoning-replay rejection path lands (E5-S3)", unnarrowedDefaultAPI)
 	}
 	p, _, err := initAPI(t, map[string]any{}, nil)
 	if err != nil {

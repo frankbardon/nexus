@@ -48,8 +48,9 @@ import (
 // whole reason this key is separate from reasoningItemsMetaKey. The summary is
 // prose about the model's reasoning, safe to show a user and useless to replay;
 // the reasoning *Items* are opaque `encrypted_content` blobs that must be
-// replayed verbatim and would mean nothing to a reader. E5-S1 turns this key
-// into thinking.step events; E5-S2 replays the other one.
+// replayed verbatim and would mean nothing to a reader. This key becomes
+// thinking.step events; the other one is replayed into the next request by
+// replayReasoningItems, and never forwarded onto a stored Message.
 //
 // Two spellings are accumulated into it — response.reasoning_summary_text.delta
 // and response.reasoning_text.delta — because at least one model streams only

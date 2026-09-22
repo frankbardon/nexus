@@ -840,9 +840,9 @@ func TestResponsesStream_EmissionsAreDeclared(t *testing.T) {
 // which is what an agent loop does between one turn and the next.
 //
 // This covers the two halves that meet: what the stream produced, and what the
-// serializer makes of it. (The turn now has a URL to be posted to — see
-// TestResponsesPath_ReachableEndToEnd — but the replay of `reasoning` Items
-// between rounds is still E5-S2's.)
+// serializer makes of it, for a turn that carried no reasoning. The replay of
+// `reasoning` Items across the same seam is
+// TestResponsesLoop_StreamedReasoningSurvivesIntoTheNextRequest's.
 func TestResponsesStream_ToolCallsRoundTripBackIntoTheNextRequest(t *testing.T) {
 	r := newStreamRecorder()
 	r.run(t, sse(
