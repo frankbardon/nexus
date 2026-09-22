@@ -10,11 +10,42 @@ import "strings"
 // string parses fine and is handed to the provider, which decides what to do
 // with it. An empty value means "not set" and providers must leave their
 // reasoning configuration untouched.
+//
+// Thinking, Reasoning, Cache and Retry extend that doctrine to whole native
+// blocks: they are the role's copy of the provider's own configuration block,
+// stored as raw maps and forwarded verbatim. Core neither knows nor checks what
+// any inner key means — an unknown one parses and travels, and the provider that
+// owns the vocabulary is the only thing that rejects anything. A nil map means
+// "the role said nothing", which is deliberately distinct from an explicitly
+// empty block (`thinking: {}`), because the two differ once a role block is
+// merged over a plugin-level one.
+//
+// Temperature is a pointer for the same reason: 0.0 is a meaningful sampling
+// temperature, so "unset" cannot be spelled as the zero value.
+//
+// The maps are shallow copies of the parsed config, so a chain entry does not
+// alias the loaded configuration at its top level. Nested values are shared;
+// treat everything reachable through them as read-only.
 type ModelConfig struct {
 	Provider  string `yaml:"provider"`
 	Model     string `yaml:"model"`
 	MaxTokens int    `yaml:"max_tokens"`
 	Effort    string `yaml:"effort"`
+
+	// API names the provider-side API surface this entry wants (e.g. a
+	// provider offering more than one). Opaque to core; empty means "not set".
+	API string `yaml:"api"`
+
+	// Temperature is the sampling temperature. nil means "not set"; providers
+	// must leave their own default alone.
+	Temperature *float64 `yaml:"temperature"`
+
+	// Thinking, Reasoning, Cache and Retry are native provider blocks carried
+	// verbatim. nil means "not set"; an empty non-nil map means "set, empty".
+	Thinking  map[string]any `yaml:"thinking"`
+	Reasoning map[string]any `yaml:"reasoning"`
+	Cache     map[string]any `yaml:"cache"`
+	Retry     map[string]any `yaml:"retry"`
 }
 
 // ModelRegistry resolves model role names to concrete model configurations.
@@ -49,7 +80,52 @@ func parseModelConfig(m map[string]any) ModelConfig {
 	if v, ok := m["effort"].(string); ok {
 		cfg.Effort = v
 	}
+	// api is likewise opaque: which API surface a provider exposes, and what it
+	// calls them, is the provider's business.
+	if v, ok := m["api"].(string); ok {
+		cfg.API = v
+	}
+	// temperature is a pointer so an explicit 0 is distinguishable from unset.
+	// YAML hands an unquoted whole number back as int and a fractional one as
+	// float64, so both spellings have to land here.
+	switch v := m["temperature"].(type) {
+	case float64:
+		t := v
+		cfg.Temperature = &t
+	case int:
+		t := float64(v)
+		cfg.Temperature = &t
+	}
+	// Native provider blocks: stored, never inspected.
+	cfg.Thinking = parseModelBlock(m, "thinking")
+	cfg.Reasoning = parseModelBlock(m, "reasoning")
+	cfg.Cache = parseModelBlock(m, "cache")
+	cfg.Retry = parseModelBlock(m, "retry")
 	return cfg
+}
+
+// parseModelBlock lifts one native provider block off a role map.
+//
+// It returns nil when the key is absent, present-but-null, or present with
+// something that is not a mapping — all of which mean "the role configured
+// nothing here". A present mapping is shallow-copied, so an explicitly empty
+// block survives as an empty non-nil map and a chain entry does not alias the
+// loaded config map at its top level. Contents are never examined: core does not
+// own these vocabularies.
+func parseModelBlock(m map[string]any, key string) map[string]any {
+	raw, ok := m[key]
+	if !ok {
+		return nil
+	}
+	block, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]any, len(block))
+	for k, v := range block {
+		out[k] = v
+	}
+	return out
 }
 
 // NewModelRegistry builds a ModelRegistry from the core.models config section.

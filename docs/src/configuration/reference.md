@@ -638,7 +638,9 @@ special-casing the second attempt.
 
 Maps role names → model configurations. Roles can be:
 
-- **single model** — map with `provider`, `model`, `max_tokens`, `effort`,
+- **single model** — map with `provider`, `model`, `max_tokens`, `effort`, `api`,
+  `temperature` and the native provider blocks `thinking`, `reasoning`, `cache`
+  and `retry`,
 - **fallback chain** — list of single-model maps (tried in order on
   non-retryable error or exhausted retries; coordinated by
   `nexus.provider.fallback`),
@@ -652,6 +654,12 @@ Maps role names → model configurations. Roles can be:
 | `<role>.model`         | string | *(required)* | Model identifier as understood by the provider. |
 | `<role>.max_tokens`    | int    | *(provider default)* | Maximum response tokens. |
 | `<role>.effort`        | string | *(unset)* | Reasoning-depth hint passed verbatim to the provider. The engine performs **no** validation — each provider owns its own vocabulary. Both consuming providers accept the **union** of the two, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and clamp what they cannot express to their own nearest level: Anthropic (native `low`…`max`) clamps `minimal` → `low`; Gemini (native `minimal`…`high`) clamps `xhigh`/`max` → `high`. So **any** of the six works on a role shared between them, including a `fanout` role dispatching to both at once, and a clamp is warned once rather than dropped in silence. A word outside the union is a typo: it is forwarded, and each provider rejects it. **Precedence**, highest first: an `effort` already on the request wins outright — the [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout) coordinators stamp the chain entry they are actually serving onto the outgoing request, so a fallback entry's or a non-first fanout leg's own `effort` reaches the provider serving *that* entry rather than the role's first one. Below that sits the role's own `effort`, and below that the provider-level key — but which of those last two wins is **inverted between the two providers**. Unset means "not set": the provider leaves its own reasoning configuration untouched. **Not consumed by `nexus.llm.openai` at all** — that provider configures reasoning depth on the plugin and has no per-role form. See [Reasoning depth: `effort`](#reasoning-depth-effort) below. |
+| `<role>.api`           | string | *(unset)* | Which of a provider's API surfaces this entry wants, in that provider's own naming. Opaque to the engine — core stores the string and forwards it, exactly as it does `effort`; the provider decides what the word means and what an unrecognised one does. Unset means "not set": the provider uses whatever surface it would have used anyway. Meaningful only on a provider that exposes more than one; see that provider's section. |
+| `<role>.temperature`   | float  | *(unset)* | Sampling temperature for this entry. Written as a number — `0`, `0.2` and `1` all parse, and a whole number is not confused with "unset". **`0` is a real value**, distinct from omitting the key: omitting it leaves the provider's (or the model's) own default alone, whereas `temperature: 0` asks for zero. Core does not range-check it — a provider that refuses the value, as reasoning models generally do, is the thing that rejects it. |
+| `<role>.thinking`      | map    | *(unset)* | The provider's own `thinking` block, carried on this role entry. See [Native provider blocks on a role](#native-provider-blocks-on-a-role) below. |
+| `<role>.reasoning`     | map    | *(unset)* | The provider's own `reasoning` block, carried on this role entry. See [Native provider blocks on a role](#native-provider-blocks-on-a-role) below. |
+| `<role>.cache`         | map    | *(unset)* | The provider's own `cache` block, carried on this role entry. See [Native provider blocks on a role](#native-provider-blocks-on-a-role) below. |
+| `<role>.retry`         | map    | *(unset)* | The provider's own `retry` block, carried on this role entry. See [Native provider blocks on a role](#native-provider-blocks-on-a-role) below. |
 | `<role>.fanout`        | bool   | `false` | If `true`, treat as fanout role; `providers:` list is dispatched in parallel. |
 | `<role>.providers`     | list   | *(required if `fanout: true`)* | List of model configs for fanout dispatch. |
 
@@ -684,6 +692,49 @@ core:
 
 A role missing from `core.models` whose name contains a hyphen is treated as a
 raw model ID with no provider (backward-compat). Otherwise resolution fails.
+
+#### Native provider blocks on a role
+
+`thinking`, `reasoning`, `cache` and `retry` are the provider's **own**
+configuration blocks, written on a role entry instead of (or as well as) on the
+plugin. Their inner keys are exactly the ones documented in that provider's
+section of this page — a role's `thinking:` takes the same keys as
+`nexus.llm.anthropic`'s `thinking:` does.
+
+Core treats them the way it treats [`effort`](#reasoning-depth-effort): it stores
+the block and forwards it, and knows nothing about the contents. No inner key is
+validated, no value is range-checked, no vocabulary is enforced. An inner key no
+provider has ever heard of parses here and travels; the provider that owns the
+block is the only thing that can reject it.
+
+Two consequences worth spelling out:
+
+- **Omitting a block is not the same as writing an empty one.** No `thinking:`
+  key means the role says nothing about thinking. `thinking: {}` means the role
+  set a thinking block that happens to be empty — a statement, not a silence.
+  The two differ wherever a role block meets a plugin-level one.
+- **The blocks belong on an entry, not on a role.** A single-model role, every
+  entry of a fallback chain, and every leg of a `fanout` `providers:` list parse
+  identically, so a chain's second entry configures its own provider rather than
+  inheriting the first entry's words. A `fanout` role map itself carries no
+  blocks — same rule as `effort`.
+
+```yaml
+core:
+  models:
+    reasoning:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+      api: messages
+      temperature: 0            # a real value; omitting the key is "unset"
+      thinking:
+        mode: budget
+        budget_tokens: 8192
+      cache:
+        enabled: true
+      retry:
+        max_attempts: 2
+```
 
 #### Reasoning depth: `effort`
 
