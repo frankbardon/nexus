@@ -92,6 +92,9 @@ func newFilesTestPlugin(t *testing.T, handler http.Handler) (*Plugin, *httptest.
 		logger:      silentLogger(),
 		filesAPIURL: srv.URL,
 		fileCache:   newFileCache(),
+		// What parseMultimodalConfig produces for a deployment that declares
+		// no multimodal: block — vision on, detail auto.
+		multimodal: multimodalConfig{Vision: true, DefaultImageDetail: "auto"},
 	}
 	return p, srv
 }
@@ -221,7 +224,7 @@ func TestPreuploadParts_FilePart_Uploaded(t *testing.T) {
 			{Type: "file", MimeType: "application/pdf", Data: original},
 		}},
 	}
-	out, err := p.preuploadParts(context.Background(), msgs)
+	out, err := p.preuploadParts(context.Background(), msgs, apiChatCompletions)
 	if err != nil {
 		t.Fatalf("preuploadParts failed: %v", err)
 	}
@@ -256,7 +259,7 @@ func TestPreuploadParts_FilePart_URIOnly(t *testing.T) {
 	msgs := []events.Message{{Role: "user", Parts: []events.MessagePart{
 		{Type: "file", MimeType: "application/pdf", URI: "https://example.com/x.pdf"},
 	}}}
-	_, err := p.preuploadParts(context.Background(), msgs)
+	_, err := p.preuploadParts(context.Background(), msgs, apiChatCompletions)
 	if err == nil {
 		t.Fatal("expected error for URI-only file part")
 	}
@@ -265,8 +268,10 @@ func TestPreuploadParts_FilePart_URIOnly(t *testing.T) {
 	}
 }
 
-// TestPreuploadParts_ImagePart_NotUploaded asserts that even oversize image
-// parts are skipped — chat completions image_url doesn't accept file_ids.
+// TestPreuploadParts_ImagePart_NotUploaded asserts that an oversize image part
+// is skipped on the CHAT surface — its image_url type accepts no file_id, so
+// uploading there would only lose the bytes. The Responses counterpart, where
+// the same part IS uploaded, is TestPreuploadParts_ImagePart_UploadedOnResponses.
 func TestPreuploadParts_ImagePart_NotUploaded(t *testing.T) {
 	var calls int32
 	mux := http.NewServeMux()
@@ -281,7 +286,7 @@ func TestPreuploadParts_ImagePart_NotUploaded(t *testing.T) {
 	msgs := []events.Message{{Role: "user", Parts: []events.MessagePart{
 		{Type: "image", MimeType: "image/png", Data: make([]byte, 10)},
 	}}}
-	out, err := p.preuploadParts(context.Background(), msgs)
+	out, err := p.preuploadParts(context.Background(), msgs, apiChatCompletions)
 	if err != nil {
 		t.Fatalf("preuploadParts failed: %v", err)
 	}
@@ -310,7 +315,7 @@ func TestPreuploadParts_FileIDPassthrough(t *testing.T) {
 	msgs := []events.Message{{Role: "user", Parts: []events.MessagePart{
 		{Type: "file", FileID: "file-existing", Data: make([]byte, 10)},
 	}}}
-	out, err := p.preuploadParts(context.Background(), msgs)
+	out, err := p.preuploadParts(context.Background(), msgs, apiChatCompletions)
 	if err != nil {
 		t.Fatalf("preuploadParts failed: %v", err)
 	}
@@ -342,11 +347,11 @@ func TestPreuploadParts_CacheHit(t *testing.T) {
 		}}}
 	}
 
-	out1, err := p.preuploadParts(context.Background(), mk())
+	out1, err := p.preuploadParts(context.Background(), mk(), apiChatCompletions)
 	if err != nil {
 		t.Fatalf("first preuploadParts: %v", err)
 	}
-	out2, err := p.preuploadParts(context.Background(), mk())
+	out2, err := p.preuploadParts(context.Background(), mk(), apiChatCompletions)
 	if err != nil {
 		t.Fatalf("second preuploadParts: %v", err)
 	}
@@ -372,7 +377,7 @@ func TestPreuploadParts_Disabled(t *testing.T) {
 	msgs := []events.Message{{Role: "user", Parts: []events.MessagePart{
 		{Type: "file", MimeType: "application/pdf", Data: make([]byte, 10)},
 	}}}
-	out, err := p.preuploadParts(context.Background(), msgs)
+	out, err := p.preuploadParts(context.Background(), msgs, apiChatCompletions)
 	if err != nil {
 		t.Fatalf("preuploadParts failed: %v", err)
 	}

@@ -19,13 +19,63 @@ func newTestPlugin(cfg multimodalConfig) *Plugin {
 }
 
 func TestParseMultimodalConfig_Defaults(t *testing.T) {
-	mc := parseMultimodalConfig(nil)
-	if mc.DefaultImageDetail != "auto" {
-		t.Errorf("expected default detail 'auto', got %q", mc.DefaultImageDetail)
+	for _, cfg := range []map[string]any{nil, {}, {"multimodal": map[string]any{}}} {
+		mc := parseMultimodalConfig(cfg)
+		if mc.DefaultImageDetail != "auto" {
+			t.Errorf("expected default detail 'auto', got %q", mc.DefaultImageDetail)
+		}
+		// Vision defaults ON: an absent multimodal block must not silently
+		// turn a sighted deployment blind.
+		if !mc.Vision {
+			t.Errorf("expected vision=true by default, got false")
+		}
 	}
-	mc = parseMultimodalConfig(map[string]any{})
-	if mc.DefaultImageDetail != "auto" {
-		t.Errorf("expected default detail 'auto', got %q", mc.DefaultImageDetail)
+}
+
+// vision: false is the only way to turn images off, and it must survive the
+// parse rather than being overwritten by the default.
+func TestParseMultimodalConfig_VisionOff(t *testing.T) {
+	mc := parseMultimodalConfig(map[string]any{
+		"multimodal": map[string]any{"vision": false},
+	})
+	if mc.Vision {
+		t.Error("expected vision=false to be honoured")
+	}
+}
+
+// With vision off the image part is dropped from the chat content array and
+// the rest of the message survives.
+func TestBuildContentParts_VisionOffDropsImages(t *testing.T) {
+	msg := events.Message{Role: "user", Content: "look", Parts: []events.MessagePart{
+		{Type: "image", MimeType: "image/png", Data: []byte{1, 2, 3}},
+		{Type: "text", Text: "and read"},
+	}}
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: false, DefaultImageDetail: "auto"})
+	if err != nil {
+		t.Fatalf("buildContentParts: %v", err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (the two texts), got %d: %v", len(parts), parts)
+	}
+	for _, p := range parts {
+		if p["type"] != "text" {
+			t.Errorf("expected only text parts with vision off, got %v", p["type"])
+		}
+	}
+}
+
+// An image-only message with vision off has nothing left to serialize, so it
+// must fall back to the plain string rather than send an empty content array.
+func TestBuildContentParts_VisionOffImageOnlyFallsBack(t *testing.T) {
+	msg := events.Message{Role: "user", Parts: []events.MessagePart{
+		{Type: "image", MimeType: "image/png", Data: []byte{1, 2, 3}},
+	}}
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: false, DefaultImageDetail: "auto"})
+	if err != nil {
+		t.Fatalf("buildContentParts: %v", err)
+	}
+	if parts != nil {
+		t.Fatalf("expected nil (string fallback), got %v", parts)
 	}
 }
 
@@ -56,7 +106,7 @@ func TestParseMultimodalConfig_InvalidFallback(t *testing.T) {
 }
 
 func TestBuildContentParts_EmptyParts(t *testing.T) {
-	parts, err := buildContentParts(events.Message{Content: "hello"}, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(events.Message{Content: "hello"}, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,7 +119,7 @@ func TestBuildContentParts_TextPart(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "text", Text: "first"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -86,7 +136,7 @@ func TestBuildContentParts_TextPart_WithContentPrefix(t *testing.T) {
 		Content: "leading",
 		Parts:   []events.MessagePart{{Type: "text", Text: "follow-up"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +152,7 @@ func TestBuildContentParts_ImageURI(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "image", URI: "https://example.com/cat.png"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "high"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "high"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,7 +180,7 @@ func TestBuildContentParts_ImageDataInline(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "image", Data: data, MimeType: "image/png"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +205,7 @@ func TestBuildContentParts_ImageDataTooLarge(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "image", Data: data, MimeType: "image/png"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for oversized image, got nil")
 	}
@@ -168,7 +218,7 @@ func TestBuildContentParts_ImageDataMissingMime(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "image", Data: []byte{1, 2, 3}}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for missing mime_type, got nil")
 	}
@@ -181,7 +231,7 @@ func TestBuildContentParts_ImageFileIDRejected(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "image", FileID: "file-abc"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for image with FileID, got nil")
 	}
@@ -195,7 +245,7 @@ func TestBuildContentParts_AudioWAV(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "audio", Data: data, MimeType: "audio/wav"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +271,7 @@ func TestBuildContentParts_AudioMP3(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "audio", Data: []byte{0xFF, 0xFB}, MimeType: "audio/mpeg"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -235,7 +285,7 @@ func TestBuildContentParts_AudioUnsupportedMime(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "audio", Data: []byte{0}, MimeType: "audio/ogg"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for unsupported audio mime, got nil")
 	}
@@ -245,7 +295,7 @@ func TestBuildContentParts_AudioMissingData(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "audio", MimeType: "audio/wav"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for missing audio data, got nil")
 	}
@@ -255,7 +305,7 @@ func TestBuildContentParts_AudioMissingMime(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "audio", Data: []byte{1}}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for missing audio mime, got nil")
 	}
@@ -265,7 +315,7 @@ func TestBuildContentParts_FileWithFileID(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "file", FileID: "file-abc123"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,7 +337,7 @@ func TestBuildContentParts_FileWithDataInline(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "file", Data: data, MimeType: "application/pdf"}},
 	}
-	parts, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	parts, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -316,7 +366,7 @@ func TestBuildContentParts_FileWithDataMissingMime(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "file", Data: []byte{1, 2}}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for missing mime_type on inline file, got nil")
 	}
@@ -326,7 +376,7 @@ func TestBuildContentParts_FileWithURIRejected(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "file", URI: "https://example.com/x.pdf"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for file URI, got nil")
 	}
@@ -336,7 +386,7 @@ func TestBuildContentParts_FileEmpty(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "file"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for empty file part, got nil")
 	}
@@ -346,7 +396,7 @@ func TestBuildContentParts_VideoRejected(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "video", URI: "https://example.com/v.mp4", MimeType: "video/mp4"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for video part, got nil")
 	}
@@ -356,14 +406,14 @@ func TestBuildContentParts_UnknownTypeRejected(t *testing.T) {
 	msg := events.Message{
 		Parts: []events.MessagePart{{Type: "hologram"}},
 	}
-	_, err := buildContentParts(msg, multimodalConfig{DefaultImageDetail: "auto"})
+	_, err := buildContentParts(msg, multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	if err == nil {
 		t.Fatal("expected error for unknown type, got nil")
 	}
 }
 
 func TestConvertMessage_UserWithImagePart(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{
 		Role:    "user",
 		Content: "what's in this picture?",
@@ -391,7 +441,7 @@ func TestConvertMessage_UserWithImagePart(t *testing.T) {
 }
 
 func TestConvertMessage_UserNoParts_FallbackString(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{Role: "user", Content: "hi"}
 	apiMsg := p.convertMessage(msg)
 	if apiMsg["content"] != "hi" {
@@ -400,7 +450,7 @@ func TestConvertMessage_UserNoParts_FallbackString(t *testing.T) {
 }
 
 func TestConvertMessage_ToolWithImagePart(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{
 		Role:       "tool",
 		ToolCallID: "call_123",
@@ -429,7 +479,7 @@ func TestConvertMessage_ToolWithImagePart(t *testing.T) {
 }
 
 func TestConvertMessage_ToolNoParts_FallbackString(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{Role: "tool", ToolCallID: "call_x", Content: "ok"}
 	apiMsg := p.convertMessage(msg)
 	if apiMsg["content"] != "ok" {
@@ -438,7 +488,7 @@ func TestConvertMessage_ToolNoParts_FallbackString(t *testing.T) {
 }
 
 func TestConvertMessage_AssistantWithParts(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{
 		Role:    "assistant",
 		Content: "here you go",
@@ -457,7 +507,7 @@ func TestConvertMessage_AssistantWithParts(t *testing.T) {
 }
 
 func TestConvertMessage_UserBadPart_FallbackToText(t *testing.T) {
-	p := newTestPlugin(multimodalConfig{DefaultImageDetail: "auto"})
+	p := newTestPlugin(multimodalConfig{Vision: true, DefaultImageDetail: "auto"})
 	msg := events.Message{
 		Role:    "user",
 		Content: "fallback text",

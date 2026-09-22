@@ -111,22 +111,44 @@ func (p *Plugin) buildResponsesBody(model string, maxTokens int, req events.LLMR
 // and one with tool calls and no text becomes only the `function_call` ones —
 // an empty message Item is not a thing the API accepts.
 //
-// Content is text-only here. events.MessagePart multimodal content serializes
-// into `input_image` / `input_file` content parts, which is E4-S4's story; this
-// is the one place that grows when it lands.
+// Content is a plain string on every Item that carries no events.MessagePart,
+// and only becomes a typed content-parts array when parts are present. That is
+// deliberate rather than an unfinished half: the API accepts both, the string
+// is the shape the overwhelming majority of turns have, and restructuring a
+// text-only conversation into one-element arrays would make every captured
+// request body harder to read for no behavioural gain. The array shapes live in
+// responses_multimodal.go.
+//
+// A part that cannot be serialized degrades to the string Content with a
+// warning rather than failing the turn — the same contract convertMessage makes
+// on the chat path, for the same reason: the messages an agent loop assembles
+// are not the operator's to fix mid-turn.
 func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 	var items []map[string]any
 	for _, msg := range msgs {
 		switch msg.Role {
 		case "tool":
-			items = append(items, map[string]any{
+			// A tool result is `output`, which is a string in the ordinary
+			// case and a content-parts array when the tool returned images or
+			// files — the Responses counterpart of the chat path's
+			// multimodal `role: tool` message.
+			item := map[string]any{
 				"type":    "function_call_output",
 				"call_id": msg.ToolCallID,
 				"output":  msg.Content,
-			})
+			}
+			if parts := p.responsesParts(msg); parts != nil {
+				item["output"] = parts
+			}
+			items = append(items, item)
 
 		case "assistant":
-			if msg.Content != "" {
+			if parts := p.responsesParts(msg); parts != nil {
+				items = append(items, map[string]any{
+					"role":    "assistant",
+					"content": parts,
+				})
+			} else if msg.Content != "" {
 				items = append(items, map[string]any{
 					"role":    "assistant",
 					"content": msg.Content,
@@ -155,23 +177,48 @@ func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 			// top-level `instructions` field: hoisting would reorder it
 			// relative to the rest of the conversation, and Nexus composes
 			// system content from several plugins that expect their position.
-			content := msg.Content
+			decorated := msg
 			if p.prompts != nil {
-				content = p.prompts.Apply(content)
+				decorated.Content = p.prompts.Apply(msg.Content)
 			}
-			items = append(items, map[string]any{
+			item := map[string]any{
 				"role":    "system",
-				"content": content,
-			})
+				"content": decorated.Content,
+			}
+			if parts := p.responsesParts(decorated); parts != nil {
+				item["content"] = parts
+			}
+			items = append(items, item)
 
 		default:
-			items = append(items, map[string]any{
+			item := map[string]any{
 				"role":    msg.Role,
 				"content": msg.Content,
-			})
+			}
+			if parts := p.responsesParts(msg); parts != nil {
+				item["content"] = parts
+			}
+			items = append(items, item)
 		}
 	}
 	return items
+}
+
+// responsesParts serializes a message's multimodal parts, or returns nil when
+// there is nothing to serialize — no parts, every part suppressed by
+// `multimodal.vision: false`, or a part this surface cannot carry. The last
+// case is logged and degraded rather than propagated: a malformed image must
+// not cost the turn.
+func (p *Plugin) responsesParts(msg events.Message) []map[string]any {
+	parts, err := buildResponsesContentParts(msg, p.multimodal)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("openai: failed to build Responses content parts; falling back to text",
+				"role", msg.Role, "error", err)
+		}
+		return nil
+	}
+	return parts
 }
 
 // responsesTools converts tool definitions into the Responses API's flattened

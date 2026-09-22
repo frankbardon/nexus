@@ -48,7 +48,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "vision": {"type": "boolean"}
+        "vision":               {"type": "boolean", "description": "Allow image parts onto the wire. false drops them from every request on both API surfaces and skips uploading them."},
+        "default_image_detail": {"type": "string", "enum": ["auto", "low", "high"], "description": "Image fidelity requested for every image part."}
       }
     },
     "retry": {

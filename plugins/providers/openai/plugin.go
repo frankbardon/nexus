@@ -433,13 +433,19 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
-	// Files API preflight: when enabled, upload file-type Data parts and
+	// Exactly one surface per request, resolved once here: it chooses the
+	// endpoint, the serializer, and — because only `input_image` can reference
+	// an uploaded image — which parts the Files preflight is allowed to
+	// upload. Nothing downstream reconsiders it.
+	api := p.resolveAPI(req)
+
+	// Files API preflight: when enabled, upload eligible Data parts and
 	// swap in the returned file_id before serializing the request body. We
 	// replace req.Messages locally (not via mutation) — the caller's slice
 	// stays untouched.
 	preflightCtx, preflightCancel := context.WithCancel(context.Background())
 	if p.files.Enabled {
-		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
+		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages, api)
 		if err != nil {
 			preflightCancel()
 			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: files preflight failed: %w", err),
@@ -451,10 +457,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		req.Messages = newMsgs
 	}
 	preflightCancel()
-
-	// Exactly one surface per request, resolved once here: it chooses both the
-	// endpoint and the serializer, and nothing downstream reconsiders it.
-	api := p.resolveAPI(req)
 
 	endpoint, err := p.auth.resolveEndpoint(api)
 	if err != nil {

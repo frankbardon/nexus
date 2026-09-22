@@ -245,8 +245,8 @@ through from the `default` role to a named one. Exactly one endpoint is chosen
 per request, from those two and nothing else.
 
 `api: responses` is **not usable yet**: the selector, the request serializer,
-the non-streaming reply parser and the SSE reader ship ahead of the multimodal
-Item shapes and the endpoint builder, so declaring it — on the plugin or on a
+the non-streaming reply parser, the SSE reader and the multimodal Item shapes
+ship ahead of the endpoint builder, so declaring it — on the plugin or on a
 role — still fails `Init` naming the release it lands in. A surface with no
 endpoint builder has no URL to post to.
 
@@ -259,6 +259,25 @@ of Items, tool calls and their results become sibling `function_call` /
 `summary`. Nexus sends `store: false` on every Responses request — it keeps its
 own history — and writes `strict: false` explicitly on every tool definition,
 because on that surface an *absent* `strict` attempts strict mode.
+
+Multimodal content is carried on both surfaces, in each one's own spelling —
+flipping `api:` costs no capability. A message's `parts` become an
+`input_text` / `input_image` / `input_file` content array on an input Item and
+`output_text` on an assistant one, against the chat surface's
+`text` / `image_url` / `file`; a tool result that returned images puts the same
+array on the Item's `output`. Items with **no** parts keep the plain string
+content the API also accepts, so an ordinary text turn is not restructured into
+one-element arrays.
+
+Two things genuinely differ rather than being renamed. `input_image` carries a
+`file_id`, which the chat surface's `image_url` cannot — so on `responses` an
+inline image at or over [`files.upload_threshold`](../../configuration/reference.md#nexusllmopenai)
+is uploaded through the Files API and referenced by id, while on
+`chat_completions` an oversize image is still an error. And an assistant Item
+accepts only text, so a non-text part on an assistant message degrades to that
+message's plain string rather than failing the turn — the same degradation the
+chat path makes for a malformed part. `multimodal.vision: false` drops image
+parts on **both** surfaces, and skips uploading them.
 
 The reply differs just as much — an `output` array of typed Items rather than a
 `choices[0].message` — but what lands on `llm.response` does not: text is the
