@@ -57,6 +57,7 @@ type Plugin struct {
 	retry             retryConfig
 	cache             cacheConfig
 	thinking          thinkingConfig
+	outputConfig      outputConfig
 	multimodal        multimodalConfig
 	files             filesConfig
 	citations         citationsConfig
@@ -156,6 +157,19 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"budget_tokens", p.thinking.BudgetTokens,
 			"display", string(p.thinking.Display),
 			"include_thoughts", p.thinking.IncludeThoughts,
+		)
+	}
+
+	// Reasoning depth. Independent of thinking.mode — effort is emitted
+	// whatever the thinking configuration is, including mode: off.
+	outputCfg, err := parseOutputConfig(ctx.Config)
+	if err != nil {
+		return err
+	}
+	p.outputConfig = outputCfg
+	if p.outputConfig.Effort != effortUnset {
+		p.logger.Debug("output_config effort configured",
+			"effort", string(p.outputConfig.Effort),
 		)
 	}
 
@@ -626,6 +640,10 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// configured policy. No-op when caching is disabled.
 	applyCacheControl(body, p.cache, p.logger)
 
+	// Reasoning depth, merged into `output_config`. Runs last so it folds into
+	// whatever else has written that object rather than racing it.
+	applyEffort(body, p.resolveEffort(req))
+
 	// Bedrock/Vertex want anthropic_version inside the body (the direct API
 	// uses an HTTP header instead). Bedrock additionally rejects bodies that
 	// carry the model field — the model id lives in the URL path there.
@@ -639,6 +657,17 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	}
 
 	return body
+}
+
+// resolveEffort picks the reasoning-depth level for one request.
+//
+// This is the single lookup point for effort, deliberately separate from its
+// use site. Today the only source is the provider-level `output_config.effort`
+// key; a per-role override layers in here, taking precedence over the
+// provider-level value when the resolved role carries one, without any other
+// part of the body builder changing.
+func (p *Plugin) resolveEffort(_ events.LLMRequest) effortLevel {
+	return p.outputConfig.Effort
 }
 
 // convertMessage converts an events.Message to the Anthropic API format.

@@ -1276,7 +1276,7 @@ All providers share the same retry block schema (see "Retry" subtable below).
 ### `nexus.llm.anthropic`
 
 Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
-`cache.go`, `thinking.go`, `multimodal.go`, `citations.go`,
+`cache.go`, `thinking.go`, `effort.go`, `multimodal.go`, `citations.go`,
 `structured_outputs.go`, `files.go`, `retry.go`.
 
 | Key                                | Type   | Default             | Description |
@@ -1307,6 +1307,7 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
 | `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
 | `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
+| `output_config.effort`             | string | *(unset — the API default, `high`)* | Reasoning depth: `low`, `medium`, `high`, `xhigh` or `max`. Emitted as `output_config: {"effort": "..."}` — **nested, never a top-level request field**. Unset adds no `output_config` key at all. **Independent of `thinking.mode`**: emitted whatever the thinking configuration is, including `mode: off`. An unknown value fails at `Init`. See "Effort" below. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
 | `citations.enabled`                | bool   | `false`             | Enable citations on document blocks. |
 | `structured_outputs.mode`          | string | `tool`              | `tool` (synthetic tool) or `native` (`response_format`). |
@@ -1411,6 +1412,46 @@ under `adaptive`, `budget` and `disabled`, and never under `off`, which sends no
 `thinking` object at all. The inference is limited to the two modes that
 actually think; under `disabled` there is no reasoning to display, so only an
 explicit `display` reaches the wire there.
+
+#### Effort
+
+`output_config.effort` is the named reasoning-depth control that replaced
+`thinking.budget_tokens` on the current model families. It accepts `low`,
+`medium`, `high`, `xhigh` and `max`, and goes on the wire nested inside
+`output_config`:
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: xhigh
+```
+
+```json
+{"model": "...", "output_config": {"effort": "xhigh"}}
+```
+
+The block is spelled to mirror the wire object, which also carries `format`
+(structured outputs) and, in beta, `task_budget`. Nexus **merges** into that
+object rather than assigning over it, so effort and a future `format` emission
+coexist.
+
+**`effort` is independent of `thinking.mode`.** It is emitted whatever the
+thinking configuration is, `mode: off` included — depth governs how hard the
+model works on the answer, `mode` governs whether thinking blocks come back.
+The two are set separately and neither implies the other.
+
+Unset is not `high`: unset sends no `effort` key and no `output_config` object,
+which the API then defaults to `high`. The distinction matters only in that an
+absent key is forward-compatible with a default Anthropic may change.
+
+As with `thinking.mode`, **the provider never inspects the model id**, and not
+every model accepts every level. Opus 4.6 and Sonnet 4.6 accept
+`low`/`medium`/`high`/`max` but **not** `xhigh`; Opus 4.5 accepts
+`low`/`medium`/`high` only; Sonnet 4.5 and Haiku 4.5 reject `effort` outright.
+A level the target model does not accept is an Anthropic HTTP 400 that the
+operator owns. An unknown value — one outside the five — is caught locally and
+fails at `Init` naming the accepted set.
 
 #### Retry block (shared by all providers)
 
