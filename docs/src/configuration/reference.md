@@ -1307,7 +1307,8 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
 | `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
 | `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
-| `output_config.effort`             | string | *(unset — the API default, `high`)* | Reasoning depth: `low`, `medium`, `high`, `xhigh` or `max`. Emitted as `output_config: {"effort": "..."}` — **nested, never a top-level request field**. Unset adds no `output_config` key at all. **Independent of `thinking.mode`**: emitted whatever the thinking configuration is, including `mode: off`. An unknown value fails at `Init`. See "Effort" below. |
+| `output_config.effort`             | string | *(unset — the API default, `high`)* | Reasoning depth: `low`, `medium`, `high`, `xhigh` or `max`. Emitted as `output_config: {"effort": "..."}` — **nested, never a top-level request field**. Unset adds no `output_config` key at all. **Independent of `thinking.mode`**: emitted whatever the thinking configuration is, including `mode: off`. An unknown value fails at `Init`. This is the **default**, not the last word: a [`core.models`](#coremodels) role's `effort` overrides it per request — see the row below. See "Effort" below. |
+| *(role `effort`)*                  | string | *(unset)*           | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `output_config.effort` in the same vocabulary, unchanged. It **wins over** the plugin-level `output_config.effort` above. That is deliberately the **inverse** of Gemini, where `thinking.level` beats a role's effort: there `level` is the native vocabulary and effort the translated one, whereas here both speak the same words, so the more specific setting wins. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` without touching the rest — and an effort already on the request (stamped by the fallback or fanout coordinator for the chain entry actually being served) wins over both. A value outside the five **fails the request**, emitting `core.error` naming the role and the accepted set; unlike the plugin key it cannot fail at `Init`, because a role's value only exists per request. Notably, Gemini's `minimal` is not in this vocabulary — see "Per-role effort" below. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
 | `citations.enabled`                | bool   | `false`             | Enable citations on document blocks. |
 | `structured_outputs.mode`          | string | `tool`              | `tool` (synthetic tool) or `native` (`response_format`). |
@@ -1452,6 +1453,56 @@ every model accepts every level. Opus 4.6 and Sonnet 4.6 accept
 A level the target model does not accept is an Anthropic HTTP 400 that the
 operator owns. An unknown value — one outside the five — is caught locally and
 fails at `Init` naming the accepted set.
+
+#### Per-role effort
+
+A [`core.models`](#coremodels) role may carry its own `effort:`, and it reaches
+this provider in the same vocabulary, unchanged:
+
+```yaml
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+      effort: max            # this role thinks hard
+
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: low            # every other role's default
+```
+
+**The role wins.** A request on `deep` sends `{"effort": "max"}`; a request on
+any role without its own `effort` sends `{"effort": "low"}`; with neither set
+nothing is emitted and the API default applies.
+
+That precedence is the **inverse of Gemini's**, where the plugin-level
+`thinking.level` beats a role's `effort`. The inversion is deliberate, not an
+oversight: on Gemini `level` is the native vocabulary and `effort` a translated
+one, so the native setting wins; here both speak the same five words, so the
+more specific one does.
+
+Resolution follows the same branches as `max_tokens`, so the role's effort is
+found whether the role is named directly, comes from the default role, or has
+to be recovered late because a router rewrote `model` without touching the
+rest. An effort **already on the request** wins over all of them: the fallback
+and fanout coordinators stamp the chain entry they are actually serving onto
+the outgoing request, and only that value is correct for a fallback entry or a
+non-first fanout leg.
+
+Because `core.models` deliberately performs no validation — the vocabularies
+differ per provider — this provider validates per request, and an unusable
+value **fails that request** with a `core.error` naming the role and the
+accepted set rather than being silently dropped. The case to watch is a
+`fanout` role spanning Anthropic and Gemini: Gemini clamps `xhigh`/`max` down
+to `high`, but Gemini's `minimal` is not in Anthropic's vocabulary, so a role
+set to `minimal` fails on the Anthropic leg. Pick a value both accept
+(`low`, `medium`, `high`) for a shared role.
 
 #### Retry block (shared by all providers)
 

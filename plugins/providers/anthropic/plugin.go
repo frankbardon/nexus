@@ -296,6 +296,123 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 	}
 }
 
+// resolvedTarget is everything one request needs that comes from resolving its
+// role against `core.models`: the concrete model, the max_tokens ceiling, and
+// the reasoning-depth hint.
+//
+// The three are resolved together because they come off the same ModelConfig on
+// the same branches. Effort deliberately rides along with max_tokens rather
+// than getting a resolution pass of its own — the branches below exist for
+// documented reasons and a parallel structure would drift out of step with them.
+type resolvedTarget struct {
+	model     string
+	maxTokens int
+
+	// effort is the raw, still-unvalidated reasoning-depth hint, and
+	// effortSource names where it came from so a bad value can be reported
+	// against its origin. Core does no validation of either, by design: the
+	// vocabularies differ per provider, so each provider owns its own.
+	effort       string
+	effortSource string
+
+	// skip is set when the resolved role names some other provider, in which
+	// case this plugin must not answer the request at all.
+	skip bool
+}
+
+// resolveTarget turns a request's Model/Role into the concrete model,
+// max_tokens and effort the API call will carry.
+func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
+	t := resolvedTarget{
+		model:     req.Model,
+		maxTokens: req.MaxTokens,
+
+		// An effort already on the request wins over anything the registry
+		// says. The fallback and fanout coordinators copy the chain entry they
+		// are actually serving onto the outgoing request, and only that field
+		// is correct for a fallback entry or a non-first fanout entry — a
+		// Resolve() here always reads chain[0]. The branches below therefore
+		// only fill in a value the request arrived without.
+		effort:       req.Effort,
+		effortSource: effortSourceLabel(req.Role),
+	}
+
+	// Resolve model role if no explicit model is set.
+	if t.model == "" && p.models != nil {
+		if cfg, ok := p.models.Resolve(req.Role); ok {
+			// If the resolved config targets a different provider, skip this request.
+			if cfg.Provider != "" && cfg.Provider != pluginID {
+				t.skip = true
+				return t
+			}
+			if cfg.Model != "" {
+				t.model = cfg.Model
+			}
+			if t.maxTokens == 0 && cfg.MaxTokens > 0 {
+				t.maxTokens = cfg.MaxTokens
+			}
+			if t.effort == "" {
+				t.effort = cfg.Effort
+			}
+		}
+	}
+
+	// Fall back to default model role.
+	if t.model == "" && p.models != nil {
+		def := p.models.Default()
+		if def.Provider == "" || def.Provider == pluginID {
+			t.model = def.Model
+			if t.maxTokens == 0 {
+				t.maxTokens = def.MaxTokens
+			}
+			if t.effort == "" && def.Effort != "" {
+				t.effort = def.Effort
+				t.effortSource = defaultRoleEffortSource
+			}
+		}
+	}
+
+	// max_tokens may still be 0 — common when the router (idea 09) rewrote
+	// req.Model to a concrete id without touching MaxTokens, so the
+	// model-resolution branches above were skipped. Try the role's
+	// max_tokens, then the default role's, then a safe constant. The
+	// Anthropic API rejects max_tokens=0 with "stream cannot be true when
+	// max tokens is 0", so we must never let that through.
+	//
+	// Effort needs the same recovery for the same reason: a rewritten
+	// req.Model skips the branches above, and an effort dropped there would be
+	// dropped silently. It has no equivalent of defaultMaxTokens — an unset
+	// effort is a valid state that emits no `effort` key at all, leaving the
+	// provider-level `output_config.effort` (and below that the API default)
+	// to apply.
+	if t.maxTokens == 0 && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
+			t.maxTokens = cfg.MaxTokens
+		}
+	}
+	if t.effort == "" && p.models != nil && req.Role != "" {
+		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.Effort != "" {
+			t.effort = cfg.Effort
+		}
+	}
+	if t.maxTokens == 0 && p.models != nil {
+		if def := p.models.Default(); def.MaxTokens > 0 {
+			t.maxTokens = def.MaxTokens
+		}
+	}
+	if t.effort == "" && p.models != nil {
+		if def := p.models.Default(); def.Effort != "" {
+			t.effort = def.Effort
+			t.effortSource = defaultRoleEffortSource
+		}
+	}
+	if t.maxTokens == 0 {
+		t.maxTokens = defaultMaxTokens
+	}
+
+	return t
+}
+
 func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// If a specific provider is targeted (e.g. by fallback plugin), skip
 	// if it's not us.
@@ -332,57 +449,33 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	p.liveCalls.Add(1)
 
-	model := req.Model
-	maxTokens := req.MaxTokens
+	target := p.resolveTarget(req)
+	if target.skip {
+		return
+	}
+	model, maxTokens := target.model, target.maxTokens
 
-	// Resolve model role if no explicit model is set.
-	if model == "" && p.models != nil {
-		if cfg, ok := p.models.Resolve(req.Role); ok {
-			// If the resolved config targets a different provider, skip this request.
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				return
-			}
-			if cfg.Model != "" {
-				model = cfg.Model
-			}
-			if maxTokens == 0 && cfg.MaxTokens > 0 {
-				maxTokens = cfg.MaxTokens
-			}
+	// A role's effort arrives per request, so — unlike the provider-level
+	// `output_config.effort` key, which parseOutputConfig checks at Init — it
+	// can only be validated here. Fail the whole request rather than drop the
+	// value: a silently ignored reasoning-depth setting is precisely the trap
+	// this key exists to avoid, and it would be invisible in the response.
+	if target.effort != "" {
+		if _, err := validateEffort(target.effort); err != nil {
+			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion,
+				Err:         fmt.Errorf("%s: %w", target.effortSource, err),
+				Retryable:   false,
+				RequestMeta: req.Metadata,
+			})
+			return
 		}
 	}
+	// Carry the resolved level on the request copy so resolveEffort — the
+	// single lookup point the body builder calls — sees it. req is a value
+	// parameter, so the caller's payload is untouched.
+	req.Effort = target.effort
 
-	// Fall back to default model role.
-	if model == "" && p.models != nil {
-		def := p.models.Default()
-		if def.Provider == "" || def.Provider == pluginID {
-			model = def.Model
-			if maxTokens == 0 {
-				maxTokens = def.MaxTokens
-			}
-		}
-	}
-
-	// max_tokens may still be 0 — common when the router (idea 09) rewrote
-	// req.Model to a concrete id without touching MaxTokens, so the
-	// model-resolution branches above were skipped. Try the role's
-	// max_tokens, then the default role's, then a safe constant. The
-	// Anthropic API rejects max_tokens=0 with "stream cannot be true when
-	// max tokens is 0", so we must never let that through.
-	if maxTokens == 0 && p.models != nil && req.Role != "" {
-		if cfg, ok := p.models.Resolve(req.Role); ok && cfg.MaxTokens > 0 {
-			maxTokens = cfg.MaxTokens
-		}
-	}
-	if maxTokens == 0 && p.models != nil {
-		if def := p.models.Default(); def.MaxTokens > 0 {
-			maxTokens = def.MaxTokens
-		}
-	}
-	if maxTokens == 0 {
-		maxTokens = defaultMaxTokens
-	}
-
-	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
+	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", target.effort)
 
 	// Files API preflight: when enabled, swap oversize Data parts for file_ids
 	// before serializing the request body. We replace req.Messages locally
@@ -662,11 +755,26 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 // resolveEffort picks the reasoning-depth level for one request.
 //
 // This is the single lookup point for effort, deliberately separate from its
-// use site. Today the only source is the provider-level `output_config.effort`
-// key; a per-role override layers in here, taking precedence over the
-// provider-level value when the resolved role carries one, without any other
-// part of the body builder changing.
-func (p *Plugin) resolveEffort(_ events.LLMRequest) effortLevel {
+// use site. The role's value wins: req.Effort carries whatever resolveTarget
+// settled on — the value a fallback or fanout coordinator stamped for the chain
+// entry being served, else the `core.models` role's own `effort:` — and the
+// provider-level `output_config.effort` key is the default it overrides.
+//
+// That precedence is the inverse of Gemini's, where the plugin-level
+// `thinking.level` beats a role's effort. The inversion is deliberate and not a
+// mistake to "fix": on Gemini `level` is the native vocabulary and effort the
+// translated one, whereas here both speak the same words.
+//
+// An invalid req.Effort is unreachable through handleRequest, which validates
+// and fails the request before a body is ever built. The check is kept so a
+// direct buildRequestBody caller degrades to the configured default instead of
+// putting a value Anthropic will 400 on onto the wire.
+func (p *Plugin) resolveEffort(req events.LLMRequest) effortLevel {
+	if req.Effort != "" {
+		if lvl, err := validateEffort(req.Effort); err == nil {
+			return lvl
+		}
+	}
 	return p.outputConfig.Effort
 }
 
