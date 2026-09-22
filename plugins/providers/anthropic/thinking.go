@@ -33,6 +33,31 @@ const (
 	thinkingModeDisabled thinkingMode = "disabled"
 )
 
+// thinkingDisplay is the value of the `thinking.display` field, which controls
+// whether the API returns readable reasoning text. It is a visibility control
+// only: whether thinking happens, and how it is billed, is identical under
+// every value, and the raw chain of thought is never exposed on any model.
+//
+// The API default is model-dependent and Nexus never infers it from the model
+// id — see thinkingConfig.Display for the one inference this provider does make.
+type thinkingDisplay string
+
+const (
+	// thinkingDisplayUnset leaves the field off the request body entirely, so
+	// whatever the target model defaults to applies.
+	thinkingDisplayUnset thinkingDisplay = ""
+
+	// thinkingDisplaySummarized returns a readable summary of the model's
+	// reasoning in the `thinking` blocks. The default on Opus 4.6 / Sonnet 4.6
+	// and older; it must be asked for on the current families.
+	thinkingDisplaySummarized thinkingDisplay = "summarized"
+
+	// thinkingDisplayOmitted still streams `thinking` blocks, but with empty
+	// text. The API default on Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and
+	// Sonnet 5.
+	thinkingDisplayOmitted thinkingDisplay = "omitted"
+)
+
 // thinkingConfig controls Anthropic's extended-thinking feature. When thinking
 // is on the API emits `thinking` (and possibly `redacted_thinking`) content
 // blocks that carry the model's internal reasoning along with a cryptographic
@@ -41,6 +66,7 @@ const (
 //	thinking:
 //	  mode: adaptive          # adaptive | budget | disabled | off
 //	  budget_tokens: 8192     # required when mode: budget, ignored otherwise
+//	  display: summarized     # summarized | omitted; inferred from include_thoughts
 //	  include_thoughts: true  # surface human-readable thinking via thinking.step
 //
 // Constraints enforced by the API, not by this provider:
@@ -48,8 +74,9 @@ const (
 //   - temperature must be unset or 1.0; applyThinking strips non-1 values.
 type thinkingConfig struct {
 	Mode            thinkingMode
-	BudgetTokens    int  // only meaningful when Mode is thinkingModeBudget
-	IncludeThoughts bool // default true when the thinking block is present
+	BudgetTokens    int             // only meaningful when Mode is thinkingModeBudget
+	Display         thinkingDisplay // "" means send no display key at all
+	IncludeThoughts bool            // default true when the thinking block is present
 }
 
 // parseThinkingConfig pulls thinkingConfig out of the plugin's raw config map.
@@ -58,9 +85,20 @@ type thinkingConfig struct {
 // bad config fails Init rather than the first request.
 //
 // The legacy `enabled` bool is still accepted as a deprecated alias
-// (true → adaptive, false → off) and is ignored when `mode` is set. A
+// (true → adaptive, false → off) and is ignored when `mode` is set. A non-zero
 // `budget_tokens` with no `mode` infers thinkingModeBudget, which preserves the
-// one legacy configuration that still works on the wire (Opus 4.6 / Sonnet 4.6).
+// one legacy configuration that still works on the wire (Opus 4.6 / Sonnet 4.6);
+// `budget_tokens: 0` with no `mode` keeps its long-documented meaning of
+// "disable thinking" and infers thinkingModeOff, because inferring budget there
+// would put an unconditional HTTP 400 (`budget_tokens: 0`) on the wire.
+//
+// `display` is a pass-through with one deliberate inference: when it is unset
+// and `include_thoughts` resolves true, thinkingDisplaySummarized is used for
+// the modes that actually think. Without that, `include_thoughts` becomes a
+// silent no-op on every model whose `display` default is `omitted` — the API
+// still streams `thinking` blocks, but with empty text, so the events carry
+// nothing and a UI just shows a long silent pause. An explicit `display` always
+// wins, in both directions.
 func parseThinkingConfig(cfg map[string]any, logger *slog.Logger) (thinkingConfig, error) {
 	raw, ok := cfg["thinking"].(map[string]any)
 	if !ok {
@@ -71,6 +109,17 @@ func parseThinkingConfig(cfg map[string]any, logger *slog.Logger) (thinkingConfi
 
 	if v, ok := raw["include_thoughts"].(bool); ok {
 		tc.IncludeThoughts = v
+	}
+
+	displaySet := false
+	if v, ok := raw["display"].(string); ok {
+		switch thinkingDisplay(v) {
+		case thinkingDisplaySummarized, thinkingDisplayOmitted:
+			tc.Display = thinkingDisplay(v)
+			displaySet = true
+		default:
+			return thinkingConfig{}, fmt.Errorf("anthropic: thinking.display %q is not one of summarized, omitted", v)
+		}
 	}
 
 	budgetSet := false
@@ -103,6 +152,14 @@ func parseThinkingConfig(cfg map[string]any, logger *slog.Logger) (thinkingConfi
 	case enabledSet && !enabled:
 		// An explicit opt out wins over any budget left behind in the block.
 		tc.Mode = thinkingModeOff
+	case budgetSet && tc.BudgetTokens == 0:
+		// `budget_tokens: 0` has always meant "disable thinking" on this
+		// provider, and still does. Inferring mode: budget here would send
+		// {"type":"enabled","budget_tokens":0}, which every model rejects.
+		tc.Mode = thinkingModeOff
+		if logger != nil {
+			logger.Warn("anthropic: thinking.budget_tokens: 0 with no thinking.mode means thinking is off; use thinking.mode: off (or disabled) instead")
+		}
 	case budgetSet:
 		// The legacy fixed-budget shape. Honour it, but say so out loud —
 		// budget_tokens is an HTTP 400 on every current model family.
@@ -127,6 +184,17 @@ func parseThinkingConfig(cfg map[string]any, logger *slog.Logger) (thinkingConfi
 
 	if tc.Mode == thinkingModeBudget && !budgetSet {
 		return thinkingConfig{}, fmt.Errorf("anthropic: thinking.mode: budget requires thinking.budget_tokens")
+	}
+
+	// include_thoughts infers display. Only for the modes that actually think:
+	// the inference exists to keep thinking.step events carrying text, and
+	// there is no reasoning to display under disabled or off. An explicit
+	// display is never touched, in either direction.
+	if !displaySet && tc.IncludeThoughts {
+		switch tc.Mode {
+		case thinkingModeAdaptive, thinkingModeBudget:
+			tc.Display = thinkingDisplaySummarized
+		}
 	}
 
 	return tc, nil
@@ -184,24 +252,38 @@ func prependThinkingBlocks(meta map[string]any) []map[string]any {
 // body, which is a different request from {"type":"disabled"} and the two are
 // not interchangeable on the wire.
 //
+// A resolved Display rides inside whatever thinking object the mode builds; an
+// unset one leaves the key off so the model's own default applies. Under
+// thinkingModeOff there is no object to carry it, so it is dropped with the
+// rest of the field.
+//
 // When thinking is actually on (adaptive or budget) it also strips temperature
 // (Anthropic requires temp=1 with thinking; the cleanest path is to omit it)
 // and logs a warning when dropping a user-set non-1 value.
 func applyThinking(body map[string]any, cfg thinkingConfig, logger *slog.Logger) {
+	var thinking map[string]any
 	switch cfg.Mode {
 	case thinkingModeAdaptive:
-		body["thinking"] = map[string]any{"type": "adaptive"}
+		thinking = map[string]any{"type": "adaptive"}
 	case thinkingModeBudget:
-		body["thinking"] = map[string]any{
+		thinking = map[string]any{
 			"type":          "enabled",
 			"budget_tokens": cfg.BudgetTokens,
 		}
 	case thinkingModeDisabled:
-		// Thinking is off, so the temperature constraint does not apply.
-		body["thinking"] = map[string]any{"type": "disabled"}
-		return
+		thinking = map[string]any{"type": "disabled"}
 	default:
 		// thinkingModeOff (and the zero value): no thinking field at all.
+		return
+	}
+
+	if cfg.Display != thinkingDisplayUnset {
+		thinking["display"] = string(cfg.Display)
+	}
+	body["thinking"] = thinking
+
+	if cfg.Mode == thinkingModeDisabled {
+		// Thinking is off, so the temperature constraint does not apply.
 		return
 	}
 

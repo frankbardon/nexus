@@ -1303,7 +1303,8 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `cache.message_prefix`             | int    | `0`                 | Number of leading user messages to mark for caching. |
 | `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). |
 | `thinking.mode`                    | string | `off` when the `thinking` block is absent, `adaptive` when it is present | Wire shape for the request's `thinking` field: `adaptive`, `budget`, `disabled` or `off`. See "Thinking modes" below. |
-| `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. |
+| `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. Set with no `mode`, a non-zero value infers `mode: budget`; `0` keeps its long-standing meaning of "disable thinking" and infers `mode: off`. Under an explicit `mode: budget` a `0` is passed through and the API rejects it. |
+| `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
 | `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
 | `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
@@ -1367,9 +1368,49 @@ that mismatch. As a guide:
 - `disabled` — models that think by default and need an explicit opt out.
 - `off` — the default when no `thinking` block is present.
 
-`budget_tokens` has no default. Setting it with no `mode` infers `mode: budget`
-and logs a warning, which preserves the one legacy configuration that still
-works on the wire. `-1` has no special meaning on this provider.
+`budget_tokens` has no default. Setting a non-zero value with no `mode` infers
+`mode: budget` and logs a warning, which preserves the one legacy configuration
+that still works on the wire. `budget_tokens: 0` is the exception: it has always
+meant "disable thinking" on this provider and still does, so with no `mode` it
+infers `mode: off` and warns. Inferring `budget` there would put
+`{"type":"enabled","budget_tokens":0}` on the wire, which every model rejects.
+Under an explicit `mode: budget` the `0` is passed through unchanged and the API
+owns the rejection — an explicit mode is the operator naming the wire shape.
+`-1` has no special meaning on this provider.
+
+#### Thinking display
+
+`thinking.display` controls whether the API returns *readable* reasoning text:
+
+| `display`     | What comes back |
+|---------------|-----------------|
+| `summarized`  | `thinking` blocks carry a readable summary of the model's reasoning. |
+| `omitted`     | `thinking` blocks are still streamed, but with **empty text**. |
+| *(unset)*     | No `display` key is sent; the target model's own default applies. |
+
+Whether the model thinks, and how that is billed, is identical under every
+value — this is a visibility control only, and the raw chain of thought is never
+exposed on any model.
+
+The default is model-dependent and changed silently: it is `omitted` on
+Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5, where it used to be
+`summarized` on Opus 4.6 / Sonnet 4.6. Nexus does **not** inspect the model id to
+compensate. Instead, one key infers the other:
+
+> When `display` is unset and `include_thoughts` resolves true, Nexus sends
+> `display: "summarized"` under `mode: adaptive` and `mode: budget`.
+
+That inference is deliberate. `include_thoughts` reads the thinking text to emit
+`thinking.step` events; under `omitted` that text is empty, so without the
+inference the feature would keep running and emit nothing — a long silent pause
+in the UI with no error anywhere. An explicit `display` always wins, in both
+directions, including `include_thoughts: true` with `display: omitted`.
+
+`display` rides inside the `thinking` object next to `type`, so it is emitted
+under `adaptive`, `budget` and `disabled`, and never under `off`, which sends no
+`thinking` object at all. The inference is limited to the two modes that
+actually think; under `disabled` there is no reasoning to display, so only an
+explicit `display` reaches the wire there.
 
 #### Retry block (shared by all providers)
 

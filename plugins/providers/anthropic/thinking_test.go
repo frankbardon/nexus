@@ -214,6 +214,147 @@ func TestParseThinkingConfig_IncludeThoughtsOverride(t *testing.T) {
 	}
 }
 
+// TestParseThinkingConfig_BudgetZeroInfersOff pins the long-documented meaning
+// of `budget_tokens: 0` — "disable thinking". Inferring mode: budget from it
+// would put {"type":"enabled","budget_tokens":0} on the wire, which is an
+// unconditional Anthropic 400.
+func TestParseThinkingConfig_BudgetZeroInfersOff(t *testing.T) {
+	var buf bytes.Buffer
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"budget_tokens": 0},
+	}, warnCaptureLogger(&buf))
+
+	if tc.Mode != thinkingModeOff {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeOff)
+	}
+	if !strings.Contains(buf.String(), "thinking is off") {
+		t.Errorf("expected a warning explaining the zero budget, got: %q", buf.String())
+	}
+
+	// And nothing reaches the body.
+	body := map[string]any{}
+	applyThinking(body, tc, silentTestLogger())
+	if _, ok := body["thinking"]; ok {
+		t.Fatalf("budget_tokens: 0 must not send a thinking field: %+v", body)
+	}
+}
+
+// TestParseThinkingConfig_BudgetZeroWithExplicitMode — an explicit mode is the
+// operator naming the wire shape, so the zero passes straight through and the
+// API owns the rejection. Only the *inference* treats 0 as "off".
+func TestParseThinkingConfig_BudgetZeroWithExplicitMode(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"mode": "budget", "budget_tokens": 0},
+	}, silentTestLogger())
+
+	if tc.Mode != thinkingModeBudget {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeBudget)
+	}
+	if tc.BudgetTokens != 0 {
+		t.Errorf("BudgetTokens: got %d, want 0", tc.BudgetTokens)
+	}
+}
+
+// --- thinking.display -------------------------------------------------------
+
+// TestParseThinkingConfig_DisplayExplicit round trips both legal values.
+func TestParseThinkingConfig_DisplayExplicit(t *testing.T) {
+	for _, want := range []thinkingDisplay{thinkingDisplaySummarized, thinkingDisplayOmitted} {
+		tc := mustParseThinking(t, map[string]any{
+			"thinking": map[string]any{"mode": "adaptive", "display": string(want)},
+		}, silentTestLogger())
+		if tc.Display != want {
+			t.Errorf("Display: got %q, want %q", tc.Display, want)
+		}
+	}
+}
+
+// TestParseThinkingConfig_DisplayUnknown rejects a typo at Init rather than
+// shipping it to the API.
+func TestParseThinkingConfig_DisplayUnknown(t *testing.T) {
+	_, err := parseThinkingConfig(map[string]any{
+		"thinking": map[string]any{"mode": "adaptive", "display": "updates"},
+	}, silentTestLogger())
+	if err == nil {
+		t.Fatal("expected an error for an unknown display")
+	}
+	if !strings.Contains(err.Error(), "thinking.display") {
+		t.Errorf("error should name the key, got: %v", err)
+	}
+}
+
+// TestParseThinkingConfig_DisplayInferredFromIncludeThoughts is the whole point
+// of the key-infers-key behavior: `omitted` is the API default on the current
+// model families and streams thinking blocks with EMPTY text, so without this
+// inference include_thoughts emits contentless thinking.step events.
+func TestParseThinkingConfig_DisplayInferredFromIncludeThoughts(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"mode": "adaptive", "include_thoughts": true},
+	}, silentTestLogger())
+	if tc.Display != thinkingDisplaySummarized {
+		t.Errorf("Display: got %q, want %q", tc.Display, thinkingDisplaySummarized)
+	}
+
+	// include_thoughts defaults to true, so a bare on-mode block infers it too.
+	bare := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"mode": "budget", "budget_tokens": 8192},
+	}, silentTestLogger())
+	if bare.Display != thinkingDisplaySummarized {
+		t.Errorf("Display (defaulted include_thoughts): got %q, want %q", bare.Display, thinkingDisplaySummarized)
+	}
+}
+
+// TestParseThinkingConfig_DisplayNotInferredWithoutThoughts — nothing is read
+// out of the thinking text, so the model's own default stands.
+func TestParseThinkingConfig_DisplayNotInferredWithoutThoughts(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"mode": "adaptive", "include_thoughts": false},
+	}, silentTestLogger())
+	if tc.Display != thinkingDisplayUnset {
+		t.Errorf("Display: got %q, want unset", tc.Display)
+	}
+}
+
+// TestParseThinkingConfig_ExplicitDisplayWinsOverInference — in both
+// directions. `omitted` alongside include_thoughts: true is a legitimate (if
+// self-defeating) request and must survive.
+func TestParseThinkingConfig_ExplicitDisplayWinsOverInference(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{
+			"mode":             "adaptive",
+			"include_thoughts": true,
+			"display":          "omitted",
+		},
+	}, silentTestLogger())
+	if tc.Display != thinkingDisplayOmitted {
+		t.Errorf("Display: got %q, want %q (explicit must win)", tc.Display, thinkingDisplayOmitted)
+	}
+
+	other := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{
+			"mode":             "adaptive",
+			"include_thoughts": false,
+			"display":          "summarized",
+		},
+	}, silentTestLogger())
+	if other.Display != thinkingDisplaySummarized {
+		t.Errorf("Display: got %q, want %q (explicit must win)", other.Display, thinkingDisplaySummarized)
+	}
+}
+
+// TestParseThinkingConfig_DisplayNotInferredWhenNotThinking — there is no
+// reasoning to display under disabled or off, so the inference stays out of it.
+func TestParseThinkingConfig_DisplayNotInferredWhenNotThinking(t *testing.T) {
+	for _, mode := range []thinkingMode{thinkingModeDisabled, thinkingModeOff} {
+		tc := mustParseThinking(t, map[string]any{
+			"thinking": map[string]any{"mode": string(mode), "include_thoughts": true},
+		}, silentTestLogger())
+		if tc.Display != thinkingDisplayUnset {
+			t.Errorf("mode %q: Display got %q, want unset", mode, tc.Display)
+		}
+	}
+}
+
 // --- applyThinking ----------------------------------------------------------
 
 // TestApplyThinking_Off writes no thinking key at all — the zero value and an
@@ -277,6 +418,63 @@ func TestApplyThinking_Budget(t *testing.T) {
 	}
 	if got["budget_tokens"] != 8192 {
 		t.Errorf("budget_tokens: got %v, want 8192", got["budget_tokens"])
+	}
+}
+
+// TestApplyThinking_DisplayRidesInsideThinking — display goes in the thinking
+// object alongside type, not at the top level of the body.
+func TestApplyThinking_DisplayRidesInsideThinking(t *testing.T) {
+	cases := []thinkingConfig{
+		{Mode: thinkingModeAdaptive, Display: thinkingDisplaySummarized},
+		{Mode: thinkingModeBudget, BudgetTokens: 8192, Display: thinkingDisplayOmitted},
+		{Mode: thinkingModeDisabled, Display: thinkingDisplayOmitted},
+	}
+	for _, cfg := range cases {
+		body := map[string]any{}
+		applyThinking(body, cfg, silentTestLogger())
+
+		got, ok := body["thinking"].(map[string]any)
+		if !ok {
+			t.Fatalf("mode %q: thinking missing or wrong type: %T", cfg.Mode, body["thinking"])
+		}
+		if got["display"] != string(cfg.Display) {
+			t.Errorf("mode %q: display got %v, want %q", cfg.Mode, got["display"], cfg.Display)
+		}
+		if _, ok := body["display"]; ok {
+			t.Errorf("mode %q: display must not be a top-level body key: %+v", cfg.Mode, body)
+		}
+	}
+}
+
+// TestApplyThinking_DisplayUnsetOmitsKey — an unset display leaves the key off
+// entirely so the target model's own default applies.
+func TestApplyThinking_DisplayUnsetOmitsKey(t *testing.T) {
+	for _, cfg := range []thinkingConfig{
+		{Mode: thinkingModeAdaptive},
+		{Mode: thinkingModeBudget, BudgetTokens: 8192},
+		{Mode: thinkingModeDisabled},
+	} {
+		body := map[string]any{}
+		applyThinking(body, cfg, silentTestLogger())
+
+		got, _ := body["thinking"].(map[string]any)
+		if _, ok := got["display"]; ok {
+			t.Errorf("mode %q: unset display must not appear: %+v", cfg.Mode, got)
+		}
+	}
+}
+
+// TestApplyThinking_OffIgnoresDisplay — mode off has no thinking object to
+// carry a display, so the whole field stays absent even when one is set.
+func TestApplyThinking_OffIgnoresDisplay(t *testing.T) {
+	body := map[string]any{"max_tokens": 1024}
+	applyThinking(body, thinkingConfig{Mode: thinkingModeOff, Display: thinkingDisplaySummarized}, silentTestLogger())
+
+	if _, ok := body["thinking"]; ok {
+		t.Fatalf("mode off must not set thinking: %+v", body)
+	}
+	if len(body) != 1 {
+		t.Fatalf("body mutated unexpectedly: %+v", body)
 	}
 }
 
