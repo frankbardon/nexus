@@ -258,9 +258,9 @@ parameters at all.
 ### Effort
 
 `output_config.effort` is Anthropic's named reasoning-depth control, and the
-replacement for `thinking.budget_tokens` on the current families. It accepts five
-values and goes on the wire **nested inside `output_config`** — never as a top-level
-request field:
+replacement for `thinking.budget_tokens` on the current families. Anthropic's own
+vocabulary is five values, and the key goes on the wire **nested inside
+`output_config`** — never as a top-level request field:
 
 ```yaml
 plugins:
@@ -287,6 +287,28 @@ object at all, and the API then applies its own default, which is currently `hig
 distinction matters only in that an absent key stays correct if Anthropic changes that
 default.
 
+**A sixth word is accepted: `minimal`.** It is Gemini's floor, not an Anthropic level,
+and it never reaches the wire — the provider **clamps it to `low`** and warns once at
+`Init` naming the configured and the effective value. The Gemini provider does the
+mirror image, clamping Anthropic's `xhigh` and `max` down to its own `high`:
+
+| Value | This provider sends | `nexus.llm.gemini` sends |
+|---|---|---|
+| `minimal` | `low` — **clamped** | `minimal` |
+| `low` / `medium` / `high` | as written | as written |
+| `xhigh` / `max` | as written | `high` — **clamped** |
+
+So all six words configure either provider, and a
+[`core.models`](../../configuration/reference.md#reasoning-depth-effort) role shared
+between them — a `fanout` role dispatching to both at once, say — stays configurable
+whichever provider's word the operator reaches for. Neither leg silently ignores the
+setting, and neither rejects the other's vocabulary. `low` is already this provider's
+floor, so clamping `minimal` onto it loses nothing there is a word for.
+
+Clamping is about cross-*provider* vocabulary, never cross-*model* capability. No clamp
+— and no code path in this provider — inspects the model id; the table below is advice
+for the operator, not something the provider enforces.
+
 As with `thinking.mode`, the provider never inspects the model id, and not every model
 accepts every level:
 
@@ -299,8 +321,57 @@ accepts every level:
 
 `xhigh` arrived with Opus 4.7, so it is the level most likely to 400 on an older model.
 A level the target model does not accept is an Anthropic HTTP 400 the operator owns. A
-value outside the five is a different matter and *is* caught locally: it fails at
-`Init`, naming the accepted set.
+value outside the accepted six is a different matter and *is* caught locally: it fails
+at `Init`, naming the accepted set.
+
+#### Per-role effort
+
+A [`core.models`](../../configuration/reference.md#coremodels) role may carry its own
+`effort:`, in the same vocabulary, and it reaches this provider per request:
+
+```yaml
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-5
+      effort: max            # this role thinks hard
+
+plugins:
+  nexus.llm.anthropic:
+    output_config:
+      effort: low            # every other role's default
+```
+
+**The role wins** over the plugin-level `output_config.effort`. A request on `deep`
+sends `{"effort": "max"}`; a request on any role without its own `effort` sends
+`{"effort": "low"}`; with neither set, nothing is emitted.
+
+That precedence is the **inverse of Gemini's**, where the plugin-level `thinking.level`
+beats a role's `effort`. The inversion is deliberate: on Gemini `level` is the native
+`thinkingLevel` vocabulary and `effort` the translated cross-provider one, so the native
+key wins; here `effort` is already this provider's own word in both places, so nothing is
+lost in translation and the more specific setting — the role — wins instead.
+
+An `effort` **already on the request** beats both. The fallback and fanout coordinators
+stamp the chain entry they are actually serving onto the outgoing request, so a fallback
+entry's or a non-first fanout leg's own `effort` is what this provider answers with,
+rather than the role's first entry's. Beyond that, the role's effort is found on every
+path that resolves a role — the named role, the `default` role, and the late recovery
+after a router rewrote `model` without touching the rest.
+
+A role's `effort` cannot fail at `Init`, because it only exists per request: an
+unusable value **fails that request** with a `core.error` naming the role and the
+accepted set. A clamp warns at request time instead, once per (role, value) — warning
+every turn would flood a busy role's log.
+
+The full cross-provider account, including a worked `fanout` role and the fact that
+`nexus.llm.openai` ignores `effort` entirely, is in the configuration reference under
+[Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
 
 ### Cost Tracking
 
