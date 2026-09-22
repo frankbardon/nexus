@@ -77,13 +77,14 @@
         "effort": {
           "type": "string",
           "enum": [
+            "minimal",
             "low",
             "medium",
             "high",
             "xhigh",
             "max"
           ],
-          "description": "Reasoning depth, emitted as output_config.effort. Independent of thinking.mode — sent whatever the thinking configuration is, including mode: off. Unset sends no effort key, so the API default (high) applies. The provider never inspects the model id: a level the target model does not accept is an Anthropic 400."
+          "description": "Reasoning depth, emitted as output_config.effort. Anthropic's own five are low, medium, high, xhigh and max; Gemini's minimal is accepted and clamped to low (warned once at Init) so a value shared with the other provider stays configurable. Independent of thinking.mode — sent whatever the thinking configuration is, including mode: off. Unset sends no effort key, so the API default (high) applies. The provider never inspects the model id: a level the target model does not accept is an Anthropic 400."
         }
       }
     },

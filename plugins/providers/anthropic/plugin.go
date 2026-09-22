@@ -49,15 +49,18 @@ type Plugin struct {
 	// circuit check). Tests assert this stays at 0 during replay.
 	liveCalls atomic.Uint64
 
-	auth              *authState
-	client            *http.Client
-	prompts           *engine.PromptRegistry
-	unsubs            []func()
-	debug             bool
-	retry             retryConfig
-	cache             cacheConfig
-	thinking          thinkingConfig
-	outputConfig      outputConfig
+	auth         *authState
+	client       *http.Client
+	prompts      *engine.PromptRegistry
+	unsubs       []func()
+	debug        bool
+	retry        retryConfig
+	cache        cacheConfig
+	thinking     thinkingConfig
+	outputConfig outputConfig
+	// effortClampWarned dedupes warnEffortClamped's per-request warning,
+	// keyed by role + configured value. See warnEffortClamped.
+	effortClampWarned sync.Map
 	multimodal        multimodalConfig
 	files             filesConfig
 	citations         citationsConfig
@@ -162,7 +165,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	// Reasoning depth. Independent of thinking.mode — effort is emitted
 	// whatever the thinking configuration is, including mode: off.
-	outputCfg, err := parseOutputConfig(ctx.Config)
+	outputCfg, err := parseOutputConfig(ctx.Config, p.logger)
 	if err != nil {
 		return err
 	}
@@ -460,14 +463,23 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// can only be validated here. Fail the whole request rather than drop the
 	// value: a silently ignored reasoning-depth setting is precisely the trap
 	// this key exists to avoid, and it would be invisible in the response.
+	//
+	// Only a word in neither provider's vocabulary fails. Gemini's `minimal`
+	// is accepted and clamped to `low` at the vocabulary gate, so a fanout role
+	// spanning both providers stays configurable; the clamp is warned once per
+	// (role, value) rather than dropped in silence.
 	if target.effort != "" {
-		if _, err := validateEffort(target.effort); err != nil {
+		lvl, clamped, err := validateEffort(target.effort)
+		if err != nil {
 			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion,
 				Err:         fmt.Errorf("%s: %w", target.effortSource, err),
 				Retryable:   false,
 				RequestMeta: req.Metadata,
 			})
 			return
+		}
+		if clamped {
+			p.warnEffortClamped(req.Role, target.effort, lvl)
 		}
 	}
 	// Carry the resolved level on the request copy so resolveEffort — the
@@ -765,13 +777,19 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 // mistake to "fix": on Gemini `level` is the native vocabulary and effort the
 // translated one, whereas here both speak the same words.
 //
+// The level returned is always one of Anthropic's own five: validateEffort is
+// the single vocabulary gate, and it clamps the other provider's `minimal` to
+// `low` on the way through, so a shared or fanout role is configurable with
+// either provider's word. Warning about that clamp is handleRequest's job, not
+// this one's — this runs per body build.
+//
 // An invalid req.Effort is unreachable through handleRequest, which validates
 // and fails the request before a body is ever built. The check is kept so a
 // direct buildRequestBody caller degrades to the configured default instead of
 // putting a value Anthropic will 400 on onto the wire.
 func (p *Plugin) resolveEffort(req events.LLMRequest) effortLevel {
 	if req.Effort != "" {
-		if lvl, err := validateEffort(req.Effort); err == nil {
+		if lvl, _, err := validateEffort(req.Effort); err == nil {
 			return lvl
 		}
 	}

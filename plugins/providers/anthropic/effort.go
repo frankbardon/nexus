@@ -1,6 +1,9 @@
 package anthropic
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+)
 
 // effortLevel is Anthropic's named reasoning-depth control — the replacement
 // for `thinking.budget_tokens`, which is an HTTP 400 on every current model
@@ -28,6 +31,11 @@ const (
 	effortHigh   effortLevel = "high"
 	effortXHigh  effortLevel = "xhigh"
 	effortMax    effortLevel = "max"
+
+	// effortMinimal is Gemini's floor, not an Anthropic level. It is accepted
+	// at the vocabulary boundary and clamped to effortLow; it never reaches the
+	// wire. See effortClamps.
+	effortMinimal effortLevel = "minimal"
 )
 
 // validEffortLevels is the closed set of accepted values.
@@ -39,22 +47,59 @@ var validEffortLevels = map[effortLevel]bool{
 	effortMax:    true,
 }
 
-// effortValues names the accepted values for error messages, in the order the
-// documentation lists them.
+// effortValues names Anthropic's own five levels for error messages, in the
+// order the documentation lists them. These are the only values that ever reach
+// the wire.
 const effortValues = "low, medium, high, xhigh, max"
 
-// validateEffort turns a raw string into an effortLevel, rejecting anything
-// outside the closed set with an error that names the accepted values.
+// effortAcceptedValues names the full vocabulary this provider *accepts* — the
+// union of both providers' words. It is wider than effortValues by exactly the
+// entries in effortClamps.
+const effortAcceptedValues = "minimal, low, medium, high, xhigh, max"
+
+// effortClamps translates an accepted-but-foreign reasoning-depth word onto the
+// nearest native Anthropic level.
+//
+// The two vocabularies do not line up — Anthropic reads low|medium|high|xhigh|max
+// and Gemini minimal|low|medium|high — and a `core.models` fanout role can
+// dispatch one role to both providers at once. Each provider therefore accepts
+// the union and clamps what it cannot express, rather than rejecting the other
+// one's word (which would make such a role unconfigurable) or ignoring it
+// (which would make `effort:` a silent no-op on this leg). The Gemini provider
+// does the mirror image of this for `xhigh`/`max`.
+//
+// `minimal` clamps to `low`, which is lossless in spirit: `low` is already
+// Anthropic's floor, so there is no shallower target to lose.
+//
+// This is deliberately *not* a model-capability table. It maps cross-*provider*
+// vocabulary only; no entry here — and no code path anywhere in this provider —
+// inspects the model id. `xhigh`/`max` remain invalid on some Claude models and
+// that stays an Anthropic 400 the operator owns.
+var effortClamps = map[effortLevel]effortLevel{
+	effortMinimal: effortLow,
+}
+
+// validateEffort turns a raw string into a native effortLevel, clamping a value
+// that belongs to the other provider's vocabulary and rejecting anything in
+// neither with an error naming what is accepted.
+//
+// clamped reports that the returned level differs from the word supplied, so a
+// caller can say so once in its logs. The clamp lives here, at the single
+// vocabulary gate, rather than at the use sites. It *widens* the accepted set
+// without making the provider permissive: a genuine typo is still an error.
 //
 // It is package-level rather than folded into parseOutputConfig so that a
-// per-role effort (which arrives per request, not at Init) can be validated
-// against exactly the same vocabulary.
-func validateEffort(v string) (effortLevel, error) {
-	lvl := effortLevel(v)
-	if !validEffortLevels[lvl] {
-		return effortUnset, fmt.Errorf("anthropic: effort %q is not one of %s", v, effortValues)
+// per-role effort (which arrives per request, not at Init) is validated against
+// exactly the same vocabulary.
+func validateEffort(v string) (lvl effortLevel, clamped bool, err error) {
+	raw := effortLevel(v)
+	if native, ok := effortClamps[raw]; ok {
+		return native, true, nil
 	}
-	return lvl, nil
+	if !validEffortLevels[raw] {
+		return effortUnset, false, fmt.Errorf("anthropic: effort %q is not a recognised reasoning-depth value (Anthropic: %s; Gemini: minimal, low, medium, high)", v, effortValues)
+	}
+	return raw, false, nil
 }
 
 // outputConfig is the parsed `output_config:` block of the plugin config. It
@@ -69,8 +114,13 @@ type outputConfig struct {
 // or a block with no `effort`, leaves Effort unset and nothing is emitted.
 //
 // Validation lives here so a bad level fails Init rather than the first request.
-func parseOutputConfig(cfg map[string]any) (outputConfig, error) {
+// A clamped level is warned here for the same reason: the provider-level key is
+// a boot-time fact, so Init is the one place it needs saying.
+func parseOutputConfig(cfg map[string]any, logger *slog.Logger) (outputConfig, error) {
 	var out outputConfig
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	raw, ok := cfg["output_config"].(map[string]any)
 	if !ok {
@@ -84,12 +134,18 @@ func parseOutputConfig(cfg map[string]any) (outputConfig, error) {
 
 	s, ok := v.(string)
 	if !ok {
-		return outputConfig{}, fmt.Errorf("anthropic: output_config.effort must be a string naming one of %s, got %T", effortValues, v)
+		return outputConfig{}, fmt.Errorf("anthropic: output_config.effort must be a string naming one of %s, got %T", effortAcceptedValues, v)
 	}
 
-	lvl, err := validateEffort(s)
+	lvl, clamped, err := validateEffort(s)
 	if err != nil {
 		return outputConfig{}, fmt.Errorf("output_config.effort: %w", err)
+	}
+	if clamped {
+		logger.Warn("output_config.effort clamped to Anthropic's effort range",
+			"configured", s,
+			"effective", string(lvl),
+		)
 	}
 	out.Effort = lvl
 	return out, nil
@@ -134,4 +190,27 @@ func effortSourceLabel(role string) string {
 		return "the request"
 	}
 	return fmt.Sprintf("core.models role %q", role)
+}
+
+// warnEffortClamped reports a clamped role effort, once per (role, configured
+// value).
+//
+// A role's effort arrives per request rather than at Init, so request time is
+// the only moment it can be said — but saying it on every request would flood
+// the logs of a busy fanout role. The clamp is a configuration fact, so once is
+// enough. The Gemini provider suppresses the same repetition for the same
+// reason, there by walking the registry at Init instead.
+func (p *Plugin) warnEffortClamped(role, configured string, effective effortLevel) {
+	if _, seen := p.effortClampWarned.LoadOrStore(role+"\x00"+configured, struct{}{}); seen {
+		return
+	}
+	logger := p.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("core.models effort clamped to Anthropic's effort range",
+		"role", role,
+		"configured", configured,
+		"effective", string(effective),
+	)
 }
