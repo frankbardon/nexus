@@ -701,6 +701,18 @@ plugin. Their inner keys are exactly the ones documented in that provider's
 section of this page — a role's `thinking:` takes the same keys as
 `nexus.llm.anthropic`'s `thinking:` does.
 
+**Why a role entry gets to speak one provider's language.** Every entry carries
+its own `provider:` — a single-model role, each entry of a fallback chain, and
+each leg of a `fanout` `providers:` list alike. So at the point a block is
+written, the provider that will read it is already named one line above, and
+there is nothing to translate: `thinking: {mode: adaptive}` under
+`provider: nexus.llm.anthropic` can only mean Anthropic's `mode`, and
+`thinking: {mode: level, level: high}` under `provider: nexus.llm.gemini` can
+only mean Gemini's. That is the whole reason these blocks can be the provider's
+native ones rather than an invented cross-provider vocabulary, and it is the
+difference between them and [`effort`](#reasoning-depth-effort), which exists
+precisely to be written *without* knowing which provider will read it.
+
 Core treats them the way it treats [`effort`](#reasoning-depth-effort): it stores
 the block and forwards it, and knows nothing about the contents. No inner key is
 validated, no value is range-checked, no vocabulary is enforced. An inner key no
@@ -733,10 +745,60 @@ the provider resolves the entry itself. Either way one precedence rule holds:
 **anything already on the request wins outright, and an entry only fills an axis
 the request arrived without.** Per axis, not per key: a request that already
 carries a `thinking` block keeps it whole rather than having the entry's keys
-merged into it. (What happens between an entry's block and the *plugin's* block
-of the same name is the provider's business, and is documented in that provider's
-section — `nexus.llm.anthropic` and `nexus.llm.gemini` both merge them key by
-key.)
+merged into it.
+
+**Where an entry's block meets the plugin's block, the merge is key-wise and the
+role wins per key.** That step belongs to the provider that owns the vocabulary —
+it is the provider's own parser that runs on the result, so the merged block
+inherits every check, inference and deprecation warning a plugin-level block
+gets — but both consuming providers implement it the same way, and it is the
+rule to reason with:
+
+- a key the role names replaces the plugin's value for that key;
+- a key the role is silent about **survives** from the plugin, so a role that
+  wants only one thing different does not have to restate the block;
+- `thinking: {}` is a *statement*, not a silence: it replaces no individual key,
+  but the merged block is present, which is what turns thinking on for a role in
+  a deployment that has no plugin-level block at all;
+- and the corollary — a role that switches `mode` inherits plugin keys that may
+  be meaningless, or missing, under the new mode. Restate what that mode needs.
+
+`nexus.llm.gemini` makes one deliberate departure from key-wise: `level` and
+`budget_tokens` **displace each other** across the merge, because Gemini rejects
+a request carrying both and the headline case (a 2.5 plugin block under a 3.x
+role, or the reverse) would otherwise merge into a block no operator could have
+written and fail the boot. See
+[Per-role thinking](../plugins/providers/gemini.md#per-role-thinking) on the
+Gemini page.
+
+**The headline case: two roles, one plugin instance, different modes.**
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    thinking:
+      mode: adaptive         # every role's default
+      display: summarized
+
+core:
+  models:
+    default: deep
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7   # inherits the plugin block whole
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      thinking:
+        mode: budget           # the role wins on `mode`
+        budget_tokens: 4096    # `display: summarized` survives from the plugin
+```
+
+One `nexus.llm.anthropic` instance, two wire shapes: `deep` sends
+`{"type": "adaptive", "display": "summarized"}` and `quick` sends
+`{"type": "enabled", "budget_tokens": 4096, "display": "summarized"}`. Before
+per-entry blocks this needed two provider instances, or an agent posture, or
+giving up on one of the two settings.
 
 **Fallthrough to the default role is limited to the shared axes.** `max_tokens`,
 `effort` and `temperature` speak one vocabulary every provider understands, so an
@@ -765,6 +827,46 @@ core:
         max_attempts: 2
 ```
 
+**One precedence rule, every provider, every axis:**
+
+```text
+request-stamped  >  role's native block  >  role's effort  >  plugin block
+```
+
+Read it as *specificity wins*. The stamp is the most specific thing there is —
+the coordinator knows exactly which chain entry is being served. Below it, a
+role's own block outranks the role's `effort` wherever the two land in the same
+wire field, because the block is the unambiguous statement and `effort` is the
+translated one. Below that, a plugin-level key is a default the role refines.
+There is no per-provider variant of this any more: `nexus.llm.gemini` used to
+invert the middle two, and no longer does — see the behaviour-change note under
+[Reasoning depth: `effort`](#reasoning-depth-effort).
+
+**What is actually wired today.** Core parses, stores and carries all six
+per-entry axes, but a block only does something where a provider has been taught
+to read it:
+
+| Axis | Consumed by |
+|---|---|
+| `thinking` | `nexus.llm.anthropic` and `nexus.llm.gemini` |
+| `max_tokens`, `effort` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`effort` is not read by `nexus.llm.openai` at all) |
+| `temperature` | **no provider yet on the paths a provider resolves itself** — see below |
+| `reasoning`, `api` | no provider yet; `nexus.llm.openai`'s are a later release |
+| `cache`, `retry` | no provider yet |
+
+An axis with no consumer is inert, not an error: the key parses, validates
+nothing, travels on the request and is read by nobody.
+
+`temperature` is the one with a seam in it. The `fallback` and `fanout`
+coordinators stamp it like every other axis, so an entry's `temperature:` **does**
+reach the wire on a fallback retry or a fanout leg. On the paths a provider
+resolves for itself — the role a request names, the default role, the recovery
+after a router rewrote `model` — neither consuming provider reads it back yet:
+each still runs its own model/`max_tokens`/`effort` resolution and takes only the
+`thinking` block from the shared resolver. Until that is closed, write a
+per-request temperature on the agent posture rather than on a plain single-entry
+role.
+
 #### Reasoning depth: `effort`
 
 `effort` is the one key in this section core does not interpret. It is stored as a
@@ -773,6 +875,30 @@ the vocabulary, the clamping and the failure mode all belong to the provider. Th
 is the canonical account of what the consumers do with it — the
 [Anthropic](../plugins/providers/anthropic.md#effort) and
 [Gemini](../plugins/providers/gemini.md#thinking) pages add narrative.
+
+**What `effort` is still for, now that a role can carry a native block.** If a
+role entry can name a reasoning depth in Gemini's own words —
+`thinking: {mode: level, level: high}` — the obvious question is why a separate
+`effort:` survives at all. Its remaining job is the case a native block cannot
+serve: **one value that has to mean something on providers that do not share a
+vocabulary.**
+
+That case is a `fanout` role. `effort: max` on an Anthropic leg and `effort: max`
+on a Gemini leg both mean "as deep as this model goes", because both consumers
+accept the union of the two vocabularies and clamp inward. Written natively
+instead, the same intent is a different block per leg, in a different vocabulary,
+landing in a different wire field — several settings to keep in step where one
+word does. The worked example is at the end of this section.
+
+The weaker version of the same argument applies to a single-provider role you
+expect to re-point later: `effort:` survives the edit, a `thinking:` block does
+not.
+
+Everywhere else — which is most roles, most of the time — the native block is the
+better instrument. It is exact, it is never clamped, and it expresses things no
+single word can: `budget_tokens`, `display`, `include_thoughts`. Prefer it
+wherever the role's `provider:` is settled, and keep `effort` for the roles whose
+value has to travel.
 
 **The two vocabularies are different sets, and neither contains the other.**
 
@@ -1651,11 +1777,10 @@ not have to restate the mode:
 
 ```yaml
 plugins:
-  active:
-    nexus.llm.anthropic:
-      thinking:
-        mode: adaptive
-        display: summarized
+  nexus.llm.anthropic:
+    thinking:
+      mode: adaptive
+      display: summarized
 
 core:
   models:
@@ -1951,12 +2076,11 @@ have to restate the mode:
 
 ```yaml
 plugins:
-  active:
-    nexus.llm.gemini:
-      thinking:
-        mode: level
-        level: medium
-        include_thoughts: true
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+      level: medium
+      include_thoughts: true
 
 core:
   models:

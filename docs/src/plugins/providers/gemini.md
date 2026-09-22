@@ -342,14 +342,21 @@ serve a Gemini 2.5 role on `mode: budget` and a Gemini 3.x role on `mode: level`
 same time, which matters here more than on any other provider: the two families take
 different parameters, and this provider never inspects the model id to guess which.
 
+The block on the role is spelled in **this provider's own vocabulary** — the same
+`mode`, `level`, `budget_tokens` and `include_thoughts` documented above, not a
+translated cross-provider shape. It can be, because a `core.models` entry names its own
+`provider:` one line above the block, so a `level:` there is unambiguously Gemini's
+`thinkingLevel` and nobody else's. The one key written *without* knowing which provider
+will read it is [`effort`](#reasoning-depth-from-a-role-effort) — which is why it still
+exists, and why the role's own block outranks it when the two land in the same field.
+
 ```yaml
 plugins:
-  active:
-    nexus.llm.gemini:
-      thinking:
-        mode: level
-        level: medium
-        include_thoughts: true
+  nexus.llm.gemini:
+    thinking:
+      mode: level
+      level: medium
+      include_thoughts: true
 
 core:
   models:
@@ -389,6 +396,11 @@ whichever layer supplied it.**
    `mode: level`;
 4. the plugin-level `thinking:` block, unchanged.
 
+That is the same rule as on every other provider —
+`request-stamped > role's native block > role's effort > plugin block` — and steps 2
+and 3 used to be settled the other way round here. See the behaviour-change note under
+[Reasoning depth from a role](#reasoning-depth-from-a-role-effort).
+
 **Invalid role blocks fail the boot.** A block on a `core.models` entry never passes
 through this plugin's `schema.json` — core stores these maps without looking inside — so
 `Init` sweeps every role, and every entry of every chain, this provider could serve,
@@ -405,6 +417,23 @@ Two edges worth knowing:
 - **A role that switches `mode` must restate the key that mode needs.** A plugin-level
   `mode: budget` plus a role's bare `level:` leaves `mode: budget` with the budget
   displaced, which fails `Init` naming the role. Set `mode` on the role alongside the key.
+
+**`include_thoughts` on a role does reach the events here**, unlike on
+[`nexus.llm.anthropic`](anthropic.md#per-role-thinking), where the `thinking.step` gate
+reads the plugin-level value. Nothing gates the emission on this provider: a
+`thinking.step` is emitted for every thought part that comes back, and thought parts
+come back only when `includeThoughts` was on the wire — which the merged role block
+decides. The asymmetry is an implementation difference, not a design one; do not rely on
+it staying that way if the Anthropic gap is closed by moving the gate rather than the
+config.
+
+**`thinking:` is the only per-entry block this provider reads today.** A role's
+`temperature:`, `cache:`, `retry:` and `api:` parse and travel — see
+[Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
+— but this provider's own resolution pass still covers only `model`, `max_tokens` and
+`effort`, so a `temperature:` on a plain single-entry role does not reach
+`generationConfig`. It does on a fallback entry or a fanout leg, where the coordinator
+stamps it onto the request directly.
 
 #### `-1` and `0` on the budget path
 

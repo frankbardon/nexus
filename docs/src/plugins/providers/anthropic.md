@@ -236,13 +236,19 @@ silent about survives. That is what lets one plugin instance serve a Haiku role
 on `mode: budget` and an Opus role on `mode: adaptive` at the same time, which is
 impossible with a single plugin-level block.
 
+The block on the role is spelled in **this provider's own vocabulary** — the same
+`mode`, `budget_tokens`, `display` and `include_thoughts` documented above, not a
+translated cross-provider shape. It can be, because a `core.models` entry names
+its own `provider:` one line above the block, so there is never any doubt about
+whose `mode` is meant. (The one key that *is* written without knowing the
+provider is [`effort`](#per-role-effort), which is why it still exists.)
+
 ```yaml
 plugins:
-  active:
-    nexus.llm.anthropic:
-      thinking:
-        mode: adaptive
-        display: summarized
+  nexus.llm.anthropic:
+    thinking:
+      mode: adaptive
+      display: summarized
 
 core:
   models:
@@ -264,19 +270,44 @@ written on a `core.models` entry never passes through this plugin's
 provider could serve and **fails the boot naming the role** when a merged block
 is invalid, rather than waiting for the first request that uses it.
 
-Precedence is: a block already stamped on the request (the `fallback` or `fanout`
-coordinator's, for the chain entry actually being served) → the role's block,
-merged over the plugin's → the role's `effort`, which lands in a different wire
-field and so never contends → the plugin block. A named role does **not** inherit
-the default role's block: these are one provider's vocabulary and a different
-role may be served by a different provider.
+**Precedence is the one rule every provider now follows** —
+
+```text
+request-stamped  >  role's thinking: block  >  role's effort  >  plugin block
+```
+
+— where "request-stamped" is what the `fallback` or `fanout` coordinator put on
+the request for the chain entry actually being served. On this provider steps 2
+and 3 never actually contend: a role's `effort` lands in `output_config.effort`
+and the thinking block lands in `thinking`, two different wire fields, so a role
+can set both and neither displaces the other. (On `nexus.llm.gemini` they *do*
+contend, because a role's `effort` becomes `thinkingLevel` — the same field a
+role's `thinking.level` writes — and the block wins there for exactly the reason
+the ordering says it should.) A named role does **not** inherit the default
+role's block: these are one provider's vocabulary and a different role may be
+served by a different provider.
 
 Two things to watch: `thinking: {}` on a role is a statement rather than a
 silence (it overrides no key, but a present block with no `mode` is `adaptive`),
 and a role that switches `mode` inherits plugin-level keys that may be
-meaningless under the new mode. `include_thoughts` set on a role feeds the
-`display` inference like any other key, but whether `thinking.step` events are
-emitted is still read from the plugin-level value.
+meaningless under the new mode.
+
+**A known gap: `include_thoughts` on a role changes the wire, not the events.**
+It feeds the `display` inference like any other merged key, so it does alter the
+`thinking` object this provider sends. But the gate deciding whether
+`thinking.step` events are emitted at all reads the **plugin-level**
+`include_thoughts`, because the response-parse path never sees the resolved
+per-role block. A role that turns it on where the plugin has it off gets the
+thinking text from Anthropic and no events on the bus. Set the plugin-level value
+to whatever you want the events to do, and use the role block for wire shape.
+
+**`thinking:` is the only per-entry block this provider reads today.** A role's
+`temperature:`, `cache:`, `retry:` and `api:` parse and travel — see
+[Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
+— but this provider's own resolution pass still covers only `model`,
+`max_tokens` and `effort`, so a `temperature:` on a plain single-entry role does
+not reach the wire. It does on a fallback entry or a fanout leg, where the
+coordinator stamps it onto the request directly.
 
 See the [configuration reference](../../configuration/reference.md#per-role-thinking)
 for the canonical account.
@@ -308,6 +339,10 @@ and `top_k` are rejected outright on Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and
 Sonnet 5 **regardless of thinking**, including under `mode: disabled` and `mode: off`,
 where the provider does not strip them. On those models, do not set sampling
 parameters at all.
+
+A `core.models` entry may carry a `temperature:` of its own, but this provider
+does not resolve one yet on the paths it resolves for itself — see the gap noted
+under [Per-role thinking](#per-role-thinking).
 
 ### Effort
 
