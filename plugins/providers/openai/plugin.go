@@ -50,7 +50,12 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
-	pricing *pricing.Table // merged: config overrides + embedded defaults
+	// retryRaw is the plugin-level `retry:` block exactly as configured, kept
+	// because a core.models role's block merges over it key by key and the
+	// merged result has to go back through parseRetryConfig. nil means the
+	// plugin set no block at all. Read-only — see mergeRetryBlock.
+	retryRaw map[string]any
+	pricing  *pricing.Table // merged: config overrides + embedded defaults
 
 	reasoning      reasoningConfig
 	forceReasoning bool
@@ -142,7 +147,22 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
-	p.retry = parseRetryConfig(ctx.Config)
+	retry, err := parseRetryConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.retry = retry
+	p.retryRaw = rawRetryBlock(ctx.Config)
+
+	// A core.models role may carry a `retry:` block of its own, which merges
+	// over the plugin-level one. These never pass through schema.json — core
+	// stores those maps without looking inside them — so this sweep is the only
+	// thing that checks them, at boot rather than at the first request that
+	// names the role.
+	if err := validateRoleRetry(p.models, p.retryRaw, p.logger); err != nil {
+		return err
+	}
+
 	if p.retry.Enabled {
 		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
@@ -247,11 +267,16 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // the default role and the late case where a router rewrote `model` and left
 // `role` alone.
 //
-// Only Temperature is taken, deliberately rather than `*req = ...`: model and
-// max_tokens already have their own resolution pass in handleRequest — one that
-// knows about defaultMaxTokens and the foreign-provider early return — and this
-// provider reads none of the other axes. `core.models` `effort` in particular is
-// not consumed here; this provider has only its plugin-level `reasoning.effort`.
+// Only Temperature and the `retry:` block are taken, deliberately rather than
+// `*req = ...`: model and max_tokens already have their own resolution pass in
+// handleRequest — one that knows about defaultMaxTokens and the foreign-provider
+// early return — and this provider reads none of the remaining axes.
+// `core.models` `effort` in particular is not consumed here; this provider has
+// only its plugin-level `reasoning.effort`.
+//
+// `retry` reaches no part of the request body: it is call-time behaviour, and
+// its one consumer is the loop in doWithRetry, which takes the configuration
+// resolveRetry merges rather than reading the plugin's.
 //
 // Temperature is a plain gap-fill, and the precedence is the engine-wide one:
 // ResolveModelConfig never disturbs a value the request already carries, so an
@@ -262,7 +287,9 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // Note that applyReasoning strips temperature again for a reasoning model, which
 // rejects the field. That is not this function's business.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
-	req.Temperature = engine.ResolveModelConfig(p.models, *req).Temperature
+	resolved := engine.ResolveModelConfig(p.models, *req)
+	req.Temperature = resolved.Temperature
+	req.Overrides.Retry = resolved.Overrides.Retry
 }
 
 func (p *Plugin) handleRequest(req events.LLMRequest) {
@@ -405,7 +432,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return httpReq, nil
 	}
 
-	resp, err := p.doWithRetry(reqCtx, makeReq)
+	// The serving chain entry's `retry:` block, merged over the plugin's. Retry
+	// is call-time behaviour rather than a request field, so this is the only
+	// place a role's block can take effect.
+	resp, err := p.doWithRetry(reqCtx, p.resolveRetry(req), makeReq)
 	if err != nil {
 		p.mu.Lock()
 		delete(p.cancels, req.RequestID)

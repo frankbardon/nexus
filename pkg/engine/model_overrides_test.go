@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/events"
@@ -354,4 +355,73 @@ func TestResolveModelConfig_NilRegistryAndUnknownRole(t *testing.T) {
 func TestStampModelConfig_NilRequestIsANoOp(t *testing.T) {
 	cfg, _ := overridesRegistry().Fallback("balanced", 0)
 	StampModelConfig(nil, cfg) // must not panic
+}
+
+// --- WalkRoleEntries --------------------------------------------------------
+
+// The sweep every provider's Init-time validator is built from: sorted roles,
+// the whole chain rather than just the primary, and an entry naming another
+// provider left to that provider.
+func TestWalkRoleEntries_SortedWholeChainAndProviderSkip(t *testing.T) {
+	models := NewModelRegistry(map[string]any{
+		"default": "balanced",
+		"zebra":   map[string]any{"provider": "mine", "model": "z"},
+		"balanced": []any{
+			map[string]any{"provider": "mine", "model": "b0"},
+			map[string]any{"provider": "theirs", "model": "b1"},
+			map[string]any{"model": "b2"}, // names no provider: could be anyone's
+		},
+	})
+
+	var seen []string
+	err := WalkRoleEntries(models, "mine", func(role string, cfg ModelConfig) error {
+		seen = append(seen, role+"/"+cfg.Model)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkRoleEntries: unexpected error: %v", err)
+	}
+
+	want := []string{"balanced/b0", "balanced/b2", "zebra/z"}
+	if len(seen) != len(want) {
+		t.Fatalf("visited %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("visited %v, want %v", seen, want)
+		}
+	}
+}
+
+// The first error stops the walk, so a config with several broken roles fails
+// on the same one every boot.
+func TestWalkRoleEntries_StopsAtTheFirstError(t *testing.T) {
+	models := NewModelRegistry(map[string]any{
+		"default": "alpha",
+		"alpha":   map[string]any{"provider": "mine", "model": "a"},
+		"beta":    map[string]any{"provider": "mine", "model": "b"},
+	})
+
+	var visited int
+	err := WalkRoleEntries(models, "mine", func(role string, _ ModelConfig) error {
+		visited++
+		return errors.New("broken " + role)
+	})
+	if err == nil || err.Error() != "broken alpha" {
+		t.Fatalf("err = %v, want the alphabetically first role's error", err)
+	}
+	if visited != 1 {
+		t.Fatalf("visited %d entries, want the walk to stop at the first error", visited)
+	}
+}
+
+// A nil registry is the embedder who configured no roles at all, and a nil
+// callback is a caller with nothing to do — neither is an error.
+func TestWalkRoleEntries_NilInputs(t *testing.T) {
+	if err := WalkRoleEntries(nil, "mine", func(string, ModelConfig) error { return errors.New("never") }); err != nil {
+		t.Fatalf("nil registry: %v", err)
+	}
+	if err := WalkRoleEntries(NewModelRegistry(nil), "mine", nil); err != nil {
+		t.Fatalf("nil callback: %v", err)
+	}
 }

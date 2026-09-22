@@ -507,47 +507,24 @@ func (p *Plugin) resolveCache(req events.LLMRequest) cacheConfig {
 // carries a typo (`ttl_hours: 1`, say) would boot clean and cache nothing,
 // invisibly, for as long as the deployment ran.
 //
-// The error names the role, which is the useful half of the answer. Roles are
-// walked in sorted order so a config with several broken roles fails on the
-// same one every boot.
-//
-// Entries naming another provider are that provider's business and are skipped;
-// an entry naming none may land here, so it is checked. The whole chain is
-// walked, not just the primary: a fallback entry's block reaches this provider
-// through the coordinator's stamp and is just as capable of being wrong.
-//
-// Shape mirrors validateRoleThinking.
+// The error names the role, which is the useful half of the answer. The sweep
+// itself — sorted roles, whole chain, foreign entries skipped — is
+// engine.WalkRoleEntries; see there for why each of those matters.
 func validateRoleCache(models *engine.ModelRegistry, plugin map[string]any, logger *slog.Logger) error {
-	if models == nil {
-		return nil
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-
-	roles := models.Roles()
-	sort.Strings(roles)
-
-	for _, role := range roles {
-		for i := 0; i < models.ChainLen(role); i++ {
-			cfg, ok := models.Fallback(role, i)
-			if !ok {
-				continue
-			}
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				continue
-			}
-			if cfg.Cache == nil {
-				continue
-			}
-			// The role's logger, so a warning raised by the merged block says
-			// which role raised it. Only entries that actually set a block get
-			// here, so the plugin block's own warnings — already said once by
-			// Init — are not repeated per role.
-			if _, err := parseMergedCache(plugin, cfg.Cache, logger.With("role", role)); err != nil {
-				return fmt.Errorf("core.models role %q: %w", role, err)
-			}
+	return engine.WalkRoleEntries(models, pluginID, func(role string, cfg engine.ModelConfig) error {
+		if cfg.Cache == nil {
+			return nil
 		}
-	}
-	return nil
+		// The role's logger, so a warning raised by the merged block says which
+		// role raised it. Only entries that actually set a block get here, so
+		// the plugin block's own warnings — already said once by Init — are not
+		// repeated per role.
+		if _, err := parseMergedCache(plugin, cfg.Cache, logger.With("role", role)); err != nil {
+			return fmt.Errorf("core.models role %q: %w", role, err)
+		}
+		return nil
+	})
 }

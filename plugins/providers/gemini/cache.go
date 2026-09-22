@@ -550,40 +550,20 @@ func (p *Plugin) resolveCache(req events.LLMRequest) cacheSettings {
 // nothing else ever checks them. Without this sweep a role whose merged block
 // carries a typo would boot clean and cache nothing, invisibly.
 //
-// The error names the role. Roles are walked in sorted order so a config with
-// several broken roles fails on the same one every boot. Entries naming another
-// provider are skipped; the whole chain is walked, not just the primary, since
-// a fallback entry's block reaches this provider through the coordinator's
-// stamp.
-//
-// Shape mirrors validateRoleThinking.
+// The error names the role. The sweep itself — sorted roles, whole chain,
+// foreign entries skipped — is engine.WalkRoleEntries; see there for why each
+// of those matters.
 func validateRoleCache(models *engine.ModelRegistry, plugin map[string]any, logger *slog.Logger) error {
-	if models == nil {
-		return nil
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-
-	roles := models.Roles()
-	sort.Strings(roles)
-
-	for _, role := range roles {
-		for i := 0; i < models.ChainLen(role); i++ {
-			cfg, ok := models.Fallback(role, i)
-			if !ok {
-				continue
-			}
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				continue
-			}
-			if cfg.Cache == nil {
-				continue
-			}
-			if _, err := parseMergedCache(plugin, cfg.Cache, logger.With("role", role)); err != nil {
-				return fmt.Errorf("core.models role %q: %w", role, err)
-			}
+	return engine.WalkRoleEntries(models, pluginID, func(role string, cfg engine.ModelConfig) error {
+		if cfg.Cache == nil {
+			return nil
 		}
-	}
-	return nil
+		if _, err := parseMergedCache(plugin, cfg.Cache, logger.With("role", role)); err != nil {
+			return fmt.Errorf("core.models role %q: %w", role, err)
+		}
+		return nil
+	})
 }

@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/frankbardon/nexus/pkg/events"
+import (
+	"sort"
+
+	"github.com/frankbardon/nexus/pkg/events"
+)
 
 // Per-entry configuration on a `core.models` chain entry — effort, temperature,
 // max_tokens, the API-surface selector and the native provider blocks — has to
@@ -160,4 +164,49 @@ func cloneModelBlock(block map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// WalkRoleEntries calls fn once for every `core.models` chain entry that
+// providerID could be asked to serve, and stops at the first error fn returns.
+//
+// It is the skeleton every provider's Init-time `validateRole*` sweep is built
+// from, and it exists because those sweeps all have to agree about four
+// non-obvious things:
+//
+//   - Roles are walked in sorted order, so a config with several broken roles
+//     fails on the same one every boot rather than on whichever one the map
+//     iteration reached first.
+//   - The whole chain is walked, not just the primary: a non-first entry's
+//     configuration reaches a provider through the fallback or fanout
+//     coordinator's stamp and is just as capable of being wrong.
+//   - An entry naming another provider is that provider's business and is
+//     skipped; an entry naming none may land anywhere, so it is checked.
+//   - A nil registry is not an error — an embedder may run without one.
+//
+// The per-axis part — which block to read off the entry, what to do with it —
+// stays with the provider, which is the only thing that can parse its own
+// vocabulary.
+func WalkRoleEntries(models *ModelRegistry, providerID string, fn func(role string, cfg ModelConfig) error) error {
+	if models == nil || fn == nil {
+		return nil
+	}
+
+	roles := models.Roles()
+	sort.Strings(roles)
+
+	for _, role := range roles {
+		for i := 0; i < models.ChainLen(role); i++ {
+			cfg, ok := models.Fallback(role, i)
+			if !ok {
+				continue
+			}
+			if cfg.Provider != "" && cfg.Provider != providerID {
+				continue
+			}
+			if err := fn(role, cfg); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

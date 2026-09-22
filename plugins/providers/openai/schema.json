@@ -56,7 +56,7 @@
         "max_retries":   {"type": "integer", "minimum": 0},
         "initial_delay": {"type": "string"},
         "max_delay":     {"type": "string"},
-        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "jitter"]},
+        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "exponential_jitter"]},
         "multiplier":    {"type": "number", "minimum": 0},
         "statuses":      {"type": "array", "items": {"type": "integer"}}
       }

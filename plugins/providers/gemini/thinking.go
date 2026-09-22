@@ -3,7 +3,6 @@ package gemini
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -310,66 +309,50 @@ func thinkingLevelFor(tc thinkingConfig, effort string) (string, error) {
 // role would repeat its deprecation warnings once per role; Init has already
 // said them once.
 func validateRoleThinking(models *engine.ModelRegistry, plugin map[string]any, pluginTC thinkingConfig, logger *slog.Logger) error {
-	if models == nil {
-		return nil
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-
-	roles := models.Roles()
-	sort.Strings(roles)
 	warned := map[string]bool{}
 
-	for _, role := range roles {
-		for i := 0; i < models.ChainLen(role); i++ {
-			cfg, ok := models.Fallback(role, i)
-			if !ok {
-				continue
+	return engine.WalkRoleEntries(models, pluginID, func(role string, cfg engine.ModelConfig) error {
+		tc := pluginTC
+		if cfg.Thinking != nil {
+			// The role's logger, so a deprecation warning raised by the
+			// merged block says which role raised it.
+			merged, err := parseMergedThinking(plugin, cfg.Thinking, logger.With("role", role))
+			if err != nil {
+				return fmt.Errorf("core.models role %q: %w", role, err)
 			}
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				continue
-			}
-
-			tc := pluginTC
-			if cfg.Thinking != nil {
-				// The role's logger, so a deprecation warning raised by the
-				// merged block says which role raised it.
-				merged, err := parseMergedThinking(plugin, cfg.Thinking, logger.With("role", role))
-				if err != nil {
-					return fmt.Errorf("core.models role %q: %w", role, err)
-				}
-				tc = merged
-			}
-
-			if cfg.Effort == "" {
-				continue
-			}
-			// Where the effort cannot reach the wire, its vocabulary is not
-			// this provider's business.
-			if tc.Mode != thinkingModeLevel || (tc.LevelSource == levelFromRole && tc.Level != "") {
-				continue
-			}
-			level, clamped, ok := resolveEffortLevel(cfg.Effort)
-			if !ok {
-				return fmt.Errorf("core.models role %q: %w", role, errUnknownEffort(cfg.Effort))
-			}
-			if !clamped {
-				continue
-			}
-			key := role + "\x00" + cfg.Effort
-			if warned[key] {
-				continue
-			}
-			warned[key] = true
-			logger.Warn("core.models effort clamped to Gemini's thinkingLevel range",
-				"role", role,
-				"configured", cfg.Effort,
-				"effective", level,
-			)
+			tc = merged
 		}
-	}
-	return nil
+
+		if cfg.Effort == "" {
+			return nil
+		}
+		// Where the effort cannot reach the wire, its vocabulary is not this
+		// provider's business.
+		if tc.Mode != thinkingModeLevel || (tc.LevelSource == levelFromRole && tc.Level != "") {
+			return nil
+		}
+		level, clamped, ok := resolveEffortLevel(cfg.Effort)
+		if !ok {
+			return fmt.Errorf("core.models role %q: %w", role, errUnknownEffort(cfg.Effort))
+		}
+		if !clamped {
+			return nil
+		}
+		key := role + "\x00" + cfg.Effort
+		if warned[key] {
+			return nil
+		}
+		warned[key] = true
+		logger.Warn("core.models effort clamped to Gemini's thinkingLevel range",
+			"role", role,
+			"configured", cfg.Effort,
+			"effective", level,
+		)
+		return nil
+	})
 }
 
 // applyThinking writes the thinkingConfig object into the generationConfig map.

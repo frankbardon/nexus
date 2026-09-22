@@ -3,7 +3,6 @@ package anthropic
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -434,36 +433,20 @@ func (p *Plugin) resolveThinking(req events.LLMRequest) thinkingConfig {
 //
 // Shape mirrors validateRoleEfforts in plugins/providers/gemini/thinking.go.
 func validateRoleThinking(models *engine.ModelRegistry, plugin map[string]any, logger *slog.Logger) error {
-	if models == nil {
-		return nil
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-
-	roles := models.Roles()
-	sort.Strings(roles)
-
-	for _, role := range roles {
-		for i := 0; i < models.ChainLen(role); i++ {
-			cfg, ok := models.Fallback(role, i)
-			if !ok {
-				continue
-			}
-			if cfg.Provider != "" && cfg.Provider != pluginID {
-				continue
-			}
-			if cfg.Thinking == nil {
-				continue
-			}
-			// The role's logger, so a deprecation warning raised by the merged
-			// block says which role raised it. Only entries that actually set a
-			// block get here, so the plugin block's own warnings — already said
-			// once by Init — are not repeated per role.
-			if _, err := parseMergedThinking(plugin, cfg.Thinking, logger.With("role", role)); err != nil {
-				return fmt.Errorf("core.models role %q: %w", role, err)
-			}
+	return engine.WalkRoleEntries(models, pluginID, func(role string, cfg engine.ModelConfig) error {
+		if cfg.Thinking == nil {
+			return nil
 		}
-	}
-	return nil
+		// The role's logger, so a deprecation warning raised by the merged
+		// block says which role raised it. Only entries that actually set a
+		// block get here, so the plugin block's own warnings — already said
+		// once by Init — are not repeated per role.
+		if _, err := parseMergedThinking(plugin, cfg.Thinking, logger.With("role", role)); err != nil {
+			return fmt.Errorf("core.models role %q: %w", role, err)
+		}
+		return nil
+	})
 }

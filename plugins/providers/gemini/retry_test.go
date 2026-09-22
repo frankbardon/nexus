@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseRetryConfig_Defaults(t *testing.T) {
-	rc := parseRetryConfig(map[string]any{})
+	rc := mustParseRetry(t, map[string]any{})
 	if rc.Enabled {
 		t.Fatal("expected retry disabled by default")
 	}
@@ -24,7 +24,7 @@ func TestParseRetryConfig_Defaults(t *testing.T) {
 }
 
 func TestParseRetryConfig_Full(t *testing.T) {
-	rc := parseRetryConfig(map[string]any{
+	rc := mustParseRetry(t, map[string]any{
 		"retry": map[string]any{
 			"max_retries":   5,
 			"initial_delay": "500ms",
@@ -103,7 +103,7 @@ func TestDoWithRetry_RetriesOnRetryableStatus(t *testing.T) {
 		},
 	}
 
-	resp, err := p.doWithRetry(context.Background(), func() (*http.Request, error) {
+	resp, err := p.doWithRetry(context.Background(), p.retry, func() (*http.Request, error) {
 		return http.NewRequest("POST", srv.URL, nil)
 	})
 	if err != nil {
@@ -137,7 +137,7 @@ func TestDoWithRetry_NonRetryableStatusPassesThrough(t *testing.T) {
 		},
 	}
 
-	resp, err := p.doWithRetry(context.Background(), func() (*http.Request, error) {
+	resp, err := p.doWithRetry(context.Background(), p.retry, func() (*http.Request, error) {
 		return http.NewRequest("POST", srv.URL, nil)
 	})
 	if err != nil {
@@ -147,4 +147,15 @@ func TestDoWithRetry_NonRetryableStatusPassesThrough(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || calls.Load() != 1 {
 		t.Fatalf("expected 1 call with 400, got %d / %d", calls.Load(), resp.StatusCode)
 	}
+}
+
+// mustParseRetry is parseRetryConfig for the tests that predate the error
+// return: a valid block must not fail, and a failure is the test's problem.
+func mustParseRetry(t *testing.T, cfg map[string]any) retryConfig {
+	t.Helper()
+	rc, err := parseRetryConfig(cfg, nil)
+	if err != nil {
+		t.Fatalf("parseRetryConfig: unexpected error: %v", err)
+	}
+	return rc
 }

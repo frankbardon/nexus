@@ -67,6 +67,28 @@ Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in
 ### Retry Logic
 
 Transient errors (rate limits, server errors) are retried with exponential backoff.
+#### Per-role retry
+
+A [`core.models`](../../configuration/reference.md#coremodels) role entry may
+carry its own `retry:` block, which **merges over** the plugin-level one key by
+key: the role wins on every key it names and a plugin key it is silent about
+survives, so a role that only wants a shorter `max_retries` keeps the plugin's
+backoff shape and status list. The merged block goes through the same parser, so
+it gets the same defaulting and the same soft fallbacks; a block already stamped
+on the request by `nexus.provider.fallback` or `nexus.provider.fanout` — for the
+chain entry actually being served — wins over the role's. Every role this
+provider could serve is swept at `Init`: an unknown key or a wrongly typed one
+fails the boot naming the role, because these blocks never pass through
+`schema.json`.
+
+Unlike every other per-entry axis this one reaches no part of the request body.
+It is call-time behaviour, resolved per request and used to drive that request's
+retry loop — which is the point: a role with a fallback chain usually wants
+*fewer* attempts at the primary than a terminal role, because every retry there
+is time not spent on the entry that might actually answer.
+
+See [Retry behaviour: `retry`](../../configuration/reference.md#retry-behaviour-retry)
+for the canonical account.
 
 ### Structured Output (Simulated)
 

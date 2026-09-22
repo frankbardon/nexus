@@ -824,7 +824,7 @@ core:
       cache:
         enabled: true
       retry:
-        max_attempts: 2
+        max_retries: 2
 ```
 
 **One precedence rule, every provider, every axis:**
@@ -854,7 +854,7 @@ to read it:
 | `effort` | `nexus.llm.anthropic` and `nexus.llm.gemini` (not read by `nexus.llm.openai` at all) |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
 | `reasoning`, `api` | no provider yet; `nexus.llm.openai`'s are a later release |
-| `retry` | no provider yet |
+| `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
 An axis with no consumer is inert, not an error: the key parses, validates
 nothing, travels on the request and is read by nobody.
@@ -924,6 +924,56 @@ does mean a typo'd OpenAI cache block is never reported.
 The `1h` beta gate on Anthropic follows the *resolved* configuration, not the
 plugin block: a role that lifts a `5m` plugin default to `1h` gets the
 `extended-cache-ttl-2025-04-11` header its own markers require.
+
+#### Retry behaviour: `retry`
+
+`retry` is a native provider block and follows the `cache` rules exactly: a
+role's block **merges over** the plugin-level one key by key, the role wins on
+every key it names, and a plugin key the role is silent about survives — so a
+role that only wants a shorter `max_retries` keeps the plugin's backoff shape
+and status list. A set-but-empty block (`retry: {}`) is a statement rather than
+a gap. The merged block goes through the provider's own retry parser, so it gets
+the same defaulting and the same soft fallbacks, and every role a provider could
+serve is swept at `Init` — an unknown key or a wrongly typed one **fails the
+boot naming the role**, because a block on a `core.models` entry never passes
+through the plugin's `schema.json`. Precedence is the unified rule: a block
+already stamped on the request (by the `fallback` or `fanout` coordinator, for
+the chain entry actually being served) wins, then the role's, then the plugin
+block. There is no `effort`-style shared axis for retrying.
+
+All three providers take the same vocabulary —
+`{enabled, max_retries, initial_delay, max_delay, backoff, multiplier, statuses}` —
+and all three read it per role. As at plugin level, the **presence** of a block
+is what turns retrying on: `max_retries: 0` is how a role asks for a single
+attempt and no retries, and a role block on a deployment with no plugin-level
+`retry:` at all turns retrying on with the built-in defaults.
+
+**This is the one per-entry axis that is call-time behaviour rather than a
+request field.** Nothing about it is serialized into the request body; it
+governs the loop around the HTTP call, which is why the provider resolves it per
+request and drives that request's loop from the result. The practical
+consequence is the reason the axis exists:
+
+```yaml
+core:
+  models:
+    balanced:
+      - provider: nexus.llm.anthropic
+        model: claude-opus-4-7
+        retry: {max_retries: 1}   # one retry, then hand over
+      - provider: nexus.llm.gemini
+        model: gemini-2.5-pro
+```
+
+A role with somewhere to fall through to usually wants **fewer** attempts at the
+primary: every retry there is time not spent on the entry that might actually
+answer. A terminal role — one whose chain is a single entry — wants the
+opposite, because there is nothing else to try. The plugin-level block cannot
+express both, and before this it was the only thing a deployment had.
+
+Note what this does *not* change: the `fallback` coordinator still only moves on
+once the provider reports `RetriesExhausted`, so a shorter budget makes the
+hand-over sooner, never automatic.
 
 #### Reasoning depth: `effort`
 
@@ -1728,6 +1778,7 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `files.cache_uploads`              | bool   | `true`              | Deduplicate identical uploads within a session. |
 | `files.delete_on_shutdown`         | bool   | `false`             | Delete uploaded files when the engine shuts down. |
 | `retry.*`                          | —      | *(see Retry block)* | Backoff configuration. |
+| *(role `retry`)*                    | map    | *(unset)*            | Not a plugin key — the [`core.models`](#coremodels) `<role>.retry` block, which **merges over** the plugin-level `retry:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a shorter `max_retries` keeps the plugin's backoff shape and status list. The merged block goes through the same parser as the plugin one, so a present block turns retrying on and an unrecognised `backoff` word or unparseable duration is warned about and defaulted rather than refused. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Unlike every other per-entry axis this one reaches no part of the request body**: it drives the retry loop around the HTTP call, resolved per request. Its point is a role with a fallback chain wanting *fewer* attempts at the primary than a terminal role — see [Retry behaviour: `retry`](#retry-behaviour-retry). |
 | `pricing.<model>.*`                | map    | *(embedded table)*  | Override per-model token pricing — see "Pricing override". |
 
 On GKE with Workload Identity, `auth_mode: vertex` alone is a complete Vertex
@@ -2024,15 +2075,21 @@ with an HTTP 400, which stays the operator's problem to size per role.
 
 #### Retry block (shared by all providers)
 
+Retrying is off unless a `retry:` block is present; **the presence of the block
+is what turns it on**, and every key below is optional inside it. A
+[`core.models`](#coremodels) role may carry its own `retry:` block, which merges
+over this one key by key — see [Retry behaviour: `retry`](#retry-behaviour-retry)
+and the *(role `retry`)* row in each provider's table.
+
 | Key                    | Type     | Default                                  | Description |
 |------------------------|----------|------------------------------------------|-------------|
-| `retry.enabled`        | bool     | `true`                                   | Enable retry on 5xx / 429. |
-| `retry.max_retries`    | int      | `3`                                      | Maximum attempts. |
-| `retry.initial_delay`  | duration | `1s`                                     | First backoff delay. |
-| `retry.max_delay`      | duration | `60s`                                    | Maximum delay between retries. |
-| `retry.backoff`        | string   | `exponential`                            | `constant`, `linear`, `exponential`, or `jitter`. |
-| `retry.multiplier`     | float    | `2.0`                                    | Multiplier for `linear`/`exponential`. |
-| `retry.statuses`       | int list | Anthropic: `[429, 500, 502, 503, 529]`<br/>OpenAI/Gemini: `[429, 500, 502, 503]` | HTTP statuses to retry. |
+| `retry.enabled`        | bool     | *(inert)*                                | Accepted and type-checked, but **not consulted**: a present `retry:` block enables retrying whatever this says. To ask for a single attempt and no retries, set `max_retries: 0`. |
+| `retry.max_retries`    | int      | `3`                                      | Retries *after* the first attempt, so `3` means up to four calls. `0` means one call and no retry. |
+| `retry.initial_delay`  | duration | `1s`                                     | First backoff delay. A value `time.ParseDuration` rejects is **warned about and defaulted**, not refused. |
+| `retry.max_delay`      | duration | `60s`                                    | Maximum delay between retries. Same soft fallback as `initial_delay`. Also caps a `Retry-After` the server sends. |
+| `retry.backoff`        | string   | `exponential_jitter`                     | `constant`, `linear`, `exponential` or `exponential_jitter`. An unrecognised word is **warned about and defaulted**, not refused. |
+| `retry.multiplier`     | float    | `2.0`                                    | Multiplier for `linear`/`exponential`/`exponential_jitter`. Written as a whole number or a decimal; both parse. |
+| `retry.statuses`       | int list | Anthropic: `[429, 500, 502, 503, 529]`<br/>OpenAI/Gemini: `[429, 500, 502, 503]` | HTTP statuses to retry. Replaces the default set outright rather than adding to it. |
 
 #### Pricing override
 
@@ -2070,9 +2127,10 @@ Source: `plugins/providers/openai/plugin.go`.
 | `force_reasoning`            | bool   | `false`                              | Force reasoning even for non-o-series models (experimental). |
 | `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
 | `retry.*`                    | —      | *(shared Retry block)*               | Backoff configuration. |
+| *(role `retry`)*              | map    | *(unset)*                             | Not a plugin key — the [`core.models`](#coremodels) `<role>.retry` block, which **merges over** the plugin-level `retry:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a shorter `max_retries` keeps the plugin's backoff shape and status list. The merged block goes through the same parser as the plugin one, so a present block turns retrying on and an unrecognised `backoff` word or unparseable duration is warned about and defaulted rather than refused. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Unlike every other per-entry axis this one reaches no part of the request body**: it drives the retry loop around the HTTP call, resolved per request. Its point is a role with a fallback chain wanting *fewer* attempts at the primary than a terminal role — see [Retry behaviour: `retry`](#retry-behaviour-retry). |
 | `pricing.<model>.*`          | map    | *(embedded table)*                   | Override per-model pricing. |
 | *(role `cache`)*             | map    | *(unset)*                            | Not a plugin key, and **not read by this provider**. There is no `cache:` block on `nexus.llm.openai` at all, so a [`core.models`](#coremodels) role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](#prompt-caching-cache). |
-| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The **only** per-entry axis beyond `model`/`max_tokens` this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache`, `retry` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again for a reasoning model, whatever its origin. |
+| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The only per-entry axis beyond `model`/`max_tokens` and the `retry:` block (see the row above) this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again for a reasoning model, whatever its origin. |
 
 ### `nexus.llm.gemini`
 
@@ -2104,6 +2162,7 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `cache.max_entries`          | int    | `64`                                             | Capacity of the in-process prefix-hash → cache-name map; the oldest entry is evicted past it. |
 | *(role `cache`)*             | map    | *(unset)*                                        | Not a plugin key — the [`core.models`](#coremodels) `<role>.cache` block, which **merges over** the plugin-level `cache:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives. The merged block goes through the same parser as the plugin one. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely — and an unparseable `ttl` is warned about once, naming the role. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Only `enabled` currently changes anything per request**: the entry map is addressed by prefix hash and shared across every role, and `min_tokens`, `ttl` and `max_entries` all belong to the write path, which is not role-scoped. See [Prompt caching: `cache`](#prompt-caching-cache). |
 | `retry.*`                    | —      | *(shared Retry block)*                           | Backoff configuration. |
+| *(role `retry`)*              | map    | *(unset)*                                         | Not a plugin key — the [`core.models`](#coremodels) `<role>.retry` block, which **merges over** the plugin-level `retry:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a shorter `max_retries` keeps the plugin's backoff shape and status list. The merged block goes through the same parser as the plugin one, so a present block turns retrying on and an unrecognised `backoff` word or unparseable duration is warned about and defaulted rather than refused. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Unlike every other per-entry axis this one reaches no part of the request body**: it drives the retry loop around the HTTP call, resolved per request. Its point is a role with a fallback chain wanting *fewer* attempts at the primary than a terminal role — see [Retry behaviour: `retry`](#retry-behaviour-retry). |
 | `pricing.<model>.*`          | map    | *(embedded table)*                               | Override per-model pricing. |
 
 On GKE with Workload Identity, `auth: vertex` alone is a complete Vertex

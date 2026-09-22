@@ -68,6 +68,11 @@ type Plugin struct {
 	// merged result has to go back through parseCacheConfig. nil means no
 	// plugin-level block at all. Read-only — see mergeCacheBlock.
 	cacheRaw map[string]any
+	// retryRaw is the plugin-level `retry:` block exactly as configured, kept
+	// because a `core.models` role's own block merges over it key by key and the
+	// merged result has to go back through parseRetryConfig. nil means no
+	// plugin-level block at all. Read-only — see mergeRetryBlock.
+	retryRaw map[string]any
 	// effortClampWarned dedupes warnEffortClamped's per-request warning,
 	// keyed by role + configured value. See warnEffortClamped.
 	effortClampWarned sync.Map
@@ -238,7 +243,22 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
-	p.retry = parseRetryConfig(ctx.Config)
+	retry, err := parseRetryConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.retry = retry
+	p.retryRaw = rawRetryBlock(ctx.Config)
+
+	// A core.models role may carry a `retry:` block of its own, which merges
+	// over the plugin-level one. Like the `thinking:` and `cache:` blocks
+	// above, these never pass through schema.json, so this sweep is the only
+	// thing that checks them — at boot, rather than at the first request that
+	// names the role.
+	if err := validateRoleRetry(p.models, p.retryRaw, p.logger); err != nil {
+		return err
+	}
+
 	if p.retry.Enabled {
 		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
@@ -465,8 +485,8 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 // model, max_tokens and effort already have their own resolution pass in
 // resolveTarget — one that knows about defaultMaxTokens, this provider's effort
 // vocabulary and the foreign-provider skip — so taking them wholesale here would
-// duplicate and quietly change it. The remaining axes (`reasoning`, `retry`,
-// `api`) have no consumer in this provider.
+// duplicate and quietly change it. The remaining axes (`reasoning`, `api`) have
+// no consumer in this provider.
 //
 // Temperature is a plain gap-fill, and the precedence is the engine-wide one:
 // ResolveModelConfig never disturbs a value the request already carries, so an
@@ -482,10 +502,16 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 // plugin-level one rather than substituted for it, by resolveCache at the two
 // points that read it — applyCacheControl in the body builder, and betaFlags
 // for the 1h-TTL beta gate.
+//
+// `retry` is the odd one out: it is merged the same way, by resolveRetry, but
+// it reaches no part of the request body at all. Its one consumer is the loop
+// in doWithRetry, which is why that function takes a retryConfig rather than
+// reading the plugin's.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Overrides.Thinking = resolved.Overrides.Thinking
 	req.Overrides.Cache = resolved.Overrides.Cache
+	req.Overrides.Retry = resolved.Overrides.Retry
 	req.Temperature = resolved.Temperature
 }
 
@@ -642,7 +668,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return httpReq, nil
 	}
 
-	resp, err := p.doWithRetry(reqCtx, makeReq)
+	// The serving chain entry's `retry:` block, merged over the plugin's. Retry
+	// is call-time behaviour rather than a request field, so this is the only
+	// place a role's block can take effect.
+	resp, err := p.doWithRetry(reqCtx, p.resolveRetry(req), makeReq)
 	if err != nil {
 		p.mu.Lock()
 		delete(p.cancels, req.RequestID)
