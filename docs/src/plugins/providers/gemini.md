@@ -292,7 +292,9 @@ the same level of specificity and the native, unambiguous one wins.
 > winning, move that value onto the role's own `thinking:` block. Two follow-on
 > consequences: a role `effort` the plugin-level `level` used to shadow now reaches the
 > vocabulary gate, so a value in neither provider's vocabulary now fails `Init` where it
-> was previously ignored; and a clamp that was previously silent is now warned.
+> was previously ignored; and a clamp that was previously silent is now warned. See
+> [Upgrading to
+> v0.29.0](../../configuration/upgrading-v0.29.md#4-gemini-a-roles-setting-now-beats-the-plugin-block).
 
 Anthropic's vocabulary reaches higher than Gemini's, so two of its words clamp:
 

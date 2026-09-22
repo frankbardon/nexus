@@ -16,8 +16,18 @@ The OpenAI provider calls the Chat Completions API or the Responses API via dire
 | `api_key_env` | string | `OPENAI_API_KEY` | Name of the environment variable containing the API key |
 | `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for local proxies and OpenAI-compatible endpoints) — the whole chat endpoint, not a prefix. Setting it narrows the default `api` to `chat_completions`; under an explicit `api: responses` the sibling `/responses` route beneath it is used |
 | `api` | string | `responses` *(narrowed)* | Which OpenAI API to speak: `responses` or `chat_completions`. Both work end to end. The default narrows to `chat_completions` when `base_url` or an Azure `auth_mode` is set (see below). Also settable per `core.models` entry, which wins |
+| `reasoning.mode` | string | `off` *(absent block)* / `effort` *(present block)* | `effort` or `off`. The **only** declaration that the target is a reasoning model, and the only gate on the sampling-parameter strip. No model id is ever inspected |
+| `reasoning.effort` | string | *(unset)* | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**. An unrecognised value fails `Init`. The least specific layer: a `core.models` role's `effort:` beats it |
+| `reasoning.summary` | string | *(unset)* | `auto`, `concise`, `detailed`. Reaches the wire only on `api: responses`; dropped with one `Init` warning on `chat_completions`, which has no summary field. Also the gate on `thinking.step` emission |
+| `reasoning.enabled` | bool | *(unset)* | **Deprecated** alias for `mode`: `true` → `effort`, `false` → `off`. Warns; does not fail boot |
+| `reasoning.budget_tokens` | int | *(unset)* | **Deprecated and ignored** — OpenAI has no reasoning token budget. Warns; does not fail boot |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
 | `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
+
+`auth_mode`, `azure.*`, `files.*`, `multimodal.*` and `retry.*` are configured
+here too; the [configuration
+reference](../../configuration/reference.md#nexusllmopenai) carries the full
+table and is canonical where the two disagree.
 
 ## Events
 
@@ -45,7 +55,7 @@ The provider uses the Model Registry to resolve role names. When an `llm.request
 
 Several per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out whatever its origin whenever the **resolved** `reasoning.mode` — the plugin block merged with the role's — is anything but `off`; a model id alone never strips it. See [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
 
-A role's `retry:` block is read too, merging over the plugin-level one, as are its `effort:` and its `reasoning:` block — the two halves of reasoning depth; see [Per-role reasoning](#per-role-reasoning) below. The remaining per-entry axes have no consumer here: the `thinking`, `cache` and `api` entries are read by nobody on this provider.
+A role's `retry:` block is read too, merging over the plugin-level one, as are its `effort:` and its `reasoning:` block — the two halves of reasoning depth; see [Per-role reasoning](#per-role-reasoning) below — and its `api:`, which picks the endpoint for that entry; see [Which API: `api`](#which-api-api). So most per-entry axes land here: `model`, `max_tokens`, `temperature`, `effort`, `reasoning`, `retry` and `api`. The two that do not are `thinking` (this provider has `reasoning:` instead) and `cache` (it has no cache block at all) — both are **ignored in silence**, typos included.
 
 There is no `cache:` block on this provider at all, so a role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](../../configuration/reference.md#prompt-caching-cache).
 
@@ -83,7 +93,9 @@ absent block included — nothing is stripped, whatever the model is called.
 > to every `nexus.llm.openai` instance that targets one; `force_reasoning: true`
 > becomes exactly that block, and the key itself must be removed or config
 > validation fails the boot with `unknown key "force_reasoning"`. See the
-> [configuration reference](../../configuration/reference.md#declaring-a-reasoning-model-openai).
+> [configuration reference](../../configuration/reference.md#declaring-a-reasoning-model-openai)
+> and [Upgrading to
+> v0.29.0](../../configuration/upgrading-v0.29.md#2-openai-no-longer-detects-reasoning-models).
 
 `reasoning.summary` (`auto` / `concise` / `detailed`) reaches the wire only on
 the Responses API, which takes a `reasoning` object carrying both the depth and
@@ -252,6 +264,24 @@ reasoning replay across a tool loop, and the failure when a replayed blob is
 exists, so the trade a default makes on an operator's behalf is a trade with a
 written failure mode rather than a silent one.
 
+**What each endpoint supports.** Everything an agent loop needs works on both;
+the differences are at the edges, and all of them are consequences of what the
+API itself offers rather than of what is implemented here:
+
+| | `chat_completions` | `responses` |
+|---|---|---|
+| Streaming, tool calling, cancellation, retries | yes | yes |
+| Structured output (`json_object` / `json_schema`) | `response_format` | `text.format`, flattened; the caller's `strict` forwarded verbatim |
+| Images and files | yes (`image_url` / `file`) | yes (`input_image` / `input_file`) |
+| An oversize inline image uploaded via the Files API and referenced by id | **no** — `image_url` carries no `file_id`, so it is an error | yes, at or above `files.upload_threshold` |
+| `reasoning_effort` on the wire | yes — but **not together with tools** from GPT-5.4 onward | yes, as a `reasoning` object |
+| `reasoning.summary` | **no field exists**; dropped with one `Init` warning | yes |
+| Reasoning text as `thinking.step` events | **none** — the API returns no reasoning text | yes |
+| Reasoning continuity across a tool round | nothing to replay | encrypted `reasoning` Items, replayed verbatim; a rejected replay fails the turn |
+| `prediction` (Predicted Outputs) | yes | **no counterpart** — dropped with one warning per role, turn proceeds |
+| Azure | deployment-scoped path + `api-version` | versionless `/openai/v1/responses`, deployment in the body |
+| Batched via [`nexus.llm.batch`](../../configuration/reference.md#nexusllmbatch) | yes | **no** — the batch coordinator hardcodes the chat endpoint |
+
 **Upgrading from v0.28.x moves a plain deployment's endpoint.** That default was
 `chat_completions`. It moved because on OpenAI's current models the chat surface
 cannot reason while tools are on the turn, and Nexus puts tools on every turn —
@@ -261,7 +291,11 @@ that should stay. No configuration key changes shape between the surfaces and
 `llm.response` carries the same fields either way; the only request field with
 no counterpart on `responses` is `prediction`, which is dropped with a warning
 naming the role. `base_url` and Azure deployments do not move, and the batch
-coordinator keeps its own chat endpoint.
+coordinator keeps its own chat endpoint. That is one of six breaking changes in
+this release — see [Upgrading to
+v0.29.0](../../configuration/upgrading-v0.29.md) for the complete list, and
+[Before you put this on real traffic](#before-you-put-this-on-real-traffic)
+below for what has and has not been verified.
 
 **The endpoint.** On `auth_mode: openai` the surfaces are
 `https://api.openai.com/v1/chat/completions` and
@@ -408,6 +442,37 @@ that surface has no field for.
 
 See [Which OpenAI API: `api`](../../configuration/reference.md#which-openai-api-api).
 
+#### Before you put this on real traffic
+
+The Responses path is complete and tested, but **everything that tested it was a
+mock**. Every test drives an `httptest` server or a substituted transport: the
+request serializer, the reply parser, the SSE reader, the multimodal Item
+shapes, the endpoint builder on all six (`auth_mode`, `api`) pairs, the
+encrypted-reasoning replay and its rejection path. The one live OpenAI test in
+the repository is skipped without `OPENAI_API_KEY`, is not in CI, and sets no
+`api:`. **Plain `api.openai.com` deployments become this path's first real
+traffic on upgrade.** Four things are worth knowing before that happens.
+
+- **How often a replayed blob is rejected after three or four tool rounds is
+  unverified.** The reports of it are from the field, not from OpenAI's
+  documentation. If they are accurate, long agent loops on OpenAI now **fail
+  loudly** rather than degrade quietly — which is the deliberate choice, for the
+  reason under [Reasoning across a tool loop](#reasoning-across-a-tool-loop) —
+  and it is the first thing to measure against a real key.
+- **A chain that crosses model families is not detected.** Encrypted reasoning
+  is reusable only within one family, and Nexus ships no family table to notice
+  when a `fallback` chain leaves one. It surfaces as a request failure whose
+  message names it as one of two possible causes, the other being a blob that
+  simply stopped verifying.
+- **Two wire shapes were asserted from API knowledge rather than a fetched
+  spec**: the nested `input_audio` content part, and a content-parts array on
+  `function_call_output.output` for a tool that returned media. Both trigger only
+  when a message actually carries those parts.
+- **`retry.enabled` is inert**, here and on the other two providers, and always
+  has been. The *presence* of a `retry:` block is what turns retrying on; the key
+  itself is never read, so `enabled: false` with a block present still retries.
+  Write `max_retries: 0` for "one attempt, no retries".
+
 ### Compatible Endpoints
 
 The `base_url` config allows pointing at any OpenAI-compatible API:
@@ -462,3 +527,24 @@ Note that the `reasoning` **role** above names a model, not a capability: to
 send `o3` reasoning controls — and to strip the sampling parameters it rejects
 — the plugin still needs an explicit `reasoning:` block, as described under
 [Reasoning](#reasoning). A role called `reasoning` declares nothing by itself.
+
+## Migrating from v0.28.x
+
+Six changes in v0.29.0 are not additive. Three are on this provider, one is
+cross-provider, and two are on `nexus.llm.gemini` and the shared `retry:` /
+`cache:` parsers. [Upgrading to
+v0.29.0](../../configuration/upgrading-v0.29.md) is the complete account — each
+one with the exact edit that restores the old behaviour. In summary:
+
+| # | Change | Fails loudly? |
+|---|---|---|
+| 1 | [`api:` now defaults to `responses`](../../configuration/upgrading-v0.29.md#1-the-openai-api-default-moved-to-responses) on plain `api.openai.com`. Opt out with `api: chat_completions` on the plugin or on a `core.models` entry. `base_url` and both Azure modes do **not** move | no — a different endpoint, the same events |
+| 2 | [`reasoningModelPattern` and `force_reasoning` removed](../../configuration/upgrading-v0.29.md#2-openai-no-longer-detects-reasoning-models). Auto-detection is gone; an explicit `reasoning.mode` is required | half — a leftover `force_reasoning` key fails boot; bare auto-detection fails at request time with an HTTP 400 |
+| 3 | [`reasoning.enabled` maps and warns, `reasoning.budget_tokens` is ignored and warns](../../configuration/upgrading-v0.29.md#3-openai-reasoningenabled-and-reasoningbudget_tokens-are-deprecated) | no — neither fails boot |
+| 4 | [Gemini's precedence inversion is fixed](../../configuration/upgrading-v0.29.md#4-gemini-a-roles-setting-now-beats-the-plugin-block): a role's setting now beats the plugin block. Two consequences — a role `effort` a plugin `thinking.level` used to shadow now reaches the vocabulary gate, and a previously-shadowed `xhigh`/`max` clamp is now warned | for a typo, yes; for the value, no |
+| 5 | [A role `effort:` now beats a plugin-level `reasoning.effort` on OpenAI](../../configuration/upgrading-v0.29.md#5-openai-a-roles-effort-now-beats-the-plugins) — specificity wins, uniformly across providers | no |
+| 6 | [`retry:` and `cache:` blocks are parsed strictly](../../configuration/upgrading-v0.29.md#6-retry-and-cache-blocks-are-parsed-strictly): unknown or mistyped keys now error, and `backoff: jitter` is no longer in the schema enum (`exponential_jitter` is, and always was what the code accepted) | yes |
+
+And read [Before you put this on real
+traffic](#before-you-put-this-on-real-traffic) before upgrading a plain
+`api.openai.com` deployment that runs long tool loops.

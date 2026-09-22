@@ -1010,7 +1010,8 @@ single word can: `budget_tokens`, `display`, `include_thoughts`. Prefer it
 wherever the role's `provider:` is settled, and keep `effort` for the roles whose
 value has to travel.
 
-**The two vocabularies are different sets, and neither contains the other.**
+**Three vocabularies. Two of them are different sets, neither containing the
+other; the third contains both.**
 
 | Provider | Native vocabulary | Where it lands on the wire |
 |---|---|---|
@@ -1105,7 +1106,8 @@ on the plugin for every role or on the one role that needs it.
 > `thinking:` block to keep the old result. Two follow-on consequences on that
 > provider: an `effort` that only a plugin-level `level` used to shadow now
 > reaches the vocabulary gate, so a typo that was silently ignored now fails
-> `Init`; and a clamp that was silently shadowed is now warned.
+> `Init`; and a clamp that was silently shadowed is now warned. See
+> [Upgrading to v0.29.0](./upgrading-v0.29.md#4-gemini-a-roles-setting-now-beats-the-plugin-block).
 
 **Step 2 reaches all three providers by the same route.** Each reads the `core.models`
 registry itself, on every path that resolves a role, so a plain single-entry role's
@@ -1177,7 +1179,8 @@ Gemini leg's is under `thinking.mode: budget`. See
 > now send the role's word instead of the plugin's, because specificity wins. To
 > keep the old result, move the value onto the role's own `reasoning:` block or
 > drop the role's `effort:`. A deployment with no `reasoning:` block is unaffected:
-> with no declared mode nothing is sent, as before.
+> with no declared mode nothing is sent, as before. See
+> [Upgrading to v0.29.0](./upgrading-v0.29.md#5-openai-a-roles-effort-now-beats-the-plugins).
 
 
 ## Engine
@@ -2246,7 +2249,16 @@ operator on one of them who wants the Responses API says so with an explicit
 > Two things the flip does **not** touch: `base_url` and Azure deployments,
 > which the narrowing keeps on `chat_completions`; and the
 > [batch coordinator](#nexusllmbatch), which keeps its own chat endpoint and its
-> own body builder.
+> own body builder — a role on `api: responses` is still batched through Chat
+> Completions.
+>
+> **One thing to know before upgrading a busy deployment**: this path has only
+> ever run against mocks, and a plain `api.openai.com` deployment is its first
+> real traffic. See [Upgrading to
+> v0.29.0](./upgrading-v0.29.md#1-the-openai-api-default-moved-to-responses) for
+> the full migration, and [What is not verified
+> yet](./upgrading-v0.29.md#what-is-not-verified-yet) for the limits of what
+> shipped.
 
 **The endpoint each pair resolves to.** One URL per (`auth_mode`, `api`), chosen
 in one place and reconsidered nowhere:
@@ -2497,6 +2509,21 @@ and a role that omits it gets none. The accumulated text still reaches
 `llm.response.Metadata["openai_reasoning_summary"]` either way — that key records
 what the API sent, while the events state what the operator turned on.
 
+**What gates the emission differs on all three providers**, and that asymmetry is
+stated rather than smoothed over:
+
+| Provider | Gate on `thinking.step` | Consequence |
+|---|---|---|
+| [`nexus.llm.anthropic`](#nexusllmanthropic) | the **plugin-level** `thinking.include_thoughts` | A role that turns `include_thoughts` on changes the wire shape and gets the thinking text from the API, but **no events** — the response-parse path never sees the resolved per-role value |
+| [`nexus.llm.gemini`](#nexusllmgemini) | **nothing** locally | `include_thoughts` is a wire field (`includeThoughts`), resolved per role like any other, and every thought part that comes back is emitted. A role's value works end to end |
+| `nexus.llm.openai` | the **resolved per-role** value: `mode: effort` *and* a `reasoning.summary` | A role naming `summary: detailed` on a deployment whose plugin block is silent gets its events; a role that omits it gets none |
+
+The OpenAI gate is deliberately the one Anthropic does not have: summaries are
+opt-in here, so a provider or proxy that volunteers summary frames cannot
+fabricate a reasoning trail nobody asked for. Bringing Anthropic's gate onto the
+resolved value is a separate change and has not been made — see
+[Asymmetries that remain](./upgrading-v0.29.md#asymmetries-that-remain).
+
 #### Declaring a reasoning model (OpenAI)
 
 `reasoning.mode` is the **only** thing that tells this provider the target is a
@@ -2537,7 +2564,9 @@ stripped and no reasoning key is sent, whatever the model is called.
 > it, because detecting it would require the model table this change deletes.
 > The regex was stale by construction: it could not know about a model
 > released after it was written, and a model it failed to match produced the
-> same undiagnosable 400 this change now makes explicit and operator-owned.
+> same undiagnosable 400 this change now makes explicit and operator-owned. See
+> [Upgrading to
+> v0.29.0](./upgrading-v0.29.md#2-openai-no-longer-detects-reasoning-models).
 
 #### Per-role reasoning (OpenAI)
 
@@ -4712,6 +4741,14 @@ Source: `plugins/llm/batch/plugin.go`. Cross-provider batch coordinator
 v1 limitations (intentional): direct-API auth only (no Bedrock/Vertex/Azure);
 text-only requests (no multimodal/thinking/caching/citations); single-provider
 per submit; no cancellation API.
+
+**This coordinator does not follow a role's [`api:`](#which-openai-api-api).**
+Its OpenAI batch lines hardcode `url: "/v1/chat/completions"`
+(`plugins/llm/batch/openai.go`), and it builds its request bodies with its own
+minimal text-only builder rather than the provider's. So a `core.models` role on
+`api: responses` is still batched through Chat Completions — including the
+GPT-5.4 restriction that makes that surface unable to call tools while reasoning.
+Flipping the provider's default in v0.29.0 did not change this.
 
 ---
 
