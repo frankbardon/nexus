@@ -697,6 +697,24 @@ func (p *Plugin) handleToolResult(result events.ToolResult) {
 		return
 	}
 
+	// Ignore a result that arrives for a turn already cancelled. A tool in
+	// flight when the cancel lands returns AFTER it by definition, and by then
+	// handleCancelEvent has zeroed pendingToolCalls and emitted agent.turn.end
+	// — so without this guard the decrement below goes negative, allDone reads
+	// true, and sendLLMRequest fires one more LLM exchange on a turn that has
+	// already ended. Its siblings handleLLMResponse and handleGateRetry carry
+	// the same guard for the same reason; this one was missing, and the request
+	// it let through went out after nexus.io.agui's handleTurnEnd had released
+	// the run's bound identity, so it reached the provider de-authenticated.
+	//
+	// The flag rather than currentTurnID is the discriminator because
+	// handleResumeEvent still needs the turn id to resume; cancelled is what
+	// says the turn is not currently running.
+	if p.cancelled {
+		p.mu.Unlock()
+		return
+	}
+
 	// Dedup against double-fired results. Without this guard a duplicate
 	// would decrement pendingToolCalls a second time and re-fire
 	// sendLLMRequest below.
