@@ -253,8 +253,8 @@ plugins:
       mode: level
 ```
 
-The same key works on a `fanout` role spanning both providers, which is where the
-clamp earns its keep:
+The same key works on a `fanout` role spanning several providers, which is where
+the clamp earns its keep:
 
 ```yaml
 core:
@@ -329,8 +329,9 @@ So the registry is consulted only when the request arrived carrying no `effort` 
 which is exactly the ordinary single-entry role.
 
 The cross-provider account — the union vocabulary, both clamp directions, and the fact
-that `nexus.llm.openai` ignores `effort` entirely — is in the configuration reference
-under [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
+that `nexus.llm.openai` consumes `effort` without clamping anything but only under a
+declared `reasoning.mode` — is in the configuration reference under
+[Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
 
 #### Per-role thinking
 

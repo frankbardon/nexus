@@ -42,9 +42,9 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 
 The provider uses the Model Registry to resolve role names. When an `llm.request` specifies a `Role` (e.g., `"reasoning"`), the provider looks up the concrete model config. If no role is specified, the default model is used.
 
-Two per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out whatever its origin whenever `reasoning.mode` is set to anything but `off` — a model id alone never strips it. See [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
+Several per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out whatever its origin whenever the **resolved** `reasoning.mode` — the plugin block merged with the role's — is anything but `off`; a model id alone never strips it. See [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
 
-A role's `retry:` block is read too, merging over the plugin-level one. The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning:` block — and neither do the `thinking`, `reasoning`, `cache` or `api` entries.
+A role's `retry:` block is read too, merging over the plugin-level one, as are its `effort:` and its `reasoning:` block — the two halves of reasoning depth; see [Per-role reasoning](#per-role-reasoning) below. The remaining per-entry axes have no consumer here: the `thinking`, `cache` and `api` entries are read by nobody on this provider.
 
 There is no `cache:` block on this provider at all, so a role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](../../configuration/reference.md#prompt-caching-cache).
 
@@ -88,6 +88,61 @@ absent block included — nothing is stripped, whatever the model is called.
 but does not reach the wire: `/v1/chat/completions` returns no reasoning
 summaries. `reasoning.enabled` and `reasoning.budget_tokens` are deprecated —
 `enabled` maps onto `mode`, `budget_tokens` is ignored — and neither fails boot.
+
+### Per-role reasoning
+
+A `core.models` entry may carry a `reasoning:` block of its own and an `effort:`,
+so one plugin instance can put a different depth on the wire per role:
+
+```yaml
+plugins:
+  nexus.llm.openai:
+    reasoning:
+      mode: effort
+      effort: low            # every role's default
+
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.openai
+      model: gpt-5.1         # inherits the plugin block whole -> low
+    deep:
+      provider: nexus.llm.openai
+      model: gpt-5.1
+      effort: max            # the cross-provider word, unclamped here
+    plain:
+      provider: nexus.llm.openai
+      model: gpt-4o
+      reasoning:
+        mode: off            # not a reasoning model: send nothing, strip nothing
+```
+
+The role's block **merges over** the plugin's key by key — the role wins on every
+key it names, a plugin key it is silent about survives — and the merged block goes
+back through the same parser, so it gets the same validation, `mode` inference and
+deprecation handling. `reasoning: {}` is a statement rather than a silence: the
+merged block is present, which declares `mode: effort` on a deployment whose
+plugin block is absent entirely.
+
+**Precedence**, highest first: a block already on the request (what the `fallback`
+and `fanout` coordinators stamp for the chain entry actually being served) → an
+`effort` the role's own `reasoning:` block names → the role's `effort:` → the
+plugin-level `reasoning:` block. One rule, every provider: specificity wins.
+
+**`mode` is the declaration, and a bare `effort:` is not.** A role's `effort:` on a
+deployment where no layer declares a reasoning mode sends nothing at all. That is
+deliberate: `reasoning_effort` on a model that is not a reasoning model is an HTTP
+400, this provider holds no model-capability table to tell one from the other, and
+`effort` is a shared axis a role may be carrying for an Anthropic or Gemini entry
+in the same chain.
+
+Nothing clamps and nothing warns — OpenAI's vocabulary is a superset of the other
+two providers' — so a word in no provider's vocabulary is simply a typo, and fails
+`Init` naming the role, for any role whose depth could actually reach the wire.
+Every role this provider could serve is swept at boot: these blocks bypass
+`schema.json` entirely, so nothing else ever checks them. See the
+[configuration reference](../../configuration/reference.md#per-role-reasoning-openai).
 
 See the [configuration reference](../../configuration/reference.md#nexusllmopenai).
 

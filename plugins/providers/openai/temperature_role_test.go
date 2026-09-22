@@ -15,8 +15,10 @@ import (
 // It did not. Only an agent posture and the approval_policy gate ever set
 // LLMRequest.Temperature, plus the fallback/fanout stamp for a coordinated
 // entry — so an ordinary role's `temperature:` parsed, validated, travelled and
-// was read by nobody. This is the only per-entry axis this provider consumes:
-// `core.models` `effort` is still not read here at all.
+// was read by nobody.
+//
+// `core.models` `effort` and the per-entry `reasoning:` block are the other half
+// of what this provider now consumes; they live in reasoning_role_test.go.
 
 // tempModels builds a registry of single-entry roles, one per map key. A nil
 // value omits the `temperature` key entirely, which is how a role that never

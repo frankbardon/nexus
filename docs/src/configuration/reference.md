@@ -653,7 +653,7 @@ Maps role names → model configurations. Roles can be:
 | `<role>.provider`      | string | *(required)* | Plugin ID of the LLM provider (e.g. `nexus.llm.anthropic`). |
 | `<role>.model`         | string | *(required)* | Model identifier as understood by the provider. |
 | `<role>.max_tokens`    | int    | *(provider default)* | Maximum response tokens. |
-| `<role>.effort`        | string | *(unset)* | Reasoning-depth hint passed verbatim to the provider. The engine performs **no** validation — each provider owns its own vocabulary. Both consuming providers accept the **union** of the two, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and clamp what they cannot express to their own nearest level: Anthropic (native `low`…`max`) clamps `minimal` → `low`; Gemini (native `minimal`…`high`) clamps `xhigh`/`max` → `high`. So **any** of the six works on a role shared between them, including a `fanout` role dispatching to both at once, and a clamp is warned once rather than dropped in silence. A word outside the union is a typo: it is forwarded, and each provider rejects it. **Precedence**, highest first: an `effort` already on the request wins outright — the [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout) coordinators stamp the chain entry they are actually serving onto the outgoing request, so a fallback entry's or a non-first fanout leg's own `effort` reaches the provider serving *that* entry rather than the role's first one. Below that sits the role's own `effort`, and below that the provider-level key — one rule on every provider, specificity first. Unset means "not set": the provider leaves its own reasoning configuration untouched. **Not consumed by `nexus.llm.openai` at all** — that provider configures reasoning depth on the plugin and has no per-role form. See [Reasoning depth: `effort`](#reasoning-depth-effort) below. |
+| `<role>.effort`        | string | *(unset)* | Reasoning-depth hint passed verbatim to the provider. The engine performs **no** validation — each provider owns its own vocabulary. All three consuming providers accept the **union** of the three, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and clamp what they cannot express to their own nearest level: Anthropic (native `low`…`max`) clamps `minimal` → `low`; Gemini (native `minimal`…`high`) clamps `xhigh`/`max` → `high`; OpenAI (native `none`…`max`) clamps **nothing**, because its vocabulary is a superset of the other two's. So **any** of the words works on a role shared between them, including a `fanout` role dispatching to all three at once, and a clamp is warned once rather than dropped in silence. `none` is the one word only OpenAI knows: it is forwarded to the other two and they reject it. A word outside the union is a typo: it is forwarded, and each provider rejects it. **Precedence**, highest first: an `effort` already on the request wins outright — the [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout) coordinators stamp the chain entry they are actually serving onto the outgoing request, so a fallback entry's or a non-first fanout leg's own `effort` reaches the provider serving *that* entry rather than the role's first one. Below that sits the role's own `effort`, and below that the provider-level key — one rule on every provider, specificity first. Unset means "not set": the provider leaves its own reasoning configuration untouched. On [`nexus.llm.openai`](#nexusllmopenai) the depth is only sent where a reasoning **mode** has been declared — on the plugin's `reasoning:` block or on the role's own — because `reasoning_effort` on a model that is not a reasoning model is an HTTP 400; a bare `effort:` with no declared mode anywhere sends nothing. See [Reasoning depth: `effort`](#reasoning-depth-effort) below. |
 | `<role>.api`           | string | *(unset)* | Which of a provider's API surfaces this entry wants, in that provider's own naming. Opaque to the engine — core stores the string and forwards it, exactly as it does `effort`; the provider decides what the word means and what an unrecognised one does. Unset means "not set": the provider uses whatever surface it would have used anyway. Meaningful only on a provider that exposes more than one; see that provider's section. |
 | `<role>.temperature`   | float  | *(unset)* | Sampling temperature for this entry. Written as a number — `0`, `0.2` and `1` all parse, and a whole number is not confused with "unset". **`0` is a real value**, distinct from omitting the key: omitting it leaves the provider's (or the model's) own default alone, whereas `temperature: 0` asks for zero. Core does not range-check it — a provider that refuses the value, as reasoning models generally do, is the thing that rejects it. Read by all three providers on every path; **a temperature already on the request — an agent posture's, the `approval_policy` gate's — wins over the role's.** Note that the current Anthropic model families (Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5) reject `temperature` outright, thinking or not: a role setting it against one of those is an HTTP 400, and nothing here strips it for you. |
 | `<role>.thinking`      | map    | *(unset)* | The provider's own `thinking` block, carried on this role entry. See [Native provider blocks on a role](#native-provider-blocks-on-a-role) below. |
@@ -751,8 +751,9 @@ merged into it.
 role wins per key.** That step belongs to the provider that owns the vocabulary —
 it is the provider's own parser that runs on the result, so the merged block
 inherits every check, inference and deprecation warning a plugin-level block
-gets — but both consuming providers implement it the same way, and it is the
-rule to reason with:
+gets — but all three consuming providers implement it the same way (Anthropic's
+and Gemini's `thinking:`, OpenAI's `reasoning:`), and it is the rule to reason
+with:
 
 - a key the role names replaces the plugin's value for that key;
 - a key the role is silent about **survives** from the plugin, so a role that
@@ -851,9 +852,9 @@ to read it:
 | `thinking` | `nexus.llm.anthropic` and `nexus.llm.gemini` |
 | `max_tokens` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` |
 | `temperature` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai`, on every path — see below |
-| `effort` | `nexus.llm.anthropic` and `nexus.llm.gemini` (not read by `nexus.llm.openai` at all) |
+| `effort` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below. Unclamped on OpenAI, whose vocabulary is a superset of the other two's; only sent there where a reasoning `mode` is declared |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
-| `reasoning` | no provider yet — the per-entry axis is still inert. The **plugin-level** `reasoning:` block on [`nexus.llm.openai`](#nexusllmopenai) is real and wired (`mode`/`effort`/`summary`); hoisting it onto a `core.models` entry is a later release. |
+| `reasoning` | `nexus.llm.openai` — the only provider with a `reasoning:` block. A role's merges over the plugin-level one **key by key**, and the merged block goes through the same parser; see [Per-role reasoning](#per-role-reasoning-openai). |
 | `api` | no provider yet; `nexus.llm.openai`'s is a later release |
 | `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
@@ -993,8 +994,8 @@ serve: **one value that has to mean something on providers that do not share a
 vocabulary.**
 
 That case is a `fanout` role. `effort: max` on an Anthropic leg and `effort: max`
-on a Gemini leg both mean "as deep as this model goes", because both consumers
-accept the union of the two vocabularies and clamp inward. Written natively
+on a Gemini leg both mean "as deep as this model goes", because every consumer
+accepts the union of the three vocabularies and clamps inward. Written natively
 instead, the same intent is a different block per leg, in a different vocabulary,
 landing in a different wire field — several settings to keep in step where one
 word does. The worked example is at the end of this section.
@@ -1015,16 +1016,22 @@ value has to travel.
 |---|---|---|
 | `nexus.llm.anthropic` | `low`, `medium`, `high`, `xhigh`, `max` | `output_config.effort` |
 | `nexus.llm.gemini` | `minimal`, `low`, `medium`, `high` | `generationConfig.thinkingConfig.thinkingLevel` — and **only** under `thinking.mode: level`, and only where the role's own `thinking:` block named no `level` |
-| `nexus.llm.openai` | *(none — `effort` is not consumed)* | — |
+| `nexus.llm.openai` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `reasoning_effort` — and **only** where a reasoning mode is declared, on the plugin's `reasoning:` block or the role's own, and only where the role's own `reasoning:` block named no `effort` |
 
-**Both consumers accept the union of the two and clamp inward**, so one role's
-value is meaningful on either:
+**All three consumers accept the union and clamp inward**, so one role's value is
+meaningful on any of them:
 
-| Role `effort:`            | Anthropic leg       | Gemini leg           |
-|---------------------------|---------------------|----------------------|
-| `minimal`                 | **clamps** to `low` | native               |
-| `low` / `medium` / `high` | native              | native               |
-| `xhigh` / `max`           | native              | **clamps** to `high` |
+| Role `effort:`            | Anthropic leg       | Gemini leg           | OpenAI leg |
+|---------------------------|---------------------|----------------------|------------|
+| `none`                    | rejected            | rejected             | native     |
+| `minimal`                 | **clamps** to `low` | native               | native     |
+| `low` / `medium` / `high` | native              | native               | native     |
+| `xhigh` / `max`           | native              | **clamps** to `high` | native     |
+
+`nexus.llm.openai` is the one consumer that never clamps: its vocabulary already
+contains everything the other two accept, so every word an operator can write for
+either of them passes through verbatim. `none` runs the other way — the only word
+OpenAI adds, and one the other two reject if a shared role sends it there.
 
 Rejecting the other provider's word would make a shared or `fanout` role
 unconfigurable; ignoring it would make `effort:` a silent no-op on one leg.
@@ -1035,12 +1042,15 @@ Clamping is the third option, and it is announced rather than hidden:
 | A role `effort` on Gemini | once at **`Init`**, once per (role, value) — the provider walks every role it could serve and logs the role, the configured value and the effective one |
 | A role `effort` on Anthropic | at **request time**, once per (role, value) — a role's effort only exists per request, and repeating it every turn would flood a busy role's log |
 | The plugin-level `output_config.effort` on Anthropic | once at **`Init`** — a plugin-level key is a boot-time fact |
+| A role `effort` on OpenAI | never — nothing clamps there, so there is nothing to announce |
 
 A word in **neither** vocabulary is a typo, not a depth. Core forwards it
 unchanged, and the provider catches it: Anthropic fails **that request** with a
 `core.error` naming the role and the accepted set, Gemini fails **`Init`** for any
-role it could serve. Clamping widens what is accepted; it does not make either
-provider permissive.
+role it could serve, OpenAI fails **`Init`** likewise — but only for a role whose
+depth could actually reach the wire, which is to say under a declared reasoning
+mode and behind no `effort` the role's own `reasoning:` block named. Clamping
+widens what is accepted; it does not make any provider permissive.
 
 Note that this is cross-*provider* vocabulary translation, never cross-*model*
 capability. No clamp — and no code path in either provider — inspects the model
@@ -1054,22 +1064,35 @@ with an HTTP 400, and that stays the operator's problem to size per role.
    request, so a fallback entry's or a non-first fanout leg's own `effort` is what
    reaches the provider answering for it — not the role's first entry's.
 2. The role's own **native block** — [`thinking:`](#native-provider-blocks-on-a-role)
-   on either provider — where it names the same axis. On Gemini that is
-   `thinking.level`, which is the same wire field `effort` would become, so the
-   two contend and the block wins. On Anthropic `thinking:` and
-   `output_config.effort` are different wire fields, so a role can set both and
-   neither displaces the other.
+   on Anthropic and Gemini, `reasoning:` on OpenAI — where it names the same axis.
+   On Gemini that is `thinking.level`, which is the same wire field `effort` would
+   become, so the two contend and the block wins; on OpenAI it is
+   `reasoning.effort`, likewise the same field, likewise the block wins. On
+   Anthropic `thinking:` and `output_config.effort` are different wire fields, so
+   a role can set both and neither displaces the other.
 3. The **role's own `effort:`**, picked up on every path that resolves a role: the
    role the request names, the `default` role, and the late recovery after a
    router rewrote `model` without touching the rest.
 4. The **provider-level key** — `output_config.effort` on Anthropic,
-   `thinking.level` on Gemini.
+   `thinking.level` on Gemini, `reasoning.effort` on OpenAI.
 5. Nothing: no depth field is emitted at all and the model's or API's own default
    stands.
 
-**One rule, both providers: specificity wins.** A plugin-level key is a default
+**One rule, every provider: specificity wins.** A plugin-level key is a default
 and a per-role key is the more specific statement, so a role's `effort` beats
-`output_config.effort` on Anthropic *and* `thinking.level` on Gemini.
+`output_config.effort` on Anthropic, `thinking.level` on Gemini *and*
+`reasoning.effort` on OpenAI.
+
+**Gating is a separate question from precedence, and OpenAI is the provider where
+it bites.** `mode` is the declaration on both Gemini and OpenAI: a role's `effort`
+is read only under Gemini's `thinking.mode: level` and only under OpenAI's
+`reasoning.mode: effort`. With no `reasoning:` block anywhere — neither on the
+plugin nor on the role — an OpenAI role's `effort:` is **inert**, and deliberately
+so. `reasoning_effort` on a model that is not a reasoning model is an HTTP 400,
+this provider holds no model-capability table to tell one from the other, and
+`effort` is a shared axis a role may be carrying for a different provider's entry
+in the same chain. Declaring the mode is a one-line `reasoning: {mode: effort}`,
+on the plugin for every role or on the one role that needs it.
 
 > **Behaviour change.** Steps 3 and 4 used to be the other way round on Gemini
 > and only on Gemini: the plugin-level `thinking.level` beat a role's `effort`,
@@ -1084,7 +1107,7 @@ and a per-role key is the more specific statement, so a role's `effort` beats
 > reaches the vocabulary gate, so a typo that was silently ignored now fails
 > `Init`; and a clamp that was silently shadowed is now warned.
 
-**Step 2 reaches both providers by the same route.** Each reads the `core.models`
+**Step 2 reaches all three providers by the same route.** Each reads the `core.models`
 registry itself, on every path that resolves a role, so a plain single-entry role's
 `effort:` is delivered without help from any coordinator. Step 1 still wins when it
 applies, and that ordering is what makes a chain correct: a registry lookup always
@@ -1093,7 +1116,7 @@ a non-first fanout leg, so the value the coordinator stamped for the entry actua
 being served must not be overwritten by it. The registry is consulted only when the
 request arrived carrying no `effort` at all.
 
-**A `fanout` role across both providers.** `effort` belongs on each entry of the
+**A `fanout` role across all three providers.** `effort` belongs on each entry of the
 `providers:` list; a fanout role map has no role-level `effort` of its own.
 
 ```yaml
@@ -1110,9 +1133,13 @@ core:
           effort: max            # the same word, clamped on this leg
         - provider: nexus.llm.openai
           model: gpt-5.1
-          effort: max            # read by nobody
+          effort: max            # native — OpenAI clamps nothing
 
 plugins:
+  nexus.llm.openai:
+    reasoning:
+      mode: effort               # the declaration; without it the leg's
+                                 # effort is inert and nothing is sent
   nexus.llm.gemini:
     thinking:
       mode: level                # effort is only read under mode: level
@@ -1125,7 +1152,7 @@ plugins:
 |---|---|---|
 | `nexus.llm.anthropic` | `"output_config": {"effort": "max"}` | no — `max` is native |
 | `nexus.llm.gemini` | `"thinkingConfig": {"thinkingLevel": "high"}` | yes — clamp logged once at `Init` naming role `panel` |
-| `nexus.llm.openai` | nothing; the key is ignored entirely | no |
+| `nexus.llm.openai` | `"reasoning_effort": "max"` | no — nothing clamps here |
 
 Give **every** leg its own `effort`. A leg that omits it does not fall back to
 "unset" on either consuming provider: the coordinator stamps an empty value, the
@@ -1134,13 +1161,23 @@ provider then consults the registry, and a registry lookup returns the role's
 `providers[0]` carries — including the Gemini leg, which clamps that inherited
 value like any other.
 
-**`nexus.llm.openai` does not consume `effort` at all.** It is not clamped, not
-warned, and never reaches OpenAI — an entry carrying `effort:` behaves exactly like
-one without it. OpenAI's reasoning depth is configured on the **plugin**, in its own
-[`reasoning`](#nexusllmopenai) block, and has no per-role form at all. This is a
-known, accepted gap rather than an oversight: a third role-level vocabulary was not
-invented for it. On a mixed `fanout` role, size the OpenAI leg on the plugin and
-expect that one setting to apply to every OpenAI request in the process.
+**`nexus.llm.openai` consumes `effort` without clamping it.** Its vocabulary is a
+superset of the union of the other two's, so every word that is meaningful on an
+Anthropic or a Gemini leg is native on the OpenAI leg — nothing is translated,
+nothing is warned. The one thing it needs that the others do not is the
+**declaration**: a `reasoning:` block, on the plugin or on the entry, saying the
+target is a reasoning model. Without one the leg's `effort:` is inert, exactly as a
+Gemini leg's is under `thinking.mode: budget`. See
+[Per-role reasoning](#per-role-reasoning-openai).
+
+> **Behaviour change.** Earlier releases read `core.models` `effort` on neither
+> `nexus.llm.openai` nor its `reasoning:` entries at all — the keys parsed,
+> travelled and were read by nobody. A deployment that already sets a role
+> `effort:` **and** a plugin-level `reasoning: {mode: effort, effort: ...}` will
+> now send the role's word instead of the plugin's, because specificity wins. To
+> keep the old result, move the value onto the role's own `reasoning:` block or
+> drop the role's `effort:`. A deployment with no `reasoning:` block is unaffected:
+> with no declared mode nothing is sent, as before.
 
 
 ## Engine
@@ -1995,7 +2032,7 @@ operator owns.
 The **accepted** vocabulary is wider than the five that reach the wire: Gemini's
 `minimal` is accepted too and clamped to `low` — Anthropic's floor, so there is
 no shallower target to lose — with a warning at `Init` naming the configured and
-the effective value. That makes one word usable on both providers; it does
+the effective value. That makes one word usable on every consumer; it does
 **not** make the key permissive. A value in neither provider's vocabulary is
 still caught locally and fails at `Init` naming the accepted set.
 
@@ -2050,17 +2087,22 @@ differ per provider — this provider validates per request, and an unusable
 value **fails that request** with a `core.error` naming the role and the
 accepted set rather than being silently dropped.
 
-**A shared role works with any of the six words.** Both consuming providers
-accept the **union** vocabulary — `minimal`, `low`, `medium`, `high`, `xhigh`,
-`max` — and clamp whatever they cannot express to their own nearest level:
+**A shared role works with any of the words.** All three consuming providers
+accept the **union** vocabulary — `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max` — and clamp whatever they cannot express to their own nearest
+level:
 
-| Role `effort:`            | Anthropic leg  | Gemini leg       |
-|---------------------------|----------------|------------------|
-| `minimal`                 | **clamps** to `low` | native      |
-| `low` / `medium` / `high` | native         | native           |
-| `xhigh` / `max`           | native         | **clamps** to `high` |
+| Role `effort:`            | Anthropic leg  | Gemini leg       | OpenAI leg |
+|---------------------------|----------------|------------------|------------|
+| `none`                    | rejected       | rejected         | native     |
+| `minimal`                 | **clamps** to `low` | native      | native     |
+| `low` / `medium` / `high` | native         | native           | native     |
+| `xhigh` / `max`           | native         | **clamps** to `high` | native |
 
-So a `fanout` role spanning both providers is configurable whichever
+`nexus.llm.openai` clamps nothing: its own vocabulary is a superset of the other
+two's, and `none` is the one word it adds.
+
+So a `fanout` role spanning several providers is configurable whichever
 provider's word the operator reaches for, and neither leg silently ignores the
 setting. A clamp is announced rather than hidden: this provider logs it at
 `WARN` with the role, the configured value and the effective one, once per
@@ -2125,7 +2167,7 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `files.cache_uploads`        | bool   | `true`                               | Deduplicate within a session. |
 | `files.delete_on_shutdown`   | bool   | `false`                              | Delete on shutdown. |
 | `reasoning.mode`             | string | `off` *(absent block)* / `effort` *(present block)* | Whether reasoning controls go on the wire, **and the only gate on the sampling-parameter strip below**. `effort` sends `reasoning_effort`; `off` sends no reasoning configuration at all and strips nothing. An **absent** `reasoning:` block is `off`; a **present** block with no `mode` is `effort`. Mirrors the `mode` axis on [`nexus.llm.anthropic`](#nexusllmanthropic) and [`nexus.llm.gemini`](#nexusllmgemini): the operator declares the shape, the provider obeys, and a mode the target model rejects is an OpenAI HTTP 400 the operator owns. The provider holds **no model-capability table** and never inspects the model id — see [Declaring a reasoning model](#declaring-a-reasoning-model-openai). |
-| `reasoning.effort`           | string | *(unset)*                            | Reasoning depth: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**, because it is a superset of the union of what the other two providers accept. Unset under `mode: effort` sends no `reasoning_effort` key, so the model's own default applies. An unrecognised value **fails `Init`** naming the accepted set. |
+| `reasoning.effort`           | string | *(unset)*                            | Reasoning depth: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**, because it is a superset of the union of what the other two providers accept. Unset under `mode: effort` sends no `reasoning_effort` key, so the model's own default applies. An unrecognised value **fails `Init`** naming the accepted set. This is the **least specific** layer: a [`core.models`](#coremodels) role's `effort:` overrides it, and an `effort` on the role's own `reasoning:` block overrides that. |
 | `reasoning.summary`          | string | *(unset)*                            | Reasoning-summary verbosity: `auto`, `concise`, `detailed`. Parsed and validated, but **does not reach the wire**: `/v1/chat/completions` returns no reasoning summaries — only the Responses API does, and this provider does not speak it. Setting it logs a warning at boot. Replaces the removed `reasoning.include_summary`. |
 | `reasoning.enabled`          | bool   | *(unset)*                            | **Deprecated** alias for `reasoning.mode`: `true` → `effort`, `false` → `off`. Ignored (with a warning) when `mode` is set. Does not fail boot. |
 | `reasoning.budget_tokens`    | int    | *(unset)*                            | **Deprecated and ignored.** OpenAI has no reasoning token budget — depth is `reasoning.effort`. Accepted with a warning rather than failing boot. |
@@ -2134,7 +2176,9 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | *(role `retry`)*              | map    | *(unset)*                             | Not a plugin key — the [`core.models`](#coremodels) `<role>.retry` block, which **merges over** the plugin-level `retry:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a shorter `max_retries` keeps the plugin's backoff shape and status list. The merged block goes through the same parser as the plugin one, so a present block turns retrying on and an unrecognised `backoff` word or unparseable duration is warned about and defaulted rather than refused. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Unlike every other per-entry axis this one reaches no part of the request body**: it drives the retry loop around the HTTP call, resolved per request. Its point is a role with a fallback chain wanting *fewer* attempts at the primary than a terminal role — see [Retry behaviour: `retry`](#retry-behaviour-retry). |
 | `pricing.<model>.*`          | map    | *(embedded table)*                   | Override per-model pricing. |
 | *(role `cache`)*             | map    | *(unset)*                            | Not a plugin key, and **not read by this provider**. There is no `cache:` block on `nexus.llm.openai` at all, so a [`core.models`](#coremodels) role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](#prompt-caching-cache). |
-| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The only per-entry axis beyond `model`/`max_tokens` and the `retry:` block (see the row above) this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever `reasoning.mode` is set to anything but `off` — a model id alone never strips it. |
+| *(role `effort`)*            | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `reasoning_effort` when the block that role resolves to is on `mode: effort` and named no `effort` of its own. It **wins over** the plugin-level `reasoning.effort`: a plugin key is a default, a per-role key the more specific statement. **Nothing is clamped and nothing is warned** — OpenAI's vocabulary is a superset of the union of what the other two providers accept, so every word an operator can write for either of them passes through verbatim. A value in no provider's vocabulary fails `Init` for any role whose depth could actually reach the wire, naming the role and the accepted set. **Ignored entirely under `mode: off`** — including the absent `reasoning:` block that resolves to it — so a role's `effort:` on a deployment that declares no reasoning mode anywhere sends nothing at all; that is deliberate, see [Per-role reasoning](#per-role-reasoning-openai). Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` without touching the rest — so a plain single-entry role's `effort:` reaches the wire with no coordinator involved. An effort already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the registry, because a registry lookup always returns the role's first entry. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
+| *(role `reasoning`)*         | map    | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.reasoning` block, which **merges over** the plugin-level `reasoning:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a deeper `effort` does not have to restate the `mode`. A set-but-empty `reasoning: {}` is a statement rather than a gap — the merged block is present, which declares `mode: effort` on a deployment whose plugin block is absent entirely. The merged block goes through the same parser as the plugin one, so it gets the same validation, the same `mode` inference and the same deprecation handling of `enabled`/`budget_tokens`. Every role this provider could serve is swept at **`Init`** and an invalid merged block **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on every path that resolves a role, and a block already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the role's. An `effort` the role's own block names outranks that same role's `effort:`. See [Per-role reasoning](#per-role-reasoning-openai). |
+| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. One of the four per-entry axes this provider reads, alongside `effort`, the `reasoning:` block and the `retry:` block (see the rows above and below); the `thinking`, `cache` and `api` entries still have no consumer here. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever the **resolved** `reasoning.mode` — plugin block merged with the role's — is anything but `off`; a model id alone never strips it. |
 
 #### Declaring a reasoning model (OpenAI)
 
@@ -2177,6 +2221,85 @@ stripped and no reasoning key is sent, whatever the model is called.
 > The regex was stale by construction: it could not know about a model
 > released after it was written, and a model it failed to match produced the
 > same undiagnosable 400 this change now makes explicit and operator-owned.
+
+#### Per-role reasoning (OpenAI)
+
+A [`core.models`](#coremodels) entry may carry a `reasoning:` block of its own,
+taking exactly the keys documented above, and an
+[`effort:`](#reasoning-depth-effort). One plugin instance can therefore put a
+different reasoning depth on the wire for different roles — and turn reasoning
+off altogether for the role pointed at a model that is not a reasoning model,
+which is the mismatch this provider cannot paper over because it never inspects
+the model id.
+
+**The merge is key-wise, and the role wins per key.** A plugin-level key the role
+does not mention survives, so a role that only wants a deeper depth does not have
+to restate the mode:
+
+```yaml
+plugins:
+  nexus.llm.openai:
+    reasoning:
+      mode: effort
+      effort: low            # every role's default
+
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.openai
+      model: gpt-5.1         # inherits the plugin block whole -> effort: low
+    deep:
+      provider: nexus.llm.openai
+      model: gpt-5.1
+      effort: max            # the cross-provider word, unclamped here
+    plain:
+      provider: nexus.llm.openai
+      model: gpt-4o
+      reasoning:
+        mode: off            # not a reasoning model; strip nothing, send nothing
+```
+
+`balanced` sends `"reasoning_effort": "low"`; `deep` sends
+`"reasoning_effort": "max"`; `plain` sends no reasoning key at all and keeps its
+`temperature`, `top_p` and the rest of the sampling parameters a reasoning model
+would have had stripped.
+
+**Precedence**, highest first:
+
+1. a `reasoning` block already on the request — what the
+   [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout)
+   coordinators stamp for the chain entry they are actually serving, which is the
+   only correct block for a fallback retry or a non-first `fanout` leg;
+2. the role's own `reasoning:` block, merged over the plugin's — including an
+   `effort` it names, which lands in the same wire field the role's `effort:`
+   would have and therefore outranks it;
+3. the role's [`effort:`](#reasoning-depth-effort), read only under
+   `mode: effort`;
+4. the plugin-level `reasoning:` block, which is what a request whose role
+   carries no block of its own gets, unchanged.
+
+**`mode` is the declaration, and a bare `effort:` is not.** A role's `effort:` on
+a deployment where no layer declares a reasoning mode sends **nothing** — no
+`reasoning_effort`, and no sampling-parameter strip. That is deliberate rather
+than an oversight: `reasoning_effort` on a model that is not a reasoning model is
+an HTTP 400, this provider holds no model-capability table to tell one from the
+other, and `effort` is a *shared* axis a role may be carrying for an Anthropic or
+Gemini entry in the same chain — inferring a mode from it would silently change
+what an OpenAI fallback entry sends. Declare the mode, on the plugin or on the
+role, and the depth flows.
+
+**Nothing clamps, and nothing warns.** `reasoning.effort`'s vocabulary is a
+superset of the union of what `nexus.llm.anthropic` and `nexus.llm.gemini`
+accept, so a role shared across all three needs no per-provider split. A word in
+no provider's vocabulary is a typo and **fails `Init`** naming the role — but only
+for a role whose depth could actually reach the wire, so a chain whose OpenAI
+entry is inert never fails the boot over a word meant for somebody else.
+
+**Every role this provider could serve is swept at `Init`.** These blocks bypass
+`schema.json` entirely — core stores them without looking inside — so the sweep is
+the only thing that checks them, and it checks the *merged* block, walking the
+whole chain in sorted role order and skipping entries that name another provider.
 
 ### `nexus.llm.gemini`
 

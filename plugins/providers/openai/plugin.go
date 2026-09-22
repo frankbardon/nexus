@@ -58,6 +58,12 @@ type Plugin struct {
 	pricing  *pricing.Table // merged: config overrides + embedded defaults
 
 	reasoning reasoningConfig
+	// reasoningRaw is the plugin-level `reasoning:` block exactly as
+	// configured, kept because a core.models role's block merges over it key by
+	// key and the merged result has to go back through parseReasoningConfig.
+	// nil means the plugin set no block at all. Read-only — see
+	// mergeReasoningBlock.
+	reasoningRaw map[string]any
 
 	multimodal multimodalConfig
 
@@ -132,6 +138,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.reasoning = reasoning
+	p.reasoningRaw = rawReasoningBlock(ctx.Config)
+
+	// A core.models role may carry a `reasoning:` block and an `effort:` of its
+	// own — the block merges over the plugin-level one, the effort fills the
+	// depth the merged block leaves unset. Neither passes through schema.json
+	// (core stores those maps without looking inside them), so this sweep is
+	// the only thing that checks them, at boot rather than at the first request
+	// that names the role.
+	if err := validateRoleReasoning(p.models, p.reasoningRaw, p.reasoning, p.logger); err != nil {
+		return err
+	}
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
@@ -267,12 +284,17 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // the default role and the late case where a router rewrote `model` and left
 // `role` alone.
 //
-// Only Temperature and the `retry:` block are taken, deliberately rather than
-// `*req = ...`: model and max_tokens already have their own resolution pass in
-// handleRequest — one that knows about defaultMaxTokens and the foreign-provider
-// early return — and this provider reads none of the remaining axes.
-// `core.models` `effort` in particular is not consumed here; this provider has
-// only its plugin-level `reasoning.effort`.
+// Only Temperature, Effort and the `reasoning:` and `retry:` blocks are taken,
+// deliberately rather than `*req = ...`: model and max_tokens already have their
+// own resolution pass in handleRequest — one that knows about defaultMaxTokens
+// and the foreign-provider early return — and this provider reads none of the
+// remaining axes.
+//
+// `effort` and the `reasoning:` block are the two halves of reasoning depth, and
+// they are resolved together by resolveReasoning at body-build time: a role's
+// `effort:` becomes `reasoning_effort` wherever the resolved block declares a
+// reasoning mode and names no deeper-specificity effort of its own. No clamp —
+// OpenAI's vocabulary is a superset of the other two providers'.
 //
 // `retry` reaches no part of the request body: it is call-time behaviour, and
 // its one consumer is the loop in doWithRetry, which takes the configuration
@@ -290,6 +312,8 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Temperature = resolved.Temperature
+	req.Effort = resolved.Effort
+	req.Overrides.Reasoning = resolved.Overrides.Reasoning
 	req.Overrides.Retry = resolved.Overrides.Retry
 }
 
@@ -370,8 +394,8 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
-	// The serving chain entry's `temperature:`. req is a value parameter, so
-	// the caller's payload is untouched.
+	// The serving chain entry's `temperature:`, `effort:` and `reasoning:`
+	// block. req is a value parameter, so the caller's payload is untouched.
 	p.applyEntryOverrides(&req)
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
@@ -607,7 +631,9 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// operator's declared `reasoning.mode`, not on the model id. NOTE: this
 	// stays on /v1/chat/completions; the /v1/responses endpoint exposes richer
 	// reasoning controls (summary streaming) and is left for a future plan.
-	applyReasoning(body, p.reasoning, p.logger)
+	// resolveReasoning merges the serving role's own `reasoning:` block over
+	// the plugin-level one and folds the role's `effort:` into the depth.
+	applyReasoning(body, p.resolveReasoning(req), p.logger)
 
 	return body
 }

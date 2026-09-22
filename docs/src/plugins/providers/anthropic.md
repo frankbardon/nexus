@@ -515,7 +515,8 @@ accepted set. A clamp warns at request time instead, once per (role, value) — 
 every turn would flood a busy role's log.
 
 The full cross-provider account, including a worked `fanout` role and the fact that
-`nexus.llm.openai` ignores `effort` entirely, is in the configuration reference under
+`nexus.llm.openai` consumes `effort` unclamped but only under a declared
+`reasoning.mode`, is in the configuration reference under
 [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
 
 ### Cost Tracking
