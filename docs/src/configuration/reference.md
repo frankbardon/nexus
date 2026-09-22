@@ -2275,10 +2275,10 @@ the body does:
 | `max_tokens` | `max_output_tokens` |
 | `reasoning_effort: "high"` | `reasoning: {effort: "high", summary: "auto"}` — the only surface that can carry [`reasoning.summary`](#nexusllmopenai) |
 | — | `store: false`, always (see below) |
-| `prediction` | *(no counterpart — the field is dropped)* |
+| `prediction` | *(no counterpart — the field is dropped, with one warning per role)* |
 | Azure: `…/openai/deployments/<deployment>/chat/completions?api-version=<v>`, `model` stripped from the body | Azure: `…/openai/v1/responses` — no deployment in the path, no `api-version`, deployment **in** the body's `model` field |
 
-Two of those rows are deliberate choices rather than transcription:
+Three of those rows are deliberate choices rather than transcription:
 
 - **`store: false` on every request.** Nexus keeps its own conversation history,
   so server-side state would be a second source of truth for the same turn — and
@@ -2294,6 +2294,16 @@ Two of those rows are deliberate choices rather than transcription:
   tool catalog into an HTTP 400 purely from changing `api:`. Structured
   **output** is the separate case, and there the caller's own `strict` is
   forwarded verbatim onto `text.format`.
+- **`prediction` is dropped, with one warning naming the role.** Predicted
+  Outputs is a Chat Completions feature and the Responses API has no counterpart
+  field, so the value is dropped rather than sent and rejected, and **the turn
+  proceeds** — the caller loses the speed-up and nothing else. It warns rather
+  than logging at DEBUG because a silently ignored request field is what an
+  operator later discovers as "why is this deployment slower"; it warns **once
+  per role** rather than per request, because an agent that sets a prediction
+  sets one every turn. This is the deliberate opposite of the rejected-replay
+  treatment below: loud-and-fatal where the answer changes, loud-but-once where
+  only the clock does.
 
 **What changes on the way back.** The reply is an `output` array of typed Items
 rather than a `choices[0].message`, so it is a second parser as well. What a
@@ -2346,8 +2356,32 @@ model family**, so a [`fallback`](#nexusproviderfallback) chain that swaps
 families mid-conversation replays Items the next model cannot verify — Nexus
 does not detect this, because detecting it would mean shipping a model-family
 table. And blobs have been reported to stop verifying after three or four tool
-rounds even within one family. Both surface as a request failure rather than a
-silent drop in quality.
+rounds even within one family.
+
+**A rejected replay fails the request.** Both limits surface the same way, and
+the behaviour is deliberate: the turn ends in `core.error` naming the cause, and
+there is **no retry without the reasoning Items**. Losing reasoning continuity
+changes the *answer*, quietly and plausibly, so a silent second attempt would
+convert a visible failure into an invisible drop in quality — the one outcome an
+operator could not act on. `Retryable` is `false`: replaying the same Items
+would be rejected the same way.
+
+The rejection is recognised on all three paths it can arrive by — a run that
+fails inside an HTTP 200, a run that dies mid-stream on `response.failed` or a
+flat `error` event, and (the commonest) an HTTP 400 that refuses the request
+before either reply parser runs. Classification is on the error text, because
+OpenAI publishes no stable code for it: an error naming a reasoning **Item** —
+its id, its type, or `encrypted_content` in the message or the `param` — is
+reported as a replay rejection; an error merely mentioning the `reasoning`
+request object (an `effort` value a model does not accept, say) is not, and
+keeps its own message. A rejection the matcher does not recognise still fails
+the request, just with the raw API message. Only HTTP 400 is classified: a 401,
+a 429 or a 5xx is about the deployment or the service, not the conversation.
+
+Because the cross-family case is not detected, the message covers it: it names
+both causes — a blob that stopped verifying under `store: false`, and a chain
+that moved between model families — so an operator hitting either can tell which
+one they have.
 
 **What changes while it streams.** Chat Completions sends one chunk shape whose
 meaning depends on which delta field is populated; Responses sends about forty
@@ -2414,6 +2448,12 @@ neither fires on `responses`:
 
 Each is said once per boot, naming the role when a `core.models` entry is what
 set it — not once per role and not per request.
+
+**One warning at request time, said once per role.** A request carrying a
+`prediction` on the `responses` surface warns that the field is being dropped
+and names the role. It cannot be an `Init` warning because a prediction is a
+per-request value rather than configuration, so it is deduped by role instead:
+five turns of one role warn once, a second degrading role gets its own line.
 
 #### Reasoning in the UI (OpenAI)
 

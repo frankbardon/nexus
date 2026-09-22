@@ -78,6 +78,11 @@ type responsesIncomplete struct {
 type responsesError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Param names the offending request field on a validation failure
+	// (`input[0].encrypted_content`, say). It is decoded only so that
+	// isReasoningReplayRejection can read it: on some rejections it is the
+	// only place the reasoning Item is named at all.
+	Param string `json:"param"`
 }
 
 // responsesOutputItem names the fields shared across the Item types this parser
@@ -140,9 +145,19 @@ func (p *Plugin) handleResponsesSyncResponse(body io.Reader, requestID string, m
 	// empty response is what lets the fallback coordinator see it, since it
 	// watches core.error and never llm.response.
 	if reply.Error != nil {
+		// A rejected reasoning replay is reported as itself rather than as a
+		// generic run failure: the two need different things from the
+		// operator, and this is one of the three places that rejection can
+		// arrive (the others being the SSE reader and handleRequest's non-200
+		// path). Retryable stays false either way — replaying the same Items
+		// would be rejected the same way.
+		err := fmt.Errorf("openai: responses run failed (%s): %s", reply.Error.Code, reply.Error.Message)
+		if isReasoningReplayRejection(reply.Error.Code, reply.Error.Message, reply.Error.Param) {
+			err = reasoningReplayError(reply.Error.Code, reply.Error.Message)
+		}
 		p.emitErrorInfo(events.ErrorInfo{
 			SchemaVersion: events.ErrorInfoVersion,
-			Err:           fmt.Errorf("openai: responses run failed (%s): %s", reply.Error.Code, reply.Error.Message),
+			Err:           err,
 			Retryable:     false,
 			RequestMeta:   meta,
 			RequestID:     requestID,

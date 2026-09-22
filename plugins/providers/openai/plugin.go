@@ -74,6 +74,10 @@ type Plugin struct {
 	// resolveAPI.
 	api apiSurface
 
+	// predictionDropWarned dedupes warnPredictionDropped's per-request
+	// warning, keyed by role. See warnPredictionDropped.
+	predictionDropWarned sync.Map
+
 	multimodal multimodalConfig
 
 	files       filesConfig
@@ -557,7 +561,19 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody)),
+		statusErr := fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody))
+		// The commonest shape of a rejected reasoning replay: the Responses
+		// API refuses the request outright rather than failing the run, so it
+		// never reaches either reply parser. Classified only on this surface —
+		// a chat request carries no reasoning Items to have rejected. The turn
+		// fails either way; what this decides is whether the operator is told
+		// what actually happened. See responses_degrade.go.
+		if api == apiResponses {
+			if replayErr := replayRejectionFromStatus(resp.StatusCode, respBody); replayErr != nil {
+				statusErr = replayErr
+			}
+		}
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: statusErr,
 			Retryable:   false,
 			RequestMeta: req.Metadata,
 			RequestID:   req.RequestID,

@@ -94,9 +94,11 @@ func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.
 
 	// Predicted outputs are a Chat Completions feature with no counterpart on
 	// this surface, so the field is dropped rather than sent and rejected. The
-	// agent that set it loses only the latency optimisation.
-	if req.Prediction != "" && p.logger != nil {
-		p.logger.Debug("openai: dropping prediction — the Responses API has no predicted-outputs field")
+	// agent that set it loses only the latency optimisation — which is why this
+	// degrades loudly-but-once rather than failing, the opposite treatment from
+	// a rejected reasoning replay. Both live in responses_degrade.go.
+	if req.Prediction != "" {
+		p.warnPredictionDropped(req.Role)
 	}
 
 	// Reasoning runs last so anything it strips (temperature) has already been

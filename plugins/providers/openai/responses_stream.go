@@ -108,9 +108,12 @@ type responsesStreamEvent struct {
 	Part *responsesSummaryPart `json:"part"`
 
 	// The `error` event is flat rather than nested under `error`, unlike the
-	// non-streaming reply's failure object.
+	// non-streaming reply's failure object. Param is decoded for the same
+	// reason responsesError decodes it: on a rejected reasoning replay it can
+	// be the only field naming the Item.
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Param   string `json:"param"`
 }
 
 // responsesSummaryPart is the `part` object on the reasoning-summary part
@@ -406,15 +409,15 @@ func (p *Plugin) applyResponsesStreamEvent(ev *responsesStreamEvent, st *respons
 
 	case "response.failed":
 		st.snapshot = ev.Response
-		code, msg := "failed", "the responses run failed"
+		code, msg, param := "failed", "the responses run failed", ""
 		if ev.Response != nil && ev.Response.Error != nil {
-			code, msg = ev.Response.Error.Code, ev.Response.Error.Message
+			code, msg, param = ev.Response.Error.Code, ev.Response.Error.Message, ev.Response.Error.Param
 		}
-		p.failResponsesStream(st, code, msg)
+		p.failResponsesStream(st, code, msg, param)
 
 	case "error":
 		// A transport-level error event, flat rather than nested.
-		p.failResponsesStream(st, ev.Code, ev.Message)
+		p.failResponsesStream(st, ev.Code, ev.Message, ev.Param)
 
 	// --- output text -------------------------------------------------------
 
@@ -508,7 +511,13 @@ func (p *Plugin) applyResponsesStreamEvent(ev *responsesStreamEvent, st *respons
 // failure dressed up as an empty response would silently consume the turn.
 // llm.stream.end still goes out, because a transport that opened on the first
 // delta needs a terminator whatever the outcome.
-func (p *Plugin) failResponsesStream(st *responsesStreamState, code, message string) {
+//
+// A rejected reasoning replay reaches this surface too — the request is only
+// refused once the run starts, so a stream can die of it mid-turn — and is
+// named as itself rather than as a generic stream failure. Half a turn having
+// already been rendered changes nothing about the verdict: the rest of it would
+// have been reasoned without the model's own reasoning, so the turn fails.
+func (p *Plugin) failResponsesStream(st *responsesStreamState, code, message, param string) {
 	st.fatal = true
 	st.pub.Close()
 	_ = p.bus.Emit("llm.stream.end", events.StreamEnd{
@@ -516,9 +525,13 @@ func (p *Plugin) failResponsesStream(st *responsesStreamState, code, message str
 		TurnID:        st.turnID,
 		FinishReason:  "error",
 	})
+	err := fmt.Errorf("openai: responses stream failed (%s): %s", code, message)
+	if isReasoningReplayRejection(code, message, param) {
+		err = reasoningReplayError(code, message)
+	}
 	p.emitErrorInfo(events.ErrorInfo{
 		SchemaVersion: events.ErrorInfoVersion,
-		Err:           fmt.Errorf("openai: responses stream failed (%s): %s", code, message),
+		Err:           err,
 		Retryable:     false,
 		RequestID:     st.requestID,
 	})
