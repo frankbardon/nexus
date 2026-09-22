@@ -26,7 +26,10 @@ import (
 //	                                     incomplete_details.reason
 //	usage.prompt_tokens/completion_tokens usage.input_tokens/output_tokens
 //
-// The SSE reader is E4-S3's; everything here stops at a complete JSON body.
+// The SSE reader is responses_stream.go's; everything here stops at a complete
+// JSON body. The two share this file's Item types, its usage mapping and its
+// finish-reason mapping, so a streamed turn and a non-streamed one of the same
+// run produce the same LLMResponse.
 
 // reasoningItemsMetaKey is where a turn's `reasoning` Items are stashed on
 // events.LLMResponse.Metadata, as the decoded Items verbatim.
@@ -306,5 +309,13 @@ func responsesFinishReason(reply responsesReply, hasToolCalls bool) string {
 func (p *Plugin) logDebug(msg string, args ...any) {
 	if p.logger != nil {
 		p.logger.Debug(msg, args...)
+	}
+}
+
+// logWarn is logDebug's counterpart for the one thing the Responses path warns
+// about on a live turn: an SSE frame it could not decode.
+func (p *Plugin) logWarn(msg string, args ...any) {
+	if p.logger != nil {
+		p.logger.Warn(msg, args...)
 	}
 }

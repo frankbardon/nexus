@@ -244,12 +244,11 @@ which wins over the plugin key; being a provider-native axis it does not fall
 through from the `default` role to a named one. Exactly one endpoint is chosen
 per request, from those two and nothing else.
 
-`api: responses` is **not usable yet**: the selector, the request serializer and
-the non-streaming reply parser ship ahead of the stream reader, the multimodal
+`api: responses` is **not usable yet**: the selector, the request serializer,
+the non-streaming reply parser and the SSE reader ship ahead of the multimodal
 Item shapes and the endpoint builder, so declaring it — on the plugin or on a
 role — still fails `Init` naming the release it lands in. A surface with no
-stream reader would read a Responses SSE stream with the chat reader, and one
-with no endpoint builder has no URL to post to.
+endpoint builder has no URL to post to.
 
 The two surfaces carry genuinely different requests, which is why this is a
 declared axis rather than a URL suffix: `messages` becomes a flat `input` list
@@ -269,8 +268,22 @@ reasoning tokens included, and the run `status` is translated back into the
 chat surface's finish-reason words. `reasoning` Items are captured whole onto
 `llm.response.Metadata["openai_reasoning_items"]` — under `store: false` they
 carry `encrypted_content`, which the next request must replay verbatim or the
-model loses its reasoning across a tool round. Both tables are in the
-[configuration
+model loses its reasoning across a tool round.
+
+Streaming is a third implementation rather than a branch: Responses sends about
+forty typed SSE events where Chat Completions sends one chunk shape. Text
+arrives as `response.output_text.delta`, tool-call arguments accumulate across
+`response.function_call_arguments.delta` / `.done` with the tool's name and
+`call_id` coming from `response.output_item.added`, and the run's status and
+usage arrive on `response.completed` — there is no `[DONE]` sentinel and no
+`stream_options`. The publication contract is unchanged: every text delta goes
+through the engine's stream publisher, so a gate that holds, redacts or blocks a
+segment behaves identically whichever surface produced it. The replayable
+`reasoning` Items are taken from the `response.completed` snapshot rather than
+reconstructed from deltas, because `encrypted_content` exists nowhere in the
+delta stream; reasoning *summary* text is accumulated separately onto
+`llm.response.Metadata["openai_reasoning_summary"]` and never released as output
+text. All three tables are in the [configuration
 reference](../../configuration/reference.md#which-openai-api-api).
 
 Two warnings fire at `Init`, each once, and neither on `responses`: one when a

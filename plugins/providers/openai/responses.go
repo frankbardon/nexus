@@ -23,9 +23,9 @@ import (
 //	max_tokens                           max_output_tokens
 //	—                                    store, include
 //
-// Only the request half lives here. The reply parser, the SSE reader, the
-// multimodal Item shapes and the endpoint builder are their own stories; this
-// file deliberately stops at the body.
+// Only the request half lives here. The reply parser (responses_reply.go), the
+// SSE reader (responses_stream.go), the multimodal Item shapes and the endpoint
+// builder are their own files; this one deliberately stops at the body.
 
 // buildResponsesBody constructs a `/v1/responses` request body.
 //

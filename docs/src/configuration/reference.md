@@ -2219,16 +2219,15 @@ An operator on a declared-compat or Azure endpoint who wants the Responses API
 says so with an explicit `api:`.
 
 > **`api: responses` is not usable yet.** The selector, its defaulting, its
-> validation, the **request serializer** and now the **non-streaming reply
-> parser** ship ahead of the stream reader, the multimodal Item shapes and the
+> validation, the **request serializer**, the **non-streaming reply parser** and
+> now the **SSE reader** ship ahead of the multimodal Item shapes and the
 > endpoint builder, so an explicit `api: responses` — on the plugin or on a
 > `core.models` entry — still **fails `Init`** naming the release it lands in
-> (`v0.29.0`). A surface with no stream reader would silently read a Responses
-> SSE stream with the chat reader, and one with no endpoint builder has no URL
-> to post to, so an honest boot failure beats a request shaped for one API and
-> posted to another. When the rest of the path lands, the unnarrowed
-> default becomes `responses`: plain `api.openai.com` deployments move, and the
-> two narrowed rows above stay on `chat_completions`.
+> (`v0.29.0`). A surface with no endpoint builder has no URL to post to, so an
+> honest boot failure beats a request shaped for one API and posted to another.
+> When the rest of the path lands, the unnarrowed default becomes `responses`:
+> plain `api.openai.com` deployments move, and the two narrowed rows above stay
+> on `chat_completions`.
 
 **What changes on the wire.** The two surfaces do not carry the same request,
 which is why the selector exists at all rather than a URL suffix. No
@@ -2297,6 +2296,44 @@ round — structurally the same problem as Anthropic's thinking blocks and
 Gemini's thought signatures. They are captured whole onto
 `llm.response.Metadata` under `openai_reasoning_items` and never rendered into
 the response text.
+
+**What changes while it streams.** Chat Completions sends one chunk shape whose
+meaning depends on which delta field is populated; Responses sends about forty
+typed events, each naming itself. So the SSE reader is a second reader too:
+
+| `chat_completions` | `responses` |
+|---|---|
+| `choices[0].delta.content` | `response.output_text.delta` |
+| `choices[0].delta.tool_calls[].function.arguments` | `response.function_call_arguments.delta` / `.done`, with the tool's `name` and `call_id` arriving separately on `response.output_item.added` |
+| `choices[0].finish_reason` | the terminal lifecycle event's `response.status` |
+| `usage` on the final chunk, and only when `stream_options` asks for it | `usage` on `response.completed`, always — Nexus sends no `stream_options` on this surface |
+| `data: [DONE]` | `response.completed` (no sentinel) |
+| — | `response.reasoning_summary_text.delta` / `response.reasoning_text.delta` |
+
+What does **not** change is the publication contract. Every text delta is
+offered to [`before:llm.stream.chunk`](../architecture/event-bus.md) through the
+engine's stream publisher before any of it reaches the bus, so a gate that
+passes, redacts, **holds** or blocks a segment behaves identically on both
+surfaces, and the terminal response still goes out through the
+`before:llm.response` gate.
+
+Three details of the streamed turn are worth stating, because getting any of
+them wrong is silent:
+
+- **The replayable `reasoning` Items come from `response.completed`**, not from
+  the delta stream. `encrypted_content` appears only on the full `output` array
+  the terminal event carries; several other SDKs have shipped stream converters
+  that drop it, which costs the model its reasoning on the next tool round.
+- **Reasoning summary text** (`response.reasoning_summary_text.delta`, and
+  `response.reasoning_text.delta` on models that stream only that spelling) is
+  accumulated onto `llm.response.Metadata` under `openai_reasoning_summary` as
+  an ordered list of parts. It is display material — it is never released as
+  output text, and it is not what gets replayed.
+- **A run that fails mid-stream** — a `response.failed` or a flat `error` event
+  — emits `llm.stream.end` and then `core.error`, and publishes no
+  `llm.response`, exactly as the non-streaming path does with the same failure.
+  A stream that simply ends early still publishes what it accumulated, but
+  reports no usage: on this surface usage rides `response.completed` alone.
 
 **Precedence**, highest first — the engine-wide rule:
 
