@@ -561,9 +561,18 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		responseBody = io.TeeReader(resp.Body, debugBuf)
 	}
 
-	if req.Stream {
+	// Two parsers as well as two serializers, dispatched on the same once-
+	// resolved surface: a Responses reply is an `output` array of typed Items,
+	// not a `choices[0].message`. The Responses stream reader is E4-S3's, so
+	// until it lands a streaming request on that surface would be read by the
+	// chat reader — which is one more reason `api: responses` is still refused
+	// at Init.
+	switch {
+	case req.Stream:
 		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
-	} else {
+	case api == apiResponses:
+		p.handleResponsesSyncResponse(responseBody, req.RequestID, meta, req.Tags)
+	default:
 		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}
 

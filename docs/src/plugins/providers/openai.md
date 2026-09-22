@@ -244,11 +244,12 @@ which wins over the plugin key; being a provider-native axis it does not fall
 through from the `default` role to a named one. Exactly one endpoint is chosen
 per request, from those two and nothing else.
 
-`api: responses` is **not usable yet**: the selector and the request serializer
-ship ahead of the reply parser, the stream reader and the endpoint builder, so
-declaring it — on the plugin or on a role — still fails `Init` naming the
-release it lands in. A request builder with no response parser cannot serve a
-turn.
+`api: responses` is **not usable yet**: the selector, the request serializer and
+the non-streaming reply parser ship ahead of the stream reader, the multimodal
+Item shapes and the endpoint builder, so declaring it — on the plugin or on a
+role — still fails `Init` naming the release it lands in. A surface with no
+stream reader would read a Responses SSE stream with the chat reader, and one
+with no endpoint builder has no URL to post to.
 
 The two surfaces carry genuinely different requests, which is why this is a
 declared axis rather than a URL suffix: `messages` becomes a flat `input` list
@@ -258,8 +259,18 @@ of Items, tool calls and their results become sibling `function_call` /
 `reasoning_effort` scalar becomes a `reasoning` object that can also carry
 `summary`. Nexus sends `store: false` on every Responses request — it keeps its
 own history — and writes `strict: false` explicitly on every tool definition,
-because on that surface an *absent* `strict` attempts strict mode. The full
-table is in the [configuration
+because on that surface an *absent* `strict` attempts strict mode.
+
+The reply differs just as much — an `output` array of typed Items rather than a
+`choices[0].message` — but what lands on `llm.response` does not: text is the
+`output_text` parts concatenated, each `function_call` Item becomes a tool call
+identified by its `call_id`, usage maps across the renamed counters with
+reasoning tokens included, and the run `status` is translated back into the
+chat surface's finish-reason words. `reasoning` Items are captured whole onto
+`llm.response.Metadata["openai_reasoning_items"]` — under `store: false` they
+carry `encrypted_content`, which the next request must replay verbatim or the
+model loses its reasoning across a tool round. Both tables are in the
+[configuration
 reference](../../configuration/reference.md#which-openai-api-api).
 
 Two warnings fire at `Init`, each once, and neither on `responses`: one when a

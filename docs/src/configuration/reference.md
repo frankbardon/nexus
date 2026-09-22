@@ -2219,12 +2219,14 @@ An operator on a declared-compat or Azure endpoint who wants the Responses API
 says so with an explicit `api:`.
 
 > **`api: responses` is not usable yet.** The selector, its defaulting, its
-> validation and now the **request serializer** ship ahead of the reply parser,
-> the stream reader and the endpoint builder, so an explicit `api: responses` —
-> on the plugin or on a `core.models` entry — still **fails `Init`** naming the
-> release it lands in (`v0.29.0`). A request builder with no response parser
-> cannot serve a turn, and an honest boot failure beats a request shaped for one
-> API and posted to another. When the rest of the path lands, the unnarrowed
+> validation, the **request serializer** and now the **non-streaming reply
+> parser** ship ahead of the stream reader, the multimodal Item shapes and the
+> endpoint builder, so an explicit `api: responses` — on the plugin or on a
+> `core.models` entry — still **fails `Init`** naming the release it lands in
+> (`v0.29.0`). A surface with no stream reader would silently read a Responses
+> SSE stream with the chat reader, and one with no endpoint builder has no URL
+> to post to, so an honest boot failure beats a request shaped for one API and
+> posted to another. When the rest of the path lands, the unnarrowed
 > default becomes `responses`: plain `api.openai.com` deployments move, and the
 > two narrowed rows above stay on `chat_completions`.
 
@@ -2262,6 +2264,39 @@ Two of those rows are deliberate choices rather than transcription:
   tool catalog into an HTTP 400 purely from changing `api:`. Structured
   **output** is the separate case, and there the caller's own `strict` is
   forwarded verbatim onto `text.format`.
+
+**What changes on the way back.** The reply is an `output` array of typed Items
+rather than a `choices[0].message`, so it is a second parser as well. What a
+subscriber sees on `llm.response` is deliberately the same either way:
+
+| `chat_completions` | `responses` |
+|---|---|
+| `choices[0].message.content` | the `output_text` parts of every `message` Item, concatenated |
+| `choices[0].message.tool_calls` | separate `function_call` Items; the tool call's id is the Item's **`call_id`**, the handle the next turn's `function_call_output` is paired by |
+| — | `reasoning` Items, captured whole (see below) rather than rendered |
+| `usage.prompt_tokens` / `completion_tokens` | `usage.input_tokens` / `output_tokens` |
+| `usage.completion_tokens_details.reasoning_tokens` | `usage.output_tokens_details.reasoning_tokens` |
+| `choices[0].finish_reason` | the run `status` plus `incomplete_details.reason`, **translated** into the same words |
+
+`FinishReason` is translated rather than passed through, because both surfaces
+are the same provider: `completed` becomes `stop` (or `tool_calls` when the turn
+called one), `incomplete` with reason `max_output_tokens` becomes `length`, and
+a status this provider does not know is passed through verbatim. An operator
+flipping `api:` does not find the field saying a new word for an outcome it
+already had one for.
+
+A run that **fails inside an HTTP 200** — the request was accepted, the run was
+not completed — is surfaced as `core.error` rather than as an empty
+`llm.response`, which is what lets the [`fallback`](#nexusproviderfallback)
+coordinator see it.
+
+`reasoning` Items are **continuity state, not output**. Under `store: false`
+each one carries `encrypted_content`, and the next request must replay the
+previous turn's Items verbatim or the model loses its reasoning across a tool
+round — structurally the same problem as Anthropic's thinking blocks and
+Gemini's thought signatures. They are captured whole onto
+`llm.response.Metadata` under `openai_reasoning_items` and never rendered into
+the response text.
 
 **Precedence**, highest first — the engine-wide rule:
 
