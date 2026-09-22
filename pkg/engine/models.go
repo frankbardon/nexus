@@ -3,10 +3,18 @@ package engine
 import "strings"
 
 // ModelConfig describes a specific model available through a provider.
+//
+// Effort is an opaque, provider-interpreted reasoning-depth hint. Core does not
+// validate it: the vocabularies genuinely differ per provider (Anthropic uses
+// low|medium|high|xhigh|max, Gemini minimal|low|medium|high), so an unrecognised
+// string parses fine and is handed to the provider, which decides what to do
+// with it. An empty value means "not set" and providers must leave their
+// reasoning configuration untouched.
 type ModelConfig struct {
 	Provider  string `yaml:"provider"`
 	Model     string `yaml:"model"`
 	MaxTokens int    `yaml:"max_tokens"`
+	Effort    string `yaml:"effort"`
 }
 
 // ModelRegistry resolves model role names to concrete model configurations.
@@ -35,6 +43,11 @@ func parseModelConfig(m map[string]any) ModelConfig {
 		cfg.MaxTokens = v
 	} else if v, ok := m["max_tokens"].(float64); ok {
 		cfg.MaxTokens = int(v)
+	}
+	// effort is passed through verbatim — core performs no validation, because
+	// each provider owns its own vocabulary.
+	if v, ok := m["effort"].(string); ok {
+		cfg.Effort = v
 	}
 	return cfg
 }
