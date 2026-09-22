@@ -328,20 +328,62 @@ func TestApplyThinking_UnknownEffortIsAnError(t *testing.T) {
 	}
 }
 
-// The plugin-level `level` is Gemini's native vocabulary; role effort is the
-// translated one, so `level` wins. This is the inverse of the Anthropic
-// precedence, on purpose.
-func TestApplyThinking_PluginLevelWinsOverRoleEffort(t *testing.T) {
+// The previously-inverted case, asserting the new direction. A role's `effort`
+// now beats the plugin-level `thinking.level`, because a plugin key is a default
+// and a per-role key is the more specific statement — the same rule Anthropic
+// has always followed. Before this story the plugin `level` won here.
+func TestApplyThinking_RoleEffortWinsOverPluginLevel(t *testing.T) {
 	cfg := thinkingConfigOf(t, thinkingConfig{Mode: thinkingModeLevel, Level: "minimal"}, "max")
-	if cfg["thinkingLevel"] != "minimal" {
-		t.Fatalf("plugin-level level must win over role effort, got %#v", cfg)
+	if cfg["thinkingLevel"] != "high" {
+		t.Fatalf("role effort must win over the plugin-level level, got %#v", cfg)
 	}
 }
 
-// An unrecognised effort cannot fail a request whose level never reads it.
-func TestApplyThinking_PluginLevelShadowsAnUnknownEffort(t *testing.T) {
-	cfg := thinkingConfigOf(t, thinkingConfig{Mode: thinkingModeLevel, Level: "high"}, "ludicrous")
+// A level the *role's own block* named still wins, because it is the more
+// specific of the two per-role statements — and it is written in Gemini's own
+// vocabulary besides.
+func TestApplyThinking_RoleLevelWinsOverRoleEffort(t *testing.T) {
+	cfg := thinkingConfigOf(t, thinkingConfig{
+		Mode:        thinkingModeLevel,
+		Level:       "minimal",
+		LevelSource: levelFromRole,
+	}, "max")
+	if cfg["thinkingLevel"] != "minimal" {
+		t.Fatalf("the role's own level must win over its effort, got %#v", cfg)
+	}
+}
+
+// A role's level shadows the effort entirely, so an unrecognised effort cannot
+// fail a request whose depth was never going to read it.
+func TestApplyThinking_RoleLevelShadowsAnUnknownEffort(t *testing.T) {
+	cfg := thinkingConfigOf(t, thinkingConfig{
+		Mode:        thinkingModeLevel,
+		Level:       "high",
+		LevelSource: levelFromRole,
+	}, "ludicrous")
 	if cfg["thinkingLevel"] != "high" {
+		t.Fatalf("expected the role's level, got %#v", cfg)
+	}
+}
+
+// A plugin-level level no longer shadows anything: the effort outranks it, so an
+// unrecognised one now reaches the vocabulary gate and fails the request.
+func TestApplyThinking_PluginLevelNoLongerShadowsAnUnknownEffort(t *testing.T) {
+	gen := map[string]any{}
+	err := applyThinking(gen, thinkingConfig{Mode: thinkingModeLevel, Level: "high"}, "ludicrous")
+	if err == nil {
+		t.Fatal("expected an unrecognised effort to fail the request")
+	}
+	if _, present := gen["thinkingConfig"]; present {
+		t.Fatalf("a rejected effort must not leave a thinkingConfig behind: %#v", gen)
+	}
+}
+
+// With no effort at all the plugin-level level still stands — it is a default,
+// not a dead key.
+func TestApplyThinking_PluginLevelStandsWithoutAnEffort(t *testing.T) {
+	cfg := thinkingConfigOf(t, thinkingConfig{Mode: thinkingModeLevel, Level: "low"}, "")
+	if cfg["thinkingLevel"] != "low" {
 		t.Fatalf("expected the plugin-level level, got %#v", cfg)
 	}
 }
@@ -371,7 +413,7 @@ func registryWithEfforts(t *testing.T, raw map[string]any) *engine.ModelRegistry
 	return engine.NewModelRegistry(raw)
 }
 
-func TestValidateRoleEfforts_WarnsOnceOnClamp(t *testing.T) {
+func TestValidateRoleThinking_WarnsOnceOnClamp(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -385,8 +427,8 @@ func TestValidateRoleEfforts_WarnsOnceOnClamp(t *testing.T) {
 		},
 	})
 
-	if err := validateRoleEfforts(models, thinkingConfig{Mode: thinkingModeLevel}, logger); err != nil {
-		t.Fatalf("validateRoleEfforts: %v", err)
+	if err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel}, logger); err != nil {
+		t.Fatalf("validateRoleThinking: %v", err)
 	}
 
 	out := buf.String()
@@ -400,7 +442,7 @@ func TestValidateRoleEfforts_WarnsOnceOnClamp(t *testing.T) {
 	}
 }
 
-func TestValidateRoleEfforts_NativeLevelsAreSilent(t *testing.T) {
+func TestValidateRoleThinking_NativeLevelsAreSilent(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -408,20 +450,20 @@ func TestValidateRoleEfforts_NativeLevelsAreSilent(t *testing.T) {
 		"fast": map[string]any{"provider": pluginID, "model": "gemini-3.5-flash", "effort": "minimal"},
 	})
 
-	if err := validateRoleEfforts(models, thinkingConfig{Mode: thinkingModeLevel}, logger); err != nil {
-		t.Fatalf("validateRoleEfforts: %v", err)
+	if err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel}, logger); err != nil {
+		t.Fatalf("validateRoleThinking: %v", err)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("a native level must not warn, got %s", buf.String())
 	}
 }
 
-func TestValidateRoleEfforts_UnknownValueFailsInit(t *testing.T) {
+func TestValidateRoleThinking_UnknownValueFailsInit(t *testing.T) {
 	models := registryWithEfforts(t, map[string]any{
 		"balanced": map[string]any{"provider": pluginID, "model": "gemini-3.5-flash", "effort": "ludicrous"},
 	})
 
-	err := validateRoleEfforts(models, thinkingConfig{Mode: thinkingModeLevel}, quietLogger())
+	err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel}, quietLogger())
 	if err == nil {
 		t.Fatal("expected an unrecognised effort to fail Init")
 	}
@@ -431,17 +473,17 @@ func TestValidateRoleEfforts_UnknownValueFailsInit(t *testing.T) {
 }
 
 // Another provider's vocabulary is not this provider's business.
-func TestValidateRoleEfforts_IgnoresForeignProviderEntries(t *testing.T) {
+func TestValidateRoleThinking_IgnoresForeignProviderEntries(t *testing.T) {
 	models := registryWithEfforts(t, map[string]any{
 		"balanced": map[string]any{"provider": "nexus.llm.openai", "model": "gpt", "effort": "ludicrous"},
 	})
 
-	if err := validateRoleEfforts(models, thinkingConfig{Mode: thinkingModeLevel}, quietLogger()); err != nil {
+	if err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel}, quietLogger()); err != nil {
 		t.Fatalf("a foreign entry must not fail this provider's Init: %v", err)
 	}
 }
 
-func TestValidateRoleEfforts_SilentUnderBudgetAndOff(t *testing.T) {
+func TestValidateRoleThinking_SilentUnderBudgetAndOff(t *testing.T) {
 	models := registryWithEfforts(t, map[string]any{
 		"balanced": map[string]any{"provider": pluginID, "model": "gemini-2.5-pro", "effort": "ludicrous"},
 	})
@@ -449,7 +491,7 @@ func TestValidateRoleEfforts_SilentUnderBudgetAndOff(t *testing.T) {
 	for _, mode := range []thinkingMode{thinkingModeBudget, thinkingModeOff} {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, nil))
-		if err := validateRoleEfforts(models, thinkingConfig{Mode: mode, BudgetTokens: 4096}, logger); err != nil {
+		if err := validateRoleThinking(models, nil, thinkingConfig{Mode: mode, BudgetTokens: 4096}, logger); err != nil {
 			t.Fatalf("mode %q must ignore role effort entirely: %v", mode, err)
 		}
 		if buf.Len() != 0 {
@@ -458,9 +500,10 @@ func TestValidateRoleEfforts_SilentUnderBudgetAndOff(t *testing.T) {
 	}
 }
 
-// A plugin-level level shadows role effort at request time, so it shadows the
-// Init-time check too — nothing there can reach the wire.
-func TestValidateRoleEfforts_SilentWhenPluginLevelSet(t *testing.T) {
+// A plugin-level level no longer shadows role effort at request time, so it no
+// longer shadows the Init-time check either: the value reaches the wire, so its
+// clamp is announced. Before this story this case was silent.
+func TestValidateRoleThinking_WarnsEvenWhenPluginLevelSet(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
@@ -468,16 +511,39 @@ func TestValidateRoleEfforts_SilentWhenPluginLevelSet(t *testing.T) {
 		"balanced": map[string]any{"provider": pluginID, "model": "gemini-3.1-pro", "effort": "max"},
 	})
 
-	if err := validateRoleEfforts(models, thinkingConfig{Mode: thinkingModeLevel, Level: "low"}, logger); err != nil {
-		t.Fatalf("validateRoleEfforts: %v", err)
+	if err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel, Level: "low"}, logger); err != nil {
+		t.Fatalf("validateRoleThinking: %v", err)
 	}
-	if buf.Len() != 0 {
-		t.Fatalf("an overridden effort must not warn, got %s", buf.String())
+	if !strings.Contains(buf.String(), "clamped") {
+		t.Fatalf("an effort that now outranks the plugin level must warn, got %s", buf.String())
 	}
 }
 
-func TestValidateRoleEfforts_NilRegistry(t *testing.T) {
-	if err := validateRoleEfforts(nil, thinkingConfig{Mode: thinkingModeLevel}, quietLogger()); err != nil {
+// A level the role's *own* block names does still shadow its effort, so the
+// Init-time check stays silent there.
+func TestValidateRoleThinking_SilentWhenTheRoleNamesALevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	models := registryWithEfforts(t, map[string]any{
+		"balanced": map[string]any{
+			"provider": pluginID,
+			"model":    "gemini-3.1-pro",
+			"effort":   "max",
+			"thinking": map[string]any{"mode": "level", "level": "low"},
+		},
+	})
+
+	if err := validateRoleThinking(models, nil, thinkingConfig{Mode: thinkingModeLevel}, logger); err != nil {
+		t.Fatalf("validateRoleThinking: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("an effort the role's own level shadows must not warn, got %s", buf.String())
+	}
+}
+
+func TestValidateRoleThinking_NilRegistry(t *testing.T) {
+	if err := validateRoleThinking(nil, nil, thinkingConfig{Mode: thinkingModeLevel}, quietLogger()); err != nil {
 		t.Fatalf("a nil registry must be a no-op: %v", err)
 	}
 }

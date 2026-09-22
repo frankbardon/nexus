@@ -150,10 +150,14 @@ func TestEffort_RegistryValueIsClamped(t *testing.T) {
 	}
 }
 
-// TestEffort_PluginLevelBeatsRegistryEffort pins that this story did not touch
-// the Gemini precedence inversion: `thinking.level` is Gemini's own vocabulary
-// and still wins over a role's translated `effort:`.
-func TestEffort_PluginLevelBeatsRegistryEffort(t *testing.T) {
+// TestEffort_RegistryEffortBeatsPluginLevel pins the direction the
+// per-role-reasoning effort reversed. Gemini used to let the plugin-level
+// `thinking.level` beat a role's translated `effort:`, on the argument that
+// `level` is this provider's own vocabulary. One rule now holds everywhere
+// instead: a plugin key is a default and a per-role key is the more specific
+// statement, so the role wins. Only a `level` the role's own `thinking:` block
+// names outranks that role's effort.
+func TestEffort_RegistryEffortBeatsPluginLevel(t *testing.T) {
 	p := effortPlugin(thinkingConfig{Mode: thinkingModeLevel, Level: "minimal"}, effortModels(map[string]string{
 		"balanced": "",
 		"worker":   "high",
@@ -163,8 +167,8 @@ func TestEffort_PluginLevelBeatsRegistryEffort(t *testing.T) {
 		Role:     "worker",
 		Messages: userMessages(),
 	})
-	if !ok || got != "minimal" {
-		t.Fatalf("thinkingLevel = %q (present=%v), want the plugin-level %q", got, ok, "minimal")
+	if !ok || got != "high" {
+		t.Fatalf("thinkingLevel = %q (present=%v), want the role's %q", got, ok, "high")
 	}
 }
 

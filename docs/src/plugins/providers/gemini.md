@@ -201,6 +201,10 @@ role's [`effort`](#reasoning-depth-from-a-role-effort); with neither set it send
 the right-hand column above — applies. Omitting `level` is therefore a valid way to say
 "whatever this model does by default", not a misconfiguration.
 
+Set here, at the **plugin** level, `level` is a default: a role's `effort` overrides it.
+Only a `level` on the role's own [`thinking:` block](#per-role-thinking) outranks that
+role's `effort`.
+
 Two asymmetries are worth keeping in mind:
 
 - **2.5 will *accept* a `thinkingLevel`** for backward compatibility, but it degrades
@@ -269,17 +273,26 @@ plugins:
   nexus.llm.gemini:
     thinking:
       mode: level
-      # no `level:` here — a plugin-level level would beat the role's effort
+      # a `level:` here is only the default this role's effort overrides
 ```
 
-**`thinking.level` wins over a role's `effort`**, which is deliberately the inverse of
-the Anthropic provider, where a role's `effort` beats the plugin-level
-`output_config.effort`. The reason is which key speaks this provider's own language:
-`level` is the native `thinkingLevel` vocabulary and `effort` the translated,
-cross-provider one, so here the native setting wins. On Anthropic both keys are already
-spelled in Anthropic's vocabulary, so nothing is lost in translation and the more
-specific setting — the role — wins there instead. It is an inversion to know about, not
-a bug to report.
+**A role's `effort` wins over the plugin-level `thinking.level`**, the same way it wins
+over `output_config.effort` on the Anthropic provider. A plugin-level key is a default
+and a per-role key is the more specific statement; that is the one rule, on every
+provider. Only a `level` on the **role's own** [`thinking:` block](#per-role-thinking)
+outranks that role's `effort`, because there the contest is between two statements at
+the same level of specificity and the native, unambiguous one wins.
+
+> **Behaviour change.** This direction was reversed until the per-role-reasoning
+> release: the plugin-level `thinking.level` beat a role's `effort`, on the argument
+> that `level` is Gemini's native vocabulary and `effort` the translated one. With a
+> role able to write `level` itself the contest is between the layers rather than the
+> vocabularies, and this provider now follows the same rule as every other. If you set
+> a plugin-level `thinking.level` **and** a role `effort` and relied on the level
+> winning, move that value onto the role's own `thinking:` block. Two follow-on
+> consequences: a role `effort` the plugin-level `level` used to shadow now reaches the
+> vocabulary gate, so a value in neither provider's vocabulary now fails `Init` where it
+> was previously ignored; and a clamp that was previously silent is now warned.
 
 Anthropic's vocabulary reaches higher than Gemini's, so two of its words clamp:
 
@@ -294,11 +307,13 @@ would instead make `effort:` a silent no-op on this leg. The clamp is announced 
 at `Init`** — the provider walks every `core.models` role it could serve and logs the
 role, the configured value and the effective one. A word in neither provider's
 vocabulary fails `Init` for any such role, and fails the request if it arrives some
-other way.
+other way. The clamp warning is raised once per (role, value).
 
 Under `mode: budget` and `mode: off`, a role's `effort` is **ignored entirely and
 without warning**: there is no `thinkingLevel` on those paths for it to become, and
-2.5's depth control is `budget_tokens`.
+2.5's depth control is `budget_tokens`. The same is true behind a `level` the role's own
+block named — and because a role may now carry its own block, the mode that decides this
+is the role's, not necessarily the plugin's.
 
 **How the value gets here.** Like the Anthropic provider, this one reads the
 `core.models` registry itself, on every path that resolves a role: the role the request
@@ -316,6 +331,80 @@ which is exactly the ordinary single-entry role.
 The cross-provider account — the union vocabulary, both clamp directions, and the fact
 that `nexus.llm.openai` ignores `effort` entirely — is in the configuration reference
 under [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
+
+#### Per-role thinking
+
+Everything above describes the **plugin-level** `thinking:` block. A
+[`core.models`](../../configuration/reference.md#coremodels) role entry may carry one of
+its own, which **merges over** it key by key — the role wins on every key it names, and
+a plugin key the role is silent about survives. That is what lets one plugin instance
+serve a Gemini 2.5 role on `mode: budget` and a Gemini 3.x role on `mode: level` at the
+same time, which matters here more than on any other provider: the two families take
+different parameters, and this provider never inspects the model id to guess which.
+
+```yaml
+plugins:
+  active:
+    nexus.llm.gemini:
+      thinking:
+        mode: level
+        level: medium
+        include_thoughts: true
+
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.gemini
+      model: gemini-3.1-pro
+    legacy:
+      provider: nexus.llm.gemini
+      model: gemini-2.5-pro
+      thinking:
+        mode: budget           # role wins
+        budget_tokens: 8192    # and displaces the inherited `level`
+                               # include_thoughts: true survives
+```
+
+`balanced` sends `{"thinkingLevel": "medium", "includeThoughts": true}`; `legacy` sends
+`{"thinkingBudget": 8192, "includeThoughts": true}`.
+
+**`level` and `budget_tokens` displace each other across the merge.** Gemini rejects a
+request carrying both `thinkingLevel` and `thinkingBudget`, so the two keys are mutually
+exclusive in configuration — and a role naming one drops an inherited other rather than
+landing beside it. Without that, the very configuration this feature exists for (a 2.5
+plugin block and a 3.x role, or the reverse) would merge into a block no operator could
+have written and fail the boot. A role naming **both keys itself** is still an `Init`
+error: that one the operator did write. **Exactly one of the two reaches the wire,
+whichever layer supplied it.**
+
+**Precedence**, highest first:
+
+1. a `thinking` block already on the request — what the `fallback` and `fanout`
+   coordinators stamp for the chain entry they are actually serving;
+2. the role's own `thinking:` block, merged over the plugin's — including a `level` it
+   names, which lands in the same wire field the role's `effort` would have and so
+   outranks it;
+3. the role's [`effort`](#reasoning-depth-from-a-role-effort), read only under
+   `mode: level`;
+4. the plugin-level `thinking:` block, unchanged.
+
+**Invalid role blocks fail the boot.** A block on a `core.models` entry never passes
+through this plugin's `schema.json` — core stores these maps without looking inside — so
+`Init` sweeps every role, and every entry of every chain, this provider could serve,
+merges each block over the plugin's and parses the result. A role whose merged block is
+invalid fails `Init` naming the role rather than failing at the first request that uses
+it. The same sweep checks each entry's `effort` against the block that entry resolves
+to, which is why a role on `mode: off` may carry any `effort` at all without complaint.
+
+Two edges worth knowing:
+
+- **`thinking: {}` on a role is a statement, not a silence.** It overrides no individual
+  key, but the merged block is *present*, so on a deployment with no plugin-level block
+  it turns thinking on — a present block with no `mode` is `mode: level`.
+- **A role that switches `mode` must restate the key that mode needs.** A plugin-level
+  `mode: budget` plus a role's bare `level:` leaves `mode: budget` with the budget
+  displaced, which fails `Init` naming the role. Set `mode` on the role alongside the key.
 
 #### `-1` and `0` on the budget path
 
@@ -346,7 +435,9 @@ Nexus does not build such a body and then check it: `mode` selects the single br
 that writes one key, so **no configuration can put both on the wire**. What is left
 is caught at boot rather than at first inference —
 
-- `level` and `budget_tokens` both set in the block → `Init` error naming both keys.
+- `level` and `budget_tokens` both set in one block → `Init` error naming both keys.
+  Across the plugin/role merge they do not collide: a role naming one **displaces** an
+  inherited other. See [Per-role thinking](#per-role-thinking).
 - `mode: budget` with no `budget_tokens` → `Init` error. A budget is a number only the
   operator can pick, so there is no default to fall back on.
 - `mode: level` with no `level` → **not** an error. Every Gemini 3.x model carries its

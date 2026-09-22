@@ -405,11 +405,10 @@ plugins:
 sends `{"effort": "max"}`; a request on any role without its own `effort` sends
 `{"effort": "low"}`; with neither set, nothing is emitted.
 
-That precedence is the **inverse of Gemini's**, where the plugin-level `thinking.level`
-beats a role's `effort`. The inversion is deliberate: on Gemini `level` is the native
-`thinkingLevel` vocabulary and `effort` the translated cross-provider one, so the native
-key wins; here `effort` is already this provider's own word in both places, so nothing is
-lost in translation and the more specific setting — the role — wins instead.
+That precedence is now **the same on Gemini**, where a role's `effort` likewise beats
+the plugin-level `thinking.level`. It used to be the inverse there; see the
+behaviour-change note on the
+[Gemini page](gemini.md#reasoning-depth-from-a-role-effort).
 
 An `effort` **already on the request** beats both. The fallback and fanout coordinators
 stamp the chain entry they are actually serving onto the outgoing request, so a fallback

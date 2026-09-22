@@ -56,7 +56,12 @@ type Plugin struct {
 	retry   retryConfig
 	pricing *pricing.Table
 
-	thinking      thinkingConfig
+	thinking thinkingConfig
+	// thinkingRaw is the plugin-level `thinking:` block exactly as configured,
+	// kept because a core.models role's block merges over it key by key and the
+	// merged result has to go back through parseThinkingConfig. nil means the
+	// plugin set no block at all.
+	thinkingRaw   map[string]any
 	codeExecution bool
 	cache         *cacheState
 
@@ -121,11 +126,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.thinking = thinking
+	p.thinkingRaw = rawThinkingBlock(ctx.Config)
 
-	// Role efforts are a configuration fact, so they are validated — and the
-	// clamp of Anthropic's xhigh/max onto Gemini's high warned — once here,
-	// never per request.
-	if err := validateRoleEfforts(p.models, p.thinking, p.log()); err != nil {
+	// A role's `thinking:` block and its `effort:` are both configuration facts,
+	// so both are checked once here rather than per request: an invalid merged
+	// block fails the boot naming the role, and the clamp of Anthropic's
+	// xhigh/max onto Gemini's high is warned once per (role, value).
+	if err := validateRoleThinking(p.models, p.thinkingRaw, p.thinking, p.log()); err != nil {
 		return err
 	}
 
@@ -383,6 +390,19 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
+	// The serving chain entry's native `thinking:` block. A fallback or fanout
+	// coordinator has already stamped it when one is involved, and
+	// ResolveModelConfig leaves a stamped request alone; otherwise it recovers
+	// the block from the registry, covering the named role, the default role
+	// and the late case where a router rewrote `model` and left `role` alone.
+	//
+	// Only Thinking is taken. The other axes ResolveModelConfig fills either
+	// already have a resolution pass here (effort, max_tokens, model) or have
+	// no consumer in this provider yet; widening that is a later story's job,
+	// not a side effect of this one. req is a value parameter, so the caller's
+	// payload is untouched.
+	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", effort)
 
 	body, err := p.buildRequestBody(model, maxTokens, effort, req)
@@ -526,9 +546,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 	}
 
 	// Thinking config: exactly one of thinkingLevel / thinkingBudget, or
-	// nothing at all under mode: off. effort is the role's reasoning-depth
-	// hint, read only under mode: level and only behind thinking.level.
-	if err := applyThinking(gen, p.thinking, effort); err != nil {
+	// nothing at all under mode: off — whichever layer supplied the value.
+	// resolveThinking merges the serving role's own `thinking:` block over the
+	// plugin-level one; effort is the role's reasoning-depth hint, read only
+	// under mode: level and only where that block named no `level` itself.
+	if err := applyThinking(gen, p.resolveThinking(req), effort); err != nil {
 		return nil, err
 	}
 
