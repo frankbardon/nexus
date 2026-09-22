@@ -118,10 +118,13 @@ func TestParseReasoningConfig_ModeOff(t *testing.T) {
 		t.Errorf("Mode: got %q, want off", rc.Mode)
 	}
 
-	body := map[string]any{"model": "o1-mini"}
-	applyReasoning(body, "o1-mini", rc, false, silentLogger())
+	body := map[string]any{"model": "o1-mini", "temperature": 0.7}
+	applyReasoning(body, rc, silentLogger())
 	if _, ok := body["reasoning_effort"]; ok {
 		t.Error("mode: off must send no reasoning configuration")
+	}
+	if body["temperature"] != 0.7 {
+		t.Error("mode: off must strip nothing, even on a model id that looks like a reasoning family")
 	}
 }
 
@@ -170,53 +173,44 @@ func TestParseReasoningConfig_DeprecatedAliases(t *testing.T) {
 	}
 }
 
-func TestIsReasoningModel(t *testing.T) {
-	matches := []string{
-		"o1", "o1-mini", "o1-preview",
-		"o3", "o3-mini",
-		"o4-mini",
-		"gpt-5", "gpt-5-mini", "gpt-5-thinking", "gpt-5-mini-thinking",
-	}
-	for _, m := range matches {
-		if !isReasoningModel(m) {
-			t.Errorf("isReasoningModel(%q): got false, want true", m)
+// The gate is the declared mode, never the model id: a model id that looks
+// like a reasoning family strips nothing while the operator has declared no
+// mode. The old reasoningModelPattern regex is gone and must not come back.
+func TestApplyReasoning_ModeOffLeavesBodyAloneOnAnyModel(t *testing.T) {
+	for _, model := range []string{"gpt-4o", "o1-mini", "o3", "gpt-5-thinking"} {
+		body := map[string]any{
+			"model":       model,
+			"temperature": 0.7,
+			"top_p":       0.9,
 		}
-	}
 
-	misses := []string{
-		"gpt-4o", "gpt-4-turbo", "gpt-4o-mini",
-		"claude-3-5-sonnet-20241022",
-		"",
-	}
-	for _, m := range misses {
-		if isReasoningModel(m) {
-			t.Errorf("isReasoningModel(%q): got true, want false", m)
+		applyReasoning(body, reasoningConfig{Mode: reasoningModeOff, Effort: "medium"}, silentLogger())
+
+		if body["temperature"] != 0.7 {
+			t.Errorf("%s: temperature should be untouched: got %v", model, body["temperature"])
+		}
+		if body["top_p"] != 0.9 {
+			t.Errorf("%s: top_p should be untouched: got %v", model, body["top_p"])
+		}
+		if _, ok := body["reasoning_effort"]; ok {
+			t.Errorf("%s: reasoning_effort should not be set under mode: off", model)
 		}
 	}
 }
 
-func TestApplyReasoning_NonReasoningModelLeavesBodyAlone(t *testing.T) {
-	body := map[string]any{
-		"model":       "gpt-4o",
-		"temperature": 0.7,
-		"top_p":       0.9,
-	}
-	cfg := reasoningConfig{Mode: reasoningModeEffort, Effort: "medium"}
+// A zero reasoningConfig — the embedder who constructed a Plugin without
+// parsing a config — is off, not on.
+func TestApplyReasoning_ZeroConfigIsOff(t *testing.T) {
+	body := map[string]any{"model": "o1-mini", "temperature": 0.7}
 
-	applyReasoning(body, "gpt-4o", cfg, false, silentLogger())
+	applyReasoning(body, reasoningConfig{}, silentLogger())
 
 	if body["temperature"] != 0.7 {
-		t.Errorf("temperature should be untouched: got %v", body["temperature"])
-	}
-	if body["top_p"] != 0.9 {
-		t.Errorf("top_p should be untouched: got %v", body["top_p"])
-	}
-	if _, ok := body["reasoning_effort"]; ok {
-		t.Errorf("reasoning_effort should not be set on non-reasoning model")
+		t.Errorf("temperature should be untouched under a zero config: got %v", body["temperature"])
 	}
 }
 
-func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
+func TestApplyReasoning_DeclaredModeStripsAndSetsEffort(t *testing.T) {
 	body := map[string]any{
 		"model":             "o1-mini",
 		"temperature":       0.7,
@@ -230,7 +224,7 @@ func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
 	}
 	cfg := reasoningConfig{Mode: reasoningModeEffort, Effort: "high"}
 
-	applyReasoning(body, "o1-mini", cfg, false, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	for _, f := range []string{
 		"temperature", "top_p", "presence_penalty", "frequency_penalty",
@@ -249,34 +243,36 @@ func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
 	}
 }
 
-func TestApplyReasoning_ForceReasoningOnNonReasoningModel(t *testing.T) {
+// The declaration also carries a model the deleted regex never matched: the
+// operator, not a table, decides what a reasoning model is.
+func TestApplyReasoning_DeclaredModeOnAnUnknownModelId(t *testing.T) {
 	body := map[string]any{
-		"model":       "gpt-4o",
+		"model":       "some-model-released-next-year",
 		"temperature": 0.5,
 	}
 	cfg := reasoningConfig{Mode: reasoningModeEffort, Effort: "low"}
 
-	applyReasoning(body, "gpt-4o", cfg, true, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	if _, ok := body["temperature"]; ok {
-		t.Error("temperature should be stripped when force_reasoning=true")
+		t.Error("temperature should be stripped whenever a reasoning mode is declared")
 	}
 	if got := body["reasoning_effort"]; got != "low" {
 		t.Errorf("reasoning_effort: got %v, want low", got)
 	}
 }
 
-func TestApplyReasoning_ReasoningModelNoEffortConfig(t *testing.T) {
+func TestApplyReasoning_DeclaredModeNoEffortConfig(t *testing.T) {
 	body := map[string]any{
 		"model":       "o3-mini",
 		"temperature": 0.7,
 	}
 	cfg := reasoningConfig{Mode: reasoningModeEffort} // no effort
 
-	applyReasoning(body, "o3-mini", cfg, false, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	if _, ok := body["temperature"]; ok {
-		t.Error("temperature should be stripped on reasoning model")
+		t.Error("temperature should be stripped under a declared reasoning mode")
 	}
 	if _, ok := body["reasoning_effort"]; ok {
 		t.Error("reasoning_effort should not be set when Effort is empty")
@@ -313,11 +309,11 @@ func TestConvertAPIResponse_PopulatesReasoningTokens(t *testing.T) {
 	}
 }
 
-// TestBuildRequestBody_ReasoningModelStripsTemperature exercises the integration
-// between buildRequestBody and applyReasoning: an LLMRequest with Temperature
-// targeting o1-mini should produce a body with no `temperature` field but with
-// the configured `reasoning_effort`.
-func TestBuildRequestBody_ReasoningModelStripsTemperature(t *testing.T) {
+// TestBuildRequestBody_DeclaredModeStripsTemperature exercises the integration
+// between buildRequestBody and applyReasoning: with `reasoning.mode: effort`
+// declared, an LLMRequest carrying a Temperature should produce a body with no
+// `temperature` field but with the configured `reasoning_effort`.
+func TestBuildRequestBody_DeclaredModeStripsTemperature(t *testing.T) {
 	temp := 0.7
 	p := &Plugin{
 		logger:    silentLogger(),
@@ -333,7 +329,7 @@ func TestBuildRequestBody_ReasoningModelStripsTemperature(t *testing.T) {
 	body := p.buildRequestBody("o1-mini", 1024, req)
 
 	if _, ok := body["temperature"]; ok {
-		t.Errorf("temperature should be stripped from o1-mini body")
+		t.Errorf("temperature should be stripped under a declared reasoning mode")
 	}
 	if got := body["reasoning_effort"]; got != "medium" {
 		t.Errorf("reasoning_effort: got %v, want medium", got)

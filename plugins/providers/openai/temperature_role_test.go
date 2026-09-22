@@ -39,8 +39,8 @@ func tempModels(entries map[string]*float64) *engine.ModelRegistry {
 
 func tempPtr(f float64) *float64 { return &f }
 
-// tempPlugin builds the minimum Plugin buildRequestBody runs against. gpt-4o is
-// not a reasoning model, so applyReasoning leaves temperature alone.
+// tempPlugin builds the minimum Plugin buildRequestBody runs against. It
+// declares no reasoning mode, so applyReasoning leaves temperature alone.
 func tempPlugin(models *engine.ModelRegistry) *Plugin {
 	return &Plugin{
 		logger: silentLogger(),
@@ -186,13 +186,26 @@ func TestRoleTemperature_RecoveredAfterModelRewrite(t *testing.T) {
 	}
 }
 
-// A reasoning model rejects the field outright, so applyReasoning strips it back
-// out however it arrived. A role's temperature is no exception.
-func TestRoleTemperature_StrippedForAReasoningModel(t *testing.T) {
+// A reasoning model rejects the field outright, so once the operator declares
+// `reasoning.mode`, applyReasoning strips it back out however it arrived. A
+// role's temperature is no exception.
+func TestRoleTemperature_StrippedUnderDeclaredReasoning(t *testing.T) {
 	p := tempPlugin(tempModels(map[string]*float64{"balanced": tempPtr(0.2)}))
+	p.reasoning = reasoningConfig{Mode: reasoningModeEffort}
 
 	if got, ok := wireTemperature(t, p, events.LLMRequest{Role: "balanced", Model: "o1-mini"}); ok {
-		t.Fatalf("temperature = %v on the wire, want it stripped for a reasoning model", got)
+		t.Fatalf("temperature = %v on the wire, want it stripped under a declared reasoning mode", got)
+	}
+}
+
+// Without that declaration the same model id keeps its temperature: the gate is
+// the operator's word, not a model table.
+func TestRoleTemperature_NotStrippedOnModelIdAlone(t *testing.T) {
+	p := tempPlugin(tempModels(map[string]*float64{"balanced": tempPtr(0.2)}))
+
+	got, ok := wireTemperature(t, p, events.LLMRequest{Role: "balanced", Model: "o1-mini"})
+	if !ok || got != 0.2 {
+		t.Fatalf("temperature = %v (present=%v), want the role's 0.2 with no reasoning mode declared", got, ok)
 	}
 }
 

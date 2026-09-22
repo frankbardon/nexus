@@ -57,8 +57,7 @@ type Plugin struct {
 	retryRaw map[string]any
 	pricing  *pricing.Table // merged: config overrides + embedded defaults
 
-	reasoning      reasoningConfig
-	forceReasoning bool
+	reasoning reasoningConfig
 
 	multimodal multimodalConfig
 
@@ -133,9 +132,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.reasoning = reasoning
-	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
-		p.forceReasoning = v
-	}
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
@@ -288,8 +284,9 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // `core.models` role's. A role's value only fills the gap when nothing upstream
 // set one. `0` is a real value, so the axis is a *float64 the whole way down.
 //
-// Note that applyReasoning strips temperature again for a reasoning model, which
-// rejects the field. That is not this function's business.
+// Note that applyReasoning strips temperature again whenever the operator has
+// declared a reasoning mode, since such a model rejects the field. That is not
+// this function's business.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Temperature = resolved.Temperature
@@ -596,8 +593,8 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// Predicted outputs (OpenAI-only): when the agent has a known-content
 	// guess (rewrite this paragraph, fix this line), pass it through as
 	// prediction.content so the model returns near-instantly for unchanged
-	// portions. applyReasoning strips this for o-series / gpt-5-thinking
-	// models since they reject the field.
+	// portions. applyReasoning strips this again whenever the operator has
+	// declared a reasoning mode, since a reasoning model rejects the field.
 	if req.Prediction != "" {
 		body["prediction"] = map[string]any{
 			"type":    "content",
@@ -606,10 +603,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	}
 
 	// Reasoning-model handling runs last so any fields about to be stripped
-	// (temperature, top_p, etc.) have already been written. NOTE: this stays
-	// on /v1/chat/completions; the /v1/responses endpoint exposes richer
+	// (temperature, top_p, etc.) have already been written. It is gated on the
+	// operator's declared `reasoning.mode`, not on the model id. NOTE: this
+	// stays on /v1/chat/completions; the /v1/responses endpoint exposes richer
 	// reasoning controls (summary streaming) and is left for a future plan.
-	applyReasoning(body, model, p.reasoning, p.forceReasoning, p.logger)
+	applyReasoning(body, p.reasoning, p.logger)
 
 	return body
 }

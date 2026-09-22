@@ -43,7 +43,6 @@
         "budget_tokens": {"type": "integer", "minimum": 0, "description": "Deprecated and ignored: OpenAI has no reasoning token budget. Use effort."}
       }
     },
-    "force_reasoning": {"type": "boolean", "description": "Force reasoning even on non-o-series models (experimental)."},
     "multimodal": {
       "type": "object",
       "additionalProperties": false,

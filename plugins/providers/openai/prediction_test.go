@@ -47,11 +47,14 @@ func TestBuildRequestBody_PredictionEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildRequestBody_PredictionStrippedOnReasoningModel verifies that
-// applyReasoning strips the prediction field for reasoning models that
-// reject it (o1, o3, o4, gpt-5*-thinking).
-func TestBuildRequestBody_PredictionStrippedOnReasoningModel(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+// TestBuildRequestBody_PredictionStrippedUnderDeclaredReasoning verifies that
+// applyReasoning strips the prediction field once the operator has declared a
+// reasoning mode, since a reasoning model rejects the field whatever its id.
+func TestBuildRequestBody_PredictionStrippedUnderDeclaredReasoning(t *testing.T) {
+	p := &Plugin{
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		reasoning: reasoningConfig{Mode: reasoningModeEffort},
+	}
 	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "user", Content: "rewrite"}},
 		Prediction: "the target",
 	}
@@ -59,7 +62,7 @@ func TestBuildRequestBody_PredictionStrippedOnReasoningModel(t *testing.T) {
 	body := p.buildRequestBody("o1-mini", 1024, req)
 
 	if _, ok := body["prediction"]; ok {
-		t.Errorf("expected prediction stripped on reasoning model o1-mini, got %v", body["prediction"])
+		t.Errorf("expected prediction stripped under a declared reasoning mode, got %v", body["prediction"])
 	}
 }
 

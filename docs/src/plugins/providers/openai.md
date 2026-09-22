@@ -42,7 +42,7 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 
 The provider uses the Model Registry to resolve role names. When an `llm.request` specifies a `Role` (e.g., `"reasoning"`), the provider looks up the concrete model config. If no role is specified, the default model is used.
 
-Two per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out for a reasoning model whatever its origin — see [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
+Two per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out whatever its origin whenever `reasoning.mode` is set to anything but `off` — a model id alone never strips it. See [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
 
 A role's `retry:` block is read too, merging over the plugin-level one. The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning:` block — and neither do the `thinking`, `reasoning`, `cache` or `api` entries.
 
@@ -59,13 +59,30 @@ nexus.llm.openai:
     effort: medium    # none | minimal | low | medium | high | xhigh | max
 ```
 
-`mode` is the operator's declaration that the target is a reasoning model; it
-is not inferred from the model id. An **absent** `reasoning:` block means `off`
-and sends no reasoning configuration at all; a **present** block with no `mode`
-means `effort`. `effort` is OpenAI's full vocabulary and is **not clamped** — it
-is a superset of what `nexus.llm.anthropic` and `nexus.llm.gemini` accept, so a
-role word written for either of those passes through verbatim. An unrecognised
-`effort` fails `Init` naming the accepted set.
+`mode` is the operator's declaration that the target is a reasoning model, and
+it is the **only** such declaration: the provider inspects no model id anywhere
+and holds no model-capability table. An **absent** `reasoning:` block means
+`off` and sends no reasoning configuration at all; a **present** block with no
+`mode` means `effort`. `effort` is OpenAI's full vocabulary and is **not
+clamped** — it is a superset of what `nexus.llm.anthropic` and
+`nexus.llm.gemini` accept, so a role word written for either of those passes
+through verbatim. An unrecognised `effort` fails `Init` naming the accepted set.
+
+`mode` also gates the **sampling-parameter strip**. Reasoning models reject
+`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logprobs`,
+`top_logprobs` and `prediction` outright, so any `mode` other than `off`
+removes them from the request body before it is sent. Under `mode: off` — an
+absent block included — nothing is stripped, whatever the model is called.
+
+> **Breaking change.** Earlier releases auto-detected reasoning models from the
+> model id (a built-in `o1*` / `o3*` / `o4*` / `gpt-5*` regex) and shipped a
+> `force_reasoning` boolean to override that guess. Both are gone. Point an
+> instance at a reasoning model with no `reasoning:` block and it will now send
+> `temperature` and get an HTTP 400 from OpenAI. Add `reasoning: {mode: effort}`
+> to every `nexus.llm.openai` instance that targets one; `force_reasoning: true`
+> becomes exactly that block, and the key itself must be removed or config
+> validation fails the boot with `unknown key "force_reasoning"`. See the
+> [configuration reference](../../configuration/reference.md#declaring-a-reasoning-model-openai).
 
 `reasoning.summary` (`auto` / `concise` / `detailed`) is accepted and validated
 but does not reach the wire: `/v1/chat/completions` returns no reasoning
@@ -192,3 +209,8 @@ core:
       model: gpt-4.1-mini
       max_tokens: 4096
 ```
+
+Note that the `reasoning` **role** above names a model, not a capability: to
+send `o3` reasoning controls — and to strip the sampling parameters it rejects
+— the plugin still needs an explicit `reasoning:` block, as described under
+[Reasoning](#reasoning). A role called `reasoning` declares nothing by itself.

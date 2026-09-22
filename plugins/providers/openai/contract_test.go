@@ -55,7 +55,7 @@ func TestContract_ReasoningBlockBoots(t *testing.T) {
 	}
 
 	body := map[string]any{}
-	applyReasoning(body, "gpt-5", p.reasoning, false, silentLogger())
+	applyReasoning(body, p.reasoning, silentLogger())
 	if got := body["reasoning_effort"]; got != "xhigh" {
 		t.Errorf("reasoning_effort on the wire: got %v, want xhigh", got)
 	}

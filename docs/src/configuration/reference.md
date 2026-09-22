@@ -2124,18 +2124,59 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `files.upload_threshold`     | int    | `40960`                              | Minimum bytes to upload. |
 | `files.cache_uploads`        | bool   | `true`                               | Deduplicate within a session. |
 | `files.delete_on_shutdown`   | bool   | `false`                              | Delete on shutdown. |
-| `reasoning.mode`             | string | `off` *(absent block)* / `effort` *(present block)* | Whether reasoning controls go on the wire. `effort` sends `reasoning_effort`; `off` sends no reasoning configuration at all. An **absent** `reasoning:` block is `off`; a **present** block with no `mode` is `effort`. Mirrors the `mode` axis on [`nexus.llm.anthropic`](#nexusllmanthropic) and [`nexus.llm.gemini`](#nexusllmgemini): the operator declares the shape, the provider obeys, and a mode the target model rejects is an OpenAI HTTP 400 the operator owns. |
+| `reasoning.mode`             | string | `off` *(absent block)* / `effort` *(present block)* | Whether reasoning controls go on the wire, **and the only gate on the sampling-parameter strip below**. `effort` sends `reasoning_effort`; `off` sends no reasoning configuration at all and strips nothing. An **absent** `reasoning:` block is `off`; a **present** block with no `mode` is `effort`. Mirrors the `mode` axis on [`nexus.llm.anthropic`](#nexusllmanthropic) and [`nexus.llm.gemini`](#nexusllmgemini): the operator declares the shape, the provider obeys, and a mode the target model rejects is an OpenAI HTTP 400 the operator owns. The provider holds **no model-capability table** and never inspects the model id — see [Declaring a reasoning model](#declaring-a-reasoning-model-openai). |
 | `reasoning.effort`           | string | *(unset)*                            | Reasoning depth: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**, because it is a superset of the union of what the other two providers accept. Unset under `mode: effort` sends no `reasoning_effort` key, so the model's own default applies. An unrecognised value **fails `Init`** naming the accepted set. |
 | `reasoning.summary`          | string | *(unset)*                            | Reasoning-summary verbosity: `auto`, `concise`, `detailed`. Parsed and validated, but **does not reach the wire**: `/v1/chat/completions` returns no reasoning summaries — only the Responses API does, and this provider does not speak it. Setting it logs a warning at boot. Replaces the removed `reasoning.include_summary`. |
 | `reasoning.enabled`          | bool   | *(unset)*                            | **Deprecated** alias for `reasoning.mode`: `true` → `effort`, `false` → `off`. Ignored (with a warning) when `mode` is set. Does not fail boot. |
 | `reasoning.budget_tokens`    | int    | *(unset)*                            | **Deprecated and ignored.** OpenAI has no reasoning token budget — depth is `reasoning.effort`. Accepted with a warning rather than failing boot. |
-| `force_reasoning`            | bool   | `false`                              | Force reasoning even for non-o-series models (experimental). |
 | `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
 | `retry.*`                    | —      | *(shared Retry block)*               | Backoff configuration. |
 | *(role `retry`)*              | map    | *(unset)*                             | Not a plugin key — the [`core.models`](#coremodels) `<role>.retry` block, which **merges over** the plugin-level `retry:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a shorter `max_retries` keeps the plugin's backoff shape and status list. The merged block goes through the same parser as the plugin one, so a present block turns retrying on and an unrecognised `backoff` word or unparseable duration is warned about and defaulted rather than refused. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Unlike every other per-entry axis this one reaches no part of the request body**: it drives the retry loop around the HTTP call, resolved per request. Its point is a role with a fallback chain wanting *fewer* attempts at the primary than a terminal role — see [Retry behaviour: `retry`](#retry-behaviour-retry). |
 | `pricing.<model>.*`          | map    | *(embedded table)*                   | Override per-model pricing. |
 | *(role `cache`)*             | map    | *(unset)*                            | Not a plugin key, and **not read by this provider**. There is no `cache:` block on `nexus.llm.openai` at all, so a [`core.models`](#coremodels) role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](#prompt-caching-cache). |
-| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The only per-entry axis beyond `model`/`max_tokens` and the `retry:` block (see the row above) this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again for a reasoning model, whatever its origin. |
+| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The only per-entry axis beyond `model`/`max_tokens` and the `retry:` block (see the row above) this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever `reasoning.mode` is set to anything but `off` — a model id alone never strips it. |
+
+#### Declaring a reasoning model (OpenAI)
+
+`reasoning.mode` is the **only** thing that tells this provider the target is a
+reasoning model. The provider inspects no model id anywhere: there is no
+model-capability table, no regex, no family list.
+
+That matters because reasoning models reject a set of sampling parameters
+outright. When `reasoning.mode` is set to anything other than `off`, the
+provider strips these from the request body before sending it:
+
+`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `logprobs`,
+`top_logprobs`, `prediction`.
+
+Under `mode: off` — including an absent `reasoning:` block — nothing is
+stripped and no reasoning key is sent, whatever the model is called.
+
+> **Breaking change.** Earlier releases auto-detected reasoning models from the
+> model id with a built-in regex (`o1*`, `o3*`, `o4*`, `gpt-5*`) and exposed a
+> `force_reasoning` boolean to override it. Both are **gone**. A config that
+> pointed at such a model with **no `reasoning:` block** used to get its
+> sampling parameters stripped for free; it now sends them and OpenAI answers
+> HTTP 400. **Add an explicit `reasoning:` block** to every `nexus.llm.openai`
+> instance that targets a reasoning model:
+>
+> ```yaml
+> nexus.llm.openai:
+>   reasoning:
+>     mode: effort
+>     effort: medium   # optional — unset leaves the model's own default
+> ```
+>
+> `force_reasoning: true` becomes exactly that block; `force_reasoning: false`
+> should simply be deleted. Either way the key is now unknown to
+> `schema.json`, so leaving it in place **fails config validation at boot**
+> with `plugins.nexus.llm.openai: unknown key "force_reasoning"` — that half of
+> the break is loud. The half that is silent is a config that relied on bare
+> auto-detection with no `reasoning:` block at all; nothing local can detect
+> it, because detecting it would require the model table this change deletes.
+> The regex was stale by construction: it could not know about a model
+> released after it was written, and a model it failed to match produced the
+> same undiagnosable 400 this change now makes explicit and operator-owned.
 
 ### `nexus.llm.gemini`
 

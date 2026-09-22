@@ -3,7 +3,6 @@ package openai
 import (
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 )
 
@@ -67,8 +66,9 @@ func validReasoningSummary(v string) bool {
 //	  effort: medium     # none | minimal | low | medium | high | xhigh | max
 //	  summary: auto      # auto | concise | detailed
 //
-// Reasoning models reject temperature/top_p/etc., so the provider strips them
-// automatically — see applyReasoning.
+// Any mode other than `off` declares the target a reasoning model, so the
+// provider strips the sampling parameters such a model rejects — see
+// applyReasoning.
 type reasoningConfig struct {
 	Mode   reasoningMode
 	Effort string // only meaningful when Mode is reasoningModeEffort
@@ -162,28 +162,24 @@ func parseReasoningConfig(cfg map[string]any, logger *slog.Logger) (reasoningCon
 	return rc, nil
 }
 
-// reasoningModelPattern matches o1*, o3*, o4* and gpt-5*-thinking* model ids.
-// Match is conservative: known reasoning families only. Users can override
-// detection with the `force_reasoning` config flag (handled in plugin.go).
-var reasoningModelPattern = regexp.MustCompile(`^(o[134](-mini|-preview)?|gpt-5(-mini|-nano)?(-\d+)?(-thinking)?)`)
-
-// isReasoningModel reports whether a model id is a known reasoning family.
-func isReasoningModel(model string) bool {
-	return reasoningModelPattern.MatchString(model)
-}
-
 // applyReasoning mutates the request body for reasoning-model calls.
 // Strips disallowed fields (temperature, top_p, presence_penalty,
 // frequency_penalty, logprobs, top_logprobs, prediction) and adds
 // reasoning_effort when the declared mode asks for it.
 //
-// The strip is still gated on the model-id regex rather than on the declared
-// mode: moving that gate onto `mode` is a separate change.
+// The gate is the operator's declared `reasoning.mode`, never the model id.
+// This provider deliberately holds no model-capability table: a table cannot
+// know about a model released after it was written, and a model it guesses
+// wrong about produces an OpenAI HTTP 400 nobody can diagnose locally.
+// Declaring a mode the target model does not accept is likewise an HTTP 400
+// the operator owns — the same bargain nexus.llm.anthropic and
+// nexus.llm.gemini already strike.
 //
 // reasoningModeOff — and an absent `reasoning:` block, which resolves to it —
-// puts no reasoning configuration on the body at all.
-func applyReasoning(body map[string]any, model string, cfg reasoningConfig, forceReasoning bool, logger *slog.Logger) {
-	if !(forceReasoning || isReasoningModel(model)) {
+// puts no reasoning configuration on the body at all and strips nothing.
+func applyReasoning(body map[string]any, cfg reasoningConfig, logger *slog.Logger) {
+	switch cfg.Mode {
+	case "", reasoningModeOff:
 		return
 	}
 	for _, f := range []string{
@@ -192,7 +188,7 @@ func applyReasoning(body map[string]any, model string, cfg reasoningConfig, forc
 	} {
 		if _, ok := body[f]; ok {
 			if logger != nil {
-				logger.Debug("openai: stripping incompatible field for reasoning model", "field", f, "model", model)
+				logger.Debug("openai: stripping field a reasoning model rejects", "field", f, "mode", string(cfg.Mode))
 			}
 			delete(body, f)
 		}
