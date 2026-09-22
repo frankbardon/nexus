@@ -49,6 +49,19 @@ import (
 // `model` field instead, so stripping it there would send a request with no
 // model at all. (That URL is E4-S5's; this is the body half of the same fact.)
 func (p *Plugin) buildResponsesBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
+	return p.buildResponsesBodyWith(model, maxTokens, req, p.resolveReasoning(req))
+}
+
+// buildResponsesBodyWith is buildResponsesBody with the reasoning resolution
+// already done.
+//
+// The split exists because handleRequest needs the resolved configuration for
+// itself — whether summaries were asked for is what gates thinking.step
+// emission on the reply — and resolving it twice would both duplicate the
+// warning an invalid hand-set override raises and leave the two halves free to
+// disagree. buildResponsesBody stays the whole-job entry point for everything
+// that only wants a body.
+func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.LLMRequest, reasoning reasoningConfig) map[string]any {
 	body := map[string]any{
 		"model":             model,
 		"max_output_tokens": maxTokens,
@@ -88,10 +101,10 @@ func (p *Plugin) buildResponsesBody(model string, maxTokens int, req events.LLMR
 
 	// Reasoning runs last so anything it strips (temperature) has already been
 	// written. Gated on the operator's declared `reasoning.mode`, never on the
-	// model id; resolveReasoning is the shared, surface-agnostic lookup that
-	// merges the serving role's block over the plugin-level one and folds the
-	// role's `effort:` into the depth.
-	applyResponsesReasoning(body, p.resolveReasoning(req), p.logger)
+	// model id; resolveReasoning — which the caller has already run — is the
+	// shared, surface-agnostic lookup that merges the serving role's block over
+	// the plugin-level one and folds the role's `effort:` into the depth.
+	applyResponsesReasoning(body, reasoning, p.logger)
 
 	return body
 }

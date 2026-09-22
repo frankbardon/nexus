@@ -18,6 +18,7 @@ func TestContract(t *testing.T) {
 	for _, want := range []string{
 		"before:llm.response", "llm.response",
 		"llm.stream.chunk", "llm.stream.end",
+		"thinking.step",
 		"before:core.error", "core.error",
 	} {
 		if !declared[want] {

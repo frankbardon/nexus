@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -172,6 +173,54 @@ func parseReasoningConfig(cfg map[string]any, logger *slog.Logger) (reasoningCon
 	// warnSummaryOnChatCompletions, which knows both halves.
 
 	return rc, nil
+}
+
+// summaryRequested reports whether this configuration actually asks OpenAI for
+// reasoning summaries — which is exactly the condition applyResponsesReasoning
+// writes a `summary` key under, and therefore the only condition under which
+// summary text can legitimately come back.
+//
+// It is the gate on thinking.step emission. Summaries are opt-in on this
+// provider: a deployment that never asked for one must never be shown one, so
+// a reasoning-summary event arriving on a turn that did not request summaries
+// is treated as something to ignore rather than something to publish. That
+// keeps the bus honest about what the operator turned on, and it means a
+// provider or proxy that volunteers summary frames cannot fabricate a
+// reasoning trail nobody asked for.
+//
+// The gate reads the RESOLVED configuration — the serving role's `reasoning:`
+// block merged over the plugin-level one, as resolveReasoning produces it — not
+// the plugin-level value. That is deliberate and is the one asymmetry this
+// provider does NOT inherit from nexus.llm.anthropic, where the emission gate
+// reads the plugin-level include_thoughts and a role that turns thinking on
+// therefore pays for reasoning it never gets to see. Here a role that names
+// `summary: auto` on a deployment whose plugin block is silent gets its events,
+// and a role that omits it does not.
+func (c reasoningConfig) summaryRequested() bool {
+	return c.Mode == reasoningModeEffort && c.Summary != ""
+}
+
+// emitReasoningStep publishes one unit of reasoning-summary text as a
+// thinking.step, the event every IO transport already renders as reasoning.
+//
+// Index carries the summary part's own index rather than a running counter,
+// which is what orders the parts of one reasoning Item for a reader
+// reconstructing the turn. Content is never empty: a contentless step is noise
+// every consumer drops anyway (nexus.io.agui discards it outright), so the
+// caller's job is to have something to say before calling.
+func (p *Plugin) emitReasoningStep(turnID string, index int, content string) {
+	if content == "" || p.bus == nil {
+		return
+	}
+	_ = p.bus.Emit("thinking.step", events.ThinkingStep{
+		SchemaVersion: events.ThinkingStepVersion,
+		TurnID:        turnID,
+		Source:        pluginID,
+		Content:       content,
+		Phase:         "reasoning",
+		Timestamp:     time.Now(),
+		Index:         index,
+	})
 }
 
 // reasoningRejectedFields are the sampling parameters a reasoning model

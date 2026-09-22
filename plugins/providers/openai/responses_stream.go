@@ -94,10 +94,29 @@ type responsesStreamEvent struct {
 	// summary_index orders reasoning summary parts within one reasoning Item.
 	SummaryIndex int `json:"summary_index"`
 
+	// content_index is summary_index's counterpart on the
+	// response.reasoning_text.* spelling, which has no summary_index at all —
+	// it is not a summary, it is the reasoning content itself. A stream using
+	// that spelling would otherwise collapse every part onto index 0.
+	ContentIndex int `json:"content_index"`
+
+	// response.reasoning_summary_part.added carries the part it opened. In the
+	// documented shape its text is empty and the deltas that follow fill it,
+	// but a server that delivers a whole part in one event puts the text here
+	// and sends no deltas — so it is read rather than assumed empty.
+	Part *responsesSummaryPart `json:"part"`
+
 	// The `error` event is flat rather than nested under `error`, unlike the
 	// non-streaming reply's failure object.
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// responsesSummaryPart is the `part` object on the reasoning-summary part
+// boundary events.
+type responsesSummaryPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // responsesStreamTool accumulates one function call across the events that
@@ -152,6 +171,15 @@ type responsesStreamState struct {
 
 	summaryIdx []summaryKey
 	summaries  map[summaryKey]*strings.Builder
+
+	// emitSummaries is the resolved answer to "did this turn ask OpenAI for
+	// reasoning summaries?" — reasoningConfig.summaryRequested on the block
+	// the serving role actually resolved to. It gates thinking.step emission
+	// and nothing else: the accumulated text still reaches
+	// reasoningSummaryMetaKey either way, because that key is a record of what
+	// the API sent, while the events are a statement about what the operator
+	// turned on.
+	emitSummaries bool
 
 	// snapshot is the run object from the terminal lifecycle event. It is the
 	// authority on usage, status and — crucially — the reasoning Items, which
@@ -239,6 +267,30 @@ func (st *responsesStreamState) addSummary(k summaryKey, delta string) {
 	b.WriteString(delta)
 }
 
+// addReasoningSummary folds one piece of reasoning-summary text into the turn
+// and, when the turn asked for summaries, publishes it as a thinking.step.
+//
+// The two halves are one call because they are one fact arriving: the
+// accumulator is what the terminal LLMResponse carries under
+// reasoningSummaryMetaKey, and the event is what a UI renders while the turn is
+// still running. Emitting per delta rather than per completed part is what
+// makes reasoning stream in a TUI instead of landing in one block at the end —
+// the same shape nexus.llm.anthropic's thinking_delta handler has.
+//
+// Index is the part's own index, not a running counter, so a reader can order
+// the parts of a reasoning Item. The gate is p-level state on the turn rather
+// than a check here so that a turn which never asked for summaries does no
+// per-delta work beyond the accumulation the response metadata needs anyway.
+func (p *Plugin) addReasoningSummary(st *responsesStreamState, outputIndex, summaryIndex int, text string) {
+	if text == "" {
+		return
+	}
+	st.addSummary(summaryKey{outputIndex: outputIndex, summaryIndex: summaryIndex}, text)
+	if st.emitSummaries {
+		p.emitReasoningStep(st.turnID, summaryIndex, text)
+	}
+}
+
 // summaries renders the accumulated reasoning summary parts in Item order.
 func (st *responsesStreamState) renderSummaries() []string {
 	if len(st.summaryIdx) == 0 {
@@ -264,11 +316,15 @@ func (st *responsesStreamState) renderSummaries() []string {
 // Responses surface. handleRequest picks between them on the surface it already
 // resolved, exactly as it picks between the two body builders and the two
 // non-streaming parsers.
-func (p *Plugin) handleResponsesStreamResponse(body io.Reader, requestID string, requestMeta map[string]any, tags map[string]string) {
+// reasoning is the resolved reasoning configuration for this turn, carried in
+// from handleRequest rather than re-read from the plugin: it is what decides
+// whether reasoning summaries were asked for at all, and therefore whether the
+// summary frames may become thinking.step events.
+func (p *Plugin) handleResponsesStreamResponse(body io.Reader, requestID string, requestMeta map[string]any, tags map[string]string, reasoning reasoningConfig) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	st := &responsesStreamState{requestID: requestID}
+	st := &responsesStreamState{requestID: requestID, emitSummaries: reasoning.summaryRequested()}
 	// Error-path backstop: a stream abandoned before the explicit Close below
 	// would otherwise leave a gate's hold outstanding and every UI showing a
 	// review indicator nothing ever clears. Close is idempotent.
@@ -409,8 +465,31 @@ func (p *Plugin) applyResponsesStreamEvent(ev *responsesStreamEvent, st *respons
 
 	// --- reasoning ---------------------------------------------------------
 
-	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-		st.addSummary(summaryKey{outputIndex: ev.OutputIndex, summaryIndex: ev.SummaryIndex}, ev.Delta)
+	case "response.reasoning_summary_part.added":
+		// The part boundary. In the documented shape it opens an empty part
+		// and the deltas below fill it, so there is usually nothing to say
+		// here — but a server that ships a whole part in one event puts the
+		// text on `part` and sends no deltas at all, and that text would
+		// otherwise be lost. Accumulating it here is safe against the
+		// documented shape precisely because that shape's text is empty.
+		if ev.Part != nil {
+			p.addReasoningSummary(st, ev.OutputIndex, ev.SummaryIndex, ev.Part.Text)
+		}
+
+	case "response.reasoning_summary_text.delta":
+		p.addReasoningSummary(st, ev.OutputIndex, ev.SummaryIndex, ev.Delta)
+
+	case "response.reasoning_text.delta":
+		// The other spelling, from the field report: a model that streams its
+		// reasoning with no summary events around it at all. It carries
+		// content_index where the summary spelling carries summary_index, so
+		// the index is taken from there when it is present — otherwise every
+		// part of such a stream would collapse onto index 0.
+		idx := ev.SummaryIndex
+		if ev.ContentIndex != 0 {
+			idx = ev.ContentIndex
+		}
+		p.addReasoningSummary(st, ev.OutputIndex, idx, ev.Delta)
 
 	default:
 		// Part-boundary events, server-side tool events and anything the API

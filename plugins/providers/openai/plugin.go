@@ -272,6 +272,12 @@ func (p *Plugin) Emissions() []string {
 		"llm.stream.hold",
 		"llm.stream.retract",
 		"llm.stream.end",
+		// Reasoning summaries, on the Responses surface only and only for a
+		// turn whose resolved `reasoning:` block asked for them. Chat
+		// Completions returns no reasoning text at all, so a chat-only
+		// deployment declares this and never emits it — which is the correct
+		// way round: Emissions() is what a plugin MAY emit.
+		"thinking.step",
 		"before:core.error",
 		"core.error",
 	}
@@ -475,9 +481,18 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	// Two serializers, not one with a branch inside it: the Responses request
 	// shares almost nothing with the chat one beyond the values it carries.
+	//
+	// The Responses surface resolves reasoning here rather than inside its
+	// serializer because the answer is needed twice: once to shape the request
+	// and again to read the reply, where whether summaries were asked for is
+	// what decides whether summary frames may become thinking.step events.
+	// Resolving once also keeps resolveReasoning's warning about an invalid
+	// hand-set override to one line per request rather than two.
 	var body map[string]any
+	var reasoning reasoningConfig
 	if api == apiResponses {
-		body = p.buildResponsesBody(model, maxTokens, req)
+		reasoning = p.resolveReasoning(req)
+		body = p.buildResponsesBodyWith(model, maxTokens, req, reasoning)
 	} else {
 		body = p.buildRequestBody(model, maxTokens, req)
 	}
@@ -576,11 +591,11 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// stream with the chat reader yields an empty turn, silently.
 	switch {
 	case req.Stream && api == apiResponses:
-		p.handleResponsesStreamResponse(responseBody, req.RequestID, meta, req.Tags)
+		p.handleResponsesStreamResponse(responseBody, req.RequestID, meta, req.Tags, reasoning)
 	case req.Stream:
 		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
 	case api == apiResponses:
-		p.handleResponsesSyncResponse(responseBody, req.RequestID, meta, req.Tags)
+		p.handleResponsesSyncResponse(responseBody, req.RequestID, meta, req.Tags, reasoning)
 	default:
 		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}

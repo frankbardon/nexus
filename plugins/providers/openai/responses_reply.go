@@ -122,7 +122,13 @@ type responsesUsage struct {
 // handleResponsesSyncResponse is handleSyncResponse's counterpart on the
 // Responses surface. handleRequest picks between them on the surface it already
 // resolved, exactly as it picks between the two body builders.
-func (p *Plugin) handleResponsesSyncResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string) {
+//
+// reasoning is the resolved reasoning configuration for this turn, carried in
+// from handleRequest for the same reason the streaming reader takes one: it is
+// what decides whether reasoning summaries were asked for, and therefore
+// whether the summaries riding the reasoning Items may become thinking.step
+// events.
+func (p *Plugin) handleResponsesSyncResponse(body io.Reader, requestID string, meta map[string]any, tags map[string]string, reasoning reasoningConfig) {
 	var reply responsesReply
 	if err := json.NewDecoder(body).Decode(&reply); err != nil {
 		p.emitError(fmt.Errorf("openai: failed to decode responses reply: %w", err))
@@ -147,12 +153,67 @@ func (p *Plugin) handleResponsesSyncResponse(body io.Reader, requestID string, m
 	resp := p.convertResponsesReply(reply)
 	resp.RequestID = requestID
 
+	// Reasoning summaries are emitted here rather than inside
+	// convertResponsesReply because that function is shared with the streaming
+	// path, which settles its turn from the same terminal snapshot after
+	// already having emitted every delta — emitting there would double every
+	// step on a streamed turn.
+	if reasoning.summaryRequested() {
+		p.emitReasoningItemSummaries(reply.ID, resp.Metadata)
+	}
+
 	// Same merge order as the chat path: request-passthrough metadata (e.g.
 	// _structured_output) wins over anything the parser attached.
 	resp.Metadata = mergeMetadata(resp.Metadata, meta)
 	resp.Tags = tags
 
 	engine.PublishLLMResponse(p.bus, resp)
+}
+
+// emitReasoningItemSummaries publishes a thinking.step per summary part of a
+// non-streamed turn.
+//
+// The two surfaces carry the same text in two places. A streamed turn gets it
+// as its own event family (response.reasoning_summary_text.delta and friends),
+// which is why responses_stream.go accumulates it under
+// reasoningSummaryMetaKey; a non-streamed one never sees those events, and the
+// text arrives only inside each reasoning Item's `summary` array:
+//
+//	{"type":"reasoning","id":"rs_1","encrypted_content":"…",
+//	 "summary":[{"type":"summary_text","text":"Checking the units first."}]}
+//
+// So this reads back out of the Items the parser already captured rather than
+// asking convertResponsesReply to fork. The Items themselves are left exactly
+// as they were — they are replay state that must survive verbatim (E5-S2), and
+// this function only looks.
+//
+// Index is the part's position in its Item's summary array, which is the
+// non-streaming counterpart of summary_index. A turn carrying several reasoning
+// Items therefore restarts the numbering per Item, exactly as the streamed
+// summary_index does.
+//
+// Everything here is a type assertion away from a nil map: the Items come from
+// JSON the provider does not control, so a shape this does not recognise is
+// skipped rather than panicking a live turn.
+func (p *Plugin) emitReasoningItemSummaries(turnID string, meta map[string]any) {
+	items, ok := meta[reasoningItemsMetaKey].([]map[string]any)
+	if !ok {
+		return
+	}
+	for _, item := range items {
+		parts, ok := item["summary"].([]any)
+		if !ok {
+			continue
+		}
+		for i, raw := range parts {
+			part, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, _ := part["text"].(string)
+			p.emitReasoningStep(turnID, i, text)
+		}
+	}
 }
 
 // convertResponsesReply turns a decoded Responses reply into an LLMResponse.

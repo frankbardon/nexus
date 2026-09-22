@@ -2360,7 +2360,9 @@ them wrong is silent:
   `response.reasoning_text.delta` on models that stream only that spelling) is
   accumulated onto `llm.response.Metadata` under `openai_reasoning_summary` as
   an ordered list of parts. It is display material — it is never released as
-  output text, and it is not what gets replayed.
+  output text, and it is not what gets replayed. It is also published as
+  `thinking.step`, one event per delta, so a TUI shows reasoning as it arrives;
+  see [Reasoning in the UI](#reasoning-in-the-ui-openai).
 - **A run that fails mid-stream** — a `response.failed` or a flat `error` event
   — emits `llm.stream.end` and then `core.error`, and publishes no
   `llm.response`, exactly as the non-streaming path does with the same failure.
@@ -2392,6 +2394,36 @@ neither fires on `responses`:
 
 Each is said once per boot, naming the role when a `core.models` entry is what
 set it — not once per role and not per request.
+
+#### Reasoning in the UI (OpenAI)
+
+On the `responses` surface, reasoning summary text is published as
+`thinking.step` — the event every IO transport already renders as reasoning.
+This is parity with [`nexus.llm.anthropic`](#nexusllmanthropic) and
+[`nexus.llm.gemini`](#nexusllmgemini); `chat_completions` returns no reasoning
+text at all, so a deployment on that surface emits nothing.
+
+- A **streamed** turn emits one step per delta —
+  `response.reasoning_summary_text.delta`, the `response.reasoning_text.delta`
+  spelling on models that stream only that, and a
+  `response.reasoning_summary_part.added` that carries a whole part at once — so
+  reasoning arrives incrementally rather than in one block at the end.
+- A **non-streamed** turn never sees those events: the text lives only inside
+  each `reasoning` Item's `summary` array, and one step is emitted per entry.
+- `ThinkingStep.Index` carries the part's own `summary_index` (the array
+  position, on the non-streaming path), which is what orders the parts of one
+  reasoning Item.
+
+**Summaries are opt-in and are never fabricated.** A step is published only when
+the turn's **resolved** reasoning configuration asked OpenAI for summaries —
+`mode: effort` *and* a [`reasoning.summary`](#nexusllmopenai) — which is exactly
+the condition that key reaches the wire under. Resolved means the serving role's
+`reasoning:` block merged over the plugin-level one (see [Per-role
+reasoning](#per-role-reasoning-openai) if a role sets one), so a role naming
+`summary: detailed` on a deployment whose plugin block is silent gets its events
+and a role that omits it gets none. The accumulated text still reaches
+`llm.response.Metadata["openai_reasoning_summary"]` either way — that key records
+what the API sent, while the events state what the operator turned on.
 
 #### Declaring a reasoning model (OpenAI)
 

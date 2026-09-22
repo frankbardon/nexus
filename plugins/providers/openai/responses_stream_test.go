@@ -52,6 +52,7 @@ type streamRecorder struct {
 	errors    []events.ErrorInfo
 	holds     []events.StreamHold
 	retracts  int
+	thinking  []events.ThinkingStep
 	types     map[string]bool
 }
 
@@ -61,6 +62,7 @@ func newStreamRecorder() *streamRecorder {
 		"llm.stream.chunk", "before:llm.stream.chunk", "llm.stream.hold",
 		"llm.stream.retract", "llm.stream.end", "llm.response",
 		"before:llm.response", "core.error", "before:core.error",
+		"thinking.step",
 	} {
 		t := t
 		r.bus.Subscribe(t, func(e engine.Event[any]) {
@@ -80,6 +82,8 @@ func newStreamRecorder() *streamRecorder {
 				r.holds = append(r.holds, p)
 			case events.StreamEnd:
 				r.ends = append(r.ends, p)
+			case events.ThinkingStep:
+				r.thinking = append(r.thinking, p)
 			case events.LLMResponse:
 				if t == "llm.response" {
 					r.responses = append(r.responses, p)
@@ -109,11 +113,26 @@ func (r *streamRecorder) text() string {
 	return b.String()
 }
 
+// run reads a stream for a turn that asked for no reasoning summaries — the
+// default, since summaries are opt-in.
 func (r *streamRecorder) run(t *testing.T, body string) {
+	t.Helper()
+	r.runWith(t, body, reasoningConfig{})
+}
+
+// runWith reads a stream under a given resolved reasoning configuration, which
+// is what decides whether summary frames become thinking.step events.
+func (r *streamRecorder) runWith(t *testing.T, body string, rc reasoningConfig) {
 	t.Helper()
 	p := quietPlugin()
 	p.bus = r.bus
-	p.handleResponsesStreamResponse(strings.NewReader(body), "req-1", nil, nil)
+	p.handleResponsesStreamResponse(strings.NewReader(body), "req-1", nil, nil, rc)
+}
+
+// summariesOn is a resolved configuration that asked OpenAI for reasoning
+// summaries — the only one under which thinking.step may be published.
+func summariesOn() reasoningConfig {
+	return reasoningConfig{Mode: reasoningModeEffort, Summary: "auto"}
 }
 
 func (r *streamRecorder) onlyResponse(t *testing.T) events.LLMResponse {
@@ -381,8 +400,9 @@ func TestResponsesStream_ReasoningItemsSurviveFromTheSnapshot(t *testing.T) {
 		t.Errorf("reasoning item id = %v, want rs_1", raw[0]["id"])
 	}
 
-	// The summary text is accumulated separately, for E5-S1 to turn into
-	// thinking.step events. It is never released as output text.
+	// The summary text is accumulated separately — it becomes thinking.step
+	// events on a turn that asked for summaries, and it is never released as
+	// output text on any turn.
 	summaries, ok := resp.Metadata[reasoningSummaryMetaKey].([]string)
 	if !ok || len(summaries) != 1 || summaries[0] != "Thinking about it." {
 		t.Errorf("%s = %v, want one part reading %q", reasoningSummaryMetaKey, resp.Metadata[reasoningSummaryMetaKey], "Thinking about it.")
@@ -407,6 +427,199 @@ func TestResponsesStream_ReasoningTextSpellingIsAccepted(t *testing.T) {
 	got, _ := resp.Metadata[reasoningSummaryMetaKey].([]string)
 	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Errorf("%s = %v, want [first second] in summary_index order", reasoningSummaryMetaKey, got)
+	}
+}
+
+// --- thinking.step ----------------------------------------------------------
+
+// Reasoning summary deltas reach the bus as thinking.step, which is the event
+// every IO transport already renders as reasoning — the parity with
+// nexus.llm.anthropic and nexus.llm.gemini this provider has never had, because
+// Chat Completions returns no reasoning text at all.
+//
+// One event per delta rather than one per completed part: that is what makes a
+// TUI show reasoning as it arrives instead of in a block at the end.
+func TestResponsesStream_SummaryDeltasBecomeThinkingSteps(t *testing.T) {
+	r := newStreamRecorder()
+	r.runWith(t, sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"Checking "}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"the units."}`,
+		`{"type":"response.output_text.delta","delta":"42"}`,
+		streamCompleted,
+	), summariesOn())
+
+	if len(r.thinking) != 2 {
+		t.Fatalf("emitted %d thinking.step events, want 2 (one per delta): %+v", len(r.thinking), r.thinking)
+	}
+	if r.thinking[0].Content != "Checking " || r.thinking[1].Content != "the units." {
+		t.Errorf("step contents = %q / %q", r.thinking[0].Content, r.thinking[1].Content)
+	}
+	for i, s := range r.thinking {
+		if s.TurnID != "resp_1" {
+			t.Errorf("step %d TurnID = %q, want resp_1", i, s.TurnID)
+		}
+		if s.Source != pluginID {
+			t.Errorf("step %d Source = %q, want %q", i, s.Source, pluginID)
+		}
+		if s.Phase != "reasoning" {
+			t.Errorf("step %d Phase = %q, want reasoning", i, s.Phase)
+		}
+		if s.SchemaVersion != events.ThinkingStepVersion {
+			t.Errorf("step %d SchemaVersion = %d", i, s.SchemaVersion)
+		}
+	}
+
+	// The summary is reasoning, not output: it must not have been released as
+	// streamed text.
+	if got := r.text(); got != "42" {
+		t.Errorf("streamed text = %q — reasoning must not reach the output stream", got)
+	}
+}
+
+// summary_index supplies the step index within the turn, so a reader can order
+// the parts of a reasoning Item independently of arrival order.
+func TestResponsesStream_SummaryIndexIsTheStepIndex(t *testing.T) {
+	r := newStreamRecorder()
+	r.runWith(t, sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":1,"delta":"second part"}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"first part"}`,
+		streamCompleted,
+	), summariesOn())
+
+	if len(r.thinking) != 2 {
+		t.Fatalf("emitted %d thinking.step events, want 2", len(r.thinking))
+	}
+	if r.thinking[0].Index != 1 || r.thinking[1].Index != 0 {
+		t.Errorf("step indexes = %d, %d; want the summary_index of each delta (1, 0)",
+			r.thinking[0].Index, r.thinking[1].Index)
+	}
+}
+
+// A server that ships a whole summary part on the part boundary — text on
+// `part`, no deltas afterwards — still produces a step. The documented shape
+// opens an empty part, which produces nothing, because a contentless step is
+// noise every consumer drops.
+func TestResponsesStream_SummaryPartAddedCarryingText(t *testing.T) {
+	r := newStreamRecorder()
+	r.runWith(t, sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`,
+		`{"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":"All at once."}}`,
+		streamCompleted,
+	), summariesOn())
+
+	if len(r.thinking) != 1 {
+		t.Fatalf("emitted %d thinking.step events, want 1 (the empty part must not fabricate one): %+v",
+			len(r.thinking), r.thinking)
+	}
+	if r.thinking[0].Content != "All at once." || r.thinking[0].Index != 1 {
+		t.Errorf("step = %q at index %d, want %q at 1", r.thinking[0].Content, r.thinking[0].Index, "All at once.")
+	}
+
+	// And it is still the response metadata's business too, so a whole-part
+	// delivery is not lost to a consumer reading the settled turn.
+	resp := r.onlyResponse(t)
+	if got, _ := resp.Metadata[reasoningSummaryMetaKey].([]string); len(got) != 1 || got[0] != "All at once." {
+		t.Errorf("%s = %v, want [All at once.]", reasoningSummaryMetaKey, got)
+	}
+}
+
+// The field-report variant: a model that streams only
+// response.reasoning_text.delta, with no summary events around it at all. It
+// carries content_index where the summary spelling carries summary_index, and
+// that is what orders its steps.
+func TestResponsesStream_ReasoningTextOnlyVariantEmitsSteps(t *testing.T) {
+	r := newStreamRecorder()
+	r.runWith(t, sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"Working "}`,
+		`{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"it out."}`,
+		`{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":1,"delta":"Second thought."}`,
+		streamCompleted,
+	), summariesOn())
+
+	if len(r.thinking) != 3 {
+		t.Fatalf("emitted %d thinking.step events, want 3: %+v", len(r.thinking), r.thinking)
+	}
+	if r.thinking[2].Index != 1 {
+		t.Errorf("content_index never reached the step index: %+v", r.thinking)
+	}
+
+	resp := r.onlyResponse(t)
+	got, _ := resp.Metadata[reasoningSummaryMetaKey].([]string)
+	if len(got) != 2 || got[0] != "Working it out." || got[1] != "Second thought." {
+		t.Errorf("%s = %v, want the two content_index parts kept apart", reasoningSummaryMetaKey, got)
+	}
+}
+
+// Summaries are opt-in. A turn whose resolved configuration never asked for one
+// publishes no thinking.step, whatever the stream volunteers — the bus must
+// only ever claim reasoning the operator actually turned on.
+func TestResponsesStream_NoSummaryConfiguredEmitsNoSteps(t *testing.T) {
+	frames := sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"unasked for"}`,
+		`{"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"also unasked for"}`,
+		streamCompleted,
+	)
+
+	for _, tc := range []struct {
+		name string
+		rc   reasoningConfig
+	}{
+		{"no reasoning block at all", reasoningConfig{}},
+		{"mode off", reasoningConfig{Mode: reasoningModeOff, Summary: "auto"}},
+		{"effort without a summary", reasoningConfig{Mode: reasoningModeEffort, Effort: "high"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newStreamRecorder()
+			r.runWith(t, frames, tc.rc)
+			if len(r.thinking) != 0 {
+				t.Errorf("emitted %d thinking.step events, want 0: %+v", len(r.thinking), r.thinking)
+			}
+			// The text still survives into the response metadata: that key is
+			// a record of what the API sent, not a claim about what was asked
+			// for.
+			if got, _ := r.onlyResponse(t).Metadata[reasoningSummaryMetaKey].([]string); len(got) == 0 {
+				t.Errorf("%s was dropped — the gate is on emission, not on capture", reasoningSummaryMetaKey)
+			}
+		})
+	}
+}
+
+// The gate reads the RESOLVED configuration, so a role that asks for summaries
+// on a deployment whose plugin-level block is silent gets its events. That is
+// the asymmetry nexus.llm.anthropic has, where the emission gate reads the
+// plugin-level include_thoughts and a role turning thinking on pays for
+// reasoning it never sees.
+func TestResponsesStream_RoleLevelSummaryReachesEmission(t *testing.T) {
+	// Plugin level declares the mode and nothing about summaries.
+	p := reasoningPlugin(t, nil, map[string]any{"mode": "effort", "effort": "medium"})
+	if p.reasoning.summaryRequested() {
+		t.Fatal("the plugin-level block asked for no summary; the premise of this test is gone")
+	}
+
+	// The serving role does.
+	rc := p.resolveReasoning(events.LLMRequest{
+		Role:      "deep",
+		Overrides: events.ModelOverrides{Reasoning: map[string]any{"summary": "detailed"}},
+	})
+	if !rc.summaryRequested() {
+		t.Fatalf("resolved config did not ask for summaries: %+v", rc)
+	}
+
+	r := newStreamRecorder()
+	r.runWith(t, sse(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
+		`{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"role asked"}`,
+		streamCompleted,
+	), rc)
+
+	if len(r.thinking) != 1 || r.thinking[0].Content != "role asked" {
+		t.Errorf("thinking.step events = %+v, want one reading %q", r.thinking, "role asked")
 	}
 }
 
@@ -565,7 +778,7 @@ func TestResponsesStream_MetadataAndTagsPassThrough(t *testing.T) {
 		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.1"}}`,
 		`{"type":"response.output_text.delta","delta":"ok"}`,
 		streamCompleted,
-	)), "req-9", map[string]any{"_structured_output": true}, map[string]string{"team": "core"})
+	)), "req-9", map[string]any{"_structured_output": true}, map[string]string{"team": "core"}, reasoningConfig{})
 
 	if len(got) != 1 {
 		t.Fatalf("published %d responses, want 1", len(got))

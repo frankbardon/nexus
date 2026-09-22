@@ -283,7 +283,7 @@ func TestResponsesReply_PublishesThroughTheGate(t *testing.T) {
 	  "usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}
 	}`)
 
-	p.handleResponsesSyncResponse(body, "req-42", map[string]any{"_structured_output": true}, map[string]string{"team": "core"})
+	p.handleResponsesSyncResponse(body, "req-42", map[string]any{"_structured_output": true}, map[string]string{"team": "core"}, reasoningConfig{})
 
 	if len(got) != 1 {
 		t.Fatalf("published %d responses, want 1", len(got))
@@ -322,7 +322,7 @@ func TestResponsesReply_RunFailureBecomesAnError(t *testing.T) {
 
 	p.handleResponsesSyncResponse(strings.NewReader(
 		`{"status":"failed","error":{"code":"server_error","message":"boom"},"output":[]}`),
-		"req-1", nil, nil)
+		"req-1", nil, nil, reasoningConfig{})
 
 	if responses != 0 {
 		t.Errorf("published %d llm.response events for a failed run, want 0", responses)
@@ -342,9 +342,116 @@ func TestResponsesReply_DecodeFailure(t *testing.T) {
 	bus.Subscribe("llm.response", func(e engine.Event[any]) { responses++ })
 	bus.Subscribe("core.error", func(e engine.Event[any]) { errs++ })
 
-	p.handleResponsesSyncResponse(strings.NewReader(`{not json`), "req-1", nil, nil)
+	p.handleResponsesSyncResponse(strings.NewReader(`{not json`), "req-1", nil, nil, reasoningConfig{})
 
 	if responses != 0 || errs != 1 {
 		t.Errorf("responses = %d, errors = %d; want 0 and 1", responses, errs)
+	}
+}
+
+// --- thinking.step ----------------------------------------------------------
+
+// A non-streamed turn never sees the reasoning-summary event family — the text
+// arrives only inside each reasoning Item's `summary` array. It still becomes
+// thinking.step, so the two surfaces put the same reasoning on the bus.
+func TestResponsesReply_ItemSummariesBecomeThinkingSteps(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := quietPlugin()
+	p.bus = bus
+
+	var steps []events.ThinkingStep
+	bus.Subscribe("thinking.step", func(e engine.Event[any]) {
+		if s, ok := e.Payload.(events.ThinkingStep); ok {
+			steps = append(steps, s)
+		}
+	})
+
+	body := strings.NewReader(`{
+	  "id":"resp_7","model":"gpt-5.1","status":"completed",
+	  "output":[
+	    {"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[
+	      {"type":"summary_text","text":"Checking the units."},
+	      {"type":"summary_text","text":"Then the arithmetic."}
+	    ]},
+	    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"42"}]}
+	  ]
+	}`)
+	p.handleResponsesSyncResponse(body, "req-1", nil, nil, summariesOn())
+
+	if len(steps) != 2 {
+		t.Fatalf("emitted %d thinking.step events, want 2: %+v", len(steps), steps)
+	}
+	for i, want := range []string{"Checking the units.", "Then the arithmetic."} {
+		if steps[i].Content != want {
+			t.Errorf("step %d Content = %q, want %q", i, steps[i].Content, want)
+		}
+		if steps[i].Index != i {
+			t.Errorf("step %d Index = %d, want %d — the summary array position is the index", i, steps[i].Index, i)
+		}
+		if steps[i].TurnID != "resp_7" {
+			t.Errorf("step %d TurnID = %q, want resp_7", i, steps[i].TurnID)
+		}
+		if steps[i].Source != pluginID || steps[i].Phase != "reasoning" {
+			t.Errorf("step %d = %+v, want source %q phase reasoning", i, steps[i], pluginID)
+		}
+	}
+}
+
+// Summaries are opt-in here too: a turn that asked for none publishes none,
+// even when the reply volunteers them. The Items themselves are still captured
+// verbatim, because they are replay state rather than display material.
+func TestResponsesReply_NoSummaryConfiguredEmitsNoSteps(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := quietPlugin()
+	p.bus = bus
+
+	var steps int
+	var got []events.LLMResponse
+	bus.Subscribe("thinking.step", func(e engine.Event[any]) { steps++ })
+	bus.Subscribe("llm.response", func(e engine.Event[any]) {
+		if resp, ok := e.Payload.(events.LLMResponse); ok {
+			got = append(got, resp)
+		}
+	})
+
+	body := `{
+	  "id":"resp_7","model":"gpt-5.1","status":"completed",
+	  "output":[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque",
+	    "summary":[{"type":"summary_text","text":"unasked for"}]}]
+	}`
+	p.handleResponsesSyncResponse(strings.NewReader(body), "req-1", nil, nil, reasoningConfig{})
+
+	if steps != 0 {
+		t.Errorf("emitted %d thinking.step events for a turn that asked for no summary, want 0", steps)
+	}
+	if len(got) != 1 {
+		t.Fatalf("published %d responses, want 1", len(got))
+	}
+	if _, ok := got[0].Metadata[reasoningItemsMetaKey]; !ok {
+		t.Errorf("reasoning items dropped — the gate is on emission, not on capture: %v", got[0].Metadata)
+	}
+}
+
+// A `summary` array in a shape this does not recognise is stepped over rather
+// than panicking a live turn: the Items are JSON the provider does not control.
+func TestResponsesReply_MalformedSummariesAreSkipped(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := quietPlugin()
+	p.bus = bus
+
+	var steps int
+	bus.Subscribe("thinking.step", func(e engine.Event[any]) { steps++ })
+
+	body := `{
+	  "id":"resp_7","model":"gpt-5.1","status":"completed",
+	  "output":[
+	    {"type":"reasoning","id":"rs_1","summary":"not an array"},
+	    {"type":"reasoning","id":"rs_2","summary":["a bare string",{"type":"summary_text"},{"type":"summary_text","text":"real"}]}
+	  ]
+	}`
+	p.handleResponsesSyncResponse(strings.NewReader(body), "req-1", nil, nil, summariesOn())
+
+	if steps != 1 {
+		t.Errorf("emitted %d thinking.step events, want 1 (only the one with text)", steps)
 	}
 }

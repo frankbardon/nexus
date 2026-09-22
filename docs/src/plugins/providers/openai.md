@@ -327,6 +327,30 @@ delta stream; reasoning *summary* text is accumulated separately onto
 text. All three tables are in the [configuration
 reference](../../configuration/reference.md#which-openai-api-api).
 
+#### Reasoning in the UI
+
+Reasoning summary text is also published as `thinking.step` — the event every IO
+transport already renders as reasoning, and the parity this provider has never
+had, because Chat Completions returns no reasoning text at all. A streamed turn
+emits one step per delta (`response.reasoning_summary_text.delta`, the
+`response.reasoning_text.delta` spelling on models that stream only that, and a
+`response.reasoning_summary_part.added` that carries a whole part at once), so a
+TUI shows reasoning as it arrives rather than in one block at the end. A
+non-streamed turn emits one step per entry of each `reasoning` Item's `summary`
+array, so both surfaces put the same reasoning on the bus. `Index` carries the
+part's own `summary_index`, which is what orders the parts of one reasoning Item.
+
+**Summaries are opt-in and are never fabricated.** A step is published only when
+the turn's **resolved** configuration asked OpenAI for summaries — `mode: effort`
+*and* a `reasoning.summary` — which is exactly the condition the `summary` key
+reaches the wire under. Resolved means the serving role's `reasoning:` block
+merged over the plugin-level one, so a role that names `summary: detailed` on a
+deployment whose plugin block is silent gets its events, and a role that omits
+it gets none. The accumulated text still reaches
+`llm.response.Metadata["openai_reasoning_summary"]` either way: that key is a
+record of what the API sent, while the events are a statement about what the
+operator turned on.
+
 Two warnings fire at `Init`, each once, and neither on `responses`: one when a
 deployment configures reasoning while its effective `api` is `chat_completions`
 (the restriction above), and one when it sets `reasoning.summary` there, which
