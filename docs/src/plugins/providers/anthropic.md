@@ -301,12 +301,12 @@ per-role block. A role that turns it on where the plugin has it off gets the
 thinking text from Anthropic and no events on the bus. Set the plugin-level value
 to whatever you want the events to do, and use the role block for wire shape.
 
-**`thinking:` is the only per-entry *block* this provider reads today.** A role's
-`cache:`, `retry:` and `api:` parse and travel — see
+**`thinking:` and `cache:` are the per-entry *blocks* this provider reads today.**
+A role's `retry:` and `api:` parse and travel — see
 [Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
 — but nothing here reads them back. The scalar axes are all wired: `model`,
 `max_tokens` and `effort` through this provider's own resolution pass, and
-`temperature` alongside the `thinking` block, on every path.
+`temperature` alongside the blocks, on every path.
 
 See the [configuration reference](../../configuration/reference.md#per-role-thinking)
 for the canonical account.
@@ -347,6 +347,37 @@ the `approval_policy` gate still outrank `core.models`. Both strippings above
 apply to a role's value exactly as they do to a posture's, and on the families
 that reject the field outright a role setting it is simply a 400 — the provider
 does not strip it for you.
+
+#### Per-role caching
+
+A `core.models` role may carry its own `cache:` block, and it merges over the
+plugin-level one exactly the way `thinking:` does — key by key, role wins, plugin
+keys the role is silent about survive, and the merged block goes back through the
+same `parseCacheConfig` the plugin block uses. Every role this provider could
+serve is swept at `Init`: an unknown key or a wrongly typed one fails the boot
+naming the role, because these blocks never pass through `schema.json`. The
+`extended-cache-ttl-2025-04-11` beta header follows the *resolved* TTL, so a role
+that lifts a `5m` plugin default to `1h` gets the gate its own markers need.
+
+```yaml
+core:
+  models:
+    cheap:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      cache:
+        ttl: "1h"        # the plugin's system/tools breakpoints survive
+```
+
+**Caching is stateful in a way thinking is not.** An Anthropic cache entry is
+addressed by the exact prefix bytes, breakpoint placement and TTL included. Two
+roles that share a model and a system prompt but differ in `system`, `tools`,
+`message_prefix` or `ttl` therefore do not share an entry: the second misses,
+pays the cache-write premium (1.25× for `5m`, 2× for `1h`) to write its own, and
+both then expire on their own clocks. Varying only `enabled` per role is always
+safe — a role that caches nothing simply stops reading and writing. Varying the
+breakpoints or the TTL is safe when the roles also differ in model or system
+prompt, and is a silent cost multiplier when they do not.
 
 ### Effort
 

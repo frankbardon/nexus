@@ -24,6 +24,19 @@ func captureLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
+// mustParseCacheConfig parses a plugin-level `cache:` block and fails the test
+// on the error path. The error is reserved for an unknown key or a wrongly
+// typed one, neither of which these tests exercise; the nil logger keeps the
+// value-level warnings out of the test output.
+func mustParseCacheConfig(t *testing.T, cfg map[string]any) cacheConfig {
+	t.Helper()
+	cc, err := parseCacheConfig(cfg, nil)
+	if err != nil {
+		t.Fatalf("parseCacheConfig: unexpected error: %v", err)
+	}
+	return cc
+}
+
 // TestParseCacheConfig_Defaults verifies that a `cache: {enabled: true}` block
 // fills in the high-leverage defaults (system + tools cached, 5m TTL, no
 // message prefix marking).
@@ -34,7 +47,7 @@ func TestParseCacheConfig_Defaults(t *testing.T) {
 		},
 	}
 
-	cc := parseCacheConfig(cfg)
+	cc := mustParseCacheConfig(t, cfg)
 
 	if !cc.Enabled {
 		t.Fatal("Enabled: got false, want true")
@@ -64,7 +77,7 @@ func TestParseCacheConfig_Disabled(t *testing.T) {
 		{"explicit-false", map[string]any{"cache": map[string]any{"enabled": false}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cc := parseCacheConfig(tc.cfg)
+			cc := mustParseCacheConfig(t, tc.cfg)
 			if cc.Enabled {
 				t.Errorf("Enabled: got true, want false")
 			}
@@ -85,7 +98,7 @@ func TestParseCacheConfig_Explicit(t *testing.T) {
 		},
 	}
 
-	cc := parseCacheConfig(cfg)
+	cc := mustParseCacheConfig(t, cfg)
 
 	if cc.System {
 		t.Errorf("System: got true, want false")
@@ -111,7 +124,7 @@ func TestParseCacheConfig_MessagePrefixFloat(t *testing.T) {
 		},
 	}
 
-	cc := parseCacheConfig(cfg)
+	cc := mustParseCacheConfig(t, cfg)
 	if cc.MessagePrefix != 3 {
 		t.Errorf("MessagePrefix: got %d, want 3", cc.MessagePrefix)
 	}
@@ -127,7 +140,7 @@ func TestParseCacheConfig_InvalidTTL(t *testing.T) {
 		},
 	}
 
-	cc := parseCacheConfig(cfg)
+	cc := mustParseCacheConfig(t, cfg)
 	if cc.TTL != "5m" {
 		t.Errorf("TTL: got %q, want %q (fallback)", cc.TTL, "5m")
 	}

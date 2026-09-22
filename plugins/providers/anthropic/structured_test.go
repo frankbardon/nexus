@@ -234,7 +234,7 @@ func TestBetaFlags_NativeStructuredOutputsHeader(t *testing.T) {
 		},
 	}
 
-	got := p.betaFlags(nil)
+	got := p.betaFlags(p.cache, nil)
 
 	if !strings.Contains(got, "output-format-2025-12-01") {
 		t.Errorf("betaFlags: got %q, want it to contain %q", got, "output-format-2025-12-01")
@@ -252,7 +252,7 @@ func TestBetaFlags_ToolModeOmitsHeader(t *testing.T) {
 		},
 	}
 
-	got := p.betaFlags(nil)
+	got := p.betaFlags(p.cache, nil)
 
 	if strings.Contains(got, "output-format-2025-12-01") {
 		t.Errorf("betaFlags: got %q, expected no native header in tool mode", got)

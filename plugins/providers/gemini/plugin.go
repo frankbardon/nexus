@@ -64,6 +64,11 @@ type Plugin struct {
 	thinkingRaw   map[string]any
 	codeExecution bool
 	cache         *cacheState
+	// cacheRaw is the plugin-level `cache:` block exactly as configured, kept
+	// because a core.models role's block merges over it key by key and the
+	// merged result has to go back through parseCacheSettings. nil means the
+	// plugin set no block at all.
+	cacheRaw map[string]any
 
 	mu sync.Mutex
 	// cancels indexes in-flight HTTP request cancel functions by
@@ -140,7 +145,20 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.codeExecution = v
 	}
 
-	p.cache = newCacheState(ctx.Config, p.logger)
+	cache, err := newCacheState(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.cache = cache
+	p.cacheRaw = rawCacheBlock(ctx.Config)
+
+	// A core.models role may carry a `cache:` block of its own, which merges
+	// over the plugin-level one. Like the `thinking:` blocks above, these never
+	// pass through schema.json, so this sweep is the only thing that checks
+	// them — at boot, rather than at the first request that names the role.
+	if err := validateRoleCache(p.models, p.cacheRaw, p.log()); err != nil {
+		return err
+	}
 
 	if p.retry.Enabled {
 		p.logger.Debug("retry enabled",
@@ -365,17 +383,22 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 // model, max_tokens and effort already have their own resolution pass in
 // resolveTarget — one that knows about defaultMaxTokens, this provider's effort
 // vocabulary and the foreign-provider skip — so taking them wholesale here would
-// duplicate and quietly change it. The remaining axes (`reasoning`, `cache`,
-// `retry`, `api`) have no consumer in this provider.
+// duplicate and quietly change it. The remaining axes (`reasoning`, `retry`,
+// `api`) have no consumer in this provider.
 //
 // Temperature is a plain gap-fill, and the precedence is the engine-wide one:
 // ResolveModelConfig never disturbs a value the request already carries, so an
 // agent posture's temperature — and the approval_policy gate's — still beats a
 // `core.models` role's. A role's value only fills the gap when nothing upstream
 // set one. `0` is a real value, so the axis is a *float64 the whole way down.
+//
+// `cache` behaves like `thinking`: the recovered block is merged over the
+// plugin-level one rather than substituted for it, by resolveCache at the one
+// point that reads it — the cachedContent lookup in the body builder.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Overrides.Thinking = resolved.Overrides.Thinking
+	req.Overrides.Cache = resolved.Overrides.Cache
 	req.Temperature = resolved.Temperature
 }
 
@@ -420,8 +443,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
-	// The serving chain entry's `thinking:` block and `temperature:`. req is a
-	// value parameter, so the caller's payload is untouched.
+	// The serving chain entry's `thinking:` and `cache:` blocks and its
+	// `temperature:`. req is a value parameter, so the caller's payload is
+	// untouched.
 	p.applyEntryOverrides(&req)
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", effort)
@@ -636,9 +660,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 	}
 
 	// Prompt caching: replace the stable prefix with cached_content reference
-	// when eligible.
-	if p.cache.enabled {
-		if cachedName := p.cache.lookup(model, systemPrompt, filteredTools, contents); cachedName != "" {
+	// when eligible. resolveCache merges the serving role's own `cache:` block
+	// over the plugin-level one, so a role can opt out of (or into) the shared
+	// entry map without changing the deployment default.
+	if cc := p.resolveCache(req); cc.enabled {
+		if cachedName := p.cache.lookupWith(true, model, systemPrompt, filteredTools, contents); cachedName != "" {
 			body["cachedContent"] = cachedName
 			// Caller's contents already includes only the trailing delta; the
 			// cache plugin stripped what's covered by the cache. See cache.go.

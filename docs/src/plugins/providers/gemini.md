@@ -550,6 +550,34 @@ nexus.llm.gemini:
 
 The provider computes a deterministic hash of the cache-eligible prefix (model + system instruction + tool declarations + the leading run of contents up to the first tool exchange). When a hit is present in the in-memory LRU, `cachedContent` is set on the request and only the trailing delta is sent. Cache entries are populated explicitly via `Plugin.createCachedContent`; the auto-populate path is intentionally read-only in this initial release. `usageMetadata.cachedContentTokenCount` flows into `events.Usage.CachedTokens` and the cost calculation applies the cached-input discount (default 25%, override via `pricing.<model>.cached_ratio`).
 
+#### Per-role caching
+
+A `core.models` role may carry its own `cache:` block, and it merges over the
+plugin-level one exactly the way `thinking:` does — key by key, role wins, plugin
+keys the role is silent about survive, and the merged block goes back through the
+same `parseCacheSettings` the plugin block uses. Every role this provider could
+serve is swept at `Init`: an unknown key or a wrongly typed one fails the boot
+naming the role, because these blocks never pass through `schema.json`. An
+unparseable `ttl` stays soft — warned once, defaulted.
+
+```yaml
+core:
+  models:
+    cheap:
+      provider: nexus.llm.gemini
+      model: gemini-3-flash
+      cache:
+        enabled: false   # this role never reads or writes the shared cache
+```
+
+**Only `enabled` changes anything per request today.** The prefix-hash entry map
+is shared across every role by design — a cache entry lives at Google and is
+addressed by prefix alone — so a role can opt in or out of reading it, and that
+is all. `min_tokens`, `ttl` and `max_entries` on a role are carried and validated
+but govern the explicit `cachedContents.create` path, which is not role-scoped;
+setting them per role is inert. `min_tokens` is inert everywhere for now: the
+token-count probe it exists for is not implemented.
+
 ### Cost Tracking
 
 Embedded defaults cover the 1.5, 2.0, and 2.5 model lines (single tier — the 2.5-pro >200k tier is **not** modeled; override via config when high-context billing matters):

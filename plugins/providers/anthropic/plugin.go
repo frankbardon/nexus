@@ -63,6 +63,11 @@ type Plugin struct {
 	// and the merged result has to go back through parseThinkingConfig. nil
 	// means no plugin-level block at all. Read-only — see mergeThinkingBlock.
 	thinkingRaw map[string]any
+	// cacheRaw is the plugin-level `cache:` block exactly as configured, kept
+	// because a `core.models` role's own block merges over it key by key and the
+	// merged result has to go back through parseCacheConfig. nil means no
+	// plugin-level block at all. Read-only — see mergeCacheBlock.
+	cacheRaw map[string]any
 	// effortClampWarned dedupes warnEffortClamped's per-request warning,
 	// keyed by role + configured value. See warnEffortClamped.
 	effortClampWarned sync.Map
@@ -144,7 +149,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.pricing = parsePricingConfig(ctx.Config)
 
-	p.cache = parseCacheConfig(ctx.Config)
+	cache, err := parseCacheConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.cache = cache
+	p.cacheRaw = rawCacheBlock(ctx.Config)
 	if p.cache.Enabled {
 		p.logger.Debug("prompt caching enabled",
 			"system", p.cache.System,
@@ -152,6 +162,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"message_prefix", p.cache.MessagePrefix,
 			"ttl", p.cache.TTL,
 		)
+	}
+
+	// A `core.models` role may carry a `cache:` block of its own, which merges
+	// over the plugin-level one. Like the `thinking:` blocks below, these never
+	// pass through schema.json, so this sweep is the only thing that checks
+	// them — and it does it at boot rather than at the first request that
+	// happens to name the role.
+	if err := validateRoleCache(p.models, p.cacheRaw, p.logger); err != nil {
+		return err
 	}
 
 	thinking, err := parseThinkingConfig(ctx.Config, p.logger)
@@ -446,8 +465,8 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 // model, max_tokens and effort already have their own resolution pass in
 // resolveTarget — one that knows about defaultMaxTokens, this provider's effort
 // vocabulary and the foreign-provider skip — so taking them wholesale here would
-// duplicate and quietly change it. The remaining axes (`reasoning`, `cache`,
-// `retry`, `api`) have no consumer in this provider.
+// duplicate and quietly change it. The remaining axes (`reasoning`, `retry`,
+// `api`) have no consumer in this provider.
 //
 // Temperature is a plain gap-fill, and the precedence is the engine-wide one:
 // ResolveModelConfig never disturbs a value the request already carries, so an
@@ -458,9 +477,15 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 // Note that applyThinking strips temperature again when thinking is on: the API
 // requires temperature 1 there, and a role setting one against a current model
 // family is an HTTP 400 regardless. That is not this function's business.
+//
+// `cache` behaves like `thinking`: the recovered block is merged over the
+// plugin-level one rather than substituted for it, by resolveCache at the two
+// points that read it — applyCacheControl in the body builder, and betaFlags
+// for the 1h-TTL beta gate.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Overrides.Thinking = resolved.Overrides.Thinking
+	req.Overrides.Cache = resolved.Overrides.Cache
 	req.Temperature = resolved.Temperature
 }
 
@@ -535,8 +560,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// parameter, so the caller's payload is untouched.
 	req.Effort = target.effort
 
-	// The serving chain entry's `thinking:` block and `temperature:`. req is a
-	// value parameter, so the caller's payload is untouched.
+	// The serving chain entry's `thinking:` and `cache:` blocks and its
+	// `temperature:`. req is a value parameter, so the caller's payload is
+	// untouched.
 	p.applyEntryOverrides(&req)
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", target.effort)
@@ -607,7 +633,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		// considers active may be rejected (or silently ignored) by the
 		// chosen backend. Surface those mismatches as explicit 400s rather
 		// than trying to predict per-feature parity here.
-		if flags := p.betaFlags(req.Metadata); flags != "" {
+		// The 1h-TTL beta gate rides on the *resolved* cache configuration, so
+		// a role that lifts a 5m plugin default to 1h gets the header its own
+		// cache_control markers require rather than the plugin block's.
+		if flags := p.betaFlags(p.resolveCache(req), req.Metadata); flags != "" {
 			httpReq.Header.Set("anthropic-beta", flags)
 		}
 		return httpReq, nil
@@ -798,7 +827,7 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 
 	// Mark cacheable prefix segments (system, last tool, leading user msgs) per
 	// configured policy. No-op when caching is disabled.
-	applyCacheControl(body, p.cache, p.logger)
+	applyCacheControl(body, p.resolveCache(req), p.logger)
 
 	// Reasoning depth, merged into `output_config`. Runs last so it folds into
 	// whatever else has written that object rather than racing it.

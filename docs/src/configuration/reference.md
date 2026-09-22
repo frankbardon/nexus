@@ -852,8 +852,9 @@ to read it:
 | `max_tokens` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` |
 | `temperature` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai`, on every path — see below |
 | `effort` | `nexus.llm.anthropic` and `nexus.llm.gemini` (not read by `nexus.llm.openai` at all) |
+| `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
 | `reasoning`, `api` | no provider yet; `nexus.llm.openai`'s are a later release |
-| `cache`, `retry` | no provider yet |
+| `retry` | no provider yet |
 
 An axis with no consumer is inert, not an error: the key parses, validates
 nothing, travels on the request and is read by nobody.
@@ -878,6 +879,51 @@ Two providers strip it back out afterwards, and neither is affected by where the
 value came from: `nexus.llm.anthropic` drops `temperature` whenever thinking is
 on, and `nexus.llm.openai` drops it for a reasoning model. Both are
 pre-existing wire requirements — see the note on the key itself.
+
+#### Prompt caching: `cache`
+
+`cache` is a native provider block and follows the `thinking` rules exactly: a
+role's block **merges over** the plugin-level one key by key, the role wins on
+every key it names, and a plugin key the role is silent about survives. A
+set-but-empty block (`cache: {}`) is a statement rather than a gap. The merged
+block goes through the provider's own cache-config parser, so it gets the same
+defaulting the plugin block does, and every role a provider could serve is swept
+at `Init` — an unknown key or a wrongly typed one **fails the boot naming the
+role**, because a block on a `core.models` entry never passes through the
+plugin's `schema.json`. Precedence is the unified rule: a block already stamped
+on the request (by the `fallback` or `fanout` coordinator, for the chain entry
+actually being served) wins, then the role's, then the plugin block. There is no
+`effort`-style shared axis for caching.
+
+The two vocabularies are different and stay that way. `nexus.llm.anthropic`
+takes `{enabled, system, tools, message_prefix, ttl}`; `nexus.llm.gemini` takes
+`{enabled, min_tokens, ttl, max_entries}`; **`nexus.llm.openai` has no `cache:`
+block at all**, so a role carrying one for an OpenAI entry is ignored in
+silence. That is deliberate — a role shared across a `fanout` spanning all three
+should not have to be split just to configure caching on two of them — but it
+does mean a typo'd OpenAI cache block is never reported.
+
+> **Caching is stateful in a way `thinking` is not, and per-role settings can
+> cost you money.** A prompt cache is written once and read many times, and the
+> entry is addressed by the exact prefix bytes — which, on Anthropic, includes
+> *where the `cache_control` breakpoints sit and what TTL they carry*. Two roles
+> that share a model and a system prompt but differ in `system`, `tools`,
+> `message_prefix` or `ttl` therefore do **not** share a cache entry: the second
+> role misses, pays the cache-write premium (1.25× for `5m`, 2× for `1h`) to
+> write its own, and both entries then expire on their own clocks. A config that
+> looks like "the cheap role caches a bit less" can read as "the deployment now
+> writes the same prefix twice". The safe shapes are to vary `cache` per role
+> only where the roles also differ in model or system prompt, or to vary only
+> `enabled` (a role that caches nothing simply stops reading and writing — it
+> cannot corrupt another role's entry). On `nexus.llm.gemini` the exposure is
+> smaller because the entry map is keyed by prefix hash alone and only `enabled`
+> changes the request path; `ttl`, `min_tokens` and `max_entries` on a role are
+> carried and validated but govern the explicit `cachedContents` write path,
+> which is not role-scoped, so setting them per role does nothing today.
+
+The `1h` beta gate on Anthropic follows the *resolved* configuration, not the
+plugin block: a role that lifts a `5m` plugin default to `1h` gets the
+`extended-cache-ttl-2025-04-11` header its own markers require.
 
 #### Reasoning depth: `effort`
 
@@ -1662,7 +1708,8 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `cache.system`                     | bool   | `true`              | Mark the system prompt for caching when enabled. |
 | `cache.tools`                      | bool   | `true`              | Mark the tools array for caching when enabled. |
 | `cache.message_prefix`             | int    | `0`                 | Number of leading user messages to mark for caching. |
-| `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). |
+| `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). Any other value is **warned about and defaulted to `5m`**, not refused. `1h` also switches on the `extended-cache-ttl-2025-04-11` beta header, which follows the *resolved* TTL — see the row below. |
+| *(role `cache`)*                   | map    | *(unset)*           | Not a plugin key — the [`core.models`](#coremodels) `<role>.cache` block, which **merges over** the plugin-level `cache:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants `ttl: 1h` keeps the plugin's breakpoint choices. The merged block goes through the same parser as the plugin one, so it gets the same defaults (`system` and `tools` both `true` once `enabled`) and the same soft TTL fallback. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them — and a merged block that leaves no breakpoint marked at all is warned about once, naming the role. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. The `extended-cache-ttl` beta header follows whatever this resolves to. **Read the caching hazard under [Prompt caching: `cache`](#prompt-caching-cache) before varying `system`, `tools`, `message_prefix` or `ttl` per role**: roles that share a prefix but differ in breakpoint placement or TTL do not share a cache entry, so each pays its own cache-write premium. |
 | `thinking.mode`                    | string | `off` when the `thinking` block is absent, `adaptive` when it is present | Wire shape for the request's `thinking` field: `adaptive`, `budget`, `disabled` or `off`. See "Thinking modes" below. |
 | `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. Set with no `mode`, a non-zero value infers `mode: budget`; `0` keeps its long-standing meaning of "disable thinking" and infers `mode: off`. Under an explicit `mode: budget` a `0` is passed through and the API rejects it. |
 | `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
@@ -2024,6 +2071,7 @@ Source: `plugins/providers/openai/plugin.go`.
 | `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
 | `retry.*`                    | —      | *(shared Retry block)*               | Backoff configuration. |
 | `pricing.<model>.*`          | map    | *(embedded table)*                   | Override per-model pricing. |
+| *(role `cache`)*             | map    | *(unset)*                            | Not a plugin key, and **not read by this provider**. There is no `cache:` block on `nexus.llm.openai` at all, so a [`core.models`](#coremodels) role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](#prompt-caching-cache). |
 | *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. The **only** per-entry axis beyond `model`/`max_tokens` this provider reads: `core.models` `effort` has no consumer here, and neither do the `thinking`, `reasoning`, `cache`, `retry` or `api` entries. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again for a reasoning model, whatever its origin. |
 
 ### `nexus.llm.gemini`
@@ -2050,9 +2098,11 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
 | `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
 | `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
-| `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). |
-| `cache.min_tokens`           | int    | `1000`                                           | Minimum tokens required for caching. |
-| `cache.ttl`                  | string | `5m`                                             | Cache TTL: `5m` or `1h`. |
+| `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). The only cache key that changes the request path: the `cachedContents` lookup is skipped entirely when it is false. |
+| `cache.min_tokens`           | int    | `32768`                                          | Minimum tokens required for caching. Parsed, validated and logged; **not consulted by any code path today** — the auto-population probe it exists for is not implemented (`lookup` is read-only). |
+| `cache.ttl`                  | string | `1h`                                             | Default lifetime of an entry this process creates, as a **Go duration** (`5m`, `90s`, `1h`) — not restricted to `5m`/`1h`. A value `time.ParseDuration` rejects is **warned about and defaulted**, not refused. Used by the explicit `cachedContents.create` path when the caller passes no TTL of its own. |
+| `cache.max_entries`          | int    | `64`                                             | Capacity of the in-process prefix-hash → cache-name map; the oldest entry is evicted past it. |
+| *(role `cache`)*             | map    | *(unset)*                                        | Not a plugin key — the [`core.models`](#coremodels) `<role>.cache` block, which **merges over** the plugin-level `cache:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives. The merged block goes through the same parser as the plugin one. Every role this provider could serve is swept at **`Init`**; an **unknown key** or a **wrongly typed** one **fails the boot naming the role** — these blocks bypass `schema.json` entirely — and an unparseable `ttl` is warned about once, naming the role. Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. **Only `enabled` currently changes anything per request**: the entry map is addressed by prefix hash and shared across every role, and `min_tokens`, `ttl` and `max_entries` all belong to the write path, which is not role-scoped. See [Prompt caching: `cache`](#prompt-caching-cache). |
 | `retry.*`                    | —      | *(shared Retry block)*                           | Backoff configuration. |
 | `pricing.<model>.*`          | map    | *(embedded table)*                               | Override per-model pricing. |
 

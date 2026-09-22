@@ -46,6 +46,8 @@ Two per-entry axes from that config are read here: `model`/`max_tokens` through 
 
 The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning.effort` key — and neither do the `thinking`, `reasoning`, `cache`, `retry` or `api` entries.
 
+There is no `cache:` block on this provider at all, so a role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](../../configuration/reference.md#prompt-caching-cache).
+
 ### Streaming
 
 When `llm.request.Stream` is `true`, the provider uses Server-Sent Events (SSE) to stream the response. Each content chunk and tool use block generates a `llm.stream.chunk` event. When streaming completes, `llm.stream.end` carries the full usage statistics. Usage is requested via `stream_options.include_usage`.

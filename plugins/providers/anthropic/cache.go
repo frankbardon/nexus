@@ -1,7 +1,13 @@
 package anthropic
 
 import (
+	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 // maxCacheBreakpoints is Anthropic's hard limit on cache_control markers per
@@ -25,24 +31,98 @@ type cacheConfig struct {
 	TTL           string // "5m" or "1h"
 }
 
+// cacheBlockKeys is the complete set of keys a `cache:` block may carry. It
+// duplicates schema.json's property list on purpose: a block written on a
+// `core.models` role never passes through schema.json — core stores those maps
+// without looking inside them — so this is the only thing that ever rejects a
+// typo there.
+var cacheBlockKeys = map[string]struct{}{
+	"enabled":        {},
+	"system":         {},
+	"tools":          {},
+	"message_prefix": {},
+	"ttl":            {},
+}
+
+// validateCacheBlock rejects a `cache:` block that schema.json would have
+// rejected — an unknown key, or a key of the wrong type. Everything else stays
+// lenient, which is this parser's long-standing contract: an unsupported `ttl`
+// is warned about and defaulted rather than refused.
+//
+// At plugin level schema.json has already caught both classes, so this is
+// belt-and-braces there. On a merged role block it is the only guard.
+func validateCacheBlock(raw map[string]any) error {
+	var unknown []string
+	for k := range raw {
+		if _, ok := cacheBlockKeys[k]; !ok {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return fmt.Errorf("anthropic: cache block has unknown key(s) %s; accepted keys are enabled, system, tools, message_prefix, ttl",
+			strings.Join(unknown, ", "))
+	}
+
+	for _, key := range []string{"enabled", "system", "tools"} {
+		if v, present := raw[key]; present {
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("anthropic: cache.%s must be a bool, got %s", key, typeName(v))
+			}
+		}
+	}
+	if v, present := raw["message_prefix"]; present {
+		// YAML decoders surface integers as int or float64 depending on path.
+		switch n := v.(type) {
+		case int:
+			if n < 0 {
+				return fmt.Errorf("anthropic: cache.message_prefix must not be negative, got %d", n)
+			}
+		case float64:
+			if n < 0 {
+				return fmt.Errorf("anthropic: cache.message_prefix must not be negative, got %v", n)
+			}
+		default:
+			return fmt.Errorf("anthropic: cache.message_prefix must be an int, got %s", typeName(v))
+		}
+	}
+	if v, present := raw["ttl"]; present {
+		if _, ok := v.(string); !ok {
+			return fmt.Errorf("anthropic: cache.ttl must be a string, got %s", typeName(v))
+		}
+	}
+	return nil
+}
+
 // parseCacheConfig pulls a cacheConfig out of the plugin's raw config map.
 //
 // When the `cache` block is absent or `enabled` is false, returns a zero-value
 // config that suppresses every mutation in applyCacheControl.
 //
-// Invalid TTL values are logged-by-omission (defaulted to "5m") rather than
-// erroring, matching the rest of the plugin's "soft fallback" parsing style.
-func parseCacheConfig(cfg map[string]any) cacheConfig {
+// The error is reserved for the two things schema.json would have caught and a
+// `core.models` role block bypasses: an unknown key and a key of the wrong
+// type. Value-level surprises stay soft, matching the rest of the plugin's
+// parsing style — an unsupported TTL is defaulted to "5m" with a warning, not
+// refused.
+//
+// logger may be nil, which suppresses those warnings. That is what the
+// per-request path wants: validateRoleCache has already run every role's merged
+// block through here once at Init with the real logger attached.
+func parseCacheConfig(cfg map[string]any, logger *slog.Logger) (cacheConfig, error) {
 	cc := cacheConfig{}
 
 	raw, ok := cfg["cache"].(map[string]any)
 	if !ok {
-		return cc
+		return cc, nil
+	}
+
+	if err := validateCacheBlock(raw); err != nil {
+		return cacheConfig{}, err
 	}
 
 	enabled, _ := raw["enabled"].(bool)
 	if !enabled {
-		return cc
+		return cc, nil
 	}
 
 	cc.Enabled = true
@@ -68,10 +148,22 @@ func parseCacheConfig(cfg map[string]any) cacheConfig {
 		switch v {
 		case "5m", "1h":
 			cc.TTL = v
+		default:
+			if logger != nil {
+				logger.Warn("anthropic: cache.ttl is not one of 5m, 1h; using 5m",
+					"ttl", v,
+				)
+			}
 		}
 	}
 
-	return cc
+	if !cc.System && !cc.Tools && cc.MessagePrefix == 0 && logger != nil {
+		// Reachable at plugin level, but far more likely on a merged role block
+		// that turned off the one breakpoint the plugin block had marked.
+		logger.Warn("anthropic: cache.enabled is true but no breakpoint is marked; the request carries no cache_control at all")
+	}
+
+	return cc, nil
 }
 
 // applyCacheControl mutates an in-flight Anthropic request body to add
@@ -298,4 +390,164 @@ func markLastContentBlock(msg map[string]any, marker map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+// --- per-role caching -------------------------------------------------------
+
+// rawCacheBlock lifts the plugin-level `cache:` block off the plugin config so
+// it can be merged with a `core.models` role's block later. nil means the
+// plugin set no block at all, which parseCacheConfig reads as caching off.
+//
+// The map is not copied: everything reachable from it is treated as read-only,
+// and mergeCacheBlock always builds a fresh map rather than writing into either
+// input.
+func rawCacheBlock(cfg map[string]any) map[string]any {
+	block, ok := cfg["cache"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return block
+}
+
+// mergeCacheBlock merges a `core.models` role's `cache:` block over the
+// plugin-level one, key by key. The role wins on every key it mentions, and a
+// plugin-level key the role is silent about survives — so a role that only
+// wants a longer `ttl` does not have to restate which breakpoints to mark.
+//
+// A nil role block means the role said nothing, and the plugin block stands
+// unchanged. A set-but-empty role block (`cache: {}`) is a statement rather
+// than a gap: it overrides no individual key, but the merged block is non-nil,
+// so on a deployment whose plugin block is absent entirely it still resolves to
+// caching off (parseCacheConfig requires `enabled: true`) rather than to
+// something inherited.
+//
+// Neither input is mutated and the result aliases neither: the plugin config
+// map and the registry's block are both shared with the loaded configuration.
+func mergeCacheBlock(plugin, role map[string]any) map[string]any {
+	if role == nil {
+		return plugin
+	}
+	merged := make(map[string]any, len(plugin)+len(role))
+	for k, v := range plugin {
+		merged[k] = v
+	}
+	for k, v := range role {
+		merged[k] = v
+	}
+	return merged
+}
+
+// parseMergedCache runs a merged block back through parseCacheConfig — the one
+// parser — by handing it the block wrapped in the shape it expects. A merged
+// block is an ordinary `cache:` block and gets exactly the same validation,
+// defaulting and warning treatment the plugin-level one does.
+//
+// A nil logger suppresses the warnings, which is what the per-request path
+// wants: validateRoleCache has already run every role's merged block through
+// here once at Init with the real logger attached.
+func parseMergedCache(plugin, role map[string]any, logger *slog.Logger) (cacheConfig, error) {
+	merged := mergeCacheBlock(plugin, role)
+	if merged == nil {
+		return cacheConfig{}, nil
+	}
+	return parseCacheConfig(map[string]any{"cache": merged}, logger)
+}
+
+// resolveCache picks the prompt-caching configuration for one request.
+//
+// This is the single lookup point for the cache block, deliberately separate
+// from its two use sites (applyCacheControl in the body builder, and the 1h
+// beta flag in betaFlags). Precedence is the unified rule, most specific first:
+//
+//  1. req.Overrides.Cache — the block of the chain entry actually being served.
+//     It arrives either stamped by the fallback or fanout coordinator (which
+//     alone knows a non-first entry is in play) or recovered from the registry
+//     by engine.ResolveModelConfig on the paths no coordinator touches. Either
+//     way it is merged over, not substituted for, the plugin block.
+//  2. the plugin-level `cache:` block, which is what a request carrying no
+//     override of its own gets, unchanged.
+//
+// There is no `effort` analogue here: caching has no shared cross-provider axis
+// on a `core.models` entry, only the native block.
+//
+// An unparseable merged block is unreachable through Init, which sweeps every
+// role this provider could serve and refuses to boot on one. The degradation
+// here exists for a request whose Overrides.Cache was hand-set by something
+// other than the registry: fall back to the plugin-level configuration rather
+// than silently caching to a policy nobody wrote.
+func (p *Plugin) resolveCache(req events.LLMRequest) cacheConfig {
+	if req.Overrides.Cache == nil {
+		return p.cache
+	}
+	// Nil logger: the warnings are boot-time facts, already said once by
+	// validateRoleCache. Repeating them per request would flood the log of a
+	// busy role.
+	cc, err := parseMergedCache(p.cacheRaw, req.Overrides.Cache, nil)
+	if err != nil {
+		logger := p.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("anthropic: ignoring an invalid per-request cache block; using the plugin-level configuration",
+			"role", req.Role,
+			"error", err,
+		)
+		return p.cache
+	}
+	return cc
+}
+
+// validateRoleCache checks every `core.models` role this provider could serve,
+// at Init, by merging its `cache:` block over the plugin-level one and parsing
+// the result.
+//
+// It exists because a block on a `core.models` entry bypasses the plugin's
+// schema.json entirely — core stores these maps without looking inside them, so
+// nothing else ever checks them. Without this sweep a role whose merged block
+// carries a typo (`ttl_hours: 1`, say) would boot clean and cache nothing,
+// invisibly, for as long as the deployment ran.
+//
+// The error names the role, which is the useful half of the answer. Roles are
+// walked in sorted order so a config with several broken roles fails on the
+// same one every boot.
+//
+// Entries naming another provider are that provider's business and are skipped;
+// an entry naming none may land here, so it is checked. The whole chain is
+// walked, not just the primary: a fallback entry's block reaches this provider
+// through the coordinator's stamp and is just as capable of being wrong.
+//
+// Shape mirrors validateRoleThinking.
+func validateRoleCache(models *engine.ModelRegistry, plugin map[string]any, logger *slog.Logger) error {
+	if models == nil {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	roles := models.Roles()
+	sort.Strings(roles)
+
+	for _, role := range roles {
+		for i := 0; i < models.ChainLen(role); i++ {
+			cfg, ok := models.Fallback(role, i)
+			if !ok {
+				continue
+			}
+			if cfg.Provider != "" && cfg.Provider != pluginID {
+				continue
+			}
+			if cfg.Cache == nil {
+				continue
+			}
+			// The role's logger, so a warning raised by the merged block says
+			// which role raised it. Only entries that actually set a block get
+			// here, so the plugin block's own warnings — already said once by
+			// Init — are not repeated per role.
+			if _, err := parseMergedCache(plugin, cfg.Cache, logger.With("role", role)); err != nil {
+				return fmt.Errorf("core.models role %q: %w", role, err)
+			}
+		}
+	}
+	return nil
 }
