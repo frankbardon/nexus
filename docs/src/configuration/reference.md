@@ -1436,9 +1436,11 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `location`                   | string | *(GCE zone-derived region, then `us-central1`)*  | Vertex region. Resolved config → region derived from this process's GCE zone → `us-central1`. |
 | `service_account_json`       | string | *(unset — full ADC chain)*                       | Vertex only: path to a credentials JSON file. Forwarded to the credential source, not parsed by the provider. |
 | `service_account_json_env`   | string | *(unset — full ADC chain)*                       | Vertex only: env var holding that path. Also forwarded; naming an unset variable is an error, not a fall-through. |
-| `thinking.enabled`           | bool   | `false`                                          | Enable thinking on Gemini 2.5+. |
-| `thinking.budget_tokens`     | int    | `8000`                                           | Thinking token budget. |
-| `thinking.include_thoughts`  | bool   | `true`                                           | Surface thinking via `thinking.step`. |
+| `thinking.mode`              | string | `off` *(no block)* / `level` *(block present)*   | Which thinking parameter goes on the wire: `level` → `thinkingConfig.thinkingLevel` (Gemini 3.x), `budget` → `thinkingConfig.thinkingBudget` (Gemini 2.5), `off` → no `thinkingConfig` at all. The provider never inspects the model id; a mode that mismatches the target model is a Gemini 400 by design. |
+| `thinking.level`             | string | *(unset — required under `mode: level`)*         | `minimal`, `low`, `medium` or `high`. Mutually exclusive with `thinking.budget_tokens`; setting both fails at `Init`. |
+| `thinking.budget_tokens`     | int    | *(unset — required under `mode: budget`)*        | Thinking token budget on Gemini 2.5. `-1` dynamic, `0` disable, otherwise a token ceiling. Mutually exclusive with `thinking.level`. Present with `mode` unset, it infers `mode: budget` and warns. |
+| `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
+| `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
 | `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
 | `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). |
 | `cache.min_tokens`           | int    | `1000`                                           | Minimum tokens required for caching. |

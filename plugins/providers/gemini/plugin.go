@@ -116,7 +116,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.pricing = parsePricingConfig(ctx.Config)
 	p.retry = parseRetryConfig(ctx.Config)
-	p.thinking = parseThinkingConfig(ctx.Config)
+	thinking, err := parseThinkingConfig(ctx.Config, p.log())
+	if err != nil {
+		return err
+	}
+	p.thinking = thinking
 
 	if v, ok := ctx.Config["code_execution"].(bool); ok {
 		p.codeExecution = v
@@ -132,8 +136,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"max_delay", p.retry.MaxDelay,
 		)
 	}
-	if p.thinking.Enabled {
+	if p.thinking.Mode != thinkingModeOff {
 		p.logger.Debug("thinking enabled",
+			"mode", string(p.thinking.Mode),
+			"level", p.thinking.Level,
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
@@ -437,19 +443,9 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		}
 	}
 
-	// Thinking config.
-	if p.thinking.Enabled {
-		tc := map[string]any{}
-		if p.thinking.IncludeThoughts {
-			tc["includeThoughts"] = true
-		}
-		if p.thinking.BudgetTokens > 0 {
-			tc["thinkingBudget"] = p.thinking.BudgetTokens
-		}
-		if len(tc) > 0 {
-			gen["thinkingConfig"] = tc
-		}
-	}
+	// Thinking config: exactly one of thinkingLevel / thinkingBudget, or
+	// nothing at all under mode: off.
+	applyThinking(gen, p.thinking)
 
 	if len(gen) > 0 {
 		body["generationConfig"] = gen
