@@ -64,7 +64,8 @@
       "properties": {
         "mode":             {"type": "string", "enum": ["adaptive", "budget", "disabled", "off"], "description": "Wire shape for the thinking field. adaptive -> {\"type\":\"adaptive\"}; budget -> {\"type\":\"enabled\",\"budget_tokens\":N}; disabled -> {\"type\":\"disabled\"}; off -> no thinking field at all."},
         "enabled":          {"type": "boolean", "description": "Deprecated alias for mode: true -> adaptive, false -> off. Ignored when mode is set."},
-        "budget_tokens":    {"type": "integer", "description": "Required when mode: budget; ignored otherwise."},
+        "budget_tokens":    {"type": "integer", "description": "Required when mode: budget; ignored otherwise. 0 with no mode set means thinking is off."},
+        "display":          {"type": "string", "enum": ["summarized", "omitted"], "description": "Whether the API returns readable reasoning text. Unset sends no display key, so the model's own default applies; unset with include_thoughts true infers summarized under mode adaptive or budget."},
         "include_thoughts": {"type": "boolean"}
       }
     },

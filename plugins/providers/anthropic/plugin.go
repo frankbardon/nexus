@@ -154,6 +154,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.logger.Debug("extended thinking configured",
 			"mode", string(p.thinking.Mode),
 			"budget_tokens", p.thinking.BudgetTokens,
+			"display", string(p.thinking.Display),
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
 	}
