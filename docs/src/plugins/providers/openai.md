@@ -42,6 +42,10 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 
 The provider uses the Model Registry to resolve role names. When an `llm.request` specifies a `Role` (e.g., `"reasoning"`), the provider looks up the concrete model config. If no role is specified, the default model is used.
 
+Two per-entry axes from that config are read here: `model`/`max_tokens` through the provider's own resolution pass, and `temperature` — on every path, including a `fallback` retry and a `fanout` leg. **A temperature already on the request wins over the role's**, so an agent posture and the `approval_policy` gate still outrank `core.models`; the role fills the axis only when nothing upstream set one, and `0` is a real value rather than "unset". `applyReasoning` strips `temperature` back out for a reasoning model whatever its origin — see [Structured Output](#structured-output-native) and the [configuration reference](../../configuration/reference.md#coremodels).
+
+The remaining per-entry axes are not read by this provider: `core.models` `effort` in particular has no consumer here — reasoning depth is the plugin-level `reasoning.effort` key — and neither do the `thinking`, `reasoning`, `cache`, `retry` or `api` entries.
+
 ### Streaming
 
 When `llm.request.Stream` is `true`, the provider uses Server-Sent Events (SSE) to stream the response. Each content chunk and tool use block generates a `llm.stream.chunk` event. When streaming completes, `llm.stream.end` carries the full usage statistics. Usage is requested via `stream_options.include_usage`.

@@ -301,13 +301,12 @@ per-role block. A role that turns it on where the plugin has it off gets the
 thinking text from Anthropic and no events on the bus. Set the plugin-level value
 to whatever you want the events to do, and use the role block for wire shape.
 
-**`thinking:` is the only per-entry block this provider reads today.** A role's
-`temperature:`, `cache:`, `retry:` and `api:` parse and travel — see
+**`thinking:` is the only per-entry *block* this provider reads today.** A role's
+`cache:`, `retry:` and `api:` parse and travel — see
 [Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
-— but this provider's own resolution pass still covers only `model`,
-`max_tokens` and `effort`, so a `temperature:` on a plain single-entry role does
-not reach the wire. It does on a fallback entry or a fanout leg, where the
-coordinator stamps it onto the request directly.
+— but nothing here reads them back. The scalar axes are all wired: `model`,
+`max_tokens` and `effort` through this provider's own resolution pass, and
+`temperature` alongside the `thinking` block, on every path.
 
 See the [configuration reference](../../configuration/reference.md#per-role-thinking)
 for the canonical account.
@@ -340,9 +339,14 @@ Sonnet 5 **regardless of thinking**, including under `mode: disabled` and `mode:
 where the provider does not strip them. On those models, do not set sampling
 parameters at all.
 
-A `core.models` entry may carry a `temperature:` of its own, but this provider
-does not resolve one yet on the paths it resolves for itself — see the gap noted
-under [Per-role thinking](#per-role-thinking).
+A `core.models` entry may carry a `temperature:` of its own, and this provider
+resolves one on every path — the role a request names, the default role, the
+recovery after a router rewrote `model`, and the fallback/fanout stamp. A
+temperature already on the request wins over the role's, so an agent posture and
+the `approval_policy` gate still outrank `core.models`. Both strippings above
+apply to a role's value exactly as they do to a posture's, and on the families
+that reject the field outright a role setting it is simply a 400 — the provider
+does not strip it for you.
 
 ### Effort
 

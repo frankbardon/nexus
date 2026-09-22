@@ -314,7 +314,7 @@ func wireThinkingFor(t *testing.T, p *Plugin, req events.LLMRequest) (map[string
 
 func genThinkingFor(p *Plugin, req events.LLMRequest) (map[string]any, error) {
 	target := p.resolveTarget(req)
-	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+	p.applyEntryOverrides(&req)
 
 	gen := map[string]any{}
 	if err := applyThinking(gen, p.resolveThinking(req), target.effort); err != nil {

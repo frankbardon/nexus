@@ -205,7 +205,7 @@ func wireThinking(t *testing.T, p *Plugin, req events.LLMRequest) (map[string]an
 		t.Fatal("resolveTarget skipped the request")
 	}
 	req.Effort = target.effort
-	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+	p.applyEntryOverrides(&req)
 
 	body := p.buildRequestBody(target.model, target.maxTokens, req)
 	thinking, ok := body["thinking"].(map[string]any)
@@ -337,7 +337,7 @@ func TestRoleThinking_CoexistsWithRoleEffort(t *testing.T) {
 	req := events.LLMRequest{Role: "balanced"}
 	target := p.resolveTarget(req)
 	req.Effort = target.effort
-	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+	p.applyEntryOverrides(&req)
 	body := p.buildRequestBody(target.model, target.maxTokens, req)
 
 	thinking, ok := body["thinking"].(map[string]any)

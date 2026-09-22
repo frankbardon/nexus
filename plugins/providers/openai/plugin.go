@@ -236,6 +236,35 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 	}
 }
 
+// applyEntryOverrides copies the per-entry axes this provider actually consumes
+// from the `core.models` chain entry being served onto the request handleRequest
+// works with. It mirrors the Anthropic and Gemini providers' method of the same
+// name.
+//
+// A fallback or fanout coordinator has already stamped the entry when one is
+// involved, and engine.ResolveModelConfig leaves a stamped request alone;
+// otherwise it recovers the entry from the registry, covering the named role,
+// the default role and the late case where a router rewrote `model` and left
+// `role` alone.
+//
+// Only Temperature is taken, deliberately rather than `*req = ...`: model and
+// max_tokens already have their own resolution pass in handleRequest — one that
+// knows about defaultMaxTokens and the foreign-provider early return — and this
+// provider reads none of the other axes. `core.models` `effort` in particular is
+// not consumed here; this provider has only its plugin-level `reasoning.effort`.
+//
+// Temperature is a plain gap-fill, and the precedence is the engine-wide one:
+// ResolveModelConfig never disturbs a value the request already carries, so an
+// agent posture's temperature — and the approval_policy gate's — still beats a
+// `core.models` role's. A role's value only fills the gap when nothing upstream
+// set one. `0` is a real value, so the axis is a *float64 the whole way down.
+//
+// Note that applyReasoning strips temperature again for a reasoning model, which
+// rejects the field. That is not this function's business.
+func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
+	req.Temperature = engine.ResolveModelConfig(p.models, *req).Temperature
+}
+
 func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// If a specific provider is targeted (e.g. by fallback plugin), skip
 	// if it's not us.
@@ -312,6 +341,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if maxTokens == 0 {
 		maxTokens = defaultMaxTokens
 	}
+
+	// The serving chain entry's `temperature:`. req is a value parameter, so
+	// the caller's payload is untouched.
+	p.applyEntryOverrides(&req)
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 

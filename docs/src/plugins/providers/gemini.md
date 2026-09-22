@@ -427,13 +427,16 @@ decides. The asymmetry is an implementation difference, not a design one; do not
 it staying that way if the Anthropic gap is closed by moving the gate rather than the
 config.
 
-**`thinking:` is the only per-entry block this provider reads today.** A role's
-`temperature:`, `cache:`, `retry:` and `api:` parse and travel — see
+**`thinking:` is the only per-entry *block* this provider reads today.** A role's
+`cache:`, `retry:` and `api:` parse and travel — see
 [Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
-— but this provider's own resolution pass still covers only `model`, `max_tokens` and
-`effort`, so a `temperature:` on a plain single-entry role does not reach
-`generationConfig`. It does on a fallback entry or a fanout leg, where the coordinator
-stamps it onto the request directly.
+— but nothing here reads them back. The scalar axes are all wired: `model`,
+`max_tokens` and `effort` through this provider's own resolution pass, and
+`temperature` alongside the `thinking` block, on every path — so a role's
+`temperature:` reaches `generationConfig.temperature` whether or not a
+coordinator is involved. A temperature already on the request wins over the
+role's, so an agent posture and the `approval_policy` gate still outrank
+`core.models`.
 
 #### `-1` and `0` on the budget path
 

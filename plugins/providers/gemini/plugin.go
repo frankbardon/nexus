@@ -349,6 +349,36 @@ func (p *Plugin) resolveTarget(req events.LLMRequest) resolvedTarget {
 	return t
 }
 
+// applyEntryOverrides copies the per-entry axes this provider actually consumes
+// from the `core.models` chain entry being served onto the request handleRequest
+// works with. It mirrors the Anthropic provider's method of the same name, and
+// is the counterpart of resolveTarget for the axes that need no
+// provider-specific resolution of their own.
+//
+// A fallback or fanout coordinator has already stamped the entry when one is
+// involved, and engine.ResolveModelConfig leaves a stamped request alone;
+// otherwise it recovers the entry from the registry, covering the named role,
+// the default role and the late case where a router rewrote `model` and left
+// `role` alone.
+//
+// Deliberately a narrow slice rather than `*req = engine.ResolveModelConfig(...)`:
+// model, max_tokens and effort already have their own resolution pass in
+// resolveTarget — one that knows about defaultMaxTokens, this provider's effort
+// vocabulary and the foreign-provider skip — so taking them wholesale here would
+// duplicate and quietly change it. The remaining axes (`reasoning`, `cache`,
+// `retry`, `api`) have no consumer in this provider.
+//
+// Temperature is a plain gap-fill, and the precedence is the engine-wide one:
+// ResolveModelConfig never disturbs a value the request already carries, so an
+// agent posture's temperature — and the approval_policy gate's — still beats a
+// `core.models` role's. A role's value only fills the gap when nothing upstream
+// set one. `0` is a real value, so the axis is a *float64 the whole way down.
+func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
+	resolved := engine.ResolveModelConfig(p.models, *req)
+	req.Overrides.Thinking = resolved.Overrides.Thinking
+	req.Temperature = resolved.Temperature
+}
+
 func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if target, ok := req.Metadata["_target_provider"].(string); ok && target != pluginID {
 		return
@@ -390,18 +420,9 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
-	// The serving chain entry's native `thinking:` block. A fallback or fanout
-	// coordinator has already stamped it when one is involved, and
-	// ResolveModelConfig leaves a stamped request alone; otherwise it recovers
-	// the block from the registry, covering the named role, the default role
-	// and the late case where a router rewrote `model` and left `role` alone.
-	//
-	// Only Thinking is taken. The other axes ResolveModelConfig fills either
-	// already have a resolution pass here (effort, max_tokens, model) or have
-	// no consumer in this provider yet; widening that is a later story's job,
-	// not a side effect of this one. req is a value parameter, so the caller's
-	// payload is untouched.
-	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+	// The serving chain entry's `thinking:` block and `temperature:`. req is a
+	// value parameter, so the caller's payload is untouched.
+	p.applyEntryOverrides(&req)
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", effort)
 
