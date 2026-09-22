@@ -6,7 +6,7 @@ the same pass repaired `nexus.llm.openai`, whose reasoning surface had never
 reached the wire, and gave it the `/v1/responses` endpoint.
 
 Most of that is additive: a config that sets none of the new keys keeps working.
-Six things are **not** additive, and this page is the complete list. Each one
+Seven things are **not** additive, and this page is the complete list. Each one
 says what moved, whether it fails loudly or quietly, and the exact edit that
 restores the old behaviour.
 
@@ -23,6 +23,7 @@ key does today; this page is only about the difference from v0.28.x.
 | 4 | [Gemini precedence inverted back](#4-gemini-a-roles-setting-now-beats-the-plugin-block) | Gemini deployments with a plugin-level `thinking.level` **and** a role `effort:` | Silently for the value; loudly for a typo or a clamp that the old order had hidden |
 | 5 | [A role `effort:` beats a plugin `reasoning.effort` on OpenAI](#5-openai-a-roles-effort-now-beats-the-plugins) | OpenAI deployments setting both | Silently — a different depth on the wire |
 | 6 | [`retry:` and `cache:` blocks are parsed strictly](#6-retry-and-cache-blocks-are-parsed-strictly) | Any provider with `backoff: jitter`, or an unknown/mistyped key in either block | **Fails boot**, naming the key |
+| 7 | [Batched OpenAI requests follow `api:`](#7-batched-openai-requests-follow-api) | `nexus.llm.batch` submitting to OpenAI | Silently — a different endpoint per batch, and reasoning now reaching the body |
 
 Nothing on this list can be detected for you from inside Nexus. Where a change
 is silent, it is silent because detecting it would need the model-capability
@@ -78,8 +79,9 @@ shape between the two surfaces, and `llm.response` carries the same fields
 either way — text, tool calls, usage and a `FinishReason` translated back into
 the chat surface's words. The one request field with no counterpart on
 `responses` is `prediction`, which is dropped with one warning naming the role;
-the turn proceeds. The [batch coordinator](./reference.md#nexusllmbatch) does
-not follow `api:` at all — see [What is not wired](#what-is-not-wired-yet).
+the turn proceeds. The [batch coordinator](./reference.md#nexusllmbatch) follows
+`api:` too, and its own default moved to `responses` alongside this one — see
+[Batched OpenAI requests follow `api:`](#7-batched-openai-requests-follow-api).
 
 ---
 
@@ -260,6 +262,61 @@ defaulted rather than refused.
 
 ---
 
+## 7. Batched OpenAI requests follow `api:`
+
+**Before.** `nexus.llm.batch` hardcoded `url: "/v1/chat/completions"` on every
+OpenAI JSONL line and built the body with a text-only adapter that had never
+heard of `reasoning`. A `core.models` role configured for depth lost that
+configuration the moment it was batched, in the one direction that matters:
+from GPT-5.4 onward Chat Completions refuses tool calling with any
+`reasoning_effort` other than `none`.
+
+**Now.** A line's `url` — and the batch's own `endpoint` — is what the role's
+effective `api:` resolves to, and on `api: responses` the resolved reasoning
+configuration rides the body as a `reasoning` object. The per-entry axes reach
+the coordinator through `engine.ResolveModelConfig`, the same core mechanism the
+provider uses, so a role's `api:`, `effort:` and `reasoning:` block mean the same
+thing on both paths.
+
+**The coordinator's own default moved too**, from the hardcoded chat endpoint to
+`responses`. That matches `nexus.llm.openai` by construction rather than by
+coincidence: the provider narrows its default to `chat_completions` for a
+deployment declaring a `base_url` or an Azure auth mode, and the coordinator has
+neither — it always talks to `api.openai.com`, the deployment the unnarrowed
+default is chosen for.
+
+**The edit**, if you want to stay where you were:
+
+```yaml
+plugins:
+  nexus.llm.batch:
+    providers:
+      openai:
+        api: chat_completions
+```
+
+Or set `api:` on the `core.models` entries that should stay — an entry's `api:`
+outranks the coordinator's key.
+
+**Two new keys.** `providers.openai.api` and `providers.openai.reasoning`
+(`mode`, `effort`, `summary`) exist because a plugin's config map is its own:
+the coordinator cannot see `nexus.llm.openai`'s plugin-level `api:` or
+`reasoning:`, exactly as it cannot see its credentials. A `core.models` entry's
+`reasoning:` block merges **over** the coordinator's, key by key.
+
+**What did not change.** Chat-path batching is byte-for-byte what it was — no
+`reasoning_effort` is written there, because on that surface it is refused
+alongside the tools every Nexus turn carries. Reasoning Items are neither
+replayed into a line nor captured off a result: a batch line is a one-shot
+request. And a submit whose roles resolve to *different* surfaces is now
+rejected, naming both — an OpenAI batch carries one `endpoint` that every line
+must match, so that submit was never expressible.
+
+**Azure batch on `/v1/responses` is not claimed.** It is unconfirmed, and the
+coordinator has no Azure mode to reach it with in any case.
+
+---
+
 ## What is not verified yet
 
 These are real limits of what shipped, not caveats about the documentation.
@@ -306,12 +363,18 @@ loop.
 
 ## What is not wired yet
 
-- **`plugins/llm/batch` does not follow a role's `api:`.** Its OpenAI batch
-  lines still hardcode `url: "/v1/chat/completions"`
-  (`plugins/llm/batch/openai.go`), and it keeps its own minimal body builder
-  rather than the provider's. So a role on `api: responses` is batched through
-  Chat Completions, without that surface's reasoning behaviour. Flipping the
-  provider default did not change this.
+- **`plugins/llm/batch` still builds its own OpenAI bodies.** It now addresses
+  each line to the endpoint the role's `api:` resolves to and carries the role's
+  reasoning configuration on the Responses one — see [Batched OpenAI requests
+  follow `api:`](#7-batched-openai-requests-follow-api) — but the serializers are
+  a second, minimal implementation rather than the provider's, because the
+  provider's are unexported methods on another plugin's state and there is no
+  cross-plugin call. In practice that means the coordinator's bodies stay
+  text-only: no multimodal parts, no prompt-registry decoration, no
+  `tool_choice`, and no replay of encrypted `reasoning` Items.
+- **Azure batch on `/v1/responses` is not claimed.** Whether the Azure Batch
+  surface accepts those lines is unconfirmed, and the coordinator has no Azure
+  mode anyway.
 - **A role's `cache:` block is ignored on OpenAI.** There is no `cache:` block
   on `nexus.llm.openai` at all, so a role carrying one for an OpenAI entry is
   ignored **in silence**, typos included. That is deliberate — a role shared

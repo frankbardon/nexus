@@ -21,22 +21,28 @@ import (
 // Submit is a two-step dance: upload a JSONL request file via /v1/files with
 // purpose=batch, then create a batch job pointing at the resulting file id.
 // Results are downloaded by fetching the output file's content.
+//
+// The per-line `url` is NOT here: it follows the role's effective `api:` and is
+// resolved per submit by resolveOpenAIBatchSurface. See openai_surface.go.
 const (
-	openaiFilesURL          = "https://api.openai.com/v1/files"
-	openaiBatchesURL        = "https://api.openai.com/v1/batches"
-	openaiCompletionWindow  = "24h"
-	openaiBatchEndpointPath = "/v1/chat/completions"
+	openaiFilesURL         = "https://api.openai.com/v1/files"
+	openaiBatchesURL       = "https://api.openai.com/v1/batches"
+	openaiCompletionWindow = "24h"
 )
 
 // submitOpenAI uploads a JSONL request file then creates a batch job.
 //
 // JSONL line shape:
 //
-//	{"custom_id":"...","method":"POST","url":"/v1/chat/completions","body":{...}}
+//	{"custom_id":"...","method":"POST","url":"/v1/responses","body":{...}}
 //
-// Each line's "body" is built by buildOpenAIChatBody — a minimal text-only
-// adapter mirroring the Anthropic counterpart. The full provider plugin's
-// buildRequestBody isn't reused (private + tightly coupled to plugin state).
+// The `url` is the endpoint the role's effective `api:` resolves to — one per
+// batch, because an OpenAI batch carries a single `endpoint` every line must
+// match. Each line's "body" is built by the builder for that surface:
+// buildOpenAIChatBody or buildOpenAIResponsesBody, minimal text-only adapters
+// mirroring the Anthropic counterpart. The provider plugin's own builders are
+// not reused — they are unexported methods on another plugin's state; see
+// openai_surface.go for what is shared instead and why.
 func (p *Plugin) submitOpenAI(ctx context.Context, requests []events.BatchRequest) (string, error) {
 	if p.openaiAPIKey == "" {
 		return "", fmt.Errorf("batch: openai api key not configured")
@@ -45,18 +51,33 @@ func (p *Plugin) submitOpenAI(ctx context.Context, requests []events.BatchReques
 		return "", fmt.Errorf("batch: openai requires at least one request")
 	}
 
+	surface, resolved, err := p.resolveOpenAIBatchSurface(requests)
+	if err != nil {
+		return "", err
+	}
+	endpointPath := openaiEndpointPath(surface)
+
 	// Step 1: build JSONL bytes.
 	var jsonl bytes.Buffer
 	enc := json.NewEncoder(&jsonl)
-	for _, r := range requests {
-		body, err := buildOpenAIChatBody(r.Request, p.defaultMaxTokens)
+	for i, r := range requests {
+		req := resolved[i]
+		var (
+			body map[string]any
+			err  error
+		)
+		if surface == openaiAPIResponses {
+			body, err = buildOpenAIResponsesBody(req, p.defaultMaxTokens, p.resolveOpenAIReasoning(req))
+		} else {
+			body, err = buildOpenAIChatBody(req, p.defaultMaxTokens)
+		}
 		if err != nil {
 			return "", fmt.Errorf("batch: openai request %q: %w", r.CustomID, err)
 		}
 		line := map[string]any{
 			"custom_id": r.CustomID,
 			"method":    "POST",
-			"url":       openaiBatchEndpointPath,
+			"url":       endpointPath,
 			"body":      body,
 		}
 		if err := enc.Encode(line); err != nil {
@@ -73,7 +94,7 @@ func (p *Plugin) submitOpenAI(ctx context.Context, requests []events.BatchReques
 	// Step 3: create the batch job.
 	body, err := json.Marshal(map[string]any{
 		"input_file_id":     fileID,
-		"endpoint":          openaiBatchEndpointPath,
+		"endpoint":          endpointPath,
 		"completion_window": openaiCompletionWindow,
 	})
 	if err != nil {
@@ -267,8 +288,13 @@ func (p *Plugin) resultsOpenAI(ctx context.Context, outputFileID string) ([]even
 
 // decodeOpenAIResultLine parses one JSONL line from OpenAI's output file.
 // Each line carries either a successful response wrapped in
-// {"response":{"status_code":200,"body":{...chat-completion...}}} or an error
-// wrapped in {"error":{"code":"...","message":"..."}}.
+// {"response":{"status_code":200,"body":{...}}} or an error wrapped in
+// {"error":{"code":"...","message":"..."}}.
+//
+// The body is either a Chat Completions reply or a Responses one, depending on
+// the endpoint the batch was submitted to. Which it is gets sniffed off the
+// body rather than read back from persisted state — see
+// openaiResultBodyIsResponses for why.
 func decodeOpenAIResultLine(line []byte) (events.BatchResult, error) {
 	var raw struct {
 		ID       string `json:"id"`
@@ -295,7 +321,11 @@ func decodeOpenAIResultLine(line []byte) (events.BatchResult, error) {
 			br.Error = fmt.Sprintf("http %d: %s", raw.Response.StatusCode, string(raw.Response.Body))
 			return br, nil
 		}
-		resp, err := decodeOpenAIChatBody(raw.Response.Body)
+		decode := decodeOpenAIChatBody
+		if openaiResultBodyIsResponses(raw.Response.Body) {
+			decode = decodeOpenAIResponsesBody
+		}
+		resp, err := decode(raw.Response.Body)
 		if err != nil {
 			br.Error = fmt.Sprintf("decode body: %v", err)
 			return br, nil

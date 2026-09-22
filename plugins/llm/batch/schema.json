@@ -26,7 +26,22 @@
           "additionalProperties": false,
           "properties": {
             "api_key":     {"type": "string"},
-            "api_key_env": {"type": "string"}
+            "api_key_env": {"type": "string"},
+            "api": {
+              "type": "string",
+              "enum": ["chat_completions", "responses"],
+              "description": "Which OpenAI API batch lines are addressed to when no core.models entry declares one. Defaults to responses, matching nexus.llm.openai."
+            },
+            "reasoning": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Reasoning configuration for batched OpenAI requests. Reaches the wire on api: responses only. A core.models entry's own reasoning block merges over this one.",
+              "properties": {
+                "mode":    {"type": "string", "enum": ["effort", "off"]},
+                "effort":  {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]},
+                "summary": {"type": "string", "enum": ["auto", "concise", "detailed"]}
+              }
+            }
           }
         }
       }

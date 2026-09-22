@@ -17,9 +17,17 @@
 //     through; the per-provider auth code stays in providers/* and isn't
 //     reused here. A second-caller refactor is the right time to extract.
 //   - Text-only LLMRequest -> wire-format adapters. Multimodal, extended
-//     thinking, prompt caching, predicted outputs, reasoning effort, and
-//     citations are NOT carried into batched requests yet. The synchronous
-//     llm.request path remains the supported way to use those features.
+//     thinking, prompt caching, predicted outputs and citations are NOT carried
+//     into batched requests. The synchronous llm.request path remains the
+//     supported way to use those features.
+//   - OpenAI reasoning IS carried, on the Responses surface only: a batch
+//     line's `url` follows the role's effective `api:` and, on
+//     `api: responses`, the resolved `reasoning` object rides the body. The
+//     resolution is shared with nexus.llm.openai through
+//     engine.ResolveModelConfig; the serialization is still a second, minimal
+//     implementation, because the provider's builders are unexported methods on
+//     another plugin's state. See openai_surface.go for the full statement of
+//     what is shared, what is duplicated, and why.
 //   - Cross-provider batches (split N requests across providers) are out of
 //     scope — one BatchSubmit = one provider.
 //   - Cancellation is not exposed; pollers run until completion or process
@@ -32,6 +40,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +90,19 @@ type Plugin struct {
 	// independently activatable.
 	anthropicAPIKey string
 	openaiAPIKey    string
+
+	// OpenAI deployment shape. A plugin's config map is its own — there is no
+	// cross-plugin read — so the coordinator cannot see nexus.llm.openai's
+	// plugin-level `api:` or `reasoning:` and states them itself, exactly as it
+	// states the credentials. A `core.models` entry's own `api:`, `effort:` and
+	// `reasoning:` DO reach here, via engine.ResolveModelConfig, and outrank
+	// both of these. See openai_surface.go.
+	//
+	// openaiReasoningRaw is the unparsed block, kept because merging a role's
+	// block over this one happens key-by-key on the raw maps before parsing.
+	openaiAPI          string
+	openaiReasoning    openaiReasoning
+	openaiReasoningRaw map[string]any
 
 	// Test overrides. When non-empty these replace the production base URLs
 	// — the per-provider helpers always check the override first, so unit
@@ -181,6 +203,25 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		}
 		if o, ok := providers["openai"].(map[string]any); ok {
 			p.openaiAPIKey = readAPIKey(o, "OPENAI_API_KEY")
+
+			// Which OpenAI API batched lines are addressed to, and the
+			// reasoning configuration they carry. Both are validated here so a
+			// typo fails the boot rather than the first submit — the same
+			// bargain nexus.llm.openai strikes in its own Init.
+			if v, ok := o["api"].(string); ok && v != "" {
+				if !validOpenAIAPI(v) {
+					return fmt.Errorf("batch: providers.openai.api %q is not one of %s",
+						v, strings.Join(openaiAPISurfaces, ", "))
+				}
+				p.openaiAPI = v
+			}
+			if block, ok := o["reasoning"].(map[string]any); ok {
+				rc, err := parseOpenAIReasoning(block)
+				if err != nil {
+					return fmt.Errorf("batch: providers.openai.%w", err)
+				}
+				p.openaiReasoning, p.openaiReasoningRaw = rc, block
+			}
 		}
 	}
 	// Backwards-compat: also look at flat top-level keys, in case operators
@@ -216,6 +257,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		"data_dir", p.dataDir,
 		"anthropic_configured", p.anthropicAPIKey != "",
 		"openai_configured", p.openaiAPIKey != "",
+		"openai_api", p.effectiveOpenAIAPI(),
 		"resumed", len(p.active),
 	)
 	return nil

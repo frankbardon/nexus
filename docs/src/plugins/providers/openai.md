@@ -280,7 +280,7 @@ API itself offers rather than of what is implemented here:
 | Reasoning continuity across a tool round | nothing to replay | encrypted `reasoning` Items, replayed verbatim; a rejected replay fails the turn |
 | `prediction` (Predicted Outputs) | yes | **no counterpart** — dropped with one warning per role, turn proceeds |
 | Azure | deployment-scoped path + `api-version` | versionless `/openai/v1/responses`, deployment in the body |
-| Batched via [`nexus.llm.batch`](../../configuration/reference.md#nexusllmbatch) | yes | **no** — the batch coordinator hardcodes the chat endpoint |
+| Batched via [`nexus.llm.batch`](../../configuration/reference.md#nexusllmbatch) | yes | yes — the coordinator follows the role's `api:` and carries its reasoning; bodies are still its own serializer, and Azure batch is unclaimed |
 
 **Upgrading from v0.28.x moves a plain deployment's endpoint.** That default was
 `chat_completions`. It moved because on OpenAI's current models the chat surface
@@ -290,8 +290,12 @@ were, set `api: chat_completions` on the plugin, or on the `core.models` entries
 that should stay. No configuration key changes shape between the surfaces and
 `llm.response` carries the same fields either way; the only request field with
 no counterpart on `responses` is `prediction`, which is dropped with a warning
-naming the role. `base_url` and Azure deployments do not move, and the batch
-coordinator keeps its own chat endpoint. That is one of six breaking changes in
+naming the role. `base_url` and Azure deployments do not move. The
+[batch coordinator](../../configuration/reference.md#openai-batch-lines-follow-a-roles-api)
+moves with you: its lines now follow the role's `api:` and default to
+`responses` for the same reason this provider does — set
+`providers.openai.api: chat_completions` on `nexus.llm.batch` to hold it back.
+That is one of seven breaking changes in
 this release — see [Upgrading to
 v0.29.0](../../configuration/upgrading-v0.29.md) for the complete list, and
 [Before you put this on real traffic](#before-you-put-this-on-real-traffic)

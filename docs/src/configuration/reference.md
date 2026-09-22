@@ -2246,11 +2246,12 @@ operator on one of them who wants the Responses API says so with an explicit
 > key changes shape between the surfaces, and `llm.response` carries the same
 > fields either way.
 >
-> Two things the flip does **not** touch: `base_url` and Azure deployments,
-> which the narrowing keeps on `chat_completions`; and the
-> [batch coordinator](#nexusllmbatch), which keeps its own chat endpoint and its
-> own body builder — a role on `api: responses` is still batched through Chat
-> Completions.
+> One thing the flip does **not** touch: `base_url` and Azure deployments, which
+> the narrowing keeps on `chat_completions`. The
+> [batch coordinator](#nexusllmbatch) now follows a role's `api:` too — its
+> lines are addressed to the endpoint the role resolves to and carry the role's
+> reasoning configuration on the Responses one — though it still builds those
+> bodies with its own serializer rather than this provider's.
 >
 > **One thing to know before upgrading a busy deployment**: this path has only
 > ever run against mocks, and a plain `api.openai.com` deployment is its first
@@ -4735,6 +4736,10 @@ Source: `plugins/llm/batch/plugin.go`. Cross-provider batch coordinator
 | `providers.anthropic.api_key_env`| string   | `ANTHROPIC_API_KEY`| Env var to read the Anthropic key from. |
 | `providers.openai.api_key`       | string   | *(env)*            | OpenAI API key. |
 | `providers.openai.api_key_env`   | string   | `OPENAI_API_KEY`   | Env var to read the OpenAI key from. |
+| `providers.openai.api`           | string   | `responses`        | Which OpenAI API batch lines are addressed to when no `core.models` entry declares one: `chat_completions` or `responses`. A typo fails the boot. |
+| `providers.openai.reasoning.mode`    | string | *(unset → off)* | `effort` or `off`. A present `reasoning:` block with no `mode` is `effort`. |
+| `providers.openai.reasoning.effort`  | string | *(unset)*       | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
+| `providers.openai.reasoning.summary` | string | *(unset)*       | `auto`, `concise`, `detailed`. |
 | `anthropic_api_key_env`          | string   | *(none)*           | Backward-compat: flat top-level Anthropic key env var. |
 | `openai_api_key_env`             | string   | *(none)*           | Backward-compat: flat top-level OpenAI key env var. |
 
@@ -4742,13 +4747,62 @@ v1 limitations (intentional): direct-API auth only (no Bedrock/Vertex/Azure);
 text-only requests (no multimodal/thinking/caching/citations); single-provider
 per submit; no cancellation API.
 
-**This coordinator does not follow a role's [`api:`](#which-openai-api-api).**
-Its OpenAI batch lines hardcode `url: "/v1/chat/completions"`
-(`plugins/llm/batch/openai.go`), and it builds its request bodies with its own
-minimal text-only builder rather than the provider's. So a `core.models` role on
-`api: responses` is still batched through Chat Completions — including the
-GPT-5.4 restriction that makes that surface unable to call tools while reasoning.
-Flipping the provider's default in v0.29.0 did not change this.
+#### OpenAI batch lines follow a role's `api:`
+
+A batch line's `url` — and the batch's own `endpoint` — is the one the role's
+effective [`api:`](#which-openai-api-api) resolves to, so a `core.models` entry
+configured for the Responses API is batched through `/v1/responses` and one on
+`api: chat_completions` through `/v1/chat/completions`. On the Responses surface
+the role's reasoning configuration rides the body as a `reasoning` object, which
+is what stops a reasoning-heavy role from silently losing its depth the moment
+it is batched.
+
+Precedence for the surface, most specific first: the `core.models` entry's
+`api:`, then `providers.openai.api`, then the default. Reasoning resolves the
+same way — the entry's `reasoning:` block merges **over**
+`providers.openai.reasoning` key by key, and the entry's `effort:` fills the
+depth where the merged block leaves room. The `mode` is the declaration
+throughout: a role carrying only an `effort:` on a coordinator whose own block is
+absent sends nothing, exactly as on `nexus.llm.openai`.
+
+**The default moved.** It was `/v1/chat/completions`, hardcoded; it is now
+`responses`, matching `nexus.llm.openai`'s own default. The two agree by
+construction rather than by coincidence: the provider narrows its default to
+`chat_completions` for a deployment declaring a `base_url` or an Azure auth
+mode, and this coordinator has neither — it always talks to `api.openai.com`,
+which is the deployment that default is chosen for. To stay where you were, set
+`providers.openai.api: chat_completions`, or set `api:` on the `core.models`
+entries that should stay.
+
+Four things this does **not** do:
+
+- **One batch, one endpoint.** The OpenAI Batch API carries a single `endpoint`
+  per batch that every line's `url` must match, so a submit whose roles resolve
+  to different surfaces is rejected with an error naming both — split the
+  submit.
+- **Reasoning is not sent on the chat surface.** From GPT-5.4 onward Chat
+  Completions refuses tool calling with any `reasoning_effort` other than
+  `none`, so writing one there would trade a silent loss for a loud rejection.
+  Chat-path batching is byte-for-byte what it was.
+- **Encrypted `reasoning` Items are not replayed**, and are not captured off a
+  result. A batch line is a one-shot request with no next round inside the batch
+  for them to reach; a multi-round conversation belongs on the synchronous
+  `llm.request` path.
+- **Azure is not claimed.** Whether the Azure Batch surface accepts
+  `/v1/responses` lines is unconfirmed, and this coordinator has no Azure mode
+  to reach it with in any case.
+
+**The bodies are still a second implementation.** `nexus.llm.batch` is a
+separate plugin from `nexus.llm.openai`, its serializers are unexported methods
+on that plugin's own state, and there is no cross-plugin call — so the
+coordinator keeps its own minimal text-only builders for both surfaces
+(`plugins/llm/batch/openai.go`, `openai_responses.go`). What *is* shared is the
+resolution: the per-entry axes reach this plugin through
+`engine.ResolveModelConfig`, the same core mechanism the provider uses. The
+consequence to know about is that `nexus.llm.openai`'s **plugin-level** `api:`
+and `reasoning:` are invisible here — a plugin's config map is its own — which
+is why `providers.openai.api` and `providers.openai.reasoning` exist, on the
+same bargain as `providers.openai.api_key_env`.
 
 ---
 
