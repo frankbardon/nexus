@@ -56,9 +56,21 @@ type LLMRequest struct {
 	ToolFilter     *ToolFilter     // nil = no filtering
 	ResponseFormat *ResponseFormat // nil = no structured output constraint
 	MaxTokens      int
-	Temperature    *float64
-	Stream         bool
-	Prediction     string // OpenAI-only: known-content prediction for low-latency edits.
+
+	// Effort is an opaque, provider-interpreted reasoning-depth hint. It is an
+	// internal carrier, not an operator-facing key: operators set it on a
+	// `core.models` chain entry (engine.ModelConfig.Effort) and the fallback
+	// and fanout coordinators copy the serving entry's value onto the outgoing
+	// request, so a provider knows which chain entry it is answering for.
+	// Core never validates it — each provider owns its own vocabulary and any
+	// clamping. Empty means "not set": providers must leave their reasoning
+	// configuration untouched. A value already present on an inbound request
+	// wins; a chain entry only fills in a value the request lacks.
+	Effort string
+
+	Temperature *float64
+	Stream      bool
+	Prediction  string // OpenAI-only: known-content prediction for low-latency edits.
 	// Other providers ignore this field. Empty = no prediction.
 	Metadata map[string]any
 

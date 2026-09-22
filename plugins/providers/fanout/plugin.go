@@ -279,6 +279,11 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		if pc.MaxTokens > 0 && fanReq.MaxTokens == 0 {
 			fanReq.MaxTokens = pc.MaxTokens
 		}
+		// The per-provider entry's own effort fills in a value the request
+		// lacks; it never overrides one the request already carries.
+		if pc.Effort != "" && fanReq.Effort == "" {
+			fanReq.Effort = pc.Effort
+		}
 
 		p.bus.EmitAsync("llm.request", fanReq)
 	}
