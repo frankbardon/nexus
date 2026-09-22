@@ -145,9 +145,14 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
-	p.thinking = parseThinkingConfig(ctx.Config)
-	if p.thinking.Enabled {
-		p.logger.Debug("extended thinking enabled",
+	thinking, err := parseThinkingConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.thinking = thinking
+	if p.thinking.Mode != thinkingModeOff {
+		p.logger.Debug("extended thinking configured",
+			"mode", string(p.thinking.Mode),
 			"budget_tokens", p.thinking.BudgetTokens,
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)

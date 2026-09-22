@@ -1,52 +1,135 @@
 package anthropic
 
-import "log/slog"
+import (
+	"fmt"
+	"log/slog"
+)
 
-// thinkingConfig controls Anthropic's extended-thinking feature (Sonnet 4+,
-// Opus 4+). When enabled the API emits `thinking` (and possibly
-// `redacted_thinking`) content blocks that carry the model's internal
-// reasoning along with a cryptographic signature.
+// thinkingMode is the operator-declared wire shape for Anthropic's
+// extended-thinking field. There is deliberately no model-capability table
+// here: the provider never inspects the model id to pick a shape. A mode the
+// target model does not accept is an Anthropic HTTP 400, and the operator owns
+// that mismatch.
+type thinkingMode string
+
+const (
+	// thinkingModeOff omits the `thinking` field from the request body
+	// entirely. This is how thinking is turned off on models that do not
+	// think unless asked (Opus 4.8, Opus 4.7 and older).
+	thinkingModeOff thinkingMode = "off"
+
+	// thinkingModeAdaptive sends {"type":"adaptive"} — the model decides how
+	// much to think. The only on-mode on the current model families.
+	thinkingModeAdaptive thinkingMode = "adaptive"
+
+	// thinkingModeBudget sends {"type":"enabled","budget_tokens":N} — the
+	// legacy fixed-budget shape, accepted only by Sonnet 4.5 / Haiku 4.5 and
+	// older, plus Opus 4.6 / Sonnet 4.6 as a deprecated escape hatch.
+	thinkingModeBudget thinkingMode = "budget"
+
+	// thinkingModeDisabled sends {"type":"disabled"} — an explicit opt out,
+	// and the only way off on models that think by default (Opus 5, Sonnet 5).
+	// Distinct from thinkingModeOff, which sends nothing at all.
+	thinkingModeDisabled thinkingMode = "disabled"
+)
+
+// thinkingConfig controls Anthropic's extended-thinking feature. When thinking
+// is on the API emits `thinking` (and possibly `redacted_thinking`) content
+// blocks that carry the model's internal reasoning along with a cryptographic
+// signature.
 //
 //	thinking:
-//	  enabled: true
-//	  budget_tokens: 8192     # -1 dynamic, 0 disabled (default 8192)
+//	  mode: adaptive          # adaptive | budget | disabled | off
+//	  budget_tokens: 8192     # required when mode: budget, ignored otherwise
 //	  include_thoughts: true  # surface human-readable thinking via thinking.step
 //
-// Constraints enforced by the API:
+// Constraints enforced by the API, not by this provider:
 //   - budget_tokens >= 1024 and < max_tokens (caller's responsibility).
 //   - temperature must be unset or 1.0; applyThinking strips non-1 values.
 type thinkingConfig struct {
-	Enabled         bool
-	BudgetTokens    int  // -1 dynamic, 0 disabled (default 8192 when Enabled)
-	IncludeThoughts bool // default true
+	Mode            thinkingMode
+	BudgetTokens    int  // only meaningful when Mode is thinkingModeBudget
+	IncludeThoughts bool // default true when the thinking block is present
 }
 
 // parseThinkingConfig pulls thinkingConfig out of the plugin's raw config map.
-// Absent block returns a zero-value config (a no-op for applyThinking and the
-// stream/sync handlers). Defaults BudgetTokens=8192 and IncludeThoughts=true
-// when the block is present so users only have to set `enabled: true`.
-func parseThinkingConfig(cfg map[string]any) thinkingConfig {
-	tc := thinkingConfig{BudgetTokens: 8192, IncludeThoughts: true}
-
+// An absent block resolves to thinkingModeOff; a present block with no `mode`
+// resolves to thinkingModeAdaptive. Validation that can fail lives here so a
+// bad config fails Init rather than the first request.
+//
+// The legacy `enabled` bool is still accepted as a deprecated alias
+// (true → adaptive, false → off) and is ignored when `mode` is set. A
+// `budget_tokens` with no `mode` infers thinkingModeBudget, which preserves the
+// one legacy configuration that still works on the wire (Opus 4.6 / Sonnet 4.6).
+func parseThinkingConfig(cfg map[string]any, logger *slog.Logger) (thinkingConfig, error) {
 	raw, ok := cfg["thinking"].(map[string]any)
 	if !ok {
-		return thinkingConfig{}
+		return thinkingConfig{Mode: thinkingModeOff}, nil
 	}
 
-	if v, ok := raw["enabled"].(bool); ok {
-		tc.Enabled = v
-	}
-	if v, ok := raw["budget_tokens"].(int); ok {
-		tc.BudgetTokens = v
-	} else if v, ok := raw["budget_tokens"].(float64); ok {
-		// YAML decoders surface integers as float64 on some paths.
-		tc.BudgetTokens = int(v)
-	}
+	tc := thinkingConfig{IncludeThoughts: true}
+
 	if v, ok := raw["include_thoughts"].(bool); ok {
 		tc.IncludeThoughts = v
 	}
 
-	return tc
+	budgetSet := false
+	if v, ok := raw["budget_tokens"].(int); ok {
+		tc.BudgetTokens = v
+		budgetSet = true
+	} else if v, ok := raw["budget_tokens"].(float64); ok {
+		// YAML decoders surface integers as float64 on some paths.
+		tc.BudgetTokens = int(v)
+		budgetSet = true
+	}
+
+	enabled, enabledSet := raw["enabled"].(bool)
+
+	modeRaw, modeSet := raw["mode"].(string)
+	switch {
+	case modeSet:
+		switch thinkingMode(modeRaw) {
+		case thinkingModeOff, thinkingModeAdaptive, thinkingModeBudget, thinkingModeDisabled:
+			tc.Mode = thinkingMode(modeRaw)
+		default:
+			return thinkingConfig{}, fmt.Errorf("anthropic: thinking.mode %q is not one of adaptive, budget, disabled, off", modeRaw)
+		}
+		if enabledSet && logger != nil {
+			logger.Warn("anthropic: thinking.enabled is deprecated and ignored when thinking.mode is set; remove it",
+				"mode", modeRaw,
+				"enabled", enabled,
+			)
+		}
+	case enabledSet && !enabled:
+		// An explicit opt out wins over any budget left behind in the block.
+		tc.Mode = thinkingModeOff
+	case budgetSet:
+		// The legacy fixed-budget shape. Honour it, but say so out loud —
+		// budget_tokens is an HTTP 400 on every current model family.
+		tc.Mode = thinkingModeBudget
+		if logger != nil {
+			logger.Warn("anthropic: thinking.budget_tokens with no thinking.mode infers mode: budget; set thinking.mode explicitly",
+				"budget_tokens", tc.BudgetTokens,
+			)
+		}
+	default:
+		// A present block with no mode — and the deprecated `enabled: true` —
+		// both resolve to adaptive.
+		tc.Mode = thinkingModeAdaptive
+	}
+
+	if enabledSet && !modeSet && logger != nil {
+		logger.Warn("anthropic: thinking.enabled is deprecated; use thinking.mode (adaptive, budget, disabled, off)",
+			"enabled", enabled,
+			"resolved_mode", string(tc.Mode),
+		)
+	}
+
+	if tc.Mode == thinkingModeBudget && !budgetSet {
+		return thinkingConfig{}, fmt.Errorf("anthropic: thinking.mode: budget requires thinking.budget_tokens")
+	}
+
+	return tc, nil
 }
 
 // prependThinkingBlocks pulls a stashed []map[string]any of thinking blocks
@@ -96,17 +179,32 @@ func prependThinkingBlocks(meta map[string]any) []map[string]any {
 	}
 }
 
-// applyThinking sets the request body's "thinking" field. When enabled it also
-// strips temperature (Anthropic requires temp=1 with thinking; the cleanest
-// path is to omit it). Logs a warning when stripping a user-set non-1 temp.
+// applyThinking sets the request body's "thinking" field from the declared
+// mode. thinkingModeOff writes nothing at all — the field is absent from the
+// body, which is a different request from {"type":"disabled"} and the two are
+// not interchangeable on the wire.
+//
+// When thinking is actually on (adaptive or budget) it also strips temperature
+// (Anthropic requires temp=1 with thinking; the cleanest path is to omit it)
+// and logs a warning when dropping a user-set non-1 value.
 func applyThinking(body map[string]any, cfg thinkingConfig, logger *slog.Logger) {
-	if !cfg.Enabled || cfg.BudgetTokens == 0 {
+	switch cfg.Mode {
+	case thinkingModeAdaptive:
+		body["thinking"] = map[string]any{"type": "adaptive"}
+	case thinkingModeBudget:
+		body["thinking"] = map[string]any{
+			"type":          "enabled",
+			"budget_tokens": cfg.BudgetTokens,
+		}
+	case thinkingModeDisabled:
+		// Thinking is off, so the temperature constraint does not apply.
+		body["thinking"] = map[string]any{"type": "disabled"}
+		return
+	default:
+		// thinkingModeOff (and the zero value): no thinking field at all.
 		return
 	}
-	body["thinking"] = map[string]any{
-		"type":          "enabled",
-		"budget_tokens": cfg.BudgetTokens,
-	}
+
 	if temp, ok := body["temperature"]; ok {
 		// Only warn when the user set a value that conflicts with the
 		// thinking-required temp=1. An exact 1.0 is silently dropped.

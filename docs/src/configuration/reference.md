@@ -1302,8 +1302,9 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `cache.tools`                      | bool   | `true`              | Mark the tools array for caching when enabled. |
 | `cache.message_prefix`             | int    | `0`                 | Number of leading user messages to mark for caching. |
 | `cache.ttl`                        | string | `5m`                | Cache TTL: `5m` (ephemeral) or `1h` (extended). |
-| `thinking.enabled`                 | bool   | `false`             | Enable extended thinking (Sonnet 4+, Opus 4+). |
-| `thinking.budget_tokens`           | int    | `8192`              | Thinking token budget; `-1` for dynamic, `0` to disable, `1024+` fixed. |
+| `thinking.mode`                    | string | `off` when the `thinking` block is absent, `adaptive` when it is present | Wire shape for the request's `thinking` field: `adaptive`, `budget`, `disabled` or `off`. See "Thinking modes" below. |
+| `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. |
+| `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
 | `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
 | `citations.enabled`                | bool   | `false`             | Enable citations on document blocks. |
@@ -1335,6 +1336,40 @@ list of regions. A pod that derives its region from its own zone can therefore l
 where the configured model is not served, and that fails at first inference with a
 404 — not at boot, because there is no boot-time availability probe by design. Set
 `vertex.region` explicitly wherever the model choice matters.
+
+#### Thinking modes
+
+`thinking.mode` is the whole axis. Each value maps to exactly one wire shape:
+
+| `mode`     | What goes in the request body |
+|------------|-------------------------------|
+| `adaptive` | `"thinking": {"type": "adaptive"}` |
+| `budget`   | `"thinking": {"type": "enabled", "budget_tokens": N}` |
+| `disabled` | `"thinking": {"type": "disabled"}` |
+| `off`      | no `thinking` field at all |
+
+`off` and `disabled` are genuinely different requests, and both are reachable
+on purpose. Omitting the field is how thinking is turned off on models that do
+not think unless asked (Opus 4.8, Opus 4.7 and older); an explicit
+`{"type":"disabled"}` is the only way off on models that think by default
+(Opus 5, Sonnet 5), where it is also rejected on the highest effort levels.
+
+**The provider never inspects the model id to pick a shape.** A `mode` the
+target model does not accept is an Anthropic HTTP 400, and the operator owns
+that mismatch. As a guide:
+
+- `adaptive` — Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5, and the
+  recommended setting on Opus 4.6 / Sonnet 4.6. `budget_tokens` is a 400 on all
+  of these.
+- `budget` — Sonnet 4.5, Haiku 4.5 and older, where `budget_tokens` is required
+  and must be at least 1024 and below `max_tokens`. Still functional but
+  deprecated on Opus 4.6 / Sonnet 4.6.
+- `disabled` — models that think by default and need an explicit opt out.
+- `off` — the default when no `thinking` block is present.
+
+`budget_tokens` has no default. Setting it with no `mode` infers `mode: budget`
+and logs a warning, which preserves the one legacy configuration that still
+works on the wire. `-1` has no special meaning on this provider.
 
 #### Retry block (shared by all providers)
 

@@ -16,109 +16,257 @@ import (
 
 // --- parseThinkingConfig ----------------------------------------------------
 
+func silentTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func warnCaptureLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+func mustParseThinking(t *testing.T, cfg map[string]any, logger *slog.Logger) thinkingConfig {
+	t.Helper()
+	tc, err := parseThinkingConfig(cfg, logger)
+	if err != nil {
+		t.Fatalf("parseThinkingConfig: unexpected error: %v", err)
+	}
+	return tc
+}
+
 // TestParseThinkingConfig_Absent verifies that omitting the `thinking` block
-// produces a zero-value config so applyThinking is a no-op and no event is
-// emitted on the bus.
+// resolves to mode off, so applyThinking writes nothing at all and no
+// thinking.step event is emitted on the bus.
 func TestParseThinkingConfig_Absent(t *testing.T) {
-	tc := parseThinkingConfig(map[string]any{})
-	if tc.Enabled || tc.BudgetTokens != 0 || tc.IncludeThoughts {
+	tc := mustParseThinking(t, map[string]any{}, silentTestLogger())
+	if tc.Mode != thinkingModeOff {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeOff)
+	}
+	if tc.BudgetTokens != 0 || tc.IncludeThoughts {
 		t.Fatalf("expected zero config, got %+v", tc)
 	}
 }
 
-// TestParseThinkingConfig_Defaults verifies that a present-but-minimal block
-// fills in the high-leverage defaults: 8192-token budget and IncludeThoughts
-// true so callers only need `enabled: true`.
-func TestParseThinkingConfig_Defaults(t *testing.T) {
-	tc := parseThinkingConfig(map[string]any{
-		"thinking": map[string]any{
-			"enabled": true,
-		},
-	})
-	if !tc.Enabled {
-		t.Fatal("expected enabled=true")
+// TestParseThinkingConfig_PresentNoMode verifies a present-but-minimal block
+// resolves to adaptive — the only on-mode the current model families accept —
+// with no budget default of any kind.
+func TestParseThinkingConfig_PresentNoMode(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{},
+	}, silentTestLogger())
+
+	if tc.Mode != thinkingModeAdaptive {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeAdaptive)
 	}
-	if tc.BudgetTokens != 8192 {
-		t.Errorf("BudgetTokens: got %d, want 8192", tc.BudgetTokens)
+	if tc.BudgetTokens != 0 {
+		t.Errorf("BudgetTokens: got %d, want 0 (no default)", tc.BudgetTokens)
 	}
 	if !tc.IncludeThoughts {
 		t.Errorf("IncludeThoughts: got false, want true (default)")
 	}
 }
 
-// TestParseThinkingConfig_Custom verifies explicit overrides take effect.
-func TestParseThinkingConfig_Custom(t *testing.T) {
-	tc := parseThinkingConfig(map[string]any{
-		"thinking": map[string]any{
-			"enabled":          true,
-			"budget_tokens":    16384,
-			"include_thoughts": false,
-		},
-	})
-	if !tc.Enabled || tc.BudgetTokens != 16384 || tc.IncludeThoughts {
-		t.Fatalf("unexpected config: %+v", tc)
+// TestParseThinkingConfig_ExplicitModes verifies each of the four values round
+// trips onto the struct.
+func TestParseThinkingConfig_ExplicitModes(t *testing.T) {
+	for _, mode := range []thinkingMode{thinkingModeAdaptive, thinkingModeDisabled, thinkingModeOff} {
+		tc := mustParseThinking(t, map[string]any{
+			"thinking": map[string]any{"mode": string(mode)},
+		}, silentTestLogger())
+		if tc.Mode != mode {
+			t.Errorf("Mode: got %q, want %q", tc.Mode, mode)
+		}
+	}
+
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"mode": "budget", "budget_tokens": 16384},
+	}, silentTestLogger())
+	if tc.Mode != thinkingModeBudget {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeBudget)
+	}
+	if tc.BudgetTokens != 16384 {
+		t.Errorf("BudgetTokens: got %d, want 16384", tc.BudgetTokens)
 	}
 }
 
-// TestParseThinkingConfig_DynamicBudget verifies -1 (dynamic budget) is
-// preserved as-is so the request body forwards it to Anthropic.
-func TestParseThinkingConfig_DynamicBudget(t *testing.T) {
-	tc := parseThinkingConfig(map[string]any{
-		"thinking": map[string]any{
-			"enabled":       true,
-			"budget_tokens": -1,
-		},
-	})
-	if tc.BudgetTokens != -1 {
-		t.Fatalf("BudgetTokens: got %d, want -1", tc.BudgetTokens)
+// TestParseThinkingConfig_UnknownMode rejects a typo at Init rather than
+// shipping it to the API.
+func TestParseThinkingConfig_UnknownMode(t *testing.T) {
+	_, err := parseThinkingConfig(map[string]any{
+		"thinking": map[string]any{"mode": "enabled"},
+	}, silentTestLogger())
+	if err == nil {
+		t.Fatal("expected an error for an unknown mode")
+	}
+	if !strings.Contains(err.Error(), "thinking.mode") {
+		t.Errorf("error should name the key, got: %v", err)
+	}
+}
+
+// TestParseThinkingConfig_BudgetModeRequiresBudget verifies the missing-budget
+// case fails at Init and names the key, not at request time.
+func TestParseThinkingConfig_BudgetModeRequiresBudget(t *testing.T) {
+	_, err := parseThinkingConfig(map[string]any{
+		"thinking": map[string]any{"mode": "budget"},
+	}, silentTestLogger())
+	if err == nil {
+		t.Fatal("expected an error for mode: budget with no budget_tokens")
+	}
+	if !strings.Contains(err.Error(), "thinking.budget_tokens") {
+		t.Errorf("error should name the key, got: %v", err)
 	}
 }
 
 // TestParseThinkingConfig_FloatBudget covers YAML decoders that surface
 // integer values as float64 — the parser should still extract the value.
 func TestParseThinkingConfig_FloatBudget(t *testing.T) {
-	tc := parseThinkingConfig(map[string]any{
+	tc := mustParseThinking(t, map[string]any{
 		"thinking": map[string]any{
-			"enabled":       true,
+			"mode":          "budget",
 			"budget_tokens": float64(4096),
 		},
-	})
+	}, silentTestLogger())
 	if tc.BudgetTokens != 4096 {
 		t.Fatalf("BudgetTokens: got %d, want 4096", tc.BudgetTokens)
 	}
 }
 
+// TestParseThinkingConfig_BudgetInfersMode preserves the one legacy shape that
+// still works on the wire (Opus 4.6 / Sonnet 4.6), loudly.
+func TestParseThinkingConfig_BudgetInfersMode(t *testing.T) {
+	var buf bytes.Buffer
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{
+			"enabled":       true,
+			"budget_tokens": 8192,
+		},
+	}, warnCaptureLogger(&buf))
+
+	if tc.Mode != thinkingModeBudget {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeBudget)
+	}
+	if tc.BudgetTokens != 8192 {
+		t.Errorf("BudgetTokens: got %d, want 8192", tc.BudgetTokens)
+	}
+	if !strings.Contains(buf.String(), "infers mode: budget") {
+		t.Errorf("expected an inference warning, got: %q", buf.String())
+	}
+}
+
+// TestParseThinkingConfig_EnabledAliasTrue — the deprecated bool still loads,
+// with a warning pointing at mode.
+func TestParseThinkingConfig_EnabledAliasTrue(t *testing.T) {
+	var buf bytes.Buffer
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"enabled": true},
+	}, warnCaptureLogger(&buf))
+
+	if tc.Mode != thinkingModeAdaptive {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeAdaptive)
+	}
+	if !strings.Contains(buf.String(), "thinking.mode") {
+		t.Errorf("deprecation warning should point at thinking.mode, got: %q", buf.String())
+	}
+}
+
+// TestParseThinkingConfig_EnabledAliasFalse — `enabled: false` means off (no
+// thinking field), not disabled (an explicit {"type":"disabled"}).
+func TestParseThinkingConfig_EnabledAliasFalse(t *testing.T) {
+	var buf bytes.Buffer
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"enabled": false},
+	}, warnCaptureLogger(&buf))
+
+	if tc.Mode != thinkingModeOff {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeOff)
+	}
+	if !strings.Contains(buf.String(), "thinking.mode") {
+		t.Errorf("deprecation warning should point at thinking.mode, got: %q", buf.String())
+	}
+}
+
+// TestParseThinkingConfig_ModeWinsOverEnabled — `enabled` is ignored when
+// `mode` is set, and the conflict is warned about.
+func TestParseThinkingConfig_ModeWinsOverEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{"enabled": false, "mode": "adaptive"},
+	}, warnCaptureLogger(&buf))
+
+	if tc.Mode != thinkingModeAdaptive {
+		t.Errorf("Mode: got %q, want %q", tc.Mode, thinkingModeAdaptive)
+	}
+	if !strings.Contains(buf.String(), "ignored when thinking.mode is set") {
+		t.Errorf("expected an ignored-alias warning, got: %q", buf.String())
+	}
+}
+
+// TestParseThinkingConfig_IncludeThoughtsOverride verifies the explicit
+// override still takes effect.
+func TestParseThinkingConfig_IncludeThoughtsOverride(t *testing.T) {
+	tc := mustParseThinking(t, map[string]any{
+		"thinking": map[string]any{
+			"mode":             "adaptive",
+			"include_thoughts": false,
+		},
+	}, silentTestLogger())
+	if tc.IncludeThoughts {
+		t.Fatalf("unexpected config: %+v", tc)
+	}
+}
+
 // --- applyThinking ----------------------------------------------------------
 
-func silentTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+// TestApplyThinking_Off writes no thinking key at all — the zero value and an
+// explicit off behave identically.
+func TestApplyThinking_Off(t *testing.T) {
+	for _, cfg := range []thinkingConfig{{}, {Mode: thinkingModeOff}} {
+		body := map[string]any{"max_tokens": 1024}
+		applyThinking(body, cfg, silentTestLogger())
+		if _, ok := body["thinking"]; ok {
+			t.Fatalf("mode %q should not set thinking", cfg.Mode)
+		}
+		if len(body) != 1 {
+			t.Fatalf("body mutated unexpectedly: %+v", body)
+		}
+	}
 }
 
-// TestApplyThinking_Disabled is a no-op — body comes back unchanged.
+// TestApplyThinking_Adaptive produces {"type":"adaptive"} with no budget.
+func TestApplyThinking_Adaptive(t *testing.T) {
+	body := map[string]any{}
+	applyThinking(body, thinkingConfig{Mode: thinkingModeAdaptive}, silentTestLogger())
+
+	got, ok := body["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking missing or wrong type: %T", body["thinking"])
+	}
+	if got["type"] != "adaptive" {
+		t.Errorf("type: got %v, want adaptive", got["type"])
+	}
+	if _, ok := got["budget_tokens"]; ok {
+		t.Errorf("adaptive must not carry budget_tokens: %+v", got)
+	}
+}
+
+// TestApplyThinking_Disabled produces an explicit {"type":"disabled"}, which is
+// a different request from omitting the field.
 func TestApplyThinking_Disabled(t *testing.T) {
-	body := map[string]any{"max_tokens": 1024}
-	applyThinking(body, thinkingConfig{}, silentTestLogger())
-	if _, ok := body["thinking"]; ok {
-		t.Fatal("disabled config should not set thinking")
+	body := map[string]any{}
+	applyThinking(body, thinkingConfig{Mode: thinkingModeDisabled}, silentTestLogger())
+
+	got, ok := body["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking missing or wrong type: %T", body["thinking"])
 	}
-	if len(body) != 1 {
-		t.Fatalf("body mutated unexpectedly: %+v", body)
+	if got["type"] != "disabled" {
+		t.Errorf("type: got %v, want disabled", got["type"])
 	}
 }
 
-// TestApplyThinking_BudgetZero treats budget=0 as disabled (mirrors gemini).
-func TestApplyThinking_BudgetZero(t *testing.T) {
+// TestApplyThinking_Budget produces the legacy fixed-budget shape.
+func TestApplyThinking_Budget(t *testing.T) {
 	body := map[string]any{}
-	applyThinking(body, thinkingConfig{Enabled: true, BudgetTokens: 0}, silentTestLogger())
-	if _, ok := body["thinking"]; ok {
-		t.Fatal("budget=0 should not set thinking")
-	}
-}
-
-// TestApplyThinking_Enabled produces the correct request shape.
-func TestApplyThinking_Enabled(t *testing.T) {
-	body := map[string]any{}
-	applyThinking(body, thinkingConfig{Enabled: true, BudgetTokens: 8192}, silentTestLogger())
+	applyThinking(body, thinkingConfig{Mode: thinkingModeBudget, BudgetTokens: 8192}, silentTestLogger())
 
 	got, ok := body["thinking"].(map[string]any)
 	if !ok {
@@ -137,10 +285,8 @@ func TestApplyThinking_Enabled(t *testing.T) {
 // is enabled.
 func TestApplyThinking_StripsTemperature(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
 	body := map[string]any{"temperature": 0.7}
-	applyThinking(body, thinkingConfig{Enabled: true, BudgetTokens: 4096}, logger)
+	applyThinking(body, thinkingConfig{Mode: thinkingModeAdaptive}, warnCaptureLogger(&buf))
 
 	if _, ok := body["temperature"]; ok {
 		t.Fatal("temperature should have been stripped")
@@ -150,14 +296,23 @@ func TestApplyThinking_StripsTemperature(t *testing.T) {
 	}
 }
 
+// TestApplyThinking_DisabledKeepsTemperature — thinking is off in this mode, so
+// the temp=1 constraint does not apply and the caller's value survives.
+func TestApplyThinking_DisabledKeepsTemperature(t *testing.T) {
+	body := map[string]any{"temperature": 0.7}
+	applyThinking(body, thinkingConfig{Mode: thinkingModeDisabled}, silentTestLogger())
+
+	if body["temperature"] != 0.7 {
+		t.Fatalf("temperature should have survived: %+v", body)
+	}
+}
+
 // TestApplyThinking_TemperatureOneNoWarn — temp=1.0 is silently dropped (it's
 // the value Anthropic would have used anyway), no warning emitted.
 func TestApplyThinking_TemperatureOneNoWarn(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
 	body := map[string]any{"temperature": 1.0}
-	applyThinking(body, thinkingConfig{Enabled: true, BudgetTokens: 4096}, logger)
+	applyThinking(body, thinkingConfig{Mode: thinkingModeBudget, BudgetTokens: 4096}, warnCaptureLogger(&buf))
 
 	if _, ok := body["temperature"]; ok {
 		t.Fatal("temperature should have been removed")
@@ -171,10 +326,8 @@ func TestApplyThinking_TemperatureOneNoWarn(t *testing.T) {
 // applyThinking is silent and leaves body otherwise alone.
 func TestApplyThinking_NoTemperatureNoWarn(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
 	body := map[string]any{"max_tokens": 4096}
-	applyThinking(body, thinkingConfig{Enabled: true, BudgetTokens: 4096}, logger)
+	applyThinking(body, thinkingConfig{Mode: thinkingModeAdaptive}, warnCaptureLogger(&buf))
 
 	if buf.Len() != 0 {
 		t.Errorf("no temperature should not log, got: %q", buf.String())
@@ -406,7 +559,7 @@ func TestStream_ExtendedThinkingRoundTrip(t *testing.T) {
 	p := &Plugin{
 		bus:      rec.bus,
 		logger:   silentTestLogger(),
-		thinking: thinkingConfig{Enabled: true, BudgetTokens: 8192, IncludeThoughts: true},
+		thinking: thinkingConfig{Mode: thinkingModeBudget, BudgetTokens: 8192, IncludeThoughts: true},
 		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
@@ -470,7 +623,7 @@ func TestStream_IncludeThoughtsFalseSilencesEvents(t *testing.T) {
 	p := &Plugin{
 		bus:      rec.bus,
 		logger:   silentTestLogger(),
-		thinking: thinkingConfig{Enabled: true, BudgetTokens: 8192, IncludeThoughts: false},
+		thinking: thinkingConfig{Mode: thinkingModeBudget, BudgetTokens: 8192, IncludeThoughts: false},
 		pricing:  pricing.DefaultsFor(pricing.ProviderAnthropic),
 	}
 
