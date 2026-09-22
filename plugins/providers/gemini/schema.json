@@ -28,9 +28,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled":          {"type": "boolean"},
-        "budget_tokens":    {"type": "integer"},
-        "include_thoughts": {"type": "boolean"}
+        "mode":             {"type": "string", "enum": ["level", "budget", "off"], "description": "Which thinking parameter goes on the wire: thinkingLevel, thinkingBudget, or neither."},
+        "level":            {"type": "string", "enum": ["minimal", "low", "medium", "high"], "description": "thinkingConfig.thinkingLevel (Gemini 3.x). Required under mode: level."},
+        "enabled":          {"type": "boolean", "description": "Deprecated alias: true -> mode: level, false -> mode: off."},
+        "budget_tokens":    {"type": "integer", "description": "thinkingConfig.thinkingBudget (Gemini 2.5). Required under mode: budget; -1 dynamic, 0 disable."},
+        "include_thoughts": {"type": "boolean", "description": "Surface thought parts as thinking.step events."}
       }
     },
     "code_execution": {"type": "boolean", "description": "Enable Gemini's built-in code-execution tool."},
