@@ -271,6 +271,11 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	if nextCfg.MaxTokens > 0 && retryReq.MaxTokens == 0 {
 		retryReq.MaxTokens = nextCfg.MaxTokens
 	}
+	// The fallback entry's own effort fills in a value the request lacks; it
+	// never overrides one the request already carries.
+	if nextCfg.Effort != "" && retryReq.Effort == "" {
+		retryReq.Effort = nextCfg.Effort
+	}
 
 	_ = p.bus.Emit("llm.request", retryReq)
 }
