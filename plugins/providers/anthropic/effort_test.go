@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 // TestParseOutputConfig_Absent verifies that omitting the `output_config` block
 // leaves the effort unset, so nothing is emitted and the API default applies.
 func TestParseOutputConfig_Absent(t *testing.T) {
-	oc, err := parseOutputConfig(map[string]any{})
+	oc, err := parseOutputConfig(map[string]any{}, silentTestLogger())
 	if err != nil {
 		t.Fatalf("parseOutputConfig: unexpected error: %v", err)
 	}
@@ -27,7 +28,7 @@ func TestParseOutputConfig_Absent(t *testing.T) {
 func TestParseOutputConfig_BlockWithoutEffort(t *testing.T) {
 	oc, err := parseOutputConfig(map[string]any{
 		"output_config": map[string]any{},
-	})
+	}, silentTestLogger())
 	if err != nil {
 		t.Fatalf("parseOutputConfig: unexpected error: %v", err)
 	}
@@ -36,13 +37,14 @@ func TestParseOutputConfig_BlockWithoutEffort(t *testing.T) {
 	}
 }
 
-// TestParseOutputConfig_AcceptedLevels pins the closed vocabulary: exactly the
-// five levels Anthropic documents, no more.
+// TestParseOutputConfig_AcceptedLevels pins that Anthropic's own five levels
+// pass through the vocabulary gate unchanged — the clamp widens what is
+// accepted, it must never rewrite a native value.
 func TestParseOutputConfig_AcceptedLevels(t *testing.T) {
 	for _, want := range []effortLevel{effortLow, effortMedium, effortHigh, effortXHigh, effortMax} {
 		oc, err := parseOutputConfig(map[string]any{
 			"output_config": map[string]any{"effort": string(want)},
-		})
+		}, silentTestLogger())
 		if err != nil {
 			t.Fatalf("effort %q: unexpected error: %v", want, err)
 		}
@@ -58,7 +60,7 @@ func TestParseOutputConfig_AcceptedLevels(t *testing.T) {
 func TestParseOutputConfig_UnknownLevel(t *testing.T) {
 	_, err := parseOutputConfig(map[string]any{
 		"output_config": map[string]any{"effort": "extreme"},
-	})
+	}, silentTestLogger())
 	if err == nil {
 		t.Fatal("expected an error for an unknown effort level")
 	}
@@ -74,7 +76,7 @@ func TestParseOutputConfig_UnknownLevel(t *testing.T) {
 func TestParseOutputConfig_NonStringLevel(t *testing.T) {
 	_, err := parseOutputConfig(map[string]any{
 		"output_config": map[string]any{"effort": 3},
-	})
+	}, silentTestLogger())
 	if err == nil {
 		t.Fatal("expected an error for a non-string effort level")
 	}
@@ -446,15 +448,16 @@ func TestEffort_InvalidRoleValueFailsTheRequest(t *testing.T) {
 }
 
 // TestEffort_InvalidRequestValueFailsTheRequest covers the same rejection for
-// a value that arrived on the request rather than off a role — what a fanout
-// leg carrying another provider's vocabulary looks like from here.
+// a value that arrived on the request rather than off a role. The value is a
+// genuine typo, not another provider's word: Gemini's `minimal` is accepted and
+// clamped here (see TestEffort_MinimalClampsOnTheRequestPath).
 func TestEffort_InvalidRequestValueFailsTheRequest(t *testing.T) {
 	rec := newBusRecorder()
 	p := &Plugin{logger: silentTestLogger(), bus: rec.bus}
 	p.models = effortModels(map[string]string{"balanced": ""})
 
 	p.handleRequest(events.LLMRequest{
-		Effort:   "minimal", // Gemini's vocabulary, not Anthropic's.
+		Effort:   "xhig", // a fat-fingered "xhigh", in nobody's vocabulary.
 		Messages: []events.Message{{Role: "user", Content: "hi"}},
 	})
 
@@ -478,5 +481,190 @@ func TestResolveEffort_IgnoresAnUnvalidatedBadValue(t *testing.T) {
 
 	if got := p.resolveEffort(events.LLMRequest{Effort: "ludicrous"}); got != effortHigh {
 		t.Fatalf("resolveEffort = %q, want the provider-level default %q", got, effortHigh)
+	}
+}
+
+// --- union vocabulary / the `minimal` clamp ---------------------------------
+
+// TestValidateEffort_UnionVocabulary pins the single vocabulary gate: both
+// providers' words are accepted, Anthropic's own pass through unchanged, and
+// Gemini's `minimal` clamps to Anthropic's floor. After this, any value on a
+// `core.models` role shared between the two providers works on both legs.
+func TestValidateEffort_UnionVocabulary(t *testing.T) {
+	native := []effortLevel{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
+	for _, want := range native {
+		got, clamped, err := validateEffort(string(want))
+		if err != nil {
+			t.Fatalf("effort %q: unexpected error: %v", want, err)
+		}
+		if clamped {
+			t.Fatalf("effort %q reported as clamped; a native value must pass through", want)
+		}
+		if got != want {
+			t.Fatalf("effort %q resolved to %q", want, got)
+		}
+	}
+
+	got, clamped, err := validateEffort("minimal")
+	if err != nil {
+		t.Fatalf("minimal: unexpected error: %v", err)
+	}
+	if !clamped {
+		t.Fatal("minimal did not report as clamped")
+	}
+	if got != effortLow {
+		t.Fatalf("minimal resolved to %q, want %q", got, effortLow)
+	}
+}
+
+// TestValidateEffort_TypoStillRejected is the other half of "widen, don't
+// loosen": the accepted set grew by exactly one word, and everything outside
+// the union is still an error naming what is accepted.
+func TestValidateEffort_TypoStillRejected(t *testing.T) {
+	for _, bad := range []string{"ludicrous", "xhig", "minimum", "MINIMAL", "none", "off"} {
+		if _, _, err := validateEffort(bad); err == nil {
+			t.Fatalf("effort %q was accepted; only the union vocabulary may pass", bad)
+		}
+	}
+
+	_, _, err := validateEffort("ludicrous")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"ludicrous", effortValues, "minimal"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestParseOutputConfig_ClampsMinimal covers the provider-level key: `minimal`
+// is accepted at Init rather than failing the boot, stored as `low`, and the
+// clamp is warned there — the one place a boot-time fact needs saying.
+func TestParseOutputConfig_ClampsMinimal(t *testing.T) {
+	var buf bytes.Buffer
+	oc, err := parseOutputConfig(map[string]any{
+		"output_config": map[string]any{"effort": "minimal"},
+	}, warnCaptureLogger(&buf))
+	if err != nil {
+		t.Fatalf("parseOutputConfig: unexpected error: %v", err)
+	}
+	if oc.Effort != effortLow {
+		t.Fatalf("effort = %q, want %q", oc.Effort, effortLow)
+	}
+
+	log := buf.String()
+	for _, want := range []string{"clamped", "minimal", "low"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("clamp warning %q does not mention %q", log, want)
+		}
+	}
+}
+
+// TestParseOutputConfig_NativeLevelIsNotWarned verifies the warning is specific
+// to a clamp: a native value must not produce log noise on every boot.
+func TestParseOutputConfig_NativeLevelIsNotWarned(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := parseOutputConfig(map[string]any{
+		"output_config": map[string]any{"effort": "max"},
+	}, warnCaptureLogger(&buf)); err != nil {
+		t.Fatalf("parseOutputConfig: unexpected error: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("unexpected warning for a native level: %q", buf.String())
+	}
+}
+
+// TestBuildRequestBody_ClampedProviderKeyOnWire verifies the clamped level —
+// not the configured word — is what reaches `output_config.effort`. Anthropic
+// would 400 on a literal "minimal".
+func TestBuildRequestBody_ClampedProviderKeyOnWire(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	oc, err := parseOutputConfig(map[string]any{
+		"output_config": map[string]any{"effort": "minimal"},
+	}, silentTestLogger())
+	if err != nil {
+		t.Fatalf("parseOutputConfig: unexpected error: %v", err)
+	}
+	p.outputConfig = oc
+
+	body := p.buildRequestBody("claude-opus-4-5", 1024, events.LLMRequest{
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	got, ok := body["output_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("output_config = %#v, want map[string]any", body["output_config"])
+	}
+	if got["effort"] != "low" {
+		t.Fatalf("output_config.effort = %#v, want %q", got["effort"], "low")
+	}
+}
+
+// TestEffort_RoleMinimalClampsToLow is the story's headline case: a shared
+// `core.models` role set to Gemini's `minimal` used to fail the Anthropic leg.
+// It now sends `low`, so a fanout role is configurable with either provider's
+// vocabulary.
+func TestEffort_RoleMinimalClampsToLow(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.models = effortModels(map[string]string{"balanced": "", "shallow": "minimal"})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "shallow",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "low" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "low")
+	}
+}
+
+// TestEffort_MinimalClampsOnTheRequestPath covers the same clamp for a value
+// stamped onto the request by the fallback or fanout coordinator, and asserts
+// the request is no longer failed for it.
+func TestEffort_MinimalClampsOnTheRequestPath(t *testing.T) {
+	rec := newBusRecorder()
+	p := &Plugin{logger: silentTestLogger(), bus: rec.bus}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "max"})
+
+	req := events.LLMRequest{
+		Role:     "deep",
+		Effort:   "minimal", // Gemini's word, stamped for this fanout leg.
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	}
+
+	target := p.resolveTarget(req)
+	if _, _, err := validateEffort(target.effort); err != nil {
+		t.Fatalf("handleRequest would have failed the request: %v", err)
+	}
+	req.Effort = target.effort
+	if got := p.resolveEffort(req); got != effortLow {
+		t.Fatalf("resolveEffort = %q, want %q", got, effortLow)
+	}
+}
+
+// TestEffort_ClampWarnsOnce verifies the clamp is observable but not noisy: a
+// role's effort arrives per request, so without dedup a busy fanout role would
+// repeat the warning on every turn.
+func TestEffort_ClampWarnsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{logger: warnCaptureLogger(&buf)}
+
+	for i := 0; i < 3; i++ {
+		p.warnEffortClamped("shallow", "minimal", effortLow)
+	}
+
+	if n := strings.Count(buf.String(), "clamped"); n != 1 {
+		t.Fatalf("clamp warning fired %d times, want exactly 1: %q", n, buf.String())
+	}
+	for _, want := range []string{"shallow", "minimal", "low"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("clamp warning %q does not mention %q", buf.String(), want)
+		}
+	}
+
+	// A different role, or a different configured value, is a separate fact
+	// and gets its own line.
+	p.warnEffortClamped("other", "minimal", effortLow)
+	if n := strings.Count(buf.String(), "clamped"); n != 2 {
+		t.Fatalf("clamp warning fired %d times for two roles, want 2: %q", n, buf.String())
 	}
 }
