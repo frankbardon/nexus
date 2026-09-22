@@ -49,6 +49,35 @@ func (sw *SSEWriter) Write(e Event) error {
 	return sw.writeData(string(data))
 }
 
+// WriteComment emits an SSE comment record — a line beginning ":" carrying no
+// event. Every conforming SSE reader ignores it (SSEReader.Next skips it
+// explicitly), so it is inert to the client and is the standard way to keep a
+// connection from idling out.
+//
+// It exists because an AG-UI stream is silent between events, and "silent" is
+// what an intermediary measures. A turn that spends thirty seconds in one LLM
+// call writes nothing in that time, and a proxy, load balancer or service mesh
+// with an idle timeout below the gap closes the connection under a live turn —
+// which the client sees as a 200 with a truncated body and no answer, and the
+// engine sees as the stream dying under a turn it must then cancel.
+//
+// A comment carrying no text is a bare ":" line, which is legal; the text is
+// for whoever reads the raw stream.
+func (sw *SSEWriter) WriteComment(text string) error {
+	var buf bytes.Buffer
+	for _, line := range strings.Split(text, "\n") {
+		buf.WriteString(": ")
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+	}
+	buf.WriteByte('\n')
+	if _, err := sw.w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("agui: write sse comment: %w", err)
+	}
+	sw.Flush()
+	return nil
+}
+
 // writeData emits a single "data:" SSE record. Multi-line payloads are split
 // across multiple data lines per the SSE spec; JSON marshalling never emits raw
 // newlines, but this keeps the writer correct for any payload.

@@ -109,6 +109,10 @@ type Plugin struct {
 
 	corsOrigins []string
 
+	// heartbeatInterval is the idle-stream keepalive gap. Zero means the
+	// server's own default; negative disables it. See DefaultHeartbeatInterval.
+	heartbeatInterval time.Duration
+
 	// emitState gates the AG-UI shared-state feature (E3-S1). When true the
 	// plugin mirrors the session's scene store as an AG-UI shared-state document,
 	// emitting a StateSnapshot at run start and ordered StateDeltas as scenes
@@ -332,12 +336,30 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.sharedState = make(map[string]json.RawMessage)
 
+	// How long an idle SSE stream may stay silent. Unset takes
+	// DefaultHeartbeatInterval; an explicit "0" (or any non-positive duration)
+	// turns keepalives off for a deployment that has its own and does not want
+	// a second. An unparseable value is a config error rather than a silent
+	// fallback, because the failure it guards against is invisible until a
+	// connection is cut mid-turn.
+	if v, ok := ctx.Config["heartbeat_interval"].(string); ok && strings.TrimSpace(v) != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("agui: heartbeat_interval %q is not a duration: %w", v, err)
+		}
+		if d <= 0 {
+			d = -1 // disabled; distinct from the zero that means "take the default"
+		}
+		p.heartbeatInterval = d
+	}
+
 	p.server = NewServer(serverConfig{
-		addr:        p.bindAddr,
-		chain:       p.authChain,
-		corsOrigins: p.corsOrigins,
-		logger:      p.logger,
-		bridge:      p,
+		addr:              p.bindAddr,
+		chain:             p.authChain,
+		corsOrigins:       p.corsOrigins,
+		logger:            p.logger,
+		bridge:            p,
+		heartbeatInterval: p.heartbeatInterval,
 	})
 
 	// Wire outbound bus subscriptions (engine -> AG-UI SSE). Handlers translate

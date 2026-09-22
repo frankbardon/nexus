@@ -11,6 +11,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/nexusauth"
 	"github.com/frankbardon/nexus/pkg/nexusheaders"
+	"time"
 )
 
 // agentPath is the POST route that accepts a RunAgentInput and responds with an
@@ -63,7 +64,26 @@ type serverConfig struct {
 	corsOrigins []string
 	logger      *slog.Logger
 	bridge      bridge
+
+	// heartbeatInterval is how often an idle SSE stream emits a comment record
+	// so the connection is never silent for longer than this. Zero takes
+	// DefaultHeartbeatInterval; negative disables it.
+	heartbeatInterval time.Duration
 }
+
+// DefaultHeartbeatInterval is the gap an idle AG-UI stream is allowed before it
+// writes a keepalive comment.
+//
+// 15s is chosen against the shortest idle timeout a deployment realistically
+// meets — 30s, which is both nginx's proxy_read_timeout default and the GKE
+// Gateway backend default — so two heartbeats fall inside the smallest window
+// rather than one landing on its edge.
+//
+// ⚠ IT DOES NOT HELP AGAINST A TOTAL-DURATION CAP. A GKE GCPBackendPolicy
+// timeoutSec bounds the WHOLE response, not the gap between writes, so a turn
+// longer than it is cut however often this writes. Keepalives answer idle
+// timeouts; a duration cap has to be raised where it is configured.
+const DefaultHeartbeatInterval = 15 * time.Second
 
 // Server is the embedded AG-UI HTTP server. It owns an *http.Server bound to a
 // loopback address by default, authenticates requests through a nexusauth
@@ -91,6 +111,9 @@ type Server struct {
 
 // NewServer builds a Server from cfg. The socket is not bound until Start.
 func NewServer(cfg serverConfig) *Server {
+	if cfg.heartbeatInterval == 0 {
+		cfg.heartbeatInterval = DefaultHeartbeatInterval
+	}
 	s := &Server{cfg: cfg, corsSet: make(map[string]struct{})}
 	for _, o := range cfg.corsOrigins {
 		if o == "*" {
@@ -303,9 +326,40 @@ func (s *Server) handleRunAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// THE STREAM MUST NEVER GO SILENT FOR LONGER THAN THE SHORTEST IDLE TIMEOUT
+	// BETWEEN HERE AND THE CLIENT. AG-UI events are bursty -- a turn spends tens
+	// of seconds inside one LLM call and writes nothing at all in that window --
+	// and "writes nothing" is exactly what a proxy, load balancer or service
+	// mesh measures before it closes a connection. The client then sees a 200
+	// with a truncated body and no answer (the status was decided with the
+	// first byte, long before), and this side sees the stream die under a live
+	// turn and cancels it.
+	//
+	// A comment record is inert to every conforming reader (SSEReader.Next
+	// skips ":" lines) so this changes nothing a client observes.
+	//
+	// A FAILED HEARTBEAT IS A DEAD SOCKET AND TAKES THE SAME EXIT AS A FAILED
+	// EVENT, which is a second thing this buys: a connection that breaks while
+	// the turn is thinking used to go unnoticed until the next event, so the
+	// agent kept working for a reader that was already gone.
+	var beat <-chan time.Time
+	if s.cfg.heartbeatInterval > 0 {
+		ticker := time.NewTicker(s.cfg.heartbeatInterval)
+		defer ticker.Stop()
+		beat = ticker.C
+	}
+
 	// Drain translated AG-UI events until the terminal event closes the run.
 	for {
 		select {
+		case <-beat:
+			if err := sse.WriteComment("heartbeat"); err != nil {
+				s.cfg.logger.Debug("agui sse heartbeat failed; ending run", "error", err)
+				if run.fail("sse write failed") {
+					s.cfg.bridge.streamDied(run)
+				}
+				return
+			}
 		case ev := <-run.out:
 			if err := sse.Write(ev); err != nil {
 				s.cfg.logger.Debug("agui sse write failed; ending run", "error", err)
