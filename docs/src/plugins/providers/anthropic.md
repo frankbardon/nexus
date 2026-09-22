@@ -227,6 +227,60 @@ the rejection, because an explicit mode is the operator naming the wire shape.
 provider `adaptive` is what hands sizing back to the model, and a `-1` copied out of a
 Gemini block is just an invalid budget.
 
+#### Per-role thinking
+
+Everything above describes the **plugin-level** `thinking:` block. A
+`core.models` role entry may carry one of its own, which **merges over** it key
+by key — the role wins on every key it names, and a plugin key the role is
+silent about survives. That is what lets one plugin instance serve a Haiku role
+on `mode: budget` and an Opus role on `mode: adaptive` at the same time, which is
+impossible with a single plugin-level block.
+
+```yaml
+plugins:
+  active:
+    nexus.llm.anthropic:
+      thinking:
+        mode: adaptive
+        display: summarized
+
+core:
+  models:
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+    legacy:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      thinking:
+        mode: budget          # role wins on `mode`
+        budget_tokens: 4096   # `display: summarized` survives from the plugin
+```
+
+The merged block goes through the same parser as the plugin one, so it inherits
+every check, inference and deprecation warning documented above. Because a block
+written on a `core.models` entry never passes through this plugin's
+`schema.json`, `Init` sweeps every role — and every entry of every chain — this
+provider could serve and **fails the boot naming the role** when a merged block
+is invalid, rather than waiting for the first request that uses it.
+
+Precedence is: a block already stamped on the request (the `fallback` or `fanout`
+coordinator's, for the chain entry actually being served) → the role's block,
+merged over the plugin's → the role's `effort`, which lands in a different wire
+field and so never contends → the plugin block. A named role does **not** inherit
+the default role's block: these are one provider's vocabulary and a different
+role may be served by a different provider.
+
+Two things to watch: `thinking: {}` on a role is a statement rather than a
+silence (it overrides no key, but a present block with no `mode` is `adaptive`),
+and a role that switches `mode` inherits plugin-level keys that may be
+meaningless under the new mode. `include_thoughts` set on a role feeds the
+`display` inference like any other key, but whether `thinking.step` events are
+emitted is still read from the plugin-level value.
+
+See the [configuration reference](../../configuration/reference.md#per-role-thinking)
+for the canonical account.
+
 #### Thinking on the bus, and round-tripping
 
 `thinking` blocks that carry text are emitted as `thinking.step` events (`Source:

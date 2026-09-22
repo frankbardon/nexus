@@ -58,6 +58,11 @@ type Plugin struct {
 	cache        cacheConfig
 	thinking     thinkingConfig
 	outputConfig outputConfig
+	// thinkingRaw is the plugin-level `thinking:` block exactly as configured,
+	// kept because a `core.models` role's own block merges over it key by key
+	// and the merged result has to go back through parseThinkingConfig. nil
+	// means no plugin-level block at all. Read-only — see mergeThinkingBlock.
+	thinkingRaw map[string]any
 	// effortClampWarned dedupes warnEffortClamped's per-request warning,
 	// keyed by role + configured value. See warnEffortClamped.
 	effortClampWarned sync.Map
@@ -154,6 +159,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		return err
 	}
 	p.thinking = thinking
+	p.thinkingRaw = rawThinkingBlock(ctx.Config)
 	if p.thinking.Mode != thinkingModeOff {
 		p.logger.Debug("extended thinking configured",
 			"mode", string(p.thinking.Mode),
@@ -161,6 +167,15 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			"display", string(p.thinking.Display),
 			"include_thoughts", p.thinking.IncludeThoughts,
 		)
+	}
+
+	// A `core.models` role may carry a `thinking:` block of its own, which
+	// merges over the plugin-level one. Those blocks never pass through
+	// schema.json — core stores them without looking inside — so this is the
+	// only thing that ever checks them, and it does it at boot rather than at
+	// the first request that happens to name the role.
+	if err := validateRoleThinking(p.models, p.thinkingRaw, p.logger); err != nil {
+		return err
 	}
 
 	// Reasoning depth. Independent of thinking.mode — effort is emitted
@@ -487,6 +502,18 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// parameter, so the caller's payload is untouched.
 	req.Effort = target.effort
 
+	// The serving chain entry's native `thinking:` block. A fallback or fanout
+	// coordinator has already stamped it when one is involved, and
+	// ResolveModelConfig leaves a stamped request alone; otherwise it recovers
+	// the block from the registry, covering the named role, the default role
+	// and the late case where a router rewrote `model` and left `role` alone.
+	//
+	// Only Thinking is taken. The other axes ResolveModelConfig fills either
+	// already have a resolution pass here (effort, max_tokens, model) or have
+	// no consumer in this provider yet; widening that is a later story's job,
+	// not a side effect of this one.
+	req.Overrides.Thinking = engine.ResolveModelConfig(p.models, req).Overrides.Thinking
+
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", target.effort)
 
 	// Files API preflight: when enabled, swap oversize Data parts for file_ids
@@ -639,7 +666,10 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 
 	// Extended thinking. When enabled this strips any non-1 temperature
 	// (Anthropic requires temp=1) and adds the thinking object to body.
-	applyThinking(body, p.thinking, p.logger)
+	// resolveThinking merges the serving role's own `thinking:` block over the
+	// plugin-level one, so two roles on this one plugin instance can put
+	// different thinking objects on the wire.
+	applyThinking(body, p.resolveThinking(req), p.logger)
 
 	// Extract system prompt and build messages.
 	var systemPrompt string

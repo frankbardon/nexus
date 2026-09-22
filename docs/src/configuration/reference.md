@@ -733,8 +733,19 @@ the provider resolves the entry itself. Either way one precedence rule holds:
 **anything already on the request wins outright, and an entry only fills an axis
 the request arrived without.** Per axis, not per key: a request that already
 carries a `thinking` block keeps it whole rather than having the entry's keys
-merged into it. An axis the named role leaves unset falls through to the default
-role's entry.
+merged into it. (What happens between an entry's block and the *plugin's* block
+of the same name is the provider's business, and is documented in that provider's
+section — `nexus.llm.anthropic` merges them key by key.)
+
+**Fallthrough to the default role is limited to the shared axes.** `max_tokens`,
+`effort` and `temperature` speak one vocabulary every provider understands, so an
+axis a named role leaves unset falls through to the default role's entry — the
+long-standing `effort` behaviour. The provider-native axes — `thinking`,
+`reasoning`, `cache`, `retry` and `api` — do **not** fall through: they resolve
+from the role the request actually names, and the default role's entry supplies
+them only when the request names no role at all. Otherwise a deployment whose
+default role is Anthropic with `thinking: {mode: adaptive}` would silently hand
+that Anthropic-shaped block to a named Gemini role that was never given one.
 
 ```yaml
 core:
@@ -1501,7 +1512,8 @@ Source: `plugins/providers/anthropic/plugin.go` + `auth.go`, `pricing.go`,
 | `thinking.budget_tokens`           | int    | *(none)*            | Thinking token budget. **Required** when `mode: budget` — `Init` fails naming the key if it is missing. Ignored in every other mode. Set with no `mode`, a non-zero value infers `mode: budget`; `0` keeps its long-standing meaning of "disable thinking" and infers `mode: off`. Under an explicit `mode: budget` a `0` is passed through and the API rejects it. |
 | `thinking.display`                 | string | *(unset — the model's own default)* | `summarized` or `omitted`. Emitted inside the `thinking` object alongside `type`; unset, the key is absent. Unset **and** `include_thoughts` true infers `summarized` under `mode: adaptive` or `budget` — see "Thinking display" below. Never emitted under `mode: off`. |
 | `thinking.enabled`                 | bool   | *(unset)*           | **Deprecated** alias for `mode`: `true` → `adaptive`, `false` → `off`. Ignored when `mode` is set. Logs a deprecation warning either way. |
-| `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. |
+| `thinking.include_thoughts`        | bool   | `true`              | Surface thinking content via `thinking.step` events. Note that the **`thinking.step` emission** is still driven by the plugin-level value: a role block that sets it changes the `display` inference and therefore the wire shape, but not whether the events are emitted. |
+| *(role `thinking`)*                | map    | *(unset)*           | Not a plugin key — the [`core.models`](#coremodels) `<role>.thinking` block, which **merges over** the plugin-level `thinking:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives. The merged block goes through the same parser as the plugin one, so it gets the same validation, the same `mode` inference and the same deprecation warnings. Every role this provider could serve is swept at **`Init`** and an invalid merged block **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on every path that resolves a role, and a block already on the request (stamped by the fallback or fanout coordinator for the chain entry actually being served) wins over the role's. See "Per-role thinking" below. |
 | `output_config.effort`             | string | *(unset — the API default, `high`)* | Reasoning depth. Anthropic's own levels are `low`, `medium`, `high`, `xhigh` and `max`; Gemini's `minimal` is also **accepted and clamped to `low`**, warned once at `Init`, so the same word configures either provider. Emitted as `output_config: {"effort": "..."}` — **nested, never a top-level request field**, and always the clamped native level. Unset adds no `output_config` key at all. **Independent of `thinking.mode`**: emitted whatever the thinking configuration is, including `mode: off`. A value in neither vocabulary fails at `Init`. This is the **default**, not the last word: a [`core.models`](#coremodels) role's `effort` overrides it per request — see the row below. See "Effort" below. |
 | *(role `effort`)*                  | string | *(unset)*           | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `output_config.effort`. Anthropic's five pass through unchanged and Gemini's `minimal` **clamps to `low`**, warned once per (role, value) at request time, so a role shared with Gemini stays configurable with either provider's word. It **wins over** the plugin-level `output_config.effort` above. That is deliberately the **inverse** of Gemini, where `thinking.level` beats a role's effort: there `level` is the native vocabulary and effort the translated one, whereas here `effort` is already this provider's own vocabulary, so the more specific setting wins. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` without touching the rest — and an effort already on the request (stamped by the fallback or fanout coordinator for the chain entry actually being served) wins over both. A value outside the **union** vocabulary **fails the request**, emitting `core.error` naming the role and the accepted set; unlike the plugin key it cannot fail at `Init`, because a role's value only exists per request. See "Per-role effort" below, and [Reasoning depth: `effort`](#reasoning-depth-effort) for the cross-provider picture. |
 | `multimodal.pdf_beta`              | bool   | `false`             | Send the `pdfs-2024-09-25` beta header for legacy PDF support. |
@@ -1608,6 +1620,84 @@ under `adaptive`, `budget` and `disabled`, and never under `off`, which sends no
 `thinking` object at all. The inference is limited to the two modes that
 actually think; under `disabled` there is no reasoning to display, so only an
 explicit `display` reaches the wire there.
+
+#### Per-role thinking
+
+A [`core.models`](#coremodels) entry may carry a `thinking:` block of its own,
+taking exactly the keys documented above. One plugin instance can therefore put
+different thinking objects on the wire for different roles — a Haiku role on
+`mode: budget` and an Opus role on `mode: adaptive`, say.
+
+**The merge is key-wise, and the role wins per key.** A plugin-level key the role
+does not mention survives, so a role that only wants a different `display` does
+not have to restate the mode:
+
+```yaml
+plugins:
+  active:
+    nexus.llm.anthropic:
+      thinking:
+        mode: adaptive
+        display: summarized
+
+core:
+  models:
+    default: balanced
+    balanced:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+    legacy:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      thinking:                  # merged over the plugin block
+        mode: budget             # role wins
+        budget_tokens: 4096
+                                 # display: summarized survives from the plugin
+```
+
+`balanced` sends `{"type": "adaptive", "display": "summarized"}`; `legacy` sends
+`{"type": "enabled", "budget_tokens": 4096, "display": "summarized"}`.
+
+**Precedence**, highest first:
+
+1. a `thinking` block already on the request — what the
+   [`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout)
+   coordinators stamp for the chain entry they are actually serving, which is the
+   only correct block for a fallback retry or a non-first fanout leg;
+2. the role's own `thinking:` block, merged over the plugin's;
+3. the role's [`effort`](#per-role-effort), which lands in a **different** wire
+   field (`output_config.effort`) and so never contends with the thinking object
+   — a role can set both;
+4. the plugin-level `thinking:` block, which is what a request whose role carries
+   no block of its own gets, unchanged.
+
+Resolution happens on every path that resolves a role: the role a request names,
+the default role when it names none, and the late recovery after a router rewrote
+`model` and left `role` alone. A named role does **not** inherit the default
+role's block — see [Native provider blocks on a role](#native-provider-blocks-on-a-role).
+
+**Invalid role blocks fail the boot.** A block on a `core.models` entry never
+passes through this plugin's `schema.json` — core stores these maps without
+looking inside — so `Init` sweeps every role (and every entry of every chain)
+this provider could serve, merges each block over the plugin's and parses the
+result. A role whose merged block is invalid, such as `mode: budget` with no
+`budget_tokens` anywhere, fails `Init` with an error naming the role, rather than
+failing at the first request that happens to use it.
+
+Two edges worth knowing:
+
+- **`thinking: {}` on a role is a statement, not a silence.** It overrides no
+  individual key, but the merged block is *present*, so on a deployment with no
+  plugin-level block it turns thinking on (a present block with no `mode` is
+  `adaptive`).
+- **A role that switches `mode` inherits plugin keys that may be meaningless
+  under the new mode.** A plugin-level `budget_tokens` left behind by
+  `mode: budget` is simply ignored under a role's `mode: adaptive`; in the other
+  direction it is what satisfies a role's `mode: budget`. Restate the keys that
+  matter on the role when that is not what you want.
+- **`include_thoughts` on a role changes the wire shape, not the events.** It
+  feeds the `display` inference like any other key, but whether `thinking.step`
+  events are emitted at all is still read from the plugin-level value.
 
 #### Effort
 

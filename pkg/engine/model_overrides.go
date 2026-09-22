@@ -51,10 +51,21 @@ func StampModelConfig(req *events.LLMRequest, cfg ModelConfig) {
 //     the late-recovery path: it is consulted whether or not `model` was already
 //     set, so a router that rewrote `model` and left `role` alone does not
 //     silently drop the role's configuration;
-//  3. the default role's entry.
+//  3. the default role's entry — for the shared axes only.
 //
-// Step 3 runs even when step 2 found a role, mirroring the Effort recovery this
-// generalises: an axis no named role sets falls through to the default role.
+// Step 3 is deliberately narrower than step 2. The *shared* axes — max_tokens,
+// effort and temperature — speak one vocabulary every provider understands, and
+// an axis a named role leaves unset falling through to the default role is the
+// long-standing Effort behaviour this generalises. The *provider-native* axes —
+// the `thinking`, `reasoning`, `cache` and `retry` blocks and the `api` selector
+// — do not fall through: they resolve from the role the request actually names,
+// and the default role supplies them only when the request names no role at all,
+// which is what "the default role" means.
+//
+// Without that split a deployment whose default role is Anthropic with
+// `thinking: {mode: adaptive}` would silently hand an Anthropic-shaped block to
+// a named Gemini role that was never given one — a configuration the operator
+// did not write, in a vocabulary that provider does not speak.
 //
 // A stamped request is returned unchanged — the coordinator already supplied the
 // only entry that is correct for it.
@@ -70,15 +81,28 @@ func ResolveModelConfig(models *ModelRegistry, req events.LLMRequest) events.LLM
 		if cfg, ok := models.Resolve(req.Role); ok {
 			applyModelConfig(&req, cfg)
 		}
+		// The named role owns the provider-native axes outright, so only the
+		// shared ones fall through.
+		applySharedModelConfig(&req, models.Default())
+		return req
 	}
 	applyModelConfig(&req, models.Default())
 	return req
 }
 
-// applyModelConfig is the shared gap-fill both halves are built from: every axis
+// applyModelConfig is the full gap-fill both halves are built from: every axis
 // cfg sets and req does not is copied across, and nothing req already carries is
 // disturbed.
 func applyModelConfig(req *events.LLMRequest, cfg ModelConfig) {
+	applySharedModelConfig(req, cfg)
+	applyNativeModelConfig(req, cfg)
+}
+
+// applySharedModelConfig fills the axes whose vocabulary is shared across every
+// provider: a token ceiling, a reasoning-depth word and a sampling temperature
+// mean the same thing whoever ends up serving the request. These are the axes
+// that may fall through from a named role to the default role.
+func applySharedModelConfig(req *events.LLMRequest, cfg ModelConfig) {
 	if cfg.MaxTokens > 0 && req.MaxTokens == 0 {
 		req.MaxTokens = cfg.MaxTokens
 	}
@@ -91,6 +115,13 @@ func applyModelConfig(req *events.LLMRequest, cfg ModelConfig) {
 		t := *cfg.Temperature
 		req.Temperature = &t
 	}
+}
+
+// applyNativeModelConfig fills the axes written in one provider's own
+// vocabulary — the native blocks and the API-surface selector. They belong to
+// the entry that named them and never fall through to a different role's entry,
+// because a different role may well be served by a different provider.
+func applyNativeModelConfig(req *events.LLMRequest, cfg ModelConfig) {
 	if cfg.API != "" && req.Overrides.API == "" {
 		req.Overrides.API = cfg.API
 	}

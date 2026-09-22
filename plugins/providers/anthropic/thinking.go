@@ -3,6 +3,10 @@ package anthropic
 import (
 	"fmt"
 	"log/slog"
+	"sort"
+
+	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 // thinkingMode is the operator-declared wire shape for Anthropic's
@@ -295,4 +299,171 @@ func applyThinking(body map[string]any, cfg thinkingConfig, logger *slog.Logger)
 		}
 		delete(body, "temperature")
 	}
+}
+
+// --- per-role thinking ------------------------------------------------------
+
+// rawThinkingBlock lifts the plugin-level `thinking:` block off the plugin
+// config so it can be merged with a `core.models` role's block later. nil means
+// the plugin set no block at all, which parseThinkingConfig reads as mode off.
+//
+// The map is not copied: everything reachable from it is treated as read-only,
+// and mergeThinkingBlock always builds a fresh map rather than writing into
+// either input.
+func rawThinkingBlock(cfg map[string]any) map[string]any {
+	block, ok := cfg["thinking"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return block
+}
+
+// mergeThinkingBlock merges a `core.models` role's `thinking:` block over the
+// plugin-level one, key by key. The role wins on every key it mentions, and a
+// plugin-level key the role is silent about survives — so a role that only
+// wants a different `display` does not have to restate the mode.
+//
+// A nil role block means the role said nothing, and the plugin block stands
+// unchanged. A set-but-empty role block (`thinking: {}`) is a statement rather
+// than a gap: it overrides no individual key, but the merged block is non-nil,
+// so a role can turn thinking on (parseThinkingConfig reads a present block with
+// no mode as adaptive) on a deployment whose plugin block is absent entirely.
+//
+// The known sharp edge, accepted deliberately: a role that switches `mode`
+// inherits plugin-level keys that are meaningless — or wrong — under the new
+// mode. `budget_tokens` left behind by a plugin-level `mode: budget` is simply
+// ignored under a role's `mode: adaptive`; the reverse direction is caught at
+// Init by validateRoleThinking. Restating the keys that matter on the role is
+// the way out.
+//
+// Neither input is mutated and the result aliases neither: the plugin config map
+// and the registry's block are both shared with the loaded configuration.
+func mergeThinkingBlock(plugin, role map[string]any) map[string]any {
+	if role == nil {
+		return plugin
+	}
+	merged := make(map[string]any, len(plugin)+len(role))
+	for k, v := range plugin {
+		merged[k] = v
+	}
+	for k, v := range role {
+		merged[k] = v
+	}
+	return merged
+}
+
+// parseMergedThinking runs a merged block back through parseThinkingConfig —
+// the one parser — by handing it the block wrapped in the shape it expects. A
+// merged block is an ordinary `thinking:` block and gets exactly the same
+// validation, inference and deprecation handling the plugin-level one does.
+//
+// A nil logger suppresses the deprecation warnings, which is what the
+// per-request path wants: validateRoleThinking has already run every role's
+// merged block through here once at Init with the real logger attached.
+func parseMergedThinking(plugin, role map[string]any, logger *slog.Logger) (thinkingConfig, error) {
+	merged := mergeThinkingBlock(plugin, role)
+	if merged == nil {
+		return thinkingConfig{Mode: thinkingModeOff}, nil
+	}
+	return parseThinkingConfig(map[string]any{"thinking": merged}, logger)
+}
+
+// resolveThinking picks the extended-thinking configuration for one request.
+//
+// This is the single lookup point for the thinking block, deliberately separate
+// from its use site, and the counterpart of resolveEffort. Precedence, most
+// specific first:
+//
+//  1. req.Overrides.Thinking — the block of the chain entry actually being
+//     served. It arrives either stamped by the fallback or fanout coordinator
+//     (which alone knows a non-first entry is in play) or recovered from the
+//     registry by engine.ResolveModelConfig on the paths no coordinator
+//     touches. Either way it is merged over, not substituted for, the plugin
+//     block.
+//  2. the role's `effort:`, which is a separate wire field on this provider
+//     (`output_config.effort`, see resolveEffort) and so never contends with
+//     the thinking object.
+//  3. the plugin-level `thinking:` block, which is what a request carrying no
+//     override of its own gets, unchanged.
+//
+// An unparseable merged block is unreachable through Init, which sweeps every
+// role this provider could serve and refuses to boot on one. The degradation
+// here exists for a request whose Overrides.Thinking was hand-set by something
+// other than the registry: fall back to the plugin-level configuration rather
+// than putting a shape Anthropic will 400 on onto the wire.
+func (p *Plugin) resolveThinking(req events.LLMRequest) thinkingConfig {
+	if req.Overrides.Thinking == nil {
+		return p.thinking
+	}
+	// Nil logger: the warnings are boot-time facts, already said once by
+	// validateRoleThinking. Repeating them per request would flood the log of
+	// a busy role.
+	tc, err := parseMergedThinking(p.thinkingRaw, req.Overrides.Thinking, nil)
+	if err != nil {
+		logger := p.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("anthropic: ignoring an invalid per-request thinking block; using the plugin-level configuration",
+			"role", req.Role,
+			"error", err,
+		)
+		return p.thinking
+	}
+	return tc
+}
+
+// validateRoleThinking checks every `core.models` role this provider could
+// serve, at Init, by merging its `thinking:` block over the plugin-level one and
+// parsing the result.
+//
+// It exists because a block on a `core.models` entry bypasses the plugin's
+// schema.json entirely — core stores these maps without looking inside them, so
+// nothing else ever checks them. Without this sweep a role whose merged block is
+// invalid (`mode: budget` with no `budget_tokens`, say) would boot clean and
+// fail at the first request that named it, possibly hours later.
+//
+// The error names the role, which is the useful half of the answer. Roles are
+// walked in sorted order so a config with several broken roles fails on the same
+// one every boot.
+//
+// Entries naming another provider are that provider's business and are skipped;
+// an entry naming none may land here, so it is checked. The whole chain is
+// walked, not just the primary: a fallback entry's block reaches this provider
+// through the coordinator's stamp and is just as capable of being wrong.
+//
+// Shape mirrors validateRoleEfforts in plugins/providers/gemini/thinking.go.
+func validateRoleThinking(models *engine.ModelRegistry, plugin map[string]any, logger *slog.Logger) error {
+	if models == nil {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	roles := models.Roles()
+	sort.Strings(roles)
+
+	for _, role := range roles {
+		for i := 0; i < models.ChainLen(role); i++ {
+			cfg, ok := models.Fallback(role, i)
+			if !ok {
+				continue
+			}
+			if cfg.Provider != "" && cfg.Provider != pluginID {
+				continue
+			}
+			if cfg.Thinking == nil {
+				continue
+			}
+			// The role's logger, so a deprecation warning raised by the merged
+			// block says which role raised it. Only entries that actually set a
+			// block get here, so the plugin block's own warnings — already said
+			// once by Init — are not repeated per role.
+			if _, err := parseMergedThinking(plugin, cfg.Thinking, logger.With("role", role)); err != nil {
+				return fmt.Errorf("core.models role %q: %w", role, err)
+			}
+		}
+	}
+	return nil
 }

@@ -238,8 +238,10 @@ func TestResolveModelConfig_StampedRequestIsLeftAlone(t *testing.T) {
 	}
 }
 
-// An axis the named role leaves unset falls through to the default role, which
-// is exactly how the Effort recovery this generalises already behaves.
+// A *shared* axis the named role leaves unset falls through to the default
+// role, which is exactly how the Effort recovery this generalises already
+// behaves. max_tokens and temperature ride along for the same reason: one
+// vocabulary, understood by every provider.
 func TestResolveModelConfig_NamedRoleFallsThroughToDefault(t *testing.T) {
 	req := ResolveModelConfig(overridesRegistry(), events.LLMRequest{
 		SchemaVersion: events.LLMRequestVersion,
@@ -249,6 +251,87 @@ func TestResolveModelConfig_NamedRoleFallsThroughToDefault(t *testing.T) {
 	if req.Effort != "high" {
 		t.Fatalf("effort = %q, want the default role's %q after the named role set none",
 			req.Effort, "high")
+	}
+	if req.MaxTokens != 8192 {
+		t.Fatalf("max_tokens = %d, want the default role's 8192 after the named role set none",
+			req.MaxTokens)
+	}
+	if req.Temperature == nil || *req.Temperature != 0 {
+		t.Fatalf("temperature = %v, want the default role's explicit 0", req.Temperature)
+	}
+}
+
+// crossProviderRegistry is the failure this split exists to stop: a default
+// role served by Anthropic carrying a `thinking:` block, and a named role served
+// by Gemini carrying none of its own.
+func crossProviderRegistry() *ModelRegistry {
+	return NewModelRegistry(map[string]any{
+		"default": "balanced",
+		"balanced": map[string]any{
+			"provider":   "nexus.llm.anthropic",
+			"model":      "claude-opus-4-7",
+			"max_tokens": 8192,
+			"effort":     "high",
+			"api":        "messages",
+			"thinking":   map[string]any{"mode": "adaptive"},
+			"cache":      map[string]any{"enabled": true},
+			"retry":      map[string]any{"max_attempts": 4},
+			"reasoning":  map[string]any{"effort": "high"},
+		},
+		"quick": map[string]any{
+			"provider": "nexus.llm.gemini",
+			"model":    "gemini-3-flash",
+		},
+	})
+}
+
+// A named role must never inherit the default role's provider-native blocks:
+// they are written in one provider's vocabulary and the named role may well be
+// served by another. The shared axes still fall through.
+func TestResolveModelConfig_NativeBlocksDoNotBleedFromDefaultRole(t *testing.T) {
+	req := ResolveModelConfig(crossProviderRegistry(), events.LLMRequest{
+		SchemaVersion: events.LLMRequestVersion,
+		Role:          "quick",
+	})
+
+	if req.Overrides.Thinking != nil {
+		t.Fatalf("thinking = %v, want nil — the Gemini role was never given an Anthropic-shaped block",
+			req.Overrides.Thinking)
+	}
+	if req.Overrides.Cache != nil {
+		t.Fatalf("cache = %v, want nil", req.Overrides.Cache)
+	}
+	if req.Overrides.Retry != nil {
+		t.Fatalf("retry = %v, want nil", req.Overrides.Retry)
+	}
+	if req.Overrides.Reasoning != nil {
+		t.Fatalf("reasoning = %v, want nil", req.Overrides.Reasoning)
+	}
+	if req.Overrides.API != "" {
+		t.Fatalf("api = %q, want empty — %q is Anthropic's surface name", req.Overrides.API, "messages")
+	}
+
+	// The shared axes are unaffected: one vocabulary, every provider reads it.
+	if req.Effort != "high" {
+		t.Fatalf("effort = %q, want the default role's %q", req.Effort, "high")
+	}
+	if req.MaxTokens != 8192 {
+		t.Fatalf("max_tokens = %d, want the default role's 8192", req.MaxTokens)
+	}
+}
+
+// "The default role" means the entry that answers a request naming no role at
+// all — and there its native blocks apply in full.
+func TestResolveModelConfig_NativeBlocksApplyWhenNoRoleNamed(t *testing.T) {
+	req := ResolveModelConfig(crossProviderRegistry(), events.LLMRequest{
+		SchemaVersion: events.LLMRequestVersion,
+	})
+
+	if got := req.Overrides.Thinking["mode"]; got != "adaptive" {
+		t.Fatalf("thinking.mode = %v, want the default role's %q", got, "adaptive")
+	}
+	if req.Overrides.API != "messages" {
+		t.Fatalf("api = %q, want the default role's %q", req.Overrides.API, "messages")
 	}
 }
 
