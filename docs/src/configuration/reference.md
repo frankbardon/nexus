@@ -855,7 +855,7 @@ to read it:
 | `effort` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below. Unclamped on OpenAI, whose vocabulary is a superset of the other two's; only sent there where a reasoning `mode` is declared |
 | `cache` | `nexus.llm.anthropic` and `nexus.llm.gemini` (`nexus.llm.openai` has no `cache:` block; a role carrying one for an OpenAI entry is **ignored**, not an error) — see below |
 | `reasoning` | `nexus.llm.openai` — the only provider with a `reasoning:` block. A role's merges over the plugin-level one **key by key**, and the merged block goes through the same parser; see [Per-role reasoning](#per-role-reasoning-openai). |
-| `api` | no provider yet; `nexus.llm.openai`'s is a later release |
+| `api` | `nexus.llm.openai` — the only provider with more than one API surface. `chat_completions` or `responses`; the per-entry value wins over the plugin-level `api:`, and **does not fall through** from the default role to a named one. `responses` is declared and validated but **not implemented yet**, so it fails the boot naming the role; see [Which OpenAI API: `api`](#which-openai-api-api). The other two providers ignore a role's `api:` in silence |
 | `retry` | `nexus.llm.anthropic`, `nexus.llm.gemini` and `nexus.llm.openai` — see below |
 
 An axis with no consumer is inert, not an error: the key parses, validates
@@ -2155,7 +2155,8 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `auth_mode`                  | string | `openai`                             | `openai`, `azure_key`, or `azure_aad`. |
 | `api_key`                    | string | *(env)*                              | Direct API key (`auth_mode: openai`, also fallback for Azure Files API). |
 | `api_key_env`                | string | `OPENAI_API_KEY`                     | Environment variable for the key. |
-| `base_url`                   | string | `https://api.openai.com/v1`          | Override for proxies / OpenAI-compatible endpoints. |
+| `base_url`                   | string | `https://api.openai.com/v1`          | Override for proxies / OpenAI-compatible endpoints. Setting it **narrows the default `api:`** to `chat_completions`, because those endpoints implement `/chat/completions` and mostly not `/responses`. |
+| `api`                        | string | `chat_completions` *(narrowed — see below)* | Which OpenAI API this instance speaks: `chat_completions` (`/v1/chat/completions`) or `responses` (`/v1/responses`). Declared, never sniffed — only the operator knows what the endpoint behind `base_url` implements. **`responses` is not implemented yet and fails `Init`** naming the release it lands in (`v0.29.0`); the key exists now so the endpoint is an operator-declared axis rather than a later migration. An unknown value also fails `Init`. Exactly one endpoint is chosen per request, from this and the role's `api:` and nothing else. See [Which OpenAI API: `api`](#which-openai-api-api). |
 | `azure.endpoint`             | string | *(required for Azure)*               | Azure OpenAI endpoint URL. |
 | `azure.api_key`              | string | *(env `AZURE_OPENAI_API_KEY`)*       | Azure key (when `auth_mode: azure_key`). |
 | `azure.api_key_env`          | string | `AZURE_OPENAI_API_KEY`               | Override the env var name. |
@@ -2178,7 +2179,72 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | *(role `cache`)*             | map    | *(unset)*                            | Not a plugin key, and **not read by this provider**. There is no `cache:` block on `nexus.llm.openai` at all, so a [`core.models`](#coremodels) role carrying one for an OpenAI entry is **ignored in silence** — including its typos, which nothing here validates. That is deliberate: a role shared across a `fanout` spanning all three providers should not have to be split just to configure caching on the two that support it. OpenAI's own prompt caching is automatic and server-side; there is nothing to configure. See [Prompt caching: `cache`](#prompt-caching-cache). |
 | *(role `effort`)*            | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.effort` value, consumed here as `reasoning_effort` when the block that role resolves to is on `mode: effort` and named no `effort` of its own. It **wins over** the plugin-level `reasoning.effort`: a plugin key is a default, a per-role key the more specific statement. **Nothing is clamped and nothing is warned** — OpenAI's vocabulary is a superset of the union of what the other two providers accept, so every word an operator can write for either of them passes through verbatim. A value in no provider's vocabulary fails `Init` for any role whose depth could actually reach the wire, naming the role and the accepted set. **Ignored entirely under `mode: off`** — including the absent `reasoning:` block that resolves to it — so a role's `effort:` on a deployment that declares no reasoning mode anywhere sends nothing at all; that is deliberate, see [Per-role reasoning](#per-role-reasoning-openai). Picked up on **every** path that resolves a role — the role the request names, the `default` role, and the late recovery after a router rewrote `model` without touching the rest — so a plain single-entry role's `effort:` reaches the wire with no coordinator involved. An effort already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the registry, because a registry lookup always returns the role's first entry. See [Reasoning depth: `effort`](#reasoning-depth-effort). |
 | *(role `reasoning`)*         | map    | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.reasoning` block, which **merges over** the plugin-level `reasoning:` block **key by key**: the role wins on every key it names, and a plugin key the role is silent about survives, so a role that only wants a deeper `effort` does not have to restate the `mode`. A set-but-empty `reasoning: {}` is a statement rather than a gap — the merged block is present, which declares `mode: effort` on a deployment whose plugin block is absent entirely. The merged block goes through the same parser as the plugin one, so it gets the same validation, the same `mode` inference and the same deprecation handling of `enabled`/`budget_tokens`. Every role this provider could serve is swept at **`Init`** and an invalid merged block **fails the boot naming the role** — these blocks bypass `schema.json` entirely, so nothing else ever checks them. Picked up on every path that resolves a role, and a block already on the request (stamped by the `fallback` or `fanout` coordinator for the chain entry actually being served) wins over the role's. An `effort` the role's own block names outranks that same role's `effort:`. See [Per-role reasoning](#per-role-reasoning-openai). |
-| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. One of the four per-entry axes this provider reads, alongside `effort`, the `reasoning:` block and the `retry:` block (see the rows above and below); the `thinking`, `cache` and `api` entries still have no consumer here. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever the **resolved** `reasoning.mode` — plugin block merged with the role's — is anything but `off`; a model id alone never strips it. |
+| *(role `temperature`)*       | float  | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.temperature` value, copied onto the request body's `temperature` field. One of the five per-entry axes this provider reads, alongside `effort`, `api` and the `reasoning:` and `retry:` blocks (see the rows above and below); the `thinking` and `cache` entries still have no consumer here. Picked up on **every** path that resolves a role — the role the request names, the default role, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp. **A temperature already on the request wins**: an agent posture's and the `approval_policy` gate's both beat the role's. `0` is a real value, not "unset". `applyReasoning` strips it again, whatever its origin, whenever the **resolved** `reasoning.mode` — plugin block merged with the role's — is anything but `off`; a model id alone never strips it. |
+| *(role `api`)*               | string | *(unset)*                            | Not a plugin key — the [`core.models`](#coremodels) `<role>.api` value, which selects the endpoint for the entry being served and **wins over** the plugin-level `api:`. A provider-native axis, so unlike the shared ones it **does not fall through** from the `default` role to a named one: a named role that sets none takes the plugin key, not the default role's. Picked up on **every** path that resolves a role — the role the request names, the `default` role when the request names none, and the late recovery after a router rewrote `model` — as well as the `fallback`/`fanout` stamp, which wins over the registry. A per-entry `api:` bypasses `schema.json` entirely, so every role this provider could serve is swept at **`Init`**: an unknown value **fails the boot naming the role**, and so does `responses`, which is not implemented yet. Exactly one endpoint is chosen per request and nothing else influences it. See [Which OpenAI API: `api`](#which-openai-api-api). |
+
+#### Which OpenAI API: `api`
+
+`nexus.llm.openai` is the one provider with more than one API surface, and which
+one it speaks is **declared** rather than detected:
+
+```yaml
+plugins:
+  nexus.llm.openai:
+    api: chat_completions     # chat_completions | responses
+```
+
+**Why it is an operator's axis and not a migration.** From GPT-5.4 onward,
+Chat Completions does not support tool calling with any `reasoning_effort`
+other than `none`. Nexus puts tools on every turn, so on a current reasoning
+model the Chat Completions path **cannot reason at all** — the Responses API is
+the only configuration that works there. But `base_url` exists precisely for
+proxies and OpenAI-compatible endpoints — vLLM, Ollama, OpenRouter, LM Studio —
+which implement `/chat/completions` and mostly not `/responses`, and Azure's
+Responses surface is a different route shape from the deployment-scoped chat one
+this provider builds. Neither value is right for everybody, so the endpoint is
+declared. The provider never inspects the model id to decide, for the same
+reason [`reasoning.mode`](#declaring-a-reasoning-model-openai) is declared: a
+capability table cannot know about a model, or an endpoint, released after it
+was written.
+
+**The default is narrowed.** With no `api:` anywhere:
+
+| Deployment | Effective `api` |
+|---|---|
+| plain `api.openai.com` | `chat_completions` |
+| `base_url` set | `chat_completions` |
+| `auth_mode: azure_key` or `azure_aad` | `chat_completions` |
+
+An operator on a declared-compat or Azure endpoint who wants the Responses API
+says so with an explicit `api:`.
+
+> **`api: responses` is not implemented yet.** The selector, its defaulting and
+> its validation ship ahead of the request/response/stream path that speaks it,
+> so an explicit `api: responses` — on the plugin or on a `core.models` entry —
+> **fails `Init`** naming the release it lands in (`v0.29.0`). An honest boot
+> failure beats a request shaped for one API and posted to another. When that
+> path lands, the unnarrowed default becomes `responses`: plain
+> `api.openai.com` deployments move, and the two narrowed rows above stay on
+> `chat_completions`.
+
+**Precedence**, highest first — the engine-wide rule:
+
+1. an `api` already on the request — what the [`fallback`](#nexusproviderfallback)
+   and [`fanout`](#nexusproviderfanout) coordinators stamp for the chain entry
+   they are actually serving;
+2. the role's [`api:`](#coremodels). Being a provider-native axis it does **not**
+   fall through from the `default` role to a named one;
+3. the plugin-level `api:`;
+4. the narrowed default above.
+
+Exactly one endpoint is chosen per request, from that and nothing else — not the
+model id, not the presence of tools, not the reasoning mode.
+
+**One warning at `Init`.** A deployment that configures reasoning — plugin-level
+or on any role — while its effective `api` is `chat_completions` gets a single
+warning naming the GPT-5.4 tool-calling restriction and pointing at
+`api: responses`. It is said once per boot, not once per role and not per
+request.
 
 #### Declaring a reasoning model (OpenAI)
 

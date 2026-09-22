@@ -65,6 +65,11 @@ type Plugin struct {
 	// mergeReasoningBlock.
 	reasoningRaw map[string]any
 
+	// api is the plugin-level API surface, already resolved against the
+	// narrowed default at Init. A request's own `api:` still wins — see
+	// resolveAPI.
+	api apiSurface
+
 	multimodal multimodalConfig
 
 	files       filesConfig
@@ -149,6 +154,26 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	if err := validateRoleReasoning(p.models, p.reasoningRaw, p.reasoning, p.logger); err != nil {
 		return err
 	}
+
+	// Which OpenAI API this deployment speaks. Declared, not sniffed — see
+	// apiSurface. The plugin-level key resolves against the narrowed default
+	// here; a `core.models` entry's own `api:` still wins per request.
+	api, err := parseAPIConfig(ctx.Config, p.auth)
+	if err != nil {
+		return err
+	}
+	p.api = api
+
+	// A per-entry `api:` bypasses schema.json entirely — core stores the value
+	// without looking at it — so this sweep is the only thing that checks it,
+	// at boot rather than at the first request that names the role.
+	if err := validateRoleAPI(p.models); err != nil {
+		return err
+	}
+
+	// Reasoning configured on the chat surface is reasoning the deployment will
+	// not get on a current model. Said once, naming the restriction.
+	p.warnReasoningOnChatCompletions()
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
@@ -284,11 +309,11 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // the default role and the late case where a router rewrote `model` and left
 // `role` alone.
 //
-// Only Temperature, Effort and the `reasoning:` and `retry:` blocks are taken,
-// deliberately rather than `*req = ...`: model and max_tokens already have their
-// own resolution pass in handleRequest — one that knows about defaultMaxTokens
-// and the foreign-provider early return — and this provider reads none of the
-// remaining axes.
+// Only Temperature, Effort, the `api:` selector and the `reasoning:` and
+// `retry:` blocks are taken, deliberately rather than `*req = ...`: model and
+// max_tokens already have their own resolution pass in handleRequest — one that
+// knows about defaultMaxTokens and the foreign-provider early return — and this
+// provider reads none of the remaining axes.
 //
 // `effort` and the `reasoning:` block are the two halves of reasoning depth, and
 // they are resolved together by resolveReasoning at body-build time: a role's
@@ -309,12 +334,17 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 // Note that applyReasoning strips temperature again whenever the operator has
 // declared a reasoning mode, since such a model rejects the field. That is not
 // this function's business.
+//
+// `api` is a provider-native axis, so — unlike the shared ones — it does not
+// fall through from the default role to a named one. resolveAPI turns whatever
+// lands here into the one endpoint the request is posted to.
 func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
 	resolved := engine.ResolveModelConfig(p.models, *req)
 	req.Temperature = resolved.Temperature
 	req.Effort = resolved.Effort
 	req.Overrides.Reasoning = resolved.Overrides.Reasoning
 	req.Overrides.Retry = resolved.Overrides.Retry
+	req.Overrides.API = resolved.Overrides.API
 }
 
 func (p *Plugin) handleRequest(req events.LLMRequest) {
@@ -419,6 +449,19 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	preflightCancel()
 
+	// Exactly one endpoint per request, chosen here from the resolved surface
+	// and from nothing else.
+	endpoint, err := p.auth.resolveEndpoint(p.resolveAPI(req))
+	if err != nil {
+		p.emitErrorInfo(events.ErrorInfo{
+			SchemaVersion: events.ErrorInfoVersion,
+			Err:           err,
+			Retryable:     false,
+			RequestMeta:   req.Metadata,
+		})
+		return
+	}
+
 	body := p.buildRequestBody(model, maxTokens, req)
 
 	jsonBody, err := json.Marshal(body)
@@ -446,7 +489,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.auth.buildURL(), bytes.NewReader(jsonBody))
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewReader(jsonBody))
 		if err != nil {
 			return nil, err
 		}

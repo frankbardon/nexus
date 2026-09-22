@@ -14,7 +14,8 @@ The OpenAI provider calls the Chat Completions API via direct HTTP requests — 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `api_key_env` | string | `OPENAI_API_KEY` | Name of the environment variable containing the API key |
-| `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for Azure, local proxies, etc.) |
+| `base_url` | string | `https://api.openai.com/v1/chat/completions` | API endpoint URL (override for Azure, local proxies, etc.). Setting it narrows the default `api` to `chat_completions` |
+| `api` | string | `chat_completions` | Which OpenAI API to speak: `chat_completions` or `responses`. `responses` is not implemented yet and fails `Init`. Also settable per `core.models` entry, which wins |
 | `debug` | bool | `false` | Log raw request/response bodies to the session plugin directory |
 | `pricing` | map | (embedded defaults) | Per-model pricing overrides. Keys are model IDs, values have `input_per_million` and `output_per_million` (USD) |
 
@@ -215,6 +216,38 @@ Config overrides are merged with embedded defaults — only override the models 
 ### Debug Mode
 
 When `debug: true`, raw request and response JSON bodies are written to the session's plugin directory for inspection.
+
+### Which API: `api`
+
+This is the one provider with more than one API surface, and the surface is
+declared rather than detected:
+
+```yaml
+nexus.llm.openai:
+  api: chat_completions   # chat_completions | responses
+```
+
+It matters because from GPT-5.4 onward Chat Completions refuses tool calling
+with any `reasoning_effort` other than `none`, and Nexus puts tools on every
+turn — so on a current reasoning model the chat surface cannot reason at all.
+It is still the right surface for older models and for the OpenAI-compatible
+endpoints `base_url` exists for, which implement `/chat/completions` and mostly
+not `/responses`.
+
+The default is `chat_completions`, narrowed further in the sense that a
+`base_url` or an Azure `auth_mode` keeps it there even after the plain
+`api.openai.com` default moves. A `core.models` entry may carry its own `api:`,
+which wins over the plugin key; being a provider-native axis it does not fall
+through from the `default` role to a named one. Exactly one endpoint is chosen
+per request, from those two and nothing else.
+
+`api: responses` is **not implemented yet**: the selector ships ahead of the
+path that speaks it, so declaring it — on the plugin or on a role — fails
+`Init` naming the release it lands in. A deployment that configures reasoning
+while its effective `api` is `chat_completions` gets one warning at `Init`
+naming the restriction above.
+
+See [Which OpenAI API: `api`](../../configuration/reference.md#which-openai-api-api).
 
 ### Compatible Endpoints
 

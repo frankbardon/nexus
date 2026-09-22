@@ -9,7 +9,8 @@
     "auth_mode":        {"type": "string", "enum": ["openai", "azure_key", "azure_aad"], "description": "Authentication mode."},
     "api_key":          {"type": "string", "description": "Direct API key."},
     "api_key_env":      {"type": "string", "description": "Environment variable for the key."},
-    "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints."},
+    "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints. Setting it narrows the default api to chat_completions."},
+    "api":              {"type": "string", "enum": ["chat_completions", "responses"], "description": "Which OpenAI API to speak. Default chat_completions, narrowed further by base_url and the Azure auth modes. responses is not implemented yet and fails Init."},
     "azure": {
       "type": "object",
       "additionalProperties": false,

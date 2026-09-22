@@ -52,8 +52,9 @@ type authState struct {
 
 	// baseURL overrides the default https://api.openai.com/v1/chat/completions
 	// for openai-mode (e.g. local proxies or OpenAI-compatible endpoints).
-	// Ignored in Azure modes — buildURL constructs Azure URLs from the
-	// resource/deployment/api-version triple.
+	// Ignored in Azure modes — resolveEndpoint constructs Azure URLs from the
+	// resource/deployment/api-version triple. Setting it also narrows the
+	// default `api:` to chat_completions — see narrowsToChatCompletions.
 	baseURL string
 
 	// Azure (used by both azure_key and azure_aad).
@@ -210,26 +211,46 @@ func readAzureField(raw map[string]any, literalKey, envKey, fallbackEnv string) 
 	return ""
 }
 
-// buildURL returns the full request URL for chat completions.
+// resolveEndpoint returns the full request URL for one request, for the API
+// surface that request resolved to.
+//
+// It is the single place an endpoint is chosen: the surface arrives already
+// decided by Plugin.resolveAPI and nothing else here influences the result.
+//
+// chat_completions:
 //
 //	openai:    <baseURL or default>/chat/completions
 //	azure_key: https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=<v>
 //	azure_aad: same as azure_key
-func (a *authState) buildURL() string {
-	switch a.mode {
-	case authModeAzureKey, authModeAzureAAD:
-		return fmt.Sprintf(
-			"https://%s.openai.azure.com/openai/deployments/%s/chat/completions?api-version=%s",
-			a.resource,
-			url.PathEscape(a.deployment),
-			url.QueryEscape(a.apiVersion),
-		)
-	default:
-		// openai mode: honor base_url override.
-		if a.baseURL != "" {
-			return a.baseURL
+//
+// responses has no URL yet, deliberately. Its route shapes differ from the chat
+// ones on every auth mode — Azure's is /openai/v1/responses with the deployment
+// in the request body rather than the path — and building them before the path
+// that speaks them exists would be a guess nothing exercises. Init already
+// refuses an explicit `api: responses`; this is the second line of defence, for
+// a surface that reached a request some other way.
+func (a *authState) resolveEndpoint(api apiSurface) (string, error) {
+	switch api {
+	case apiChatCompletions:
+		switch a.mode {
+		case authModeAzureKey, authModeAzureAAD:
+			return fmt.Sprintf(
+				"https://%s.openai.azure.com/openai/deployments/%s/chat/completions?api-version=%s",
+				a.resource,
+				url.PathEscape(a.deployment),
+				url.QueryEscape(a.apiVersion),
+			), nil
+		default:
+			// openai mode: honor base_url override.
+			if a.baseURL != "" {
+				return a.baseURL, nil
+			}
+			return apiURL, nil
 		}
-		return apiURL
+	case apiResponses:
+		return "", errResponsesUnimplemented("")
+	default:
+		return "", fmt.Errorf("openai: unknown api surface %q", string(api))
 	}
 }
 
