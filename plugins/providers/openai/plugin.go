@@ -172,8 +172,11 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	// Reasoning configured on the chat surface is reasoning the deployment will
-	// not get on a current model. Said once, naming the restriction.
+	// not get on a current model. Said once, naming the restriction. Both of
+	// these are surface-conditional, so they run after the `api:` is resolved:
+	// on the Responses path the summary does reach the wire.
 	p.warnReasoningOnChatCompletions()
+	p.warnSummaryOnChatCompletions()
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
@@ -449,9 +452,11 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	preflightCancel()
 
-	// Exactly one endpoint per request, chosen here from the resolved surface
-	// and from nothing else.
-	endpoint, err := p.auth.resolveEndpoint(p.resolveAPI(req))
+	// Exactly one surface per request, resolved once here: it chooses both the
+	// endpoint and the serializer, and nothing downstream reconsiders it.
+	api := p.resolveAPI(req)
+
+	endpoint, err := p.auth.resolveEndpoint(api)
 	if err != nil {
 		p.emitErrorInfo(events.ErrorInfo{
 			SchemaVersion: events.ErrorInfoVersion,
@@ -462,7 +467,14 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return
 	}
 
-	body := p.buildRequestBody(model, maxTokens, req)
+	// Two serializers, not one with a branch inside it: the Responses request
+	// shares almost nothing with the chat one beyond the values it carries.
+	var body map[string]any
+	if api == apiResponses {
+		body = p.buildResponsesBody(model, maxTokens, req)
+	} else {
+		body = p.buildRequestBody(model, maxTokens, req)
+	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -565,6 +577,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 }
 
 // buildRequestBody constructs the OpenAI Chat Completions API request body.
+// buildResponsesBody in responses.go is its counterpart on the other surface.
 func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
 	body := map[string]any{
 		"max_tokens": maxTokens,
@@ -671,11 +684,12 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 
 	// Reasoning-model handling runs last so any fields about to be stripped
 	// (temperature, top_p, etc.) have already been written. It is gated on the
-	// operator's declared `reasoning.mode`, not on the model id. NOTE: this
-	// stays on /v1/chat/completions; the /v1/responses endpoint exposes richer
-	// reasoning controls (summary streaming) and is left for a future plan.
-	// resolveReasoning merges the serving role's own `reasoning:` block over
-	// the plugin-level one and folds the role's `effort:` into the depth.
+	// operator's declared `reasoning.mode`, not on the model id. This is the
+	// chat surface's single `reasoning_effort` scalar; the richer `reasoning`
+	// object — which is the only one that can carry a summary — is
+	// applyResponsesReasoning. resolveReasoning is shared by both: it merges
+	// the serving role's own `reasoning:` block over the plugin-level one and
+	// folds the role's `effort:` into the depth.
 	applyReasoning(body, p.resolveReasoning(req), p.logger)
 
 	return body

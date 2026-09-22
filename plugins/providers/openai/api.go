@@ -190,6 +190,56 @@ func (p *Plugin) resolveAPI(req events.LLMRequest) apiSurface {
 	return p.api
 }
 
+// firstChatCompletionsEntry finds the first place a deployment both speaks the
+// Chat Completions API and has a reasoning configuration matching want: the
+// plugin-level statement if it qualifies, else the first `core.models` role in
+// sorted order that does.
+//
+// It exists because the boot-time statements about what the chat surface cannot
+// do are each worth making exactly once, not once per role, and because the
+// question "which surface does this entry resolve to, and what reasoning
+// configuration does it resolve to" has one answer shared by all of them.
+//
+// The returned role is empty when the plugin-level configuration was the match,
+// which is the one case that has no role to name. The bool is the only thing
+// that reports whether anything matched at all.
+func (p *Plugin) firstChatCompletionsEntry(want func(reasoningConfig) bool) (string, bool) {
+	if p.api == apiChatCompletions && want(p.reasoning) {
+		return "", true
+	}
+
+	var role string
+	found := false
+	_ = engine.WalkRoleEntries(p.models, pluginID, func(r string, cfg engine.ModelConfig) error {
+		if found {
+			return nil
+		}
+		api := p.api
+		if cfg.API != "" && validAPISurface(cfg.API) {
+			api = apiSurface(cfg.API)
+		}
+		if api != apiChatCompletions {
+			return nil
+		}
+		rc := p.reasoning
+		if cfg.Reasoning != nil {
+			// Nil logger: validateRoleReasoning has already said this block's
+			// deprecation warnings once, naming the role.
+			merged, err := parseMergedReasoning(p.reasoningRaw, cfg.Reasoning, nil)
+			if err != nil {
+				return nil
+			}
+			rc = merged
+		}
+		if !want(rc) {
+			return nil
+		}
+		role, found = r, true
+		return nil
+	})
+	return role, found
+}
+
 // warnReasoningOnChatCompletions says once, at Init, that a deployment has
 // configured reasoning it will not get.
 //
@@ -210,38 +260,48 @@ func (p *Plugin) warnReasoningOnChatCompletions() {
 	}
 	const msg = "openai: reasoning is configured but this deployment speaks the Chat Completions API — from GPT-5.4 onward Chat Completions refuses tool calling with any reasoning_effort other than `none`, and Nexus puts tools on every turn; declare `api: responses` to use the Responses API"
 
-	if p.reasoning.Mode == reasoningModeEffort && p.api == apiChatCompletions {
-		logger.Warn(msg, "api", string(apiChatCompletions))
+	role, found := p.firstChatCompletionsEntry(func(rc reasoningConfig) bool {
+		return rc.Mode == reasoningModeEffort
+	})
+	if !found {
 		return
 	}
+	attrs := []any{"api", string(apiChatCompletions)}
+	if role != "" {
+		attrs = append(attrs, "role", role)
+	}
+	logger.Warn(msg, attrs...)
+}
 
-	warned := false
-	_ = engine.WalkRoleEntries(p.models, pluginID, func(role string, cfg engine.ModelConfig) error {
-		if warned {
-			return nil
-		}
-		api := p.api
-		if cfg.API != "" && validAPISurface(cfg.API) {
-			api = apiSurface(cfg.API)
-		}
-		if api != apiChatCompletions {
-			return nil
-		}
-		rc := p.reasoning
-		if cfg.Reasoning != nil {
-			// Nil logger: validateRoleReasoning has already said this block's
-			// deprecation warnings once, naming the role.
-			merged, err := parseMergedReasoning(p.reasoningRaw, cfg.Reasoning, nil)
-			if err != nil {
-				return nil
-			}
-			rc = merged
-		}
-		if rc.Mode != reasoningModeEffort {
-			return nil
-		}
-		logger.Warn(msg, "api", string(apiChatCompletions), "role", role)
-		warned = true
-		return nil
+// warnSummaryOnChatCompletions says once, at Init, that a configured
+// `reasoning.summary` will not reach the wire on this deployment.
+//
+// The summary verbosity dial is a Responses-API field: that surface takes a
+// `reasoning` object carrying both `effort` and `summary`, while Chat
+// Completions has only the `reasoning_effort` scalar and no summary field at
+// all. So the warning is about the *surface*, not about the key — which is why
+// it lives here rather than in parseReasoningConfig, where it used to fire
+// unconditionally. A deployment on `api: responses` configures a summary and
+// gets one; warning it would be a lie.
+//
+// Same "once" discipline as the restriction warning above, and the same sweep:
+// the plugin-level statement first, then the roles in sorted order.
+func (p *Plugin) warnSummaryOnChatCompletions() {
+	logger := p.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	const msg = "openai: reasoning.summary does not reach the wire on this deployment — /v1/chat/completions returns no reasoning summaries; declare `api: responses` to receive them"
+
+	role, found := p.firstChatCompletionsEntry(func(rc reasoningConfig) bool {
+		return rc.Summary != ""
 	})
+	if !found {
+		return
+	}
+	attrs := []any{"api", string(apiChatCompletions)}
+	if role != "" {
+		attrs = append(attrs, "role", role)
+	}
+	logger.Warn(msg, attrs...)
 }

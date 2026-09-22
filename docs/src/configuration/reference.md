@@ -2169,7 +2169,7 @@ Source: `plugins/providers/openai/plugin.go` + `auth.go`, `reasoning.go`,
 | `files.delete_on_shutdown`   | bool   | `false`                              | Delete on shutdown. |
 | `reasoning.mode`             | string | `off` *(absent block)* / `effort` *(present block)* | Whether reasoning controls go on the wire, **and the only gate on the sampling-parameter strip below**. `effort` sends `reasoning_effort`; `off` sends no reasoning configuration at all and strips nothing. An **absent** `reasoning:` block is `off`; a **present** block with no `mode` is `effort`. Mirrors the `mode` axis on [`nexus.llm.anthropic`](#nexusllmanthropic) and [`nexus.llm.gemini`](#nexusllmgemini): the operator declares the shape, the provider obeys, and a mode the target model rejects is an OpenAI HTTP 400 the operator owns. The provider holds **no model-capability table** and never inspects the model id — see [Declaring a reasoning model](#declaring-a-reasoning-model-openai). |
 | `reasoning.effort`           | string | *(unset)*                            | Reasoning depth: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` — OpenAI's full vocabulary, **unclamped**, because it is a superset of the union of what the other two providers accept. Unset under `mode: effort` sends no `reasoning_effort` key, so the model's own default applies. An unrecognised value **fails `Init`** naming the accepted set. This is the **least specific** layer: a [`core.models`](#coremodels) role's `effort:` overrides it, and an `effort` on the role's own `reasoning:` block overrides that. |
-| `reasoning.summary`          | string | *(unset)*                            | Reasoning-summary verbosity: `auto`, `concise`, `detailed`. Parsed and validated, but **does not reach the wire**: `/v1/chat/completions` returns no reasoning summaries — only the Responses API does, and this provider does not speak it. Setting it logs a warning at boot. Replaces the removed `reasoning.include_summary`. |
+| `reasoning.summary`          | string | *(unset)*                            | Reasoning-summary verbosity: `auto`, `concise`, `detailed`. **Whether it reaches the wire depends on the effective [`api`](#which-openai-api-api).** On `responses` it rides the `reasoning` object alongside the depth (`"reasoning": {"effort": "high", "summary": "auto"}`) and the model returns summaries. On `chat_completions` there is no summary field at all, so it is dropped — and **that** is what logs a warning at boot, once per deployment, naming the role when a `core.models` entry is what set it. A deployment on `responses` is not warned. Replaces the removed `reasoning.include_summary`. |
 | `reasoning.enabled`          | bool   | *(unset)*                            | **Deprecated** alias for `reasoning.mode`: `true` → `effort`, `false` → `off`. Ignored (with a warning) when `mode` is set. Does not fail boot. |
 | `reasoning.budget_tokens`    | int    | *(unset)*                            | **Deprecated and ignored.** OpenAI has no reasoning token budget — depth is `reasoning.effort`. Accepted with a warning rather than failing boot. |
 | `multimodal.vision`          | bool   | `true`                               | Allow image inputs (GPT-4V). |
@@ -2218,14 +2218,50 @@ was written.
 An operator on a declared-compat or Azure endpoint who wants the Responses API
 says so with an explicit `api:`.
 
-> **`api: responses` is not implemented yet.** The selector, its defaulting and
-> its validation ship ahead of the request/response/stream path that speaks it,
-> so an explicit `api: responses` — on the plugin or on a `core.models` entry —
-> **fails `Init`** naming the release it lands in (`v0.29.0`). An honest boot
-> failure beats a request shaped for one API and posted to another. When that
-> path lands, the unnarrowed default becomes `responses`: plain
-> `api.openai.com` deployments move, and the two narrowed rows above stay on
-> `chat_completions`.
+> **`api: responses` is not usable yet.** The selector, its defaulting, its
+> validation and now the **request serializer** ship ahead of the reply parser,
+> the stream reader and the endpoint builder, so an explicit `api: responses` —
+> on the plugin or on a `core.models` entry — still **fails `Init`** naming the
+> release it lands in (`v0.29.0`). A request builder with no response parser
+> cannot serve a turn, and an honest boot failure beats a request shaped for one
+> API and posted to another. When the rest of the path lands, the unnarrowed
+> default becomes `responses`: plain `api.openai.com` deployments move, and the
+> two narrowed rows above stay on `chat_completions`.
+
+**What changes on the wire.** The two surfaces do not carry the same request,
+which is why the selector exists at all rather than a URL suffix. No
+configuration key changes shape between them — the same YAML produces both — but
+the body does:
+
+| `chat_completions` | `responses` |
+|---|---|
+| `messages: [...]` | `input: [...]` — a flat list of **Items** |
+| assistant `tool_calls` field | separate `function_call` Items |
+| `role: tool` message | `function_call_output` Item, paired by `call_id` |
+| `{"type":"function","function":{…}}` | `{"type":"function","name":…}` — flattened |
+| `response_format` | `text.format`, also flattened |
+| `max_tokens` | `max_output_tokens` |
+| `reasoning_effort: "high"` | `reasoning: {effort: "high", summary: "auto"}` — the only surface that can carry [`reasoning.summary`](#nexusllmopenai) |
+| — | `store: false`, always (see below) |
+| `prediction` | *(no counterpart — the field is dropped)* |
+| Azure: deployment in the URL, `model` stripped from the body | Azure: deployment **in** the body's `model` field |
+
+Two of those rows are deliberate choices rather than transcription:
+
+- **`store: false` on every request.** Nexus keeps its own conversation history,
+  so server-side state would be a second source of truth for the same turn — and
+  a divergent one the moment a gate rewrites a response. It is also what makes
+  reasoning items come back carrying `encrypted_content`, which is how reasoning
+  survives a tool round on this API.
+- **`strict` is always written explicitly on tool definitions, as `false`.** On
+  Chat Completions an absent `strict` means off; on Responses an absent `strict`
+  *attempts* strict mode, which imposes the Structured Outputs schema subset.
+  Nexus tool schemas come from shipped plugins, MCP servers, skills and
+  operator-authored catalogs, and plenty of them are valid JSON Schema that
+  strict mode rejects — so inheriting that reversed default would turn a working
+  tool catalog into an HTTP 400 purely from changing `api:`. Structured
+  **output** is the separate case, and there the caller's own `strict` is
+  forwarded verbatim onto `text.format`.
 
 **Precedence**, highest first — the engine-wide rule:
 
@@ -2240,11 +2276,18 @@ says so with an explicit `api:`.
 Exactly one endpoint is chosen per request, from that and nothing else — not the
 model id, not the presence of tools, not the reasoning mode.
 
-**One warning at `Init`.** A deployment that configures reasoning — plugin-level
-or on any role — while its effective `api` is `chat_completions` gets a single
-warning naming the GPT-5.4 tool-calling restriction and pointing at
-`api: responses`. It is said once per boot, not once per role and not per
-request.
+**Two warnings at `Init`, each said once.** Both are about the chat surface and
+neither fires on `responses`:
+
+- A deployment that configures **reasoning** — plugin-level or on any role —
+  while its effective `api` is `chat_completions` gets a single warning naming
+  the GPT-5.4 tool-calling restriction and pointing at `api: responses`.
+- A deployment that sets [`reasoning.summary`](#nexusllmopenai) on the chat
+  surface gets a single warning that it will be dropped, because
+  `/v1/chat/completions` has no summary field.
+
+Each is said once per boot, naming the role when a `core.models` entry is what
+set it — not once per role and not per request.
 
 #### Declaring a reasoning model (OpenAI)
 

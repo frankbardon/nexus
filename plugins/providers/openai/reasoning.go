@@ -75,10 +75,12 @@ func validReasoningSummary(v string) bool {
 type reasoningConfig struct {
 	Mode   reasoningMode
 	Effort string // only meaningful when Mode is reasoningModeEffort
-	// Summary is accepted and validated here but does not reach the wire on
-	// the Chat Completions path, which has no reasoning-summary field at all.
-	// It is the Responses API (`/v1/responses`) that returns summaries, and
-	// this provider does not speak it yet.
+	// Summary reaches the wire only on the Responses API, which takes a
+	// `reasoning` object carrying both the depth and the summary verbosity —
+	// see applyResponsesReasoning. The Chat Completions path has no
+	// reasoning-summary field at all and drops it; that is said once at boot,
+	// by warnSummaryOnChatCompletions, and only for a deployment whose
+	// effective `api:` is actually the chat one.
 	Summary string
 
 	// EffortSource records which configuration layer named Effort, which is
@@ -163,19 +165,46 @@ func parseReasoningConfig(cfg map[string]any, logger *slog.Logger) (reasoningCon
 		)
 	}
 
-	if rc.Summary != "" && logger != nil {
-		logger.Warn("openai: reasoning.summary is accepted but does not reach the wire — /v1/chat/completions returns no reasoning summaries",
-			"summary", rc.Summary,
-		)
-	}
+	// Whether `summary` reaches the wire depends on the API surface, which this
+	// parser does not know and must not: it runs once for the plugin block and
+	// again per merged role block, while the surface is resolved separately and
+	// per role. The statement is made once at boot instead, by
+	// warnSummaryOnChatCompletions, which knows both halves.
 
 	return rc, nil
 }
 
-// applyReasoning mutates the request body for reasoning-model calls.
-// Strips disallowed fields (temperature, top_p, presence_penalty,
+// reasoningRejectedFields are the sampling parameters a reasoning model
+// rejects. Only some of them exist on any given surface — a Responses body has
+// no `presence_penalty` to strip — but the list is one list, because what it
+// describes is a property of the model rather than of the endpoint.
+var reasoningRejectedFields = []string{
+	"temperature", "top_p", "presence_penalty", "frequency_penalty",
+	"logprobs", "top_logprobs", "prediction",
+}
+
+// stripReasoningRejectedFields removes from a request body every sampling
+// parameter a reasoning model rejects. Shared by both surfaces' apply* helpers,
+// which differ in the reasoning shape they then write and in nothing else.
+func stripReasoningRejectedFields(body map[string]any, mode reasoningMode, logger *slog.Logger) {
+	for _, f := range reasoningRejectedFields {
+		if _, ok := body[f]; ok {
+			if logger != nil {
+				logger.Debug("openai: stripping field a reasoning model rejects", "field", f, "mode", string(mode))
+			}
+			delete(body, f)
+		}
+	}
+}
+
+// applyReasoning mutates a Chat Completions request body for reasoning-model
+// calls. Strips disallowed fields (temperature, top_p, presence_penalty,
 // frequency_penalty, logprobs, top_logprobs, prediction) and adds
 // reasoning_effort when the declared mode asks for it.
+//
+// applyResponsesReasoning is the counterpart on the other surface, which takes a
+// `reasoning` object rather than a scalar and is the only one of the two that
+// can carry reasoningConfig.Summary.
 //
 // The gate is the operator's declared `reasoning.mode`, never the model id.
 // This provider deliberately holds no model-capability table: a table cannot
@@ -192,17 +221,7 @@ func applyReasoning(body map[string]any, cfg reasoningConfig, logger *slog.Logge
 	case "", reasoningModeOff:
 		return
 	}
-	for _, f := range []string{
-		"temperature", "top_p", "presence_penalty", "frequency_penalty",
-		"logprobs", "top_logprobs", "prediction",
-	} {
-		if _, ok := body[f]; ok {
-			if logger != nil {
-				logger.Debug("openai: stripping field a reasoning model rejects", "field", f, "mode", string(cfg.Mode))
-			}
-			delete(body, f)
-		}
-	}
+	stripReasoningRejectedFields(body, cfg.Mode, logger)
 	if cfg.Mode == reasoningModeEffort && cfg.Effort != "" {
 		body["reasoning_effort"] = cfg.Effort
 	}

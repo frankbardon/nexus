@@ -79,3 +79,26 @@ func resolveToolChoice(tc *events.ToolChoice, tools []events.ToolDef) any {
 		return nil
 	}
 }
+
+// resolveResponsesToolChoice is resolveToolChoice for the Responses API, where
+// the named-tool form is flattened the same way the tool definition itself is:
+// `{"type":"function","name":"x"}` rather than a nested `function` object. The
+// three keywords ("auto", "required", "none") are spelled identically on both
+// surfaces.
+//
+// The decision — including the fallbacks to "required" for a nameless or
+// unknown tool — is deliberately not restated here: it is one policy, and this
+// reshapes its result rather than re-deriving it.
+func resolveResponsesToolChoice(tc *events.ToolChoice, tools []events.ToolDef) any {
+	chosen := resolveToolChoice(tc, tools)
+	nested, ok := chosen.(map[string]any)
+	if !ok {
+		return chosen
+	}
+	fn, _ := nested["function"].(map[string]any)
+	name, _ := fn["name"].(string)
+	return map[string]any{
+		"type": "function",
+		"name": name,
+	}
+}
