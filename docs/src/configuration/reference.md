@@ -638,7 +638,7 @@ special-casing the second attempt.
 
 Maps role names → model configurations. Roles can be:
 
-- **single model** — map with `provider`, `model`, `max_tokens`,
+- **single model** — map with `provider`, `model`, `max_tokens`, `effort`,
 - **fallback chain** — list of single-model maps (tried in order on
   non-retryable error or exhausted retries; coordinated by
   `nexus.provider.fallback`),
@@ -651,6 +651,7 @@ Maps role names → model configurations. Roles can be:
 | `<role>.provider`      | string | *(required)* | Plugin ID of the LLM provider (e.g. `nexus.llm.anthropic`). |
 | `<role>.model`         | string | *(required)* | Model identifier as understood by the provider. |
 | `<role>.max_tokens`    | int    | *(provider default)* | Maximum response tokens. |
+| `<role>.effort`        | string | *(unset)* | Reasoning-depth hint passed verbatim to the provider. The engine performs **no** validation — each provider owns its own vocabulary (Anthropic: `low`, `medium`, `high`, `xhigh`, `max`; Gemini: `minimal`, `low`, `medium`, `high`). Unset means "not set": the provider leaves its own reasoning configuration untouched. An unrecognised value is forwarded and the provider decides what to do with it. Not consumed by `nexus.llm.openai`, which uses `reasoning.budget_tokens` instead. |
 | `<role>.fanout`        | bool   | `false` | If `true`, treat as fanout role; `providers:` list is dispatched in parallel. |
 | `<role>.providers`     | list   | *(required if `fanout: true`)* | List of model configs for fanout dispatch. |
 
@@ -664,6 +665,7 @@ core:
       provider: nexus.llm.anthropic
       model: claude-opus-4-7
       max_tokens: 16384
+      effort: xhigh            # provider-interpreted; not validated by core
     balanced:
       - provider: nexus.llm.anthropic
         model: claude-sonnet-4-6
