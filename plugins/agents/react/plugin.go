@@ -431,6 +431,21 @@ func (p *Plugin) handleInput(input events.UserInput) {
 	p.iteration = 0
 	p.pendingToolCalls = 0
 	p.toolChoiceOverride = nil
+	// A new question abandons a cancelled turn rather than inheriting it.
+	// Without this the flag outlived the turn it belonged to and the only
+	// other writer that clears it is handleResumeEvent, which needs a /resume
+	// some transports (nexus.io.agui among them) have no path to send — so one
+	// cancelled turn left it set for the life of the agent and
+	// handleLLMResponse's own cancelled guard then dropped the response to
+	// EVERY later turn on that session. Measured: the turn after a client
+	// disconnect emitted agent.turn.start and nothing else. No tool call, no
+	// answer, no error, no timeout — a dead session that looks like it is
+	// thinking.
+	//
+	// It costs no resumability. currentTurnID is regenerated immediately
+	// above and handleResumeEvent resumes p.currentTurnID, so the cancelled
+	// turn is already unresumable by the time this line runs.
+	p.cancelled = false
 	if p.turnCancel != nil {
 		p.turnCancel()
 		p.turnCancel = nil
