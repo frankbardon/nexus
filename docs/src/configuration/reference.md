@@ -719,6 +719,23 @@ Two consequences worth spelling out:
   inheriting the first entry's words. A `fanout` role map itself carries no
   blocks — same rule as `effort`.
 
+**How an entry's configuration reaches the provider serving it.** Same mechanism
+as [`effort`](#reasoning-depth-effort), and for the same reason: looking a role
+up returns its *first* entry, so a fallback retry or a non-first `fanout` leg
+would otherwise be handed the primary's blocks. On the coordinated paths, the
+[`fallback`](#nexusproviderfallback) and [`fanout`](#nexusproviderfanout)
+coordinators stamp the entry they are actually serving — `max_tokens`, `effort`,
+`temperature`, `api` and all four blocks — onto the outgoing request, and a
+stamped request is final: the provider does not look the role up again. On the
+uncoordinated paths — the role a request names, the default role when it names
+none, and the recovery after something rewrote `model` and left `role` alone —
+the provider resolves the entry itself. Either way one precedence rule holds:
+**anything already on the request wins outright, and an entry only fills an axis
+the request arrived without.** Per axis, not per key: a request that already
+carries a `thinking` block keeps it whole rather than having the entry's keys
+merged into it. An axis the named role leaves unset falls through to the default
+role's entry.
+
 ```yaml
 core:
   models:

@@ -1,0 +1,132 @@
+package engine
+
+import "github.com/frankbardon/nexus/pkg/events"
+
+// Per-entry configuration on a `core.models` chain entry — effort, temperature,
+// max_tokens, the API-surface selector and the native provider blocks — has to
+// reach the provider that is actually serving *that* entry. A registry lookup
+// cannot do it alone: ModelRegistry.Resolve always returns a role's first entry,
+// so a fallback retry or a non-first fanout leg would silently be handed the
+// primary's configuration.
+//
+// The mechanism, established by Effort and generalised here, has two halves:
+//
+//   - Coordinators that know which entry is being served stamp it onto the
+//     outgoing request with StampModelConfig.
+//   - Providers on the paths no coordinator touches — the role the request
+//     names, the default role, and the late recovery after a router rewrote
+//     `model` without touching the rest — recover it with ResolveModelConfig.
+//
+// One precedence rule governs both: a value already on the request wins
+// outright, and an entry only fills an axis the request arrived without.
+
+// StampModelConfig applies the chain entry a coordinator is serving to an
+// outgoing request, filling only the axes the request does not already carry
+// and marking the request as stamped.
+//
+// Callers are the fallback and fanout coordinators. Model is deliberately not
+// touched: a coordinator retargets a request at a different model outright
+// rather than filling a gap, so that assignment stays at the call site.
+//
+// The stamp is authoritative. Once it is set, ResolveModelConfig will not
+// consult the registry again, because the registry would answer with the role's
+// first entry rather than the one being served.
+func StampModelConfig(req *events.LLMRequest, cfg ModelConfig) {
+	if req == nil {
+		return
+	}
+	applyModelConfig(req, cfg)
+	req.Overrides.Stamped = true
+}
+
+// ResolveModelConfig returns a copy of req with every per-entry axis it does not
+// already carry filled in from the model registry, and is how a provider
+// recovers a role's configuration on the paths no coordinator touches.
+//
+// Layering, most specific first:
+//
+//  1. whatever the request already carries — a coordinator's stamp, an agent
+//     posture's temperature, a gate's override;
+//  2. the entry for the role the request names, when it names one. This is also
+//     the late-recovery path: it is consulted whether or not `model` was already
+//     set, so a router that rewrote `model` and left `role` alone does not
+//     silently drop the role's configuration;
+//  3. the default role's entry.
+//
+// Step 3 runs even when step 2 found a role, mirroring the Effort recovery this
+// generalises: an axis no named role sets falls through to the default role.
+//
+// A stamped request is returned unchanged — the coordinator already supplied the
+// only entry that is correct for it.
+//
+// Resolution says nothing about *which* provider should answer: a role naming
+// another provider still resolves here. Callers do their own `_target_provider`
+// and resolved-provider checks first, as every provider plugin already does.
+func ResolveModelConfig(models *ModelRegistry, req events.LLMRequest) events.LLMRequest {
+	if models == nil || req.Overrides.Stamped {
+		return req
+	}
+	if req.Role != "" {
+		if cfg, ok := models.Resolve(req.Role); ok {
+			applyModelConfig(&req, cfg)
+		}
+	}
+	applyModelConfig(&req, models.Default())
+	return req
+}
+
+// applyModelConfig is the shared gap-fill both halves are built from: every axis
+// cfg sets and req does not is copied across, and nothing req already carries is
+// disturbed.
+func applyModelConfig(req *events.LLMRequest, cfg ModelConfig) {
+	if cfg.MaxTokens > 0 && req.MaxTokens == 0 {
+		req.MaxTokens = cfg.MaxTokens
+	}
+	if cfg.Effort != "" && req.Effort == "" {
+		req.Effort = cfg.Effort
+	}
+	if cfg.Temperature != nil && req.Temperature == nil {
+		// Copy the value rather than the pointer: ModelConfig is shared with
+		// the loaded configuration and a request must not be able to reach it.
+		t := *cfg.Temperature
+		req.Temperature = &t
+	}
+	if cfg.API != "" && req.Overrides.API == "" {
+		req.Overrides.API = cfg.API
+	}
+	// A nil block means the request said nothing about that axis, which is what
+	// makes a gap; a set-but-empty block is a statement and blocks the fill.
+	if req.Overrides.Thinking == nil {
+		req.Overrides.Thinking = cloneModelBlock(cfg.Thinking)
+	}
+	if req.Overrides.Reasoning == nil {
+		req.Overrides.Reasoning = cloneModelBlock(cfg.Reasoning)
+	}
+	if req.Overrides.Cache == nil {
+		req.Overrides.Cache = cloneModelBlock(cfg.Cache)
+	}
+	if req.Overrides.Retry == nil {
+		req.Overrides.Retry = cloneModelBlock(cfg.Retry)
+	}
+}
+
+// cloneModelBlock copies a native provider block's top level so a request never
+// aliases the map a ModelConfig holds — a stamped request travels the bus and
+// outlives the call, and the registry's copy is shared by every request that
+// resolves the same entry. Nested values stay shared: they are read-only by the
+// ModelConfig contract, and a consumer that needs to change one builds its own
+// map.
+//
+// nil in, nil out: "the entry said nothing" must not become "the entry set an
+// empty block", because the two differ once a role block is merged over a
+// plugin-level one.
+func cloneModelBlock(block map[string]any) map[string]any {
+	if block == nil {
+		return nil
+	}
+	out := make(map[string]any, len(block))
+	for k, v := range block {
+		out[k] = v
+	}
+	return out
+}

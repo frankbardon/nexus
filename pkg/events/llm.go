@@ -2,7 +2,7 @@ package events
 
 // Schema-version constants for llm.* payloads. See doc.go.
 const (
-	LLMRequestVersion    = 1
+	LLMRequestVersion    = 2
 	LLMResponseVersion   = 1
 	StreamChunkVersion   = 1
 	StreamEndVersion     = 1
@@ -37,7 +37,55 @@ type ResponseFormat struct {
 	Strict bool           `json:"strict,omitempty"` // enforce strict schema adherence
 }
 
+// ModelOverrides carries the configuration of the `core.models` chain entry a
+// request is actually being served by, for every per-entry axis that has no
+// dedicated LLMRequest field of its own.
+//
+// Like Effort it is an internal carrier, not an operator-facing key: operators
+// write these on a `core.models` entry (engine.ModelConfig) and they arrive here
+// one of two ways — the fallback and fanout coordinators stamp the entry they
+// are actually serving onto the outgoing request, and for the paths no
+// coordinator touches the provider recovers them from the registry itself.
+// engine.StampModelConfig and engine.ResolveModelConfig are the two sides of
+// that, and the only place the precedence rule lives.
+//
+// Core never looks inside a block. Each map is the provider's own native
+// configuration block, forwarded verbatim; the provider that owns the
+// vocabulary is the only thing that validates or rejects anything. A nil map
+// means "nothing was set", which is deliberately distinct from a set-but-empty
+// block, because the two differ once a role block is merged over a
+// plugin-level one.
+//
+// Treat every map reachable from here as read-only: the stamping helper copies
+// a block's top level so a request does not alias the loaded configuration, but
+// nested values are shared. A consumer that needs to change something builds its
+// own map.
+type ModelOverrides struct {
+	// Stamped reports that a coordinator has already applied the chain entry
+	// it is actually serving. A consumer seeing it MUST NOT consult the model
+	// registry for anything left unset here: a registry lookup always returns
+	// the role's *first* entry, which for a fallback retry or a non-first
+	// fanout leg is the wrong one.
+	Stamped bool `json:"stamped,omitempty"`
+
+	// API names the provider-side API surface this entry asked for, in that
+	// provider's own naming. Empty means "not set".
+	API string `json:"api,omitempty"`
+
+	// Thinking, Reasoning, Cache and Retry are the entry's copies of the
+	// provider's native blocks of the same names.
+	Thinking  map[string]any `json:"thinking,omitempty"`
+	Reasoning map[string]any `json:"reasoning,omitempty"`
+	Cache     map[string]any `json:"cache,omitempty"`
+	Retry     map[string]any `json:"retry,omitempty"`
+}
+
 // LLMRequest describes a request to a language model.
+//
+// SchemaVersion bumped to 2 when Overrides was added. The field is a struct of
+// optional scalars and maps, so a v1 payload still parses cleanly into the v2
+// struct (every axis reads as unset) and a v1 consumer ignores the extra JSON
+// object — the addition is forward- and backward-compatible in the journal.
 type LLMRequest struct {
 	SchemaVersion int `json:"_schema_version"`
 
@@ -68,6 +116,18 @@ type LLMRequest struct {
 	// wins; a chain entry only fills in a value the request lacks.
 	Effort string
 
+	// Overrides carries the rest of the serving chain entry's configuration —
+	// the native provider blocks and the API-surface selector, which have no
+	// dedicated field here. Same rule as Effort in both directions: a value
+	// already on the request wins outright, and a chain entry only fills an
+	// axis the request arrived without. Added in schema v2.
+	Overrides ModelOverrides
+
+	// Temperature is the sampling temperature. nil means "not set": the
+	// provider leaves its own default alone. It is a pointer because 0.0 is a
+	// meaningful temperature and so cannot double as "unset". Anything that
+	// already put a value here — an agent posture, a gate — wins over a
+	// `core.models` entry, which only fills the gap.
 	Temperature *float64
 	Stream      bool
 	Prediction  string // OpenAI-only: known-content prediction for low-latency edits.
