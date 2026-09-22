@@ -122,6 +122,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 	p.thinking = thinking
 
+	// Role efforts are a configuration fact, so they are validated — and the
+	// clamp of Anthropic's xhigh/max onto Gemini's high warned — once here,
+	// never per request.
+	if err := validateRoleEfforts(p.models, p.thinking, p.log()); err != nil {
+		return err
+	}
+
 	if v, ok := ctx.Config["code_execution"].(bool); ok {
 		p.codeExecution = v
 	}
@@ -444,8 +451,11 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	}
 
 	// Thinking config: exactly one of thinkingLevel / thinkingBudget, or
-	// nothing at all under mode: off.
-	applyThinking(gen, p.thinking)
+	// nothing at all under mode: off. req.Effort is the role's reasoning-depth
+	// hint, read only under mode: level and only behind thinking.level.
+	if err := applyThinking(gen, p.thinking, req.Effort); err != nil {
+		return nil, err
+	}
 
 	if len(gen) > 0 {
 		body["generationConfig"] = gen
