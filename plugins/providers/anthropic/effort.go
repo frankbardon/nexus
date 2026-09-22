@@ -117,3 +117,21 @@ func applyEffort(body map[string]any, effort effortLevel) {
 	oc["effort"] = string(effort)
 	body["output_config"] = oc
 }
+
+// defaultRoleEffortSource labels an effort that came off the default
+// `core.models` role rather than the one the request named. The registry
+// exposes the default role's config but not its name, so it is described
+// rather than quoted.
+const defaultRoleEffortSource = "the default core.models role"
+
+// effortSourceLabel names where a request's effort came from, for the error
+// raised when it turns out to be invalid. The role name is the useful half of
+// the answer whenever there is one: the value either came off that role's
+// `core.models` entry or was set for that role upstream by the fallback or
+// fanout coordinator.
+func effortSourceLabel(role string) string {
+	if role == "" {
+		return "the request"
+	}
+	return fmt.Sprintf("core.models role %q", role)
+}

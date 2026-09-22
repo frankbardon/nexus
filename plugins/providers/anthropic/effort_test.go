@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -223,5 +224,259 @@ func TestBuildRequestBody_EffortSurvivesNativeStructuredOutput(t *testing.T) {
 	}
 	if _, ok := body["response_format"]; !ok {
 		t.Fatal("native structured output was lost")
+	}
+}
+
+// --- per-role effort --------------------------------------------------------
+
+// effortModels builds a `core.models` registry whose default role is
+// "balanced". Each entry is a (role, effort) pair; an empty effort omits the
+// key entirely, which is how an operator who never sets one is configured.
+func effortModels(entries map[string]string) *engine.ModelRegistry {
+	raw := map[string]any{"default": "balanced"}
+	for role, effort := range entries {
+		cfg := map[string]any{
+			"provider":   pluginID,
+			"model":      "claude-opus-4-5",
+			"max_tokens": 2048,
+		}
+		if effort != "" {
+			cfg["effort"] = effort
+		}
+		raw[role] = cfg
+	}
+	return engine.NewModelRegistry(raw)
+}
+
+// wireEffort runs the same two steps handleRequest does — resolve the role,
+// then build the body with the resolved effort on the request — and reports
+// what `output_config.effort` ended up as. A false second return means no
+// `output_config` was emitted at all.
+func wireEffort(t *testing.T, p *Plugin, req events.LLMRequest) (string, bool) {
+	t.Helper()
+
+	target := p.resolveTarget(req)
+	if target.skip {
+		t.Fatal("resolveTarget skipped the request")
+	}
+	req.Effort = target.effort
+
+	body := p.buildRequestBody(target.model, target.maxTokens, req)
+	oc, ok := body["output_config"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	v, ok := oc["effort"].(string)
+	return v, ok
+}
+
+// TestEffort_RoleOnly verifies a `core.models` role's effort reaches the wire
+// when the provider block sets none.
+func TestEffort_RoleOnly(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "max"})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "deep",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "max" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "max")
+	}
+}
+
+// TestEffort_ProviderOnly verifies the E1-S3 provider-level key still applies
+// when the resolved role carries no effort of its own.
+func TestEffort_ProviderOnly(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.outputConfig = outputConfig{Effort: effortLow}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": ""})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "deep",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "low" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "low")
+	}
+}
+
+// TestEffort_RoleWinsOverProvider pins the precedence: the role's value beats
+// the provider-level key. This is deliberately the inverse of Gemini, where
+// the plugin-level `thinking.level` beats a role's effort — there `level` is
+// the native vocabulary and effort the translated one, whereas both speak the
+// same words here.
+func TestEffort_RoleWinsOverProvider(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.outputConfig = outputConfig{Effort: effortLow}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "xhigh"})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "deep",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "xhigh" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "xhigh")
+	}
+}
+
+// TestEffort_NeitherSet verifies that with no effort anywhere the body carries
+// no `output_config` at all, so the API default applies and an existing
+// deployment's request is byte-identical.
+func TestEffort_NeitherSet(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": ""})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "deep",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if ok {
+		t.Fatalf("output_config.effort = %q, want no output_config emitted", got)
+	}
+}
+
+// TestEffort_RequestBeatsRegistry verifies an effort already on the request
+// wins over the registry. This is what makes a fallback entry or a non-first
+// fanout entry correct: those coordinators stamp the chain entry they are
+// actually serving onto the request, whereas a Resolve() here always reads
+// chain[0].
+func TestEffort_RequestBeatsRegistry(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.outputConfig = outputConfig{Effort: effortLow}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "max"})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Role:     "deep",
+		Effort:   "medium",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "medium" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "medium")
+	}
+}
+
+// TestEffort_DefaultRoleFallback verifies the default-role branch picks up
+// effort, mirroring the max_tokens resolution beside it: a request that names
+// no role at all resolves through `core.models`' default.
+func TestEffort_DefaultRoleFallback(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.outputConfig = outputConfig{Effort: effortLow}
+	p.models = effortModels(map[string]string{"balanced": "high"})
+
+	got, ok := wireEffort(t, p, events.LLMRequest{
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+	if !ok || got != "high" {
+		t.Fatalf("output_config.effort = %q (present=%v), want %q", got, ok, "high")
+	}
+}
+
+// TestEffort_LateRecoveryAfterModelRewrite is the router case the max_tokens
+// recovery branches exist for: something rewrote req.Model to a concrete id
+// without touching the rest, so the role-resolution branches are skipped
+// entirely. The role's effort must still be found.
+func TestEffort_LateRecoveryAfterModelRewrite(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "max"})
+
+	target := p.resolveTarget(events.LLMRequest{
+		Role:  "deep",
+		Model: "claude-opus-4-5-rewritten-by-a-router",
+	})
+	if target.effort != "max" {
+		t.Fatalf("effort = %q, want %q after a model rewrite skipped the role branch", target.effort, "max")
+	}
+	if target.model != "claude-opus-4-5-rewritten-by-a-router" {
+		t.Fatalf("model = %q, want the rewritten id untouched", target.model)
+	}
+}
+
+// TestEffort_LateRecoveryFromDefaultRole covers the last recovery branch: an
+// explicit model plus an unknown role, so only the default role is left to
+// answer. It mirrors the max_tokens branch immediately above it.
+func TestEffort_LateRecoveryFromDefaultRole(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.models = effortModels(map[string]string{"balanced": "medium"})
+
+	target := p.resolveTarget(events.LLMRequest{
+		Role:  "no-such-role",
+		Model: "claude-opus-4-5",
+	})
+	if target.effort != "medium" {
+		t.Fatalf("effort = %q, want %q from the default role", target.effort, "medium")
+	}
+	if target.effortSource != defaultRoleEffortSource {
+		t.Fatalf("effortSource = %q, want %q", target.effortSource, defaultRoleEffortSource)
+	}
+}
+
+// TestEffort_InvalidRoleValueFailsTheRequest verifies an unusable role effort
+// is reported rather than dropped. Core deliberately does not validate the key
+// — the vocabularies differ per provider — so this provider must, and it can
+// only do so per request because a role's value does not exist at Init.
+func TestEffort_InvalidRoleValueFailsTheRequest(t *testing.T) {
+	rec := newBusRecorder()
+	p := &Plugin{logger: silentTestLogger(), bus: rec.bus}
+	p.models = effortModels(map[string]string{"balanced": "", "deep": "ludicrous"})
+
+	p.handleRequest(events.LLMRequest{
+		Role:     "deep",
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+
+	errs := rec.byType("core.error")
+	if len(errs) != 1 {
+		t.Fatalf("core.error count = %d, want 1", len(errs))
+	}
+	info, ok := errs[0].Payload.(events.ErrorInfo)
+	if !ok {
+		t.Fatalf("core.error payload = %#v, want events.ErrorInfo", errs[0].Payload)
+	}
+	msg := info.Err.Error()
+	// The error must name the role, the offending value, and the vocabulary.
+	for _, want := range []string{`core.models role "deep"`, `"ludicrous"`, effortValues} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not mention %q", msg, want)
+		}
+	}
+	if info.Retryable {
+		t.Fatal("a misconfigured effort is not retryable")
+	}
+}
+
+// TestEffort_InvalidRequestValueFailsTheRequest covers the same rejection for
+// a value that arrived on the request rather than off a role — what a fanout
+// leg carrying another provider's vocabulary looks like from here.
+func TestEffort_InvalidRequestValueFailsTheRequest(t *testing.T) {
+	rec := newBusRecorder()
+	p := &Plugin{logger: silentTestLogger(), bus: rec.bus}
+	p.models = effortModels(map[string]string{"balanced": ""})
+
+	p.handleRequest(events.LLMRequest{
+		Effort:   "minimal", // Gemini's vocabulary, not Anthropic's.
+		Messages: []events.Message{{Role: "user", Content: "hi"}},
+	})
+
+	errs := rec.byType("core.error")
+	if len(errs) != 1 {
+		t.Fatalf("core.error count = %d, want 1", len(errs))
+	}
+	info := errs[0].Payload.(events.ErrorInfo)
+	if !strings.Contains(info.Err.Error(), "the request") {
+		t.Fatalf("error %q does not name the request as the source", info.Err.Error())
+	}
+}
+
+// TestResolveEffort_IgnoresAnUnvalidatedBadValue pins the defensive half of
+// the seam: handleRequest never lets a bad value reach here, but a direct
+// buildRequestBody caller must degrade to the configured default rather than
+// put a guaranteed 400 on the wire.
+func TestResolveEffort_IgnoresAnUnvalidatedBadValue(t *testing.T) {
+	p := &Plugin{logger: silentTestLogger()}
+	p.outputConfig = outputConfig{Effort: effortHigh}
+
+	if got := p.resolveEffort(events.LLMRequest{Effort: "ludicrous"}); got != effortHigh {
+		t.Fatalf("resolveEffort = %q, want the provider-level default %q", got, effortHigh)
 	}
 }
