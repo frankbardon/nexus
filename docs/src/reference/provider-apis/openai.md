@@ -95,6 +95,17 @@ not been deprecated, but it is no longer where the API grows.
 - A new `reasoning.effort` value. Nexus does not clamp, so a new word passes
   through — good — but the `Init` allowlist would reject it.
 
+## Verification basis
+
+The best-sourced page of the three. The changelog was fetched on 2026-09-22, and
+the Responses surface details come from five direct fetches made during the
+per-role-reasoning effort — reasoning guide, migrate-to-responses, batch,
+streaming events, and the Azure route — captured in
+`.planning/per-role-reasoning/research/openai-responses-api.md` before that
+directory is cleaned up. Two wire shapes in the Nexus column are explicitly NOT
+confirmed against a spec: nested `input_audio`, and a content-parts array on
+`function_call_output.output`.
+
 ## References
 
 - Changelog (**the page to diff against `Last verified`**) — https://developers.openai.com/api/docs/changelog

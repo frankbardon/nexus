@@ -98,6 +98,14 @@ is ever needed.
 - New streaming event types. The version contract explicitly permits adding
   these, so our SSE reader must keep ignoring unknown events rather than erroring.
 
+## Verification basis
+
+Versioning policy and API release notes both fetched directly on 2026-09-22 —
+the beta-header list and the recent-changes column come from the release-notes
+page itself. Feature rows not named in those two pages (citations, files, PDF,
+batches) are read from our own code and cite files; they describe what Nexus
+sends, not independent confirmation that the API still accepts it.
+
 ## References
 
 - Versioning policy — https://platform.claude.com/docs/en/api/versioning
