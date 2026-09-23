@@ -112,6 +112,10 @@
 - [Event Types](./events/reference.md)
 - [Configuration Reference](./configuration/reference.md)
 - [Upgrading to v0.29.0](./configuration/upgrading-v0.29.md)
+- [Provider API Surfaces](./reference/provider-apis/index.md)
+  - [Anthropic](./reference/provider-apis/anthropic.md)
+  - [OpenAI](./reference/provider-apis/openai.md)
+  - [Gemini](./reference/provider-apis/gemini.md)
 - [Sandboxing](./security/sandboxing.md)
 - [Native Realtime API — deferred](./multimodal/native-realtime-deferred.md)
 
