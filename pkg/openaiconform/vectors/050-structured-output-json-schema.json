@@ -1,0 +1,43 @@
+{
+  "id": "structured-output-json-schema",
+  "title": "A json_schema response format lands flattened under text.format",
+  "rationale": "Structured output moves AND flattens: Chat Completions wraps the schema in a `json_schema` sub-object of `response_format`, Responses puts name, schema and strict directly on `text.format`. Unlike a tool definition's strict, this one is forwarded exactly as the caller set it -- the json_schema gate and the structured-output path both set it on purpose.",
+  "model": "gpt-5.1",
+  "max_tokens": 1500,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "Extract the fields."}
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "name": "extraction",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+      "required": ["name", "age"],
+      "additionalProperties": false
+    }
+  },
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 1500,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Extract the fields."}
+    ],
+    "text": {
+      "format": {
+        "type": "json_schema",
+        "name": "extraction",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+          "required": ["name", "age"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

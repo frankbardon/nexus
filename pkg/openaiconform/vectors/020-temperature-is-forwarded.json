@@ -1,0 +1,21 @@
+{
+  "id": "temperature-is-forwarded",
+  "title": "A set temperature reaches the body unchanged when reasoning is off",
+  "rationale": "Temperature is a pointer precisely so that 0.0 is expressible, and a set one must survive to the wire on a non-reasoning request. It is the same field the reasoning strip removes, so pinning it here is what makes the reasoning vectors mean something.",
+  "model": "gpt-5.1",
+  "max_tokens": 1024,
+  "temperature": 0.2,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "Write a haiku."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 1024,
+    "store": false,
+    "temperature": 0.2,
+    "input": [
+      {"role": "user", "content": "Write a haiku."}
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "reasoning-effort-and-summary",
+  "title": "A resolved reasoning depth is an object, and it strips the sampling parameters",
+  "rationale": "Chat Completions has a single top-level `reasoning_effort` scalar and no summary field at all; Responses takes a `reasoning` object carrying both. The strip runs last, after the rest of the body is written, so a temperature the caller set is removed rather than racing the write -- a reasoning model rejects it.",
+  "model": "gpt-5.1",
+  "max_tokens": 8000,
+  "temperature": 0.7,
+  "reasoning": {"mode": "effort", "effort": "high", "summary": "auto"},
+  "messages": [
+    {"role": "user", "content": "Think this through."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 8000,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Think this through."}
+    ],
+    "reasoning": {"effort": "high", "summary": "auto"}
+  }
+}

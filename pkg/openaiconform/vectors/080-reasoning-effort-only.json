@@ -1,0 +1,20 @@
+{
+  "id": "reasoning-effort-only",
+  "title": "A depth with no summary writes only the depth",
+  "rationale": "The summary dial is optional, and an absent one must not become an empty string or a default the operator never asked for.",
+  "model": "gpt-5.1",
+  "max_tokens": 4000,
+  "reasoning": {"mode": "effort", "effort": "low"},
+  "messages": [
+    {"role": "user", "content": "Quick answer please."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 4000,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Quick answer please."}
+    ],
+    "reasoning": {"effort": "low"}
+  }
+}

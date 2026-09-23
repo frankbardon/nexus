@@ -1,0 +1,19 @@
+{
+  "id": "incomplete-without-a-reason",
+  "title": "An incomplete run with no reason finishes as incomplete",
+  "rationale": "The reason is optional on the wire, and flattening a reasonless incomplete run to stop would tell every downstream consumer the turn finished normally.",
+  "reply": {
+    "id": "resp_5",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "incomplete",
+    "output": [],
+    "usage": {"input_tokens": 3, "output_tokens": 0, "total_tokens": 3}
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "",
+    "finish_reason": "incomplete",
+    "usage": {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3}
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "id": "function-tools-are-flat-and-non-strict",
+  "title": "Function tools are flat and carry an explicit strict: false",
+  "rationale": "Chat Completions nests a tool under a `function` object and defaults `strict` to off; Responses puts name/description/parameters directly on the tool and treats an ABSENT `strict` as an attempt at strict mode. Nexus tool schemas come from plugins, MCP servers, skills and operator catalogs, so inheriting that default would turn a working catalog into an HTTP 400 purely from changing `api:`. Both surfaces therefore write the key explicitly.",
+  "model": "gpt-5.1",
+  "max_tokens": 4096,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "What is on my calendar?"}
+  ],
+  "tools": [
+    {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"]
+      }
+    },
+    {
+      "name": "calendar_list",
+      "description": "",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "range": {
+            "type": "object",
+            "properties": {"from": {"type": "string"}, "to": {"type": "string"}}
+          }
+        }
+      }
+    }
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 4096,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "What is on my calendar?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "search",
+        "description": "Search the web.",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {"q": {"type": "string"}},
+          "required": ["q"]
+        }
+      },
+      {
+        "type": "function",
+        "name": "calendar_list",
+        "description": "",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "range": {
+              "type": "object",
+              "properties": {"from": {"type": "string"}, "to": {"type": "string"}}
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -282,6 +282,19 @@ API itself offers rather than of what is implemented here:
 | Azure | deployment-scoped path + `api-version` | versionless `/openai/v1/responses`, deployment in the body |
 | Batched via [`nexus.llm.batch`](../../configuration/reference.md#nexusllmbatch) | yes | yes — the coordinator follows the role's `api:` and carries its reasoning; bodies are still its own serializer, and Azure batch is unclaimed |
 
+**The batch coordinator's Responses serializer is a second one, pinned to the
+same corpus as this one.** `nexus.llm.batch` cannot call into this plugin — the
+builders here are unexported methods on plugin state the coordinator neither has
+nor should have, and reaching across would be a plugin-to-plugin call — so the
+two are held together by `pkg/openaiconform` instead: one set of request
+vectors, one set of named wire invariants (`store: false`, an explicit
+`strict: false` on every function tool, `max_output_tokens`, `input`,
+`text.format`, `model` present in Azure modes) and one set of reply fixtures,
+with the fields that legitimately differ listed explicitly rather than quietly
+omitted. A divergence in either direction fails a test naming the vector and the
+differing key. See [Plugin Contract
+Tests](../../guides/plugin-contracts.md#conformance-corpora-when-two-plugins-must-agree-on-a-wire-format).
+
 **Upgrading from v0.28.x moves a plain deployment's endpoint.** That default was
 `chat_completions`. It moved because on OpenAI's current models the chat surface
 cannot reason while tools are on the turn, and Nexus puts tools on every turn —
