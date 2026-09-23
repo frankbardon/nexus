@@ -1,6 +1,6 @@
 # Gemini API — surface tracking
 
-- **Last verified:** 2026-09-22
+- **Last verified:** 2026-09-23 (changelog fetched directly)
 - **Plugin:** `nexus.llm.gemini` (`plugins/providers/gemini/`)
 - **Batch surface:** none — Gemini is not wired into `nexus.llm.batch`
 
@@ -20,6 +20,23 @@ Nexus sends `v1beta` on AI Studio and `v1` on Vertex.
 channel by construction, which is what makes explicit context caching reachable
 there. It also means a `v1beta` breaking change is in-contract for Google and
 will arrive without a version bump.
+
+## Model families, as of the last check
+
+The changelog's Sept 2026 entries show the active lineup is **3.5 / 3.6 / 3.7 /
+3.8**, and that on **2026-09-18 Gemini 2.5 was restricted to active users** —
+new projects are directed to 3.5 Flash-Lite or 3.8 Flash.
+
+**This demotes `thinking.mode: budget` to a legacy path.** `thinkingBudget` is
+the 2.5-era control; a new project cannot reach a model that accepts it. The
+mode stays supported for existing deployments, but `mode: level` is the one to
+document first and to reach for on anything new.
+
+The changelog shows **no recent changes to thinking levels or budgets**, so the
+implementation shipped in v0.29.0 is current. The last context-caching entry was
+April 2025, and the Batch API has been stable since its 2025 launch. The most
+recent breaking change was a May 2026 schema shift in the **Interactions API**,
+which Nexus deliberately does not speak.
 
 ## What Nexus pins
 
@@ -62,10 +79,13 @@ will arrive without a version bump.
 
 **Open, ranked.**
 
-1. **Vertex explicit caching is unverified.** The v1beta-only rule is documented
-   for AI Studio; Nexus calls `/v1/cachedContents` on Vertex and nothing in this
-   repo confirms that route behaves the same. Worth a live check before anyone
-   relies on per-role caching against Vertex.
+1. **Vertex explicit caching is unverified — and a documentation attempt failed.**
+   The v1beta-only rule is documented for AI Studio; Nexus calls
+   `/v1/cachedContents` on Vertex (`auth.go:402`) and nothing confirms that route
+   behaves the same. The Vertex context-caching *overview* page was fetched on
+   2026-09-23 and does not state the API version path, the resource name, or how
+   it differs from AI Studio. Resolving this needs the Vertex API reference or a
+   live call — **do not repeat the overview page, it does not answer it.**
 2. **`cache.min_tokens` is inert.** The token-count probe was never implemented
    and `lookup` is read-only, so the key parses and does nothing. Documented in
    the reference as of v0.29.0.
@@ -82,6 +102,13 @@ will arrive without a version bump.
   `high`; a genuinely new Gemini level would need adding to the vocabulary.
 - Thought-signature handling changes — this path is load-bearing and its absence
   is an immediate `400 INVALID_ARGUMENT`.
+
+## Verification basis
+
+Changelog fetched directly on 2026-09-23. The v1 vs v1beta feature split comes
+from Google's "API versions explained" page via search summary, not a direct
+fetch — treat the v1beta-only list as indicative and confirm a specific feature
+before depending on it. The Nexus column is read from the code and cites files.
 
 ## References
 

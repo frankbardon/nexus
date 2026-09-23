@@ -29,6 +29,11 @@ canonical URLs. To review:
 model family Nexus is asked to target. Provider APIs in this space have moved
 faster than quarterly.
 
+**Verification basis.** Pages are not equally well sourced, and each says so in
+its own *Verification basis* section. A page grounded in a directly fetched
+changelog is stronger evidence than one assembled from search summaries plus our
+own code. When the difference matters for a decision, fetch before relying.
+
 **Accuracy rule.** Every claim about Nexus behaviour cites a file. Every claim
 about a provider's API cites a URL. A row that cannot cite either is marked
 `unverified` rather than asserted — an unverified row is a research task, not a
