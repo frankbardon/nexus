@@ -32,6 +32,20 @@
 // plus the real `{Type, From: 1, To: 2}` migrator chained after it. Apply
 // is the entry point.
 //
+// # Shipped versions above 1
+//
+// Most payloads are still at v1. The ones that have moved, and why:
+//
+//   - io.input / UserInput — v2 added PreloadMessages, v3 added Headers.
+//   - llm.request / LLMRequest — v2 added Overrides, the carrier for the
+//     `core.models` chain entry a request is actually being served by
+//     (native provider blocks plus the API-surface selector). Both
+//     directions are compatible: a v1 payload parses into the v2 struct
+//     with every axis unset, and a v1 consumer ignores the extra object.
+//
+// Each of those additions is an optional field, so neither needed a
+// compat migrator — see the mutation rules below.
+//
 // # Adding a new event type
 //
 //  1. Define the struct in the appropriate per-domain file

@@ -1,0 +1,19 @@
+{
+  "id": "unknown-status-passes-through",
+  "title": "A status neither surface knows is passed through, not flattened to stop",
+  "rationale": "A status this code has never seen is more useful reported as itself than reported as a normal completion. Flattening it would make a new lifecycle state indistinguishable from success on both surfaces at once.",
+  "reply": {
+    "id": "resp_7",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "queued",
+    "output": [],
+    "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "",
+    "finish_reason": "queued",
+    "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}
+  }
+}

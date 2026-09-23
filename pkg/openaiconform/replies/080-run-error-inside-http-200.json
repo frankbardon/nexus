@@ -1,0 +1,15 @@
+{
+  "id": "run-error-inside-http-200",
+  "title": "A run that failed inside an HTTP 200 is an error, not an empty success",
+  "rationale": "The Responses API accepts a request and then reports the run's own failure in the body. Reading that as an empty successful reply is how a failed turn arrives looking finished -- and on the synchronous path it is also what hides the failure from the fallback coordinator, which watches core.error and never llm.response.",
+  "reply": {
+    "id": "resp_8",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "failed",
+    "error": {"code": "server_error", "message": "the model failed to generate a response"},
+    "output": [],
+    "usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}
+  },
+  "error": true
+}

@@ -3,6 +3,7 @@ package openai
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine/pricing"
@@ -15,93 +16,201 @@ func silentLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestParseReasoningConfig_Defaults(t *testing.T) {
-	rc := parseReasoningConfig(map[string]any{})
+func TestParseReasoningConfig_AbsentBlockIsOff(t *testing.T) {
+	rc, err := parseReasoningConfig(map[string]any{}, silentLogger())
+	if err != nil {
+		t.Fatalf("parseReasoningConfig: %v", err)
+	}
+	if rc.Mode != reasoningModeOff {
+		t.Errorf("default Mode: got %q, want off", rc.Mode)
+	}
 	if rc.Effort != "" {
 		t.Errorf("default Effort: got %q, want empty", rc.Effort)
 	}
-	if rc.IncludeSummary {
-		t.Errorf("default IncludeSummary: got true, want false")
+	if rc.Summary != "" {
+		t.Errorf("default Summary: got %q, want empty", rc.Summary)
 	}
 }
 
-func TestParseReasoningConfig_ExplicitEfforts(t *testing.T) {
-	for _, want := range []string{"minimal", "low", "medium", "high"} {
-		cfg := map[string]any{
-			"reasoning": map[string]any{
-				"effort":          want,
-				"include_summary": true,
-			},
+// A present block with no `mode` resolves to the one on-mode, mirroring
+// thinking on nexus.llm.anthropic and nexus.llm.gemini.
+func TestParseReasoningConfig_PresentBlockDefaultsToEffortMode(t *testing.T) {
+	rc, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"effort": "high"},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("parseReasoningConfig: %v", err)
+	}
+	if rc.Mode != reasoningModeEffort {
+		t.Errorf("Mode: got %q, want effort", rc.Mode)
+	}
+	if rc.Effort != "high" {
+		t.Errorf("Effort: got %q, want high", rc.Effort)
+	}
+}
+
+// OpenAI's full vocabulary, unclamped: it is a superset of the union of what
+// Anthropic and Gemini accept, so every word from either passes through.
+func TestParseReasoningConfig_FullEffortVocabulary(t *testing.T) {
+	for _, want := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		rc, err := parseReasoningConfig(map[string]any{
+			"reasoning": map[string]any{"mode": "effort", "effort": want},
+		}, silentLogger())
+		if err != nil {
+			t.Fatalf("effort=%q: %v", want, err)
 		}
-		rc := parseReasoningConfig(cfg)
 		if rc.Effort != want {
 			t.Errorf("effort=%q: got %q", want, rc.Effort)
 		}
-		if !rc.IncludeSummary {
-			t.Errorf("effort=%q: IncludeSummary should be true", want)
+	}
+}
+
+func TestParseReasoningConfig_InvalidEffortFailsInit(t *testing.T) {
+	_, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"effort": "extreme"},
+	}, silentLogger())
+	if err == nil {
+		t.Fatal("expected an error for an unknown effort")
+	}
+	for _, want := range []string{"extreme", "none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should name %q", err, want)
 		}
 	}
 }
 
-func TestParseReasoningConfig_InvalidEffortIgnored(t *testing.T) {
-	cfg := map[string]any{
-		"reasoning": map[string]any{
-			"effort": "extreme", // not a valid value
-		},
+func TestParseReasoningConfig_Summary(t *testing.T) {
+	for _, want := range []string{"auto", "concise", "detailed"} {
+		rc, err := parseReasoningConfig(map[string]any{
+			"reasoning": map[string]any{"summary": want},
+		}, silentLogger())
+		if err != nil {
+			t.Fatalf("summary=%q: %v", want, err)
+		}
+		if rc.Summary != want {
+			t.Errorf("summary=%q: got %q", want, rc.Summary)
+		}
 	}
-	rc := parseReasoningConfig(cfg)
-	if rc.Effort != "" {
-		t.Errorf("invalid effort: got %q, want empty", rc.Effort)
+	if _, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"summary": "verbose"},
+	}, silentLogger()); err == nil {
+		t.Error("expected an error for an unknown summary")
 	}
 }
 
-func TestIsReasoningModel(t *testing.T) {
-	matches := []string{
-		"o1", "o1-mini", "o1-preview",
-		"o3", "o3-mini",
-		"o4-mini",
-		"gpt-5", "gpt-5-mini", "gpt-5-thinking", "gpt-5-mini-thinking",
+func TestParseReasoningConfig_InvalidModeFailsInit(t *testing.T) {
+	_, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"mode": "adaptive"},
+	}, silentLogger())
+	if err == nil {
+		t.Fatal("expected an error for an unknown mode")
 	}
-	for _, m := range matches {
-		if !isReasoningModel(m) {
-			t.Errorf("isReasoningModel(%q): got false, want true", m)
-		}
+}
+
+func TestParseReasoningConfig_ModeOff(t *testing.T) {
+	rc, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"mode": "off", "effort": "high"},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("parseReasoningConfig: %v", err)
+	}
+	if rc.Mode != reasoningModeOff {
+		t.Errorf("Mode: got %q, want off", rc.Mode)
 	}
 
-	misses := []string{
-		"gpt-4o", "gpt-4-turbo", "gpt-4o-mini",
-		"claude-3-5-sonnet-20241022",
-		"",
+	body := map[string]any{"model": "o1-mini", "temperature": 0.7}
+	applyReasoning(body, rc, silentLogger())
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Error("mode: off must send no reasoning configuration")
 	}
-	for _, m := range misses {
-		if isReasoningModel(m) {
-			t.Errorf("isReasoningModel(%q): got true, want false", m)
+	if body["temperature"] != 0.7 {
+		t.Error("mode: off must strip nothing, even on a model id that looks like a reasoning family")
+	}
+}
+
+// The deprecated aliases are accepted rather than failing the boot.
+func TestParseReasoningConfig_DeprecatedAliases(t *testing.T) {
+	rc, err := parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"enabled": true},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("enabled: true: %v", err)
+	}
+	if rc.Mode != reasoningModeEffort {
+		t.Errorf("enabled: true -> Mode %q, want effort", rc.Mode)
+	}
+
+	rc, err = parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"enabled": false, "effort": "high"},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("enabled: false: %v", err)
+	}
+	if rc.Mode != reasoningModeOff {
+		t.Errorf("enabled: false -> Mode %q, want off", rc.Mode)
+	}
+
+	// An explicit mode wins over the alias.
+	rc, err = parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"enabled": false, "mode": "effort", "effort": "low"},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("mode beats enabled: %v", err)
+	}
+	if rc.Mode != reasoningModeEffort {
+		t.Errorf("mode should win over enabled: got %q", rc.Mode)
+	}
+
+	// budget_tokens is accepted, ignored and does not fail the boot.
+	rc, err = parseReasoningConfig(map[string]any{
+		"reasoning": map[string]any{"budget_tokens": 10000, "effort": "medium"},
+	}, silentLogger())
+	if err != nil {
+		t.Fatalf("budget_tokens: %v", err)
+	}
+	if rc.Mode != reasoningModeEffort || rc.Effort != "medium" {
+		t.Errorf("budget_tokens should be ignored: got mode %q effort %q", rc.Mode, rc.Effort)
+	}
+}
+
+// The gate is the declared mode, never the model id: a model id that looks
+// like a reasoning family strips nothing while the operator has declared no
+// mode. The old reasoningModelPattern regex is gone and must not come back.
+func TestApplyReasoning_ModeOffLeavesBodyAloneOnAnyModel(t *testing.T) {
+	for _, model := range []string{"gpt-4o", "o1-mini", "o3", "gpt-5-thinking"} {
+		body := map[string]any{
+			"model":       model,
+			"temperature": 0.7,
+			"top_p":       0.9,
+		}
+
+		applyReasoning(body, reasoningConfig{Mode: reasoningModeOff, Effort: "medium"}, silentLogger())
+
+		if body["temperature"] != 0.7 {
+			t.Errorf("%s: temperature should be untouched: got %v", model, body["temperature"])
+		}
+		if body["top_p"] != 0.9 {
+			t.Errorf("%s: top_p should be untouched: got %v", model, body["top_p"])
+		}
+		if _, ok := body["reasoning_effort"]; ok {
+			t.Errorf("%s: reasoning_effort should not be set under mode: off", model)
 		}
 	}
 }
 
-func TestApplyReasoning_NonReasoningModelLeavesBodyAlone(t *testing.T) {
-	body := map[string]any{
-		"model":       "gpt-4o",
-		"temperature": 0.7,
-		"top_p":       0.9,
-	}
-	cfg := reasoningConfig{Effort: "medium"}
+// A zero reasoningConfig — the embedder who constructed a Plugin without
+// parsing a config — is off, not on.
+func TestApplyReasoning_ZeroConfigIsOff(t *testing.T) {
+	body := map[string]any{"model": "o1-mini", "temperature": 0.7}
 
-	applyReasoning(body, "gpt-4o", cfg, false, silentLogger())
+	applyReasoning(body, reasoningConfig{}, silentLogger())
 
 	if body["temperature"] != 0.7 {
-		t.Errorf("temperature should be untouched: got %v", body["temperature"])
-	}
-	if body["top_p"] != 0.9 {
-		t.Errorf("top_p should be untouched: got %v", body["top_p"])
-	}
-	if _, ok := body["reasoning_effort"]; ok {
-		t.Errorf("reasoning_effort should not be set on non-reasoning model")
+		t.Errorf("temperature should be untouched under a zero config: got %v", body["temperature"])
 	}
 }
 
-func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
+func TestApplyReasoning_DeclaredModeStripsAndSetsEffort(t *testing.T) {
 	body := map[string]any{
 		"model":             "o1-mini",
 		"temperature":       0.7,
@@ -113,9 +222,9 @@ func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
 		"prediction":        map[string]any{"type": "content", "content": "hi"},
 		"messages":          []any{},
 	}
-	cfg := reasoningConfig{Effort: "high"}
+	cfg := reasoningConfig{Mode: reasoningModeEffort, Effort: "high"}
 
-	applyReasoning(body, "o1-mini", cfg, false, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	for _, f := range []string{
 		"temperature", "top_p", "presence_penalty", "frequency_penalty",
@@ -134,34 +243,36 @@ func TestApplyReasoning_ReasoningModelStripsAndSetsEffort(t *testing.T) {
 	}
 }
 
-func TestApplyReasoning_ForceReasoningOnNonReasoningModel(t *testing.T) {
+// The declaration also carries a model the deleted regex never matched: the
+// operator, not a table, decides what a reasoning model is.
+func TestApplyReasoning_DeclaredModeOnAnUnknownModelId(t *testing.T) {
 	body := map[string]any{
-		"model":       "gpt-4o",
+		"model":       "some-model-released-next-year",
 		"temperature": 0.5,
 	}
-	cfg := reasoningConfig{Effort: "low"}
+	cfg := reasoningConfig{Mode: reasoningModeEffort, Effort: "low"}
 
-	applyReasoning(body, "gpt-4o", cfg, true, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	if _, ok := body["temperature"]; ok {
-		t.Error("temperature should be stripped when force_reasoning=true")
+		t.Error("temperature should be stripped whenever a reasoning mode is declared")
 	}
 	if got := body["reasoning_effort"]; got != "low" {
 		t.Errorf("reasoning_effort: got %v, want low", got)
 	}
 }
 
-func TestApplyReasoning_ReasoningModelNoEffortConfig(t *testing.T) {
+func TestApplyReasoning_DeclaredModeNoEffortConfig(t *testing.T) {
 	body := map[string]any{
 		"model":       "o3-mini",
 		"temperature": 0.7,
 	}
-	cfg := reasoningConfig{} // no effort
+	cfg := reasoningConfig{Mode: reasoningModeEffort} // no effort
 
-	applyReasoning(body, "o3-mini", cfg, false, silentLogger())
+	applyReasoning(body, cfg, silentLogger())
 
 	if _, ok := body["temperature"]; ok {
-		t.Error("temperature should be stripped on reasoning model")
+		t.Error("temperature should be stripped under a declared reasoning mode")
 	}
 	if _, ok := body["reasoning_effort"]; ok {
 		t.Error("reasoning_effort should not be set when Effort is empty")
@@ -198,15 +309,15 @@ func TestConvertAPIResponse_PopulatesReasoningTokens(t *testing.T) {
 	}
 }
 
-// TestBuildRequestBody_ReasoningModelStripsTemperature exercises the integration
-// between buildRequestBody and applyReasoning: an LLMRequest with Temperature
-// targeting o1-mini should produce a body with no `temperature` field but with
-// the configured `reasoning_effort`.
-func TestBuildRequestBody_ReasoningModelStripsTemperature(t *testing.T) {
+// TestBuildRequestBody_DeclaredModeStripsTemperature exercises the integration
+// between buildRequestBody and applyReasoning: with `reasoning.mode: effort`
+// declared, an LLMRequest carrying a Temperature should produce a body with no
+// `temperature` field but with the configured `reasoning_effort`.
+func TestBuildRequestBody_DeclaredModeStripsTemperature(t *testing.T) {
 	temp := 0.7
 	p := &Plugin{
 		logger:    silentLogger(),
-		reasoning: reasoningConfig{Effort: "medium"},
+		reasoning: reasoningConfig{Mode: reasoningModeEffort, Effort: "medium"},
 	}
 
 	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{
@@ -218,7 +329,7 @@ func TestBuildRequestBody_ReasoningModelStripsTemperature(t *testing.T) {
 	body := p.buildRequestBody("o1-mini", 1024, req)
 
 	if _, ok := body["temperature"]; ok {
-		t.Errorf("temperature should be stripped from o1-mini body")
+		t.Errorf("temperature should be stripped under a declared reasoning mode")
 	}
 	if got := body["reasoning_effort"]; got != "medium" {
 		t.Errorf("reasoning_effort: got %v, want medium", got)

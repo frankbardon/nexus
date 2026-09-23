@@ -1,0 +1,27 @@
+{
+  "id": "function-calls-use-call-id",
+  "title": "function_call Items become ToolCallRequests keyed by call_id",
+  "rationale": "call_id is the pairing handle a later function_call_output references, so it -- not the Item's own id -- must become ToolCallRequest.ID. The Item id is the fallback only because a call with no id at all cannot be answered. An empty arguments string is normalised to the empty object on the way in for the same reason it is on the way out. A turn carrying tool calls finishes as tool_calls, not stop.",
+  "reply": {
+    "id": "resp_2",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "completed",
+    "output": [
+      {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "looking"}]},
+      {"type": "function_call", "id": "fc_1", "call_id": "call_abc", "name": "search", "arguments": "{\"q\":\"go\"}"},
+      {"type": "function_call", "id": "fc_2", "name": "fetch", "arguments": ""}
+    ],
+    "usage": {"input_tokens": 20, "output_tokens": 9, "total_tokens": 29}
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "looking",
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {"id": "call_abc", "name": "search", "arguments": "{\"q\":\"go\"}"},
+      {"id": "fc_2", "name": "fetch", "arguments": "{}"}
+    ],
+    "usage": {"prompt_tokens": 20, "completion_tokens": 9, "total_tokens": 29}
+  }
+}

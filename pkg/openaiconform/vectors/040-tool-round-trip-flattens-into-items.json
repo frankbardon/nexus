@@ -1,0 +1,28 @@
+{
+  "id": "tool-round-trip-flattens-into-items",
+  "title": "Assistant tool calls and their results become sibling Items paired by call_id",
+  "rationale": "Chat Completions carries a turn's tool calls as a field on the assistant message and each result as a `role: tool` message. Responses makes all three sibling Items paired by call_id alone, so an assistant turn with text and calls becomes several Items and one with calls and no text becomes only the function_call Items -- an empty message Item is not something the API accepts. An empty arguments string is not valid JSON, so it is normalised to the empty object rather than failing the whole request over one call.",
+  "model": "gpt-5.1",
+  "max_tokens": 2048,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "search for go"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "name": "search", "arguments": "{\"q\":\"go\"}"}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "results"},
+    {"role": "assistant", "content": "here you go", "tool_calls": [{"id": "call_2", "name": "fetch", "arguments": ""}]},
+    {"role": "tool", "tool_call_id": "call_2", "content": "page"}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 2048,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "search for go"},
+      {"type": "function_call", "call_id": "call_1", "name": "search", "arguments": "{\"q\":\"go\"}"},
+      {"type": "function_call_output", "call_id": "call_1", "output": "results"},
+      {"role": "assistant", "content": "here you go"},
+      {"type": "function_call", "call_id": "call_2", "name": "fetch", "arguments": "{}"},
+      {"type": "function_call_output", "call_id": "call_2", "output": "page"}
+    ]
+  }
+}

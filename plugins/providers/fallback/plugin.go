@@ -268,14 +268,13 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	retryReq := origReq
 	retryReq.Model = nextCfg.Model
 	retryReq.Metadata = newMeta
-	if nextCfg.MaxTokens > 0 && retryReq.MaxTokens == 0 {
-		retryReq.MaxTokens = nextCfg.MaxTokens
-	}
-	// The fallback entry's own effort fills in a value the request lacks; it
-	// never overrides one the request already carries.
-	if nextCfg.Effort != "" && retryReq.Effort == "" {
-		retryReq.Effort = nextCfg.Effort
-	}
+	// The fallback entry's own configuration — max_tokens, effort, temperature,
+	// the API-surface selector and the native provider blocks — fills in what
+	// the request lacks; it never overrides anything the request already
+	// carries. This is the only way the entry actually being served reaches the
+	// provider: a registry lookup there would answer with the chain's first
+	// entry, not this one.
+	engine.StampModelConfig(&retryReq, nextCfg)
 
 	_ = p.bus.Emit("llm.request", retryReq)
 }

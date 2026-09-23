@@ -1,0 +1,20 @@
+{
+  "id": "content-filter-passes-through",
+  "title": "An incomplete reason that already reads as a finish reason passes through",
+  "rationale": "content_filter -- and anything OpenAI adds later in the same position -- already reads as a finish reason, so it is forwarded verbatim rather than mapped onto a shorter list neither surface can keep current.",
+  "reply": {
+    "id": "resp_6",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "incomplete",
+    "incomplete_details": {"reason": "content_filter"},
+    "output": [],
+    "usage": {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8}
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "",
+    "finish_reason": "content_filter",
+    "usage": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8}
+  }
+}

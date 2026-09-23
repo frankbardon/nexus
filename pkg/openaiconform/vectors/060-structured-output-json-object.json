@@ -1,0 +1,21 @@
+{
+  "id": "structured-output-json-object",
+  "title": "A json_object response format is a bare format type",
+  "rationale": "The looser structured-output mode carries no schema, so it is the one-key form of the same move: `text.format.type`, never `response_format`.",
+  "model": "gpt-5.1",
+  "max_tokens": 800,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "Reply as JSON."}
+  ],
+  "response_format": {"type": "json_object"},
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 800,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Reply as JSON."}
+    ],
+    "text": {"format": {"type": "json_object"}}
+  }
+}

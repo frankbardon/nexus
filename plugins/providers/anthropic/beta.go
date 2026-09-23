@@ -85,9 +85,16 @@ func typeName(v any) string {
 // is preserved (standing flags first, then per-request additions in
 // insertion order).
 //
+// `cache` is passed in rather than read off the plugin because a `core.models`
+// role's `cache:` block may raise the TTL to 1h on a deployment whose
+// plugin-level block is on 5m. The extended-cache-ttl beta gate has to follow
+// the markers actually placed on the body, so the caller hands in whatever
+// resolveCache returned for this request. Callers with no request in hand pass
+// p.cache.
+//
 // Returns an empty string when no flags are active so callers can omit the
 // header entirely.
-func (p *Plugin) betaFlags(reqMeta map[string]any) string {
+func (p *Plugin) betaFlags(cache cacheConfig, reqMeta map[string]any) string {
 	seen := map[string]struct{}{}
 	var flags []string
 	add := func(f string) {
@@ -102,7 +109,7 @@ func (p *Plugin) betaFlags(reqMeta map[string]any) string {
 	}
 
 	// Standing plugin flags.
-	if p.cache.Enabled && p.cache.TTL == "1h" {
+	if cache.Enabled && cache.TTL == "1h" {
 		add("extended-cache-ttl-2025-04-11")
 	}
 	if p.files.Enabled {

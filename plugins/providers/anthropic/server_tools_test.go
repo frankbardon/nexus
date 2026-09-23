@@ -21,7 +21,7 @@ func TestBetaFlags_StandingOnly(t *testing.T) {
 		},
 	}
 
-	got := p.betaFlags(nil)
+	got := p.betaFlags(p.cache, nil)
 	want := "extended-cache-ttl-2025-04-11," + filesAPIBetaHeader + ",pdfs-2024-09-25"
 	if got != want {
 		t.Errorf("betaFlags(nil) = %q, want %q", got, want)
@@ -39,7 +39,7 @@ func TestBetaFlags_MetadataOnly(t *testing.T) {
 			"code-execution-2025-05-22",
 		},
 	}
-	got := p.betaFlags(meta)
+	got := p.betaFlags(p.cache, meta)
 	want := "computer-use-2025-01-24,code-execution-2025-05-22"
 	if got != want {
 		t.Errorf("betaFlags(meta) = %q, want %q", got, want)
@@ -58,7 +58,7 @@ func TestBetaFlags_BothMerged(t *testing.T) {
 		"_anthropic_beta_headers": []string{"code-execution-2025-05-22"},
 	}
 
-	got := p.betaFlags(meta)
+	got := p.betaFlags(p.cache, meta)
 	want := filesAPIBetaHeader + ",code-execution-2025-05-22"
 	if got != want {
 		t.Errorf("betaFlags = %q, want %q", got, want)
@@ -81,7 +81,7 @@ func TestBetaFlags_Deduplicates(t *testing.T) {
 		},
 	}
 
-	got := p.betaFlags(meta)
+	got := p.betaFlags(p.cache, meta)
 	want := filesAPIBetaHeader + ",code-execution-2025-05-22"
 	if got != want {
 		t.Errorf("betaFlags = %q, want %q", got, want)
@@ -92,10 +92,10 @@ func TestBetaFlags_Deduplicates(t *testing.T) {
 // can omit the header entirely.
 func TestBetaFlags_Empty(t *testing.T) {
 	p := &Plugin{logger: silentLogger()}
-	if got := p.betaFlags(nil); got != "" {
+	if got := p.betaFlags(p.cache, nil); got != "" {
 		t.Errorf("betaFlags(nil) = %q, want \"\"", got)
 	}
-	if got := p.betaFlags(map[string]any{}); got != "" {
+	if got := p.betaFlags(p.cache, map[string]any{}); got != "" {
 		t.Errorf("betaFlags(empty) = %q, want \"\"", got)
 	}
 }
@@ -112,7 +112,7 @@ func TestBetaFlags_AnyTyped(t *testing.T) {
 			42, // non-string element should be silently skipped
 		},
 	}
-	got := p.betaFlags(meta)
+	got := p.betaFlags(p.cache, meta)
 	want := "bash-2025-01-24,text-editor-2025-07-28"
 	if got != want {
 		t.Errorf("betaFlags = %q, want %q", got, want)

@@ -178,8 +178,86 @@ plugin → pkg/testharness → pkg/engine/allplugins → plugin
 
 Splitting into a sub-package breaks the cycle.
 
+## Conformance corpora: when two plugins must agree on a wire format
+
+The contract harness pins one plugin against the bus. A different problem shows
+up when **two plugins independently produce the same external format** and
+nothing in the type system makes them agree — they cannot call each other (the
+no-plugin-to-plugin-calls rule), so the only thing keeping them aligned is that
+someone remembers to change both.
+
+The answer is a **shared, test-only conformance corpus**: one package holding
+the canonical vectors, the named invariants and the checking, which each plugin
+imports from its own `_test.go` and drives with its own code. Neither plugin
+imports the other; both import the corpus.
+
+Three ship today:
+
+| Corpus | Holds honest | Consumers |
+|---|---|---|
+| `pkg/a2a/a2aconform` | the A2A frame stream | `nexus.io.a2a`, `cmd/nexus-broker` |
+| `pkg/engine/objectstore/objectstoretest` | the object-store backend contract | every `objectstore.Backend`, in-tree and out |
+| `pkg/openaiconform` | the OpenAI Responses request body and reply parse | `nexus.llm.openai`, `nexus.llm.batch` |
+
+They share a shape worth copying:
+
+- **Vectors are data, not Go.** JSON documents, embedded with `go:embed` and
+  decoded strictly, so a typo is a failure rather than an expectation that
+  silently never runs — and so the corpus is readable by a reviewer who does not
+  read Go.
+- **Each vector carries a rationale**, printed on failure. The first instinct on
+  a red conformance test is to change the expectation, and the rationale is what
+  argues back.
+- **The whole output is the expectation, not a list of spot checks.** The
+  realistic drift is a *key-set* divergence — one side gains a field, or stops
+  writing one — and every value check ever written still passes through it.
+  `openaiconform.CheckBody` therefore compares key sets in both directions and
+  reports `UNEXPECTED KEY` / `MISSING` by path.
+- **Legitimate differences are an explicit allowlist**, enforced both ways. A
+  key declared specific to one surface is *required absent* on the others, so
+  "the other plugin quietly grew this field" fails as loudly as "this plugin
+  stopped writing it". Deleting a key from a vector to make a run green is not
+  a substitute, and `openaiconform` refuses a vector that tries.
+- **The oracle has its own tests.** `check_test.go` feeds the pure checker
+  deliberately-wrong bodies and asserts it rejects them, naming the invariant.
+  A harness nobody has watched fail is not evidence.
+
+### The OpenAI Responses corpus
+
+`plugins/providers/openai` and `plugins/llm/batch` each build a
+`/v1/responses` body and parse a `/v1/responses` reply, with no shared code: the
+provider's builders are unexported methods on plugin state (auth mode,
+multimodal config, prompt registry) the batch coordinator neither has nor
+should have. A wire fix applied to one and not the other does not fail a build —
+it surfaces as an HTTP 400 on batched traffic only, months later.
+
+`pkg/openaiconform` pins both against one corpus. The invariants it asserts by
+name are the ones the Responses migration settled: `store: false`; an explicit
+`strict: false` on every function tool (an *absent* `strict` attempts strict
+mode on this API, the reverse of Chat Completions); `max_output_tokens` not
+`max_tokens`; `input` not `messages`; `text.format` not `response_format`;
+`model` present on every request including Azure modes, where the chat path
+strips it; a `reasoning` object rather than the chat scalar, applied last so it
+strips the sampling parameters a reasoning model rejects. The reply half pins
+text, tool calls keyed by `call_id`, the five usage counters and the
+finish-reason translation, plus that a run which failed inside an HTTP 200 is
+reported as a failure rather than as an empty success.
+
+Scope is what **both** surfaces claim to serialize. The provider-only halves —
+multimodal Items, prompt decoration, `tool_choice`, tool filtering, reasoning-Item
+replay, predicted-output degradation — stay in that package's own tests, because
+a vector exercising one would be testing a single plugin.
+
+The drivers are `plugins/providers/openai/conform_test.go` and
+`plugins/llm/batch/conform_test.go`. Adding a vector means adding a JSON file;
+both suites pick it up with no code change.
+
 ## Reference
 
 - Source: `pkg/testharness/contract/contract.go`
 - Self-tests: `pkg/testharness/contract/contract_test.go`
 - Examples: every `contract_test.go` and `plugin_test.go` under `plugins/`.
+- Conformance corpora: `pkg/a2a/a2aconform`,
+  `pkg/engine/objectstore/objectstoretest`, `pkg/openaiconform` (drivers in
+  `plugins/providers/openai/conform_test.go` and
+  `plugins/llm/batch/conform_test.go`).

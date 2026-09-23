@@ -25,6 +25,10 @@ const (
 	pluginName = "OpenAI LLM Provider"
 	version    = "0.1.0"
 	apiURL     = "https://api.openai.com/v1/chat/completions"
+	// responsesURL is the public Responses endpoint — the `api: responses`
+	// counterpart of apiURL. Both are only defaults; resolveEndpoint owns the
+	// choice and the Azure and base_url variants.
+	responsesURL = "https://api.openai.com/v1/responses"
 
 	// defaultMaxTokens is the floor max_tokens applied when neither the
 	// request, the request's role, nor the default role specifies one.
@@ -50,10 +54,29 @@ type Plugin struct {
 	unsubs  []func()
 	debug   bool
 	retry   retryConfig
-	pricing *pricing.Table // merged: config overrides + embedded defaults
+	// retryRaw is the plugin-level `retry:` block exactly as configured, kept
+	// because a core.models role's block merges over it key by key and the
+	// merged result has to go back through parseRetryConfig. nil means the
+	// plugin set no block at all. Read-only — see mergeRetryBlock.
+	retryRaw map[string]any
+	pricing  *pricing.Table // merged: config overrides + embedded defaults
 
-	reasoning      reasoningConfig
-	forceReasoning bool
+	reasoning reasoningConfig
+	// reasoningRaw is the plugin-level `reasoning:` block exactly as
+	// configured, kept because a core.models role's block merges over it key by
+	// key and the merged result has to go back through parseReasoningConfig.
+	// nil means the plugin set no block at all. Read-only — see
+	// mergeReasoningBlock.
+	reasoningRaw map[string]any
+
+	// api is the plugin-level API surface, already resolved against the
+	// narrowed default at Init. A request's own `api:` still wins — see
+	// resolveAPI.
+	api apiSurface
+
+	// predictionDropWarned dedupes warnPredictionDropped's per-request
+	// warning, keyed by role. See warnPredictionDropped.
+	predictionDropWarned sync.Map
 
 	multimodal multimodalConfig
 
@@ -123,10 +146,45 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.pricing = parsePricingConfig(ctx.Config)
 
-	p.reasoning = parseReasoningConfig(ctx.Config)
-	if v, ok := ctx.Config["force_reasoning"].(bool); ok {
-		p.forceReasoning = v
+	reasoning, err := parseReasoningConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
 	}
+	p.reasoning = reasoning
+	p.reasoningRaw = rawReasoningBlock(ctx.Config)
+
+	// A core.models role may carry a `reasoning:` block and an `effort:` of its
+	// own — the block merges over the plugin-level one, the effort fills the
+	// depth the merged block leaves unset. Neither passes through schema.json
+	// (core stores those maps without looking inside them), so this sweep is
+	// the only thing that checks them, at boot rather than at the first request
+	// that names the role.
+	if err := validateRoleReasoning(p.models, p.reasoningRaw, p.reasoning, p.logger); err != nil {
+		return err
+	}
+
+	// Which OpenAI API this deployment speaks. Declared, not sniffed — see
+	// apiSurface. The plugin-level key resolves against the narrowed default
+	// here; a `core.models` entry's own `api:` still wins per request.
+	api, err := parseAPIConfig(ctx.Config, p.auth)
+	if err != nil {
+		return err
+	}
+	p.api = api
+
+	// A per-entry `api:` bypasses schema.json entirely — core stores the value
+	// without looking at it — so this sweep is the only thing that checks it,
+	// at boot rather than at the first request that names the role.
+	if err := validateRoleAPI(p.models); err != nil {
+		return err
+	}
+
+	// Reasoning configured on the chat surface is reasoning the deployment will
+	// not get on a current model. Said once, naming the restriction. Both of
+	// these are surface-conditional, so they run after the `api:` is resolved:
+	// on the Responses path the summary does reach the wire.
+	p.warnReasoningOnChatCompletions()
+	p.warnSummaryOnChatCompletions()
 
 	p.multimodal = parseMultimodalConfig(ctx.Config)
 
@@ -142,7 +200,22 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		)
 	}
 
-	p.retry = parseRetryConfig(ctx.Config)
+	retry, err := parseRetryConfig(ctx.Config, p.logger)
+	if err != nil {
+		return err
+	}
+	p.retry = retry
+	p.retryRaw = rawRetryBlock(ctx.Config)
+
+	// A core.models role may carry a `retry:` block of its own, which merges
+	// over the plugin-level one. These never pass through schema.json — core
+	// stores those maps without looking inside them — so this sweep is the only
+	// thing that checks them, at boot rather than at the first request that
+	// names the role.
+	if err := validateRoleRetry(p.models, p.retryRaw, p.logger); err != nil {
+		return err
+	}
+
 	if p.retry.Enabled {
 		p.logger.Debug("retry enabled",
 			"max_retries", p.retry.MaxRetries,
@@ -203,6 +276,12 @@ func (p *Plugin) Emissions() []string {
 		"llm.stream.hold",
 		"llm.stream.retract",
 		"llm.stream.end",
+		// Reasoning summaries, on the Responses surface only and only for a
+		// turn whose resolved `reasoning:` block asked for them. Chat
+		// Completions returns no reasoning text at all, so a chat-only
+		// deployment declares this and never emits it — which is the correct
+		// way round: Emissions() is what a plugin MAY emit.
+		"thinking.step",
 		"before:core.error",
 		"core.error",
 	}
@@ -234,6 +313,55 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 	for _, cancel := range cancels {
 		cancel()
 	}
+}
+
+// applyEntryOverrides copies the per-entry axes this provider actually consumes
+// from the `core.models` chain entry being served onto the request handleRequest
+// works with. It mirrors the Anthropic and Gemini providers' method of the same
+// name.
+//
+// A fallback or fanout coordinator has already stamped the entry when one is
+// involved, and engine.ResolveModelConfig leaves a stamped request alone;
+// otherwise it recovers the entry from the registry, covering the named role,
+// the default role and the late case where a router rewrote `model` and left
+// `role` alone.
+//
+// Only Temperature, Effort, the `api:` selector and the `reasoning:` and
+// `retry:` blocks are taken, deliberately rather than `*req = ...`: model and
+// max_tokens already have their own resolution pass in handleRequest — one that
+// knows about defaultMaxTokens and the foreign-provider early return — and this
+// provider reads none of the remaining axes.
+//
+// `effort` and the `reasoning:` block are the two halves of reasoning depth, and
+// they are resolved together by resolveReasoning at body-build time: a role's
+// `effort:` becomes `reasoning_effort` wherever the resolved block declares a
+// reasoning mode and names no deeper-specificity effort of its own. No clamp —
+// OpenAI's vocabulary is a superset of the other two providers'.
+//
+// `retry` reaches no part of the request body: it is call-time behaviour, and
+// its one consumer is the loop in doWithRetry, which takes the configuration
+// resolveRetry merges rather than reading the plugin's.
+//
+// Temperature is a plain gap-fill, and the precedence is the engine-wide one:
+// ResolveModelConfig never disturbs a value the request already carries, so an
+// agent posture's temperature — and the approval_policy gate's — still beats a
+// `core.models` role's. A role's value only fills the gap when nothing upstream
+// set one. `0` is a real value, so the axis is a *float64 the whole way down.
+//
+// Note that applyReasoning strips temperature again whenever the operator has
+// declared a reasoning mode, since such a model rejects the field. That is not
+// this function's business.
+//
+// `api` is a provider-native axis, so — unlike the shared ones — it does not
+// fall through from the default role to a named one. resolveAPI turns whatever
+// lands here into the one endpoint the request is posted to.
+func (p *Plugin) applyEntryOverrides(req *events.LLMRequest) {
+	resolved := engine.ResolveModelConfig(p.models, *req)
+	req.Temperature = resolved.Temperature
+	req.Effort = resolved.Effort
+	req.Overrides.Reasoning = resolved.Overrides.Reasoning
+	req.Overrides.Retry = resolved.Overrides.Retry
+	req.Overrides.API = resolved.Overrides.API
 }
 
 func (p *Plugin) handleRequest(req events.LLMRequest) {
@@ -313,15 +441,25 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		maxTokens = defaultMaxTokens
 	}
 
+	// The serving chain entry's `temperature:`, `effort:` and `reasoning:`
+	// block. req is a value parameter, so the caller's payload is untouched.
+	p.applyEntryOverrides(&req)
+
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens)
 
-	// Files API preflight: when enabled, upload file-type Data parts and
+	// Exactly one surface per request, resolved once here: it chooses the
+	// endpoint, the serializer, and — because only `input_image` can reference
+	// an uploaded image — which parts the Files preflight is allowed to
+	// upload. Nothing downstream reconsiders it.
+	api := p.resolveAPI(req)
+
+	// Files API preflight: when enabled, upload eligible Data parts and
 	// swap in the returned file_id before serializing the request body. We
 	// replace req.Messages locally (not via mutation) — the caller's slice
 	// stays untouched.
 	preflightCtx, preflightCancel := context.WithCancel(context.Background())
 	if p.files.Enabled {
-		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages)
+		newMsgs, err := p.preuploadParts(preflightCtx, req.Messages, api)
 		if err != nil {
 			preflightCancel()
 			p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: files preflight failed: %w", err),
@@ -334,7 +472,34 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	preflightCancel()
 
-	body := p.buildRequestBody(model, maxTokens, req)
+	endpoint, err := p.auth.resolveEndpoint(api)
+	if err != nil {
+		p.emitErrorInfo(events.ErrorInfo{
+			SchemaVersion: events.ErrorInfoVersion,
+			Err:           err,
+			Retryable:     false,
+			RequestMeta:   req.Metadata,
+		})
+		return
+	}
+
+	// Two serializers, not one with a branch inside it: the Responses request
+	// shares almost nothing with the chat one beyond the values it carries.
+	//
+	// The Responses surface resolves reasoning here rather than inside its
+	// serializer because the answer is needed twice: once to shape the request
+	// and again to read the reply, where whether summaries were asked for is
+	// what decides whether summary frames may become thinking.step events.
+	// Resolving once also keeps resolveReasoning's warning about an invalid
+	// hand-set override to one line per request rather than two.
+	var body map[string]any
+	var reasoning reasoningConfig
+	if api == apiResponses {
+		reasoning = p.resolveReasoning(req)
+		body = p.buildResponsesBodyWith(model, maxTokens, req, reasoning)
+	} else {
+		body = p.buildRequestBody(model, maxTokens, req)
+	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -361,7 +526,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.mu.Unlock()
 
 	makeReq := func() (*http.Request, error) {
-		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", p.auth.buildURL(), bytes.NewReader(jsonBody))
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewReader(jsonBody))
 		if err != nil {
 			return nil, err
 		}
@@ -372,7 +537,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		return httpReq, nil
 	}
 
-	resp, err := p.doWithRetry(reqCtx, makeReq)
+	// The serving chain entry's `retry:` block, merged over the plugin's. Retry
+	// is call-time behaviour rather than a request field, so this is the only
+	// place a role's block can take effect.
+	resp, err := p.doWithRetry(reqCtx, p.resolveRetry(req), makeReq)
 	if err != nil {
 		p.mu.Lock()
 		delete(p.cancels, req.RequestID)
@@ -393,7 +561,19 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody)),
+		statusErr := fmt.Errorf("openai: API returned status %d: %s", resp.StatusCode, string(respBody))
+		// The commonest shape of a rejected reasoning replay: the Responses
+		// API refuses the request outright rather than failing the run, so it
+		// never reaches either reply parser. Classified only on this surface —
+		// a chat request carries no reasoning Items to have rejected. The turn
+		// fails either way; what this decides is whether the operator is told
+		// what actually happened. See responses_degrade.go.
+		if api == apiResponses {
+			if replayErr := replayRejectionFromStatus(resp.StatusCode, respBody); replayErr != nil {
+				statusErr = replayErr
+			}
+		}
+		p.emitErrorInfo(events.ErrorInfo{SchemaVersion: events.ErrorInfoVersion, Err: statusErr,
 			Retryable:   false,
 			RequestMeta: req.Metadata,
 			RequestID:   req.RequestID,
@@ -418,9 +598,21 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 		responseBody = io.TeeReader(resp.Body, debugBuf)
 	}
 
-	if req.Stream {
+	// Four readers, dispatched on the once-resolved surface and the streaming
+	// flag: a Responses reply is an `output` array of typed Items rather than
+	// a `choices[0].message`, and a Responses *stream* is ~40 self-naming
+	// typed events rather than one chunk shape discriminated by which delta
+	// field is populated. Neither pair shares a parser with the other, so the
+	// surface has to reach the streaming branch too — reading a Responses
+	// stream with the chat reader yields an empty turn, silently.
+	switch {
+	case req.Stream && api == apiResponses:
+		p.handleResponsesStreamResponse(responseBody, req.RequestID, meta, req.Tags, reasoning)
+	case req.Stream:
 		p.handleStreamResponse(responseBody, req.RequestID, meta, req.Tags)
-	} else {
+	case api == apiResponses:
+		p.handleResponsesSyncResponse(responseBody, req.RequestID, meta, req.Tags, reasoning)
+	default:
 		p.handleSyncResponse(responseBody, req.RequestID, meta, req.Tags)
 	}
 
@@ -434,6 +626,7 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 }
 
 // buildRequestBody constructs the OpenAI Chat Completions API request body.
+// buildResponsesBody in responses.go is its counterpart on the other surface.
 func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
 	body := map[string]any{
 		"max_tokens": maxTokens,
@@ -529,8 +722,8 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// Predicted outputs (OpenAI-only): when the agent has a known-content
 	// guess (rewrite this paragraph, fix this line), pass it through as
 	// prediction.content so the model returns near-instantly for unchanged
-	// portions. applyReasoning strips this for o-series / gpt-5-thinking
-	// models since they reject the field.
+	// portions. applyReasoning strips this again whenever the operator has
+	// declared a reasoning mode, since a reasoning model rejects the field.
 	if req.Prediction != "" {
 		body["prediction"] = map[string]any{
 			"type":    "content",
@@ -539,10 +732,14 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	}
 
 	// Reasoning-model handling runs last so any fields about to be stripped
-	// (temperature, top_p, etc.) have already been written. NOTE: this stays
-	// on /v1/chat/completions; the /v1/responses endpoint exposes richer
-	// reasoning controls (summary streaming) and is left for a future plan.
-	applyReasoning(body, model, p.reasoning, p.forceReasoning, p.logger)
+	// (temperature, top_p, etc.) have already been written. It is gated on the
+	// operator's declared `reasoning.mode`, not on the model id. This is the
+	// chat surface's single `reasoning_effort` scalar; the richer `reasoning`
+	// object — which is the only one that can carry a summary — is
+	// applyResponsesReasoning. resolveReasoning is shared by both: it merges
+	// the serving role's own `reasoning:` block over the plugin-level one and
+	// folds the role's `effort:` into the depth.
+	applyReasoning(body, p.resolveReasoning(req), p.logger)
 
 	return body
 }

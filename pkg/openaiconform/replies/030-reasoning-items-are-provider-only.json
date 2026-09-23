@@ -1,0 +1,35 @@
+{
+  "id": "reasoning-items-are-provider-only",
+  "title": "Reasoning Items are captured on the synchronous surface and stepped over in a batch",
+  "rationale": "Under store:false each reasoning Item carries an opaque encrypted_content blob the NEXT request of a tool loop must replay verbatim, so the provider keeps them whole on Metadata. A batch line is a one-shot request with no next round inside the batch to replay them into, so the coordinator counts their tokens and nothing else. Either way the Items are never text: they must not leak into Content. An Item type neither surface asked for is stepped over rather than failing the turn.",
+  "reply": {
+    "id": "resp_3",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "completed",
+    "output": [
+      {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-blob-1", "summary": [{"type": "summary_text", "text": "Checking the units first."}]},
+      {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+      {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "42 metres."}]},
+      {"type": "reasoning", "id": "rs_2", "encrypted_content": "opaque-blob-2"}
+    ],
+    "usage": {
+      "input_tokens": 100,
+      "output_tokens": 60,
+      "total_tokens": 160,
+      "output_tokens_details": {"reasoning_tokens": 50}
+    }
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "42 metres.",
+    "finish_reason": "stop",
+    "reasoning_items": 2,
+    "usage": {
+      "prompt_tokens": 100,
+      "completion_tokens": 60,
+      "total_tokens": 160,
+      "reasoning_tokens": 50
+    }
+  }
+}

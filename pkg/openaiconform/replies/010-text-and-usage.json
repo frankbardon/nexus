@@ -1,0 +1,36 @@
+{
+  "id": "text-and-usage",
+  "title": "output_text parts concatenate, and the usage block is renamed onto events.Usage",
+  "rationale": "Text arrives as output_text parts inside message Items and several of them concatenate into the one Content string the rest of Nexus expects. The usage names differ from the chat block (input/output rather than prompt/completion) but the meaning does not, and reasoning tokens are already counted inside output_tokens.",
+  "reply": {
+    "id": "resp_1",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "completed",
+    "output": [
+      {"type": "message", "role": "assistant", "content": [
+        {"type": "output_text", "text": "Hello, "},
+        {"type": "output_text", "text": "world."}
+      ]}
+    ],
+    "usage": {
+      "input_tokens": 11,
+      "output_tokens": 5,
+      "total_tokens": 16,
+      "input_tokens_details": {"cached_tokens": 4},
+      "output_tokens_details": {"reasoning_tokens": 3}
+    }
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "Hello, world.",
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 11,
+      "completion_tokens": 5,
+      "total_tokens": 16,
+      "cached_tokens": 4,
+      "reasoning_tokens": 3
+    }
+  }
+}

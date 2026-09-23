@@ -9,7 +9,8 @@
     "auth_mode":        {"type": "string", "enum": ["openai", "azure_key", "azure_aad"], "description": "Authentication mode."},
     "api_key":          {"type": "string", "description": "Direct API key."},
     "api_key_env":      {"type": "string", "description": "Environment variable for the key."},
-    "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints."},
+    "base_url":         {"type": "string", "description": "Override for proxies / OpenAI-compatible endpoints. Setting it narrows the default api to chat_completions."},
+    "api":              {"type": "string", "enum": ["chat_completions", "responses"], "description": "Which OpenAI API to speak. Default responses, because from GPT-5.4 onward Chat Completions refuses tool calling with any reasoning_effort other than none and Nexus puts tools on every turn; narrowed to chat_completions when base_url or an Azure auth mode is set. Both surfaces are implemented end to end. Changed in v0.29.0: a plain api.openai.com deployment that names no api: used to speak chat_completions."},
     "azure": {
       "type": "object",
       "additionalProperties": false,
@@ -36,16 +37,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled":       {"type": "boolean"},
-        "budget_tokens": {"type": "integer", "minimum": 0}
+        "mode":          {"type": "string", "enum": ["effort", "off"], "description": "Whether reasoning controls go on the wire. effort -> send reasoning_effort; off -> send no reasoning configuration at all."},
+        "effort":        {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Reasoning depth. Unset under mode: effort sends no reasoning_effort, so the model's own default applies."},
+        "summary":       {"type": "string", "enum": ["auto", "concise", "detailed"], "description": "Reasoning-summary verbosity. Rides the reasoning object on api: responses; dropped with one Init warning on api: chat_completions, which has no summary field. Also gates thinking.step emission."},
+        "enabled":       {"type": "boolean", "description": "Deprecated alias for mode: true -> effort, false -> off. Ignored when mode is set."},
+        "budget_tokens": {"type": "integer", "minimum": 0, "description": "Deprecated and ignored: OpenAI has no reasoning token budget. Use effort."}
       }
     },
-    "force_reasoning": {"type": "boolean", "description": "Force reasoning even on non-o-series models (experimental)."},
     "multimodal": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "vision": {"type": "boolean"}
+        "vision":               {"type": "boolean", "description": "Allow image parts onto the wire. false drops them from every request on both API surfaces and skips uploading them."},
+        "default_image_detail": {"type": "string", "enum": ["auto", "low", "high"], "description": "Image fidelity requested for every image part."}
       }
     },
     "retry": {
@@ -56,7 +60,7 @@
         "max_retries":   {"type": "integer", "minimum": 0},
         "initial_delay": {"type": "string"},
         "max_delay":     {"type": "string"},
-        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "jitter"]},
+        "backoff":       {"type": "string", "enum": ["constant", "linear", "exponential", "exponential_jitter"]},
         "multiplier":    {"type": "number", "minimum": 0},
         "statuses":      {"type": "array", "items": {"type": "integer"}}
       }

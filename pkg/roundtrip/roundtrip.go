@@ -10,6 +10,12 @@
 //     assistant turn that precedes a tool_result, or the API returns HTTP 400.
 //   - Gemini thinking: a `thoughtSignature` rides alongside each functionCall
 //     part and must be re-emitted with that call, or the API returns HTTP 400.
+//   - OpenAI Responses reasoning: under `store: false` — which is the only mode
+//     Nexus uses, because it keeps its own history — each `reasoning` Item in a
+//     turn's output carries `encrypted_content`, and every Item must be replayed
+//     verbatim on the next request or the model loses its reasoning across a
+//     tool round. This one degrades quietly rather than erroring: the request
+//     still succeeds, it is just reasoning-blind from the second round on.
 //
 // The forwarder deliberately does NOT copy the whole metadata map. Engine-
 // internal flags like `_source`, `_structured_output` and `_target_*` are
@@ -33,14 +39,22 @@ package roundtrip
 // Message. Keep this list minimal: every entry is persisted to history JSONL
 // and replayed on later requests.
 //
-// NOTE: "gemini_thought_signatures" is duplicated here as a string literal
-// because the Gemini provider declares it as an unexported constant in its own
-// package (`thoughtSignatureMetaKey` in plugins/providers/gemini/plugin.go).
-// Nothing outside a provider may import one, so the two spellings are coupled
-// by convention only — change one and you must change the other.
+// NOTE: "gemini_thought_signatures" and "openai_reasoning_items" are duplicated
+// here as string literals because each provider declares its key as an
+// unexported constant in its own package (`thoughtSignatureMetaKey` in
+// plugins/providers/gemini/plugin.go, `reasoningItemsMetaKey` in
+// plugins/providers/openai/responses_reply.go). Nothing outside a provider may
+// import one, so the spellings are coupled by convention only — change one and
+// you must change the other.
+//
+// NOT on this list, deliberately: "openai_reasoning_summary". That key is the
+// prose a model wrote about its own reasoning — display material a UI renders
+// and the next request has no use for. Forwarding it would persist a second
+// copy of every summary into history and replay it as nothing.
 var forwardedKeys = []string{
 	"thinking_blocks",
 	"gemini_thought_signatures",
+	"openai_reasoning_items",
 }
 
 // ForwardMessageMetadata returns the allowlisted subset of an LLMResponse
@@ -71,11 +85,13 @@ func ForwardMessageMetadata(src map[string]any) map[string]any {
 // perCallKeys enumerates the forwarded keys whose value is a map keyed by
 // tool-call ID, as opposed to a single per-message payload.
 //
-// The distinction exists because the two providers issue their continuity
-// token at different grains. Anthropic's `thinking_blocks` describes the whole
-// assistant turn; Gemini's `gemini_thought_signatures` is a
-// call-ID -> signature map, and Gemini signs only the FIRST functionCall of a
-// parallel batch, so the value is sparse across the calls of one turn.
+// The distinction exists because the providers issue their continuity token at
+// different grains. Anthropic's `thinking_blocks` describes the whole assistant
+// turn, and so does OpenAI's `openai_reasoning_items` — an ordered list of the
+// turn's reasoning Items, which are not addressed by call ID at all; Gemini's
+// `gemini_thought_signatures` is a call-ID -> signature map, and Gemini signs
+// only the FIRST functionCall of a parallel batch, so the value is sparse
+// across the calls of one turn.
 //
 // A transport that carries metadata per tool call rather than per message --
 // AG-UI is one -- has to split a turn's metadata across its calls on the way

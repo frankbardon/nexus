@@ -25,11 +25,12 @@ const (
 	// "user_data" is the value OpenAI documents for files referenced from
 	// chat completions.
 	defaultFilesPurpose = "user_data"
-	// uploadThresholdDefault is 5MB; matches the smallest of the inline image
-	// limits we care about. Image parts over this size are not auto-uploaded
-	// by OpenAI (the chat completions image_url type doesn't accept file_ids),
-	// but the threshold is kept in config for forward-compatibility and for
-	// any future part type that does benefit from it.
+	// uploadThresholdDefault is 5MB. It is the size at or above which an
+	// inline image part is uploaded and referenced by id instead of inlined
+	// as a data URL — which only the Responses surface can do, because its
+	// `input_image` carries a `file_id` and the chat surface's `image_url`
+	// does not. File parts ignore it: file_id is their canonical reference at
+	// any size.
 	uploadThresholdDefault = 5 * 1024 * 1024
 )
 
@@ -38,15 +39,16 @@ const (
 //	files:
 //	  enabled: true                # default false; when false the plugin never uploads
 //	  purpose: user_data           # default "user_data" — sent as multipart `purpose` field
-//	  upload_threshold: 5242880    # bytes; reserved for future use, doesn't affect file parts
+//	  upload_threshold: 5242880    # bytes; image parts at or over this are uploaded (Responses only)
 //	  cache_uploads: true          # in-memory sha256(content) -> file_id reuse within session
 //	  delete_on_shutdown: false    # best-effort DELETE for session-uploaded ids on Shutdown
 //
 // Note: file-type parts (PDFs, etc.) are ALWAYS uploaded when Enabled is true,
-// because OpenAI's chat completions API doesn't accept inline file payloads
-// well — file_id is the canonical reference. Image parts are never
-// auto-uploaded since the chat completions image_url type doesn't accept a
-// bare file_id; oversize images must be passed by public URL or rejected.
+// on both surfaces, because neither accepts inline file payloads well —
+// file_id is the canonical reference. Image parts are auto-uploaded only on
+// the Responses surface and only at or over UploadThreshold; the chat
+// surface's image_url type doesn't accept a bare file_id, so an oversize image
+// there must be passed by public URL or is rejected.
 type filesConfig struct {
 	Enabled          bool
 	Purpose          string
@@ -244,24 +246,32 @@ func (p *Plugin) deleteFile(ctx context.Context, id string) error {
 	return nil
 }
 
-// preuploadParts walks msgs and uploads file-type Data parts to the Files API,
+// preuploadParts walks msgs and uploads eligible Data parts to the Files API,
 // swapping in the returned file_id (preferred over inline data).
 //
 // Rules:
-//   - file parts: ALWAYS upload when Data is present (no inline path on
-//     OpenAI's chat completions API matches well — file_id is the canonical
-//     reference). If the part already carries FileID, leave it alone. URI on a
-//     file part is rejected at request-build time by buildFilePart.
-//   - image parts: SKIPPED entirely. OpenAI's chat completions image_url type
-//     doesn't accept a bare file_id, so auto-upload would just lose data.
-//     Oversize images must be referenced by public URL.
+//   - file parts: ALWAYS upload when Data is present, on both surfaces (no
+//     inline path matches well — file_id is the canonical reference). If the
+//     part already carries FileID, leave it alone. URI on a file part is
+//     rejected at request-build time.
+//   - image parts: eligible only on the **Responses** surface, and only when
+//     the inline payload is at or over files.upload_threshold. The chat
+//     surface's `image_url` type has no way to reference an uploaded image, so
+//     uploading there would just lose data; `input_image` on Responses carries
+//     a `file_id` natively, which is what finally gives upload_threshold a
+//     consumer. A small image stays inline on both surfaces: a data URL costs
+//     one request, an upload costs two.
+//   - image parts with `multimodal.vision: false`: skipped, because the
+//     serializer is going to drop them anyway and uploading bytes that will
+//     never be referenced is pure waste (and a file the operator then has to
+//     reclaim).
 //   - other types (text, audio, video): skipped — they don't go through
 //     the Files API.
 //
 // Returns a fresh slice (caller's messages are not mutated). Successful
 // uploads clear part.Data to free memory and avoid double-send if the
 // message is re-serialized.
-func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]events.Message, error) {
+func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message, api apiSurface) ([]events.Message, error) {
 	if !p.files.Enabled || len(msgs) == 0 {
 		return msgs, nil
 	}
@@ -274,9 +284,7 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 		}
 		var newParts []events.MessagePart
 		for j, part := range m.Parts {
-			// Only file-type parts are eligible for auto-upload. Image,
-			// audio, video, and text are passed through unchanged.
-			if part.Type != "file" {
+			if !p.uploadEligible(part, api) {
 				if newParts != nil {
 					newParts[j] = part
 				}
@@ -294,10 +302,10 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 			// the bytes. buildFilePart will surface a clearer error if the
 			// caller meant to reference an already-uploaded file.
 			if len(part.Data) == 0 {
-				return nil, fmt.Errorf("openai: file part has no Data to upload (set FileID or Data)")
+				return nil, fmt.Errorf("openai: %s part has no Data to upload (set FileID or Data)", part.Type)
 			}
 			if part.MimeType == "" {
-				return nil, fmt.Errorf("openai: file part requires mime_type for files upload")
+				return nil, fmt.Errorf("openai: %s part requires mime_type for files upload", part.Type)
 			}
 
 			// Allocate the per-message copy lazily — saves an alloc when
@@ -337,6 +345,29 @@ func (p *Plugin) preuploadParts(ctx context.Context, msgs []events.Message) ([]e
 		}
 	}
 	return out, nil
+}
+
+// uploadEligible reports whether one part should go through the Files API on
+// the surface this request is bound for. See preuploadParts for the rules and
+// why they differ by surface.
+func (p *Plugin) uploadEligible(part events.MessagePart, api apiSurface) bool {
+	switch part.Type {
+	case "file":
+		return true
+	case "image":
+		if api != apiResponses || !p.multimodal.Vision {
+			return false
+		}
+		// An already-referenced image needs nothing, and a URI-only one has no
+		// bytes to send; both fall out of the threshold test on their own.
+		threshold := p.files.UploadThreshold
+		if threshold <= 0 {
+			threshold = uploadThresholdDefault
+		}
+		return len(part.Data) >= threshold
+	default:
+		return false
+	}
 }
 
 // trackUploadedID records a file_id this session uploaded so Shutdown can

@@ -1,0 +1,21 @@
+{
+  "id": "text-only-turn",
+  "title": "A plain system+user turn becomes role/content Items",
+  "rationale": "The baseline. Responses replaces `messages` with an `input` array of Items, and an ordinary conversational message stays a role/content Item with a plain string content -- not a one-element content-parts array. The token cap is `max_output_tokens`, and `store` is false so that Nexus stays the only source of truth for the turn.",
+  "model": "gpt-5.1",
+  "max_tokens": 2048,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Hello."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 2048,
+    "store": false,
+    "input": [
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "Hello."}
+    ]
+  }
+}

@@ -17,18 +17,30 @@ const inlineImageLimit = 20 * 1024 * 1024
 // multimodalConfig holds OpenAI multimodal defaults.
 //
 //	multimodal:
+//	  vision: true                  # false suppresses image parts entirely
 //	  default_image_detail: auto    # auto | low | high
 type multimodalConfig struct {
+	// Vision allows image parts onto the wire. Default true. When false,
+	// image parts are dropped from the serialized content on BOTH surfaces
+	// and never uploaded to the Files API — the turn still goes out, minus
+	// the images. It is a deployment-level "this model cannot see" switch,
+	// not a validation error, because the messages an agent loop assembles
+	// are not the operator's to fix mid-turn.
+	Vision bool
+
 	DefaultImageDetail string
 }
 
 // parseMultimodalConfig reads the optional "multimodal" map from the plugin
 // config. Unknown or invalid values fall back to "auto".
 func parseMultimodalConfig(cfg map[string]any) multimodalConfig {
-	mc := multimodalConfig{DefaultImageDetail: "auto"}
+	mc := multimodalConfig{Vision: true, DefaultImageDetail: "auto"}
 	raw, ok := cfg["multimodal"].(map[string]any)
 	if !ok {
 		return mc
+	}
+	if v, ok := raw["vision"].(bool); ok {
+		mc.Vision = v
 	}
 	if v, ok := raw["default_image_detail"].(string); ok {
 		switch v {
@@ -42,6 +54,10 @@ func parseMultimodalConfig(cfg map[string]any) multimodalConfig {
 // buildContentParts converts an events.Message with Parts into OpenAI's
 // content-array form. Returns nil when Parts is empty (caller falls back to
 // the string Content path). Errors on unsupported types.
+//
+// A nil return also happens when every part was suppressed — `vision: false`
+// on a message whose only parts are images — so the caller sends the plain
+// string Content rather than an empty content array, which the API rejects.
 func buildContentParts(msg events.Message, cfg multimodalConfig) ([]map[string]any, error) {
 	if len(msg.Parts) == 0 {
 		return nil, nil
@@ -56,6 +72,9 @@ func buildContentParts(msg events.Message, cfg multimodalConfig) ([]map[string]a
 			out = append(out, map[string]any{"type": "text", "text": part.Text})
 
 		case "image":
+			if !cfg.Vision {
+				continue
+			}
 			block, err := buildImagePart(part, cfg.DefaultImageDetail)
 			if err != nil {
 				return nil, err
@@ -82,6 +101,9 @@ func buildContentParts(msg events.Message, cfg multimodalConfig) ([]map[string]a
 		default:
 			return nil, fmt.Errorf("openai: unsupported part type %q", part.Type)
 		}
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }

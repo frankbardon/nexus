@@ -1,0 +1,22 @@
+{
+  "id": "incomplete-max-output-tokens-is-length",
+  "title": "An incomplete run capped by max_output_tokens finishes as length",
+  "rationale": "Responses reports completion as a run status plus an incomplete_details.reason; Chat Completions reports it as one per-choice string. They are translated rather than passed through, so an operator flipping api: does not find FinishReason saying max_output_tokens where it used to say length -- every consumer of llm.response and llm.batch.results reads one vocabulary.",
+  "reply": {
+    "id": "resp_4",
+    "object": "response",
+    "model": "gpt-5.1",
+    "status": "incomplete",
+    "incomplete_details": {"reason": "max_output_tokens"},
+    "output": [
+      {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "It begins"}]}
+    ],
+    "usage": {"input_tokens": 5, "output_tokens": 4096, "total_tokens": 4101}
+  },
+  "expect": {
+    "model": "gpt-5.1",
+    "content": "It begins",
+    "finish_reason": "length",
+    "usage": {"prompt_tokens": 5, "completion_tokens": 4096, "total_tokens": 4101}
+  }
+}

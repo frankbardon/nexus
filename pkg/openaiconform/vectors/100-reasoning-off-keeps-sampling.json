@@ -1,0 +1,21 @@
+{
+  "id": "reasoning-off-keeps-sampling",
+  "title": "Reasoning off writes nothing and strips nothing",
+  "rationale": "Off is the resting state an absent `reasoning:` block resolves to. It must not be a quiet strip: a non-reasoning model is entitled to the temperature the caller set, and a surface that stripped it anyway would silently change sampling for every deployment that never asked for reasoning.",
+  "model": "gpt-5.1",
+  "max_tokens": 2000,
+  "temperature": 0.0,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "Deterministic please."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 2000,
+    "store": false,
+    "temperature": 0,
+    "input": [
+      {"role": "user", "content": "Deterministic please."}
+    ]
+  }
+}

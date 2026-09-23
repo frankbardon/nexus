@@ -1,0 +1,20 @@
+{
+  "id": "reasoning-on-without-depth",
+  "title": "Reasoning on with nothing resolved writes no reasoning key but still strips",
+  "rationale": "An empty `reasoning` object says nothing the model's own defaults do not already say, so it is not written. The strip is a property of the declared MODE rather than of the depth, though: the operator declared the target a reasoning model, and a reasoning model rejects temperature whether or not a depth was named.",
+  "model": "gpt-5.1",
+  "max_tokens": 4000,
+  "temperature": 0.9,
+  "reasoning": {"mode": "effort"},
+  "messages": [
+    {"role": "user", "content": "Anything."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 4000,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Anything."}
+    ]
+  }
+}

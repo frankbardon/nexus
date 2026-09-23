@@ -295,15 +295,26 @@ func TestParseAuthConfig_AzureAAD_MissingClientSecretErrors(t *testing.T) {
 }
 
 // =====================================================================
-// buildURL / stripModelFromBody
+// resolveEndpoint / stripModelFromBody
 // =====================================================================
+
+// mustEndpoint resolves an endpoint for the given surface and fails the test
+// if it errors — the chat surface never does.
+func mustEndpoint(t *testing.T, a *authState, api apiSurface) string {
+	t.Helper()
+	got, err := a.resolveEndpoint(api)
+	if err != nil {
+		t.Fatalf("resolveEndpoint(%q) error: %v", api, err)
+	}
+	return got
+}
 
 func TestBuildURL_OpenAI_Default(t *testing.T) {
 	a := &authState{mode: authModeOpenAI}
-	got := a.buildURL()
+	got := mustEndpoint(t, a, apiChatCompletions)
 	want := "https://api.openai.com/v1/chat/completions"
 	if got != want {
-		t.Errorf("buildURL = %q, want %q", got, want)
+		t.Errorf("resolveEndpoint = %q, want %q", got, want)
 	}
 }
 
@@ -312,9 +323,9 @@ func TestBuildURL_OpenAI_BaseURLOverride(t *testing.T) {
 		mode:    authModeOpenAI,
 		baseURL: "https://my-proxy.example.com/v1/chat/completions",
 	}
-	got := a.buildURL()
+	got := mustEndpoint(t, a, apiChatCompletions)
 	if got != "https://my-proxy.example.com/v1/chat/completions" {
-		t.Errorf("buildURL = %q", got)
+		t.Errorf("resolveEndpoint = %q", got)
 	}
 }
 
@@ -325,7 +336,7 @@ func TestBuildURL_AzureKey(t *testing.T) {
 		deployment: "gpt-4o",
 		apiVersion: "2024-10-21",
 	}
-	got := a.buildURL()
+	got := mustEndpoint(t, a, apiChatCompletions)
 	// All three pieces must appear in the URL.
 	if !strings.Contains(got, "my-resource.openai.azure.com") {
 		t.Errorf("URL missing resource: %q", got)
@@ -345,10 +356,10 @@ func TestBuildURL_AzureAAD_SameAsAzureKey(t *testing.T) {
 		deployment: "d",
 		apiVersion: "v",
 	}
-	got := a.buildURL()
+	got := mustEndpoint(t, a, apiChatCompletions)
 	want := "https://r.openai.azure.com/openai/deployments/d/chat/completions?api-version=v"
 	if got != want {
-		t.Errorf("buildURL = %q, want %q", got, want)
+		t.Errorf("resolveEndpoint = %q, want %q", got, want)
 	}
 }
 

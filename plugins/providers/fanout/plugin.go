@@ -276,14 +276,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		fanReq.Model = pc.Model
 		fanReq.Metadata = newMeta
 		fanReq.Stream = false // fanout requires complete responses
-		if pc.MaxTokens > 0 && fanReq.MaxTokens == 0 {
-			fanReq.MaxTokens = pc.MaxTokens
-		}
-		// The per-provider entry's own effort fills in a value the request
-		// lacks; it never overrides one the request already carries.
-		if pc.Effort != "" && fanReq.Effort == "" {
-			fanReq.Effort = pc.Effort
-		}
+		// The per-provider entry's own configuration — max_tokens, effort,
+		// temperature, the API-surface selector and the native provider blocks
+		// — fills in what the request lacks; it never overrides anything the
+		// request already carries. Each leg gets its own copy, so a non-first
+		// leg is configured by its own entry rather than the role's first one.
+		engine.StampModelConfig(&fanReq, pc)
 
 		p.bus.EmitAsync("llm.request", fanReq)
 	}

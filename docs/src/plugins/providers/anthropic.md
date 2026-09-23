@@ -67,6 +67,28 @@ Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in
 ### Retry Logic
 
 Transient errors (rate limits, server errors) are retried with exponential backoff.
+#### Per-role retry
+
+A [`core.models`](../../configuration/reference.md#coremodels) role entry may
+carry its own `retry:` block, which **merges over** the plugin-level one key by
+key: the role wins on every key it names and a plugin key it is silent about
+survives, so a role that only wants a shorter `max_retries` keeps the plugin's
+backoff shape and status list. The merged block goes through the same parser, so
+it gets the same defaulting and the same soft fallbacks; a block already stamped
+on the request by `nexus.provider.fallback` or `nexus.provider.fanout` — for the
+chain entry actually being served — wins over the role's. Every role this
+provider could serve is swept at `Init`: an unknown key or a wrongly typed one
+fails the boot naming the role, because these blocks never pass through
+`schema.json`.
+
+Unlike every other per-entry axis this one reaches no part of the request body.
+It is call-time behaviour, resolved per request and used to drive that request's
+retry loop — which is the point: a role with a fallback chain usually wants
+*fewer* attempts at the primary than a terminal role, because every retry there
+is time not spent on the entry that might actually answer.
+
+See [Retry behaviour: `retry`](../../configuration/reference.md#retry-behaviour-retry)
+for the canonical account.
 
 ### Structured Output (Simulated)
 
@@ -227,6 +249,90 @@ the rejection, because an explicit mode is the operator naming the wire shape.
 provider `adaptive` is what hands sizing back to the model, and a `-1` copied out of a
 Gemini block is just an invalid budget.
 
+#### Per-role thinking
+
+Everything above describes the **plugin-level** `thinking:` block. A
+`core.models` role entry may carry one of its own, which **merges over** it key
+by key — the role wins on every key it names, and a plugin key the role is
+silent about survives. That is what lets one plugin instance serve a Haiku role
+on `mode: budget` and an Opus role on `mode: adaptive` at the same time, which is
+impossible with a single plugin-level block.
+
+The block on the role is spelled in **this provider's own vocabulary** — the same
+`mode`, `budget_tokens`, `display` and `include_thoughts` documented above, not a
+translated cross-provider shape. It can be, because a `core.models` entry names
+its own `provider:` one line above the block, so there is never any doubt about
+whose `mode` is meant. (The one key that *is* written without knowing the
+provider is [`effort`](#per-role-effort), which is why it still exists.)
+
+```yaml
+plugins:
+  nexus.llm.anthropic:
+    thinking:
+      mode: adaptive
+      display: summarized
+
+core:
+  models:
+    deep:
+      provider: nexus.llm.anthropic
+      model: claude-opus-4-7
+    legacy:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      thinking:
+        mode: budget          # role wins on `mode`
+        budget_tokens: 4096   # `display: summarized` survives from the plugin
+```
+
+The merged block goes through the same parser as the plugin one, so it inherits
+every check, inference and deprecation warning documented above. Because a block
+written on a `core.models` entry never passes through this plugin's
+`schema.json`, `Init` sweeps every role — and every entry of every chain — this
+provider could serve and **fails the boot naming the role** when a merged block
+is invalid, rather than waiting for the first request that uses it.
+
+**Precedence is the one rule every provider now follows** —
+
+```text
+request-stamped  >  role's thinking: block  >  role's effort  >  plugin block
+```
+
+— where "request-stamped" is what the `fallback` or `fanout` coordinator put on
+the request for the chain entry actually being served. On this provider steps 2
+and 3 never actually contend: a role's `effort` lands in `output_config.effort`
+and the thinking block lands in `thinking`, two different wire fields, so a role
+can set both and neither displaces the other. (On `nexus.llm.gemini` they *do*
+contend, because a role's `effort` becomes `thinkingLevel` — the same field a
+role's `thinking.level` writes — and the block wins there for exactly the reason
+the ordering says it should.) A named role does **not** inherit the default
+role's block: these are one provider's vocabulary and a different role may be
+served by a different provider.
+
+Two things to watch: `thinking: {}` on a role is a statement rather than a
+silence (it overrides no key, but a present block with no `mode` is `adaptive`),
+and a role that switches `mode` inherits plugin-level keys that may be
+meaningless under the new mode.
+
+**A known gap: `include_thoughts` on a role changes the wire, not the events.**
+It feeds the `display` inference like any other merged key, so it does alter the
+`thinking` object this provider sends. But the gate deciding whether
+`thinking.step` events are emitted at all reads the **plugin-level**
+`include_thoughts`, because the response-parse path never sees the resolved
+per-role block. A role that turns it on where the plugin has it off gets the
+thinking text from Anthropic and no events on the bus. Set the plugin-level value
+to whatever you want the events to do, and use the role block for wire shape.
+
+**`thinking:` and `cache:` are the per-entry *blocks* this provider reads today.**
+A role's `retry:` and `api:` parse and travel — see
+[Native provider blocks on a role](../../configuration/reference.md#native-provider-blocks-on-a-role)
+— but nothing here reads them back. The scalar axes are all wired: `model`,
+`max_tokens` and `effort` through this provider's own resolution pass, and
+`temperature` alongside the blocks, on every path.
+
+See the [configuration reference](../../configuration/reference.md#per-role-thinking)
+for the canonical account.
+
 #### Thinking on the bus, and round-tripping
 
 `thinking` blocks that carry text are emitted as `thinking.step` events (`Source:
@@ -254,6 +360,46 @@ and `top_k` are rejected outright on Fable 5/5.1, Opus 5, Opus 4.8, Opus 4.7 and
 Sonnet 5 **regardless of thinking**, including under `mode: disabled` and `mode: off`,
 where the provider does not strip them. On those models, do not set sampling
 parameters at all.
+
+A `core.models` entry may carry a `temperature:` of its own, and this provider
+resolves one on every path — the role a request names, the default role, the
+recovery after a router rewrote `model`, and the fallback/fanout stamp. A
+temperature already on the request wins over the role's, so an agent posture and
+the `approval_policy` gate still outrank `core.models`. Both strippings above
+apply to a role's value exactly as they do to a posture's, and on the families
+that reject the field outright a role setting it is simply a 400 — the provider
+does not strip it for you.
+
+#### Per-role caching
+
+A `core.models` role may carry its own `cache:` block, and it merges over the
+plugin-level one exactly the way `thinking:` does — key by key, role wins, plugin
+keys the role is silent about survive, and the merged block goes back through the
+same `parseCacheConfig` the plugin block uses. Every role this provider could
+serve is swept at `Init`: an unknown key or a wrongly typed one fails the boot
+naming the role, because these blocks never pass through `schema.json`. The
+`extended-cache-ttl-2025-04-11` beta header follows the *resolved* TTL, so a role
+that lifts a `5m` plugin default to `1h` gets the gate its own markers need.
+
+```yaml
+core:
+  models:
+    cheap:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5
+      cache:
+        ttl: "1h"        # the plugin's system/tools breakpoints survive
+```
+
+**Caching is stateful in a way thinking is not.** An Anthropic cache entry is
+addressed by the exact prefix bytes, breakpoint placement and TTL included. Two
+roles that share a model and a system prompt but differ in `system`, `tools`,
+`message_prefix` or `ttl` therefore do not share an entry: the second misses,
+pays the cache-write premium (1.25× for `5m`, 2× for `1h`) to write its own, and
+both then expire on their own clocks. Varying only `enabled` per role is always
+safe — a role that caches nothing simply stops reading and writing. Varying the
+breakpoints or the TTL is safe when the roles also differ in model or system
+prompt, and is a silent cost multiplier when they do not.
 
 ### Effort
 
@@ -351,11 +497,10 @@ plugins:
 sends `{"effort": "max"}`; a request on any role without its own `effort` sends
 `{"effort": "low"}`; with neither set, nothing is emitted.
 
-That precedence is the **inverse of Gemini's**, where the plugin-level `thinking.level`
-beats a role's `effort`. The inversion is deliberate: on Gemini `level` is the native
-`thinkingLevel` vocabulary and `effort` the translated cross-provider one, so the native
-key wins; here `effort` is already this provider's own word in both places, so nothing is
-lost in translation and the more specific setting — the role — wins instead.
+That precedence is now **the same on Gemini**, where a role's `effort` likewise beats
+the plugin-level `thinking.level`. It used to be the inverse there; see the
+behaviour-change note on the
+[Gemini page](gemini.md#reasoning-depth-from-a-role-effort).
 
 An `effort` **already on the request** beats both. The fallback and fanout coordinators
 stamp the chain entry they are actually serving onto the outgoing request, so a fallback
@@ -370,7 +515,8 @@ accepted set. A clamp warns at request time instead, once per (role, value) — 
 every turn would flood a busy role's log.
 
 The full cross-provider account, including a worked `fanout` role and the fact that
-`nexus.llm.openai` ignores `effort` entirely, is in the configuration reference under
+`nexus.llm.openai` consumes `effort` unclamped but only under a declared
+`reasoning.mode`, is in the configuration reference under
 [Reasoning depth: `effort`](../../configuration/reference.md#reasoning-depth-effort).
 
 ### Cost Tracking

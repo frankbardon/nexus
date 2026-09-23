@@ -12,8 +12,20 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
+// mustCacheState builds the shared cache state and fails the test on the error
+// path. The error is reserved for an unknown key or a wrongly typed one,
+// neither of which these tests exercise.
+func mustCacheState(t *testing.T, cfg map[string]any) *cacheState {
+	t.Helper()
+	cs, err := newCacheState(cfg, slog.Default())
+	if err != nil {
+		t.Fatalf("newCacheState: unexpected error: %v", err)
+	}
+	return cs
+}
+
 func TestNewCacheState_Defaults(t *testing.T) {
-	cs := newCacheState(map[string]any{}, slog.Default())
+	cs := mustCacheState(t, map[string]any{})
 	if cs.enabled {
 		t.Fatal("expected disabled by default")
 	}
@@ -26,14 +38,14 @@ func TestNewCacheState_Defaults(t *testing.T) {
 }
 
 func TestNewCacheState_FromConfig(t *testing.T) {
-	cs := newCacheState(map[string]any{
+	cs := mustCacheState(t, map[string]any{
 		"cache": map[string]any{
 			"enabled":     true,
 			"min_tokens":  10000,
 			"ttl":         "30m",
 			"max_entries": 8,
 		},
-	}, slog.Default())
+	})
 	if !cs.enabled {
 		t.Fatal("enabled should be true")
 	}
@@ -49,7 +61,7 @@ func TestNewCacheState_FromConfig(t *testing.T) {
 }
 
 func TestPrefixHash_StableAcrossToolOrder(t *testing.T) {
-	cs := newCacheState(map[string]any{"cache": map[string]any{"enabled": true}}, slog.Default())
+	cs := mustCacheState(t, map[string]any{"cache": map[string]any{"enabled": true}})
 
 	t1 := []events.ToolDef{{Name: "b", Description: "B"}, {Name: "a", Description: "A"}}
 	t2 := []events.ToolDef{{Name: "a", Description: "A"}, {Name: "b", Description: "B"}}
@@ -63,7 +75,7 @@ func TestPrefixHash_StableAcrossToolOrder(t *testing.T) {
 }
 
 func TestPrefixHash_StopsAtFunctionResponse(t *testing.T) {
-	cs := newCacheState(map[string]any{"cache": map[string]any{"enabled": true}}, slog.Default())
+	cs := mustCacheState(t, map[string]any{"cache": map[string]any{"enabled": true}})
 
 	stableContents := []map[string]any{
 		{"role": "user", "parts": []map[string]any{{"text": "stable"}}},
@@ -83,7 +95,7 @@ func TestPrefixHash_StopsAtFunctionResponse(t *testing.T) {
 }
 
 func TestCachePopulateLookup(t *testing.T) {
-	cs := newCacheState(map[string]any{"cache": map[string]any{"enabled": true, "ttl": "1h"}}, slog.Default())
+	cs := mustCacheState(t, map[string]any{"cache": map[string]any{"enabled": true, "ttl": "1h"}})
 	contents := []map[string]any{{"role": "user", "parts": []map[string]any{{"text": "hi"}}}}
 
 	if got := cs.lookup("m", "s", nil, contents); got != "" {
@@ -99,7 +111,7 @@ func TestCachePopulateLookup(t *testing.T) {
 }
 
 func TestCacheExpiry(t *testing.T) {
-	cs := newCacheState(map[string]any{"cache": map[string]any{"enabled": true}}, slog.Default())
+	cs := mustCacheState(t, map[string]any{"cache": map[string]any{"enabled": true}})
 	contents := []map[string]any{{"role": "user", "parts": []map[string]any{{"text": "hi"}}}}
 
 	cs.populate("m", "s", nil, contents, "cachedContents/expired", -1*time.Second)
@@ -110,7 +122,7 @@ func TestCacheExpiry(t *testing.T) {
 }
 
 func TestCacheInvalidate(t *testing.T) {
-	cs := newCacheState(map[string]any{"cache": map[string]any{"enabled": true}}, slog.Default())
+	cs := mustCacheState(t, map[string]any{"cache": map[string]any{"enabled": true}})
 	contents := []map[string]any{{"role": "user", "parts": []map[string]any{{"text": "hi"}}}}
 
 	cs.populate("m", "s", nil, contents, "cachedContents/abc", time.Hour)
@@ -126,7 +138,7 @@ func TestCreateCachedContent_Disabled(t *testing.T) {
 		client: http.DefaultClient,
 		logger: slog.Default(),
 		auth:   &authState{mode: authModeAPIKey, apiKey: "k"},
-		cache:  newCacheState(map[string]any{}, slog.Default()),
+		cache:  mustCacheState(t, map[string]any{}),
 	}
 	if _, err := p.createCachedContent(context.Background(), "m", "s", nil, nil, time.Hour); err == nil {
 		t.Fatal("expected error when cache disabled")
@@ -153,9 +165,9 @@ func TestCreateCachedContentAt_HappyPath(t *testing.T) {
 		client: srv.Client(),
 		logger: slog.Default(),
 		auth:   &authState{mode: authModeAPIKey, apiKey: "k"},
-		cache: newCacheState(map[string]any{
+		cache: mustCacheState(t, map[string]any{
 			"cache": map[string]any{"enabled": true, "ttl": "1h"},
-		}, slog.Default()),
+		}),
 	}
 
 	contents := []map[string]any{{"role": "user", "parts": []map[string]any{{"text": "hello"}}}}
