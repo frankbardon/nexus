@@ -144,22 +144,26 @@ test-broker-integration:
 # modules/objectstore-s3/minio_test.go is //go:build minio, so `make test`
 # (plain `go test ./...`, no tags — including the submodule sweep) never runs
 # it. That is not tidiness: the submodule sweep IS untagged, so an emulator
-# suite left untagged would put a container start and ~10s of round trips into
-# the default loop and break the "fast, offline, secret-free" promise `make
+# suite left untagged would put a MinIO build and ~10s of round trips into the
+# default loop and break the "fast, offline, secret-free" promise `make
 # test` makes.
 #
 # Follows test-broker-integration rather than tests/integration/. The engine
 # suite is excluded from CI because live mode needs ANTHROPIC_API_KEY; that
-# reasoning does not reach here. MinIO is an S3-compatible store running on
-# loopback in a container this target starts and stops itself, so this needs no
-# cloud account, no API key and no repository secret — exactly the property that
-# lets the broker suite run in CI, and this one runs there too.
+# reasoning does not reach here. MinIO is an S3-compatible store, built from
+# a pinned source release and run on loopback by this target, so this needs no
+# container runtime, no cloud account, no API key and no repository secret —
+# exactly the property that lets the broker suite run in CI, and this one runs
+# there too.
 #
-# scripts/with-minio.sh owns the container lifecycle and records why it is a
-# script rather than a GitHub Actions `services:` block or testcontainers. It
-# also exports NEXUS_TEST_MINIO_REQUIRED, which turns the suite's
-# no-MinIO-so-skip path into a failure: the skip exists for a laptop with no
-# container runtime, and a skip in a run that provisioned MinIO would be green
+# scripts/with-minio.sh owns the server lifecycle and records why it builds
+# MinIO from source (every official image and binary channel is gone to an
+# anonymous machine) rather than chasing a registry, and why it is a script
+# rather than a GitHub Actions `services:` block or testcontainers. The first
+# run builds MinIO, about a minute on a cold cache; NEXUS_TEST_MINIO_ENDPOINT
+# points it at a MinIO you already run and skips the build. It also exports
+# NEXUS_TEST_MINIO_REQUIRED, which turns the suite's no-MinIO-so-skip path into
+# a failure: the skip exists for a machine that cannot produce MinIO, and a skip in a run that provisioned MinIO would be green
 # while testing nothing.
 #
 # -count=1 for the broker suite's reason: the result depends on a server this
@@ -189,8 +193,8 @@ test-objectstore-minio:
 # The build tag is the emulator's full name rather than "fakegcs", because that
 # name is already taken inside the module: fakegcs_test.go is the in-process
 # httptest fake the untagged suite runs against. scripts/with-fake-gcs.sh owns
-# the emulator lifecycle and records why it builds a pinned Go binary where
-# with-minio.sh runs a pinned container. It also exports
+# the emulator lifecycle the same way with-minio.sh owns MinIO's: a pinned Go
+# binary built with `go install`, no container runtime. It also exports
 # NEXUS_TEST_FAKE_GCS_REQUIRED, which turns the suite's no-emulator-so-skip path
 # into a failure: the skip exists for a machine that cannot produce the
 # emulator, and a skip in a run that provisioned one would be green while

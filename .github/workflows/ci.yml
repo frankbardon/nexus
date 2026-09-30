@@ -73,24 +73,32 @@ jobs:
   #
   # Its own job rather than another step in `test`, for the reason `race` is its
   # own job: it runs concurrently, so a green CI costs no extra wall clock, and
-  # it needs a container runtime that nothing else in `test` should have to care
-  # about. Roughly 20-30s including the image pull.
+  # it spends most of its time building MinIO, which nothing else in `test`
+  # should have to wait for. The wall clock is dominated by that build — about
+  # 50s cold on a laptop, and a cold runner is slower — with the suite itself
+  # taking seconds.
   #
   # No secrets and no cloud account, which is what makes it CI-able at all —
-  # MinIO is an S3-compatible store that `make test-objectstore-minio` starts
-  # and stops itself on loopback. That is the same property that lets the broker
-  # integration suite run above, and the reason tests/integration/ is still
-  # excluded (it needs ANTHROPIC_API_KEY) does not apply here.
+  # MinIO is an S3-compatible store that `make test-objectstore-minio` builds
+  # from its pinned release tag with the Go toolchain this job already has, and
+  # starts and stops itself on loopback. That is the same property that lets the
+  # broker integration suite run above, and the reason tests/integration/ is
+  # still excluded (it needs ANTHROPIC_API_KEY) does not apply here.
   #
-  # The suite skips when no MinIO is reachable, so that a contributor without
-  # Docker gets an honest "not run" rather than a red they cannot act on. A skip
+  # No container runtime is involved: every official MinIO image and binary
+  # channel has closed (quay.io, Docker Hub and dl.min.io, probed 2026-09-30),
+  # and scripts/with-minio.sh records why source was chosen over a third-party
+  # image, a GHCR image of our own, or a different emulator.
+  #
+  # The suite skips when no MinIO is reachable, so that a contributor who cannot
+  # build one gets an honest "not run" rather than a red they cannot act on. A skip
   # here would be indistinguishable from a pass, which is exactly the
   # invisible-forever failure mode the submodule plumbing exists to prevent — so
   # scripts/with-minio.sh exports NEXUS_TEST_MINIO_REQUIRED, and the suite fails
   # rather than skips in any run that provisioned MinIO. If this job is green,
   # the tests ran.
   #
-  # ubuntu-latest ships a working Docker daemon, so there is no setup step. No
+  # No setup step beyond Go itself, the same as objectstore-fake-gcs. No
   # `go mod download` either: it covers the root module, and everything this job
   # builds is either root-module code reached through the submodule's `replace`
   # or a submodule dependency the make target fetches on demand.
@@ -121,8 +129,9 @@ jobs:
   # No secrets and no cloud account. `make test-objectstore-fake-gcs` builds a
   # pinned fake-gcs-server with the Go toolchain this job already has and runs
   # it on loopback — no container runtime is involved, which is why there is no
-  # setup step here beyond Go itself. scripts/with-fake-gcs.sh records why that
-  # differs from the MinIO job's container.
+  # setup step here beyond Go itself. The MinIO job provisions its emulator the
+  # same way; scripts/with-fake-gcs.sh records why a `go install`ed binary
+  # rather than a container.
   #
   # The suite skips when no emulator is reachable, so a contributor who cannot
   # build one gets an honest "not run" rather than a red they cannot act on. A

@@ -266,14 +266,26 @@ func TestTheQueueDoesNotDeadlockOnAnUnansweredQuestion(t *testing.T) {
 
 	// The instance is told to stop waiting, or its agent loop would stay blocked
 	// inside ask_user for the life of the process.
-	var canceled bool
-	for _, msg := range instance.sentMessages() {
-		if msg.Type == ioTypeCancel && msg.TurnID == "t1" {
-			canceled = true
+	//
+	// Polled, not read once. expireInputDeadline settles the task BEFORE it
+	// sends the cancel, on purpose (see its comment), and settling is what
+	// promotes the next task, so seeing `second` at WORKING does not mean the
+	// cancel has been sent yet. A single read lost that race on a loaded -race
+	// runner (CI run 36729362170) while passing 200 of 200 locally.
+	canceled := func() bool {
+		for _, msg := range instance.sentMessages() {
+			if msg.Type == ioTypeCancel && msg.TurnID == "t1" {
+				return true
+			}
 		}
+		return false
 	}
-	if !canceled {
-		t.Errorf("the instance was never told to cancel the abandoned turn: %+v", instance.sentMessages())
+	deadline := time.Now().Add(3 * time.Second)
+	for !canceled() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance was never told to cancel the abandoned turn: %+v", instance.sentMessages())
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

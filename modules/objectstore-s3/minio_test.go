@@ -79,7 +79,7 @@ import (
 )
 
 // The knobs, all env-supplied so the same test binary serves three callers:
-// `make test-objectstore-minio` (which starts a container and sets all four),
+// `make test-objectstore-minio` (which builds and starts MinIO and sets all four),
 // CI (the same target), and a developer with their own MinIO already running
 // who exports NEXUS_TEST_MINIO_ENDPOINT and nothing else.
 const (
@@ -90,8 +90,8 @@ const (
 	// envRequired turns the absent-MinIO skip into a failure.
 	//
 	// This is the whole answer to "a suite that silently skips in CI is green
-	// forever". The skip has to exist -- a laptop without Docker must still be
-	// able to run `go test -tags minio ./...` without a spurious red -- but a
+	// forever". The skip has to exist -- a machine that cannot produce MinIO must
+	// still be able to run `go test -tags minio ./...` without a spurious red -- but a
 	// skip is indistinguishable from a pass in a CI summary, so the caller that
 	// *provisioned* MinIO sets this and gets a hard failure if the suite would
 	// have skipped anyway. scripts/with-minio.sh sets it unconditionally,
@@ -102,7 +102,7 @@ const (
 )
 
 // Defaults for a hand-started MinIO. scripts/with-minio.sh sets all three
-// explicitly -- it publishes on a Docker-chosen port precisely so it cannot
+// explicitly -- it binds a free port it picks itself precisely so it cannot
 // collide with a MinIO somebody already has on 9000 -- so these are what a
 // developer running `go test -tags minio ./...` directly gets, against the
 // conventional port and the credentials the script would have used.
