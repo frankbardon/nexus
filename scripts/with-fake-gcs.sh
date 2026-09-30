@@ -14,17 +14,19 @@
 #   GO                            go toolchain to build the emulator with
 #
 # ---------------------------------------------------------------------------
-# Why this builds a Go binary where scripts/with-minio.sh runs a container
+# Why this builds a Go binary rather than running a container
 # ---------------------------------------------------------------------------
 #
-# The two scripts are deliberately the same shape — one command, a pinned
-# version, a readiness wait, a port nothing else can be holding, an EXIT trap,
-# and NEXUS_TEST_*_REQUIRED so a provisioned run cannot pass by skipping — and
-# deliberately different in exactly one place: how the emulator is obtained.
+# This script and scripts/with-minio.sh are deliberately the same shape end to
+# end — one command, a pinned version built with `go install` into a scratch
+# GOBIN, a readiness wait, a port nothing else can be holding, an EXIT trap, and
+# NEXUS_TEST_*_REQUIRED so a provisioned run cannot pass by skipping.
 #
 # fake-gcs-server is a Go program distributed as a Go module, so `go install
-# <module>@<version>` is available here and was not available for MinIO. Taking
-# it means:
+# <module>@<version>` builds it directly. This script took that route first;
+# with-minio.sh ran MinIO's container image until every official image and
+# binary channel stopped serving anonymous machines, and records that history.
+# The route means:
 #
 #   - No container runtime. The suite runs anywhere the repository's own
 #     toolchain runs, which is a strictly larger set of machines than "has a
@@ -109,9 +111,9 @@ fi
 # 4443 is fake-gcs-server's own default and was the obvious choice, and it is
 # wrong here for the reason 9000 was wrong for MinIO: a test harness that only
 # works when a well-known port happens to be free intermittently blames the
-# wrong thing. The emulator has no equivalent of `docker port` — it is told a
-# port and binds it, and `-port 0` logs ":0" rather than what it got — so the
-# port is chosen here and handed to both the server and the tests. Pin one with
+# wrong thing. Like MinIO, the emulator is told a port and binds it, and
+# `-port 0` logs ":0" rather than what it got — so the port is chosen here and
+# handed to both the server and the tests. Pin one with
 # NEXUS_TEST_FAKE_GCS_PORT only if you want to poke at the store by hand while
 # it runs.
 port_is_free() {

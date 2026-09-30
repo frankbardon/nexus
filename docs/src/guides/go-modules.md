@@ -223,15 +223,26 @@ Three deliberate exceptions:
   above stays untagged, which is what keeps `make test` offline and secret-free
   even though it sweeps `modules/`.
 
-  The two scripts are the same shape on purpose — a pinned emulator version, a
-  readiness wait, a port nothing else can be holding, an EXIT trap, and a
-  `NEXUS_TEST_*_REQUIRED` variable that turns the suite's no-emulator skip into
-  a failure so a provisioned run cannot pass by skipping — and differ in one
-  place: `with-minio.sh` runs a pinned container, while `with-fake-gcs.sh`
-  builds a pinned Go binary with `go install <module>@<version>`, because
-  fake-gcs-server is a Go module and MinIO is not. That means the GCS emulator
-  suite needs no container runtime at all. Each script records the reasoning and
-  the alternatives that were rejected.
+  The two scripts are the same shape on purpose, end to end: a pinned emulator
+  version built with `go install <module>@<version>` into a scratch `GOBIN`
+  using the toolchain the repository already requires, a readiness wait, a port
+  nothing else can be holding, an EXIT trap, and a `NEXUS_TEST_*_REQUIRED`
+  variable that turns the suite's no-emulator skip into a failure so a
+  provisioned run cannot pass by skipping. Neither emulator suite needs a
+  container runtime.
+
+  MinIO used to come from its official container image. It is built from source
+  because every official MinIO image and binary channel stopped serving
+  anonymous machines, and chasing another registry would mean chasing the thing
+  that had already failed twice. The pin is `RELEASE.2025-09-07T16-13-09Z`,
+  which `NEXUS_TEST_MINIO_VERSION` overrides. MinIO is a large program, so the
+  first run takes about a minute on a cold cache, and the module and build
+  caches make later runs a few seconds. To skip the build, point
+  `NEXUS_TEST_MINIO_ENDPOINT` at a MinIO you already run, and set
+  `NEXUS_TEST_MINIO_ACCESS_KEY` / `NEXUS_TEST_MINIO_SECRET_KEY` if its
+  credentials differ from the defaults. Each script records the reasoning and
+  the alternatives that were rejected. `with-minio.sh` also records the channel
+  history.
 
   Both suites are also where the kill-and-resume cycle is proven against a real
   store, which is why **both** `modules/objectstore-s3/go.mod` and

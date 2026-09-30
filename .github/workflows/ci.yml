@@ -129,8 +129,9 @@ jobs:
   # No secrets and no cloud account. `make test-objectstore-fake-gcs` builds a
   # pinned fake-gcs-server with the Go toolchain this job already has and runs
   # it on loopback — no container runtime is involved, which is why there is no
-  # setup step here beyond Go itself. scripts/with-fake-gcs.sh records why that
-  # differs from the MinIO job's container.
+  # setup step here beyond Go itself. The MinIO job provisions its emulator the
+  # same way; scripts/with-fake-gcs.sh records why a `go install`ed binary
+  # rather than a container.
   #
   # The suite skips when no emulator is reachable, so a contributor who cannot
   # build one gets an honest "not run" rather than a red they cannot act on. A

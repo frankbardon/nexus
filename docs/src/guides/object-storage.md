@@ -480,14 +480,22 @@ constants rather than config keys:
 
 ## Trying it without a cloud account
 
-Both backends have an emulator suite in-repo that starts and stops the emulator
-itself, needs no cloud account and no repo secret, and runs the same
-conformance suite plus a real kill-and-resume cycle:
+Both backends have an emulator suite in-repo that builds, starts and stops the
+emulator itself. Each needs no cloud account, no repo secret and no container
+runtime, and each runs the same conformance suite plus a real kill-and-resume
+cycle:
 
 ```console
-$ make test-objectstore-minio      # modules/objectstore-s3 against MinIO (needs Docker)
-$ make test-objectstore-fake-gcs   # modules/objectstore-gcs against fake-gcs-server (no container runtime)
+$ make test-objectstore-minio      # modules/objectstore-s3 against MinIO
+$ make test-objectstore-fake-gcs   # modules/objectstore-gcs against fake-gcs-server
 ```
+
+Each target builds a pinned emulator with `go install` and the Go toolchain
+you already have. MinIO is pinned at `RELEASE.2025-09-07T16-13-09Z`, which
+`NEXUS_TEST_MINIO_VERSION` overrides. It is a large build, so the first run
+takes about a minute on a cold cache. Set `NEXUS_TEST_MINIO_ENDPOINT` to use a
+MinIO you already run and skip the build. See
+[Repository Go Modules](./go-modules.md) for why both are provisioned this way.
 
 Both run in CI as their own jobs, and both **fail rather than skip** when an
 emulator was provisioned, so a green job means the tests actually ran. Neither

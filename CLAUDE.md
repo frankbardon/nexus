@@ -9,7 +9,7 @@ make build        # Build binary to bin/nexus
 make run          # Build and run with default config (configs/default.yaml)
 make test         # Run all tests
 make test-broker-integration  # Broker integration suite (tagged; no API key needed)
-make test-objectstore-minio   # modules/objectstore-s3 against MinIO (tagged; starts/stops its own container)
+make test-objectstore-minio   # modules/objectstore-s3 against MinIO (tagged; builds/starts its own emulator, no container)
 make test-objectstore-fake-gcs # modules/objectstore-gcs against fake-gcs-server (tagged; builds/starts its own emulator, no container)
 make fmt          # Format code (gofmt)
 make submodules   # List the Go submodules under modules/ that every sweep covers
@@ -21,7 +21,7 @@ Run specific profile: `bin/nexus -config configs/coding.yaml`
 
 Run engine integration tests: `go test -tags integration ./tests/integration/ -v` (live mode needs `ANTHROPIC_API_KEY`)
 
-`make test` is untagged, so it skips every tagged suite. CI runs `make test`, then `make test-broker-integration` as its own step, and `make test-objectstore-minio` and `make test-objectstore-fake-gcs` as their own jobs; the engine suite under `tests/integration/` stays out of CI because live mode requires an API key. The two emulator targets run each object-store backend's conformance suite, and the shared kill-and-resume cycle from `pkg/engine/objectstore/enginetest`, against a real store on loopback — MinIO in a container `scripts/with-minio.sh` starts and stops, fake-gcs-server as a pinned Go binary `scripts/with-fake-gcs.sh` builds and starts, so the GCS one needs no container runtime. Neither needs a cloud account or a repo secret, and both fail rather than skip whenever the emulator was provisioned, so a green job means the tests actually ran. Neither covers IAM: no emulator reproduces IRSA, Workload Identity, ADC resolution or Workload Identity Federation.
+`make test` is untagged, so it skips every tagged suite. CI runs `make test`, then `make test-broker-integration` as its own step, and `make test-objectstore-minio` and `make test-objectstore-fake-gcs` as their own jobs; the engine suite under `tests/integration/` stays out of CI because live mode requires an API key. The two emulator targets run each object-store backend's conformance suite, and the shared kill-and-resume cycle from `pkg/engine/objectstore/enginetest`, against a real store on loopback — MinIO and fake-gcs-server each as a pinned Go binary that `scripts/with-minio.sh` / `scripts/with-fake-gcs.sh` builds with the job's own toolchain and starts, so neither needs a container runtime. Neither needs a cloud account or a repo secret, and both fail rather than skip whenever the emulator was provisioned, so a green job means the tests actually ran. Neither covers IAM: no emulator reproduces IRSA, Workload Identity, ADC resolution or Workload Identity Federation.
 
 Needs an LLM provider API key in env or `.env` file (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
