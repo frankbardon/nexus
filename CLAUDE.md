@@ -51,7 +51,9 @@ All comms via central typed event bus — plugins never call each other direct.
   submodule carries `replace github.com/frankbardon/nexus => ../..` instead. `make build`, `test`, `test-race`,
   `fmt`, `vet` and `lint` all sweep `modules/` (a separate module is invisible to `./...`), and
   `make check-modules` fails a `go.mod` found anywhere else. Submodule tags are `modules/<name>/vX.Y.Z`, cut on
-  demand and versioned independently of the core `vX.Y.Z`. See `docs/src/guides/go-modules.md`.
+  demand and versioned independently of the core `vX.Y.Z`. A root bump leaves submodules needing `go mod tidy`,
+  so `.github/workflows/dependabot-tidy.yml` tidies all modules on Dependabot gomod PRs, pushes, and dispatches
+  `ci.yml`. See `docs/src/guides/go-modules.md`.
 - **Test harness** (`pkg/testharness/`) — Integration test framework. Boots real engine with `nexus.io.test` plugin, provides two-tier assertions (deterministic + semantic LLM judge).
 - **Contract harness** (`pkg/testharness/contract/`) — Unit-level harness for one plugin in isolation against a real `engine.Bus`. Asserts declared `Subscriptions()`/`Emissions()` match runtime behavior. Lives in a sub-package to avoid the `plugin → harness → allplugins → plugin` import cycle. See `docs/src/guides/plugin-contracts.md`.
 - **Object-store contract suite** (`pkg/engine/objectstore/objectstoretest/`) — exported conformance suite every `objectstore.Backend` must pass (`RunSuite`), plus `NewMemory`, the in-memory backend that passes it and doubles as the substituted seam for untagged unit tests. Out-of-tree backend modules run the same suite, plus `pkg/engine/objectstore/enginetest.RunResumeSuite`, the shared kill-and-resume cycle. See `docs/src/guides/object-storage.md` and `docs/src/architecture/sessions.md`.

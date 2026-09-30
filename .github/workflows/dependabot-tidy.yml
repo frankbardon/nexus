@@ -1,0 +1,156 @@
+name: Dependabot tidy
+
+# Tidies every Go module in the repository on a Dependabot gomod PR, pushes the
+# result back to the Dependabot branch, and dispatches CI against it.
+#
+# Why this exists
+# ---------------
+# Each submodule under modules/ carries `replace github.com/frankbardon/nexus
+# => ../..`, so it builds against the working tree's root module and inherits
+# the root's requirements. When a root-module bump raises the minimum version of
+# a dependency a submodule shares (modernc.org/sqlite pulling libc and memory
+# along with it, klauspost/compress, ...), every submodule's go.mod/go.sum is
+# stale too. Dependabot's gomod updater only edits the directory it was
+# scheduled for (`/`), so it never tidies them, and `make build` goes red on the
+# submodule sweep. Reproduced with the sqlite 1.56.0 -> 1.58.0 bump applied to
+# main: `go build ./...` at the root is green, then
+#
+#   ==> modules/objectstore-gcs: go build ./...
+#   go: updates to go.mod needed; to update it:
+#   	go mod tidy
+#
+# That is systemic, not specific to one PR: every root bump Dependabot opens
+# fails CI the same way, and with `open-pull-requests-limit: 5` a backlog of red
+# PRs also stops Dependabot opening new ones. This workflow runs the missing
+# `go mod tidy` for it.
+#
+# PRs Dependabot opens for a submodule directory (`/modules/*` in
+# .github/dependabot.yml) usually tidy to a no-op: the bumped module is the one
+# that was edited, and nothing else inherits from a submodule. The job still
+# runs on them because the branch name does not say which directory it came
+# from, and a clean tree simply logs and exits 0.
+#
+# Why CI is dispatched explicitly
+# -------------------------------
+# A push made with GITHUB_TOKEN does not trigger `pull_request` (or `push`)
+# workflows — GitHub's guard against workflow recursion. So the tidy commit
+# would land on the PR with no CI run for it, and the PR would keep showing the
+# red run for the untidied commit. `workflow_dispatch` is the documented
+# exception to that rule: a dispatch made with GITHUB_TOKEN does start a run.
+# ci.yml already declares `workflow_dispatch` (for manual re-validation of a
+# ref), so the job below runs `gh workflow run ci.yml --ref <branch>` after
+# pushing. That is what `actions: write` is for. Whether those dispatched runs
+# surface in the PR's checks list is validated post-merge by a live
+# `@dependabot recreate` on #175; the runs exist and are attributable to the
+# branch either way.
+#
+# Why the permissions block matters
+# ---------------------------------
+# A `pull_request` run triggered by Dependabot gets a read-only GITHUB_TOKEN and
+# no access to repository secrets, whatever the repository's default token
+# permissions are — unless the workflow's `permissions:` grants write. The
+# job-level `contents: write` (push the tidy commit) and `actions: write`
+# (dispatch ci.yml) are what make this work with no secret or PAT at all. The
+# workflow-level default is `contents: read`, so nothing else here gets write.
+#
+# The accepted tradeoff: Dependabot stops rebasing
+# ------------------------------------------------
+# Once any actor other than Dependabot pushes to a Dependabot branch, Dependabot
+# stops rebasing or updating that PR, to avoid clobbering someone's work. After
+# this workflow pushes a tidy commit, a PR that later conflicts with main will
+# sit there rather than fix itself. Recovery is a comment of
+# `@dependabot recreate` on the PR: Dependabot rebuilds the branch from scratch
+# (discarding the tidy commit), the fresh push is Dependabot's own, so it fires
+# `pull_request` and this workflow tidies it again. That was judged a better
+# deal than every root bump arriving red and needing a hand-run tidy.
+#
+# Security
+# --------
+# `github.head_ref` is attacker-influenceable text in the general case (a branch
+# name). The `if:` guard restricts this job to Dependabot's own branches, but it
+# is still never interpolated into `run:` shell text: it reaches the shell only
+# through `env:` as "$HEAD_REF". Using it in `if:`, `concurrency:` and `with:`
+# is expression evaluation, not shell, and is safe.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Use exactly the Go that setup-go installs. Without this, a go directive in
+  # some bumped dependency newer than 1.26 would make the go command silently
+  # download a different toolchain and tidy with it, producing go.mod edits CI
+  # (which runs 1.26) might not reproduce.
+  GOTOOLCHAIN: local
+
+jobs:
+  tidy:
+    if: github.actor == 'dependabot[bot]' && startsWith(github.head_ref, 'dependabot/go_modules/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    # One run per Dependabot branch. A newer push (Dependabot rebasing, or a
+    # recreate) supersedes an in-flight tidy of the old head, which would
+    # otherwise race it and fail the push as non-fast-forward.
+    concurrency:
+      group: dependabot-tidy-${{ github.head_ref }}
+      cancel-in-progress: true
+    steps:
+      # The PR head branch, not the default merge ref (refs/pull/N/merge): the
+      # merge ref is a detached synthetic commit that cannot be pushed back to
+      # the branch. Checkout persists GITHUB_TOKEN credentials, which is what
+      # the push below authenticates with.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      # Root first, then every submodule, so each submodule tidies against the
+      # root requirements it inherits through `replace ../..`. The submodule
+      # list comes from `make submodules` (the same GO_SUBMODULES glob every
+      # make sweep uses) rather than a second glob here that could drift from
+      # it. Only lines shaped like `modules/<name>` are taken, so any stray make
+      # chatter is ignored rather than cd'd into.
+      - name: go mod tidy (root and modules/*)
+        run: |
+          set -euo pipefail
+          echo "==> .: go mod tidy"
+          go mod tidy
+          mods="$(make --no-print-directory -s submodules | grep -E '^modules/[^/[:space:]]+$' || true)"
+          if [ -z "$mods" ]; then
+            echo "no submodules listed by 'make submodules'" >&2
+            exit 1
+          fi
+          for mod in $mods; do
+            echo "==> $mod: go mod tidy"
+            (cd "$mod" && go mod tidy)
+          done
+
+      - name: Commit, push and dispatch CI
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "All modules already tidy; nothing to push."
+            exit 0
+          fi
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "build(deps): go mod tidy root and modules/* after dependabot bump" \
+            -m "Submodules inherit the root module's requirements through replace ../.., so a root bump leaves their go.mod/go.sum stale until tidied. Pushed by .github/workflows/dependabot-tidy.yml."
+          git push origin "HEAD:$HEAD_REF"
+          # A GITHUB_TOKEN push does not trigger pull_request; dispatch CI on
+          # the branch explicitly (see the header comment).
+          gh workflow run ci.yml --ref "$HEAD_REF"

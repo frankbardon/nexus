@@ -286,6 +286,60 @@ to it does.
 Dependabot covers the submodules through a glob (`directories: [/, /modules/*]`)
 for the same reason.
 
+## Dependabot and submodule tidy
+
+Every submodule's `replace github.com/frankbardon/nexus => ../..` means it
+inherits the root module's requirements. When a root-module bump raises the
+minimum version of a dependency a submodule shares, that submodule's
+`go.mod`/`go.sum` is stale too, and `make build` fails on the submodule sweep:
+
+```
+==> modules/objectstore-gcs: go build ./...
+go: updates to go.mod needed; to update it:
+	go mod tidy
+```
+
+(Reproduced by applying the `modernc.org/sqlite` 1.56.0 → 1.58.0 bump to `main`;
+`go build ./...` at the root stays green.) Dependabot's gomod updater edits only
+the directory it was scheduled for, so every root bump it opens would arrive red.
+
+`.github/workflows/dependabot-tidy.yml` fixes that. On a `pull_request` to
+`main` from `dependabot[bot]` on a `dependabot/go_modules/*` branch it:
+
+1. checks out the PR's head branch (not the merge ref, which cannot be pushed
+   back), sets up Go 1.26 with `GOTOOLCHAIN=local`;
+2. runs `go mod tidy` at the root, then in every directory `make submodules`
+   lists;
+3. if anything changed, commits it as `github-actions[bot]`
+   (`build(deps): go mod tidy root and modules/* after dependabot bump`), pushes
+   to the Dependabot branch, and runs `gh workflow run ci.yml --ref <branch>`; if
+   nothing changed it logs that and exits 0.
+
+Points worth knowing:
+
+- **It needs no secret.** A Dependabot-triggered `pull_request` run gets a
+  read-only `GITHUB_TOKEN` unless the workflow grants more; the job's
+  `permissions: { contents: write, actions: write }` is what lets it push and
+  dispatch.
+- **CI is dispatched, not triggered.** A push made with `GITHUB_TOKEN` does not
+  fire `pull_request` or `push` workflows (GitHub's recursion guard), so the tidy
+  commit would otherwise get no CI run. `workflow_dispatch` is the documented
+  exception, and `ci.yml` already declares it. Whether those dispatched runs
+  show up in the PR's checks list is validated post-merge with a live
+  `@dependabot recreate` on #175.
+- **Dependabot stops rebasing the PR** once another actor has pushed to its
+  branch. If a tidied PR later conflicts with `main`, comment
+  `@dependabot recreate`: Dependabot rebuilds the branch from scratch, its own
+  push fires `pull_request`, and this workflow tidies the fresh branch again.
+  That tradeoff was accepted over every root bump arriving red.
+- **Submodule-directory PRs usually tidy to a no-op.** Nothing inherits from a
+  submodule, so a `/modules/*` bump rarely leaves another module stale; the job
+  still runs (the branch name does not say which directory it came from) and
+  exits clean.
+- `github.head_ref` reaches the shell only through `env:`, never interpolated
+  into `run:` text, and a newer push to the same branch cancels an in-flight
+  tidy through a per-branch `concurrency` group.
+
 ## Versioning and tagging
 
 The core module is released as a bare tag, `vX.Y.Z`, with a matching GitHub
