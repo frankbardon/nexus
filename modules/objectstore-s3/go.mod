@@ -7,7 +7,7 @@ module github.com/frankbardon/nexus/modules/objectstore-s3
 go 1.26.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.0
+	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.1
 	// Pinned to the newest core release rather than a v0.0.0 placeholder, so a
