@@ -16,6 +16,8 @@ Output-side gates (`content_safety`, `stop_words`, `json_schema`, `output_length
 
 A gate that holds `before:llm.response` without `before:llm.stream.chunk` costs the whole deployment streaming: the engine reads declared `Subscriptions()` at boot and clears `Stream` on outbound requests, rather than letting a veto that cannot prevent disclosure look like one that can. Override with `core.streaming.response_gate_policy: allow`.
 
+Internal requests: Nexus's own requests (summaries, compaction, gate/fallback retries, fanout judge, planner/classifier probes, RAG contextual, HITL synthesis) go through `before:llm.request` too. `engine.IsInternalLLMRequest(req.Metadata)` (`pkg/engine/llm_request.go`) is the discriminator: non-empty `_source` AND `task_kind` not an agent-loop turn (`react_main`, `planexec_*`, `orchestrator_*`, `subagent`, `delegate`). Do NOT test bare `_source != ""` to mean "internal" — agent turns stamp `_source` too since #83. `prompt_injection` and `stop_words` skip internal requests on `before:llm.request` (the user text was scanned on the turn that carried it); `rate_limiter` and `token_budget` count them; `endless_loop`, `context_window`, `approval_policy` skip any non-empty `_source`.
+
 Resume mechanism: Gates that veto `before:llm.request` temporarily (rate limiter, context window) emit `gate.llm.retry` when the condition clears. All agent plugins (react, planexec, orchestrator) subscribe to this event and re-invoke `sendLLMRequest()` if they have an active turn — no user re-submission needed.
 
 ## Gate Config Reference

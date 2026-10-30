@@ -176,3 +176,28 @@ func TestPublishLLMRequest_NilBus(t *testing.T) {
 		t.Fatal("nil bus reported published")
 	}
 }
+
+func TestIsInternalLLMRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]any
+		want bool
+	}{
+		{"nil", nil, false},
+		{"untagged", map[string]any{"task_kind": "summarise"}, false},
+		{"react main", map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"}, false},
+		{"planexec step", map[string]any{"_source": "nexus.agent.planexec", "task_kind": "planexec_step"}, false},
+		{"orchestrator synth", map[string]any{"_source": "x", "task_kind": "orchestrator_synthesize"}, false},
+		{"subagent", map[string]any{"_source": "x", "task_kind": "subagent"}, false},
+		{"delegate", map[string]any{"_source": "x", "task_kind": "delegate"}, false},
+		{"compaction", map[string]any{"_source": "nexus.memory.compaction", "task_kind": "compaction"}, true},
+		{"gate retry", map[string]any{"_source": "nexus.gate.json_schema", "task_kind": "gate_retry"}, true},
+		{"fanout judge", map[string]any{"_source": "nexus.provider.fanout", "task_kind": "fanout_judge"}, true},
+		{"tagged no kind", map[string]any{"_source": "third.party"}, true},
+	}
+	for _, tc := range cases {
+		if got := IsInternalLLMRequest(tc.meta); got != tc.want {
+			t.Errorf("%s: IsInternalLLMRequest=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

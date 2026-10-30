@@ -22,6 +22,28 @@ providers.
 | `nexus.gate.tool_filter`          | `before:llm.request`    | Modify the tool list (allowlist / blocklist). |
 | `nexus.gate.approval_policy`      | `before:tool.invoke`, `before:llm.request` | Policy-driven HITL approvals; emits `before:hitl.requested` then `hitl.requested` and applies the operator's allow/reject/edit. |
 
+## Internal requests
+
+Nexus issues its own `llm.request`s besides the agent's turns — summaries and
+compaction, gate retries, fallback retries, the fanout judge, planner and
+classifier probes, RAG contextualisation, HITL synthesis. All of them go
+through `before:llm.request` (`engine.PublishLLMRequest`), so request-side
+gates see them. A request is **internal** when `engine.IsInternalLLMRequest`
+says so: it carries a non-empty `Metadata["_source"]` and its `task_kind` is
+not an agent-loop turn (`react_main`, `planexec_step`, `planexec_synthesize`,
+`orchestrator_decompose`, `orchestrator_synthesize`, `subagent`, `delegate`).
+An untagged request is treated as a turn.
+
+| Gate | Internal requests |
+|---|---|
+| `prompt_injection`, `stop_words` (request side) | **Skipped.** The user text they quote was already scanned on the agent turn that carried it; re-scanning a summary that quotes a banned word would only fail the compaction. Agent turns are still scanned; `stop_words`' output-side hooks are unchanged. |
+| `rate_limiter`, `token_budget` | **Counted.** They are real provider calls. |
+| `endless_loop`, `context_window`, `approval_policy` | Skip any request with a non-empty `_source` (recursion guard). |
+| `tool_filter` | Applied like any other request. |
+
+See the recursion convention in
+[the event bus architecture page](../../architecture/event-bus.md).
+
 ## Configuration
 
 Every gate's full YAML config — keys, types, defaults — is in the

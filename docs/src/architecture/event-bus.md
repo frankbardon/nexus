@@ -231,9 +231,16 @@ loop through the hook.
 **Which handlers see internal requests.** Handlers that skip any non-empty
 `_source` — `endless_loop`, `context_window`, `approval_policy`,
 `discovery.progressive`, the classifier router — are unaffected by internal
-requests. The rest (`rate_limiter`, `token_budget`, `prompt_injection`,
-`stop_words`, `dynvars`, `tool_filter`, the metadata router, the curators and
-stream policy) apply to them like any other request. A blocked internal request
+requests. `prompt_injection` and `stop_words` skip requests for which
+`engine.IsInternalLLMRequest` is true — a non-empty `_source` whose `task_kind`
+is not an agent-loop turn (`react_main`, `planexec_step`,
+`planexec_synthesize`, `orchestrator_decompose`, `orchestrator_synthesize`,
+`subagent`, `delegate`) — because the user text a summary quotes was already
+scanned on the turn that carried it. Agent turns stamp `_source` too (cost
+attribution), so a bare `_source != ""` test is not an internal-request test.
+The rest (`rate_limiter`, `token_budget`, `dynvars`, `tool_filter`, the
+metadata router, the curators and stream policy) apply to them like any other
+request. A blocked internal request
 fails fast: a gate retry returns invalid, a summariser or compaction releases
 its in-flight flag and leaves history as-is, a fallback retry leaves the
 original provider error to surface.

@@ -141,3 +141,65 @@ func offerLLMRequest(bus EventBus, req events.LLMRequest) (LLMRequestResult, boo
 	// emit, the same as every producer did before this helper existed.
 	return res, true
 }
+
+// MetaSource is the LLMRequest.Metadata key a producer stamps with its own
+// identity ("_source"). A non-empty value is the recursion guard documented in
+// docs/src/architecture/event-bus.md, and it is also the cost-attribution tag:
+// since #83 the agent loops stamp it on their own main turns too, so a
+// non-empty "_source" alone no longer means "internal request".
+const MetaSource = "_source"
+
+// MetaTaskKind is the LLMRequest.Metadata key naming what kind of call a
+// request is ("react_main", "summarise", "gate_retry", ...). It is the
+// discriminator IsInternalLLMRequest reads to tell an agent-loop turn from an
+// internal sub-flow.
+const MetaTaskKind = "task_kind"
+
+// agentTurnTaskKinds are the task_kind values of agent-loop turns: requests
+// whose response drives the conversation and tool execution. Every other
+// _source-tagged request — planner, classifier probe, summariser, compaction,
+// gate retry, fanout judge, RAG contextualisation, HITL synthesis, and any
+// tagged request whose kind is not listed here — is internal.
+//
+// subagent and delegate are listed because they are agent loops that run
+// tools; their prompts are authored by a parent model rather than echoing
+// content the user already sent through io.input.
+var agentTurnTaskKinds = map[string]bool{
+	"react_main":              true,
+	"planexec_step":           true,
+	"planexec_synthesize":     true,
+	"orchestrator_decompose":  true,
+	"orchestrator_synthesize": true,
+	"subagent":                true,
+	"delegate":                true,
+}
+
+// IsAgentTurnTaskKind reports whether kind is the task_kind of an agent-loop
+// turn (see IsInternalLLMRequest).
+func IsAgentTurnTaskKind(kind string) bool {
+	return agentTurnTaskKinds[kind]
+}
+
+// IsInternalLLMRequest reports whether a request's metadata marks it as one of
+// Nexus's own internal requests rather than an agent-loop turn: it carries a
+// non-empty "_source" and its "task_kind" is not an agent-turn kind. A request
+// with no "_source" is never internal — an untagged request is treated as a
+// turn, so a handler that skips internal requests fails closed on it.
+//
+// Fallback retries copy the original request's metadata, so a retried agent
+// turn stays a turn and a retried summary stays internal.
+//
+// Content gates whose input was already checked at io.input
+// (nexus.gate.prompt_injection, nexus.gate.stop_words) skip internal requests
+// on before:llm.request; counting gates (rate_limiter, token_budget) do not.
+func IsInternalLLMRequest(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	src, _ := meta[MetaSource].(string)
+	if src == "" {
+		return false
+	}
+	kind, _ := meta[MetaTaskKind].(string)
+	return !agentTurnTaskKinds[kind]
+}

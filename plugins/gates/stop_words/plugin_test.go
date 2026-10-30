@@ -131,3 +131,32 @@ func TestStopWords_EmptyWordList(t *testing.T) {
 		t.Fatal("empty word list should never veto")
 	}
 }
+
+// Internal requests (compaction, summaries) quote user text that was already
+// checked on the agent turn that carried it; they must not be blocked. Agent
+// turns — which also carry a _source since #83 — still are.
+func TestStopWords_InternalVsAgentTurn(t *testing.T) {
+	cases := []struct {
+		name     string
+		meta     map[string]any
+		wantVeto bool
+	}{
+		{"compaction", map[string]any{"_source": "nexus.memory.compaction", "task_kind": "compaction"}, false},
+		{"summarise", map[string]any{"_source": "nexus.memory.summary_buffer", "task_kind": "summarise"}, false},
+		{"react main turn", map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"}, true},
+		{"untagged", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, bus := newTestPlugin([]string{"hack"}, false)
+			req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+				Messages: []events.Message{{Role: "user", Content: "Earlier the user asked how to hack a server."}},
+				Metadata: tc.meta,
+			}
+			result, _ := bus.EmitVetoable("before:llm.request", &req)
+			if result.Vetoed != tc.wantVeto {
+				t.Fatalf("vetoed=%v, want %v", result.Vetoed, tc.wantVeto)
+			}
+		})
+	}
+}
