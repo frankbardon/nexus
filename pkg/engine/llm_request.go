@@ -155,6 +155,22 @@ const MetaSource = "_source"
 // internal sub-flow.
 const MetaTaskKind = "task_kind"
 
+// TaskKindCompaction is the task_kind nexus.memory.compaction stamps on its
+// summarisation request. It is a named constant because two sides must agree
+// on its spelling: the producer, and every consumer that recognises a
+// compaction call by kind (the memory plugins' internalflow skip list, router
+// rules matching metadata.task_kind). Those drifted once ("compact" vs
+// "compaction") and the memory plugins recorded the compaction summary into
+// the conversation history.
+const TaskKindCompaction = "compaction"
+
+// Task kinds of the nested agent loops: they run inside a parent turn, keep
+// their own in-process history, and offer a tool set scoped by their caller.
+const (
+	TaskKindSubagent = "subagent"
+	TaskKindDelegate = "delegate"
+)
+
 // agentTurnTaskKinds are the task_kind values of agent-loop turns: requests
 // whose response drives the conversation and tool execution. Every other
 // _source-tagged request — planner, classifier probe, summariser, compaction,
@@ -170,14 +186,38 @@ var agentTurnTaskKinds = map[string]bool{
 	"planexec_synthesize":     true,
 	"orchestrator_decompose":  true,
 	"orchestrator_synthesize": true,
-	"subagent":                true,
-	"delegate":                true,
+	TaskKindSubagent:          true,
+	TaskKindDelegate:          true,
 }
 
 // IsAgentTurnTaskKind reports whether kind is the task_kind of an agent-loop
 // turn (see IsInternalLLMRequest).
 func IsAgentTurnTaskKind(kind string) bool {
 	return agentTurnTaskKinds[kind]
+}
+
+// IsNestedAgentTaskKind reports whether kind is the task_kind of a nested
+// agent loop (subagent, delegate) — an agent turn that runs inside a parent
+// turn rather than being the conversation itself.
+func IsNestedAgentTaskKind(kind string) bool {
+	return kind == TaskKindSubagent || kind == TaskKindDelegate
+}
+
+// IsConversationLLMRequest reports whether a request is a turn of the
+// top-level conversation: not internal (see IsInternalLLMRequest) and not a
+// nested agent loop (see IsNestedAgentTaskKind). Handlers that act on the
+// conversation's own history or tool surface — the context-window gate
+// (which compacts the main history) and progressive discovery (which
+// replaces the tool list from the global catalog) — use this, because doing
+// either to a subagent's or delegate's request would compact the wrong
+// history or widen a caller-scoped tool set. An untagged request is a
+// conversation turn.
+func IsConversationLLMRequest(meta map[string]any) bool {
+	if IsInternalLLMRequest(meta) {
+		return false
+	}
+	kind, _ := meta[MetaTaskKind].(string)
+	return !IsNestedAgentTaskKind(kind)
 }
 
 // IsInternalLLMRequest reports whether a request's metadata marks it as one of
@@ -190,8 +230,10 @@ func IsAgentTurnTaskKind(kind string) bool {
 // turn stays a turn and a retried summary stays internal.
 //
 // Content gates whose input was already checked at io.input
-// (nexus.gate.prompt_injection, nexus.gate.stop_words) skip internal requests
-// on before:llm.request; counting gates (rate_limiter, token_budget) do not.
+// (nexus.gate.prompt_injection, nexus.gate.stop_words), the iteration counter
+// (nexus.gate.endless_loop) and the approval-policy gate skip internal
+// requests on before:llm.request; budget gates (rate_limiter, token_budget)
+// do not.
 func IsInternalLLMRequest(meta map[string]any) bool {
 	if meta == nil {
 		return false

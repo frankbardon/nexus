@@ -4723,6 +4723,11 @@ Source: `plugins/discovery/progressive/plugin.go`. Hierarchical tool discovery
 `discover` meta-tool. Intercepts `before:llm.request` (priority 8) and
 `tool.invoke` (priority 40).
 
+It reshapes only top-level conversation turns
+(`engine.IsConversationLLMRequest`) that offer tools: internal requests,
+nested `subagent` / `delegate` loops (whose tool set is scoped by their caller)
+and tool-less turns such as synthesis calls pass through unchanged.
+
 | Key                  | Type   | Default     | Description |
 |----------------------|--------|-------------|-------------|
 | `scope`              | string | `session`   | `session`, `turn`, or `hybrid`. |

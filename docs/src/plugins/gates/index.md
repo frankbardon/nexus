@@ -38,8 +38,15 @@ An untagged request is treated as a turn.
 |---|---|
 | `prompt_injection`, `stop_words` (request side) | **Skipped.** The user text they quote was already scanned on the agent turn that carried it; re-scanning a summary that quotes a banned word would only fail the compaction. Agent turns are still scanned; `stop_words`' output-side hooks are unchanged. |
 | `rate_limiter`, `token_budget` | **Counted.** They are real provider calls. |
-| `endless_loop`, `context_window`, `approval_policy` | Skip any request with a non-empty `_source` (recursion guard). |
+| `endless_loop` | **Skipped** — only agent-loop turns count toward the per-turn iteration limit. Nested loops (`subagent`, `delegate`) **count** toward the parent turn: they run inside it, emit no `agent.turn.start` of their own, and have no iteration cap of their own. |
+| `approval_policy` (`llm.request` rules) | **Skipped.** Agent-loop turns, nested ones included, are evaluated. |
+| `context_window` | **Skipped**, and so are nested `subagent` / `delegate` requests (`engine.IsConversationLLMRequest`): compaction shrinks the main history, which is not the history a nested loop sends. Skipping compaction's own request is the recursion guard. |
 | `tool_filter` | Applied like any other request. |
+
+Until E1-S15 the last three skipped any request with a non-empty `_source`.
+Agent loops stamp `_source` on their own turns (cost attribution), so the
+iteration limit, the `llm.request` approval rules and context-window
+compaction never fired on an agent turn.
 
 See the recursion convention in
 [the event bus architecture page](../../architecture/event-bus.md).

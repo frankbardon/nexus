@@ -606,7 +606,7 @@ func (p *Plugin) startCompaction(reason string) {
 			"_source":     llmSource,
 			"_backup":     backupPath,
 			"_prev_count": msgCount,
-			"task_kind":   "compaction",
+			"task_kind":   engine.TaskKindCompaction,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})

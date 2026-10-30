@@ -23,7 +23,7 @@ func New() engine.Plugin {
 	}
 }
 
-// Plugin gates before:llm.request events by counting internal LLM calls per turn.
+// Plugin gates before:llm.request events by counting agent-loop LLM calls per turn.
 // Vetoes when the count exceeds the configured limit.
 type Plugin struct {
 	bus    engine.EventBus
@@ -121,9 +121,16 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Skip gate-originated or planner LLM requests.
+	// Count agent-loop iterations only. The agent loops stamp _source on
+	// their own turns, so a non-empty _source alone is not "internal":
+	// skipping on it (as this gate did until E1-S15) left every react /
+	// planexec / orchestrator iteration uncounted and the limit inert.
+	// Nested loops (subagent, delegate) count toward the parent turn — they
+	// run inside it, emit no agent.turn.start of their own, and rely on this
+	// gate as their iteration cap. Internal requests (planner, summariser,
+	// compaction, gate retry, judge, ...) do not count.
 	if req, ok := vp.Original.(*events.LLMRequest); ok {
-		if src, _ := req.Metadata["_source"].(string); src != "" {
+		if engine.IsInternalLLMRequest(req.Metadata) {
 			return
 		}
 	}

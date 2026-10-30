@@ -252,8 +252,19 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Skip internal/gate requests.
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	// Reshape only the top-level conversation's turns. Internal requests
+	// are left alone, and so are nested subagent/delegate loops: their tool
+	// set is scoped by the caller, and replacing it from the global catalog
+	// would widen it. Agent loops stamp _source on their own turns, so
+	// skipping on any non-empty _source (as this plugin did until E1-S15)
+	// left discovery inert for every agent loop.
+	if !engine.IsConversationLLMRequest(req.Metadata) {
+		return
+	}
+	// A turn that offers no tools (planexec / orchestrator synthesis, a
+	// decompose call) is left alone: replacing its empty list would hand
+	// tools to a call whose loop does not execute them.
+	if len(req.Tools) == 0 {
 		return
 	}
 

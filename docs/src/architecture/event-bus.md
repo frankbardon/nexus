@@ -251,10 +251,14 @@ one (the classifier also stamps and checks `_routed_by`; fanout uses
 output side (`before:io.output`), not from a request handler, so they cannot
 loop through the hook.
 
-**Which handlers see internal requests.** Handlers that skip any non-empty
-`_source` — `endless_loop`, `context_window`, `approval_policy`,
-`discovery.progressive`, the classifier router — are unaffected by internal
-requests. `prompt_injection` and `stop_words` skip requests for which
+**Which handlers see internal requests.** The classifier router skips any
+non-empty `_source` (its recursion guard). `endless_loop` and
+`approval_policy` skip requests for which `engine.IsInternalLLMRequest` is
+true; `context_window` and `discovery.progressive` act only when
+`engine.IsConversationLLMRequest` is true — not internal and not a nested
+`subagent` / `delegate` loop, whose history and tool set are its caller's,
+not the conversation's (discovery also leaves a request offering no tools
+alone). `prompt_injection` and `stop_words` skip requests for which
 `engine.IsInternalLLMRequest` is true — a non-empty `_source` whose `task_kind`
 is not an agent-loop turn (`react_main`, `planexec_step`,
 `planexec_synthesize`, `orchestrator_decompose`, `orchestrator_synthesize`,

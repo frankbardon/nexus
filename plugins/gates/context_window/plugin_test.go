@@ -182,3 +182,42 @@ func TestContextWindow_NoRetryWithoutPriorVeto(t *testing.T) {
 		t.Fatalf("expected 0 retries without prior veto, got %d", retryCount)
 	}
 }
+
+// TestContextWindow_GatesConversationTurns pins that the agent loops' own
+// turns are measured. They stamp _source (cost attribution, #83), and until
+// E1-S15 this gate skipped any non-empty _source — so it never compacted.
+func TestContextWindow_GatesConversationTurns(t *testing.T) {
+	for _, meta := range []map[string]any{
+		{"_source": "nexus.agent.react", "task_kind": "react_main"},
+		{"_source": "nexus.agent.planexec.executor", "task_kind": "planexec_step"},
+	} {
+		bus := engine.NewEventBus()
+		p := &Plugin{bus: bus, logger: slog.Default(), maxContextTokens: 10, triggerRatio: 0.5, charsPerToken: 1.0}
+		bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest, engine.WithPriority(15))
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: meta,
+			Messages: []events.Message{{Role: "user", Content: "a long message that exceeds the limit easily"}}}
+		if veto, _ := bus.EmitVetoable("before:llm.request", req); !veto.Vetoed {
+			t.Errorf("%v: over-threshold agent turn not gated", meta["task_kind"])
+		}
+	}
+}
+
+// TestContextWindow_SkipsNestedAgentLoops pins that subagent and delegate
+// requests are not measured: their history is in-process, so compacting the
+// main history would not shrink it, and the veto would fail the nested call.
+func TestContextWindow_SkipsNestedAgentLoops(t *testing.T) {
+	for _, meta := range []map[string]any{
+		{"_source": "nexus.agent.subagent.s1", "task_kind": "subagent"},
+		{"_source": "delegate.sub-1", "task_kind": "delegate"},
+		{"_source": "nexus.memory.compaction", "task_kind": engine.TaskKindCompaction},
+	} {
+		bus := engine.NewEventBus()
+		p := &Plugin{bus: bus, logger: slog.Default(), maxContextTokens: 10, triggerRatio: 0.5, charsPerToken: 1.0}
+		bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest, engine.WithPriority(15))
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: meta,
+			Messages: []events.Message{{Role: "user", Content: "a long message that exceeds the limit easily"}}}
+		if veto, _ := bus.EmitVetoable("before:llm.request", req); veto.Vetoed {
+			t.Errorf("%v: request should not be gated", meta["task_kind"])
+		}
+	}
+}

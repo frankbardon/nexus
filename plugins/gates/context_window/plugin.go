@@ -117,8 +117,13 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Skip compaction plugin's own LLM requests.
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	// Only the top-level conversation's turns are measured: compaction
+	// compacts the main history, so it must neither re-trigger on its own
+	// request (internal) nor fire on a subagent's or delegate's request,
+	// whose history is in-process and not the one compaction would shrink.
+	// Agent loops stamp _source on their own turns, so skipping on any
+	// non-empty _source (as this gate did until E1-S15) never gated them.
+	if !engine.IsConversationLLMRequest(req.Metadata) {
 		return
 	}
 

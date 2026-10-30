@@ -497,3 +497,32 @@ func TestParseRules_InvalidMode(t *testing.T) {
 		t.Fatal("expected error for bogus mode")
 	}
 }
+
+// TestApprovalPolicy_LLMRequest_MatchesAgentLoopTurns pins that llm.request
+// rules see the agent loops' own turns. They stamp _source (cost
+// attribution, #83), and until E1-S15 this gate skipped any non-empty
+// _source — so no llm.request rule could ever match a turn.
+func TestApprovalPolicy_LLMRequest_MatchesAgentLoopTurns(t *testing.T) {
+	rules := []rule{{
+		match: map[string]any{"action_kind": "llm.request", "model": "claude-opus-*"},
+		mode:  string(events.HITLModeChoices),
+	}}
+	_, bus := newTestPlugin(t, rules)
+	newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "reject"})
+
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-7",
+		Metadata: map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"}}
+	done := make(chan bool, 1)
+	go func() {
+		veto, _ := bus.EmitVetoable("before:llm.request", &req)
+		done <- veto.Vetoed
+	}()
+	select {
+	case vetoed := <-done:
+		if !vetoed {
+			t.Fatal("expected the react turn to match the rule and be rejected")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval did not complete")
+	}
+}

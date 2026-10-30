@@ -201,3 +201,25 @@ func TestIsInternalLLMRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestIsConversationLLMRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]any
+		want bool
+	}{
+		{"nil", nil, true},
+		{"untagged", map[string]any{}, true},
+		{"react main", map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"}, true},
+		{"orchestrator synth", map[string]any{"_source": "x", "task_kind": "orchestrator_synthesize"}, true},
+		{"subagent", map[string]any{"_source": "x", "task_kind": TaskKindSubagent}, false},
+		{"delegate", map[string]any{"_source": "delegate.s1", "task_kind": TaskKindDelegate}, false},
+		{"compaction", map[string]any{"_source": "nexus.memory.compaction", "task_kind": TaskKindCompaction}, false},
+		{"tagged no kind", map[string]any{"_source": "third.party"}, false},
+	}
+	for _, tc := range cases {
+		if got := IsConversationLLMRequest(tc.meta); got != tc.want {
+			t.Errorf("%s: IsConversationLLMRequest=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

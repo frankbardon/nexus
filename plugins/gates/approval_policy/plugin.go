@@ -160,9 +160,12 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Skip gate-originated and planner-tagged requests so we never gate
-	// our own follow-up emissions or planner-generated calls.
-	if src, _ := req.Metadata["_source"].(string); src != "" {
+	// Skip internal requests (gate retries, planner, summariser, ...) so we
+	// never gate our own follow-up emissions or internal calls. Agent-loop
+	// turns — nested subagent/delegate loops included — are evaluated: they
+	// stamp _source too, so skipping on any non-empty _source (as this gate
+	// did until E1-S15) left llm.request rules unable to match any turn.
+	if engine.IsInternalLLMRequest(req.Metadata) {
 		return
 	}
 

@@ -112,7 +112,7 @@ func runToolChoiceLeg(t *testing.T, label, configPath, expectedProvider string) 
 			}
 			kind, _ := req.Metadata["task_kind"].(string)
 			switch kind {
-			case "plan", "summarise", "compact", "classify":
+			case "plan", "summarise", engine.TaskKindCompaction, "classify":
 				return
 			}
 			mu.Lock()
