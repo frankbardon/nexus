@@ -259,6 +259,18 @@ func (e *Engine) Boot(ctx context.Context) error {
 			e.releaseObjectStore()
 		}
 	}()
+	// Drop every run-scoped subscription installed so far if Boot fails —
+	// the journal wildcard, the tool cache, the tag seeder and anything else
+	// appended to e.runUnsubs before the failing step. The caller will not
+	// call Stop on a failed boot, so without this a retried Boot on the same
+	// engine registered each handler a second time (#206). Deferred after the
+	// object-store release so it runs before it: the snapshot handlers read
+	// e.objectStore, the same ordering Stop and Abandon depend on.
+	defer func() {
+		if !bootSucceeded {
+			e.unsubscribeRunScoped()
+		}
+	}()
 
 	// Pull down the roots that live outside the session tree — app- and
 	// agent-scope plugin stores — before anything can open one. This has to
@@ -736,10 +748,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 		e.runCancel = nil
 	}
 
-	for _, unsub := range e.runUnsubs {
-		unsub()
-	}
-	e.runUnsubs = nil
+	e.unsubscribeRunScoped()
 
 	// Stop the object-store recovery worker before anything else is torn down.
 	// It snapshots through the journal writer this function closes further
@@ -875,10 +884,7 @@ func (e *Engine) Abandon() {
 	// goroutine dispatched agent.turn.end, so unsubscribing first is what makes
 	// writing that field here not a data race. Stop depends on the same
 	// ordering for the same reason.
-	for _, unsub := range e.runUnsubs {
-		unsub()
-	}
-	e.runUnsubs = nil
+	e.unsubscribeRunScoped()
 
 	// The recovery worker first, for the reason Stop gives at the same point:
 	// it snapshots through the journal writer and emits on the bus, so it has
@@ -911,6 +917,16 @@ func (e *Engine) Abandon() {
 	e.Logger.Info("object store: session abandoned; no shutdown snapshot was taken "+
 		"and the owner marker was left in place for the next host to age out",
 		"backend", store.cfg.BackendName, "session_id", sessionID)
+}
+
+// unsubscribeRunScoped removes every run-scoped bus subscription Boot
+// installed and empties the list, so a later Boot starts from none. Shared by
+// Stop, Abandon and Boot's own failure path. Idempotent.
+func (e *Engine) unsubscribeRunScoped() {
+	for _, unsub := range e.runUnsubs {
+		unsub()
+	}
+	e.runUnsubs = nil
 }
 
 // startJournal constructs the per-session journal writer and installs the

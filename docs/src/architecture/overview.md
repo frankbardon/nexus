@@ -63,6 +63,14 @@ When `Engine.Run()` is called:
 7. **Event loop** — The engine listens for events until a shutdown signal arrives
 8. **Shutdown** — Plugins shut down in reverse dependency order, `core.shutdown` emitted
 
+If `Boot` returns an error, the caller does not call `Stop`. Boot undoes its own
+partial work on the way out: it releases the session lock and the object-store
+handle, and it unsubscribes every engine-owned run-scoped handler installed before
+the failing step. That covers the journal wildcard, the tool cache and the cost-tag
+seeder. So a host that retries `Boot` on the same `Engine` gets each of those
+handlers registered exactly once
+([#206](https://github.com/frankbardon/nexus/issues/206)).
+
 ```mermaid
 sequenceDiagram
     autonumber
