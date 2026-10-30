@@ -39,6 +39,20 @@ type Plugin struct {
 	mu             sync.Mutex
 	availableTools []events.ToolDef
 	unsubs         []func()
+
+	// ctx bounds every worker's LLM waits and is cancelled on Shutdown, so
+	// a worker waiting on an intercepted request (fanout role, test IO mock)
+	// that is never answered does not outlive the plugin.
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// lifetime returns the plugin's lifetime context (Background before Init).
+func (p *Plugin) lifetime() context.Context {
+	if p.ctx == nil {
+		return context.Background()
+	}
+	return p.ctx
 }
 
 func New() engine.Plugin {
@@ -77,6 +91,7 @@ func (p *Plugin) Requires() []engine.Requirement {
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
@@ -171,6 +186,9 @@ func (p *Plugin) Ready() error {
 }
 
 func (p *Plugin) Shutdown(_ context.Context) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	for _, unsub := range p.unsubs {
 		unsub()
 	}
@@ -445,7 +463,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			},
 			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}
-		resp, err := delegate.SyncLLM(context.Background(), p.bus, req)
+		resp, err := delegate.SyncLLM(p.lifetime(), p.bus, req)
 		if err != nil {
 			logger.Error("subagent llm error", "err", err)
 			return p.completeSubagent(spawnID, parentTurnID, "", err.Error(), iteration, totalUsage, totalCost)

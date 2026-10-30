@@ -269,7 +269,7 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		}
 		newMeta["_fanout_id"] = fanoutID
 		newMeta["_target_provider"] = pc.Provider
-		newMeta["_fanout_provider"] = pc.Provider
+		newMeta[engine.MetaFanoutProvider] = pc.Provider
 		// Tag with _source so agent handlers skip individual fanout responses.
 		// The final combined response emitted by finalize() has no _source.
 		newMeta["_source"] = pluginID
@@ -325,7 +325,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 		return
 	}
 
-	provider, _ := resp.Metadata["_fanout_provider"].(string)
+	provider, _ := resp.Metadata[engine.MetaFanoutProvider].(string)
 
 	p.mu.Lock()
 	state, exists := p.inflight[fanoutID]
@@ -384,7 +384,7 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 		return
 	}
 
-	provider, _ := meta["_fanout_provider"].(string)
+	provider, _ := meta[engine.MetaFanoutProvider].(string)
 	model, _ := meta["_target_provider"].(string)
 
 	p.mu.Lock()
@@ -561,7 +561,7 @@ func (p *Plugin) emitFinalResponse(fanoutID string, state *fanoutState, response
 	// Strip fanout metadata from primary.
 	cleanMeta := make(map[string]any)
 	for k, v := range primary.Metadata {
-		if k == "_fanout_id" || k == "_fanout_provider" || k == "_target_provider" {
+		if k == "_fanout_id" || k == engine.MetaFanoutProvider || k == "_target_provider" {
 			continue
 		}
 		cleanMeta[k] = v

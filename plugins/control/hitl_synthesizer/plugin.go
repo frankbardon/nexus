@@ -37,6 +37,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -65,6 +66,13 @@ const (
 		"Do not preamble. Do not explain. Do not include the action verbatim. " +
 		"Mention the most important detail (path, command, namespace, etc.) so the reviewer " +
 		"can decide quickly. Output the prompt and nothing else."
+
+	// interceptWaitTimeout bounds how long synthesize waits for the answer
+	// to an intercepted request (fanout role, test IO mock), which arrives
+	// asynchronously. A published request is answered inside the emit and
+	// never waits. The caller falls back to the unsynthesized prompt on
+	// timeout.
+	interceptWaitTimeout = 60 * time.Second
 )
 
 // Plugin renders HITL prompts via a small LLM and caches the results.
@@ -85,21 +93,29 @@ type Plugin struct {
 	cache   map[string]string
 
 	// pending tracks in-flight llm.request → llm.response correlations.
-	// Keyed by the synthesis correlation ID emitted in
-	// LLMRequest.Metadata["_synth_id"].
+	// Keyed by the synthesis correlation ID, which is both the request's
+	// RequestID and LLMRequest.Metadata["_synth_id"].
 	pendingMu sync.Mutex
 	pending   map[string]chan string
 
 	corrCounter uint64
+
+	// ctx is cancelled on Shutdown so a synthesis waiting on an intercepted
+	// request stops waiting.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	unsubs []func()
 }
 
 // New creates the synthesizer plugin.
 func New() engine.Plugin {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Plugin{
 		cache:   make(map[string]string),
 		pending: make(map[string]chan string),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 }
 
@@ -123,6 +139,7 @@ func (p *Plugin) Capabilities() []engine.Capability {
 }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 	p.session = ctx.Session
@@ -188,6 +205,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 func (p *Plugin) Ready() error { return nil }
 
 func (p *Plugin) Shutdown(_ context.Context) error {
+	p.cancel()
 	for _, unsub := range p.unsubs {
 		unsub()
 	}
@@ -280,10 +298,11 @@ func (p *Plugin) maybeSynthesize(req *events.HITLRequest) {
 	}
 }
 
-// synthesize emits llm.request and returns the rendered prompt. Blocks
-// the dispatch goroutine until the provider finishes (synchronous bus
-// dispatch makes this safe — the provider emits llm.response from
-// inside the same call).
+// synthesize emits llm.request and returns the rendered prompt. A
+// published request is answered inside the synchronous emit; an intercepted
+// one (fanout role, test IO mock) is answered asynchronously, so synthesize
+// waits for it, bounded by interceptWaitTimeout and Shutdown. A block veto
+// fails at once. Every failure leaves the caller on the fallback prompt.
 func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 	corrID := p.nextCorrID(req.ID)
 
@@ -300,10 +319,8 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 	systemMsg := defaultSystemPrompt
 	userMsg := buildUserPrompt(req, p.maxActionRefChars)
 
-	// Any veto — an interception included — ends in the "no response"
-	// error below: this call only collects a response delivered inside the
-	// synchronous emit, and the caller falls back to the unsynthesized prompt.
 	res := engine.PublishLLMRequest(p.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
+		RequestID: corrID,
 		Messages: []events.Message{
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: userMsg},
@@ -316,43 +333,43 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})
-	if res.Err != nil {
-		return "", fmt.Errorf("emit llm.request: %w", res.Err)
-	}
-	if res.Veto.Vetoed {
-		return "", fmt.Errorf("synthesizer llm.request vetoed: %s", res.Veto.Reason)
-	}
 
-	select {
-	case content := <-respCh:
-		content = strings.TrimSpace(content)
-		if content == "" {
-			return "", errors.New("synthesizer received empty response")
-		}
-		return content, nil
-	default:
-		// Provider didn't emit llm.response (likely core.error path).
-		return "", errors.New("synthesizer received no response")
+	ctx, cancel := context.WithTimeout(p.ctx, interceptWaitTimeout)
+	defer cancel()
+	content, err := engine.AwaitLLMResponse(ctx, res, respCh)
+	if err != nil {
+		return "", fmt.Errorf("synthesizer llm.request: %w", err)
 	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", errors.New("synthesizer received empty response")
+	}
+	return content, nil
 }
 
-// handleLLMResponse routes responses tagged with our llmSource back to
-// the synthesize() call that's blocked waiting for them.
+// handleLLMResponse routes the response to a synthesis request back to the
+// synthesize() call waiting for it. It correlates on RequestID (the
+// synthesis correlation ID) first — that is what survives an interceptor
+// such as fanout, whose merged response carries the fanout's own _source —
+// and falls back to the _source + _synth_id metadata pair. Fanout legs share
+// the RequestID and are skipped.
 func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
 	resp, ok := event.Payload.(events.LLMResponse)
 	if !ok {
 		return
 	}
-	source, _ := resp.Metadata["_source"].(string)
-	if source != llmSource {
-		return
-	}
-	corrID, _ := resp.Metadata["_synth_id"].(string)
-	if corrID == "" {
+	if engine.IsFanoutLegResponse(resp.Metadata) {
 		return
 	}
 	p.pendingMu.Lock()
-	ch, exists := p.pending[corrID]
+	ch, exists := p.pending[resp.RequestID]
+	if !exists {
+		if source, _ := resp.Metadata["_source"].(string); source == llmSource {
+			if corrID, _ := resp.Metadata["_synth_id"].(string); corrID != "" {
+				ch, exists = p.pending[corrID]
+			}
+		}
+	}
 	p.pendingMu.Unlock()
 	if !exists {
 		return
@@ -360,7 +377,7 @@ func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
 	select {
 	case ch <- resp.Content:
 	default:
-		p.logger.Warn("hitl_synthesizer: response dropped — channel full", "synth_id", corrID)
+		p.logger.Warn("hitl_synthesizer: response dropped — channel full", "request_id", resp.RequestID)
 	}
 }
 

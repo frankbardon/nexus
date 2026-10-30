@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"fmt"
+
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -68,6 +72,72 @@ func InterceptLLMRequest(vp *VetoablePayload, req *events.LLMRequest, by, reason
 	}
 	req.Metadata[MetaInterceptedBy] = by
 	vp.Veto = VetoResult{Vetoed: true, Reason: reason}
+}
+
+// MetaFanoutProvider is the LLMResponse.Metadata key nexus.provider.fanout
+// stamps on each per-provider leg of a fanout (its value is the leg's
+// provider). Legs are copies of the intercepted request and keep its
+// RequestID, so a producer correlating by RequestID must skip them and wait
+// for the merged response, which carries the same RequestID without this key.
+// Read it through IsFanoutLegResponse.
+const MetaFanoutProvider = "_fanout_provider"
+
+// IsFanoutLegResponse reports whether a response is one per-provider leg of a
+// fanout rather than the answer to the request (see MetaFanoutProvider).
+func IsFanoutLegResponse(meta map[string]any) bool {
+	p, _ := meta[MetaFanoutProvider].(string)
+	return p != ""
+}
+
+// ErrLLMRequestBlocked is returned by AwaitLLMResponse when a
+// before:llm.request handler vetoed the request outright: nothing will
+// answer it.
+var ErrLLMRequestBlocked = errors.New("llm.request vetoed")
+
+// ErrNoLLMResponse is returned by AwaitLLMResponse when the request was
+// published but no response was delivered during the synchronous emit (no
+// provider active for the request's role, or the provider failed).
+var ErrNoLLMResponse = errors.New("no LLM response (provider not active for this role?)")
+
+// AwaitLLMResponse collects the response to a request published with
+// PublishLLMRequest by a producer that blocks on it. ch is the producer's
+// own correlation channel, fed by its llm.response subscription (match on
+// RequestID, skipping IsFanoutLegResponse legs); it must be subscribed
+// before the publish so a response delivered inside the emit is not lost.
+//
+//   - Emit error: returned as is.
+//   - Blocked: ErrLLMRequestBlocked wrapping the veto reason, at once.
+//   - Intercepted: a handler owns the answer and typically publishes it
+//     asynchronously (fanout merge, test IO mock), so this waits on ch until
+//     ctx is done and then returns ctx.Err(). ctx is the only bound.
+//   - Published: the bus dispatches synchronously and a non-streaming
+//     provider answers inside the emit, so the response is either already
+//     on ch or not coming — ErrNoLLMResponse (ctx.Err() if ctx is done).
+func AwaitLLMResponse[T any](ctx context.Context, res LLMRequestResult, ch <-chan T) (T, error) {
+	var zero T
+	if res.Err != nil {
+		return zero, res.Err
+	}
+	if res.Blocked() {
+		return zero, fmt.Errorf("%w: %s", ErrLLMRequestBlocked, res.Veto.Reason)
+	}
+	select {
+	case v := <-ch:
+		return v, nil
+	default:
+	}
+	if res.Intercepted() {
+		select {
+		case v := <-ch:
+			return v, nil
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	return zero, ErrNoLLMResponse
 }
 
 // PublishLLMRequest runs req through the vetoable "before:llm.request" hook

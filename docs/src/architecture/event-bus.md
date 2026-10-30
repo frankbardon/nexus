@@ -237,9 +237,27 @@ them apart:
 
 The two interceptors in tree are the fanout coordinator (dispatches to several
 providers, publishes one merged response) and the test IO plugin's mock mode.
-`AwaitResponse()` is `Published || Intercepted()`. Producers that only collect
-a response delivered *inside* the synchronous emit (`delegate.SyncLLM`, the
-HITL synthesizer) treat any veto, interception included, as a failure.
+`AwaitResponse()` is `Published || Intercepted()`.
+
+A producer that blocks on its response — `delegate.SyncLLM` (behind the
+delegate runtime and the subagent worker loop) and the HITL synthesizer —
+collects it with `engine.AwaitLLMResponse(ctx, res, ch)`, where `ch` is fed by
+the producer's own `llm.response` subscription, set up before the publish:
+
+```go
+res := engine.PublishLLMRequest(bus, req)
+resp, err := engine.AwaitLLMResponse(ctx, res, respCh)
+```
+
+A block veto fails at once with `engine.ErrLLMRequestBlocked`. A published
+request is answered inside the synchronous emit or not at all
+(`engine.ErrNoLLMResponse`). An intercepted one is answered asynchronously, so
+the helper waits on `ctx` and returns `ctx.Err()` when it ends first — `ctx` is
+the only bound, so pass one that ends. Correlate on `RequestID`: interceptors
+carry it onto their response, while fanout's merged response carries the
+fanout's own `_source`. Fanout legs keep the parent's `RequestID` too, so skip
+any response for which `engine.IsFanoutLegResponse` is true
+(`Metadata["_fanout_provider"]`, `engine.MetaFanoutProvider`).
 
 **Recursion.** A `before:llm.request` handler that itself produces a request
 re-enters the hook: the classifier router's probe, and compaction triggered by

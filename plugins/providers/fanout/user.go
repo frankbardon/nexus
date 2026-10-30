@@ -3,6 +3,7 @@ package fanout
 import (
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -34,7 +35,7 @@ func (p *Plugin) presentToUser(fanoutID string, state *fanoutState, responses []
 	// Build options from responses.
 	options := make([]events.ProviderFanoutOption, len(responses))
 	for i, r := range responses {
-		provider, _ := r.Metadata["_fanout_provider"].(string)
+		provider, _ := r.Metadata[engine.MetaFanoutProvider].(string)
 		options[i] = events.ProviderFanoutOption{
 			Index:    i,
 			Provider: provider,

@@ -42,7 +42,7 @@ func buildJudgePrompt(responses []events.LLMResponse) string {
 	b.WriteString("Choose the single best response.\n\n")
 
 	for i, r := range responses {
-		provider, _ := r.Metadata["_fanout_provider"].(string)
+		provider, _ := r.Metadata[engine.MetaFanoutProvider].(string)
 		fmt.Fprintf(&b, "--- Response %d (provider: %s, model: %s) ---\n", i, provider, r.Model)
 		b.WriteString(r.Content)
 		b.WriteString("\n\n")

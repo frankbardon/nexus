@@ -3,7 +3,6 @@ package delegate
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -27,14 +26,19 @@ import (
 //     compatibility with callers that haven't migrated their downstream
 //     filters yet.
 //
-//   - The before:llm.request veto is honored; a vetoed request surfaces as
-//     an ErrVetoed error rather than waiting for a response that will never
-//     come.
+//   - A block veto on before:llm.request surfaces as an error wrapping
+//     engine.ErrLLMRequestBlocked rather than waiting for a response that
+//     will never come.
 //
-//   - If ctx cancels before a response arrives, ctx.Err() is returned. If
-//     Emit completes without a synchronous response (no provider wired for
-//     the request's role), ErrNoResponse is returned — same diagnostic
-//     behavior the call sites had before extraction.
+//   - An interception (engine.InterceptLLMRequest — a fanout role, the test
+//     IO mock) is answered asynchronously, so the helper waits on ctx for the
+//     correlated llm.response and returns ctx.Err() if ctx ends first. Fanout
+//     legs, which share the RequestID, are skipped for the merged response.
+//
+//   - If a published request gets no synchronous response (no provider wired
+//     for the request's role), engine.ErrNoLLMResponse is returned — same
+//     diagnostic behavior the call sites had before extraction. See
+//     engine.AwaitLLMResponse.
 func SyncLLM(ctx context.Context, bus engine.EventBus, req events.LLMRequest) (events.LLMResponse, error) {
 	if bus == nil {
 		return events.LLMResponse{}, errors.New("delegate.SyncLLM: bus is nil")
@@ -66,28 +70,18 @@ func SyncLLM(ctx context.Context, bus engine.EventBus, req events.LLMRequest) (e
 	}, engine.WithPriority(1))
 	defer unsub()
 
-	// Any veto — including an interception (engine.MetaInterceptedBy) — is
-	// an error here: an interceptor answers asynchronously, and this helper
-	// only collects a response delivered inside the synchronous emit.
+	// A block veto fails at once; an interception (fanout, test mock) is
+	// answered asynchronously, so AwaitLLMResponse waits on ctx for it.
 	res := engine.PublishLLMRequest(bus, req)
-	if res.Veto.Vetoed {
-		return events.LLMResponse{}, fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
-	}
-	if res.Err != nil {
-		return events.LLMResponse{}, res.Err
-	}
-
-	select {
-	case resp := <-respCh:
-		return resp, nil
-	case <-ctx.Done():
-		return events.LLMResponse{}, ctx.Err()
-	default:
-		return events.LLMResponse{}, errors.New("no LLM response (provider not active for this role?)")
-	}
+	return engine.AwaitLLMResponse(ctx, res, respCh)
 }
 
 func responseMatches(resp events.LLMResponse, requestID, source string) bool {
+	// A fanout leg shares the request's RequestID (and carries the fanout's
+	// own _source); only the merged response answers the request.
+	if engine.IsFanoutLegResponse(resp.Metadata) {
+		return false
+	}
 	if requestID != "" && resp.RequestID == requestID {
 		return true
 	}
