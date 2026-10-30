@@ -632,14 +632,28 @@ func TestForeignTaskCannotBeResumedOrCanceled(t *testing.T) {
 // must not pin the session for ever. On expiry the task is driven to a REAL
 // terminal state — which closes every attached stream by the ordinary rule —
 // and hitl.cancel retracts the question so the blocked agent loop unblocks.
+//
+// The budget is deliberately not tiny. The deadline is armed inside run.park
+// BEFORE the INPUT_REQUIRED frame is persisted and delivered, so a budget
+// shorter than that one SQLite write plus a scheduler stall lets FAILED win the
+// race and the INPUT_REQUIRED frame is dropped. At 50ms that was a coin flip
+// under -race contention (2 in ~300 runs, #155). One second is roughly three orders of
+// magnitude above the window on an idle machine, and the elapsed-time assertion
+// below keeps the test honest: the task must have failed BECAUSE the deadline
+// passed, not for any earlier reason.
 func TestInputDeadlineFailsTheTask(t *testing.T) {
+	const inputTimeout = time.Second
 	p, bus := newTestPlugin(t, map[string]any{
-		"tasks": map[string]any{"input_timeout": "50ms"},
+		"tasks": map[string]any{"input_timeout": inputTimeout.String()},
 	})
 	agent := newHITLAgent(t, bus, "unreachable ")
 
+	start := time.Now()
 	rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
 		jsonrpcBody(t, a2a.MethodSendStreamingMessage, sendMessageParams("deploy", "ctx-deadline")))
+	if elapsed := time.Since(start); elapsed < inputTimeout {
+		t.Errorf("the stream ended after %s, before the %s input deadline could have fired", elapsed, inputTimeout)
+	}
 	fs := frames(t, rec.Body.Bytes())
 	want := []a2a.TaskState{
 		a2a.TaskStateSubmitted, a2a.TaskStateWorking, a2a.TaskStateInputRequired, a2a.TaskStateFailed,

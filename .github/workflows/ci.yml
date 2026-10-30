@@ -164,6 +164,10 @@ jobs:
   # CGO_ENABLED=0 build the `test` job exercises.
   race:
     runs-on: ubuntu-latest
+    # A job cap independent of RACE_TIMEOUT (the Makefile's per-package go test
+    # budget): without it a wedged run inherits GitHub's 6h default. The job
+    # takes ~5 minutes today, so 60 leaves ample room under contention. See #155.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
