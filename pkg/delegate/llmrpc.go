@@ -66,11 +66,15 @@ func SyncLLM(ctx context.Context, bus engine.EventBus, req events.LLMRequest) (e
 	}, engine.WithPriority(1))
 	defer unsub()
 
-	if veto, err := bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		return events.LLMResponse{}, fmt.Errorf("llm.request vetoed: %s", veto.Reason)
+	// Any veto — including an interception (engine.MetaInterceptedBy) — is
+	// an error here: an interceptor answers asynchronously, and this helper
+	// only collects a response delivered inside the synchronous emit.
+	res := engine.PublishLLMRequest(bus, req)
+	if res.Veto.Vetoed {
+		return events.LLMResponse{}, fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
 	}
-	if err := bus.Emit("llm.request", req); err != nil {
-		return events.LLMResponse{}, err
+	if res.Err != nil {
+		return events.LLMResponse{}, res.Err
 	}
 
 	select {

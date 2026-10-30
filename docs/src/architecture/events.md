@@ -38,8 +38,9 @@ type LLMRequest struct {
     // ...
 }
 
-// Producer:
-_ = bus.Emit("llm.request", events.LLMRequest{
+// Producer (llm.request goes through engine.PublishLLMRequest so the
+// before:llm.request hop runs — see Event Bus):
+engine.PublishLLMRequest(bus, events.LLMRequest{
     SchemaVersion: events.LLMRequestVersion,
     Role:          "balanced",
     // ...

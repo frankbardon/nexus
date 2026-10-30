@@ -650,11 +650,9 @@ func (p *Plugin) sendStepLLMRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleExecutorResponse processes LLM responses during step execution.
@@ -908,11 +906,9 @@ func (p *Plugin) sendSynthesisRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleSynthesizerResponse processes the final synthesis response.

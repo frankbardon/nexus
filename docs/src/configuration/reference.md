@@ -5349,8 +5349,14 @@ the next request on. Plugin-set tags win over seeded ones (set-if-absent).
 When the seeder cannot fully tag a request — no session, or unreadable
 session metadata (in which case `session_id` is still set) — it logs one
 `WARN` per cause per engine run rather than one per request. The seeder sees
-only requests that go through `before:llm.request`; a plugin that emits
-`llm.request` directly without the vetoable hop is not seeded.
+only requests that go through `before:llm.request`, which is why every
+in-tree producer — agent loops, planners, routers, memory summarisers and
+compaction, gate retries, provider failover retries, the fanout judge, RAG
+contextualisation, HITL synthesis — publishes through
+`engine.PublishLLMRequest`. Fanout legs are the one documented exception
+(they are copies of a request already inside the hop). The seeder runs at
+priority 100, so a request vetoed or intercepted by an earlier handler (the
+fanout coordinator at 2, the test IO mock at 20) is not seeded.
 
 `SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
 reachable rather than requiring test code to poke `Labels` directly. A

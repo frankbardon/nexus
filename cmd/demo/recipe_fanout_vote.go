@@ -98,8 +98,13 @@ func runFanoutVoteRecipe(ctx context.Context, args []string) error {
 			Content: *prompt,
 		}},
 	}
-	if err := eng.Bus.Emit("llm.request", req); err != nil {
-		return fmt.Errorf("emit llm.request: %w", err)
+	// PublishLLMRequest runs the before:llm.request hop the fanout plugin
+	// intercepts on; a bare Emit("llm.request") would skip it and reach the
+	// providers un-fanned.
+	if res := engine.PublishLLMRequest(eng.Bus, req); res.Err != nil {
+		return fmt.Errorf("emit llm.request: %w", res.Err)
+	} else if !res.AwaitResponse() {
+		return fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
 	}
 
 	fmt.Println("Recipe: fanout-vote")

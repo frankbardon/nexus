@@ -115,6 +115,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.request",
 		"llm.request",
 		"before:llm.response",
 		"llm.response",
@@ -213,12 +214,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Veto the original request — we'll re-emit targeted copies.
+	// Intercept the original request — we'll re-emit targeted copies and
+	// publish one merged llm.response for it, so the producer keeps waiting
+	// rather than treating the veto as a block.
 	fanoutID := engine.GenerateID()
-	vp.Veto = engine.VetoResult{
-		Vetoed: true,
-		Reason: fmt.Sprintf("fanout: dispatching to %d providers", len(providers)),
-	}
+	engine.InterceptLLMRequest(vp, req, pluginID,
+		fmt.Sprintf("fanout: dispatching to %d providers", len(providers)))
 
 	// Build targets list for the event.
 	targets := make([]events.ProviderFanoutTarget, len(providers))
@@ -282,7 +283,16 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		// request already carries. Each leg gets its own copy, so a non-first
 		// leg is configured by its own entry rather than the role's first one.
 		engine.StampModelConfig(&fanReq, pc)
+		// The intercept marker belongs to the parent request, not the legs.
+		delete(fanReq.Metadata, engine.MetaInterceptedBy)
 
+		// Deliberate exception to "every llm.request goes through
+		// engine.PublishLLMRequest": a leg is a copy of a request that is
+		// itself already IN the before:llm.request hop (this handler), so
+		// offering it again would run the request-side gates once per leg
+		// against one logical request — the rate limiter and token budget
+		// would count N requests that share one RequestID, and a leg vetoed
+		// mid-fanout would leave the collector waiting out its deadline.
 		p.bus.EmitAsync("llm.request", fanReq)
 	}
 

@@ -173,7 +173,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	}
 }
 
-func (p *Plugin) Emissions() []string { return []string{"llm.request"} }
+func (p *Plugin) Emissions() []string { return []string{"before:llm.request", "llm.request"} }
 
 func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	vp, ok := event.Payload.(*engine.VetoablePayload)
@@ -273,11 +273,13 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 			"_routed_by": pluginID, // suppress further routing on this probe
 		},
 	}
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &probe); err == nil && veto.Vetoed {
-		p.logger.Warn("classifier probe vetoed, skipping", "reason", veto.Reason)
+	// The probe re-enters before:llm.request, including this plugin's own
+	// handler; the "_source" / "_routed_by" metadata above is the recursion
+	// guard that handler skips on.
+	if res := engine.PublishLLMRequest(p.bus, probe); !res.AwaitResponse() {
+		p.logger.Warn("classifier probe vetoed, skipping", "reason", res.Veto.Reason)
 		return
 	}
-	_ = p.bus.Emit("llm.request", probe)
 
 	select {
 	case resp, ok := <-ch:

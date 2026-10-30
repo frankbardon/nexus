@@ -505,11 +505,9 @@ func (p *Plugin) sendDecomposeRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleDecomposeResponse processes the LLM's decomposition response.
@@ -901,11 +899,9 @@ func (p *Plugin) sendSynthesizeRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleSynthesizeResponse processes the final synthesis LLM response.

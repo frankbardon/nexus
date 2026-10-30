@@ -272,6 +272,10 @@ func (p *Plugin) Emissions() []string {
 		"rag.ingest",
 		"rag.ingest.delete",
 		"rag.ingest.result",
+		// contextual retrieval (contextual.go) publishes one request per
+		// chunk through engine.PublishLLMRequest.
+		"before:llm.request",
+		"llm.request",
 	}
 }
 

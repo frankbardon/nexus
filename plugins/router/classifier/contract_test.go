@@ -13,7 +13,9 @@ func TestContract(t *testing.T) {
 		"fallback_role":   "balanced",
 	}))
 	h.AssertSubscribesTo("before:llm.request", "llm.response")
-	if got := h.Plugin().Emissions(); len(got) != 1 || got[0] != "llm.request" {
-		t.Errorf("Emissions() = %v, want [llm.request]", got)
+	// Requests are published through engine.PublishLLMRequest, which offers
+	// before:llm.request ahead of llm.request.
+	if got := h.Plugin().Emissions(); len(got) != 2 || got[0] != "before:llm.request" || got[1] != "llm.request" {
+		t.Errorf("Emissions() = %v, want [before:llm.request llm.request]", got)
 	}
 }

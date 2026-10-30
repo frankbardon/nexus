@@ -173,6 +173,77 @@ already-redacted text at 10.
 
 Mutate to change *what* happens; veto to stop it happening at all.
 
+### `before:llm.request`: every producer goes through the hop
+
+`before:llm.request` is where the engine seeds the cost-attribution tags
+(`session_id`, `tenant`, `project`, `user`) and where every request-side gate
+and curator runs — rate limiter, token budget, tool filter, prompt-injection
+and stop-word scans, dynamic variables, routing, stream policy. A request
+emitted straight onto `llm.request` skips all of them: it is billed to no
+session and no gate ever sees it.
+
+So **every producer of an `llm.request` publishes through
+`engine.PublishLLMRequest`** rather than calling `bus.Emit("llm.request", …)`
+directly — agent loops, planners, routers, memory summarisers, gate retries,
+provider failover, RAG contextualisation, HITL synthesis, and embedder code
+alike:
+
+```go
+res := engine.PublishLLMRequest(p.bus, req)
+if !res.AwaitResponse() {
+    // Blocked outright: nothing will answer this request.
+    return fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
+}
+// Published (or intercepted): wait for the correlated llm.response.
+```
+
+It runs the hook, emits `llm.request` with whatever the handlers left in the
+payload unless one vetoed, and returns an `engine.LLMRequestResult`.
+`PublishLLMRequestAsync` is the same with the emission dispatched by
+`EmitAsync`, for a producer that bounds the provider round-trip under its own
+deadline (the fanout judge); the hop itself still runs synchronously.
+
+A veto comes in two kinds, and a producer waiting on its response must tell
+them apart:
+
+| Result | Meaning | Producer should |
+|---|---|---|
+| `Published` | `llm.request` was emitted. | Wait for the response. |
+| `Intercepted()` | A handler vetoed because it **owns the answer** and will publish the correlated `llm.response` itself. It marked the request with `engine.InterceptLLMRequest` (`Metadata["_intercepted_by"]`). | Keep waiting, as if published. |
+| `Blocked()` | Any other veto. Nothing will answer. | Give up now — don't sit out a timeout. |
+
+The two interceptors in tree are the fanout coordinator (dispatches to several
+providers, publishes one merged response) and the test IO plugin's mock mode.
+`AwaitResponse()` is `Published || Intercepted()`. Producers that only collect
+a response delivered *inside* the synchronous emit (`delegate.SyncLLM`, the
+HITL synthesizer) treat any veto, interception included, as a failure.
+
+**Recursion.** A `before:llm.request` handler that itself produces a request
+re-enters the hook: the classifier router's probe, and compaction triggered by
+the context-window gate's `memory.compact.request`. The convention that keeps
+this finite: every internal request carries a non-empty `Metadata["_source"]`,
+and every handler that emits from inside the hook skips requests that carry
+one (the classifier also stamps and checks `_routed_by`; fanout uses
+`_fanout_id`; failover uses `_fallback_id`). Gate retries are driven from the
+output side (`before:io.output`), not from a request handler, so they cannot
+loop through the hook.
+
+**Which handlers see internal requests.** Handlers that skip any non-empty
+`_source` — `endless_loop`, `context_window`, `approval_policy`,
+`discovery.progressive`, the classifier router — are unaffected by internal
+requests. The rest (`rate_limiter`, `token_budget`, `prompt_injection`,
+`stop_words`, `dynvars`, `tool_filter`, the metadata router, the curators and
+stream policy) apply to them like any other request. A blocked internal request
+fails fast: a gate retry returns invalid, a summariser or compaction releases
+its in-flight flag and leaves history as-is, a fallback retry leaves the
+original provider error to surface.
+
+**The one exception: fanout legs.** The fanout coordinator's per-provider legs
+are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
+already inside the hop (fanout's own `before:llm.request` handler); offering
+every leg again would count one logical request N times against the rate
+limiter and token budget under one shared `RequestID`.
+
 ### `before:llm.response`: veto means substitute
 
 `before:llm.response` is the one vetoable event where a veto does **not** block

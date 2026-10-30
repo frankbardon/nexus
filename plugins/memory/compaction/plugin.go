@@ -143,6 +143,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.request",
 		"llm.request",
 		"memory.compaction.triggered",
 		"memory.compacted",
@@ -593,7 +594,12 @@ func (p *Plugin) startCompaction(reason string) {
 		{Role: "user", Content: "Here is the conversation to compact:\n\n" + transcript.String()},
 	}
 
-	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
+	// The request re-enters before:llm.request — typically from inside the
+	// context-window gate's own before:llm.request handler, which emitted
+	// memory.compact.request. The non-empty "_source" is the recursion guard:
+	// that gate skips internal requests, so compaction cannot re-trigger
+	// itself.
+	res := engine.PublishLLMRequest(p.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
@@ -604,6 +610,15 @@ func (p *Plugin) startCompaction(reason string) {
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})
+	if !res.AwaitResponse() {
+		// Vetoed outright: no response will arrive to finish or abort the
+		// compaction, so release it here.
+		p.logger.Warn("compaction llm.request vetoed; history left as-is", "reason", res.Veto.Reason)
+		p.mu.Lock()
+		p.compacting = false
+		p.mu.Unlock()
+		_ = p.bus.Emit("io.status", events.StatusUpdate{SchemaVersion: events.StatusUpdateVersion, State: "idle"})
+	}
 }
 
 func (p *Plugin) finishCompaction(summary string) {

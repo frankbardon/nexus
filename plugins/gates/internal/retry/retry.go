@@ -129,8 +129,12 @@ func (h *Handler) AttemptRetry(
 		}
 		h.mu.Unlock()
 
-		// Emit LLM request tagged with our source.
-		_ = h.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: h.config.ModelRole,
+		// Publish the retry through before:llm.request so it is seeded and
+		// gated like any other request. No recursion: the gates that drive
+		// retries do so from the output side (before:io.output), not from a
+		// before:llm.request handler, and the non-empty "_source" makes the
+		// request-side handlers that skip internal flows skip this one too.
+		res := engine.PublishLLMRequest(h.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: h.config.ModelRole,
 			Messages: messages,
 			Stream:   false,
 			Metadata: map[string]any{
@@ -139,6 +143,15 @@ func (h *Handler) AttemptRetry(
 			},
 			Tags: map[string]string{"source_plugin": tag},
 		})
+		if !res.AwaitResponse() {
+			// Blocked outright: no response is coming, so don't sit out
+			// the timeout below.
+			h.logger.Warn("retry llm.request vetoed", "attempt", attempt+1, "reason", res.Veto.Reason)
+			h.mu.Lock()
+			delete(h.pending, tag)
+			h.mu.Unlock()
+			return RetryResult{Valid: false, Content: content, Error: "retry vetoed: " + res.Veto.Reason}
+		}
 
 		// Wait for response (blocking — bus is synchronous, response arrives on another handler).
 		// Use a timeout to prevent deadlock.
