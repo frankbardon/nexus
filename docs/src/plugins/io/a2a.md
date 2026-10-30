@@ -369,7 +369,11 @@ Because a parked task holds the process's one agent loop, the wait is bounded by
 a real terminal transition, so the store, every attached subscriber and the
 client all agree — and `hitl.cancel` retracts the question so the blocked agent
 unblocks. `"0s"` disables the deadline; the consequence is a task that can stay
-parked until the process exits.
+parked until the process exits. The deadline is measured from the moment the
+task **enters** `INPUT_REQUIRED` — it is armed only after that transition has
+been recorded and emitted — so however short it is, a client always sees
+`INPUT_REQUIRED` before the `FAILED` it causes, and nothing ever follows a
+terminal state on the wire or in the store.
 
 **A client must act on the `INPUT_REQUIRED` frame, not on the stream ending.**
 Holding the stream open is deliberate (above), so a client that waits for the
