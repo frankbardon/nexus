@@ -56,6 +56,11 @@ Exactly one JSON object on stdin, terminated by EOF:
 | `max_turns` | integer | no | Hard cap on `agent.turn.end` events observed. `0` (or omitted) = no protocol-level cap; the agent's own iteration gate still bounds the run. |
 | `metadata` | object | no | Opaque pass-through. Round-tripped to the response. |
 
+`protocol.Request` also carries an `ExtraPlugins` Go field for in-process
+callers of `protocol.Run` (embedder plugin factories registered after the
+built-ins; see [Embedding](./embedding.md#registering-extra-plugins-extraplugins)).
+It is tagged `json:"-"` and is not part of this wire format.
+
 Strict parsing applies: unknown fields are rejected with `INVALID_REQUEST`.
 This catches typos at the harness boundary instead of silently defaulting
 fields.
