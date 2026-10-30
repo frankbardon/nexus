@@ -506,8 +506,8 @@ func (p *Plugin) sendDecomposeRequest() {
 		Messages: messages,
 		Stream:   false, // Need full response to parse JSON.
 		Metadata: map[string]any{
-			"_source":   decomposeSource,
-			"task_kind": "orchestrator_decompose",
+			"_source":           decomposeSource,
+			engine.MetaTaskKind: engine.TaskKindOrchestratorDecompose,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
@@ -900,8 +900,8 @@ func (p *Plugin) sendSynthesizeRequest() {
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
-			"_source":   synthesizeSource,
-			"task_kind": "orchestrator_synthesize",
+			"_source":           synthesizeSource,
+			engine.MetaTaskKind: engine.TaskKindOrchestratorSynthesize,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

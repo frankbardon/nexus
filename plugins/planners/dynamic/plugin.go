@@ -231,8 +231,8 @@ func (p *Plugin) handlePlanRequest(req events.PlanRequest) {
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source":   pluginID,
-			"task_kind": "plan",
+			"_source":           pluginID,
+			engine.MetaTaskKind: engine.TaskKindPlan,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

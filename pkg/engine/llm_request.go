@@ -171,6 +171,40 @@ const (
 	TaskKindDelegate = "delegate"
 )
 
+// Task kinds of the top-level agent-loop turns. Their responses drive the
+// conversation and tool execution, so IsInternalLLMRequest treats them as
+// turns even though the loops stamp "_source" for cost attribution.
+const (
+	TaskKindReactMain              = "react_main"
+	TaskKindPlanexecStep           = "planexec_step"
+	TaskKindPlanexecSynthesize     = "planexec_synthesize"
+	TaskKindOrchestratorDecompose  = "orchestrator_decompose"
+	TaskKindOrchestratorSynthesize = "orchestrator_synthesize"
+)
+
+// Task kinds of internal sub-flows: requests Nexus makes on its own behalf
+// whose response is not a conversation turn. Every value is a wire value —
+// it lands in cost records (`nexus cost --group-by task_kind`) and router
+// rules matching metadata.task_kind — so the spellings are fixed.
+const (
+	// TaskKindPlan is nexus.planner.dynamic's plan-generation request.
+	TaskKindPlan = "plan"
+	// TaskKindClassify is nexus.router.classifier's routing probe.
+	TaskKindClassify = "classify"
+	// TaskKindSummarise is nexus.memory.summary_buffer's summary request.
+	TaskKindSummarise = "summarise"
+	// TaskKindGateRetry is the shared gate retry-with-LLM helper's request
+	// (plugins/gates/internal/retry).
+	TaskKindGateRetry = "gate_retry"
+	// TaskKindFanoutJudge is nexus.provider.fanout's judge request.
+	TaskKindFanoutJudge = "fanout_judge"
+	// TaskKindRAGContextualize is nexus.rag.ingest's contextual-chunk request.
+	TaskKindRAGContextualize = "rag_contextualize"
+	// TaskKindHITLSynthesize is nexus.control.hitl_synthesizer's answer
+	// synthesis request.
+	TaskKindHITLSynthesize = "hitl_synthesize"
+)
+
 // agentTurnTaskKinds are the task_kind values of agent-loop turns: requests
 // whose response drives the conversation and tool execution. Every other
 // _source-tagged request — planner, classifier probe, summariser, compaction,
@@ -181,13 +215,13 @@ const (
 // tools; their prompts are authored by a parent model rather than echoing
 // content the user already sent through io.input.
 var agentTurnTaskKinds = map[string]bool{
-	"react_main":              true,
-	"planexec_step":           true,
-	"planexec_synthesize":     true,
-	"orchestrator_decompose":  true,
-	"orchestrator_synthesize": true,
-	TaskKindSubagent:          true,
-	TaskKindDelegate:          true,
+	TaskKindReactMain:              true,
+	TaskKindPlanexecStep:           true,
+	TaskKindPlanexecSynthesize:     true,
+	TaskKindOrchestratorDecompose:  true,
+	TaskKindOrchestratorSynthesize: true,
+	TaskKindSubagent:               true,
+	TaskKindDelegate:               true,
 }
 
 // IsAgentTurnTaskKind reports whether kind is the task_kind of an agent-loop

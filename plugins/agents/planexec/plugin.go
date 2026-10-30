@@ -651,8 +651,8 @@ func (p *Plugin) sendStepLLMRequest() {
 		Tools:    tools,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source":   executorSource,
-			"task_kind": "planexec_step",
+			"_source":           executorSource,
+			engine.MetaTaskKind: engine.TaskKindPlanexecStep,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
@@ -907,8 +907,8 @@ func (p *Plugin) sendSynthesisRequest() {
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
-			"_source":   synthesizerSource,
-			"task_kind": "planexec_synthesize",
+			"_source":           synthesizerSource,
+			engine.MetaTaskKind: engine.TaskKindPlanexecSynthesize,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

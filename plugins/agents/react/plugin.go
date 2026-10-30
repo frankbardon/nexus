@@ -877,9 +877,9 @@ func (p *Plugin) sendLLMRequest() {
 		ToolChoice: tc,
 		Stream:     true,
 		Metadata: map[string]any{
-			"_source":   pluginID,
-			"task_kind": "react_main",
-			"iteration": iteration,
+			"_source":           pluginID,
+			engine.MetaTaskKind: engine.TaskKindReactMain,
+			"iteration":         iteration,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

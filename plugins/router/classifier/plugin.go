@@ -267,10 +267,10 @@ func (p *Plugin) classifyAndCache(prompt, key string) {
 		},
 		MaxTokens: 32,
 		Metadata: map[string]any{
-			"_source":    pluginID,
-			"_call_id":   callID,
-			"task_kind":  "classify",
-			"_routed_by": pluginID, // suppress further routing on this probe
+			"_source":           pluginID,
+			"_call_id":          callID,
+			engine.MetaTaskKind: engine.TaskKindClassify,
+			"_routed_by":        pluginID, // suppress further routing on this probe
 		},
 	}
 	// The probe re-enters before:llm.request, including this plugin's own

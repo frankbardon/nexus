@@ -339,9 +339,9 @@ func (r *Runtime) requestLLM(ctx context.Context, source string, post posture.Ag
 		Messages:  history,
 		Tools:     tools,
 		Metadata: map[string]any{
-			"_source":   source,
-			"task_kind": "delegate",
-			"posture":   post.Name,
+			"_source":           source,
+			engine.MetaTaskKind: engine.TaskKindDelegate,
+			"posture":           post.Name,
 		},
 		Tags: map[string]string{"source_plugin": "nexus.agent.delegate"},
 	}

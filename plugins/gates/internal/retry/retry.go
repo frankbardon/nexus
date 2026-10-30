@@ -138,8 +138,8 @@ func (h *Handler) AttemptRetry(
 			Messages: messages,
 			Stream:   false,
 			Metadata: map[string]any{
-				"_source":   tag,
-				"task_kind": "gate_retry",
+				"_source":           tag,
+				engine.MetaTaskKind: engine.TaskKindGateRetry,
 			},
 			Tags: map[string]string{"source_plugin": tag},
 		})

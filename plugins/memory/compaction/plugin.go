@@ -603,10 +603,10 @@ func (p *Plugin) startCompaction(reason string) {
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source":     llmSource,
-			"_backup":     backupPath,
-			"_prev_count": msgCount,
-			"task_kind":   engine.TaskKindCompaction,
+			"_source":           llmSource,
+			"_backup":           backupPath,
+			"_prev_count":       msgCount,
+			engine.MetaTaskKind: engine.TaskKindCompaction,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})

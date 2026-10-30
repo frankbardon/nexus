@@ -63,7 +63,7 @@ func TestToolResultClear_FiresAfterTwoTurns(t *testing.T) {
 		}
 		// Only the agent's main loop carries tool messages; planner /
 		// summariser / classifier sub-flows don't.
-		if kind, _ := req.Metadata["task_kind"].(string); kind != "react_main" {
+		if kind, _ := req.Metadata["task_kind"].(string); kind != engine.TaskKindReactMain {
 			return
 		}
 		mu.Lock()

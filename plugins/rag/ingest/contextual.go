@@ -130,9 +130,9 @@ func (c *contextualizer) generate(docContext, chunk string) (string, error) {
 		},
 		Stream: false,
 		Metadata: map[string]any{
-			"_source":   "rag.ingest.contextual",
-			"_ctxreq":   id,
-			"task_kind": "rag_contextualize",
+			"_source":           "rag.ingest.contextual",
+			"_ctxreq":           id,
+			engine.MetaTaskKind: engine.TaskKindRAGContextualize,
 		},
 		Tags: map[string]string{"source_plugin": "nexus.rag.ingest"},
 	}

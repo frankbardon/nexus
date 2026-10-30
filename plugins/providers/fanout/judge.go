@@ -116,10 +116,10 @@ func (p *Plugin) selectByJudge(fanoutID string, state *fanoutState, responses []
 
 	// Build and emit the judge LLM request.
 	judgeMeta := map[string]any{
-		"_source":       pluginID,
-		"_fanout_judge": true,
-		"_fanout_id":    fanoutID,
-		"task_kind":     "fanout_judge",
+		"_source":           pluginID,
+		"_fanout_judge":     true,
+		"_fanout_id":        fanoutID,
+		engine.MetaTaskKind: engine.TaskKindFanoutJudge,
 	}
 
 	judgeReq := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.cfg.JudgeRole,

@@ -440,8 +440,8 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 			Messages: history,
 			Tools:    tools,
 			Metadata: map[string]any{
-				"_source":   source,
-				"task_kind": "subagent",
+				"_source":           source,
+				engine.MetaTaskKind: engine.TaskKindSubagent,
 			},
 			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}

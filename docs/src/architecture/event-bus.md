@@ -272,6 +272,21 @@ fails fast: a gate retry returns invalid, a summariser or compaction releases
 its in-flight flag and leaves history as-is, a fallback retry leaves the
 original provider error to surface.
 
+**Task kinds are engine constants.** Every `task_kind` value a producer
+stamps is an exported constant in `pkg/engine/llm_request.go`, set under the
+key `engine.MetaTaskKind`. Agent-loop turns: `TaskKindReactMain`,
+`TaskKindPlanexecStep`, `TaskKindPlanexecSynthesize`,
+`TaskKindOrchestratorDecompose`, `TaskKindOrchestratorSynthesize`, and the
+nested loops `TaskKindSubagent` and `TaskKindDelegate`. Internal sub-flows:
+`TaskKindPlan`, `TaskKindClassify`, `TaskKindSummarise`, `TaskKindCompaction`,
+`TaskKindGateRetry`, `TaskKindFanoutJudge`, `TaskKindRAGContextualize` and
+`TaskKindHITLSynthesize`. Producers and consumers (`IsInternalLLMRequest`'s
+turn table, the memory plugins' `internalflow` skip list) both use the
+constants, so a spelling cannot drift between the two sides; the values are
+wire values (cost records, router rules on `metadata.task_kind`) and do not
+change. A new kind gets a constant here, and an agent-loop kind must also be
+added to the turn table or every gate treats its turns as internal.
+
 **The one exception: fanout legs.** The fanout coordinator's per-provider legs
 are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
 already inside the hop (fanout's own `before:llm.request` handler); offering
