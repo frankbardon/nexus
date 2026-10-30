@@ -47,6 +47,9 @@ type Plugin struct {
 	replay  *engine.ReplayState
 	// liveCalls counts API calls that survived the replay short-circuit.
 	liveCalls atomic.Uint64
+	// schemaWarned dedupes tool-schema repair warnings (tool + JSON path +
+	// detail) so a bad MCP tool is reported once per process, not every turn.
+	schemaWarned sync.Map
 
 	auth    *authState
 	client  *http.Client
@@ -670,7 +673,7 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 			decls = append(decls, map[string]any{
 				"name":        t.Name,
 				"description": t.Description,
-				"parameters":  sanitizeSchemaForGemini(t.Parameters),
+				"parameters":  p.sanitizeToolSchema(t.Name, t.Parameters),
 			})
 		}
 		toolGroups = append(toolGroups, map[string]any{
@@ -849,6 +852,103 @@ func (p *Plugin) convertMessages(msgs []events.Message) (string, []map[string]an
 // plus "nullable", since Gemini's Schema.type is a non-repeating enum and
 // rejects an array outright. Walks recursively.
 func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
+	return sanitizeSchemaAt(schema, "", nil)
+}
+
+// sanitizeToolSchema sanitizes a tool's parameter schema, logging a warning
+// (once per tool+path+detail) for every lossy repair so an operator can find
+// and fix the offending tool. One bad tool must never 400 the whole catalog.
+func (p *Plugin) sanitizeToolSchema(toolName string, schema map[string]any) map[string]any {
+	warn := func(path, detail string) {
+		key := toolName + "\x00" + path + "\x00" + detail
+		if _, seen := p.schemaWarned.LoadOrStore(key, struct{}{}); seen {
+			return
+		}
+		logger := p.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn(fmt.Sprintf("gemini: tool %q %s %s", toolName, path, detail),
+			"tool", toolName, "path", path)
+	}
+	return sanitizeSchemaAt(schema, "parameters", warn)
+}
+
+// schemaWarnFunc reports one lossy schema repair at a JSON path. nil
+// suppresses reporting.
+type schemaWarnFunc func(path, detail string)
+
+func joinSchemaPath(base, key string) string {
+	if base == "" {
+		return key
+	}
+	return base + "." + key
+}
+
+// sanitizeEnumForGemini normalizes an "enum" keyword. Gemini's Schema.enum is
+// a repeated string field valid only on STRING-typed schemas, and the API
+// rejects the entire request when any member anywhere is a non-string or an
+// empty string. Coercing to strings is not an option: it would require
+// retyping the field as STRING, and the model would then send "0.05" to a
+// tool expecting 0.05. So:
+//   - on an explicitly non-string type (number, integer, boolean, ...) the
+//     enum is dropped wholesale — the type still constrains the value and
+//     the description still carries the advice;
+//   - otherwise non-string and empty-string members are removed;
+//   - an enum left empty is dropped.
+//
+// It returns the cleaned members and whether the key should be kept.
+func sanitizeEnumForGemini(members []any, typ, path string, warn schemaWarnFunc) ([]any, bool) {
+	report := func(p, detail string) {
+		if warn != nil {
+			warn(p, detail)
+		}
+	}
+	enumPath := joinSchemaPath(path, "enum")
+	if typ != "" && !strings.EqualFold(typ, "string") {
+		report(enumPath, fmt.Sprintf("dropped: enum on type %q is not supported by Gemini (string enums only)", typ))
+		return nil, false
+	}
+	kept := make([]any, 0, len(members))
+	for i, m := range members {
+		memberPath := fmt.Sprintf("%s[%d]", enumPath, i)
+		switch v := m.(type) {
+		case string:
+			if v == "" {
+				report(memberPath, "is an empty string; removed")
+				continue
+			}
+			kept = append(kept, v)
+		case nil:
+			report(memberPath, "is null; removed")
+		default:
+			report(memberPath, fmt.Sprintf("is %v (%s); removed", v, jsonKind(v)))
+		}
+	}
+	if len(kept) == 0 {
+		report(enumPath, "has no valid string members; dropped")
+		return nil, false
+	}
+	return kept, true
+}
+
+// jsonKind names the JSON type of a decoded value for log messages.
+func jsonKind(v any) string {
+	switch v.(type) {
+	case float64, float32, int, int64, int32, uint, uint64, uint32, json.Number:
+		return "number"
+	case bool:
+		return "boolean"
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
+}
+
+func sanitizeSchemaAt(schema map[string]any, path string, warn schemaWarnFunc) map[string]any {
 	if schema == nil {
 		return nil
 	}
@@ -881,12 +981,12 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 		}
 		switch vv := v.(type) {
 		case map[string]any:
-			out[k] = sanitizeSchemaForGemini(vv)
+			out[k] = sanitizeSchemaAt(vv, joinSchemaPath(path, k), warn)
 		case []any:
 			arr := make([]any, len(vv))
 			for i, item := range vv {
 				if m, ok := item.(map[string]any); ok {
-					arr[i] = sanitizeSchemaForGemini(m)
+					arr[i] = sanitizeSchemaAt(m, fmt.Sprintf("%s[%d]", joinSchemaPath(path, k), i), warn)
 				} else {
 					arr[i] = item
 				}
@@ -902,6 +1002,18 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 	// servers routinely omit it for free-form arrays (e.g. an RFC 6902
 	// patch ops array). An empty item schema satisfies the proto without
 	// inventing an element type the tool never declared.
+	// Enum normalization runs after the loop so it sees the resolved
+	// singular type. Only a list value is treated as the keyword: inside a
+	// "properties" map a property may legitimately be named "enum", and its
+	// value is then a schema object, not a member list.
+	if members, ok := out["enum"].([]any); ok {
+		t, _ := out["type"].(string)
+		if cleaned, keep := sanitizeEnumForGemini(members, t, path, warn); keep {
+			out["enum"] = cleaned
+		} else {
+			delete(out, "enum")
+		}
+	}
 	if t, _ := out["type"].(string); strings.EqualFold(t, "array") {
 		if _, ok := out["items"]; !ok {
 			out["items"] = map[string]any{}
