@@ -337,15 +337,16 @@ func buildAnthropicMessageBody(req events.LLMRequest, defaultMaxTokens int) (map
 		body["temperature"] = *req.Temperature
 	}
 
-	var systemPrompt string
+	// Every system message is kept, in order, wherever it sits — the same
+	// rule nexus.llm.anthropic applies: one becomes the bare-string `system`
+	// field, two or more become one text block each.
+	var systemTexts []string
 	apiMessages := make([]map[string]any, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case "system":
-			if systemPrompt == "" {
-				systemPrompt = msg.Content
-			} else {
-				systemPrompt = systemPrompt + "\n\n" + msg.Content
+			if msg.Content != "" {
+				systemTexts = append(systemTexts, msg.Content)
 			}
 		case "assistant":
 			if len(msg.ToolCalls) > 0 {
@@ -382,8 +383,16 @@ func buildAnthropicMessageBody(req events.LLMRequest, defaultMaxTokens int) (map
 			apiMessages = append(apiMessages, map[string]any{"role": msg.Role, "content": msg.Content})
 		}
 	}
-	if systemPrompt != "" {
-		body["system"] = systemPrompt
+	switch len(systemTexts) {
+	case 0:
+	case 1:
+		body["system"] = systemTexts[0]
+	default:
+		blocks := make([]map[string]any, 0, len(systemTexts))
+		for _, t := range systemTexts {
+			blocks = append(blocks, map[string]any{"type": "text", "text": t})
+		}
+		body["system"] = blocks
 	}
 	body["messages"] = apiMessages
 

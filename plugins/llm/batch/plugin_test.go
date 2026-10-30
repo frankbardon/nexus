@@ -617,6 +617,58 @@ func TestBuildAnthropicMessageBody_SystemSplitOut(t *testing.T) {
 	}
 }
 
+// Two system messages — one leading, one mid-conversation — must both reach
+// the Anthropic body, in order, as separate text blocks (GitHub #205).
+func TestBuildAnthropicMessageBody_AllSystemMessagesInOrder(t *testing.T) {
+	body, err := buildAnthropicMessageBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-sonnet-4-5",
+		Messages: []events.Message{
+			{Role: "system", Content: "agent prompt"},
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+			{Role: "system", Content: "summary so far"},
+			{Role: "user", Content: "next"},
+		},
+	}, 1024)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	blocks, ok := body["system"].([]map[string]any)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("expected two system blocks, got %#v", body["system"])
+	}
+	if blocks[0]["text"] != "agent prompt" || blocks[1]["text"] != "summary so far" {
+		t.Fatalf("system blocks out of order: %#v", blocks)
+	}
+	for _, b := range blocks {
+		if b["type"] != "text" {
+			t.Fatalf("expected text block, got %#v", b)
+		}
+	}
+	msgs, _ := body["messages"].([]map[string]any)
+	if len(msgs) != 3 {
+		t.Fatalf("expected the three non-system messages, got %#v", msgs)
+	}
+}
+
+// The chat-completions serializer keeps every system message inline, at its
+// position.
+func TestBuildOpenAIChatBody_AllSystemMessagesInOrder(t *testing.T) {
+	body, err := buildOpenAIChatBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "gpt-4o-mini",
+		Messages: []events.Message{
+			{Role: "system", Content: "agent prompt"},
+			{Role: "user", Content: "hi"},
+			{Role: "system", Content: "summary so far"},
+		},
+	}, 1024)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	msgs, _ := body["messages"].([]map[string]any)
+	if len(msgs) != 3 || msgs[0]["content"] != "agent prompt" || msgs[2]["role"] != "system" || msgs[2]["content"] != "summary so far" {
+		t.Fatalf("expected both system messages inline in order, got %#v", msgs)
+	}
+}
+
 func TestBuildOpenAIChatBody_BasicShape(t *testing.T) {
 	body, err := buildOpenAIChatBody(events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "gpt-4o-mini",
 		Messages: []events.Message{

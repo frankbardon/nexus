@@ -132,6 +132,16 @@ The measured cost was **zero new modules in the build graph**: both were already
 
 `bin/nexus`, `bin/nexus-broker` and the reference desktop app all blank-import `google-adc`. A custom binary must blank-import the package registering whichever source it names in `credentials`, or boot fails with an error naming that source and listing the sources the build actually carries.
 
+### System Messages
+
+Every `system` message in the request reaches the model, in order. Gemini has no
+in-conversation system role, so each one — leading or mid-conversation — is
+folded into the single `systemInstruction` text, separated by a blank line, and
+the prompt registry decorates that combined text once. Nothing is dropped and
+nothing is left in `contents`. Because the combined text is part of the
+context-cache key, a system message whose content changes (a rewritten summary)
+produces a new cached-content entry.
+
 ### Streaming
 
 When `llm.request.Stream` is `true`, the provider uses `:streamGenerateContent?alt=sse` and parses SSE `data:` lines. Text deltas are emitted as `llm.stream.chunk` (Content), function calls as `llm.stream.chunk` (ToolCall), and a final `llm.stream.end` carries `usageMetadata`.

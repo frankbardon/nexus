@@ -10,6 +10,17 @@ The prompt registry allows plugins to inject dynamic sections into the system pr
 4. Sections are appended in priority order (lower priority numbers first)
 5. If a base system prompt is provided, it's wrapped in `<system_instructions>` tags
 
+### Several system messages
+
+A request may carry more than one `system` message — the agent's prompt plus,
+say, a compaction summary or a gate note, possibly mid-conversation. Every
+provider delivers **all** of them, in order: Anthropic as one `system` text block
+per message (bare string when there is only one), OpenAI inline at each
+message's position, Gemini concatenated into `systemInstruction`. The registry's
+sections are applied once — to the first system message (Anthropic, OpenAI) or
+to the combined text (Gemini) — never to each message. See the per-provider
+"System Messages" sections.
+
 ## XML Structure
 
 All prompt content uses XML tag boundaries for clean structural separation. The assembled prompt looks like:

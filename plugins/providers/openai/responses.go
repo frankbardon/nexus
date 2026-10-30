@@ -145,6 +145,7 @@ func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.
 // are not the operator's to fix mid-turn.
 func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 	var items []map[string]any
+	decoratedSystem := false
 	for _, msg := range msgs {
 		switch msg.Role {
 		case "tool":
@@ -202,10 +203,13 @@ func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 			// top-level `instructions` field: hoisting would reorder it
 			// relative to the rest of the conversation, and Nexus composes
 			// system content from several plugins that expect their position.
+			// The registry decorates the first system message only, so its
+			// sections are not repeated onto a later one (a summary, a note).
 			decorated := msg
-			if p.prompts != nil {
+			if p.prompts != nil && !decoratedSystem {
 				decorated.Content = p.prompts.Apply(msg.Content)
 			}
+			decoratedSystem = true
 			item := map[string]any{
 				"role":    "system",
 				"content": decorated.Content,

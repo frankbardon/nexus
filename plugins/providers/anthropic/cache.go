@@ -173,7 +173,9 @@ func parseCacheConfig(cfg map[string]any, logger *slog.Logger) (cacheConfig, err
 //
 //  1. body["system"] is converted from a bare string into the array-of-blocks
 //     form Anthropic requires for cacheable system prompts, with one
-//     cache_control marker on the single text block.
+//     cache_control marker on the single text block. When it is already
+//     array-form (several system messages), the marker goes on the first
+//     block — the stable agent prompt — never on a later, volatile one.
 //  2. The LAST entry in body["tools"] gets a cache_control field. Marking only
 //     the tail covers the entire tools prefix at one breakpoint cost — there's
 //     no benefit to marking individual tools.
@@ -266,12 +268,17 @@ func applySystemCacheControl(body map[string]any, marker map[string]any) bool {
 		}
 		return true
 	case []map[string]any:
-		// Already array-form (unexpected at this stage); attach to the last
-		// block so we don't double-mark.
+		// Array form: the request carried more than one system message (see
+		// buildSystemField). The marker goes on the FIRST block, the agent's
+		// own prompt plus the registry sections, which is the stable part.
+		// Later blocks are typically volatile (a compaction summary rewritten
+		// as the conversation grows); marking the last one would put the
+		// breakpoint after content that changes, and the cache would miss on
+		// every rewrite instead of reusing the tools + agent-prompt prefix.
 		if len(v) == 0 {
 			return false
 		}
-		v[len(v)-1]["cache_control"] = marker
+		v[0]["cache_control"] = marker
 		body["system"] = v
 		return true
 	default:
