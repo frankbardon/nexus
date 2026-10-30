@@ -4859,7 +4859,7 @@ Top-level keys:
 | `resources.auto_register_static`   | bool     | `true`  | When true, every static resource becomes a no-arg catalog tool. |
 | `resources.auto_register_template` | bool     | `true`  | When true, every resource template becomes a catalog tool whose inputSchema mirrors the template's variables. |
 | `resources.auto_register_max`      | int ≥ 0  | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. Unlike `timeout`, this one *is* a number — the parser reads it through an int/int64/float64 coercion. Negative values are rejected at boot (the parser would silently ignore them). |
-| `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. |
+| `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. Only honoured when the server advertises `capabilities.resources.subscribe`; otherwise it's skipped silently (Debug). A failure on a server that advertised it logs one Warn per server. |
 | `prompts.enabled`                  | bool     | `true`  | Toggle the prompt slash-command surface for the server. |
 
 #### `servers[]`

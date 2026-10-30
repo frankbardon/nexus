@@ -65,6 +65,10 @@ Slugs are deterministic: `slug(title|name|URI) + "_" + sha1(uri)[:8]`. They stay
 
 When `resources.subscribe_updates` is true (default), the plugin subscribes to every auto-registered static. Each `notifications/resources/updated` from the server emits an `mcp.resource.updated` event onto the Nexus bus. No core consumer reads this in Phase 1 — it's plumbed for future RAG ingest / memory plugins.
 
+Subscriptions are gated on the server's advertised capabilities: the plugin subscribes only when the handshake reported `capabilities.resources.subscribe: true`. A server that doesn't advertise it is skipped cleanly (one Debug line naming the server and negotiated protocol version) rather than sent requests it would reject. The gate matters at both protocol generations — a legacy (`<= 2025-11-25`) server answers an unadvertised `resources/subscribe` with MethodNotFound, and at `2026-07-28`, where `resources/subscribe` no longer exists and the SDK carries each subscription on a `subscriptions/listen` stream instead, the server silently drops the URI so no update would ever arrive.
+
+When a server *did* advertise the capability and a subscribe still fails, the plugin logs a Warn naming the server and URI — once per server, so a server that rejects every URI doesn't flood the log on each `resources/list_changed` refresh; later failures drop to Debug. At `2026-07-28` the SDK sends `subscriptions/listen` without waiting for a reply, so a server-side rejection there can't be seen by the client at all; the capability gate is the only check that applies.
+
 ## Prompts
 
 Prompts surface as slash commands. The command shape is `/<command_prefix>.<server>.<prompt>`, lowercase, underscores. With `command_prefix: mcp` (default) and a server `gh` exposing a prompt `review_pr`, the slash command is `/mcp.gh.review_pr`.

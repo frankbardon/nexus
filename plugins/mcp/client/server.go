@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -37,6 +38,11 @@ type server struct {
 	templates       map[string]*mcp.ResourceTemplate // catalog slug -> Template
 	prompts         map[string]*mcp.Prompt           // raw name -> Prompt
 	resourceURIs    map[string]string                // catalog slug -> URI (for static resource invocation)
+
+	// subscribeWarned latches after the first resources/subscribe failure on
+	// a server that advertised resources.subscribe, so the Warn fires once
+	// per server rather than once per URI per refresh. See subscribe.go.
+	subscribeWarned atomic.Bool
 }
 
 func newServer(cfg ServerConfig, parent *Plugin) *server {
