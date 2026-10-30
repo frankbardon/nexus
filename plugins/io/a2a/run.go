@@ -138,7 +138,20 @@ type run struct {
 	done     chan struct{}
 	closeOne sync.Once
 
+	// emitMu serializes emit end to end — the store write AND the delivery — so
+	// the order frames reach the store is the order they reach the wire, and a
+	// frame that lost a race with a terminal one can be refused before it is
+	// recorded rather than after. It is taken BEFORE r.mu and never while r.mu
+	// is held.
+	emitMu sync.Mutex
+
 	mu sync.Mutex
+	// final records that a terminal-state frame has been applied. It is the
+	// under-lock half of "nothing follows a terminal state": r.done is only
+	// closed at the END of the terminal sequence, so a frame that checked
+	// terminated() before the terminal frame was emitted would otherwise still
+	// be recorded and delivered after it.
+	final bool
 	// subs is every attached observer. See the concurrency note above.
 	subs map[*stream]struct{}
 	// snapshot is the task as every frame emitted so far leaves it. It is what a
@@ -160,7 +173,11 @@ type run struct {
 	// message routable: the client names the task, and this names the pending
 	// hitl.requested the answer belongs to.
 	parked parkedInput
-	// inputTimer bounds that wait. It is armed when the task parks and stopped
+	// parkSeq numbers park calls, so a deadline armed after the INPUT_REQUIRED
+	// frame was emitted is only armed if no newer question replaced it meanwhile.
+	parkSeq uint64
+	// inputTimer bounds that wait. It is armed once the task has announced
+	// INPUT_REQUIRED and stopped
 	// on resume and on any terminal transition, so a task cannot be terminated
 	// twice by a timer that outlived the question it was watching.
 	inputTimer *time.Timer
@@ -331,17 +348,35 @@ func (r *run) awaitSettled(ctx context.Context) {
 // It is the ONLY path a frame takes. A frame reaching the wire without reaching
 // the store, or reaching one observer but not another, is not expressible: both
 // happen here or neither does.
-func (r *run) emit(frame a2a.StreamResponse) {
+//
+// It reports whether the frame was emitted. A frame offered after a terminal
+// one is refused, and refused BEFORE it is recorded, so neither the store nor
+// any observer ever sees a state follow FAILED, CANCELED or COMPLETED.
+func (r *run) emit(frame a2a.StreamResponse) bool {
 	if r.terminated() {
 		// Nothing may follow a terminal state on the wire, so a late frame is
 		// discarded rather than queued behind a finished stream.
-		return
+		return false
+	}
+	// emitMu makes the final check below hold for the whole emit: only emit
+	// sets r.final, so once this goroutine has seen it clear, no terminal frame
+	// can slip in between the check, the store write and the delivery.
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	r.mu.Lock()
+	final := r.final
+	r.mu.Unlock()
+	if final {
+		return false
 	}
 	// Persisted BEFORE delivery, and outside r.mu because this touches SQLite.
 	r.record(frame)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if frame.Kind() == a2a.StreamPayloadStatusUpdate && frame.StatusUpdate.Status.State.IsTerminal() {
+		r.final = true
+	}
 	applyFrame(&r.snapshot, frame)
 	for s := range r.subs {
 		select {
@@ -358,6 +393,7 @@ func (r *run) emit(frame a2a.StreamResponse) {
 			}
 		}
 	}
+	return true
 }
 
 // record persists one frame to the durable task record.
@@ -416,6 +452,9 @@ func (r *run) emitTelemetry(frame a2a.StreamResponse) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.final {
+		return
+	}
 	for s := range r.subs {
 		if !s.nexusExtension {
 			continue
@@ -694,7 +733,8 @@ func (r *run) onTurnEnd(t events.TurnInfo) bool {
 // --- interruption: INPUT_REQUIRED and back ---
 
 // park moves the task to TASK_STATE_INPUT_REQUIRED, carrying the agent's
-// question on the attached status message, and arms the input deadline.
+// question on the attached status message, and — only once that transition has
+// been recorded and emitted — arms the input deadline.
 //
 // INPUT_REQUIRED is an INTERRUPTION, not a termination (specification section
 // 3.1.1): the task stays live, any open stream stays open, and the client is
@@ -704,9 +744,13 @@ func (r *run) onTurnEnd(t events.TurnInfo) bool {
 // that reconnects with GetTask or SubscribeToTask sees the question it missed.
 //
 // timeout bounds the wait; zero leaves the task parked indefinitely. onExpired
-// runs on the timer's own goroutine when it elapses. It reports whether the
-// task actually parked, so a question arriving after the task ended is visibly
-// ignored.
+// runs on the timer's own goroutine when it elapses. The deadline is measured
+// from the INPUT_REQUIRED announcement, not from the moment the question
+// arrived: that is the moment the client learns it owes an answer, and arming
+// any earlier lets a short deadline fail the task before INPUT_REQUIRED is
+// emitted, so the client would see FAILED for a question it was never asked.
+// It reports whether the task actually parked, so a question arriving after
+// the task ended is visibly ignored.
 func (r *run) park(in parkedInput, question string, timeout time.Duration, onExpired func()) bool {
 	if r.terminated() {
 		return false
@@ -717,10 +761,9 @@ func (r *run) park(in parkedInput, question string, timeout time.Duration, onExp
 	// is waiting for, and tracking only the newest request id is the honest
 	// reading: it is the one whose answer will unblock the agent loop.
 	r.parked = in
+	r.parkSeq++
+	seq := r.parkSeq
 	r.stopTimerLocked()
-	if timeout > 0 && onExpired != nil {
-		r.inputTimer = time.AfterFunc(timeout, onExpired)
-	}
 	r.mu.Unlock()
 
 	if question == "" {
@@ -740,8 +783,23 @@ func (r *run) park(in parkedInput, question string, timeout time.Duration, onExp
 	// status: history is what a reconnecting client reads, and a question that
 	// existed only on a status nobody was watching would be lost to it.
 	r.recordMessage(messageRef{MessageID: message.MessageID, Role: a2a.RoleAgent, Text: question})
-	r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
-		a2a.NewTaskStatus(a2a.TaskStateInputRequired).WithMessage(message))))
+	if !r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateInputRequired).WithMessage(message)))) {
+		return false
+	}
+
+	// Armed only now, and only if the question is still the one outstanding:
+	// in the gap since r.parked was set it may have been answered (unpark),
+	// replaced by a newer question (parkSeq), or the task may have ended
+	// (terminate clears r.parked, and r.final covers the window before it does).
+	if timeout > 0 && onExpired != nil {
+		r.mu.Lock()
+		if !r.final && r.parked.live() && r.parkSeq == seq {
+			r.stopTimerLocked()
+			r.inputTimer = time.AfterFunc(timeout, onExpired)
+		}
+		r.mu.Unlock()
+	}
 	return true
 }
 

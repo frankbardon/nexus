@@ -25,6 +25,28 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 6. If not vetoed, the tool plugin emits `tool.result`
 7. The agent feeds the result back to the LLM
 
+### Unknown tools
+
+If the model calls a tool nobody handles — a hallucinated name, or a client tool
+an AG-UI client advertised on an earlier run but not this one — no tool plugin
+emits a `tool.result`, which would leave the agent loop waiting forever.
+`nexus.tool.catalog` closes that gap. On every `tool.invoke` it checks, first
+(priority -100), whether the name is registered or offered by any
+`tool.catalog.query` responder; if neither, it waits for the dispatch to finish
+(priority 1000) and, unless some subscriber already answered synchronously,
+emits an error result through the normal `before:tool.result` → `tool.result`
+path:
+
+```json
+{"id": "<call id>", "name": "get_weather", "error": "unknown tool: get_weather"}
+```
+
+The model sees it on the next iteration like any tool failure. A registered
+tool is never touched, even if its handler answers asynchronously (delegate,
+remote agents, `ask_user`). Invokes with no `ID` (fire-and-forget seeds) are
+skipped. The catalog is auto-activated by ReAct, plan-exec, subagent and
+orchestrator, so every agent loop gets this behaviour.
+
 ## Tool Registration Event
 
 Each tool emits a `tool.register` event with a `ToolDef`:

@@ -21,7 +21,7 @@ func TestLLMResponse_SkipsDelegateSubSession(t *testing.T) {
 	p.logger = slog.Default()
 	p.persist = false
 
-	for _, kind := range []string{"plan", "classify", "summarise", "compact", "subagent", "delegate"} {
+	for _, kind := range []string{"plan", "classify", "summarise", "compaction", "subagent", "delegate"} {
 		p.handleLLMResponse(engine.Event[any]{Payload: events.LLMResponse{
 			SchemaVersion: events.LLMResponseVersion,
 			Content:       "internal output from " + kind,

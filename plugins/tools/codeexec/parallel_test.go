@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,10 +101,75 @@ func Run(ctx context.Context) (any, error) {
 	}
 }
 
+// registerBarrierEchoTool installs an echo-like tool whose every invocation
+// blocks at a barrier until n invocations are in flight at once, then replies.
+//
+// It proves concurrency structurally rather than by wall time: the barrier only
+// opens if n calls are simultaneously inside the handler, which a serialised
+// dispatcher can never achieve. A call that waits longer than timeout without
+// the barrier opening replies anyway (so a regression fails the test instead of
+// hanging it) and is counted in the returned timedOut counter. timeout is a
+// failure bound, not a measurement: on the success path nothing waits on it.
+func (h *testHarness) registerBarrierEchoTool(n int64, timeout time.Duration) (peak, timedOut *atomic.Int64) {
+	_ = h.bus.Emit("tool.register", events.ToolDef{
+		Name:        "barrier_echo",
+		Description: "Echo once n calls are in flight together",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"message": map[string]any{"type": "string"},
+			},
+			"required": []any{"message"},
+		},
+	})
+	peak, timedOut = new(atomic.Int64), new(atomic.Int64)
+	// The barrier counts calls IN FLIGHT, not calls that have ever arrived: a
+	// serialised dispatcher eventually delivers n arrivals too, one at a time.
+	var inflight atomic.Int64
+	var open sync.Once
+	release := make(chan struct{})
+	h.bus.Subscribe("tool.invoke", func(e engine.Event[any]) {
+		tc, ok := e.Payload.(events.ToolCall)
+		if !ok || tc.Name != "barrier_echo" {
+			return
+		}
+		c := inflight.Add(1)
+		defer inflight.Add(-1)
+		for {
+			p := peak.Load()
+			if c <= p || peak.CompareAndSwap(p, c) {
+				break
+			}
+		}
+		if c >= n {
+			open.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(timeout):
+			timedOut.Add(1)
+		}
+		msg, _ := tc.Arguments["message"].(string)
+		_ = h.bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
+			Name:   tc.Name,
+			Output: "echoed: " + msg,
+			TurnID: tc.TurnID,
+		})
+	}, engine.WithPriority(40), engine.WithSource("fake-barrier-echo"))
+	return peak, timedOut
+}
+
+// TestParallel_Map_RunsConcurrently asserts that parallel.Map with
+// max_workers >= len(inputs) has every worker in flight at once. It used to
+// assert a wall-clock ceiling (<180ms for four 50ms calls), which failed under
+// -race contention without anything being serialised (#155). The barrier makes
+// the assertion independent of scheduling speed: it passes only if all four
+// calls overlap, and a serialised Map leaves the first call stranded at the
+// barrier until its timeout, which is reported as a failure.
 func TestParallel_Map_RunsConcurrently(t *testing.T) {
-	h := newHarness(t, map[string]any{"max_workers": 4})
-	var peak atomic.Int64
-	h.registerSlowEchoTool(50*time.Millisecond, &peak)
+	const workers = 4
+	h := newHarness(t, map[string]any{"max_workers": workers})
+	peak, timedOut := h.registerBarrierEchoTool(workers, 5*time.Second)
 
 	script := `package main
 
@@ -116,23 +182,22 @@ import (
 func Run(ctx context.Context) (any, error) {
 	msgs := []string{"a", "b", "c", "d"}
 	return parallel.Map(ctx, msgs, func(ctx context.Context, m string) (string, error) {
-		r, err := tools.SlowEcho(tools.SlowEchoArgs{Message: m})
+		r, err := tools.BarrierEcho(tools.BarrierEchoArgs{Message: m})
 		if err != nil { return "", err }
 		return r.Output, nil
 	})
 }
 `
-	start := time.Now()
 	res := h.runCode(script)
-	dur := time.Since(start)
 	if res.Error != "" {
 		t.Fatalf("error: %s", res.Error)
 	}
-	if dur > 180*time.Millisecond {
-		t.Errorf("expected concurrent execution (<180ms); got %s — possibly serialised", dur)
+	if n := timedOut.Load(); n != 0 {
+		t.Errorf("%d call(s) waited at the barrier without all %d workers ever being in flight together — parallel.Map serialised (peak=%d)",
+			n, workers, peak.Load())
 	}
-	if peak.Load() < 2 {
-		t.Errorf("expected observed concurrency >=2; peak=%d", peak.Load())
+	if got := peak.Load(); got != workers {
+		t.Errorf("peak in-flight calls = %d, want %d", got, workers)
 	}
 }
 

@@ -123,11 +123,18 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string                        { return pluginID }
-func (p *Plugin) Name() string                      { return pluginName }
-func (p *Plugin) Version() string                   { return version }
-func (p *Plugin) Dependencies() []string            { return []string{"nexus.agent.subagent"} }
-func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return pluginName }
+func (p *Plugin) Version() string        { return version }
+func (p *Plugin) Dependencies() []string { return []string{"nexus.agent.subagent"} }
+
+// Requires auto-activates the shared tool catalog (optional, so a host that
+// deliberately omits it still boots). Besides the registry, the catalog owns
+// the unknown-tool fallback: a hallucinated tool name gets an error
+// tool.result instead of leaving this loop waiting forever.
+func (p *Plugin) Requires() []engine.Requirement {
+	return []engine.Requirement{{Capability: "tool.catalog", Optional: true}}
+}
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {
@@ -505,11 +512,9 @@ func (p *Plugin) sendDecomposeRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleDecomposeResponse processes the LLM's decomposition response.
@@ -901,11 +906,9 @@ func (p *Plugin) sendSynthesizeRequest() {
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
 
-	if veto, err := p.bus.EmitVetoable("before:llm.request", &req); err == nil && veto.Vetoed {
-		p.logger.Debug("llm.request vetoed", "reason", veto.Reason)
-		return
+	if res := engine.PublishLLMRequest(p.bus, req); res.Veto.Vetoed {
+		p.logger.Debug("llm.request vetoed", "reason", res.Veto.Reason)
 	}
-	_ = p.bus.Emit("llm.request", req)
 }
 
 // handleSynthesizeResponse processes the final synthesis LLM response.

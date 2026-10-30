@@ -92,7 +92,26 @@ plugins:
 
 `ExtraPlugins` is honored identically by `Run` and `RunLive` — both route
 through the same `bootEngine` helper, so there is exactly one call site
-that ever registers it.
+that ever registers it. `RunMany` threads it through to every per-case
+`Run`.
+
+Without the hook, a case naming an unregistered ID fails at boot with
+`boot: plugin "<id>" not found in registry` — that is the error to look
+for when an `ExtraPlugins` entry is missing or misspelled.
+
+**Collision with a built-in ID: the extra entry wins.** Entries are
+registered after `allplugins.RegisterAll`, and the plugin registry is
+last-`Register`-wins, so an `ExtraPlugins` entry keyed by, say,
+`nexus.observe.thinking` replaces Nexus's own factory for that case's
+engine. There is no error or warning — shadowing a built-in with a stub is
+a supported testing move (pinned by `TestRun_ExtraPluginOverridesBuiltin`).
+
+The inspect-mode runner has the same hook for in-process callers:
+`protocol.Request.ExtraPlugins` (same type, same after-built-ins,
+extra-wins semantics). It is tagged `json:"-"`, so it is not part of the
+[wire format](./inspect-protocol.md) — `nexus eval --inspect-mode` never
+sets it; only Go code calling `protocol.Run` directly (e.g. a judge run
+inside an embedder's own test binary) can.
 
 ## Live runs (`RunLive`) and the rendered transcript
 

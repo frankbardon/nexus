@@ -172,6 +172,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.request",
 		"llm.request",
 		"memory.compaction.triggered",
 		"memory.compacted",
@@ -525,7 +526,7 @@ func (p *Plugin) triggerSummarisation(reason string) {
 		{Role: "user", Content: "Here is the conversation to compact:\n\n" + transcript.String()},
 	}
 
-	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
+	res := engine.PublishLLMRequest(p.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
@@ -537,6 +538,19 @@ func (p *Plugin) triggerSummarisation(reason string) {
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})
+	if !res.AwaitResponse() {
+		p.abandonSummarisation(res.Veto.Reason)
+	}
+}
+
+// abandonSummarisation releases the in-flight flag when the summary request
+// was vetoed outright. No response will arrive to clear it, and a flag left
+// set would suppress every later trigger for the life of the session.
+func (p *Plugin) abandonSummarisation(reason string) {
+	p.logger.Warn("summary_buffer: summary llm.request vetoed; history left as-is", "reason", reason)
+	p.mu.Lock()
+	p.summarising = false
+	p.mu.Unlock()
 }
 
 func (p *Plugin) finishSummarisation(summary string) {
@@ -664,7 +678,7 @@ func (p *Plugin) dispatchSummaryRetry(startTurn, endTurn int) {
 		{Role: "user", Content: "Here is the conversation to compact:\n\n" + transcript.String()},
 	}
 
-	_ = p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
+	res := engine.PublishLLMRequest(p.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Messages: messages,
 		Stream:   false,
 		Metadata: map[string]any{
@@ -679,6 +693,9 @@ func (p *Plugin) dispatchSummaryRetry(startTurn, endTurn int) {
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})
+	if !res.AwaitResponse() {
+		p.abandonSummarisation(res.Veto.Reason)
+	}
 }
 
 // parsePreservedKinds extracts the comma-separated kinds from the

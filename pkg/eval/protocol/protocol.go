@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/frankbardon/nexus/pkg/engine"
 )
 
 // SchemaVersion is the wire-format version. Bumping this is a deliberate
@@ -38,6 +40,20 @@ type Request struct {
 	MaxTurns int `json:"max_turns,omitempty"`
 	// Metadata is opaque pass-through round-tripped on the response.
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// ExtraPlugins is the in-process embedder seam, mirroring
+	// runner.Options.ExtraPlugins: plugin factories registered onto the
+	// request's engine after allplugins.RegisterAll, keyed by plugin ID, so
+	// a config whose plugins.active names an embedder-authored plugin can
+	// boot. Registering an ID does not activate it — the config must still
+	// list it. An ID colliding with a built-in overrides the built-in (the
+	// registry's last-Register-wins semantics); that is deliberate, so an
+	// embedder can shadow a built-in under eval.
+	//
+	// It is NOT part of the wire format (json:"-"): factories are Go
+	// values, so only callers of protocol.Run in the same process can set
+	// it. `nexus eval --inspect-mode` never does.
+	ExtraPlugins map[string]engine.PluginFactory `json:"-"`
 }
 
 // Response is the inspect-mode response envelope. On success, Error is

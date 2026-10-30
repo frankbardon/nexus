@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -217,8 +218,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	)
 
 	// Mock LLM responses: intercept before:llm.request after gates (priority 20),
-	// and also intercept llm.request directly to catch retry requests from gates
-	// (e.g. json_schema retrier emits llm.request, not before:llm.request).
+	// and also intercept llm.request directly to catch the one producer that
+	// legitimately bypasses the hop (fanout legs; see engine.PublishLLMRequest).
 	if len(p.mockResponses) > 0 {
 		p.unsubs = append(p.unsubs,
 			p.bus.Subscribe("before:llm.request", p.handleMockBeforeLLMRequest,
@@ -385,10 +386,22 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 
 	mock := p.nextMockResponse()
 
-	// Veto the real LLM request so it never reaches the provider.
-	vp.Veto = engine.VetoResult{
-		Vetoed: true,
-		Reason: "test IO mock: intercepted by mock response",
+	// Intercept the real LLM request so it never reaches the provider. An
+	// interception (not a plain veto) tells a producer waiting on its
+	// response — a gate retry, a summariser — that one is coming.
+	var meta map[string]any
+	var tags map[string]string
+	var requestID string
+	if req != nil {
+		engine.InterceptLLMRequest(vp, req, pluginID, "test IO mock: intercepted by mock response")
+		meta = req.Metadata
+		tags = maps.Clone(req.Tags)
+		requestID = req.RequestID
+	} else {
+		vp.Veto = engine.VetoResult{
+			Vetoed: true,
+			Reason: "test IO mock: intercepted by mock response",
+		}
 	}
 
 	// Emit synthetic llm.response in a goroutine — we're inside a vetoable
@@ -396,21 +409,16 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 	// Propagate metadata + RequestID so downstream correlation (orchestrator
 	// _source dispatch, token-budget reserve/commit) matches real provider
 	// behavior — see also handleMockLLMRequest below.
-	var meta map[string]any
-	var requestID string
-	if req != nil {
-		meta = req.Metadata
-		requestID = req.RequestID
-	}
 	go func() {
-		resp := p.buildMockResponse(mock, meta)
+		resp := p.buildMockResponse(mock, meta, tags)
 		resp.RequestID = requestID
 		engine.PublishLLMResponse(p.bus, resp)
 	}()
 }
 
-// handleMockLLMRequest intercepts direct llm.request emissions (e.g. gate
-// retrier sends llm.request directly, bypassing before:llm.request).
+// handleMockLLMRequest intercepts direct llm.request emissions — requests
+// that bypass before:llm.request (fanout legs, which are copies of a request
+// already in that hop).
 // Responds with the next mock and suppresses the real provider call by
 // emitting llm.response before the provider handler runs.
 func (p *Plugin) handleMockLLMRequest(e engine.Event[any]) {
@@ -423,7 +431,7 @@ func (p *Plugin) handleMockLLMRequest(e engine.Event[any]) {
 
 	// Propagate full request metadata so downstream plugins (fanout, retrier)
 	// can correlate the response. Matches real provider behavior.
-	engine.PublishLLMResponse(p.bus, p.buildMockResponse(mock, req.Metadata))
+	engine.PublishLLMResponse(p.bus, p.buildMockResponse(mock, req.Metadata, req.Tags))
 }
 
 func (p *Plugin) nextMockResponse() MockResponse {
@@ -439,12 +447,15 @@ func (p *Plugin) nextMockResponse() MockResponse {
 	return mock
 }
 
-func (p *Plugin) buildMockResponse(mock MockResponse, metadata map[string]any) events.LLMResponse {
+func (p *Plugin) buildMockResponse(mock MockResponse, metadata map[string]any, tags map[string]string) events.LLMResponse {
 	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: mock.Content,
 		ToolCalls:    mock.ToolCalls,
 		Model:        "mock",
 		FinishReason: "end_turn",
 		Metadata:     metadata,
+		// Real providers copy request Tags onto the response; the cost
+		// report and token_budget's tenant commit read them from there.
+		Tags: maps.Clone(tags),
 	}
 }
 

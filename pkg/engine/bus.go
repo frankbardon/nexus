@@ -158,16 +158,23 @@ type eventBus struct {
 	handlers  map[string][]*subscription
 	wildcards []*subscription
 	nextID    uint64
-	inflight  sync.WaitGroup
-	// drainMu serializes inflight.Add against inflight.Wait. Without it, a
-	// race window exists where Wait wakes up because the counter hit zero
-	// and is about to return — if Add(positive) lands during that window,
-	// the runtime panics with "WaitGroup is reused before previous Wait
-	// has returned." Holding drainMu around every Add and across the
-	// entire Wait closes that window. Done is left lock-free; it can
-	// never trigger the panic.
-	drainMu sync.Mutex
-	ring    *eventRing
+	// inflightN counts dispatches currently running (EmitEvent/EmitVetoable
+	// between entry and return, including nested emits from handlers).
+	// It is a plain mutex-guarded counter plus an "idle" channel, NOT a
+	// sync.WaitGroup: a WaitGroup panics when Add races a Wait that is
+	// returning, and the old fix for that (a mutex held across the whole
+	// Wait) deadlocked against nested emits from the very handlers Drain
+	// was waiting on (#172, #202). Here no lock is ever held while waiting:
+	// inflightMu guards only the counter and channel swap, and Drain waits
+	// on the channel outside it. See beginDispatch/endDispatch/Drain.
+	inflightMu sync.Mutex
+	inflightN  int
+	// inflightIdle is closed whenever inflightN is zero. beginDispatch
+	// replaces it with a fresh open channel on the 0 -> 1 transition and
+	// endDispatch closes it on 1 -> 0, so a Drain that captured it is
+	// released the moment the bus goes quiet.
+	inflightIdle chan struct{}
+	ring         *eventRing
 
 	// seqCounter is the per-bus monotonic dispatch counter. Assigned at
 	// EmitEvent / EmitVetoable entry, before typed handlers run, so a
@@ -657,10 +664,8 @@ func (b *eventBus) Emit(eventType string, payload any) error {
 }
 
 func (b *eventBus) EmitEvent(event Event[any]) error {
-	b.drainMu.Lock()
-	b.inflight.Add(1)
-	b.drainMu.Unlock()
-	defer b.inflight.Done()
+	b.beginDispatch()
+	defer b.endDispatch()
 
 	if event.ID == "" {
 		event.ID = GenerateID()
@@ -731,10 +736,8 @@ func (b *eventBus) EmitAsync(eventType string, payload any) <-chan error {
 }
 
 func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, error) {
-	b.drainMu.Lock()
-	b.inflight.Add(1)
-	b.drainMu.Unlock()
-	defer b.inflight.Done()
+	b.beginDispatch()
+	defer b.endDispatch()
 
 	// Wrap in VetoablePayload so handlers can set Veto via the shared pointer.
 	// Handlers receive the event by value, but VetoablePayload is a pointer —
@@ -795,23 +798,46 @@ func (b *eventBus) EmitVetoable(eventType string, payload any) (VetoResult, erro
 	return result, nil
 }
 
+// beginDispatch registers one in-flight dispatch. It takes inflightMu only
+// for the counter update, so it never blocks behind a Drain.
+func (b *eventBus) beginDispatch() {
+	b.inflightMu.Lock()
+	if b.inflightN == 0 {
+		b.inflightIdle = make(chan struct{})
+	}
+	b.inflightN++
+	b.inflightMu.Unlock()
+}
+
+// endDispatch retires one in-flight dispatch, releasing every waiting Drain
+// when the count returns to zero.
+func (b *eventBus) endDispatch() {
+	b.inflightMu.Lock()
+	b.inflightN--
+	if b.inflightN == 0 {
+		close(b.inflightIdle)
+	}
+	b.inflightMu.Unlock()
+}
+
+// Drain blocks until no dispatch is in flight or ctx is done, whichever is
+// first. "In flight" counts nested emits: a handler that emits while Drain
+// waits is dispatched normally (Drain never blocks an emit) and keeps the
+// bus busy until it, too, returns. Drain waits for a quiescent moment, not
+// for a closed bus — it does not reject new emits, and a bus that never goes
+// quiet is bounded only by ctx. Drain holds no lock while waiting and starts
+// no goroutine, so returning on ctx expiry leaves the bus fully usable.
 func (b *eventBus) Drain(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		// Hold drainMu across the entire Wait. Any concurrent Add must
-		// acquire drainMu first, so an Add cannot land in the brief
-		// window between the WaitGroup counter hitting zero and Wait
-		// returning — which is the only window that triggers the
-		// "WaitGroup is reused before previous Wait has returned"
-		// runtime panic.
-		b.drainMu.Lock()
-		b.inflight.Wait()
-		b.drainMu.Unlock()
-		close(done)
-	}()
+	b.inflightMu.Lock()
+	if b.inflightN == 0 {
+		b.inflightMu.Unlock()
+		return nil
+	}
+	idle := b.inflightIdle
+	b.inflightMu.Unlock()
 
 	select {
-	case <-done:
+	case <-idle:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

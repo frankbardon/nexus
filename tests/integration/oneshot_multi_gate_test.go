@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness"
 	testio "github.com/frankbardon/nexus/plugins/io/test"
@@ -56,12 +57,11 @@ func TestOneshotMultiGate_RetryThenPass(t *testing.T) {
 
 	collected := h.Events()
 
-	// --- Assertion 1: the json_schema gate emitted at least one retry
-	// llm.request. The retrier tags every retry with _source prefixed by
-	// the gate's plugin ID and Tags["source_plugin"] set the same way.
-	// The agent's primary request was vetoed at before:llm.request by the
-	// mock IO plugin, so the only llm.request events on the bus are the
-	// gate retries.
+	// --- Assertion 1: the json_schema gate published at least one retry
+	// request. The retrier tags every retry with _source prefixed by the
+	// gate's plugin ID and Tags["source_plugin"] set the same way. Every
+	// request — the agent's primary and the gate retries alike — goes
+	// through before:llm.request, where the mock IO plugin intercepts it.
 	llmReqs := collectLLMRequests(collected)
 	if !hasJSONSchemaRetrySource(llmReqs) {
 		// Diagnostic dump on failure.
@@ -169,14 +169,24 @@ func TestOneshotMultiGate_RetryThenPass(t *testing.T) {
 
 // -- helpers ---------------------------------------------------------------
 
+// collectLLMRequests returns every LLM request offered on the bus. In mock
+// mode the test IO plugin intercepts at before:llm.request, so a request
+// published through engine.PublishLLMRequest never reaches llm.request; the
+// before:llm.request offer is where it shows up.
 func collectLLMRequests(es []testio.CollectedEvent) []events.LLMRequest {
 	var out []events.LLMRequest
 	for _, e := range es {
-		if e.Type != "llm.request" {
-			continue
-		}
-		if req, ok := e.Payload.(events.LLMRequest); ok {
-			out = append(out, req)
+		switch e.Type {
+		case "llm.request":
+			if req, ok := e.Payload.(events.LLMRequest); ok {
+				out = append(out, req)
+			}
+		case "before:llm.request":
+			if vp, ok := e.Payload.(*engine.VetoablePayload); ok {
+				if req, ok := vp.Original.(*events.LLMRequest); ok {
+					out = append(out, *req)
+				}
+			}
 		}
 	}
 	return out

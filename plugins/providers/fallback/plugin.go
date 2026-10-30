@@ -5,7 +5,8 @@
 //   - before:llm.request (priority 3): injects fallback tracking metadata into
 //     requests for roles with fallback chains, and stores the original request.
 //   - before:core.error (priority 5): intercepts provider errors, vetoes them
-//     when a fallback is available, and re-emits llm.request targeting the next
+//     when a fallback is available, and re-publishes the request (through
+//     before:llm.request, via engine.PublishLLMRequest) targeting the next
 //     provider in the chain.
 package fallback
 
@@ -67,6 +68,7 @@ func (p *Plugin) Emissions() []string {
 	return []string{
 		"io.output.clear",
 		"provider.fallback",
+		"before:llm.request",
 		"llm.request",
 	}
 }
@@ -220,12 +222,6 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 		failedModel = currentCfg.Model
 	}
 
-	// Veto the error — we're handling it.
-	vp.Veto = engine.VetoResult{
-		Vetoed: true,
-		Reason: fmt.Sprintf("fallback: switching from %s to %s/%s", failedProvider, nextCfg.Provider, nextCfg.Model),
-	}
-
 	p.logger.Info("provider fallback triggered",
 		"role", role,
 		"failed_provider", failedProvider,
@@ -276,5 +272,31 @@ func (p *Plugin) handleBeforeError(event engine.Event[any]) {
 	// entry, not this one.
 	engine.StampModelConfig(&retryReq, nextCfg)
 
-	_ = p.bus.Emit("llm.request", retryReq)
+	// The retry goes back through before:llm.request: it is a new provider
+	// call, so it is seeded with the session's cost tags and counted by the
+	// request gates like the attempt it replaces. The stored request is the
+	// snapshot taken at priority 3, before later handlers decorated it, so
+	// they decorate the retry exactly once. Recursion guard: "_fallback_id"
+	// makes this plugin's own before:llm.request handler skip it, and
+	// "_target_provider" keeps the routers from re-routing it.
+	res := engine.PublishLLMRequest(p.bus, retryReq)
+	if !res.AwaitResponse() {
+		// Blocked outright: nothing will answer the retry, so leave the
+		// original error un-vetoed and let it surface rather than swallow
+		// it and leave the caller waiting.
+		p.logger.Warn("provider fallback retry vetoed; surfacing original error",
+			"role", role, "next_provider", nextCfg.Provider, "reason", res.Veto.Reason)
+		p.mu.Lock()
+		delete(p.inflight, fallbackID)
+		p.mu.Unlock()
+		return
+	}
+
+	// Veto the error — we're handling it. Set after the publish (the bus
+	// reads the veto once this handler returns), so a blocked retry above
+	// leaves the error to propagate.
+	vp.Veto = engine.VetoResult{
+		Vetoed: true,
+		Reason: fmt.Sprintf("fallback: switching from %s to %s/%s", failedProvider, nextCfg.Provider, nextCfg.Model),
+	}
 }

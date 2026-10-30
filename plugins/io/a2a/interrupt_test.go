@@ -632,14 +632,28 @@ func TestForeignTaskCannotBeResumedOrCanceled(t *testing.T) {
 // must not pin the session for ever. On expiry the task is driven to a REAL
 // terminal state — which closes every attached stream by the ordinary rule —
 // and hitl.cancel retracts the question so the blocked agent loop unblocks.
+//
+// The budget is deliberately not tiny. The deadline is armed inside run.park
+// BEFORE the INPUT_REQUIRED frame is persisted and delivered, so a budget
+// shorter than that one SQLite write plus a scheduler stall lets FAILED win the
+// race and the INPUT_REQUIRED frame is dropped. At 50ms that was a coin flip
+// under -race contention (2 in ~300 runs, #155). One second is roughly three orders of
+// magnitude above the window on an idle machine, and the elapsed-time assertion
+// below keeps the test honest: the task must have failed BECAUSE the deadline
+// passed, not for any earlier reason.
 func TestInputDeadlineFailsTheTask(t *testing.T) {
+	const inputTimeout = time.Second
 	p, bus := newTestPlugin(t, map[string]any{
-		"tasks": map[string]any{"input_timeout": "50ms"},
+		"tasks": map[string]any{"input_timeout": inputTimeout.String()},
 	})
 	agent := newHITLAgent(t, bus, "unreachable ")
 
+	start := time.Now()
 	rec := do(t, p.server, http.MethodPost, "/a2a", withVersion("1.0"),
 		jsonrpcBody(t, a2a.MethodSendStreamingMessage, sendMessageParams("deploy", "ctx-deadline")))
+	if elapsed := time.Since(start); elapsed < inputTimeout {
+		t.Errorf("the stream ended after %s, before the %s input deadline could have fired", elapsed, inputTimeout)
+	}
 	fs := frames(t, rec.Body.Bytes())
 	want := []a2a.TaskState{
 		a2a.TaskStateSubmitted, a2a.TaskStateWorking, a2a.TaskStateInputRequired, a2a.TaskStateFailed,
@@ -677,6 +691,139 @@ func TestInputDeadlineFailsTheTask(t *testing.T) {
 	if task.Status.State != a2a.TaskStateFailed {
 		t.Errorf("stored state = %s, want the timeout to be durable", task.Status.State)
 	}
+}
+
+// gatedSink wraps a run's sink so a test can hold park between arming the old
+// deadline and announcing INPUT_REQUIRED. RecordMessage is the one store write
+// park makes before its emit; holding it there until the deadline has fired (or
+// a grace period lapses) turns a scheduling race into a deterministic ordering.
+// It also records every status the store is asked to write, in order.
+type gatedSink struct {
+	inner   taskSink
+	expired <-chan struct{}
+
+	mu       sync.Mutex
+	statuses []a2a.TaskState
+}
+
+func (g *gatedSink) RecordStatus(taskID string, status a2a.TaskStatus) error {
+	g.mu.Lock()
+	g.statuses = append(g.statuses, status.State)
+	g.mu.Unlock()
+	return g.inner.RecordStatus(taskID, status)
+}
+
+func (g *gatedSink) RecordArtifact(taskID string, artifact a2a.Artifact) error {
+	return g.inner.RecordArtifact(taskID, artifact)
+}
+
+func (g *gatedSink) RecordMessage(taskID string, ref messageRef) error {
+	select {
+	case <-g.expired:
+	case <-time.After(100 * time.Millisecond):
+	}
+	return g.inner.RecordMessage(taskID, ref)
+}
+
+func (g *gatedSink) recorded() []a2a.TaskState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]a2a.TaskState(nil), g.statuses...)
+}
+
+// TestInputDeadlineStartsAtTheParkAnnouncement forces the ordering the input
+// deadline used to lose. park once armed the deadline BEFORE it recorded and
+// emitted INPUT_REQUIRED, so a short deadline could fail the task first and the
+// client saw FAILED for a question it was never shown. The sink holds park at
+// exactly that gap until a 1ns deadline has had every chance to fire; with the
+// deadline armed only after the announcement, INPUT_REQUIRED must precede
+// FAILED and nothing may follow FAILED — on the wire and in the store.
+func TestInputDeadlineStartsAtTheParkAnnouncement(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	r := p.startTurnForTest(t, "ctx-deadline-order")
+	expired := make(chan struct{})
+	sink := &gatedSink{inner: r.sink, expired: expired}
+	r.sink = sink
+	sub, _ := r.attach(streamOptions{})
+	defer r.detach(sub)
+
+	r.onTurnStart(events.TurnInfo{SchemaVersion: events.TurnInfoVersion, TurnID: "turn-1"})
+	failed := make(chan struct{})
+	onExpired := func() {
+		defer close(failed)
+		// What Plugin.expireInput does, minus the bus: unpark, then fail.
+		if _, ok := r.unpark("req-1"); ok {
+			r.fail("no answer arrived")
+		}
+		close(expired)
+	}
+	if !r.park(parkedInput{requestID: "req-1"}, "which one?", time.Nanosecond, onExpired) {
+		t.Fatal("the task did not park")
+	}
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the input deadline never fired")
+	}
+
+	var got []a2a.TaskState
+	for len(sub.frames) > 0 {
+		f := <-sub.frames
+		if f.Kind() == a2a.StreamPayloadStatusUpdate {
+			got = append(got, f.StatusUpdate.Status.State)
+		}
+	}
+	want := []a2a.TaskState{a2a.TaskStateWorking, a2a.TaskStateInputRequired, a2a.TaskStateFailed}
+	if !equalStates(got, want) {
+		t.Errorf("streamed states = %v, want %v", got, want)
+	}
+	if rec := sink.recorded(); !equalStates(rec, want) {
+		t.Errorf("recorded states = %v, want %v", rec, want)
+	}
+}
+
+// TestEmitRefusesFramesAfterATerminalOne pins the under-lock half of the
+// terminal guard. r.done closes only at the END of the terminal sequence, so a
+// frame offered after the terminal frame but before that close passes the
+// terminated() fast path; emit must still refuse it, record nothing, and
+// deliver nothing.
+func TestEmitRefusesFramesAfterATerminalOne(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	r := p.startTurnForTest(t, "ctx-emit-after-final")
+	sub, _ := r.attach(streamOptions{nexusExtension: true})
+	defer r.detach(sub)
+
+	if !r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateFailed)))) {
+		t.Fatal("the terminal frame itself was refused")
+	}
+	if r.terminated() {
+		t.Fatal("test precondition: done must still be open")
+	}
+	if r.emit(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateInputRequired)))) {
+		t.Error("a non-terminal frame was emitted after a terminal one")
+	}
+	r.emitTelemetry(a2a.StreamStatusUpdate(a2a.NewStatusUpdate(r.taskID, r.contextID,
+		a2a.NewTaskStatus(a2a.TaskStateWorking))))
+
+	var got []a2a.TaskState
+	for len(sub.frames) > 0 {
+		f := <-sub.frames
+		if f.Kind() == a2a.StreamPayloadStatusUpdate {
+			got = append(got, f.StatusUpdate.Status.State)
+		}
+	}
+	if len(got) != 1 || got[0] != a2a.TaskStateFailed {
+		t.Errorf("delivered states = %v, want only FAILED", got)
+	}
+	r.mu.Lock()
+	state := r.snapshot.Status.State
+	r.mu.Unlock()
+	if state != a2a.TaskStateFailed {
+		t.Errorf("snapshot state = %s, want FAILED", state)
+	}
+	r.fail("test teardown")
 }
 
 // TestInputDeadlineIsConfigurable pins both ends of the knob, including the

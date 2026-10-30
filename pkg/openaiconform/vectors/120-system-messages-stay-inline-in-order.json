@@ -1,0 +1,27 @@
+{
+  "id": "system-messages-stay-inline-in-order",
+  "title": "Every system message survives, in order, at its own position",
+  "rationale": "Several plugins contribute system content -- the agent's own prompt first, then a compaction summary or a gate note that may land mid-conversation. Responses accepts system-role Items anywhere in `input`, so both serializers keep each one as an ordinary role/content Item at its position rather than hoisting one into `instructions` (which would reorder it and leave room for last-one-wins). Pins GitHub #205: two system messages produce two system Items, in order.",
+  "model": "gpt-5.1",
+  "max_tokens": 2048,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Hello."},
+    {"role": "assistant", "content": "Hi there."},
+    {"role": "system", "content": "Summary of the earlier conversation."},
+    {"role": "user", "content": "Continue."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 2048,
+    "store": false,
+    "input": [
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "Hello."},
+      {"role": "assistant", "content": "Hi there."},
+      {"role": "system", "content": "Summary of the earlier conversation."},
+      {"role": "user", "content": "Continue."}
+    ]
+  }
+}

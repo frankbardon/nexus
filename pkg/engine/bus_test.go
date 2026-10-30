@@ -349,9 +349,9 @@ func TestNewEventBusWithRingSize_FallsBackOnZero(t *testing.T) {
 
 // TestDrain_ConcurrentEmitsDoNotPanic exercises the race that triggered
 // "WaitGroup is reused before previous Wait has returned" in CI: many
-// emits firing concurrently with a Drain call. Without the drainMu
-// guard around inflight.Add, this test panics under -race within a
-// few iterations.
+// emits firing concurrently with a Drain call. The in-flight tracker is
+// now a mutex-guarded counter rather than a WaitGroup, so the panic is
+// impossible by construction; this test keeps the stress shape as a guard.
 func TestDrain_ConcurrentEmitsDoNotPanic(t *testing.T) {
 	bus := NewEventBus()
 

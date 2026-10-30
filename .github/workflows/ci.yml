@@ -164,6 +164,10 @@ jobs:
   # CGO_ENABLED=0 build the `test` job exercises.
   race:
     runs-on: ubuntu-latest
+    # A job cap independent of RACE_TIMEOUT (the Makefile's per-package go test
+    # budget): without it a wedged run inherits GitHub's 6h default. The job
+    # takes ~5 minutes today, so 60 leaves ample room under contention. See #155.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -194,11 +198,13 @@ jobs:
 
       - name: Install staticcheck
         # Pinned, not @latest. staticcheck v0.8.0 requires Go >= 1.26 while this
-        # workflow pins Go 1.25 with GOTOOLCHAIN=local, so an unpinned install
+        # workflow pinned Go 1.25 with GOTOOLCHAIN=local, so an unpinned install
         # started failing the moment v0.8.0 was published -- on every commit,
-        # including ones that had already passed. v0.7.0 declares go 1.25.0.
+        # including ones that had already passed. v0.8.2 declares go 1.26.0 and
+        # also reads go1.27 export data, so it serves this 1.26 job and a local
+        # go1.27 toolchain alike.
         # Bump this together with the go-version matrix, never separately.
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.0  # keep in step with STATICCHECK_VERSION in the Makefile
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.2  # keep in step with STATICCHECK_VERSION in the Makefile
 
       - name: Lint
         run: make lint

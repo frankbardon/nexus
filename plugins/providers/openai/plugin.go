@@ -650,14 +650,19 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		}
 	}
 
-	// Build messages. OpenAI keeps system messages inline.
+	// Build messages. OpenAI keeps system messages inline, every one at its
+	// own position. The prompt registry decorates the FIRST system message
+	// only (the agent's prompt) so its sections are not repeated onto a later
+	// one such as a compaction summary.
 	var apiMessages []map[string]any
+	decoratedSystem := false
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			content := msg.Content
-			if p.prompts != nil {
+			if p.prompts != nil && !decoratedSystem {
 				content = p.prompts.Apply(content)
 			}
+			decoratedSystem = true
 			apiMessages = append(apiMessages, map[string]any{
 				"role":    "system",
 				"content": content,

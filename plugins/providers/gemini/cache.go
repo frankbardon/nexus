@@ -400,7 +400,7 @@ func (p *Plugin) createCachedContentAt(ctx context.Context, url, model, system s
 			decls = append(decls, map[string]any{
 				"name":        t.Name,
 				"description": t.Description,
-				"parameters":  sanitizeSchemaForGemini(t.Parameters),
+				"parameters":  p.sanitizeToolSchema(t.Name, t.Parameters),
 			})
 		}
 		body["tools"] = []map[string]any{{"functionDeclarations": decls}}

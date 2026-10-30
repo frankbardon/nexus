@@ -136,8 +136,12 @@ func (c *contextualizer) generate(docContext, chunk string) (string, error) {
 		},
 		Tags: map[string]string{"source_plugin": "nexus.rag.ingest"},
 	}
-	if err := c.bus.Emit("llm.request", req); err != nil {
-		return "", fmt.Errorf("emit llm.request: %w", err)
+	res := engine.PublishLLMRequest(c.bus, req)
+	if res.Err != nil {
+		return "", fmt.Errorf("emit llm.request: %w", res.Err)
+	}
+	if !res.AwaitResponse() {
+		return "", fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
 	}
 	select {
 	case prefix := <-respCh:

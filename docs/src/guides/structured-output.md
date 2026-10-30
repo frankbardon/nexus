@@ -148,7 +148,7 @@ req := events.LLMRequest{
     Stream:    true,
 }
 
-_ = bus.Emit("llm.request", req)
+engine.PublishLLMRequest(bus, req) // runs before:llm.request, then emits llm.request
 ```
 
 Use direct `ResponseFormat` when:

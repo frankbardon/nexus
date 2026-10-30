@@ -2,6 +2,8 @@
 
 Complete reference for all event types in Nexus, organized by domain.
 
+Every versioned payload struct and its current `_schema_version` is available at runtime from `events.Versions()`; see [Events — Consumer-side guard](../architecture/events.md#consumer-side-guard) for pinning them in an embedder's tests.
+
 ## Core Events
 
 | Event Type | Payload | Description |
@@ -194,6 +196,7 @@ Complete reference for all event types in Nexus, organized by domain.
 
 | Event Type | Payload | Description |
 |------------|---------|-------------|
+| `before:llm.request` | `LLMRequest` | Before a request reaches the providers (vetoable; cost tags seeded and request gates run here). Producers publish via `engine.PublishLLMRequest`, never a bare `bus.Emit("llm.request", …)` — see [Event Bus](../architecture/event-bus.md#beforellmrequest-every-producer-goes-through-the-hop) |
 | `llm.request` | `LLMRequest` | Request to an LLM provider |
 | `before:llm.response` | `LLMResponse` | Before the agent loop sees the model's response (vetoable; **veto substitutes rather than blocks** — see below) |
 | `llm.response` | `LLMResponse` | Complete LLM response |

@@ -173,6 +173,113 @@ already-redacted text at 10.
 
 Mutate to change *what* happens; veto to stop it happening at all.
 
+### `before:llm.request`: every producer goes through the hop
+
+`before:llm.request` is where the engine seeds the cost-attribution tags
+(`session_id`, `tenant`, `project`, `user`) and where every request-side gate
+and curator runs — rate limiter, token budget, tool filter, prompt-injection
+and stop-word scans, dynamic variables, routing, stream policy. A request
+emitted straight onto `llm.request` skips all of them: it is billed to no
+session and no gate ever sees it.
+
+**Handler order.** Lower priorities run first, and a veto stops dispatch, so
+an interceptor hides the request from everything after it. The shipped map:
+
+| Priority | Handler | Role |
+|---|---|---|
+| -1000 | engine tag seeder | Seeds `session_id`, `tenant`, `project`, `user` (set-if-absent). First, so every later handler — and every fanout leg — sees them. |
+| 2 | `nexus.provider.fanout` | Intercepts fanout roles; legs copy the (already seeded) request. |
+| 3 | `nexus.provider.fallback` | Snapshots the request for failover. |
+| 5 | engine schema registry | Attaches `_expects_schema` structured-output schemas. |
+| 6 | `nexus.gate.endless_loop` | Iteration counter. |
+| 7 | `nexus.gate.token_budget` | Ceiling check + reservation (tenant ceilings read the seeded `tenant`). |
+| 8 | `nexus.discovery.progressive` | Discovery tool projection. |
+| 9 | `nexus.gate.rate_limiter` | Throttle. |
+| 10 | `nexus.gate.tool_filter` | Tool allow/blocklist. |
+| 11 | `nexus.gate.prompt_injection` | Input scan. |
+| 12 | `nexus.gate.stop_words`, `nexus.memory.tool_result_clear` | Ban scan; stale tool-result clearing. |
+| 13 | `nexus.gate.approval_policy` | Policy HITL approval. |
+| 14 | `nexus.memory.tool_def_pruner` | Tool-definition pruning. |
+| 15 | `nexus.gate.context_window`, `nexus.skills` | Context estimate / compaction trigger; skill schema tagging. |
+| 20 | `nexus.system.dynvars`, `nexus.io.test` (mock mode) | Runtime-context block; mock interception. |
+| 45 / 50 | `nexus.router.classifier` / `nexus.router.metadata` | Model routing. |
+| 10000 | engine stream policy | Final word on `Stream`. |
+
+So **every producer of an `llm.request` publishes through
+`engine.PublishLLMRequest`** rather than calling `bus.Emit("llm.request", …)`
+directly — agent loops, planners, routers, memory summarisers, gate retries,
+provider failover, RAG contextualisation, HITL synthesis, and embedder code
+alike:
+
+```go
+res := engine.PublishLLMRequest(p.bus, req)
+if !res.AwaitResponse() {
+    // Blocked outright: nothing will answer this request.
+    return fmt.Errorf("llm.request vetoed: %s", res.Veto.Reason)
+}
+// Published (or intercepted): wait for the correlated llm.response.
+```
+
+It runs the hook, emits `llm.request` with whatever the handlers left in the
+payload unless one vetoed, and returns an `engine.LLMRequestResult`.
+`PublishLLMRequestAsync` is the same with the emission dispatched by
+`EmitAsync`, for a producer that bounds the provider round-trip under its own
+deadline (the fanout judge); the hop itself still runs synchronously.
+
+A veto comes in two kinds, and a producer waiting on its response must tell
+them apart:
+
+| Result | Meaning | Producer should |
+|---|---|---|
+| `Published` | `llm.request` was emitted. | Wait for the response. |
+| `Intercepted()` | A handler vetoed because it **owns the answer** and will publish the correlated `llm.response` itself. It marked the request with `engine.InterceptLLMRequest` (`Metadata["_intercepted_by"]`). | Keep waiting, as if published. |
+| `Blocked()` | Any other veto. Nothing will answer. | Give up now — don't sit out a timeout. |
+
+The two interceptors in tree are the fanout coordinator (dispatches to several
+providers, publishes one merged response) and the test IO plugin's mock mode.
+`AwaitResponse()` is `Published || Intercepted()`. Producers that only collect
+a response delivered *inside* the synchronous emit (`delegate.SyncLLM`, the
+HITL synthesizer) treat any veto, interception included, as a failure.
+
+**Recursion.** A `before:llm.request` handler that itself produces a request
+re-enters the hook: the classifier router's probe, and compaction triggered by
+the context-window gate's `memory.compact.request`. The convention that keeps
+this finite: every internal request carries a non-empty `Metadata["_source"]`,
+and every handler that emits from inside the hook skips requests that carry
+one (the classifier also stamps and checks `_routed_by`; fanout uses
+`_fanout_id`; failover uses `_fallback_id`). Gate retries are driven from the
+output side (`before:io.output`), not from a request handler, so they cannot
+loop through the hook.
+
+**Which handlers see internal requests.** The classifier router skips any
+non-empty `_source` (its recursion guard). `endless_loop` and
+`approval_policy` skip requests for which `engine.IsInternalLLMRequest` is
+true; `context_window` and `discovery.progressive` act only when
+`engine.IsConversationLLMRequest` is true — not internal and not a nested
+`subagent` / `delegate` loop, whose history and tool set are its caller's,
+not the conversation's (discovery also leaves a request offering no tools
+alone). `prompt_injection` and `stop_words` skip requests for which
+`engine.IsInternalLLMRequest` is true — a non-empty `_source` whose `task_kind`
+is not an agent-loop turn (`react_main`, `planexec_step`,
+`planexec_synthesize`, `orchestrator_decompose`, `orchestrator_synthesize`,
+`subagent`, `delegate`) — because the user text a summary quotes was already
+scanned on the turn that carried it. Agent turns stamp `_source` too (cost
+attribution), so a bare `_source != ""` test is not an internal-request test.
+The rest (`rate_limiter`, `token_budget`, `dynvars`, `tool_filter`, the
+metadata router, the curators and stream policy) apply to them like any other
+request. A blocked internal request
+fails fast: a gate retry returns invalid, a summariser or compaction releases
+its in-flight flag and leaves history as-is, a fallback retry leaves the
+original provider error to surface.
+
+**The one exception: fanout legs.** The fanout coordinator's per-provider legs
+are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
+already inside the hop (fanout's own `before:llm.request` handler); offering
+every leg again would count one logical request N times against the rate
+limiter and token budget under one shared `RequestID`. A leg inherits the parent's
+tags (cloned per leg): the parent was seeded before fanout saw it, so legs are
+billed to the same session and tenant.
+
 ### `before:llm.response`: veto means substitute
 
 `before:llm.response` is the one vetoable event where a veto does **not** block
@@ -347,6 +454,16 @@ ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 bus.Drain(ctx)
 ```
+
+Semantics:
+
+- **In flight** means any `Emit`/`EmitEvent`/`EmitVetoable` that has entered and not yet returned, nested emits included. A handler's nested emit keeps the bus busy until it returns too.
+- **Drain never blocks an emit.** Emits issued while `Drain` waits, nested or top-level, dispatch normally. `Drain` waits for a quiescent moment (in-flight count reaches zero). It does not close the bus or reject new events, so a bus that never goes quiet is bounded only by `ctx`.
+- **Drain holds no lock while waiting and starts no goroutine.** It returns `nil` once the bus is idle (immediately if it already is, even with a done `ctx`), or `ctx.Err()` on expiry. Either way the bus stays fully usable, so plugin `Shutdown` hooks that emit after a timed-out drain do not hang.
+
+In-flight tracking is a mutex-guarded counter plus an "idle" channel that is closed on every 1 → 0 transition. It replaced a `sync.WaitGroup` whose `Add`/`Wait` race guard was a mutex held across the whole `Wait`. That mutex deadlocked against nested emits from the handlers `Drain` was waiting on, then hung `Engine.Stop` after the drain timeout ([#172](https://github.com/frankbardon/nexus/issues/172), [#202](https://github.com/frankbardon/nexus/issues/202)).
+
+`LifecycleManager.Shutdown` emits `core.shutdown`, drains for up to `engine.shutdown.drain_timeout` (or the largest plugin `DrainOverride`), logs `drain timed out` on expiry, and then shuts plugins down regardless.
 
 ## Thread Safety
 

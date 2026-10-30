@@ -148,7 +148,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 }
 
 func (p *Plugin) Emissions() []string {
-	return []string{"llm.request", "io.output"}
+	return []string{"before:llm.request", "llm.request", "io.output"}
 }
 
 // handleLLMResponse tracks whether the most recent response used native structured output.

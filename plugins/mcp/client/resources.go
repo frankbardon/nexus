@@ -109,16 +109,8 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []*mcp.
 		slug := resourceSlug(r.Title, r.Name, r.URI)
 		seen[slug] = true
 		s.registerStaticResource(slug, r)
-		if s.cfg.Resources.SubscribeUpdates {
-			subCtx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-			if sess := s.getSession(); sess != nil {
-				if err := sess.Subscribe(subCtx, &mcp.SubscribeParams{URI: r.URI}); err != nil {
-					s.logger.Debug("mcp: resources/subscribe failed", "uri", r.URI, "error", err)
-				}
-			}
-			cancel()
-		}
 	}
+	s.subscribeResources(ctx, resources)
 
 	s.mu.Lock()
 	for slug := range s.staticResources {

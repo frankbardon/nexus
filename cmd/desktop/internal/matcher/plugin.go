@@ -155,6 +155,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 func (p *Plugin) Emissions() []string {
 	return []string{
 		EventMatchResult,
+		"before:llm.request",
 		"llm.request",
 		"session.meta.title",
 		"session.meta.preview",
@@ -352,10 +353,18 @@ func (p *Plugin) runMatch(req MatchRequest) {
 	// what the user actually experiences.
 	startedAt := time.Now()
 
-	if err := p.bus.Emit("llm.request", llmReq); err != nil {
+	res := engine.PublishLLMRequest(p.bus, llmReq)
+	if res.Err != nil {
 		p.emitResult(MatchResult{
 			RequestID: req.RequestID,
-			Error:     fmt.Sprintf("emitting llm.request: %v", err),
+			Error:     fmt.Sprintf("emitting llm.request: %v", res.Err),
+		})
+		return
+	}
+	if !res.AwaitResponse() {
+		p.emitResult(MatchResult{
+			RequestID: req.RequestID,
+			Error:     fmt.Sprintf("llm.request vetoed: %s", res.Veto.Reason),
 		})
 		return
 	}

@@ -2672,7 +2672,7 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
 | `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
 | `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
-| `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). The only cache key that changes the request path: the `cachedContents` lookup is skipped entirely when it is false. |
+| `cache.enabled`              | bool   | `false`                                          | Turns on the per-request in-process `cachedContents` lookup (skipped entirely when false) — the only cache key that changes the request path. **Read-only today:** nothing outside tests ever writes an entry (`createCachedContent` is unexported and has no caller, and there is no auto-population), so with `true` the lookup always misses, `cachedContent` is never set, and the key costs one in-memory map read per request and buys nothing. It does not enable Gemini prompt caching. See [Prompt Caching](../plugins/providers/gemini.md#prompt-caching). |
 | `cache.min_tokens`           | int    | `32768`                                          | Minimum tokens required for caching. Parsed, validated and logged; **not consulted by any code path today** — the auto-population probe it exists for is not implemented (`lookup` is read-only). |
 | `cache.ttl`                  | string | `1h`                                             | Default lifetime of an entry this process creates, as a **Go duration** (`5m`, `90s`, `1h`) — not restricted to `5m`/`1h`. A value `time.ParseDuration` rejects is **warned about and defaulted**, not refused. Used by the explicit `cachedContents.create` path when the caller passes no TTL of its own. |
 | `cache.max_entries`          | int    | `64`                                             | Capacity of the in-process prefix-hash → cache-name map; the oldest entry is evicted past it. |
@@ -2701,6 +2701,10 @@ zone can therefore land in a region where the configured model is not served, an
 that fails at first inference with a 404 — not at boot, because there is no
 boot-time availability probe by design. Set `location` explicitly wherever the model
 choice matters.
+
+#### Multimodal file upload
+
+There is no config key; the behaviour is fixed. An inline part (`Data`) up to 18 MiB (`18 * 1024 * 1024` bytes) is sent as `inlineData`. Under `auth: api_key`, a larger `Data` part with no `URI` is uploaded to the Gemini Files API (resumable upload) on each request that carries it and replaced by the returned URI; it needs a non-empty `mime_type`, and the provider applies no MIME allowlist or size cap of its own. Under `auth: vertex` the Files API is unavailable and the plugin has no Cloud Storage client: an oversize `Data` part with no `URI` fails the request, and the caller must supply a `URI` (for example a `gs://` object it uploaded itself) plus `mime_type`. See [Multimodal](../plugins/providers/gemini.md#multimodal).
 
 #### Per-role thinking
 
@@ -2901,7 +2905,16 @@ was inlined.
 
 Source: `plugins/tools/catalog/plugin.go`. **No configuration.** Provides the
 `tool.catalog` capability — a shared registry queried via
-`tool.catalog.query`. Required by `nexus.agent.react`.
+`tool.catalog.query`. Required by `nexus.agent.react`, and optionally
+required (auto-activated when absent) by `nexus.agent.planexec`,
+`nexus.agent.subagent` and `nexus.agent.orchestrator`.
+
+It also owns the **unknown-tool fallback**: a `tool.invoke` whose name is not
+registered, is not offered by any `tool.catalog.query` responder (e.g. the
+active AG-UI run's client tools), and is not answered synchronously by any
+other `tool.invoke` subscriber gets an error `tool.result`
+(`Error: "unknown tool: <name>"`) so the waiting agent loop continues instead
+of hanging. Always on; there is no key to disable it.
 
 ### `nexus.tool.web`
 
@@ -4651,8 +4664,9 @@ priority 5 (ahead of memory plugins).
 
 Plugins that subscribe `before:llm.request` and rewrite `request.Model`
 based on the request's metadata, tags, or an LLM-classifier judgment.
-Routers run at priority 50 (metadata) / 45 (classifier) — above gates,
-below the engine's tag seeder. Both stand down when the request already
+Routers run at priority 50 (metadata) / 45 (classifier) — after the gates
+and after the engine's tag seeder (priority -1000), so routing rules that
+match on `Tags` see the seeded `session_id`/`tenant`/`project`/`user`. Both stand down when the request already
 carries `_target_provider` (a fallback retry) or `_routed_by` (an upstream
 rule already chose a model).
 
@@ -4708,6 +4722,11 @@ Source: `plugins/discovery/progressive/plugin.go`. Hierarchical tool discovery
 — the LLM sees class-level summaries and drills into specific classes via a
 `discover` meta-tool. Intercepts `before:llm.request` (priority 8) and
 `tool.invoke` (priority 40).
+
+It reshapes only top-level conversation turns
+(`engine.IsConversationLLMRequest`) that offer tools: internal requests,
+nested `subagent` / `delegate` loops (whose tool set is scoped by their caller)
+and tool-less turns such as synthesis calls pass through unchanged.
 
 | Key                  | Type   | Default     | Description |
 |----------------------|--------|-------------|-------------|
@@ -4850,7 +4869,7 @@ Top-level keys:
 | `resources.auto_register_static`   | bool     | `true`  | When true, every static resource becomes a no-arg catalog tool. |
 | `resources.auto_register_template` | bool     | `true`  | When true, every resource template becomes a catalog tool whose inputSchema mirrors the template's variables. |
 | `resources.auto_register_max`      | int ≥ 0  | `50`    | If a server returns more static resources than this, the static auto-registration is skipped and only the generic `list_resources`/`read_resource` tools are exposed. Unlike `timeout`, this one *is* a number — the parser reads it through an int/int64/float64 coercion. Negative values are rejected at boot (the parser would silently ignore them). |
-| `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. |
+| `resources.subscribe_updates`      | bool     | `true`  | Subscribe to `resources/updated` for each auto-registered static. Notifications produce `mcp.resource.updated` events. Only honoured when the server advertises `capabilities.resources.subscribe`; otherwise it's skipped silently (Debug). A failure on a server that advertised it logs one Warn per server. |
 | `prompts.enabled`                  | bool     | `true`  | Toggle the prompt slash-command surface for the server. |
 
 #### `servers[]`
@@ -5338,6 +5357,32 @@ Tags are populated by:
 - The engine's `before:llm.request` seeder (`session_id`, plus `tenant`/`project`/`user` from `SessionMeta.Labels`).
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
+
+The seeder is subscribed before plugin `Init`/`Ready` and before a recall's
+history replay and crash resume, so **resume-driven requests are tagged**:
+a request a plugin emits from `Ready`, and every request of the unfinished
+turn that `crashResumeIfPartial` re-fires, carries the session dimensions
+like any other. Labels are re-read from `metadata/session.json` on every
+request, so labels an embedder writes after `Engine.Boot` returns apply from
+the next request on. Plugin-set tags win over seeded ones (set-if-absent).
+When the seeder cannot fully tag a request — no session, or unreadable
+session metadata (in which case `session_id` is still set) — it logs one
+`WARN` per cause per engine run rather than one per request. The seeder sees
+only requests that go through `before:llm.request`, which is why every
+in-tree producer — agent loops, planners, routers, memory summarisers and
+compaction, gate retries, provider failover retries, the fanout judge, RAG
+contextualisation, HITL synthesis — publishes through
+`engine.PublishLLMRequest`. Fanout legs are the one documented exception
+(they are copies of a request already inside the hop), and they inherit
+the parent's tags: the seeder runs at priority -1000, ahead of every other
+`before:llm.request` handler, so the parent is seeded before the fanout
+coordinator (priority 2) copies it into the legs, each leg getting its own
+copy of the tag map. Running first also means a request intercepted by the
+test IO mock (priority 20) is seeded — and its scripted `llm.response`
+carries the request's tags, as a real provider's does — and that gates read
+the seeded dimensions: `nexus.gate.token_budget` (priority 7) enforces a
+`tenant` ceiling against the tenant label. Seeding stays set-if-absent, so
+a tag the producing plugin already set still wins.
 
 `SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
 reachable rather than requiring test code to poke `Labels` directly. A

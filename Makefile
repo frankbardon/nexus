@@ -220,8 +220,11 @@ vet:
 # -- deterministically, on every commit, including ones that passed hours
 # earlier. It also passes on a developer machine running a newer Go, which is how
 # v0.8.0 reached main unnoticed while the floor was still 1.25.
+# v0.8.2 (2026.2.2) declares go 1.26.0, so it runs on CI's pinned 1.26, and it
+# reads go1.27 export data, which v0.8.0 cannot -- a local go1.27 toolchain
+# made `make lint` fail outright on v0.8.0.
 # Bump this together with the go-version matrix in .github/workflows/ci.yml.
-STATICCHECK_VERSION ?= v0.8.0
+STATICCHECK_VERSION ?= v0.8.2
 
 # check-events is deliberately NOT run per submodule: scripts/check-event-versions.sh
 # cd's to the repo top level and inspects pkg/events/ only, so running it from

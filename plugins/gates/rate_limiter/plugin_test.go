@@ -247,3 +247,21 @@ func TestRateLimiter_QueueMode_NoLeakOnShutdown(t *testing.T) {
 		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
 	}
 }
+
+// Internal requests (compaction, summaries) are real provider calls and must
+// count against the window just like agent turns — unlike the content gates,
+// the rate limiter does not skip engine.IsInternalLLMRequest payloads.
+func TestRateLimiter_CountsInternalRequests(t *testing.T) {
+	_, bus := newRejectPlugin(t, 2, 10*time.Second)
+	internal := map[string]any{"_source": "nexus.memory.compaction", "task_kind": "compaction"}
+	for i := range 2 {
+		veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: internal})
+		if veto.Vetoed {
+			t.Fatalf("request %d: should not be vetoed under limit", i)
+		}
+	}
+	veto, _ := bus.EmitVetoable("before:llm.request", &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: internal})
+	if !veto.Vetoed {
+		t.Fatal("third internal request should be rejected: internal requests must count")
+	}
+}

@@ -56,7 +56,7 @@ If a provider fails mid-stream:
 
 1. Emits `io.output.clear` to wipe partial streamed content from UI
 2. Emits `provider.fallback` notification so user sees "Switching to [provider]..."
-3. Re-emits `llm.request` targeting next provider in chain
+3. Re-publishes the request targeting the next provider in the chain, through `engine.PublishLLMRequest` — so the retry is seeded with the session's cost tags and counted by the request gates like the attempt it replaces. If a gate blocks the retry, the original provider error is left un-vetoed and surfaces.
 
 Clean restart — splicing output from two different models produces incoherent text.
 

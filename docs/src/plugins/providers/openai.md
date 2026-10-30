@@ -174,6 +174,19 @@ The provider translates Nexus tool definitions into the OpenAI function calling 
 
 Before sending a request, the provider calls `PromptRegistry.Apply()` to append dynamic sections (skills catalog, system variables, etc.) to the system prompt.
 
+### System Messages
+
+Every `system` message in the request reaches the model, in order, **at its own
+position** — on both `api: chat` (a `role: system` message) and `api:
+responses` (a `role: system` Item in `input`, never hoisted to
+`instructions`). Both APIs accept system content mid-conversation, so a summary
+or note that arrives after user or assistant turns stays exactly where its
+plugin put it. The prompt registry's sections are applied to the **first**
+system message only, so they are not repeated onto a later one.
+`nexus.llm.batch` keeps system messages inline the same way; the shared
+`pkg/openaiconform` vector `120-system-messages-stay-inline-in-order` pins it
+for both Responses serializers.
+
 ### Request Cancellation
 
 Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in-flight HTTP request context is cancelled, aborting the API call.

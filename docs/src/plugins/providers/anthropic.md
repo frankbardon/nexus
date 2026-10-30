@@ -60,6 +60,34 @@ The provider translates Nexus tool definitions into the Anthropic `tool_use` for
 
 Before sending a request, the provider calls `PromptRegistry.Apply()` to append dynamic sections (skills catalog, system variables, etc.) to the system prompt.
 
+### System Messages
+
+Every `system` message in the request reaches the model, in order. Anthropic has
+no in-conversation system role, so each one — the agent's prompt, a
+`memory.summary_buffer` / `memory.compaction` summary, a gate or posture note —
+is lifted out of `messages` into the top-level `system` field, **wherever it sat
+in the list**. A system message that arrives mid-conversation (after user or
+assistant turns) is folded into `system` in its order, not passed through as a
+user-role note. Empty system messages are skipped.
+
+- **One** system message keeps the bare-string form (`"system": "..."`), so a
+  single-prompt request is byte-for-byte what it always was.
+- **Two or more** become the array form, one `{"type":"text","text":...}` block
+  per message, in order.
+
+The prompt registry's sections are applied to the **first** system message only
+(the agent's own prompt), so they are not repeated onto a later summary block.
+
+With `cache.system` on, the system `cache_control` breakpoint sits on the
+**first** block — the stable agent prompt plus registry sections — never on a
+later block. A summary block is rewritten as the conversation grows; a
+breakpoint after it would miss on every rewrite, whereas the first-block
+breakpoint keeps the tools + agent-prompt prefix cached across them.
+
+Through v0.29 only the last system message was kept, so any plugin that injected
+one silently replaced the agent's prompt (GitHub #205). `nexus.llm.batch`
+applies the same rule to its Anthropic Messages Batch bodies.
+
 ### Request Cancellation
 
 Subscribes to `cancel.active` at priority 5. When a cancellation arrives, the in-flight HTTP request context is cancelled, aborting the API call.

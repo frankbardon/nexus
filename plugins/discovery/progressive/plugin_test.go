@@ -221,9 +221,7 @@ func TestBeforeLLMRequest_ClasslessExclude(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools: []events.ToolDef{},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Messages: []events.Message{{Role: "system", Content: "test"}}}
 	vp := &engine.VetoablePayload{Original: req}
 
 	p.handleBeforeLLMRequest(engine.Event[any]{
@@ -275,9 +273,7 @@ func TestDiscoverRevealsTools(t *testing.T) {
 	}
 
 	// Now a subsequent LLM request should include filesystem tools.
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools: []events.ToolDef{},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Messages: []events.Message{{Role: "system", Content: "test"}}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -320,9 +316,7 @@ func TestDiscoverSubclass(t *testing.T) {
 	}
 
 	// LLM request should include read_file but not write_file.
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools: []events.ToolDef{},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Messages: []events.Message{{Role: "system", Content: "test"}}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -351,9 +345,7 @@ func TestTurnScope(t *testing.T) {
 	p.revealed["filesystem"] = true
 
 	// First turn — revealed set gets reset.
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools: []events.ToolDef{},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Messages: []events.Message{{Role: "system", Content: "test"}}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -387,9 +379,7 @@ func TestAlwaysInclude(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Messages: []events.Message{{Role: "system", Content: "test"}},
-		Tools: []events.ToolDef{},
-	}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Messages: []events.Message{{Role: "system", Content: "test"}}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -442,7 +432,7 @@ func TestToolChoiceForcesReveal(t *testing.T) {
 		Payload: events.ToolDef{Name: "query_db", Description: "Query.", Class: "database"},
 	})
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "write_file"}}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "write_file"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -473,7 +463,7 @@ func TestToolChoiceNoOpWhenAlreadyVisible(t *testing.T) {
 		Payload: events.ToolDef{Name: "custom_tool"},
 	})
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "custom_tool"}}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "custom_tool"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -496,7 +486,7 @@ func TestToolChoiceUnknownToolIsNoOp(t *testing.T) {
 		Payload: events.ToolDef{Name: "read_file", Description: "Read.", Class: "filesystem"},
 	})
 
-	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "nonexistent"}}
+	req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, ToolChoice: &events.ToolChoice{Mode: "tool", Name: "nonexistent"}}
 	vp := &engine.VetoablePayload{Original: req}
 	p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: vp})
 
@@ -682,4 +672,59 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// catalogTools stands in for the full tool list an agent loop offers;
+// discovery replaces it, and leaves a tool-less request alone.
+var catalogTools = []events.ToolDef{{Name: "all_tools_placeholder"}}
+
+// TestReshapesAgentLoopTurns pins that the agent loops' own turns are
+// reshaped. They stamp _source (cost attribution, #83), and until E1-S15
+// discovery skipped every request with a non-empty _source — so it never
+// reshaped a single agent turn.
+func TestReshapesAgentLoopTurns(t *testing.T) {
+	for _, meta := range []map[string]any{
+		{"_source": "nexus.agent.react", "task_kind": "react_main"},
+		{"_source": "nexus.agent.planexec.executor", "task_kind": "planexec_step"},
+	} {
+		p := newTestPlugin()
+		p.handleToolRegister(engine.Event[any]{Type: "tool.register",
+			Payload: events.ToolDef{Name: "read_file", Description: "Read a file.", Class: "filesystem"}})
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: catalogTools, Metadata: meta,
+			Messages: []events.Message{{Role: "system", Content: "test"}}}
+		p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: &engine.VetoablePayload{Original: req}})
+		names := map[string]bool{}
+		for _, td := range req.Tools {
+			names[td.Name] = true
+		}
+		if !names["discover"] || names["all_tools_placeholder"] {
+			t.Errorf("%v: agent turn not reshaped, tools=%v", meta["task_kind"], names)
+		}
+	}
+}
+
+// TestLeavesNestedAndToolLessRequestsAlone pins the two cases discovery
+// must not touch: a nested subagent/delegate loop (caller-scoped tool set
+// that the global catalog would widen) and a turn offering no tools
+// (synthesis / decompose calls whose loop does not run tools).
+func TestLeavesNestedAndToolLessRequestsAlone(t *testing.T) {
+	cases := []struct {
+		name  string
+		meta  map[string]any
+		tools []events.ToolDef
+	}{
+		{"subagent", map[string]any{"_source": "nexus.agent.subagent.x", "task_kind": "subagent"}, []events.ToolDef{{Name: "scoped"}}},
+		{"delegate", map[string]any{"_source": "delegate.s1", "task_kind": "delegate"}, []events.ToolDef{{Name: "scoped"}}},
+		{"synthesis", map[string]any{"_source": "nexus.agent.planexec.synthesizer", "task_kind": "planexec_synthesize"}, nil},
+	}
+	for _, tc := range cases {
+		p := newTestPlugin()
+		p.handleToolRegister(engine.Event[any]{Type: "tool.register",
+			Payload: events.ToolDef{Name: "read_file", Description: "Read a file.", Class: "filesystem"}})
+		req := &events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Tools: tc.tools, Metadata: tc.meta}
+		p.handleBeforeLLMRequest(engine.Event[any]{Type: "before:llm.request", Payload: &engine.VetoablePayload{Original: req}})
+		if len(req.Tools) != len(tc.tools) || (len(tc.tools) == 1 && req.Tools[0].Name != "scoped") {
+			t.Errorf("%s: tools modified: %v", tc.name, req.Tools)
+		}
+	}
 }

@@ -144,7 +144,19 @@ func (p *Plugin) selectByJudge(fanoutID string, state *fanoutState, responses []
 		"deadline_ms", judgeDeadline.Milliseconds(),
 	)
 
-	p.bus.EmitAsync("llm.request", judgeReq)
+	// The judge call is a fresh request on its own role, so it goes through
+	// before:llm.request (seeded and gated like any other). Async, because
+	// the judge deadline below bounds the provider round-trip. Recursion
+	// guard: "_fanout_id" makes this plugin's before:llm.request handler skip
+	// it even when the judge role is itself a fanout role.
+	if res := engine.PublishLLMRequestAsync(p.bus, judgeReq); !res.AwaitResponse() {
+		p.logger.Warn("judge request vetoed, falling back to first response",
+			"fanout_id", fanoutID,
+			"reason", res.Veto.Reason,
+		)
+		p.emitFinalResponse(fanoutID, state, responses)
+		return
+	}
 
 	// Wait for judge response or timeout.
 	timer := time.NewTimer(judgeDeadline)

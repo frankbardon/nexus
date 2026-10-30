@@ -16,7 +16,9 @@ func TestSkipForHistory(t *testing.T) {
 		{"plan_skipped", map[string]any{"task_kind": "plan"}, true},
 		{"summarise_skipped", map[string]any{"task_kind": "summarise"}, true},
 		{"classify_skipped", map[string]any{"task_kind": "classify"}, true},
-		{"compact_skipped", map[string]any{"task_kind": "compact"}, true},
+		// nexus.memory.compaction stamps engine.TaskKindCompaction; the list
+		// once said "compact" and the summary leaked into history.
+		{"compaction_skipped", map[string]any{"task_kind": "compaction", "_source": "nexus.memory.compaction"}, true},
 		{"subagent_skipped", map[string]any{"task_kind": "subagent"}, true},
 		// pkg/delegate stamps this on every LLM request it makes inside a
 		// sub-session (pkg/delegate/runtime.go, requestLLM). The sub-session

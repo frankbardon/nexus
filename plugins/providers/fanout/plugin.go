@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -115,6 +116,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.request",
 		"llm.request",
 		"before:llm.response",
 		"llm.response",
@@ -162,7 +164,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	p.unsubs = append(p.unsubs,
-		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithPriority(2), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleResponse, engine.WithPriority(1), engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fanout.chosen", p.handleUserChoice, engine.WithSource(pluginID)),
@@ -213,12 +215,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		return
 	}
 
-	// Veto the original request — we'll re-emit targeted copies.
+	// Intercept the original request — we'll re-emit targeted copies and
+	// publish one merged llm.response for it, so the producer keeps waiting
+	// rather than treating the veto as a block.
 	fanoutID := engine.GenerateID()
-	vp.Veto = engine.VetoResult{
-		Vetoed: true,
-		Reason: fmt.Sprintf("fanout: dispatching to %d providers", len(providers)),
-	}
+	engine.InterceptLLMRequest(vp, req, pluginID,
+		fmt.Sprintf("fanout: dispatching to %d providers", len(providers)))
 
 	// Build targets list for the event.
 	targets := make([]events.ProviderFanoutTarget, len(providers))
@@ -275,6 +277,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		fanReq := *req
 		fanReq.Model = pc.Model
 		fanReq.Metadata = newMeta
+		// Legs skip the before:llm.request hop, so they carry exactly the
+		// tags the parent had when it reached this handler — the engine's
+		// seeder runs first, so that includes session_id and the
+		// tenant/project/user labels. Each leg gets its own map: the legs
+		// are dispatched concurrently and must not alias the parent's.
+		fanReq.Tags = maps.Clone(req.Tags)
 		fanReq.Stream = false // fanout requires complete responses
 		// The per-provider entry's own configuration — max_tokens, effort,
 		// temperature, the API-surface selector and the native provider blocks
@@ -282,7 +290,16 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		// request already carries. Each leg gets its own copy, so a non-first
 		// leg is configured by its own entry rather than the role's first one.
 		engine.StampModelConfig(&fanReq, pc)
+		// The intercept marker belongs to the parent request, not the legs.
+		delete(fanReq.Metadata, engine.MetaInterceptedBy)
 
+		// Deliberate exception to "every llm.request goes through
+		// engine.PublishLLMRequest": a leg is a copy of a request that is
+		// itself already IN the before:llm.request hop (this handler), so
+		// offering it again would run the request-side gates once per leg
+		// against one logical request — the rate limiter and token budget
+		// would count N requests that share one RequestID, and a leg vetoed
+		// mid-fanout would leave the collector waiting out its deadline.
 		p.bus.EmitAsync("llm.request", fanReq)
 	}
 
@@ -322,14 +339,15 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	state.responses = append(state.responses, resp)
 	state.receivedAt = append(state.receivedAt, time.Now())
 	state.received++
-	allDone := state.received >= state.expected
+	received := state.received
+	allDone := received >= state.expected
 	state.mu.Unlock()
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "fanout response received",
 		"fanout_id", fanoutID,
 		"provider", provider,
 		"model", resp.Model,
-		"received", state.received,
+		"received", received,
 		"expected", state.expected,
 	)
 

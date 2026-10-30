@@ -204,6 +204,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 
 func (p *Plugin) Emissions() []string {
 	return []string{
+		"before:llm.request",
 		"llm.request",
 	}
 }
@@ -299,7 +300,10 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 	systemMsg := defaultSystemPrompt
 	userMsg := buildUserPrompt(req, p.maxActionRefChars)
 
-	emitErr := p.bus.Emit("llm.request", events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
+	// Any veto — an interception included — ends in the "no response"
+	// error below: this call only collects a response delivered inside the
+	// synchronous emit, and the caller falls back to the unsynthesized prompt.
+	res := engine.PublishLLMRequest(p.bus, events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Role: p.modelRole,
 		Messages: []events.Message{
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: userMsg},
@@ -312,8 +316,11 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	})
-	if emitErr != nil {
-		return "", fmt.Errorf("emit llm.request: %w", emitErr)
+	if res.Err != nil {
+		return "", fmt.Errorf("emit llm.request: %w", res.Err)
+	}
+	if res.Veto.Vetoed {
+		return "", fmt.Errorf("synthesizer llm.request vetoed: %s", res.Veto.Reason)
 	}
 
 	select {

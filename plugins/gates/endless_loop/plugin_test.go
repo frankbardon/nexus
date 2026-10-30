@@ -121,3 +121,62 @@ func TestEndlessLoop_Warning(t *testing.T) {
 		t.Fatalf("expected 1 warning, got %d", len(warnings))
 	}
 }
+
+// TestEndlessLoop_CountsAgentLoopTurns pins that the agent loops' own
+// iterations count. They stamp _source on every turn (cost attribution,
+// #83), and until E1-S15 this gate skipped any non-empty _source — so a
+// react turn could iterate forever and the limit never fired. Nested loops
+// (subagent, delegate) count toward the parent turn: they run inside it and
+// rely on this gate as their iteration cap.
+func TestEndlessLoop_CountsAgentLoopTurns(t *testing.T) {
+	for _, meta := range []map[string]any{
+		{"_source": "nexus.agent.react", "task_kind": "react_main"},
+		{"_source": "nexus.agent.planexec.executor", "task_kind": "planexec_step"},
+		{"_source": "nexus.agent.orchestrator.decompose", "task_kind": "orchestrator_decompose"},
+		{"_source": "nexus.agent.subagent.s1", "task_kind": "subagent"},
+		{"_source": "delegate.sub-1", "task_kind": "delegate"},
+	} {
+		bus := engine.NewEventBus()
+		p := New().(*Plugin)
+		p.bus = bus
+		p.logger = testLogger
+		p.maxIterations = 3
+		bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest, engine.WithPriority(10))
+
+		req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Metadata: meta}
+		for i := 1; i <= 3; i++ {
+			if res, _ := bus.EmitVetoable("before:llm.request", &req); res.Vetoed {
+				t.Fatalf("%v: vetoed at iteration %d, limit 3", meta["task_kind"], i)
+			}
+		}
+		if res, _ := bus.EmitVetoable("before:llm.request", &req); !res.Vetoed {
+			t.Fatalf("%v: iteration 4 not vetoed — agent-loop turns are not counted", meta["task_kind"])
+		}
+	}
+}
+
+// TestEndlessLoop_InternalRequestsDoNotCount pins that internal requests
+// interleaved with a turn's iterations do not consume its budget.
+func TestEndlessLoop_InternalRequestsDoNotCount(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	p.bus = bus
+	p.logger = testLogger
+	p.maxIterations = 2
+	bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest, engine.WithPriority(10))
+
+	turn := events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+		Metadata: map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main"}}
+	internal := events.LLMRequest{SchemaVersion: events.LLMRequestVersion,
+		Metadata: map[string]any{"_source": "nexus.memory.compaction", "task_kind": engine.TaskKindCompaction}}
+	for i := 0; i < 2; i++ {
+		if res, _ := bus.EmitVetoable("before:llm.request", &turn); res.Vetoed {
+			t.Fatalf("turn %d vetoed", i)
+		}
+		for j := 0; j < 3; j++ {
+			if res, _ := bus.EmitVetoable("before:llm.request", &internal); res.Vetoed {
+				t.Fatal("internal request vetoed")
+			}
+		}
+	}
+}

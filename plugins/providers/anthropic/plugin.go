@@ -754,13 +754,19 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// different thinking objects on the wire.
 	applyThinking(body, p.resolveThinking(req), p.logger)
 
-	// Extract system prompt and build messages.
-	var systemPrompt string
+	// Extract system messages and build messages. Every system message is
+	// kept, in order, wherever it sits in the list: Anthropic has no
+	// in-conversation system role, so a mid-conversation one (a compaction
+	// summary, a gate note) is folded into the top-level system field rather
+	// than replacing whatever came before it.
+	var systemTexts []string
 	var apiMessages []map[string]any
 
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			systemPrompt = msg.Content
+			if msg.Content != "" {
+				systemTexts = append(systemTexts, msg.Content)
+			}
 			continue
 		}
 
@@ -770,11 +776,8 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 		}
 	}
 
-	if p.prompts != nil {
-		systemPrompt = p.prompts.Apply(systemPrompt)
-	}
-	if systemPrompt != "" {
-		body["system"] = systemPrompt
+	if sys := buildSystemField(systemTexts, p.prompts); sys != nil {
+		body["system"] = sys
 	}
 	body["messages"] = apiMessages
 
@@ -1646,4 +1649,48 @@ func (p *Plugin) emitErrorInfo(info events.ErrorInfo) {
 	}
 
 	_ = p.bus.Emit("core.error", info)
+}
+
+// buildSystemField assembles the Anthropic top-level `system` value from the
+// request's system messages, in order.
+//
+// The prompt registry's sections decorate the FIRST system message only, the
+// agent's own prompt, so they are not repeated onto every later block. With
+// no system message at all, the registry output alone becomes the prompt.
+//
+// One system text keeps the bare-string wire form, byte-compatible with what
+// a single-system-message request has always sent. Two or more become the
+// array-of-text-blocks form, one block per message, so each stays separate
+// and cache_control can sit on the stable first block (see
+// applySystemCacheControl). Returns nil when there is nothing to send.
+func buildSystemField(texts []string, prompts *engine.PromptRegistry) any {
+	first := ""
+	if len(texts) > 0 {
+		first = texts[0]
+	}
+	if prompts != nil {
+		first = prompts.Apply(first)
+	}
+	if len(texts) > 0 {
+		texts[0] = first
+	} else if first != "" {
+		texts = []string{first}
+	}
+	switch len(texts) {
+	case 0:
+		return nil
+	case 1:
+		if texts[0] == "" {
+			return nil
+		}
+		return texts[0]
+	}
+	blocks := make([]map[string]any, 0, len(texts))
+	for _, t := range texts {
+		if t == "" {
+			continue
+		}
+		blocks = append(blocks, map[string]any{"type": "text", "text": t})
+	}
+	return blocks
 }

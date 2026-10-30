@@ -14,6 +14,8 @@
 // task_kind value, and main agent loops do not appear in this set.
 package internalflow
 
+import "github.com/frankbardon/nexus/pkg/engine"
+
 // internalTaskKinds enumerates the task_kind values produced by sub-flows
 // memory plugins should not record in the main conversation history.
 // Agent main loops (react_main, planexec_step, orchestrator_decompose,
@@ -23,9 +25,12 @@ var internalTaskKinds = map[string]bool{
 	"plan":      true, // dynamic / static planner
 	"classify":  true, // classifier router probe
 	"summarise": true, // summary_buffer / compaction summary call
-	"compact":   true, // explicit compaction
-	"subagent":  true, // subagent has its own scratch history
-	"delegate":  true, // delegated sub-session keeps its own history
+	// nexus.memory.compaction's summary call. The shared constant is the
+	// fix for a drift: this list said "compact" while the producer sent
+	// "compaction", so the compaction summary was recorded into history.
+	engine.TaskKindCompaction: true,
+	engine.TaskKindSubagent:   true, // subagent has its own scratch history
+	engine.TaskKindDelegate:   true, // delegated sub-session keeps its own history
 }
 
 // The delegate entry was missing until a topology of

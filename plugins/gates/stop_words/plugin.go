@@ -154,6 +154,14 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
+	// Internal requests (summaries, compaction, gate/judge calls, planner
+	// and classifier probes) carry user text that already passed this gate
+	// on the agent turn that sent it; re-scanning a summary that quotes it
+	// would only fail the sub-flow. Agent-loop turns are still scanned.
+	if engine.IsInternalLLMRequest(req.Metadata) {
+		return
+	}
+
 	// Check user messages for stop words.
 	for _, msg := range req.Messages {
 		if msg.Role != "user" {

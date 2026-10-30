@@ -366,3 +366,32 @@ func TestRun_UnregisteredExtraPluginFailsBoot(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// TestRun_ExtraPluginOverridesBuiltin pins the collision behavior: an
+// ExtraPlugins entry whose ID matches a built-in registered by
+// allplugins.RegisterAll replaces that built-in (it is registered after
+// RegisterAll and the registry is last-Register-wins), so the engine boots
+// the embedder's factory, not Nexus's.
+func TestRun_ExtraPluginOverridesBuiltin(t *testing.T) {
+	const builtinID = "nexus.observe.thinking"
+	c, sessionsRoot := buildExtraPluginCase(t, builtinID)
+
+	fake := &fakeExtraPlugin{id: builtinID}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := Run(ctx, c, Options{
+		SessionsRoot: sessionsRoot,
+		ExtraPlugins: map[string]engine.PluginFactory{
+			builtinID: func() engine.Plugin { return fake },
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Pass {
+		t.Fatalf("expected pass, got fail: %+v", res.Assertions)
+	}
+	if !fake.initCalled {
+		t.Error("expected the ExtraPlugins factory to shadow the same-ID built-in")
+	}
+}

@@ -69,6 +69,9 @@ func Run(ctx context.Context, req *Request) (*Response, error) {
 		return nil, ErrEngineBoot(err)
 	}
 	allplugins.RegisterAll(eng.Registry)
+	for id, factory := range req.ExtraPlugins {
+		eng.Registry.Register(id, factory)
+	}
 
 	bootCtx, bootCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer bootCancel()

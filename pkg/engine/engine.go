@@ -333,6 +333,14 @@ func (e *Engine) Boot(ctx context.Context) error {
 		_ = journal.Sweep(root, e.Config.Journal.RetainDays)
 	}()
 
+	// Seed baseline cost-attribution tags onto every llm.request. Installed
+	// before Lifecycle.Boot and the recall branch on purpose: a plugin's
+	// Ready, replayHistory and crashResumeIfPartial can all start agent work,
+	// and crashResumeIfPartial re-fires a whole unfinished turn synchronously.
+	// Installing it after them left every request of that turn with no
+	// session dimensions at all (#148). See tag_seeder.go.
+	e.installTagSeeder()
+
 	if err := e.Lifecycle.Boot(ctx); err != nil {
 		return fmt.Errorf("boot failed: %w", err)
 	}
@@ -355,36 +363,7 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// Install schema registry bus subscriptions.
 	e.runUnsubs = append(e.runUnsubs, e.Schemas.Install(e.Bus)...)
 
-	// Seed baseline cost-attribution tags onto every llm.request before any
-	// router/gate runs. Tags must be attached at request creation per the
-	// DigitalApplied 2026 production guide; the engine owns the session
-	// dimensions (tenant/project/user/session_id), plugins layer their own
-	// (source_plugin, task_kind, parent_call_id) downstream.
-	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("before:llm.request", func(event Event[any]) {
-		vp, ok := event.Payload.(*VetoablePayload)
-		if !ok || e.Session == nil {
-			return
-		}
-		req, ok := vp.Original.(*events.LLMRequest)
-		if !ok {
-			return
-		}
-		meta, err := e.Session.SessionMetadata()
-		if err != nil {
-			return
-		}
-		if req.Tags == nil {
-			req.Tags = make(map[string]string)
-		}
-		setTagIfAbsent(req.Tags, "session_id", e.Session.ID)
-		for _, k := range []string{"tenant", "project", "user"} {
-			if v, ok := meta.Labels[k]; ok && v != "" {
-				setTagIfAbsent(req.Tags, k, v)
-			}
-		}
-	}, WithPriority(100), WithSource("nexus.engine.tag_seeder")))
-
-	// Give SessionMeta.Labels — the store the seeder above reads tenant/
+	// Give SessionMeta.Labels — the store the tag seeder reads tenant/
 	// project/user from — a real write path: before:session.tag.set and
 	// before:session.tag.delete, with the reserved ("_"-prefixed) namespace
 	// unconditionally barred from this path. See session_tags.go.
