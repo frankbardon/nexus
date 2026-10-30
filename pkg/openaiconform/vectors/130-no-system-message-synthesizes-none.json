@@ -1,0 +1,23 @@
+{
+  "id": "no-system-message-synthesizes-none",
+  "title": "A request with no system message produces no system Item",
+  "rationale": "When the request carries no system message, the provider fills one from the prompt registry (GitHub #216) -- but only when the registry renders something. With nothing to add, neither serializer may synthesize a system Item, empty or otherwise: an empty system message is noise on the wire and a body divergence between the two surfaces. The corpus builds with no prompt registry (a provider-only concern the batch coordinator does not have), so this pins the shared half of the #216 fix: the registry-less no-system-message body is identical on both surfaces and starts with the user turn.",
+  "model": "gpt-5.1",
+  "max_tokens": 1024,
+  "reasoning": {"mode": "off"},
+  "messages": [
+    {"role": "user", "content": "Hello."},
+    {"role": "assistant", "content": "Hi there."},
+    {"role": "user", "content": "Continue."}
+  ],
+  "body": {
+    "model": "gpt-5.1",
+    "max_output_tokens": 1024,
+    "store": false,
+    "input": [
+      {"role": "user", "content": "Hello."},
+      {"role": "assistant", "content": "Hi there."},
+      {"role": "user", "content": "Continue."}
+    ]
+  }
+}
