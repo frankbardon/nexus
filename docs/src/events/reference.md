@@ -2,6 +2,8 @@
 
 Complete reference for all event types in Nexus, organized by domain.
 
+Every versioned payload struct and its current `_schema_version` is available at runtime from `events.Versions()`; see [Events — Consumer-side guard](../architecture/events.md#consumer-side-guard) for pinning them in an embedder's tests.
+
 ## Core Events
 
 | Event Type | Payload | Description |

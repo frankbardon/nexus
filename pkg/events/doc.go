@@ -46,13 +46,32 @@
 // Each of those additions is an optional field, so neither needed a
 // compat migrator — see the mutation rules below.
 //
+// # Consumer-side pinning
+//
+// Versions returns the whole manifest — payload struct name to its
+// `<Name>Version` constant — so an embedder pinned to a released Nexus
+// can name the payloads it reads in one table test and get a single
+// failure listing every one that moved on a pin bump. `make check-events`
+// is the producer-side guard; it diffs git revisions and cannot run from
+// a module cache. Versions is the fact a consumer asserts against.
+//
+// A version pin is NOT a complete guard. An additive field is not required
+// to bump the version and usually does not (see below; the io.input and
+// llm.request bumps above were the author's choice, not the rule), so a
+// payload can gain a field a consumer ought to start reading while its
+// version stays put. A consumer that must react
+// to new fields reads the release notes (the GitHub Release for each tag)
+// for the payloads it pins; the version only signals a breaking change.
+//
 // # Adding a new event type
 //
 //  1. Define the struct in the appropriate per-domain file
 //     (core.go, llm.go, agent.go, …) with a SchemaVersion int field
 //     tagged `json:"_schema_version"` as the first declared field.
 //  2. Add a <Name>Version = 1 constant alongside the struct.
-//  3. Producers must stamp `SchemaVersion = <Name>Version` on every
+//  3. List it in the versions manifest in versions.go (what Versions
+//     returns); TestVersionsManifestCoversEveryConstant fails until you do.
+//  4. Producers must stamp `SchemaVersion = <Name>Version` on every
 //     literal they emit. The `make check-events` lint rule catches
 //     mutations to existing structs that forget to bump the constant;
 //     net-new structs are not lint-enforced (no diff).

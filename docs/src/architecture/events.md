@@ -138,6 +138,63 @@ tolerable — the operator just bumps the version trivially. False
 negatives (a rename slipping through) are the failure case the rule
 guards against; the position+type+name comparator catches that class.
 
+## Consumer-side guard
+
+`make check-events` is a **producer-side** guard: it diffs two git
+revisions of a Nexus checkout, so an embedder pinned to a released Nexus
+from its module cache cannot run it. The consumer-side fact is
+`events.Versions()`, an exported manifest mapping every versioned payload
+struct name (`"ToolCall"`, `"LLMRequest"`, `"UserInput"`, …) to its
+`<Name>Version` constant. It is keyed by **struct**, not event type,
+because one struct rides several topics (`ToolCall` is both
+`before:tool.invoke` and `tool.invoke`) and the version belongs to the
+struct. Each call returns a fresh copy, so a caller cannot mutate it.
+
+Pin the payloads your own code reads in one table, so a Nexus bump fails
+once and names every payload that moved:
+
+```go
+func TestNexusPayloadPins(t *testing.T) {
+    pinned := map[string]int{
+        "ToolCall":   1,
+        "LLMRequest": 2,
+        "UserInput":  3,
+    }
+    current := events.Versions()
+    for name, want := range pinned {
+        got, ok := current[name]
+        if !ok {
+            t.Errorf("%s: no longer a versioned payload", name)
+            continue
+        }
+        if got != want {
+            t.Errorf("%s: pinned v%d, running v%d", name, want, got)
+        }
+    }
+}
+```
+
+On a failure, read the moved payload against your own use, update the
+pin, and register or adopt any `pkg/events/compat` migrator the release
+ships.
+
+### What a pin does not catch
+
+**Additive fields do not have to bump the version, and usually do not.**
+(The `UserInput` and `LLMRequest` bumps were authors choosing to bump
+for an additive field; the lint rule never requires it.) A payload can
+gain a field your code ought to start reading while its `<Name>Version`
+stays put — the pin passes. The version only signals a change an old consumer could
+misread (remove, rename, retype). A consumer that must react to new
+fields reads the release notes — the GitHub Release for each Nexus tag —
+for the payloads it pins. There is no separate additive-change process.
+
+The manifest is kept honest by
+`TestVersionsManifestCoversEveryConstant` in
+`pkg/events/versions_test.go`, which parses the package and fails when a
+`<Name>Version` constant is missing from the manifest, disagrees with
+it, or has been removed while its entry stayed.
+
 ## Author guide
 
 ### Adding a new event type
@@ -148,6 +205,9 @@ guards against; the position+type+name comparator catches that class.
 2. Add `<Name>Version = 1` to that file's version-constants block.
 3. List the struct in `pkg/events/version_test.go`'s
    `versionedPayloads()` table so the round-trip test covers it.
+   Also add it to the `versions` manifest in `pkg/events/versions.go`
+   (what `events.Versions()` returns); the manifest test fails until
+   you do.
 4. Producers must stamp `SchemaVersion: events.<Name>Version` on every
    literal they emit.
 
