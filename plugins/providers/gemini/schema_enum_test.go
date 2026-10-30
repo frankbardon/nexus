@@ -165,3 +165,25 @@ func TestSanitizeToolSchema_WarnsOncePerToolPath(t *testing.T) {
 		t.Errorf("warn count = %d, want 1 (deduped across turns)", n)
 	}
 }
+
+func TestSanitizeResponseSchema_WarnsOnInvalidEnum(t *testing.T) {
+	p, logs := newEnumTestPlugin()
+	in := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"level": map[string]any{"type": "string", "enum": []any{"low", 2.0}},
+		},
+	}
+	out := p.sanitizeResponseSchema(in)
+	lv := out["properties"].(map[string]any)["level"].(map[string]any)
+	if !reflect.DeepEqual(lv["enum"], []any{"low"}) {
+		t.Errorf("enum = %#v, want [low]", lv["enum"])
+	}
+	if !strings.Contains(logs.String(), "gemini: responseSchema responseSchema.properties.level.enum[1]") {
+		t.Errorf("warning should name responseSchema and path, got: %s", logs.String())
+	}
+	p.sanitizeResponseSchema(in)
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
+		t.Errorf("warn count = %d, want 1", n)
+	}
+}

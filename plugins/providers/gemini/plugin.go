@@ -617,7 +617,7 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 		case "json_schema":
 			gen["responseMimeType"] = "application/json"
 			if rf.Schema != nil {
-				gen["responseSchema"] = sanitizeSchemaForGemini(rf.Schema)
+				gen["responseSchema"] = p.sanitizeResponseSchema(rf.Schema)
 			}
 		}
 	}
@@ -859,8 +859,21 @@ func sanitizeSchemaForGemini(schema map[string]any) map[string]any {
 // (once per tool+path+detail) for every lossy repair so an operator can find
 // and fix the offending tool. One bad tool must never 400 the whole catalog.
 func (p *Plugin) sanitizeToolSchema(toolName string, schema map[string]any) map[string]any {
+	return p.sanitizeSchemaWarn(fmt.Sprintf("tool %q", toolName), "tool", toolName, "parameters", schema)
+}
+
+// sanitizeResponseSchema sanitizes a structured-output responseSchema with the
+// same once-per-path warning as tool schemas; the label is "responseSchema".
+func (p *Plugin) sanitizeResponseSchema(schema map[string]any) map[string]any {
+	return p.sanitizeSchemaWarn("responseSchema", "schema", "responseSchema", "responseSchema", schema)
+}
+
+// sanitizeSchemaWarn runs sanitizeSchemaAt, logging each lossy repair once per
+// (owner, path, detail). label prefixes the message; attrKey/owner become the
+// structured log attribute identifying the schema's owner.
+func (p *Plugin) sanitizeSchemaWarn(label, attrKey, owner, root string, schema map[string]any) map[string]any {
 	warn := func(path, detail string) {
-		key := toolName + "\x00" + path + "\x00" + detail
+		key := owner + "\x00" + path + "\x00" + detail
 		if _, seen := p.schemaWarned.LoadOrStore(key, struct{}{}); seen {
 			return
 		}
@@ -868,10 +881,10 @@ func (p *Plugin) sanitizeToolSchema(toolName string, schema map[string]any) map[
 		if logger == nil {
 			logger = slog.Default()
 		}
-		logger.Warn(fmt.Sprintf("gemini: tool %q %s %s", toolName, path, detail),
-			"tool", toolName, "path", path)
+		logger.Warn(fmt.Sprintf("gemini: %s %s %s", label, path, detail),
+			attrKey, owner, "path", path)
 	}
-	return sanitizeSchemaAt(schema, "parameters", warn)
+	return sanitizeSchemaAt(schema, root, warn)
 }
 
 // schemaWarnFunc reports one lossy schema repair at a JSON path. nil
