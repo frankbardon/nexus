@@ -5339,6 +5339,19 @@ Tags are populated by:
 - Each `llm.request`-emitting plugin (`source_plugin`, plus `task_kind` on `req.Metadata`).
 - Plugins routing decisions (`_routed_by`, `_routed_rule`, `_downgraded_by`, `_downgraded_from` on `req.Metadata`).
 
+The seeder is subscribed before plugin `Init`/`Ready` and before a recall's
+history replay and crash resume, so **resume-driven requests are tagged**:
+a request a plugin emits from `Ready`, and every request of the unfinished
+turn that `crashResumeIfPartial` re-fires, carries the session dimensions
+like any other. Labels are re-read from `metadata/session.json` on every
+request, so labels an embedder writes after `Engine.Boot` returns apply from
+the next request on. Plugin-set tags win over seeded ones (set-if-absent).
+When the seeder cannot fully tag a request — no session, or unreadable
+session metadata (in which case `session_id` is still set) — it logs one
+`WARN` per cause per engine run rather than one per request. The seeder sees
+only requests that go through `before:llm.request`; a plugin that emits
+`llm.request` directly without the vetoable hop is not seeded.
+
 `SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
 reachable rather than requiring test code to poke `Labels` directly. A
 plugin sets a general-namespace label by emitting the vetoable
