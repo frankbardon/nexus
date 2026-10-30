@@ -49,6 +49,30 @@ Any plugin can emit `agent.tool_choice` with `AgentToolChoice{Mode, ToolName, Du
 
 1. All registered tools → 2. `nexus.gate.tool_filter` (config include/exclude) → 3. `before:llm.request` gate modifications → 4. Resolve tool choice (event override > config sequence > config default) → 5. Validate (named tool filtered out → fall back to required) → 6. Provider maps to native or simulates.
 
+## Unknown-Tool Fallback
+
+`nexus.tool.catalog` answers any `tool.invoke` nobody handles with an error
+`tool.result` (`Error: "unknown tool: <name>"`), so a hallucinated tool name can't
+hang an agent loop waiting on `tool.result` (issue #203).
+
+- **Claim** (`tool.invoke` priority -100): name registered via `tool.register`,
+  or present in a fresh `tool.catalog.query` snapshot (which picks up the
+  active AG-UI run's client tools, appended by `nexus.io.agui` at priority 60)
+  → leave it alone. Otherwise record `ToolCall.ID` as unclaimed. Runs before
+  agui (priority 0) suspends and ends the run.
+- **Observe** (`tool.result` priority 1): an unclaimed ID whose result appears
+  mid-dispatch is marked answered — covers synchronous handlers of
+  unregistered names (progressive discovery's `discover` meta-tool).
+- **Settle** (`tool.invoke` priority 1000, after the tool cache at 95):
+  unclaimed and unanswered → replay short-circuit, else emit
+  `before:tool.result` → `tool.result`.
+
+Registered tools are never synthesized for, even when answered asynchronously.
+Calls with empty `ID` are skipped. ReAct requires the catalog; planexec,
+subagent and orchestrator require it optionally so every loop is covered.
+A plugin that handles an unregistered tool name **asynchronously** would get a
+duplicate result — register the name (or contribute it to `tool.catalog.query`).
+
 ## Parallel Tool Dispatch
 
 ReAct agent can fan out multiple tool calls from a single LLM response across bounded goroutines instead of running them one at a time. Opt-in, ReAct-only.

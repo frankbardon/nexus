@@ -148,6 +148,13 @@ inline and produces the `tool.result` that streams as a normal `TOOL_CALL_RESULT
 Client tools are distinguished purely by **origin** (they came from
 `RunAgentInput.tools`).
 
+A tool call that is **neither** — not a server tool and not advertised by the
+current run (a hallucinated name, or a client tool from an earlier run) — does
+not suspend the run and does not hang it: `nexus.tool.catalog` answers the
+`tool.invoke` with an error `tool.result` (`unknown tool: <name>`), which streams
+as a `TOOL_CALL_RESULT`, the agent continues, and the run ends with
+`RUN_FINISHED` as usual.
+
 ### The interrupt anchor
 
 `RUN_FINISHED(interrupt)` carries an `Interrupt` payload in its `result` field.

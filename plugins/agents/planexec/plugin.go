@@ -112,11 +112,18 @@ func New() engine.Plugin {
 	}
 }
 
-func (p *Plugin) ID() string                        { return pluginID }
-func (p *Plugin) Name() string                      { return pluginName }
-func (p *Plugin) Version() string                   { return version }
-func (p *Plugin) Dependencies() []string            { return nil }
-func (p *Plugin) Requires() []engine.Requirement    { return nil }
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return pluginName }
+func (p *Plugin) Version() string        { return version }
+func (p *Plugin) Dependencies() []string { return nil }
+
+// Requires auto-activates the shared tool catalog (optional, so a host that
+// deliberately omits it still boots). Besides the registry, the catalog owns
+// the unknown-tool fallback: a hallucinated tool name gets an error
+// tool.result instead of leaving this loop waiting forever.
+func (p *Plugin) Requires() []engine.Requirement {
+	return []engine.Requirement{{Capability: "tool.catalog", Optional: true}}
+}
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Init(ctx engine.PluginContext) error {

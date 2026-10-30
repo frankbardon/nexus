@@ -2901,7 +2901,16 @@ was inlined.
 
 Source: `plugins/tools/catalog/plugin.go`. **No configuration.** Provides the
 `tool.catalog` capability — a shared registry queried via
-`tool.catalog.query`. Required by `nexus.agent.react`.
+`tool.catalog.query`. Required by `nexus.agent.react`, and optionally
+required (auto-activated when absent) by `nexus.agent.planexec`,
+`nexus.agent.subagent` and `nexus.agent.orchestrator`.
+
+It also owns the **unknown-tool fallback**: a `tool.invoke` whose name is not
+registered, is not offered by any `tool.catalog.query` responder (e.g. the
+active AG-UI run's client tools), and is not answered synchronously by any
+other `tool.invoke` subscriber gets an error `tool.result`
+(`Error: "unknown tool: <name>"`) so the waiting agent loop continues instead
+of hanging. Always on; there is no key to disable it.
 
 ### `nexus.tool.web`
 
