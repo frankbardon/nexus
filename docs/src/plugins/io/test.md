@@ -48,7 +48,7 @@ plugins:
 
 When `mock_responses` is configured, the plugin intercepts `before:llm.request` (at priority 20, after gates at priority 10) and injects synthetic `llm.response` events instead of letting requests reach the real LLM provider. No API key needed, millisecond execution.
 
-Gates still fire first — a stop words gate can veto a request before the mock ever sees it. Responses are consumed in order; the last one repeats for any remaining requests.
+Gates still fire first — a stop words gate can veto a request before the mock ever sees it. The engine's cost-attribution tag seeder (priority -1000) runs ahead of the mock too, so an intercepted request carries `session_id` and the session's `tenant`/`project`/`user` labels, and the synthetic `llm.response` copies the request's tags as a real provider does. Responses are consumed in order; the last one repeats for any remaining requests.
 
 Mock responses can include tool calls for testing tool execution flows:
 

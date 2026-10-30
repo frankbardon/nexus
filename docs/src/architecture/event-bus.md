@@ -182,6 +182,29 @@ and stop-word scans, dynamic variables, routing, stream policy. A request
 emitted straight onto `llm.request` skips all of them: it is billed to no
 session and no gate ever sees it.
 
+**Handler order.** Lower priorities run first, and a veto stops dispatch, so
+an interceptor hides the request from everything after it. The shipped map:
+
+| Priority | Handler | Role |
+|---|---|---|
+| -1000 | engine tag seeder | Seeds `session_id`, `tenant`, `project`, `user` (set-if-absent). First, so every later handler — and every fanout leg — sees them. |
+| 2 | `nexus.provider.fanout` | Intercepts fanout roles; legs copy the (already seeded) request. |
+| 3 | `nexus.provider.fallback` | Snapshots the request for failover. |
+| 5 | engine schema registry | Attaches `_expects_schema` structured-output schemas. |
+| 6 | `nexus.gate.endless_loop` | Iteration counter. |
+| 7 | `nexus.gate.token_budget` | Ceiling check + reservation (tenant ceilings read the seeded `tenant`). |
+| 8 | `nexus.discovery.progressive` | Discovery tool projection. |
+| 9 | `nexus.gate.rate_limiter` | Throttle. |
+| 10 | `nexus.gate.tool_filter` | Tool allow/blocklist. |
+| 11 | `nexus.gate.prompt_injection` | Input scan. |
+| 12 | `nexus.gate.stop_words`, `nexus.memory.tool_result_clear` | Ban scan; stale tool-result clearing. |
+| 13 | `nexus.gate.approval_policy` | Policy HITL approval. |
+| 14 | `nexus.memory.tool_def_pruner` | Tool-definition pruning. |
+| 15 | `nexus.gate.context_window`, `nexus.skills` | Context estimate / compaction trigger; skill schema tagging. |
+| 20 | `nexus.system.dynvars`, `nexus.io.test` (mock mode) | Runtime-context block; mock interception. |
+| 45 / 50 | `nexus.router.classifier` / `nexus.router.metadata` | Model routing. |
+| 10000 | engine stream policy | Final word on `Stream`. |
+
 So **every producer of an `llm.request` publishes through
 `engine.PublishLLMRequest`** rather than calling `bus.Emit("llm.request", …)`
 directly — agent loops, planners, routers, memory summarisers, gate retries,
@@ -249,7 +272,9 @@ original provider error to surface.
 are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
 already inside the hop (fanout's own `before:llm.request` handler); offering
 every leg again would count one logical request N times against the rate
-limiter and token budget under one shared `RequestID`.
+limiter and token budget under one shared `RequestID`. A leg inherits the parent's
+tags (cloned per leg): the parent was seeded before fanout saw it, so legs are
+billed to the same session and tenant.
 
 ### `before:llm.response`: veto means substitute
 

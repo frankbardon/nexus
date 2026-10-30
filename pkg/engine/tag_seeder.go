@@ -6,6 +6,16 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
+// tagSeederPriority runs the seeder before every other before:llm.request
+// handler. Seeding is set-if-absent, so running first never overrides a
+// plugin's tag — it only means the session dimensions are already on the
+// request when a gate reads them (token_budget's tenant ceiling at 7), when an
+// interceptor vetoes it (the fanout coordinator at 2, the test IO mock at 20),
+// and when fanout copies it into its per-provider legs. Every in-tree handler
+// sits at or above 0 (the engine's schema registry at 5, plugins in the tens,
+// the stream policy at 10000), so a negative value is unambiguous.
+const tagSeederPriority = -1000
+
 // tagSeederLabelKeys are the SessionMeta.Labels keys the seeder copies onto
 // every llm.request as cost-attribution tags.
 var tagSeederLabelKeys = []string{"tenant", "project", "user"}
@@ -14,7 +24,9 @@ var tagSeederLabelKeys = []string{"tenant", "project", "user"}
 // before:llm.request. The engine owns the session dimensions (session_id,
 // plus tenant/project/user from SessionMeta.Labels); plugins layer their own
 // (source_plugin, task_kind, parent_call_id) and win on a collision, because
-// every seed is set-if-absent.
+// every seed is set-if-absent. It subscribes at tagSeederPriority — ahead of
+// every other handler — so an interceptor's veto cannot strand a request
+// unseeded.
 //
 // Boot calls this before Lifecycle.Boot and before the recall branch, so no
 // request a plugin can emit — from Ready, from history replay, or from the
@@ -64,5 +76,5 @@ func (e *Engine) installTagSeeder() {
 				setTagIfAbsent(req.Tags, k, v)
 			}
 		}
-	}, WithPriority(100), WithSource("nexus.engine.tag_seeder")))
+	}, WithPriority(tagSeederPriority), WithSource("nexus.engine.tag_seeder")))
 }

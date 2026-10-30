@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -389,10 +390,12 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 	// interception (not a plain veto) tells a producer waiting on its
 	// response — a gate retry, a summariser — that one is coming.
 	var meta map[string]any
+	var tags map[string]string
 	var requestID string
 	if req != nil {
 		engine.InterceptLLMRequest(vp, req, pluginID, "test IO mock: intercepted by mock response")
 		meta = req.Metadata
+		tags = maps.Clone(req.Tags)
 		requestID = req.RequestID
 	} else {
 		vp.Veto = engine.VetoResult{
@@ -407,7 +410,7 @@ func (p *Plugin) handleMockBeforeLLMRequest(e engine.Event[any]) {
 	// _source dispatch, token-budget reserve/commit) matches real provider
 	// behavior — see also handleMockLLMRequest below.
 	go func() {
-		resp := p.buildMockResponse(mock, meta)
+		resp := p.buildMockResponse(mock, meta, tags)
 		resp.RequestID = requestID
 		engine.PublishLLMResponse(p.bus, resp)
 	}()
@@ -428,7 +431,7 @@ func (p *Plugin) handleMockLLMRequest(e engine.Event[any]) {
 
 	// Propagate full request metadata so downstream plugins (fanout, retrier)
 	// can correlate the response. Matches real provider behavior.
-	engine.PublishLLMResponse(p.bus, p.buildMockResponse(mock, req.Metadata))
+	engine.PublishLLMResponse(p.bus, p.buildMockResponse(mock, req.Metadata, req.Tags))
 }
 
 func (p *Plugin) nextMockResponse() MockResponse {
@@ -444,12 +447,15 @@ func (p *Plugin) nextMockResponse() MockResponse {
 	return mock
 }
 
-func (p *Plugin) buildMockResponse(mock MockResponse, metadata map[string]any) events.LLMResponse {
+func (p *Plugin) buildMockResponse(mock MockResponse, metadata map[string]any, tags map[string]string) events.LLMResponse {
 	return events.LLMResponse{SchemaVersion: events.LLMResponseVersion, Content: mock.Content,
 		ToolCalls:    mock.ToolCalls,
 		Model:        "mock",
 		FinishReason: "end_turn",
 		Metadata:     metadata,
+		// Real providers copy request Tags onto the response; the cost
+		// report and token_budget's tenant commit read them from there.
+		Tags: maps.Clone(tags),
 	}
 }
 

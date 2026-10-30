@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -163,7 +164,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	}
 
 	p.unsubs = append(p.unsubs,
-		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithPriority(2), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleResponse, engine.WithPriority(1), engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fanout.chosen", p.handleUserChoice, engine.WithSource(pluginID)),
@@ -276,6 +277,12 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		fanReq := *req
 		fanReq.Model = pc.Model
 		fanReq.Metadata = newMeta
+		// Legs skip the before:llm.request hop, so they carry exactly the
+		// tags the parent had when it reached this handler — the engine's
+		// seeder runs first, so that includes session_id and the
+		// tenant/project/user labels. Each leg gets its own map: the legs
+		// are dispatched concurrently and must not alias the parent's.
+		fanReq.Tags = maps.Clone(req.Tags)
 		fanReq.Stream = false // fanout requires complete responses
 		// The per-provider entry's own configuration — max_tokens, effort,
 		// temperature, the API-surface selector and the native provider blocks
@@ -332,14 +339,15 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	state.responses = append(state.responses, resp)
 	state.receivedAt = append(state.receivedAt, time.Now())
 	state.received++
-	allDone := state.received >= state.expected
+	received := state.received
+	allDone := received >= state.expected
 	state.mu.Unlock()
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "fanout response received",
 		"fanout_id", fanoutID,
 		"provider", provider,
 		"model", resp.Model,
-		"received", state.received,
+		"received", received,
 		"expected", state.expected,
 	)
 

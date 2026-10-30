@@ -4664,8 +4664,9 @@ priority 5 (ahead of memory plugins).
 
 Plugins that subscribe `before:llm.request` and rewrite `request.Model`
 based on the request's metadata, tags, or an LLM-classifier judgment.
-Routers run at priority 50 (metadata) / 45 (classifier) — above gates,
-below the engine's tag seeder. Both stand down when the request already
+Routers run at priority 50 (metadata) / 45 (classifier) — after the gates
+and after the engine's tag seeder (priority -1000), so routing rules that
+match on `Tags` see the seeded `session_id`/`tenant`/`project`/`user`. Both stand down when the request already
 carries `_target_provider` (a fallback retry) or `_routed_by` (an upstream
 rule already chose a model).
 
@@ -5367,9 +5368,16 @@ in-tree producer — agent loops, planners, routers, memory summarisers and
 compaction, gate retries, provider failover retries, the fanout judge, RAG
 contextualisation, HITL synthesis — publishes through
 `engine.PublishLLMRequest`. Fanout legs are the one documented exception
-(they are copies of a request already inside the hop). The seeder runs at
-priority 100, so a request vetoed or intercepted by an earlier handler (the
-fanout coordinator at 2, the test IO mock at 20) is not seeded.
+(they are copies of a request already inside the hop), and they inherit
+the parent's tags: the seeder runs at priority -1000, ahead of every other
+`before:llm.request` handler, so the parent is seeded before the fanout
+coordinator (priority 2) copies it into the legs, each leg getting its own
+copy of the tag map. Running first also means a request intercepted by the
+test IO mock (priority 20) is seeded — and its scripted `llm.response`
+carries the request's tags, as a real provider's does — and that gates read
+the seeded dimensions: `nexus.gate.token_budget` (priority 7) enforces a
+`tenant` ceiling against the tenant label. Seeding stays set-if-absent, so
+a tag the producing plugin already set still wins.
 
 `SessionMeta.Labels` has a real write path, so `tenant`/`project`/`user` are
 reachable rather than requiring test code to poke `Labels` directly. A

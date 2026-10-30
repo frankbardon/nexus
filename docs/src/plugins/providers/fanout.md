@@ -116,5 +116,5 @@ The fanout plugin injects tracking metadata into per-provider requests:
 ## Interaction with Other Plugins
 
 - **Fallback**: Fanout and fallback serve different purposes. Fallback is sequential error recovery; fanout is parallel dispatch. A fanout leg that fails is simply marked as failed — no per-leg fallback.
-- **Gates**: The initial `before:llm.request` passes through gates normally. Per-provider requests emitted by fanout are direct `llm.request` events (not vetoable).
+- **Gates**: The initial `before:llm.request` passes through gates normally. Per-provider requests emitted by fanout are direct `llm.request` events (not vetoable). Each carries its own copy of the parent request's tags, including the engine-seeded `session_id`/`tenant`/`project`/`user` (the seeder runs ahead of fanout).
 - **Mock mode**: Test IO mock responses work with fanout — each fanout leg gets the next mock response in sequence.
