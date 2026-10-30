@@ -2672,7 +2672,7 @@ Source: `plugins/providers/gemini/plugin.go`.
 | `thinking.include_thoughts`  | bool   | `false`                                          | Surface thinking via `thinking.step`. Independent of the mode axis; ignored under `mode: off`. |
 | `thinking.enabled`           | bool   | *(unset)*                                        | **Deprecated** alias for `thinking.mode`: `true` → `level`, `false` → `off`. Ignored when `mode` is set. Warned either way. |
 | `code_execution`             | bool   | `false`                                          | Enable Gemini's built-in code-execution tool. |
-| `cache.enabled`              | bool   | `false`                                          | Enable prompt caching (Gemini 2.0+). The only cache key that changes the request path: the `cachedContents` lookup is skipped entirely when it is false. |
+| `cache.enabled`              | bool   | `false`                                          | Turns on the per-request in-process `cachedContents` lookup (skipped entirely when false) — the only cache key that changes the request path. **Read-only today:** nothing outside tests ever writes an entry (`createCachedContent` is unexported and has no caller, and there is no auto-population), so with `true` the lookup always misses, `cachedContent` is never set, and the key costs one in-memory map read per request and buys nothing. It does not enable Gemini prompt caching. See [Prompt Caching](../plugins/providers/gemini.md#prompt-caching). |
 | `cache.min_tokens`           | int    | `32768`                                          | Minimum tokens required for caching. Parsed, validated and logged; **not consulted by any code path today** — the auto-population probe it exists for is not implemented (`lookup` is read-only). |
 | `cache.ttl`                  | string | `1h`                                             | Default lifetime of an entry this process creates, as a **Go duration** (`5m`, `90s`, `1h`) — not restricted to `5m`/`1h`. A value `time.ParseDuration` rejects is **warned about and defaulted**, not refused. Used by the explicit `cachedContents.create` path when the caller passes no TTL of its own. |
 | `cache.max_entries`          | int    | `64`                                             | Capacity of the in-process prefix-hash → cache-name map; the oldest entry is evicted past it. |
@@ -2701,6 +2701,10 @@ zone can therefore land in a region where the configured model is not served, an
 that fails at first inference with a 404 — not at boot, because there is no
 boot-time availability probe by design. Set `location` explicitly wherever the model
 choice matters.
+
+#### Multimodal file upload
+
+There is no config key; the behaviour is fixed. An inline part (`Data`) up to 18 MiB (`18 * 1024 * 1024` bytes) is sent as `inlineData`. Under `auth: api_key`, a larger `Data` part with no `URI` is uploaded to the Gemini Files API (resumable upload) on each request that carries it and replaced by the returned URI; it needs a non-empty `mime_type`, and the provider applies no MIME allowlist or size cap of its own. Under `auth: vertex` the Files API is unavailable and the plugin has no Cloud Storage client: an oversize `Data` part with no `URI` fails the request, and the caller must supply a `URI` (for example a `gs://` object it uploaded itself) plus `mime_type`. See [Multimodal](../plugins/providers/gemini.md#multimodal).
 
 #### Per-role thinking
 

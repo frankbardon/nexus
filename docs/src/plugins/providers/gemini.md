@@ -535,7 +535,17 @@ that forwarding on or off.
 
 ### Multimodal
 
-`events.Message.Parts` (text, image, audio, video, file) is serialized into Gemini parts. Inline payloads up to 18 MB use `inlineData` with base64 bytes; larger payloads must be uploaded via the Files API and referenced by URI (`fileData.fileUri`). Provider falls back to `Content` only when `Parts` is empty, so existing text-only callers are unaffected.
+`events.Message.Parts` (text, image, audio, video, file) is serialized into Gemini parts. Provider falls back to `Content` only when `Parts` is empty, so existing text-only callers are unaffected. A part carrying `Data` must also carry `MimeType`; a part with neither `Data` nor `URI` is an error. A part carrying a `URI` is sent as `fileData` (`fileUri` + `mimeType`; `MimeType` is required) in both auth modes.
+
+**Inline limit.** `Data` up to 18 MiB (`18 * 1024 * 1024` bytes) goes inline as `inlineData` with base64 bytes. There is no config key for the threshold.
+
+**File upload, `auth: api_key`.** Before the request body is built, every part whose `Data` exceeds the inline limit and which has no `URI` is uploaded to the Gemini Files API (`https://generativelanguage.googleapis.com`, resumable protocol: a `start` call, then one `upload, finalize` call carrying all the bytes). The returned file URI replaces `Data` on a copy of the message; the caller's messages are not mutated. The upload is implemented and live on the request path. As coded:
+
+- The only constraint is that `MimeType` is non-empty (otherwise the request fails with `oversize <type> part requires mime_type`). The provider has no MIME allowlist and no upper size cap of its own, so whatever the Files API accepts is what works.
+- There is no upload cache, no deduplication and no deletion: the same oversize part is uploaded again each time a request that carries it is built. The upload call does not honor request cancellation.
+- Any upload failure fails the request.
+
+**File upload, `auth: vertex`.** The Files API is not available and the plugin has no Cloud Storage client. This is the contract, not a gap awaiting a later phase: the caller uploads the object itself and supplies a `URI` (for example a `gs://` URI) plus `MimeType` on the part. An oversize `Data` part with no `URI` fails the request with `gemini: <type> part (<n> bytes) exceeds inline limit and Files API is unavailable in Vertex mode; upload to Cloud Storage and set URI`. Inline parts at or under 18 MiB work in Vertex mode as in api-key mode.
 
 ### Code Execution
 
@@ -552,7 +562,15 @@ nexus.llm.gemini:
     max_entries: 64
 ```
 
-The provider computes a deterministic hash of the cache-eligible prefix (model + system instruction + tool declarations + the leading run of contents up to the first tool exchange). When a hit is present in the in-memory LRU, `cachedContent` is set on the request and only the trailing delta is sent. Cache entries are populated explicitly via `Plugin.createCachedContent`; the auto-populate path is intentionally read-only in this initial release. `usageMetadata.cachedContentTokenCount` flows into `events.Usage.CachedTokens` and the cost calculation applies the cached-input discount (default 25%, override via `pricing.<model>.cached_ratio`).
+The provider computes a deterministic hash of the cache-eligible prefix (model + system instruction + tool declarations + the leading run of contents up to the first tool exchange). When `cache.enabled` is true, every request looks that hash up in an in-process map (a mutex-guarded map read; no network call). On a live hit, `cachedContent` is set on the request body. `usageMetadata.cachedContentTokenCount` flows into `events.Usage.CachedTokens` and the cost calculation applies the cached-input discount (default 25%, override via `pricing.<model>.cached_ratio`).
+
+**Nothing populates the map in a running Nexus process today.** The lookup is wired; the write path is not:
+
+- No code in the plugin, the engine or any other plugin calls the function that creates a cache entry. `createCachedContent` (which POSTs to `cachedContents`, then records the returned resource name against the prefix hash) is an **unexported** method on the provider's `Plugin`, and its only callers are tests. There is no exported API, no bus event, no config key and no tool that reaches it, so an embedder cannot call it from outside the package.
+- There is no auto-population: no request path creates an entry, and `cache.min_tokens`, the threshold meant for that probe, is not consulted anywhere.
+- The map lives in process memory only. It is not persisted, and a restarted process starts empty.
+
+The consequence: with `cache.enabled: true` the lookup always misses, `cachedContent` is never set, and the setting costs one in-memory hash and map lookup per request and buys nothing. Setting it is harmless. It is also not a way to turn on Gemini caching; do not depend on provider-side prompt caching through this plugin. The write helpers also check the plugin-level `cache.enabled` (not a role's).
 
 #### Per-role caching
 
