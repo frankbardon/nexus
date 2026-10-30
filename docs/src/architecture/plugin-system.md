@@ -158,8 +158,8 @@ During runtime, plugins interact exclusively through the event bus. They emit ev
 ### Shutdown Phase
 
 1. A shutdown signal arrives (SIGINT, SIGTERM, or programmatic)
-2. `Shutdown()` is called on each plugin in **reverse** dependency order
-3. The event bus drains remaining in-flight events
+2. The engine emits `core.shutdown`, then the event bus drains in-flight events for up to `engine.shutdown.drain_timeout` (see [Event Bus → Draining](event-bus.md#draining)); a timeout is logged and shutdown continues
+3. `Shutdown()` is called on each plugin in **reverse** dependency order (late-shutdown plugins last). Plugins may still emit here
 
 ## Dependencies
 

@@ -348,6 +348,16 @@ defer cancel()
 bus.Drain(ctx)
 ```
 
+Semantics:
+
+- **In flight** means any `Emit`/`EmitEvent`/`EmitVetoable` that has entered and not yet returned, nested emits included. A handler's nested emit keeps the bus busy until it returns too.
+- **Drain never blocks an emit.** Emits issued while `Drain` waits, nested or top-level, dispatch normally. `Drain` waits for a quiescent moment (in-flight count reaches zero). It does not close the bus or reject new events, so a bus that never goes quiet is bounded only by `ctx`.
+- **Drain holds no lock while waiting and starts no goroutine.** It returns `nil` once the bus is idle (immediately if it already is, even with a done `ctx`), or `ctx.Err()` on expiry. Either way the bus stays fully usable, so plugin `Shutdown` hooks that emit after a timed-out drain do not hang.
+
+In-flight tracking is a mutex-guarded counter plus an "idle" channel that is closed on every 1 → 0 transition. It replaced a `sync.WaitGroup` whose `Add`/`Wait` race guard was a mutex held across the whole `Wait`. That mutex deadlocked against nested emits from the handlers `Drain` was waiting on, then hung `Engine.Stop` after the drain timeout ([#172](https://github.com/frankbardon/nexus/issues/172), [#202](https://github.com/frankbardon/nexus/issues/202)).
+
+`LifecycleManager.Shutdown` emits `core.shutdown`, drains for up to `engine.shutdown.drain_timeout` (or the largest plugin `DrainOverride`), logs `drain timed out` on expiry, and then shuts plugins down regardless.
+
 ## Thread Safety
 
 The event bus is safe for concurrent use. Handler registration and event dispatch use read-write locks. Handler slices are copied before dispatch to allow concurrent emits without blocking.
