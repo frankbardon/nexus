@@ -141,12 +141,12 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:io.output", p.handleBeforeOutput,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(8), engine.WithSource(pluginID)),
 	)
 	if p.scanToolResults {
 		p.unsubs = append(p.unsubs,
 			p.bus.Subscribe("before:tool.result", p.handleBeforeToolResult,
-				engine.WithPriority(10), engine.WithSource(pluginID)),
+				engine.WithPriority(8), engine.WithSource(pluginID)),
 		)
 	}
 	if p.scanLLMResponses {

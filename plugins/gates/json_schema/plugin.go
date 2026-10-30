@@ -117,7 +117,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:io.output", p.handleBeforeOutput,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(9), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleLLMResponse,
 			engine.WithPriority(99), engine.WithSource(pluginID)),
 	)
@@ -143,6 +143,10 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// on post-redaction content but before the final ban check. See #121.
 	return []engine.EventSubscription{
 		{EventType: "before:io.output", Priority: 9},
+		// The shared retry helper (gates/internal/retry) watches for the
+		// answer to its own retry request at 5, ahead of the gate's own
+		// response handler at 99.
+		{EventType: "llm.response", Priority: 5},
 		{EventType: "llm.response", Priority: 99},
 	}
 }

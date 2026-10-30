@@ -62,6 +62,7 @@ type ContractHarness struct {
 	storage     *storage.Manager
 	sessionDir  string
 	withSession bool
+	registered  []engine.SubscriptionInfo
 }
 
 // ContractOption configures a ContractHarness.
@@ -201,6 +202,17 @@ func NewContract(t *testing.T, factory engine.PluginFactory, opts ...ContractOpt
 	if err := plugin.Ready(); err != nil {
 		t.Fatalf("contract harness: plugin Ready: %v", err)
 	}
+
+	// Snapshot the typed handler table now: everything on it at this point
+	// was registered by the plugin's Init/Ready (the harness itself only
+	// holds a wildcard observer), and anything a test subscribes later via
+	// Bus() must not be mistaken for the plugin's. Then hold the declared
+	// priorities against it — a declared priority that differs from the
+	// registered one silently reorders before:* pipelines.
+	if insp, ok := h.bus.(engine.SubscriptionInspector); ok {
+		h.registered = insp.RegisteredSubscriptions()
+	}
+	h.checkSubscriptionPriorities()
 
 	t.Cleanup(func() {
 		_ = h.bus.Drain(context.Background())
@@ -410,6 +422,65 @@ func (h *ContractHarness) AssertSubscribesTo(eventTypes ...string) {
 				h.plugin.ID(), want, have)
 		}
 	}
+}
+
+// RegisteredSubscriptions returns the typed subscriptions the plugin had
+// registered on the harness bus when Init and Ready returned. Subscriptions a
+// test adds afterwards through Bus() are not included.
+func (h *ContractHarness) RegisteredSubscriptions() []engine.SubscriptionInfo {
+	out := make([]engine.SubscriptionInfo, len(h.registered))
+	copy(out, h.registered)
+	return out
+}
+
+// checkSubscriptionPriorities runs automatically from NewContract. For every
+// event type the plugin both declares in Subscriptions() and actually
+// subscribed to during Init/Ready, the set of declared priorities must equal
+// the set of registered priorities. A declared type with no registration is
+// not an error here — plenty of subscriptions are config-conditional — and
+// AssertSubscribesTo plus Inject cover whether a declared subscription fires.
+func (h *ContractHarness) checkSubscriptionPriorities() {
+	h.t.Helper()
+	if msg := subscriptionPriorityMismatch(h.plugin.ID(), h.plugin.Subscriptions(), h.registered); msg != "" {
+		h.t.Error(msg)
+	}
+}
+
+// subscriptionPriorityMismatch returns a diagnostic for every event type
+// whose declared and registered priority sets differ, or "" when they agree.
+func subscriptionPriorityMismatch(pluginID string, declared []engine.EventSubscription, registered []engine.SubscriptionInfo) string {
+	want := map[string][]int{}
+	for _, d := range declared {
+		if !slices.Contains(want[d.EventType], d.Priority) {
+			want[d.EventType] = append(want[d.EventType], d.Priority)
+		}
+	}
+	got := map[string][]int{}
+	for _, r := range registered {
+		if _, ok := want[r.EventType]; !ok {
+			continue
+		}
+		if !slices.Contains(got[r.EventType], r.Priority) {
+			got[r.EventType] = append(got[r.EventType], r.Priority)
+		}
+	}
+	types := make([]string, 0, len(got))
+	for t := range got {
+		types = append(types, t)
+	}
+	slices.Sort(types)
+	var sb strings.Builder
+	for _, t := range types {
+		w, g := want[t], got[t]
+		slices.Sort(w)
+		slices.Sort(g)
+		if slices.Equal(w, g) {
+			continue
+		}
+		fmt.Fprintf(&sb, "plugin %q subscription priority mismatch on %q: declared %v in Subscriptions(), registered %v on the bus\n",
+			pluginID, t, w, g)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 // summary renders the captured stream as a one-line diagnostic.

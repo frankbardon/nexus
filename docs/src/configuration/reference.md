@@ -4973,7 +4973,10 @@ the priorities or accept the registration-order tiebreak knowingly.
 
 The shipped gates encode an explicit policy in their priorities so safety
 outcomes don't depend on activation order. The values below are the
-authoritative pipeline; treat them as a contract when adding a new gate.
+authoritative pipeline; treat them as a contract when adding a new gate. The
+contract harness enforces it: `contract.NewContract` fails when a plugin's
+declared `Subscriptions()` priority differs from the priority it actually
+subscribed at (see [Plugin Contract Tests](../guides/plugin-contracts.md)).
 
 `before:io.output` — mutate-then-veto pipeline:
 

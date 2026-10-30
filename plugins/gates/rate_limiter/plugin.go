@@ -125,7 +125,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(8), engine.WithSource(pluginID)),
+			engine.WithPriority(9), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("rate limiter gate initialized",

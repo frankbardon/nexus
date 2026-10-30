@@ -130,3 +130,108 @@ func TestContract_InjectVetoableReturnsResult(t *testing.T) {
 		t.Errorf("reason = %q", res.Reason)
 	}
 }
+
+// priorityStub declares its subscriptions at one set of priorities and
+// registers them at another, so tests can drive the declared-vs-registered
+// priority check NewContract runs automatically.
+type priorityStub struct {
+	declared   []engine.EventSubscription
+	registered []engine.EventSubscription
+	unsubs     []func()
+}
+
+func (p *priorityStub) ID() string                        { return "nexus.test.priority" }
+func (p *priorityStub) Name() string                      { return "Priority Stub" }
+func (p *priorityStub) Version() string                   { return "0.1.0" }
+func (p *priorityStub) Dependencies() []string            { return nil }
+func (p *priorityStub) Requires() []engine.Requirement    { return nil }
+func (p *priorityStub) Capabilities() []engine.Capability { return nil }
+func (p *priorityStub) Subscriptions() []engine.EventSubscription {
+	return p.declared
+}
+func (p *priorityStub) Emissions() []string { return nil }
+func (p *priorityStub) Init(ctx engine.PluginContext) error {
+	for _, s := range p.registered {
+		p.unsubs = append(p.unsubs, ctx.Bus.Subscribe(s.EventType, func(engine.Event[any]) {},
+			engine.WithPriority(s.Priority), engine.WithSource(p.ID())))
+	}
+	return nil
+}
+func (p *priorityStub) Ready() error { return nil }
+func (p *priorityStub) Shutdown(_ context.Context) error {
+	for _, u := range p.unsubs {
+		u()
+	}
+	return nil
+}
+
+func TestContract_SubscriptionPriority(t *testing.T) {
+	cases := []struct {
+		name       string
+		declared   []engine.EventSubscription
+		registered []engine.EventSubscription
+		wantFail   bool
+	}{
+		{
+			// The #213 shape: declared priority 2, subscribed with no
+			// WithPriority (0). before:llm.request ordering silently moves.
+			name:       "declared priority not registered",
+			declared:   []engine.EventSubscription{{EventType: "before:llm.request", Priority: 2}},
+			registered: []engine.EventSubscription{{EventType: "before:llm.request", Priority: 0}},
+			wantFail:   true,
+		},
+		{
+			name:       "matching priority",
+			declared:   []engine.EventSubscription{{EventType: "before:llm.request", Priority: 2}},
+			registered: []engine.EventSubscription{{EventType: "before:llm.request", Priority: 2}},
+		},
+		{
+			name: "two handlers on one type, both declared",
+			declared: []engine.EventSubscription{
+				{EventType: "llm.response", Priority: 5},
+				{EventType: "llm.response", Priority: 99},
+			},
+			registered: []engine.EventSubscription{
+				{EventType: "llm.response", Priority: 99},
+				{EventType: "llm.response", Priority: 5},
+			},
+		},
+		{
+			name:       "second handler on a declared type left undeclared",
+			declared:   []engine.EventSubscription{{EventType: "llm.response", Priority: 99}},
+			registered: []engine.EventSubscription{{EventType: "llm.response", Priority: 5}, {EventType: "llm.response", Priority: 99}},
+			wantFail:   true,
+		},
+		{
+			// Config-conditional subscriptions: declared but not wired in
+			// this config is not a priority mismatch.
+			name:     "declared but never registered",
+			declared: []engine.EventSubscription{{EventType: "before:io.output", Priority: 8}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subT := &testing.T{}
+			NewContract(subT, func() engine.Plugin {
+				return &priorityStub{declared: tc.declared, registered: tc.registered}
+			})
+			if subT.Failed() != tc.wantFail {
+				t.Errorf("NewContract failed = %v, want %v", subT.Failed(), tc.wantFail)
+			}
+		})
+	}
+}
+
+func TestContract_RegisteredSubscriptionsExcludesTestSubscriptions(t *testing.T) {
+	h := NewContract(t, newStubPlugin)
+	h.Bus().Subscribe("stub.input", func(engine.Event[any]) {}, engine.WithPriority(7))
+
+	got := h.RegisteredSubscriptions()
+	if len(got) != 1 {
+		t.Fatalf("RegisteredSubscriptions() = %+v, want only the plugin's own subscription", got)
+	}
+	want := engine.SubscriptionInfo{EventType: "stub.input", Priority: 0, Source: "nexus.test.contract.stub"}
+	if got[0] != want {
+		t.Errorf("RegisteredSubscriptions()[0] = %+v, want %+v", got[0], want)
+	}
+}

@@ -91,7 +91,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(11), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("prompt injection gate initialized",

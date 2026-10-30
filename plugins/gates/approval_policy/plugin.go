@@ -80,7 +80,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("before:tool.invoke", p.handleBeforeToolInvoke,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(13), engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.responded", p.handleHITLResponse,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)

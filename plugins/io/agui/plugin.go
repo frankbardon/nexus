@@ -228,13 +228,13 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 // enforces this).
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
-		{EventType: "agent.turn.start", Priority: 50},
-		{EventType: "agent.turn.end", Priority: 50},
-		{EventType: "llm.stream.chunk", Priority: 50},
-		{EventType: "llm.stream.hold", Priority: 50},
-		{EventType: "llm.stream.retract", Priority: 50},
-		{EventType: "llm.stream.end", Priority: 50},
-		{EventType: "io.output", Priority: 50},
+		{EventType: "agent.turn.start"},
+		{EventType: "agent.turn.end"},
+		{EventType: "llm.stream.chunk"},
+		{EventType: "llm.stream.hold"},
+		{EventType: "llm.stream.retract"},
+		{EventType: "llm.stream.end"},
+		{EventType: "io.output"},
 		// llm.response is consumed for its Metadata alone -- the provider
 		// continuity tokens a later request has to echo back. It runs at 20
 		// because nexus.agent.react dispatches tool.invoke from INSIDE its own
@@ -245,15 +245,15 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		// event that carries the resolved arguments and drives ToolCallStart/
 		// Args/End. A client-executed tool (advertised via RunAgentInput.tools)
 		// rides the same event and additionally suspends the run.
-		{EventType: "tool.invoke", Priority: 50},
-		{EventType: "tool.result", Priority: 50},
-		{EventType: "thinking.step", Priority: 50},
+		{EventType: "tool.invoke"},
+		{EventType: "tool.result"},
+		{EventType: "thinking.step"},
 		// HITL suspends the run at the transport boundary (virtual-run model):
 		// hitl.requested ends the SSE with an interrupt outcome; hitl.cancel
 		// ends it with a cancelled outcome. Neither unblocks the in-process
 		// agent — that is the resume side's job (E2-S2).
-		{EventType: "hitl.requested", Priority: 50},
-		{EventType: "hitl.cancel", Priority: 50},
+		{EventType: "hitl.requested"},
+		{EventType: "hitl.cancel"},
 		// Client-executed frontend tools (E2-S3) are advertised per-run via
 		// RunAgentInput.tools. The plugin appends them to the catalog snapshot the
 		// agent assembles, so it subscribes to the catalog query at a priority
@@ -262,7 +262,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "tool.catalog.query", Priority: 60},
 	}
 	for _, et := range customBridgedEvents {
-		subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
+		subs = append(subs, engine.EventSubscription{EventType: et})
 	}
 	// Shared-state (E3-S1) is opt-in: only when emit_state is enabled does the
 	// plugin subscribe to the scene store's mutation events to mirror them as
@@ -270,7 +270,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// reflects the resolved config and stays in lockstep with the Subscribe calls.
 	if p.emitState {
 		for _, et := range stateEventTypes {
-			subs = append(subs, engine.EventSubscription{EventType: et, Priority: 50})
+			subs = append(subs, engine.EventSubscription{EventType: et})
 		}
 	}
 	return subs

@@ -79,8 +79,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.models = ctx.Models
 
 	p.unsubs = append(p.unsubs,
-		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithSource(pluginID)),
-		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithPriority(3), engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithPriority(5), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("provider fallback plugin initialized")

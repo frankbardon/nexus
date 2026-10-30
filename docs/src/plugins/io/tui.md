@@ -19,18 +19,18 @@ No additional configuration. The TUI plugin uses BubbleTea defaults.
 
 | Event | Priority | Purpose |
 |-------|----------|---------|
-| `io.output` | 50 | Display agent responses |
-| `io.output.stream` / `io.output.stream.end` | 50 | Streaming response rendering |
-| `io.status` | 50 | Update status bar (thinking, tool_running, etc.) |
-| `io.approval.request` | 50 | Show tool approval dialogs |
+| `io.output` | 0 | Display agent responses |
+| `io.output.stream` / `io.output.stream.end` | 0 | Streaming response rendering |
+| `io.status` | 0 | Update status bar (thinking, tool_running, etc.) |
+| `io.approval.request` | 0 | Show tool approval dialogs |
 | `io.ask` | 50 | Show question prompts |
-| `thinking.step` | 50 | Display thinking indicators |
-| `plan.approval.request` | 50 | Show plan approval dialogs |
-| `plan.created` | 50 | Display generated plans |
-| `agent.plan` | 50 | Display plan progress |
-| `session.file.created` / `session.file.updated` | 50 | Show file activity notifications |
-| `io.history.replay` | 50 | Replay conversation on session resume |
-| `cancel.complete` | 50 | Handle cancellation UI |
+| `thinking.step` | 0 | Display thinking indicators |
+| `plan.approval.request` | 0 | Show plan approval dialogs |
+| `plan.created` | 0 | Display generated plans |
+| `agent.plan` | 0 | Display plan progress |
+| `session.file.created` / `session.file.updated` | 0 | Show file activity notifications |
+| `io.history.replay` | 0 | Replay conversation on session resume |
+| `cancel.complete` | 0 | Handle cancellation UI |
 
 ### Emits
 

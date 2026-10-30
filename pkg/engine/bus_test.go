@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -558,4 +559,34 @@ func TestPushCausationContext_ReplacesFrameWholeWithoutInheritingSessionID(t *te
 			t.Errorf("SessionID = %q, want %q: explicit propagation must survive the push", got, sessionID)
 		}
 	})
+}
+
+func TestEventBus_RegisteredSubscriptions(t *testing.T) {
+	bus := NewEventBus()
+	insp, ok := bus.(SubscriptionInspector)
+	if !ok {
+		t.Fatal("default bus does not implement SubscriptionInspector")
+	}
+	bus.Subscribe("b.event", func(Event[any]) {}, WithPriority(20), WithSource("p2"))
+	unsub := bus.Subscribe("b.event", func(Event[any]) {}, WithPriority(5), WithSource("p1"))
+	bus.Subscribe("a.event", func(Event[any]) {})
+	bus.SubscribeAll(func(Event[any]) {}) // wildcards are not reported
+
+	want := []SubscriptionInfo{
+		{EventType: "a.event", Priority: 0},
+		{EventType: "b.event", Priority: 5, Source: "p1"},
+		{EventType: "b.event", Priority: 20, Source: "p2"},
+	}
+	if got := insp.RegisteredSubscriptions(); !reflect.DeepEqual(got, want) {
+		t.Errorf("RegisteredSubscriptions() = %+v, want %+v", got, want)
+	}
+
+	unsub()
+	want = []SubscriptionInfo{
+		{EventType: "a.event", Priority: 0},
+		{EventType: "b.event", Priority: 20, Source: "p2"},
+	}
+	if got := insp.RegisteredSubscriptions(); !reflect.DeepEqual(got, want) {
+		t.Errorf("after unsubscribe: RegisteredSubscriptions() = %+v, want %+v", got, want)
+	}
 }

@@ -106,11 +106,11 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
 		{EventType: "io.output", Priority: 50},
-		{EventType: "io.approval.request", Priority: 10},
-		{EventType: "plan.approval.request", Priority: 10},
+		{EventType: "io.approval.request"},
+		{EventType: "plan.approval.request"},
 		{EventType: "io.ask", Priority: 10},
-		{EventType: "agent.turn.start", Priority: 50},
-		{EventType: "agent.turn.end", Priority: 50},
+		{EventType: "agent.turn.start"},
+		{EventType: "agent.turn.end"},
 	}
 	if len(p.mockResponses) > 0 {
 		subs = append(subs, engine.EventSubscription{

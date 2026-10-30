@@ -110,7 +110,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		// Capture provider errors within fanout sequences.
 		{EventType: "before:core.error", Priority: 4},
 		// User strategy: receive user's choice.
-		{EventType: "provider.fanout.chosen", Priority: 50},
+		{EventType: "provider.fanout.chosen"},
 	}
 }
 
@@ -166,7 +166,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:llm.request", p.handleBeforeRequest, engine.WithPriority(2), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleResponse, engine.WithPriority(1), engine.WithSource(pluginID)),
-		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithSource(pluginID)),
+		p.bus.Subscribe("before:core.error", p.handleBeforeError, engine.WithPriority(4), engine.WithSource(pluginID)),
 		p.bus.Subscribe("provider.fanout.chosen", p.handleUserChoice, engine.WithSource(pluginID)),
 	)
 

@@ -100,17 +100,17 @@ Every array field is omitted from the JSON when empty.
 
 | Event | Priority | Purpose |
 |-------|----------|---------|
-| `io.output` | 50 | Capture final assistant text and error messages |
-| `io.approval.request` | 10 | Auto-approve tool call approvals |
-| `plan.approval.request` | 10 | Auto-approve plan approvals |
+| `io.output` | 0 | Capture final assistant text and error messages |
+| `io.approval.request` | 0 | Auto-approve tool call approvals |
+| `plan.approval.request` | 0 | Auto-approve plan approvals |
 | `io.ask` | 10 | Auto-respond with an empty answer |
-| `plan.created` | 50 | Record generated plans in the transcript |
-| `agent.plan` | 50 | Record plan status updates |
-| `thinking.step` | 50 | Record reasoning trace |
-| `agent.turn.start` / `agent.turn.end` | 50 | Detect when the single turn has completed |
-| `core.error` | 50 | Record errors in the transcript |
+| `plan.created` | 0 | Record generated plans in the transcript |
+| `agent.plan` | 0 | Record plan status updates |
+| `thinking.step` | 0 | Record reasoning trace |
+| `agent.turn.start` / `agent.turn.end` | 0 | Detect when the single turn has completed |
+| `core.error` | 0 | Record errors in the transcript |
 
-The approval / ask handlers subscribe at priority `10` so they run before any other plugin's handlers and respond immediately.
+Every handler subscribes at the default priority `0`, so the approval handlers run ahead of any plugin that subscribes later or at a higher priority and respond immediately.
 
 ### Emits
 

@@ -92,38 +92,38 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	// one-for-one. Wrapper features (file dialogs, session list, etc.)
 	// are emitted separately and live only in the wails plugin.
 	return []engine.EventSubscription{
-		{EventType: "io.output", Priority: 50},
-		{EventType: "llm.stream.chunk", Priority: 50},
-		{EventType: "llm.stream.hold", Priority: 50},
-		{EventType: "llm.stream.retract", Priority: 50},
-		{EventType: "llm.stream.end", Priority: 50},
-		{EventType: "io.output.clear", Priority: 50},
-		{EventType: "io.status", Priority: 50},
-		{EventType: "io.approval.request", Priority: 50},
-		{EventType: "hitl.requested", Priority: 50},
-		{EventType: "thinking.step", Priority: 50},
-		{EventType: "code.exec.stdout", Priority: 50},
-		{EventType: "plan.approval.request", Priority: 50},
-		{EventType: "plan.created", Priority: 50},
-		{EventType: "agent.plan", Priority: 50},
+		{EventType: "io.output"},
+		{EventType: "llm.stream.chunk"},
+		{EventType: "llm.stream.hold"},
+		{EventType: "llm.stream.retract"},
+		{EventType: "llm.stream.end"},
+		{EventType: "io.output.clear"},
+		{EventType: "io.status"},
+		{EventType: "io.approval.request"},
+		{EventType: "hitl.requested"},
+		{EventType: "thinking.step"},
+		{EventType: "code.exec.stdout"},
+		{EventType: "plan.approval.request"},
+		{EventType: "plan.created"},
+		{EventType: "agent.plan"},
 		// Subagent lifecycle: bridged so orchestrator-style agents can
 		// surface per-worker progress in the UI instead of leaving the
 		// operator staring at a "dispatching N workers" status until
 		// synthesis finishes. The frontend renders one chip per spawn
 		// keyed by SpawnID and updates it in place on each event.
-		{EventType: "subagent.started", Priority: 50},
-		{EventType: "subagent.iteration", Priority: 50},
-		{EventType: "subagent.complete", Priority: 50},
-		{EventType: "provider.fallback", Priority: 50},
-		{EventType: "session.file.created", Priority: 50},
-		{EventType: "session.file.updated", Priority: 50},
-		{EventType: "io.history.replay", Priority: 50},
-		{EventType: "cancel.complete", Priority: 50},
+		{EventType: "subagent.started"},
+		{EventType: "subagent.iteration"},
+		{EventType: "subagent.complete"},
+		{EventType: "provider.fallback"},
+		{EventType: "session.file.created"},
+		{EventType: "session.file.updated"},
+		{EventType: "io.history.replay"},
+		{EventType: "cancel.complete"},
 
 		// Wrapper features (CLAUDE.md §7a). nexus.io.browser does not
 		// subscribe to these — a session-scoped browser transport has
 		// no business popping OS-native dialogs.
-		{EventType: "io.file.open.request", Priority: 50},
+		{EventType: "io.file.open.request"},
 	}
 }
 

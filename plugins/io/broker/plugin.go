@@ -93,14 +93,14 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 // io/realtime so parity holds (see .claude/docs/io-transport.md).
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "io.output", Priority: 50},
-		{EventType: "llm.stream.chunk", Priority: 50},
-		{EventType: "llm.stream.end", Priority: 50},
-		{EventType: "io.status", Priority: 50},
-		{EventType: "io.approval.request", Priority: 50},
-		{EventType: "hitl.requested", Priority: 50},
-		{EventType: "cancel.complete", Priority: 50},
-		{EventType: "core.ready", Priority: 50},
+		{EventType: "io.output"},
+		{EventType: "llm.stream.chunk"},
+		{EventType: "llm.stream.end"},
+		{EventType: "io.status"},
+		{EventType: "io.approval.request"},
+		{EventType: "hitl.requested"},
+		{EventType: "cancel.complete"},
+		{EventType: "core.ready"},
 	}
 }
 
