@@ -479,8 +479,32 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 
 	p.logger.Log(context.Background(), engine.LevelTrace, "resolving LLM request", "role", req.Role, "model", model, "max_tokens", maxTokens, "effort", effort)
 
-	body, err := p.buildRequestBody(model, maxTokens, effort, req)
+	// The request context is registered before the body is built, because
+	// building it can upload oversize parts to the Files API, and a
+	// cancel.active must abort those uploads too.
+	reqCtx, cancel := context.WithCancel(context.Background())
+	if req.RequestID == "" {
+		req.RequestID = engine.GenerateID()
+	}
+	p.mu.Lock()
+	if p.cancels == nil {
+		p.cancels = make(map[string]context.CancelFunc)
+	}
+	p.cancels[req.RequestID] = cancel
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.cancels, req.RequestID)
+		p.mu.Unlock()
+		cancel()
+	}()
+
+	body, err := p.buildRequestBody(reqCtx, model, maxTokens, effort, req)
 	if err != nil {
+		if reqCtx.Err() == context.Canceled {
+			p.logger.Info("LLM request cancelled")
+			return
+		}
 		p.emitError(fmt.Errorf("gemini: build request: %w", err))
 		return
 	}
@@ -504,17 +528,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	}
 	url := p.auth.apiURL(model, op)
 
-	reqCtx, cancel := context.WithCancel(context.Background())
-	if req.RequestID == "" {
-		req.RequestID = engine.GenerateID()
-	}
-	p.mu.Lock()
-	if p.cancels == nil {
-		p.cancels = make(map[string]context.CancelFunc)
-	}
-	p.cancels[req.RequestID] = cancel
-	p.mu.Unlock()
-
 	makeReq := func() (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", url, bytes.NewReader(jsonBody))
 		if err != nil {
@@ -532,9 +545,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	// place a role's block can take effect.
 	resp, err := p.doWithRetry(reqCtx, p.resolveRetry(req), makeReq)
 	if err != nil {
-		p.mu.Lock()
-		delete(p.cancels, req.RequestID)
-		p.mu.Unlock()
 		if reqCtx.Err() == context.Canceled {
 			p.logger.Info("LLM request cancelled")
 			return
@@ -585,10 +595,6 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	if debugBuf != nil {
 		p.debugLog("response", debugBuf.Bytes())
 	}
-
-	p.mu.Lock()
-	delete(p.cancels, req.RequestID)
-	p.mu.Unlock()
 }
 
 // buildRequestBody constructs a Gemini generateContent request body.
@@ -597,7 +603,10 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 // events.LLMRequest.Effort when something stamped it, otherwise the
 // core.models role's `effort:`. It is not read off req, because req.Effort
 // alone is only ever set by the fallback and fanout coordinators.
-func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, req events.LLMRequest) (map[string]any, error) {
+//
+// ctx bounds the Files API uploads of oversize parts; handleRequest passes the
+// request's cancellable context so a cancelled turn aborts them.
+func (p *Plugin) buildRequestBody(ctx context.Context, model string, maxTokens int, effort string, req events.LLMRequest) (map[string]any, error) {
 	body := map[string]any{}
 
 	// generationConfig.
@@ -637,7 +646,7 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 
 	// Pre-upload any oversize multimodal parts via the Files API so the rest of
 	// the request can stay in a single HTTP call.
-	preparedMsgs, err := p.preuploadParts(context.Background(), req.Messages)
+	preparedMsgs, err := p.preuploadParts(ctx, req.Messages)
 	if err != nil {
 		return nil, err
 	}
@@ -691,19 +700,44 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, effort string, re
 		body["toolConfig"] = tc
 	}
 
-	// Prompt caching: replace the stable prefix with cached_content reference
-	// when eligible. resolveCache merges the serving role's own `cache:` block
-	// over the plugin-level one, so a role can opt out of (or into) the shared
-	// entry map without changing the deployment default.
+	// Prompt caching: replace the stable prefix with a cachedContent
+	// reference when eligible. resolveCache merges the serving role's own
+	// `cache:` block over the plugin-level one, so a role can opt out of (or
+	// into) the shared entry map without changing the deployment default.
 	if cc := p.resolveCache(req); cc.enabled {
-		if cachedName := p.cache.lookupWith(true, model, systemPrompt, filteredTools, contents); cachedName != "" {
-			body["cachedContent"] = cachedName
-			// Caller's contents already includes only the trailing delta; the
-			// cache plugin stripped what's covered by the cache. See cache.go.
+		if name, covered := p.cache.lookupWith(true, model, systemPrompt, filteredTools, contents); name != "" {
+			applyCachedContent(p.log(), body, name, covered, contents)
 		}
 	}
 
 	return body, nil
+}
+
+// applyCachedContent rewrites a fully built body to reference a cachedContents
+// resource, per the generateContent contract: a request carrying
+// cachedContent may not also set systemInstruction, tools or toolConfig — they
+// come from the cache — and its contents carry only the turns after the cached
+// prefix. covered is the prefix length the entry recorded at populate time.
+//
+// Two shapes fall back to the uncached body rather than send something the
+// cache cannot express:
+//   - a toolConfig: the cache entry was created without one, and it cannot be
+//     resent, so honouring the request's tool choice wins over the cache;
+//   - an empty tail: the request is exactly the cached prefix, and
+//     generateContent requires at least one content.
+func applyCachedContent(logger *slog.Logger, body map[string]any, name string, covered int, contents []map[string]any) {
+	if _, ok := body["toolConfig"]; ok {
+		logger.Debug("gemini: skipping cachedContent; request carries a toolConfig the cache entry does not", "cached_content", name)
+		return
+	}
+	if covered >= len(contents) {
+		logger.Debug("gemini: skipping cachedContent; no contents follow the cached prefix", "cached_content", name)
+		return
+	}
+	body["cachedContent"] = name
+	body["contents"] = contents[covered:]
+	delete(body, "systemInstruction")
+	delete(body, "tools")
 }
 
 // log returns the plugin logger, falling back to slog.Default() when the

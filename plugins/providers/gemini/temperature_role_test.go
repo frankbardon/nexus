@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -65,7 +66,7 @@ func wireTemperature(t *testing.T, p *Plugin, req events.LLMRequest) (float64, b
 	}
 	p.applyEntryOverrides(&req)
 
-	body, err := p.buildRequestBody(target.model, target.maxTokens, target.effort, req)
+	body, err := p.buildRequestBody(context.Background(), target.model, target.maxTokens, target.effort, req)
 	if err != nil {
 		t.Fatalf("buildRequestBody: unexpected error: %v", err)
 	}
