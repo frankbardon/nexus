@@ -2,6 +2,13 @@
 // gate for tool invocations. It observes tool.invoke, starts a timer per
 // call, and on expiry synthesizes a tool.result error plus a tool.timeout
 // event so the agent's bookkeeping unwinds even when a tool hangs.
+//
+// The gate is on by default: nexus.tool.catalog auto-activates it through
+// Requires(), so every profile that dispatches tools through the catalog gets
+// a per-call deadline without listing the gate. The default deadline is a
+// backstop (minutes, not seconds) sized above every shipped tool's own
+// timeout, and tools whose wait is bounded by a human or by their own
+// wall-clock budget are exempt by default (see builtinPerTool).
 package tooltimeout
 
 import (
@@ -19,13 +26,39 @@ import (
 
 const pluginID = "nexus.gate.tool_timeout"
 
-const defaultTimeout = 30 * time.Second
+// defaultTimeout is the backstop deadline for any tool with no per_tool entry.
+// It is deliberately far above the internal timeouts of the shipped tools
+// (shell 30s, run_code 30s, web 20s, MCP 30s, delegate_agui_* 120s,
+// delegate_a2a_* 5m per call): its job is to end a turn whose tool result
+// never arrives (a vetoed before:tool.result, a handler that never answers),
+// not to police a tool that is merely slow.
+const defaultTimeout = 10 * time.Minute
+
+// builtinPerTool exempts (0 = no deadline) the tools whose wait is either
+// bounded by a human or by a wall-clock budget the tool enforces itself:
+//
+//   - ask_user waits on a human answer, which has no machine upper bound.
+//   - delegate, spawn_* (subagent instances), delegate_a2a_* and
+//     delegate_agui_* run a whole nested agent under their own posture or
+//     per-remote timeout, and may park on HITL; a shorter outer deadline
+//     would cut them off below what the operator configured.
+//
+// Any user per_tool key (exact or glob) is consulted before these, so an
+// operator can still bound one of them, e.g. per_tool: {ask_user: 15m}.
+var builtinPerTool = map[string]time.Duration{
+	"ask_user":        0,
+	"delegate":        0,
+	"spawn_*":         0,
+	"delegate_a2a_*":  0,
+	"delegate_agui_*": 0,
+}
 
 // New creates a new tool_timeout gate plugin instance.
 func New() engine.Plugin {
 	return &Plugin{
 		defaultTimeout: defaultTimeout,
 		perTool:        map[string]time.Duration{},
+		builtin:        builtinPerTool,
 		inflight:       map[string]*tracker{},
 		timedOut:       map[string]struct{}{},
 		synthesizing:   map[string]struct{}{},
@@ -44,6 +77,11 @@ type Plugin struct {
 	// Resolution: exact key beats glob; among glob matches the longest
 	// pattern wins. Documented in schema.json.
 	perTool map[string]time.Duration
+	// builtin holds the default exemptions, consulted after perTool. Nil in
+	// hand-built test plugins, which then see only perTool.
+	builtin map[string]time.Duration
+	// disabled turns every deadline off (enabled: false).
+	disabled bool
 
 	mu       sync.Mutex
 	inflight map[string]*tracker // call ID -> live timer
@@ -63,7 +101,7 @@ type tracker struct {
 
 func (p *Plugin) ID() string                        { return pluginID }
 func (p *Plugin) Name() string                      { return "Tool Timeout Gate" }
-func (p *Plugin) Version() string                   { return "0.1.0" }
+func (p *Plugin) Version() string                   { return "0.2.0" }
 func (p *Plugin) Dependencies() []string            { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
@@ -72,13 +110,17 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.bus = ctx.Bus
 	p.logger = ctx.Logger
 
+	if v, ok := ctx.Config["enabled"].(bool); ok && !v {
+		p.disabled = true
+	}
+
 	if v, ok := ctx.Config["default_timeout"].(string); ok && v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return fmt.Errorf("default_timeout %q: %w", v, err)
 		}
-		if d <= 0 {
-			return fmt.Errorf("default_timeout %q must be positive", v)
+		if d < 0 {
+			return fmt.Errorf("default_timeout %q must not be negative (0 means no default deadline)", v)
 		}
 		p.defaultTimeout = d
 	}
@@ -93,8 +135,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			if err != nil {
 				return fmt.Errorf("per_tool[%q] %q: %w", name, s, err)
 			}
-			if d <= 0 {
-				return fmt.Errorf("per_tool[%q] %q must be positive", name, s)
+			if d < 0 {
+				return fmt.Errorf("per_tool[%q] %q must not be negative (0 means no deadline)", name, s)
 			}
 			p.perTool[name] = d
 		}
@@ -113,8 +155,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	)
 
 	p.logger.Info("tool_timeout gate initialized",
+		"enabled", !p.disabled,
 		"default_timeout", p.defaultTimeout,
-		"per_tool_overrides", len(p.perTool))
+		"per_tool_overrides", len(p.perTool),
+		"builtin_exemptions", len(p.builtin))
 	return nil
 }
 
@@ -272,25 +316,46 @@ func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
 	}
 }
 
-// resolveTimeout returns the timeout for a given tool name. Exact key in
-// per_tool wins; among glob matches the longest pattern wins; otherwise
-// default_timeout applies.
+// resolveTimeout returns the timeout for a given tool name; 0 means no
+// deadline. Resolution: the user's per_tool map (exact key, then longest
+// matching glob), then the built-in exemptions (same order), then
+// default_timeout. enabled: false short-circuits to 0.
 func (p *Plugin) resolveTimeout(name string) time.Duration {
-	if d, ok := p.perTool[name]; ok {
+	if p.disabled {
+		return 0
+	}
+	if d, ok := lookup(p.perTool, name); ok {
 		return d
 	}
-	// Walk keys in deterministic (longest first) order so glob fall-backs
-	// are stable across runs.
-	keys := make([]string, 0, len(p.perTool))
-	for k := range p.perTool {
+	if d, ok := lookup(p.builtin, name); ok {
+		return d
+	}
+	return p.defaultTimeout
+}
+
+// lookup resolves name against one override map: an exact key wins; among
+// path.Match glob matches the longest pattern wins.
+func lookup(m map[string]time.Duration, name string) (time.Duration, bool) {
+	if d, ok := m[name]; ok {
+		return d, true
+	}
+	// Walk keys in deterministic (longest first, then lexical) order so glob
+	// fall-backs are stable across runs.
+	keys := make([]string, 0, len(m))
+	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	sort.Slice(keys, func(i, j int) bool {
+		if len(keys[i]) != len(keys[j]) {
+			return len(keys[i]) > len(keys[j])
+		}
+		return keys[i] < keys[j]
+	})
 	for _, k := range keys {
 		match, err := path.Match(k, name)
 		if err == nil && match {
-			return p.perTool[k]
+			return m[k], true
 		}
 	}
-	return p.defaultTimeout
+	return 0, false
 }

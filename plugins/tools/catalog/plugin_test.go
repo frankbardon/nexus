@@ -185,3 +185,17 @@ func TestUnknownTool_ConcurrentInvokes(t *testing.T) {
 		}
 	}
 }
+
+// TestRequiresToolTimeoutGate pins the default-on per-call tool deadline
+// (#211): the catalog auto-activates nexus.gate.tool_timeout, optionally and
+// with no Default config so the gate's in-code defaults apply.
+func TestRequiresToolTimeoutGate(t *testing.T) {
+	reqs := New().Requires()
+	if len(reqs) != 1 {
+		t.Fatalf("Requires() = %+v, want exactly the tool_timeout gate", reqs)
+	}
+	r := reqs[0]
+	if r.ID != "nexus.gate.tool_timeout" || r.Capability != "" || !r.Optional || r.Default != nil {
+		t.Fatalf("Requires()[0] = %+v, want {ID: nexus.gate.tool_timeout, Optional: true, Default: nil}", r)
+	}
+}

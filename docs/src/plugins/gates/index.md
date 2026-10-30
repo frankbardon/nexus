@@ -21,6 +21,7 @@ providers.
 | `nexus.gate.context_window`       | `before:llm.request`    | Estimate context size; trigger compaction when approaching the limit. |
 | `nexus.gate.tool_filter`          | `before:llm.request`    | Modify the tool list (allowlist / blocklist). |
 | `nexus.gate.approval_policy`      | `before:tool.invoke`, `before:llm.request` | Policy-driven HITL approvals; emits `before:hitl.requested` then `hitl.requested` and applies the operator's allow/reject/edit. |
+| `nexus.gate.tool_timeout`         | `before:tool.result` (late results only) | Per-call tool deadline; synthesizes an error `tool.result` + `tool.timeout` when a result never arrives. **On by default** — auto-activated by `nexus.tool.catalog` with a `10m` backstop; `ask_user`, `delegate`, `spawn_*`, `delegate_a2a_*`, `delegate_agui_*` exempt. Opt out with `enabled: false`. |
 
 ## Internal requests
 

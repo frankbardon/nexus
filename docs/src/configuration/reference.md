@@ -2916,6 +2916,14 @@ other `tool.invoke` subscriber gets an error `tool.result`
 (`Error: "unknown tool: <name>"`) so the waiting agent loop continues instead
 of hanging. Always on; there is no key to disable it.
 
+`Requires()` also auto-activates [`nexus.gate.tool_timeout`](#nexusgatetool_timeout)
+(optional — an embedder that does not register the gate still boots), so every
+profile that dispatches tools through the catalog gets a per-call deadline by
+default. That covers the case the fallback above cannot: a tool that *is*
+served but whose `tool.result` never arrives (a vetoed `before:tool.result`, a
+handler that never answers). No `Default` config is installed — the gate's own
+defaults apply; tune or disable it with a `nexus.gate.tool_timeout` block.
+
 ### `nexus.tool.web`
 
 Source: `plugins/tools/web/plugin.go`. Registers `web_search`, `web_fetch`,
@@ -5124,10 +5132,40 @@ counter stays consistent. Note: Go cancellation is cooperative — the original
 tool goroutine may keep running until it honors its own context. The gate's
 job is to unblock the agent, not preempt the tool.
 
+**On by default.** `nexus.tool.catalog` auto-activates this gate through
+`Requires()`, so it runs in every profile that dispatches tools through the
+catalog without being listed in `plugins.active`. The default is a backstop
+against a `tool.result` that never arrives, not a policy on slow tools: `10m`
+sits well above every shipped tool's own timeout (`shell` 30s, `run_code` 30s,
+`web_*` 20s, MCP 30s, `delegate_agui_*` 120s, `delegate_a2a_*` 5m per call).
+Tools whose wait is bounded by a human or by a wall-clock budget they enforce
+themselves have **no deadline** by default (built-in exemptions):
+
+| Built-in key       | Why exempt |
+|--------------------|------------|
+| `ask_user`         | Waits on a human answer. |
+| `delegate`         | Bounded by the posture's `budget.timeout`; may park on HITL. |
+| `spawn_*`          | Subagent instances; a whole nested agent loop. |
+| `delegate_a2a_*`   | Bounded by the remote's `timeout` / `hitl.input_timeout`. |
+| `delegate_agui_*`  | Bounded by the remote's own `timeout`. |
+
+Tools that block on HITL *inside* their handler (e.g. `nexus.memory.longterm`
+write approvals, AG-UI client tools) are **not** exempt: if an approval can
+legitimately take longer than 10m, raise their `per_tool` entry.
+
 Per-tool override keys may be exact tool names (`web_fetch`) or
 [`path.Match`](https://pkg.go.dev/path#Match)-style globs (`mcp.*`).
-Resolution: an exact key wins; among glob matches the longest pattern wins;
-otherwise `default_timeout` applies.
+Resolution: the user's `per_tool` map first (an exact key wins; among glob
+matches the longest pattern wins), then the built-in exemptions (same rule),
+otherwise `default_timeout`. A user key always beats a built-in exemption, so
+`per_tool: {ask_user: 15m}` bounds `ask_user`, and a catch-all `"*": 2m`
+bounds the exempt tools too. A duration of `0s` means "no deadline".
+
+**Opt-out:** `enabled: false` turns every deadline off; `default_timeout: 0s`
+keeps only explicit `per_tool` deadlines. Because the gate is auto-activated,
+supplying any `nexus.gate.tool_timeout` block replaces nothing but the keys you
+set — the built-in exemptions and the `10m` default live in code, not in a
+`Requires()` default config.
 
 The synthetic error message format is fixed and intended to be read by
 operators:
@@ -5138,8 +5176,9 @@ tool <name> exceeded timeout <duration>; raise via gates.tool_timeout.per_tool.<
 
 | Key               | Type            | Default | Description |
 |-------------------|-----------------|---------|-------------|
-| `default_timeout` | duration string | `30s`   | Applied when no `per_tool` key matches. |
-| `per_tool`        | map[string]duration | `{}` | Per-tool overrides keyed by exact tool name or `path.Match` glob. |
+| `enabled`         | bool            | `true`  | `false` disables every deadline (the gate stays active but never fires). |
+| `default_timeout` | duration string | `10m`   | Applied when neither a `per_tool` key nor a built-in exemption matches. `0s` = no default deadline. Was `30s` before the gate became default-on. Negative values fail boot. |
+| `per_tool`        | map[string]duration | `{}` (built-in exemptions above still apply) | Per-tool overrides keyed by exact tool name or `path.Match` glob. `0s` = no deadline for that tool. Consulted before the built-in exemptions. |
 
 ### `nexus.gate.prompt_injection`
 

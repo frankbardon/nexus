@@ -26,6 +26,7 @@ Each `Requirement` carries **exactly one** of `ID` (concrete plugin ID — e.g. 
 
 **Currently declared (non-nil) Requires():**
 - `nexus.agent.react` → `Capability: memory.history` (default: `max_messages: 100, persist: true`), `Capability: control.cancel`, `Capability: tool.catalog`
+- `nexus.tool.catalog` → `ID: nexus.gate.tool_timeout` (optional, no default config — the gate's in-code defaults apply: 10m backstop, HITL/delegation tools exempt; opt out with `enabled: false`)
 - `nexus.agent.subagent`, `nexus.agent.orchestrator` — still use `Dependencies()`; will migrate as part of the same dedup if their state machines warrant it.
 
 ## Capabilities (`Capabilities()`, `Requirement.Capability`)
