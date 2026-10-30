@@ -5088,6 +5088,15 @@ Each entry under `ceilings`:
 
 Tenant ceilings persist via app-scope SQLite (`~/.nexus/plugins/nexus.gate.token_budget/store.db`). Other dimensions are in-memory per session.
 
+Session-scoped reservations are released three ways: settled against actual
+usage on `llm.response`, rolled back on `core.error` (matched by
+`ErrorInfo.RequestID`), or rolled back when the **same `RequestID` reserves
+again**. The last case is the `nexus.provider.fallback` retry: fallback vetoes
+`before:core.error` (so `core.error` never fires) and re-publishes the request
+with its original `RequestID`, so the failed attempt's estimate is dropped
+before the retry is projected and reserved. A fallback sequence therefore ends
+with the bucket holding only the successful attempt's usage.
+
 ### `nexus.gate.rate_limiter`
 
 Source: `plugins/gates/rate_limiter/plugin.go`. Vetoes `before:llm.request`
