@@ -86,7 +86,7 @@ parked on a human, say) must arrange for the wait to end inside it.
 
 ### Input Feeding
 
-Inputs are sent sequentially. The plugin waits for the agent to become idle (turn depth returns to zero) before sending the next input. After all inputs are sent and the final turn completes, the plugin emits `io.session.end`.
+Feeding starts on `core.ready`, not in the plugin's own `Ready()`: the engine runs every plugin's `Ready()` concurrently and emits `core.ready` only once all of them have returned, so the first input cannot reach an agent before tool plugins have published their `tool.register` (an earlier input could, and the catalog then answered the call with `unknown tool`). Inputs are sent sequentially. The plugin waits for the agent to become idle (turn depth returns to zero) before sending the next input. After all inputs are sent and the final turn completes, the plugin emits `io.session.end`.
 
 ### Questions to the user
 
@@ -119,6 +119,7 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 | `io.approval.request` | Auto-respond per approval config |
 | `plan.approval.request` | Auto-respond per approval config |
 | `hitl.requested` | Respond per `hitl_responses` / `hitl_auto_respond` |
+| `core.ready` | Start feeding scripted inputs once every plugin is ready |
 | `agent.turn.start` | Track turn depth for input pacing |
 | `agent.turn.end` | Detect idle state, trigger next input or session end |
 | `before:llm.request` (priority 20) | Mock mode only: answer the request from `mock_responses` |
