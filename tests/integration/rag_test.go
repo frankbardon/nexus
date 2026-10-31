@@ -189,8 +189,13 @@ func bootRAGEngine(t *testing.T) (*engine.Engine, string) {
 	t.Helper()
 	vectorDir := t.TempDir()
 	cacheDir := t.TempDir()
+	stateDir := t.TempDir()
 	yaml := fmt.Sprintf(`core:
   log_level: warn
+  sessions:
+    root: %q
+  storage:
+    root: %q
 plugins:
   active:
     - nexus.embeddings.mock
@@ -203,7 +208,7 @@ plugins:
       size: 400
       overlap: 80
     cache_dir: %q
-`, vectorDir, cacheDir)
+`, filepath.Join(stateDir, "sessions"), filepath.Join(stateDir, "data"), vectorDir, cacheDir)
 
 	eng, err := engine.NewFromBytes([]byte(yaml))
 	if err != nil {

@@ -18,6 +18,8 @@ core:
       model: llama3
       max_tokens: 256
   sessions:
+    # Manual runs only (bin/nexus -config ...). pkg/testharness replaces
+    # this, and core.storage.root, with a per-test temp dir.
     root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short

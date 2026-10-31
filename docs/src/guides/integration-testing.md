@@ -156,8 +156,37 @@ h.AssertOutputSemantic("response recalls the user's earlier question about greet
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `WithTimeout(duration)` | 90s | Max time before harness gives up |
-| `WithRetainSession()` | off | Keep session dir on failure for debugging |
+| `WithRetainSession()` | off | Keep the session dir (and the harness temp root) on failure for debugging; the path is logged |
+| `WithKeepSession()` | off | Keep the session dir after `Run` so the test can read post-run artifacts; still removed when the test ends |
+| `WithConfiguredRoots()` | off | Use the config's `core.sessions.root` and `core.storage.root` verbatim instead of the per-test temp dir |
 | `WithJudge(judge)` | auto Haiku | Custom semantic judge implementation |
+| `WithFailFast()` | off | Disable bus panic recovery so handler panics keep their stack trace |
+
+## Session and Storage Roots
+
+`testharness.New` keeps the engine's own state out of `~/.nexus`. Before
+building the engine it rewrites the config's `core.sessions.root` to
+`<tmp>/sessions` and `core.storage.root` to `<tmp>/data`, where `<tmp>` is a
+fresh per-test temp dir (`h.TempRoot()`) removed when the test ends. Whatever
+the YAML says is ignored, so runs never share session trees or app/agent
+plugin SQLite across invocations. The `root: ~/.nexus/test-sessions` lines in
+`configs/test-*.yaml` only matter when you run a test config by hand with
+`bin/nexus -config`.
+
+Pass `WithConfiguredRoots()` only when a test prepared a root itself and needs
+the engine to find it again (for example, a hand-built session to recall).
+A test that cannot use `Run` because something other than scripted
+`nexus.io.test` inputs drives it (an AG-UI or A2A request against a serve
+transport) builds its engine with `testharness.NewEngine(t, configPath)`,
+which registers every plugin and applies the same redirect but leaves boot
+and stop to the caller. Tests that construct the engine themselves with
+`engine.NewFromBytes`, such as the journal replay, crash-resume and RAG
+ingest tests, put `t.TempDir()` roots in their inline config.
+
+Plugin-owned paths (`nexus.memory.longterm` `path`, `nexus.vectorstore.chromem`
+`path`, ingest `cache_dir`, ...) are not rewritten. A test whose config writes
+to one must override it with `t.TempDir()` through `copyConfig`, as the
+longterm-memory, vector-memory, kitchen-sink and cross-provider RAG tests do.
 
 ## Raw Event Access
 

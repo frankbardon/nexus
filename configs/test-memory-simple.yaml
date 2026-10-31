@@ -18,6 +18,8 @@ core:
       model: claude-haiku-4-5-20251001
       max_tokens: 4096
   sessions:
+    # Manual runs only (bin/nexus -config ...). pkg/testharness replaces
+    # this, and core.storage.root, with a per-test temp dir.
     root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short

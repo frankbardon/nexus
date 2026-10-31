@@ -12,7 +12,16 @@ import (
 // TestKitchenSink_Boot validates that every shipping plugin can boot together
 // without dependency conflicts, init errors, or event-bus contention.
 func TestKitchenSink_Boot(t *testing.T) {
-	h := testharness.New(t, "configs/test-kitchen-sink.yaml", testharness.WithTimeout(30*time.Second))
+	// The harness redirects the sessions and storage roots, not plugin
+	// paths, so point longterm memory at a temp dir to keep it out of ~/.nexus.
+	cfg := copyConfig(t, "configs/test-kitchen-sink.yaml", map[string]any{
+		"nexus.memory.longterm": map[string]any{
+			"scope":     "global",
+			"auto_load": false,
+			"path":      t.TempDir(),
+		},
+	})
+	h := testharness.New(t, cfg, testharness.WithTimeout(30*time.Second))
 	h.Run()
 
 	h.AssertBooted(

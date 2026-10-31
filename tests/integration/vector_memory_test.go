@@ -13,7 +13,7 @@ import (
 // alongside its required capabilities (embeddings.provider, vector.store)
 // and emits no errors during a minimal two-input run.
 func TestVectorMemory_Boot(t *testing.T) {
-	h := testharness.New(t, "configs/test-vector-memory.yaml",
+	h := testharness.New(t, vectorMemoryConfig(t),
 		testharness.WithTimeout(30*time.Second))
 	h.Run()
 
@@ -34,9 +34,19 @@ func TestVectorMemory_Boot(t *testing.T) {
 // io.input the vector memory plugin emits embeddings.request to embed
 // the user's query before searching the vector store.
 func TestVectorMemory_EmitsEmbeddingsRequest(t *testing.T) {
-	h := testharness.New(t, "configs/test-vector-memory.yaml",
+	h := testharness.New(t, vectorMemoryConfig(t),
 		testharness.WithTimeout(30*time.Second))
 	h.Run()
 
 	h.AssertEventEmitted("embeddings.request")
+}
+
+// vectorMemoryConfig points chromem at a per-test temp dir. Its default path
+// is ~/.nexus/vectors, and the harness redirects only the engine's sessions
+// and storage roots, not plugin paths.
+func vectorMemoryConfig(t *testing.T) string {
+	t.Helper()
+	return copyConfig(t, "configs/test-vector-memory.yaml", map[string]any{
+		"nexus.vectorstore.chromem": map[string]any{"path": t.TempDir()},
+	})
 }

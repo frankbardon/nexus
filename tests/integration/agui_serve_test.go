@@ -6,14 +6,13 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/agui/aguiclient"
 	"github.com/frankbardon/nexus/pkg/engine"
-	"github.com/frankbardon/nexus/pkg/engine/allplugins"
+	"github.com/frankbardon/nexus/pkg/testharness"
 )
 
 // aguiBindAddr is the loopback address configured in configs/test-agui-serve.yaml
@@ -25,20 +24,12 @@ const aguiBindAddr = "127.0.0.1:18190"
 // (the same registry cmd/nexus and the test harness use) and returns it with a
 // cleanup that stops it. Unlike testharness.Run it does NOT block on the test IO
 // plugin's Done channel — the AG-UI POST is the driver here, not scripted io.test
-// inputs, so the caller controls the lifecycle.
+// inputs, so the caller controls the lifecycle. testharness.NewEngine redirects
+// the sessions and storage roots into a per-test temp dir, as the harness does.
 func bootEngine(t *testing.T, configPath string) *engine.Engine {
 	t.Helper()
 
-	abs := configPath
-	if !filepath.IsAbs(configPath) {
-		abs = filepath.Join(findRoot(t), configPath)
-	}
-	eng, err := engine.New(abs)
-	if err != nil {
-		t.Fatalf("engine.New(%s): %v", configPath, err)
-	}
-	allplugins.RegisterAll(eng.Registry)
-
+	eng := testharness.NewEngine(t, configPath)
 	if err := eng.Boot(context.Background()); err != nil {
 		t.Fatalf("engine.Boot: %v", err)
 	}

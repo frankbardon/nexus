@@ -21,6 +21,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/allplugins"
 	"github.com/frankbardon/nexus/pkg/events"
 	testio "github.com/frankbardon/nexus/plugins/io/test"
+	"gopkg.in/yaml.v3"
 )
 
 const testPluginID = "nexus.io.test"
@@ -37,6 +38,14 @@ type Harness struct {
 	retainSession bool // keep session dir on failure for debugging
 	keepSession   bool // keep session dir unconditionally (used by tests that read post-run artifacts)
 	failFast      bool // disable bus panic recovery so tests surface stack traces
+
+	// configuredRoots keeps core.sessions.root and core.storage.root as the
+	// config file states them instead of redirecting both into dataRoot.
+	configuredRoots bool
+	// dataRoot is the per-harness temp dir that holds the sessions root
+	// (dataRoot/sessions) and the app/agent storage root (dataRoot/data).
+	// Empty when configuredRoots is set.
+	dataRoot string
 }
 
 // Option configures the test harness.
@@ -57,12 +66,23 @@ func WithRetainSession() Option {
 }
 
 // WithKeepSession keeps the session directory unconditionally so tests can
-// read post-run artifacts (the journal, plugin data dirs, metadata). The
-// caller is responsible for cleanup; using t.TempDir() as the sessions root
-// is the typical pattern.
+// read post-run artifacts (the journal, plugin data dirs, metadata) after
+// Run returns. The directory still lives under the harness's per-test temp
+// root, which is removed when the test ends.
 func WithKeepSession() Option {
 	return func(h *Harness) {
 		h.keepSession = true
+	}
+}
+
+// WithConfiguredRoots keeps core.sessions.root and core.storage.root exactly
+// as the config file sets them. Without it the harness redirects both into a
+// per-test temp dir so no harness-driven test writes under ~/.nexus or shares
+// state with another run. Use it only for a test that deliberately points
+// the engine at a root it prepared itself and must find again.
+func WithConfiguredRoots() Option {
+	return func(h *Harness) {
+		h.configuredRoots = true
 	}
 }
 
@@ -85,6 +105,11 @@ func WithFailFast() Option {
 
 // New creates a test harness from a config file. The config should use
 // nexus.io.test as its IO plugin.
+//
+// Unless WithConfiguredRoots is passed, the harness overrides the config's
+// core.sessions.root and core.storage.root with directories under a fresh
+// per-test temp dir, removed when the test ends (or retained, and logged,
+// when WithRetainSession is set and the test failed).
 func New(t *testing.T, configPath string, opts ...Option) *Harness {
 	t.Helper()
 
@@ -95,23 +120,19 @@ func New(t *testing.T, configPath string, opts ...Option) *Harness {
 		absPath = filepath.Join(root, configPath)
 	}
 
-	eng, err := engine.New(absPath)
-	if err != nil {
-		t.Fatalf("testharness: failed to create engine from %s: %v", configPath, err)
-	}
-
-	allplugins.RegisterAll(eng.Registry)
-
 	h := &Harness{
 		t:          t,
 		configPath: absPath,
-		eng:        eng,
 		timeout:    90 * time.Second,
 	}
 
 	for _, opt := range opts {
 		opt(h)
 	}
+
+	var eng *engine.Engine
+	eng, h.dataRoot = newEngine(t, absPath, h.configuredRoots, &h.retainSession)
+	h.eng = eng
 
 	// Apply fail-fast on the bus before Boot so the very first dispatch in
 	// startJournal subscriptions sees the toggled wrapper.
@@ -129,6 +150,129 @@ func New(t *testing.T, configPath string, opts ...Option) *Harness {
 	}
 
 	return h
+}
+
+// NewEngine builds an engine from configPath with every plugin registered
+// (the registry cmd/nexus uses) and core.sessions.root / core.storage.root
+// redirected into a per-test temp dir removed when the test ends, exactly as
+// New does. It neither boots nor stops the engine: it is for tests whose
+// driver is not the scripted nexus.io.test lifecycle (an inbound HTTP request
+// against a serve transport, say) and so cannot use Harness.Run, but must
+// still keep their state out of ~/.nexus. A relative configPath resolves
+// against the project root.
+func NewEngine(t *testing.T, configPath string) *engine.Engine {
+	t.Helper()
+	absPath := configPath
+	if !filepath.IsAbs(configPath) {
+		absPath = filepath.Join(findProjectRoot(t), configPath)
+	}
+	eng, _ := newEngine(t, absPath, false, nil)
+	return eng
+}
+
+// newEngine is the shared constructor behind New and NewEngine. Unless
+// configuredRoots is set, it creates the per-test temp root, registers its
+// cleanup, and builds the engine from the config with both roots rewritten
+// into it, returning the temp root ("" under configuredRoots). retain, when
+// non-nil, is read at cleanup: true plus a failed test keeps the dir.
+//
+// The rewrite happens on the YAML before the engine is constructed because
+// the storage manager captures its root at construction; setting eng.Config
+// afterwards would redirect sessions but not app/agent storage. engine.New is
+// LoadConfig(file bytes) + construction, so NewFromBytes on the rewritten
+// bytes is equivalent; ConfigPath is restored for config reloads.
+func newEngine(t *testing.T, absPath string, configuredRoots bool, retain *bool) (*engine.Engine, string) {
+	t.Helper()
+	fail := func(err error) {
+		t.Fatalf("testharness: failed to create engine from %s: %v", absPath, err)
+	}
+
+	if configuredRoots {
+		eng, err := engine.New(absPath)
+		if err != nil {
+			fail(err)
+		}
+		allplugins.RegisterAll(eng.Registry)
+		return eng, ""
+	}
+
+	dir, err := os.MkdirTemp("", "nexus-testharness-")
+	if err != nil {
+		fail(fmt.Errorf("create temp root: %w", err))
+	}
+	t.Cleanup(func() {
+		if retain != nil && *retain && t.Failed() {
+			t.Logf("testharness: retaining temp root: %s", dir)
+			return
+		}
+		os.RemoveAll(dir)
+	})
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		fail(fmt.Errorf("read config: %w", err))
+	}
+	data, err = overrideRoots(data, filepath.Join(dir, "sessions"), filepath.Join(dir, "data"))
+	if err != nil {
+		fail(fmt.Errorf("override roots: %w", err))
+	}
+	eng, err := engine.NewFromBytes(data)
+	if err != nil {
+		fail(err)
+	}
+	eng.ConfigPath = absPath
+	allplugins.RegisterAll(eng.Registry)
+	return eng, dir
+}
+
+// overrideRoots sets core.sessions.root and core.storage.root in a YAML
+// config, creating the core/sessions/storage mappings when absent and
+// leaving every other key untouched.
+func overrideRoots(in []byte, sessionsRoot, storageRoot string) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(in, &doc); err != nil {
+		return nil, fmt.Errorf("parse yaml: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
+	}
+	top := doc.Content[0]
+	if top.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("yaml root is not a mapping")
+	}
+	core := mappingChild(top, "core")
+	setScalar(mappingChild(core, "sessions"), "root", sessionsRoot)
+	setScalar(mappingChild(core, "storage"), "root", storageRoot)
+	return yaml.Marshal(&doc)
+}
+
+// mappingChild returns the mapping stored under key in parent, creating it
+// (or replacing a non-mapping value) as needed.
+func mappingChild(parent *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Kind == yaml.ScalarNode && parent.Content[i].Value == key {
+			v := parent.Content[i+1]
+			if v.Kind != yaml.MappingNode {
+				*v = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			}
+			return v
+		}
+	}
+	v := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
+	return v
+}
+
+// setScalar sets key to a string scalar value in a mapping node.
+func setScalar(m *yaml.Node, key, value string) {
+	val := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Kind == yaml.ScalarNode && m.Content[i].Value == key {
+			m.Content[i+1] = val
+			return
+		}
+	}
+	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
 }
 
 // Run boots the engine, waits for the test IO plugin to signal completion
@@ -175,6 +319,13 @@ func (h *Harness) Run() {
 	} else if h.eng.Session != nil {
 		h.t.Logf("testharness: retaining session dir: %s", h.eng.Session.RootDir)
 	}
+}
+
+// TempRoot returns the per-test temp dir the harness redirected
+// core.sessions.root (TempRoot()/sessions) and core.storage.root
+// (TempRoot()/data) into. Empty under WithConfiguredRoots.
+func (h *Harness) TempRoot() string {
+	return h.dataRoot
 }
 
 // SessionDir returns the absolute path of the session workspace created by
