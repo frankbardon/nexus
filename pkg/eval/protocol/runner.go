@@ -478,7 +478,7 @@ func sequenceContains(seq *yaml.Node, value string) bool {
 }
 
 // stripVisualTransports removes nexus.io.tui / nexus.io.browser /
-// nexus.io.wails entries from an active list. They block on stdin or
+// nexus.io.oneshot entries from an active list. They block on stdin or
 // serve a UI; the inspect-mode invocation must be headless.
 func stripVisualTransports(seq *yaml.Node) {
 	out := seq.Content[:0]
@@ -488,7 +488,7 @@ func stripVisualTransports(seq *yaml.Node) {
 			continue
 		}
 		switch n.Value {
-		case "nexus.io.tui", "nexus.io.browser", "nexus.io.wails", "nexus.io.oneshot":
+		case "nexus.io.tui", "nexus.io.browser", "nexus.io.oneshot":
 			continue
 		}
 		out = append(out, n)

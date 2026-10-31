@@ -184,7 +184,6 @@ func TestConfig_Validate_RejectsBootstrapStderrWithVisualPlugin(t *testing.T) {
 	cases := []string{
 		"nexus.io.tui",
 		"nexus.io.browser",
-		"nexus.io.wails",
 		"nexus.io.tui/instance-2", // instance suffix should still match base ID
 	}
 	for _, active := range cases {

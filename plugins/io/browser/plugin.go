@@ -507,9 +507,8 @@ func (p *Plugin) handleAgentPlan(e engine.Event[any]) {
 	})
 }
 
-// handleSubagentStarted bridges the worker's start event to the UI.
-// Mirrors the wails plugin handler — see plugins/io/wails/plugin.go for
-// the rationale on why subagent lifecycle events get bridged.
+// handleSubagentStarted bridges the worker's start event to the UI so
+// orchestrator-style agents can surface per-worker progress.
 func (p *Plugin) handleSubagentStarted(e engine.Event[any]) {
 	st, ok := e.Payload.(events.SubagentStarted)
 	if !ok {

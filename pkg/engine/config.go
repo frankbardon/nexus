@@ -190,7 +190,7 @@ type LoggingConfig struct {
 	// BootstrapStderr, when true, registers a stderr sink at engine
 	// construction time so pre-sink records appear on the terminal. Default
 	// false. Rejected by config validation when a known visual transport
-	// plugin (nexus.io.tui, nexus.io.browser, nexus.io.wails) is active,
+	// plugin (nexus.io.tui, nexus.io.browser) is active,
 	// because interleaving slog output with the UI corrupts the display.
 	BootstrapStderr bool `yaml:"bootstrap_stderr"`
 	// BufferSize is the capacity of the slog log ring buffer. Values <= 0
@@ -319,7 +319,6 @@ func LoadConfigFromBytes(data []byte) (*Config, error) {
 var visualTransportPlugins = map[string]bool{
 	"nexus.io.tui":     true,
 	"nexus.io.browser": true,
-	"nexus.io.wails":   true,
 }
 
 // validate is a post-load check. Keep rules narrow: only flag combinations

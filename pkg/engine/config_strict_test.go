@@ -181,23 +181,8 @@ core:
 // configs/demo-rewind.yaml, which had carried a silently-ignored
 // core.journal.fsync_mode block since it was written.
 func TestEveryShippedConfigStillLoads(t *testing.T) {
-	// Every engine config in the tree, including the ones TestConfigsSmokeBoot
-	// cannot reach: cmd/demo/config-*.yaml and cmd/desktop/config-*.yaml name
-	// plugins outside the default registry, so schema validation fails on them
-	// for reasons unrelated to the config. Loading needs no registry, so this
-	// half covers them.
 	globs := []string{
 		"../../configs/*.yaml",
-		"../../cmd/demo/config-*.yaml",
-		"../../cmd/demo/recipe-*.yaml",
-		"../../cmd/desktop/config-*.yaml",
-	}
-
-	// Not an engine config: it sits in cmd/demo because it accompanies the otel
-	// recipe, but it is a docker-compose file and its top-level keys are
-	// compose's.
-	notAnEngineConfig := map[string]bool{
-		"recipe-otel-trace-docker-compose.yaml": true,
 	}
 
 	var paths []string
@@ -206,12 +191,7 @@ func TestEveryShippedConfigStillLoads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, path := range matched {
-			if notAnEngineConfig[filepath.Base(path)] {
-				continue
-			}
-			paths = append(paths, path)
-		}
+		paths = append(paths, matched...)
 	}
 	if len(paths) == 0 {
 		t.Fatal("no configs found; this test is not checking anything")

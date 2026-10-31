@@ -47,7 +47,6 @@ The `configs/` directory holds two kinds of YAML profiles, distinguished by file
 | TUI | `nexus.io.tui` | (none) |
 | Browser | `nexus.io.browser` | `host` (default `localhost`), `port` (default `8080`), `open_browser` (default `true`) |
 | One-shot | `nexus.io.oneshot` | `input`, `pretty`, `read_stdin` |
-| Wails | `nexus.io.wails` | `subscribe` (bus→frontend), `accept` (frontend→bus) — config-driven event bridging |
 
 ### Tools
 
