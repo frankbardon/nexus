@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -165,7 +166,18 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 
 	_ = lm.bus.Emit("core.boot", nil)
 
-	// Init phase.
+	// Init phase. initialized records, in init order, every plugin whose
+	// Init returned nil. If Boot fails from here on, each of them is shut
+	// down in reverse order before Boot returns: the caller does not call
+	// Stop on a failed Boot, so without this their bus subscriptions and
+	// anything else they opened in Init outlived the failure (#206).
+	initialized := make([]Plugin, 0, len(sortedIDs))
+	bootOK := false
+	defer func() {
+		if !bootOK {
+			lm.teardownFailedBoot(ctx, initialized)
+		}
+	}()
 	for _, configuredID := range sortedIDs {
 		p := pluginMap[configuredID]
 		pluginCfg := lm.config.Plugins.Configs[configuredID]
@@ -207,6 +219,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		if err := p.Init(pctx); err != nil {
 			return fmt.Errorf("plugin %q init failed: %w", configuredID, err)
 		}
+		initialized = append(initialized, p)
 	}
 
 	// All subscribes have landed by end of Init. Surface any equal-priority
@@ -235,9 +248,57 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 		return err
 	}
 
+	bootOK = true
 	_ = lm.bus.Emit("core.ready", nil)
 	lm.logger.Info("engine ready", "plugins", len(lm.plugins))
 	return nil
+}
+
+// teardownFailedBoot shuts down, in reverse init order, every plugin whose
+// Init succeeded during a Boot that then failed — a later plugin's Init, or
+// any plugin's Ready. Plugins are expected to tolerate Shutdown after Init
+// without Ready; a Shutdown that panics anyway is recovered and logged so it
+// cannot take down a host that is handling the Boot error. Shutdown errors
+// are logged and never replace the Boot error the caller receives.
+//
+// No core.shutdown is emitted and the bus is not drained: core.ready never
+// fired, so nothing has started work that a drain would wait for.
+//
+// The Shutdown context is detached from Boot's: a Boot that failed because
+// its context was cancelled must still give plugins a usable context to
+// release resources with, bounded by the shutdown drain timeout.
+func (lm *LifecycleManager) teardownFailedBoot(ctx context.Context, initialized []Plugin) {
+	// lm.plugins named every sorted plugin, including ones that never
+	// Init'd. Clear it so Plugins() and a stray Shutdown do not act on them.
+	lm.plugins = nil
+	if len(initialized) == 0 {
+		return
+	}
+
+	sdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lm.resolveDrainTimeout())
+	defer cancel()
+
+	var errs []error
+	for i := len(initialized) - 1; i >= 0; i-- {
+		p := initialized[i]
+		lm.logger.Info("shutting down plugin after failed boot", "plugin", p.ID())
+		if err := shutdownRecovered(sdCtx, p); err != nil {
+			errs = append(errs, fmt.Errorf("plugin %q shutdown failed: %w", p.ID(), err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		lm.logger.Error("plugin shutdown errors after failed boot", "error", err)
+	}
+}
+
+// shutdownRecovered calls p.Shutdown, converting a panic into an error.
+func shutdownRecovered(ctx context.Context, p Plugin) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in Shutdown: %v", r)
+		}
+	}()
+	return p.Shutdown(ctx)
 }
 
 // Shutdown tears down plugins in reverse order, drains the bus, and signals

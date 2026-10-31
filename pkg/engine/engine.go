@@ -266,9 +266,17 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// engine registered each handler a second time (#206). Deferred after the
 	// object-store release so it runs before it: the snapshot handlers read
 	// e.objectStore, the same ordering Stop and Abandon depend on.
+	//
+	// The journal writer is closed in the same defer, after the unsubscribe
+	// so the wildcard handler can no longer Append to it — the order Stop
+	// uses. Without it a failed Boot left the drain goroutine and the open
+	// segment file behind, and a retry started a second writer over the
+	// same directory. Plugins that already completed Init have been shut
+	// down by Lifecycle.Boot itself before this runs.
 	defer func() {
 		if !bootSucceeded {
 			e.unsubscribeRunScoped()
+			e.closeJournal()
 		}
 	}()
 
@@ -771,13 +779,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 	// The writer is kept in a local so the shutdown snapshot below can still
 	// capture its segments: a closed writer is the ideal thing to snapshot,
 	// since nothing can rotate underneath it.
-	journalWriter := e.Journal
-	if e.Journal != nil {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = e.Journal.Close(closeCtx)
-		cancel()
-		e.Journal = nil
-	}
+	journalWriter := e.closeJournal()
 
 	// Drain any blob pushed but not yet uploaded, before the shutdown snapshot
 	// rather than after it: the snapshot lists the session prefix to decide
@@ -927,6 +929,28 @@ func (e *Engine) unsubscribeRunScoped() {
 		unsub()
 	}
 	e.runUnsubs = nil
+}
+
+// closeJournal closes the journal writer Boot started, if any, and detaches
+// it from the engine and the lifecycle manager. It returns the closed writer
+// so Stop can still snapshot its segments. A short deadline keeps a stuck
+// drain from blocking teardown indefinitely. Shared by Stop and Boot's own
+// failure path; idempotent.
+func (e *Engine) closeJournal() *journal.Writer {
+	w := e.Journal
+	if w == nil {
+		return nil
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := w.Close(closeCtx); err != nil {
+		e.Logger.Warn("journal close error", "error", err)
+	}
+	cancel()
+	e.Journal = nil
+	if e.Lifecycle != nil {
+		e.Lifecycle.journal = nil
+	}
+	return w
 }
 
 // startJournal constructs the per-session journal writer and installs the
