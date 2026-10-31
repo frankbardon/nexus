@@ -69,7 +69,7 @@ The oneshot plugin auto-approves **every** approval request so agents with plann
 
 - `io.approval.request` (tool call approval) → responds `Approved: true`
 - `plan.approval.request` (planner approval) → responds `Approved: true`
-- `io.ask` (free-form question to the user) → responds with an empty string
+- `hitl.requested` (human-in-the-loop question, e.g. `ask_user`) → responds with the request's default choice if it has one, otherwise an empty answer
 
 Every auto-approval is recorded in the `approvals` array of the transcript so callers can audit what happened.
 
@@ -103,12 +103,13 @@ Every array field is omitted from the JSON when empty.
 | `io.output` | 0 | Capture final assistant text and error messages |
 | `io.approval.request` | 0 | Auto-approve tool call approvals |
 | `plan.approval.request` | 0 | Auto-approve plan approvals |
-| `io.ask` | 10 | Auto-respond with an empty answer |
+| `hitl.requested` | 0 | Auto-answer with the default choice (or empty) |
 | `plan.created` | 0 | Record generated plans in the transcript |
 | `agent.plan` | 0 | Record plan status updates |
 | `thinking.step` | 0 | Record reasoning trace |
 | `agent.turn.start` / `agent.turn.end` | 0 | Detect when the single turn has completed |
 | `core.error` | 0 | Record errors in the transcript |
+| `core.ready` | 0 | Start the run once the engine is ready |
 
 Every handler subscribes at the default priority `0`, so the approval handlers run ahead of any plugin that subscribes later or at a higher priority and respond immediately.
 
@@ -116,10 +117,11 @@ Every handler subscribes at the default priority `0`, so the approval handlers r
 
 | Event | When |
 |-------|------|
+| `before:io.input` | Vetoable hop ahead of the prompt submission |
 | `io.input` | Once during `Ready`, with the resolved prompt |
 | `io.approval.response` | Auto-approval for a tool call |
 | `plan.approval.response` | Auto-approval for a plan |
-| `io.ask.response` | Auto-response for an ask prompt |
+| `hitl.responded` | Auto-answer for a human-in-the-loop request |
 | `io.session.start` | On `Ready` |
 | `io.session.end` | After the final JSON transcript has been flushed |
 

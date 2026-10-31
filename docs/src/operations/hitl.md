@@ -303,9 +303,5 @@ session — switch to a different session first or stop the agent.
   Linux are covered by the underlying `fsnotify/fsnotify` library.
 - The prompt-synthesizer capability is reserved in the event payload
   but not yet implemented; literal prompts are the only rendered shape.
-- Approval-policy gate (`gates/approval_policy/`) and per-plugin
-  `require_approval` configs (memory longterm/vector/compaction) are
-  not yet shipped; today, only the `ask_user` tool emits
-  `hitl.requested`.
 
 These follow-ups are tracked off this PR.
