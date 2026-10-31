@@ -202,6 +202,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "llm.stream.chunk", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "skill.loaded", Priority: 50},
+		{EventType: "tool.register"},
 		{EventType: "plan.result", Priority: 50},
 		{EventType: "plan.approval.response", Priority: 50},
 		{EventType: "memory.compacted", Priority: 50},

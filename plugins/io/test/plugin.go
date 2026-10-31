@@ -108,14 +108,18 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "io.output", Priority: 50},
 		{EventType: "io.approval.request"},
 		{EventType: "plan.approval.request"},
+		{EventType: "hitl.requested"},
 		{EventType: "io.ask", Priority: 10},
 		{EventType: "agent.turn.start"},
 		{EventType: "agent.turn.end"},
 	}
 	if len(p.mockResponses) > 0 {
-		subs = append(subs, engine.EventSubscription{
-			EventType: "before:llm.request", Priority: 20,
-		})
+		subs = append(subs,
+			engine.EventSubscription{EventType: "before:llm.request", Priority: 20},
+			// Catches fanout legs, the one producer that bypasses the
+			// before:llm.request hop.
+			engine.EventSubscription{EventType: "llm.request", Priority: 5},
+		)
 	}
 	return subs
 }

@@ -94,6 +94,9 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "before:io.output", Priority: 12},
+		// The shared retry helper (gates/internal/retry) watches for the
+		// answer to its own retry request at 5.
+		{EventType: "llm.response", Priority: 5},
 	}
 }
 

@@ -86,6 +86,7 @@ Constructs the harness, calls `Init` and `Ready` on the plugin, registers cleanu
 | `AssertEmittedInOrder(types ...string)` | Types appeared in the captured stream in the given relative order. Other emissions between them are ignored. |
 | `AssertNoUndeclaredEmissions()` | Every plugin-origin event the harness saw is in the plugin's declared `Emissions()` list. Use after `Inject` to catch contract drift. |
 | *(automatic in `NewContract`)* | Every declared subscription priority equals the priority the plugin registered on the bus. See below. |
+| *(automatic in `NewContract`)* | Every event type the plugin registered on the bus is declared in `Subscriptions()`. See below. |
 
 `Captured()` returns every event observed (including injects); `PluginEmissions()` filters down to plugin-origin only.
 
@@ -115,9 +116,10 @@ What it does and does not flag:
 - **Ignores** a declared type that is not registered at all. Many subscriptions
   are config-conditional; whether a declared subscription fires is what
   `AssertSubscribesTo` plus `Inject` cover.
-- **Ignores** registered types that are not declared at all, and anything a
-  test subscribes through `Bus()` after `NewContract` returns — the snapshot is
-  taken first, so only the plugin's own registrations are compared.
+- **Ignores** registered types that are not declared at all (the undeclared
+  check below covers those), and anything a test subscribes through `Bus()`
+  after `NewContract` returns — the snapshot is taken first, so only the
+  plugin's own registrations are compared.
 
 `RegisteredSubscriptions()` returns that snapshot (event type, priority,
 `WithSource` tag) for tests that want to assert on it directly.
@@ -135,6 +137,39 @@ and the handler map in [Event Bus](../architecture/event-bus.md)), so fix the
 `Subscribe` call. On plain notification events, where nothing depends on the
 number, correcting the declaration to the shipped runtime priority is the
 behaviour-neutral fix.
+
+### Automatic check: every registered subscription is declared
+
+The same snapshot drives a second check. Every subscription the plugin
+registered during `Init`/`Ready` must be for an event type listed in its
+`Subscriptions()`. An omission fails the test and names the plugin, event and
+priority:
+
+```
+plugin "nexus.gate.output_length" registered undeclared subscription "llm.response" at priority 5 (source "nexus.gate.output_length"); add it to Subscriptions()
+```
+
+A registration counts as the plugin's when its `WithSource` tag is the plugin
+ID (or the `WithPluginID` override, or the ID's part before a `/` instance
+suffix), or when it has no tag at all, since nothing but the plugin had the bus
+before the snapshot. A registration tagged with a *different* ID is left to
+that ID's own contract test.
+
+**Shared helpers.** A helper that subscribes on the owning plugin's bus, such as
+`plugins/gates/internal/retry` (`llm.response` at priority 5), is part of that
+plugin's contract. Every plugin that constructs the helper declares what it
+subscribes to, and the helper tags its subscription with the owner's ID
+(`retry.Config.Source`).
+
+**Config-conditional subscriptions** are not an exemption. Declare them
+unconditionally, or conditionally on the same config the `Subscribe` call
+reads. `nexus.io.test` declares its mock-mode `before:llm.request` and
+`llm.request` handlers only when `mock_responses` is set. There is no opt-out:
+every subscription found so far could be declared, so none was added. Fix an
+omission by adding the declaration, not by dropping the subscription.
+
+The check sees only what the harness config exercises. A subscription wired
+under a config no contract test uses is not caught.
 
 ## Patterns
 

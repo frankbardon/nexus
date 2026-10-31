@@ -121,6 +121,8 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 | `hitl.requested` | Respond per `hitl_responses` / `hitl_auto_respond` |
 | `agent.turn.start` | Track turn depth for input pacing |
 | `agent.turn.end` | Detect idle state, trigger next input or session end |
+| `before:llm.request` (priority 20) | Mock mode only: answer the request from `mock_responses` |
+| `llm.request` (priority 5) | Mock mode only: answer fanout legs, which skip the `before:llm.request` hop |
 | `*` (wildcard) | Collect all events for assertions |
 
 ## Emissions

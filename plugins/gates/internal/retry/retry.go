@@ -53,7 +53,7 @@ func New(bus engine.EventBus, logger *slog.Logger, config Config) *Handler {
 
 	// Subscribe to LLM responses — filter by _source metadata in handler.
 	h.unsub = bus.Subscribe("llm.response", h.handleLLMResponse,
-		engine.WithPriority(5))
+		engine.WithPriority(5), engine.WithSource(config.Source))
 
 	return h
 }

@@ -63,6 +63,7 @@ type ContractHarness struct {
 	sessionDir  string
 	withSession bool
 	registered  []engine.SubscriptionInfo
+	pluginID    string
 }
 
 // ContractOption configures a ContractHarness.
@@ -127,6 +128,7 @@ func NewContract(t *testing.T, factory engine.PluginFactory, opts ...ContractOpt
 		bus:         engine.NewEventBus(),
 		injectedIDs: map[string]struct{}{},
 		withSession: cfg.withSession,
+		pluginID:    pluginID,
 	}
 
 	// Capture every event with origin tagging. Subscribe BEFORE Init so the
@@ -207,12 +209,15 @@ func NewContract(t *testing.T, factory engine.PluginFactory, opts ...ContractOpt
 	// was registered by the plugin's Init/Ready (the harness itself only
 	// holds a wildcard observer), and anything a test subscribes later via
 	// Bus() must not be mistaken for the plugin's. Then hold the declared
-	// priorities against it — a declared priority that differs from the
-	// registered one silently reorders before:* pipelines.
+	// subscriptions against it — a declared priority that differs from the
+	// registered one silently reorders before:* pipelines, and a registered
+	// event type that is not declared at all is invisible to every reader of
+	// Subscriptions().
 	if insp, ok := h.bus.(engine.SubscriptionInspector); ok {
 		h.registered = insp.RegisteredSubscriptions()
 	}
 	h.checkSubscriptionPriorities()
+	h.checkUndeclaredSubscriptions()
 
 	t.Cleanup(func() {
 		_ = h.bus.Drain(context.Background())
@@ -479,6 +484,45 @@ func subscriptionPriorityMismatch(pluginID string, declared []engine.EventSubscr
 		}
 		fmt.Fprintf(&sb, "plugin %q subscription priority mismatch on %q: declared %v in Subscriptions(), registered %v on the bus\n",
 			pluginID, t, w, g)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+// checkUndeclaredSubscriptions runs automatically from NewContract. Every
+// subscription the plugin registered during Init/Ready must be for an event
+// type it declares in Subscriptions(). A registration is the plugin's when its
+// WithSource tag is the plugin ID (or the harness ID, or the ID's part before
+// any "/" instance suffix), or when it carries no tag at all — nothing but the
+// plugin had the bus before the snapshot. A registration tagged with some
+// other ID belongs to that ID's own contract and is left alone.
+//
+// There is no opt-out: a subscription that exists only under some config is
+// declared unconditionally or conditionally on the same config, as io.test
+// does for its mock handlers.
+func (h *ContractHarness) checkUndeclaredSubscriptions() {
+	h.t.Helper()
+	if msg := undeclaredSubscriptions(h.plugin.ID(), h.pluginID, h.plugin.Subscriptions(), h.registered); msg != "" {
+		h.t.Error(msg)
+	}
+}
+
+// undeclaredSubscriptions returns a diagnostic naming the plugin, event type
+// and priority of every registration attributed to the plugin whose event
+// type is absent from its declarations, or "" when there are none.
+func undeclaredSubscriptions(pluginID, harnessID string, declared []engine.EventSubscription, registered []engine.SubscriptionInfo) string {
+	declaredTypes := map[string]bool{}
+	for _, d := range declared {
+		declaredTypes[d.EventType] = true
+	}
+	owners := map[string]bool{"": true, pluginID: true, harnessID: true}
+	owners[strings.SplitN(pluginID, "/", 2)[0]] = true
+	var sb strings.Builder
+	for _, r := range registered {
+		if declaredTypes[r.EventType] || !owners[r.Source] {
+			continue
+		}
+		fmt.Fprintf(&sb, "plugin %q registered undeclared subscription %q at priority %d (source %q); add it to Subscriptions()\n",
+			pluginID, r.EventType, r.Priority, r.Source)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
