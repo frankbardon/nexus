@@ -49,10 +49,10 @@ type HITLChoice struct {
 }
 
 // HITLRequest is the unified human-in-the-loop request payload. It
-// supersedes AskUser and the design-doc-only ApprovalRequest: any plugin
-// that needs an operator's input — clarifying a question, approving a
-// destructive tool call, picking among curated plans, or signing off on a
-// memory write — emits this single event type.
+// supersedes the retired io.ask (AskUser) event and the design-doc-only
+// ApprovalRequest: any plugin that needs an operator's input — clarifying a
+// question, approving a destructive tool call, picking among curated plans,
+// or signing off on a memory write — emits this single event type.
 //
 // Exactly one of Prompt, PromptTemplate, or PromptSynthesizer should be
 // set. The control/hitl plugin renders the final string at request time;

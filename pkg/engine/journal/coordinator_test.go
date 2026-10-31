@@ -272,3 +272,43 @@ func TestCoordinator_PayloadAs(t *testing.T) {
 		t.Errorf("PayloadAs typed fast path: got=%+v err=%v", got, err)
 	}
 }
+
+// TestCoordinator_LegacyAskEventsSkipCleanly pins that a journal recorded
+// before the io.ask / io.ask.response pair was retired (superseded by
+// hitl.requested / hitl.responded) still replays: the legacy envelopes are
+// neither stashed nor re-emitted, and Run completes without error.
+func TestCoordinator_LegacyAskEventsSkipCleanly(t *testing.T) {
+	dir := t.TempDir()
+	writeJournal(t, dir, []Envelope{
+		{Seq: 1, Type: "io.session.start"},
+		{Seq: 2, Type: "io.input", Payload: map[string]any{"content": "deploy?"}},
+		{Seq: 3, Type: "io.ask", Payload: map[string]any{"prompt_id": "p1", "question": "which env?"}},
+		{Seq: 4, Type: "io.ask.response", Payload: map[string]any{"prompt_id": "p1", "answer": "staging"}},
+		{Seq: 5, Type: "llm.response", Payload: map[string]any{"content": "deployed"}},
+		{Seq: 6, Type: "agent.turn.end"},
+	})
+
+	bus := &stubBus{}
+	rep := newStubReplay()
+	c, err := NewCoordinator(dir, bus, rep, CoordinatorOptions{})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	bus.mu.Lock()
+	if len(bus.emits) != 1 || bus.emits[0].Type != "io.input" {
+		t.Errorf("expected exactly one io.input re-emit, got %+v", bus.emits)
+	}
+	bus.mu.Unlock()
+	for _, typ := range []string{"io.ask", "io.ask.response"} {
+		if n := rep.queueLen(typ); n != 0 {
+			t.Errorf("legacy %q stashed %d payloads, want 0", typ, n)
+		}
+	}
+	if n := rep.queueLen("llm.response"); n != 1 {
+		t.Errorf("llm.response stashed %d payloads, want 1", n)
+	}
+}

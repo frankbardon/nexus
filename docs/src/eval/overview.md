@@ -82,7 +82,7 @@ migration note.
    `input/config.yaml`. `core.sessions.root` is overridden to a per-run
    tempdir under `<reports_dir>/<run-id>/_sessions/`.
 3. **Replay.** `journal.NewCoordinator` seeds the FIFO stash with
-   `llm.response` / `tool.result` / `io.ask.response` payloads from the
+   `llm.response` / `tool.result` / `hitl.responded` payloads from the
    journal, then re-emits `io.input` events in seq order. The live agent
    reacts as if the inputs were fresh; side-effecting plugins detect
    `engine.Replay.Active()` and pop the stash instead of calling out.

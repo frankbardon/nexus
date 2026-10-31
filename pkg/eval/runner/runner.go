@@ -170,7 +170,7 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 	}
 
 	// Drive replay. Coordinator handles seeding the FIFO stash with
-	// llm.response/tool.result/io.ask.response payloads from the journal
+	// llm.response/tool.result/hitl.responded payloads from the journal
 	// and re-firing io.inputs in seq order.
 	replayCtx, replayCancel := context.WithTimeout(ctx, opts.ReplayTimeout)
 	defer replayCancel()

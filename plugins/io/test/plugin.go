@@ -105,11 +105,9 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
-		{EventType: "io.output", Priority: 50},
 		{EventType: "io.approval.request"},
 		{EventType: "plan.approval.request"},
 		{EventType: "hitl.requested"},
-		{EventType: "io.ask", Priority: 10},
 		{EventType: "agent.turn.start"},
 		{EventType: "agent.turn.end"},
 	}
@@ -130,7 +128,7 @@ func (p *Plugin) Emissions() []string {
 		"before:io.input",
 		"io.approval.response",
 		"plan.approval.response",
-		"io.ask.response",
+		"hitl.responded",
 		"io.session.start",
 		"io.session.end",
 		"before:llm.response",
@@ -499,7 +497,7 @@ func (p *Plugin) parseMockResponses(cfg map[string]any) {
 	}
 }
 
-// -- approval/ask handlers ---------------------------------------------------
+// -- approval/hitl handlers --------------------------------------------------
 
 func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 	req, ok := e.Payload.(events.ApprovalRequest)
