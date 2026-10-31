@@ -65,6 +65,9 @@ type Plugin struct {
 	prompts *engine.PromptRegistry
 	replay  *engine.ReplayState
 	sandbox sandbox.Sandbox
+	// toolCalls hands each run_code call a context the engine cancels when
+	// the call times out; nil-safe.
+	toolCalls *engine.ToolCallContexts
 
 	liveCalls atomic.Uint64
 
@@ -130,6 +133,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.prompts = ctx.Prompts
 	p.replay = ctx.Replay
 	p.sandbox = ctx.Sandbox
+	p.toolCalls = ctx.ToolCalls
 
 	if s, ok := ctx.Config["compiler"].(string); ok && s != "" {
 		switch compilerKind(s) {
@@ -518,7 +522,9 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		parts := p.flushImageBuffer(imageBuf)
 		p.emitResultParts(tc, stdout.String(), result, errMsg, durationMs, stdout.Truncated(), parts)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	callCtx, release := p.toolCalls.Begin(context.Background(), tc.ID)
+	defer release()
+	ctx, cancel := context.WithTimeout(callCtx, p.timeout)
 	defer cancel()
 
 	inv := &invocation{

@@ -16,7 +16,9 @@ import (
 func (p *Plugin) runScriptWasm(tc events.ToolCall, script string) {
 	started := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	callCtx, release := p.toolCalls.Begin(context.Background(), tc.ID)
+	defer release()
+	ctx, cancel := context.WithTimeout(callCtx, p.timeout)
 	defer cancel()
 
 	res, err := p.sandbox.Exec(ctx, sandbox.ExecRequest{

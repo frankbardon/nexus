@@ -25,6 +25,25 @@ Tool plugins give the agent capabilities to interact with the outside world. Eac
 6. If not vetoed, the tool plugin emits `tool.result`
 7. The agent feeds the result back to the LLM
 
+### Cancellation
+
+A handler that does real work should run it under a per-call context from the
+engine, so the call can be stopped when it is timed out:
+
+```go
+ctx, release := p.toolCalls.Begin(context.Background(), tc.ID) // p.toolCalls = pctx.ToolCalls
+defer release()
+```
+
+The engine cancels that context when a `tool.timeout` names the call's ID
+(`nexus.gate.tool_timeout` emits one when a call exceeds its deadline) and when
+it stops; `context.Cause(ctx)` is `engine.ErrToolCallTimedOut` or
+`engine.ErrToolCallsStopped`. `shell` (process group killed), `run_code` and
+`web_fetch` honor it. It is cooperative — a handler that ignores it runs on,
+and its late result is vetoed by the gate — and `ToolCalls` is nil-safe, so a
+hand-built test `PluginContext` needs no registry. A `Cancel` for an ID with no
+live `Begin` does nothing; it does not pre-cancel a later one.
+
 ### Unknown tools
 
 If the model calls a tool nobody handles — a hallucinated name, or a client tool

@@ -46,6 +46,10 @@ type Engine struct {
 	// after construction; idle until a replay coordinator activates it.
 	// Plugins inspect Replay.Active() to short-circuit side effects.
 	Replay *ReplayState
+	// ToolCalls is the per-call tool context registry handed to plugins as
+	// PluginContext.ToolCalls. Always non-nil after construction. Boot
+	// attaches it to tool.timeout; Stop cancels whatever is still live.
+	ToolCalls *ToolCallContexts
 	// Storage opens scoped per-plugin SQLite-backed storage. Always
 	// non-nil after construction; closed by Stop. Plugins access it via
 	// PluginContext.Storage rather than reaching here directly.
@@ -167,6 +171,8 @@ func newFromConfig(cfg *Config) *Engine {
 	ctxMgr := NewContextManager(bus, logger)
 	replay := NewReplayState()
 	lifecycle.replay = replay
+	toolCalls := NewToolCallContexts()
+	lifecycle.toolCalls = toolCalls
 
 	storageRoot := storageRoot(cfg)
 	storageMgr := storage.NewManager(
@@ -190,6 +196,7 @@ func newFromConfig(cfg *Config) *Engine {
 		Logger:    logger,
 		Logging:   fanout,
 		Replay:    replay,
+		ToolCalls: toolCalls,
 		Storage:   storageMgr,
 	}
 	// Resolve session-scoped storage paths against whatever Session is set
@@ -388,6 +395,11 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// before:session.tag.delete, with the reserved ("_"-prefixed) namespace
 	// unconditionally barred from this path. See session_tags.go.
 	e.installSessionTagHandlers()
+
+	// A tool.timeout cancels the timed-out call's dispatch context, so a
+	// handler that runs under ToolCalls.Begin stops instead of running on
+	// in the background after the agent has been handed an error result.
+	e.runUnsubs = append(e.runUnsubs, e.ToolCalls.Attach(e.Bus))
 
 	// Track token usage and cost from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {
@@ -757,6 +769,10 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 
 	e.unsubscribeRunScoped()
+
+	// Cancel every tool call still in flight so its handler unwinds rather
+	// than outliving the run.
+	e.ToolCalls.CancelAll(ErrToolCallsStopped)
 
 	// Stop the object-store recovery worker before anything else is torn down.
 	// It snapshots through the journal writer this function closes further

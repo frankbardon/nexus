@@ -5131,9 +5131,18 @@ late real result for the same call ID so the agent's `pendingToolCalls`
 counter stays consistent. Timed-out call IDs are remembered for one hour
 (swept whenever a new timeout fires, and cleared on shutdown), so a call whose
 real result never arrives does not pin memory for the life of the process; a
-real result later than that window is no longer suppressed. Note: Go cancellation is cooperative — the original
-tool goroutine may keep running until it honors its own context. The gate's
-job is to unblock the agent, not preempt the tool.
+real result later than that window is no longer suppressed.
+
+**Cancellation.** The engine cancels the timed-out call's dispatch context on
+that `tool.timeout`: every tool handler can take a per-call context from
+`PluginContext.ToolCalls.Begin(parent, call.ID)` (an engine-owned registry,
+`engine.ToolCallContexts`), and `context.Cause` on it reports
+`engine.ErrToolCallTimedOut`. `shell` kills the command's whole process group
+(grandchildren included, on unix), `run_code` (both compilers) and `web_fetch`
+abort. Cancellation is cooperative: a handler that does not take the context, or
+ignores it, keeps running until it finishes on its own, and its late result is
+still vetoed as above. The engine also cancels every live call context on
+`Stop`, with cause `engine.ErrToolCallsStopped`.
 
 **On by default.** `nexus.tool.catalog` auto-activates this gate through
 `Requires()`, so it runs in every profile that dispatches tools through the

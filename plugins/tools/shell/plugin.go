@@ -25,6 +25,9 @@ type Plugin struct {
 	session *engine.SessionWorkspace
 	replay  *engine.ReplayState
 	sandbox sandbox.Sandbox
+	// toolCalls hands each call a context the engine cancels when the call
+	// times out; nil-safe.
+	toolCalls *engine.ToolCallContexts
 
 	workingDir string
 	timeout    time.Duration
@@ -57,6 +60,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.session = ctx.Session
 	p.replay = ctx.Replay
 	p.sandbox = ctx.Sandbox
+	p.toolCalls = ctx.ToolCalls
 
 	// Working directory. Default to session files dir so shell commands and
 	// the file_io plugin see the same filesystem location.
@@ -190,7 +194,12 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 		_ = p.session.AppendFile("plugins/"+pluginID+"/history.txt", []byte(entry))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	// The per-call context is cancelled when this call is timed out
+	// (tool.timeout) or the engine stops; the sandbox then kills the
+	// command's process group instead of letting it run on unobserved.
+	callCtx, release := p.toolCalls.Begin(context.Background(), tc.ID)
+	defer release()
+	ctx, cancel := context.WithTimeout(callCtx, p.timeout)
 	defer cancel()
 
 	res, err := p.sandbox.Exec(ctx, sandbox.ExecRequest{
@@ -199,6 +208,14 @@ func (p *Plugin) handleInvoke(tc events.ToolCall) {
 		WorkDir: p.workingDir,
 		Timeout: p.timeout,
 	})
+	if callCtx.Err() != nil {
+		// Cancelled from outside (timed out by the gate, engine stop). The
+		// caller has usually answered for this call already and will drop
+		// this result; emit it anyway so a caller that has not still gets
+		// one.
+		p.emitResult(tc, "", fmt.Sprintf("command cancelled: %v", context.Cause(callCtx)), nil)
+		return
+	}
 	if err != nil {
 		p.emitResult(tc, "", fmt.Sprintf("sandbox: %v", err), nil)
 		return

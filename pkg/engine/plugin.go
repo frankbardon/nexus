@@ -163,6 +163,15 @@ type PluginContext struct {
 	// instead of calling out. Idle outside of a replay run.
 	Replay *ReplayState
 
+	// ToolCalls is the engine's per-call tool context registry. A
+	// tool.invoke handler calls ToolCalls.Begin(parent, call.ID) and runs
+	// its work under the returned context, which is cancelled when that
+	// call is timed out (a tool.timeout naming its ID) or the engine stops;
+	// context.Cause reports which (ErrToolCallTimedOut,
+	// ErrToolCallsStopped). Nil-safe: a nil registry (hand-built test
+	// contexts) returns contexts nothing cancels. See toolcall_ctx.go.
+	ToolCalls *ToolCallContexts
+
 	// Journal is the per-session durable event log. Non-nil after
 	// startJournal — i.e. always populated when plugin Init runs. Plugins
 	// that observe events post-journal (rather than via the live bus)

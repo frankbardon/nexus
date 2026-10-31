@@ -1,7 +1,9 @@
 // Package tooltimeout implements nexus.gate.tool_timeout, a per-call deadline
 // gate for tool invocations. It observes tool.invoke, starts a timer per
 // call, and on expiry synthesizes a tool.result error plus a tool.timeout
-// event so the agent's bookkeeping unwinds even when a tool hangs.
+// event so the agent's bookkeeping unwinds even when a tool hangs. The
+// engine cancels the timed-out call's dispatch context on that tool.timeout
+// (see engine.ToolCallContexts), so tools that honor it stop working too.
 //
 // The gate is on by default: nexus.tool.catalog auto-activates it through
 // Requires(), so every profile that dispatches tools through the catalog gets
@@ -284,12 +286,14 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 		return
 	}
 
-	// Cooperative cancellation: this context is plumbed nowhere by the
-	// engine today — tools that already use exec.CommandContext or net/http
-	// with their own timeout honor their own deadline. Our timer's role is
-	// purely to unblock the agent's bookkeeping (pendingToolCalls,
-	// semaphore) by synthesizing a tool.result on expiry. The original tool
-	// goroutine may keep running until it completes or the process exits.
+	// This timer is the gate's own; it is not the tool's context. On expiry
+	// the gate emits tool.timeout, which the engine's per-call registry
+	// (engine.ToolCallContexts, attached at Boot) turns into cancelling the
+	// context the tool handler took with PluginContext.ToolCalls.Begin.
+	// That cancellation is cooperative: a handler that never called Begin,
+	// or ignores its context, keeps running, and its late result is vetoed
+	// in handleBeforeToolResult. The synthesized tool.result is what
+	// unblocks the agent's bookkeeping (pendingToolCalls, semaphore).
 	timerCtx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	p.mu.Lock()

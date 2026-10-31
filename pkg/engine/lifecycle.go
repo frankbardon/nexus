@@ -45,8 +45,11 @@ type LifecycleManager struct {
 	schemas  *SchemaRegistry
 	system   *SystemInfo
 	replay   *ReplayState
-	journal  *journal.Writer
-	storage  *storage.Manager
+	// toolCalls is the engine's per-call tool context registry, handed to
+	// every plugin as PluginContext.ToolCalls. See toolcall_ctx.go.
+	toolCalls *ToolCallContexts
+	journal   *journal.Writer
+	storage   *storage.Manager
 	// provenance records why each configured ID is active: the zero value
 	// (empty requiredBy) means the user listed it explicitly; otherwise it
 	// was auto-activated to satisfy the named plugin's Requires().
@@ -208,6 +211,7 @@ func (lm *LifecycleManager) Boot(ctx context.Context) error {
 			Logging:      lm.logging,
 			InstanceID:   instanceIDs[configuredID],
 			Replay:       lm.replay,
+			ToolCalls:    lm.toolCalls,
 			Journal:      lm.journal,
 			Sandbox:      sb,
 			LookupPlugin: func(id string) Plugin {

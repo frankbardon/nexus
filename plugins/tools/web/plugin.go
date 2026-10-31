@@ -43,6 +43,9 @@ type Plugin struct {
 	logger  *slog.Logger
 	session *engine.SessionWorkspace
 	replay  *engine.ReplayState
+	// toolCalls hands each web_fetch call a context the engine cancels when
+	// the call times out; nil-safe.
+	toolCalls *engine.ToolCallContexts
 
 	client *http.Client
 	cache  *urlCache
@@ -108,6 +111,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.logger = ctx.Logger
 	p.session = ctx.Session
 	p.replay = ctx.Replay
+	p.toolCalls = ctx.ToolCalls
 
 	if err := p.loadConfig(ctx.Config); err != nil {
 		return err
