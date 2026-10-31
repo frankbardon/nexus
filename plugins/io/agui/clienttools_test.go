@@ -318,3 +318,13 @@ func assertHasTypes(t *testing.T, evs []agui.Event, want ...agui.EventType) {
 		}
 	}
 }
+
+// TestClientToolDefAwaitsHuman: a client-executed tool's result comes back on a
+// later request, so its definition carries events.ToolTagAwaitsHuman, which is
+// what exempts it from nexus.gate.tool_timeout's default deadline.
+func TestClientToolDefAwaitsHuman(t *testing.T) {
+	td := clientToolDef(agui.Tool{Name: "pick_color", Description: "ask the user"})
+	if !td.HasTag(events.ToolTagAwaitsHuman) {
+		t.Fatalf("client tool def Tags = %v, want %q", td.Tags, events.ToolTagAwaitsHuman)
+	}
+}

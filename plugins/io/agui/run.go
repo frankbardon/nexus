@@ -180,6 +180,10 @@ func clientToolDef(t agui.Tool) events.ToolDef {
 	td := events.ToolDef{
 		Name:        t.Name,
 		Description: t.Description,
+		// The result comes back from the client (often a human acting in
+		// the frontend) on a later request, so nexus.gate.tool_timeout
+		// exempts the call from its default deadline.
+		Tags: []string{events.ToolTagAwaitsHuman},
 	}
 	if len(t.Parameters) > 0 {
 		var params map[string]any

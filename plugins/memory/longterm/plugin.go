@@ -256,6 +256,19 @@ func (p *Plugin) Ready() error {
 		},
 	}
 
+	// With require_approval on, memory_write blocks on a human decision from
+	// inside its handler; tag it so nexus.gate.tool_timeout's machine-sized
+	// default deadline does not cut the approval off (require_approval.timeout
+	// bounds that wait instead). Off, it is an ordinary file write and keeps
+	// the default deadline.
+	if p.approvalEnabled {
+		for i := range tools {
+			if tools[i].Name == "memory_write" {
+				tools[i].Tags = append(tools[i].Tags, events.ToolTagAwaitsHuman)
+			}
+		}
+	}
+
 	for _, tool := range tools {
 		_ = p.bus.Emit("tool.register", tool)
 	}

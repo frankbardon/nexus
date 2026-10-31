@@ -21,7 +21,7 @@ providers.
 | `nexus.gate.context_window`       | `before:llm.request`    | Estimate context size; trigger compaction when approaching the limit. |
 | `nexus.gate.tool_filter`          | `before:llm.request`    | Modify the tool list (allowlist / blocklist). |
 | `nexus.gate.approval_policy`      | `before:tool.invoke`, `before:llm.request` | Policy-driven HITL approvals; emits `before:hitl.requested` then `hitl.requested` and applies the operator's allow/reject/edit. The request's `TurnID` is the gated action's turn (the tool call's `BindingTurnID()` — the parent turn inside a subagent/delegate loop — or an `llm.request`'s `Metadata["turn_id"]`), so a turn-scoped transport such as `nexus.io.agui` resumes the right turn. |
-| `nexus.gate.tool_timeout`         | `before:tool.result` (late results only) | Per-call tool deadline; synthesizes an error `tool.result` + `tool.timeout` when a result never arrives. **On by default** — auto-activated by `nexus.tool.catalog` with a `10m` backstop; `ask_user`, `delegate`, `spawn_*`, `delegate_a2a_*`, `delegate_agui_*` exempt. Opt out with `enabled: false`. |
+| `nexus.gate.tool_timeout`         | `before:tool.result` (late results only) | Per-call tool deadline; synthesizes an error `tool.result` + `tool.timeout` when a result never arrives. **On by default** — auto-activated by `nexus.tool.catalog` with a `10m` backstop; `ask_user`, `delegate`, `spawn_*`, `delegate_a2a_*`, `delegate_agui_*` exempt, plus any tool tagged `awaits_human` (approval-gated `memory_write`, AG-UI client tools). Opt out with `enabled: false`. |
 
 ## Internal requests
 

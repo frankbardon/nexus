@@ -301,3 +301,38 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 		t.Errorf("bus-event store HITLRequest.TurnID = %q, want empty", got[1])
 	}
 }
+
+// TestReady_MemoryWriteAwaitsHumanOnlyWithApproval: memory_write is tagged
+// events.ToolTagAwaitsHuman (so nexus.gate.tool_timeout exempts it) exactly
+// when require_approval is on, and no other memory tool ever is.
+func TestReady_MemoryWriteAwaitsHumanOnlyWithApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want bool
+	}{
+		{"approval off", nil, false},
+		{"approval on", map[string]any{"enabled": true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, bus := newTestPlugin(t, tc.cfg)
+			tagged := map[string]bool{}
+			bus.Subscribe("tool.register", func(ev engine.Event[any]) {
+				td := ev.Payload.(events.ToolDef)
+				tagged[td.Name] = td.HasTag(events.ToolTagAwaitsHuman)
+			})
+			if err := p.Ready(); err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if len(tagged) != 4 {
+				t.Fatalf("registered %d tools, want 4: %v", len(tagged), tagged)
+			}
+			for name, got := range tagged {
+				want := tc.want && name == "memory_write"
+				if got != want {
+					t.Errorf("%s awaits_human = %v, want %v", name, got, want)
+				}
+			}
+		})
+	}
+}

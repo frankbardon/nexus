@@ -3200,7 +3200,7 @@ Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
 | `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
 | `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
 | `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
-| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds. |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds, and `memory_write` is tagged `awaits_human` so `nexus.gate.tool_timeout` gives it no deadline — set `require_approval.timeout` (or `nexus.gate.tool_timeout.per_tool.memory_write`) to bound the wait. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
 | `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
 | `require_approval.match.key_glob`             | string   | *(any)*   | Only require approval when the entry key matches this glob. |
@@ -5152,22 +5152,36 @@ themselves have **no deadline** by default (built-in exemptions):
 | `delegate_a2a_*`   | Bounded by the remote's `timeout` / `hitl.input_timeout`. |
 | `delegate_agui_*`  | Bounded by the remote's own `timeout`. |
 
-Tools that block on HITL *inside* their handler (e.g. `nexus.memory.longterm`
-write approvals, AG-UI client tools) are **not** exempt: if an approval can
-legitimately take longer than 10m, raise their `per_tool` entry.
+Tools that block on a human *inside* their handler are exempt too, by a tag
+rather than by name: any tool whose `ToolDef.Tags` carries `awaits_human`
+(`events.ToolTagAwaitsHuman`) has no deadline. The gate learns the tag from
+`tool.register` and from finished `tool.catalog.query` snapshots (so per-run
+tools that are never registered are covered), and a later untagged
+definition of the same name drops the exemption. Shipped taggers:
+
+| Tool | Tagged when | Bounded instead by |
+|------|-------------|--------------------|
+| `memory_write` (`nexus.memory.longterm`) | only while `require_approval.enabled` is `true` | `require_approval.timeout` |
+| AG-UI client tools (`nexus.io.agui`, any name a client advertises in `RunAgentInput.tools`) | always | the client's resume |
+
+`memory_delete` and the other memory tools never ask a human and keep the
+default deadline.
 
 Per-tool override keys may be exact tool names (`web_fetch`) or
 [`path.Match`](https://pkg.go.dev/path#Match)-style globs (`mcp.*`).
 Resolution: the user's `per_tool` map first (an exact key wins; among glob
 matches the longest pattern wins), then the built-in exemptions (same rule),
-otherwise `default_timeout`. A user key always beats a built-in exemption, so
-`per_tool: {ask_user: 15m}` bounds `ask_user`, and a catch-all `"*": 2m`
-bounds the exempt tools too. A duration of `0s` means "no deadline".
+then the `awaits_human` tag, otherwise `default_timeout`. A user key always
+beats an exemption, so `per_tool: {ask_user: 15m}` bounds `ask_user`,
+`per_tool: {memory_write: 30m}` bounds an approval-gated write, and a
+catch-all `"*": 2m` bounds every exempt tool too. A duration of `0s` means
+"no deadline".
+
 
 **Opt-out:** `enabled: false` turns every deadline off; `default_timeout: 0s`
 keeps only explicit `per_tool` deadlines. Because the gate is auto-activated,
 supplying any `nexus.gate.tool_timeout` block replaces nothing but the keys you
-set — the built-in exemptions and the `10m` default live in code, not in a
+set — the built-in exemptions, the `awaits_human` tag rule and the `10m` default live in code, not in a
 `Requires()` default config.
 
 The synthetic error message format is fixed and intended to be read by
@@ -5180,8 +5194,8 @@ tool <name> exceeded timeout <duration>; raise via nexus.gate.tool_timeout.per_t
 | Key               | Type            | Default | Description |
 |-------------------|-----------------|---------|-------------|
 | `enabled`         | bool            | `true`  | `false` disables every deadline (the gate stays active but never fires). |
-| `default_timeout` | duration string | `10m`   | Applied when neither a `per_tool` key nor a built-in exemption matches. `0s` = no default deadline. Was `30s` before the gate became default-on. Negative values fail boot. |
-| `per_tool`        | map[string]duration | `{}` (built-in exemptions above still apply) | Per-tool overrides keyed by exact tool name or `path.Match` glob. `0s` = no deadline for that tool. Consulted before the built-in exemptions. |
+| `default_timeout` | duration string | `10m`   | Applied when no `per_tool` key, built-in exemption or `awaits_human` tag matches. `0s` = no default deadline. Was `30s` before the gate became default-on. Negative values fail boot. |
+| `per_tool`        | map[string]duration | `{}` (built-in and `awaits_human` exemptions above still apply) | Per-tool overrides keyed by exact tool name or `path.Match` glob. `0s` = no deadline for that tool. Consulted before every exemption. |
 
 ### `nexus.gate.prompt_injection`
 

@@ -8,7 +8,7 @@ import (
 
 func TestContract(t *testing.T) {
 	h := contract.NewContract(t, New)
-	h.AssertSubscribesTo("tool.invoke", "tool.result", "before:tool.result")
+	h.AssertSubscribesTo("tool.invoke", "tool.result", "before:tool.result", "tool.register", "tool.catalog.query")
 	declared := map[string]bool{}
 	for _, e := range h.Plugin().Emissions() {
 		declared[e] = true

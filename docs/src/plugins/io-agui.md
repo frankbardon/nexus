@@ -142,6 +142,9 @@ Two flows ride the identical suspend/resume machinery:
   to produce a `tool.result`, so the **client** runs the tool and resumes with a
   tool result. The plugin feeds that result back to the parked agent as the
   `tool.result` it was waiting on, and the continuation streams on a fresh run.
+  Client tool definitions carry the `awaits_human` tag, so the default-on
+  `nexus.gate.tool_timeout` gives the parked call no deadline however long the
+  client takes; bound it with `nexus.gate.tool_timeout.per_tool.<name>` if needed.
 
 A server-side Nexus catalog tool is never intercepted: its own handler runs
 inline and produces the `tool.result` that streams as a normal `TOOL_CALL_RESULT`.
