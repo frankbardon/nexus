@@ -26,7 +26,7 @@ const resultSummaryCap = 2048
 //
 //  1. Validate the request envelope.
 //  2. Resolve the config (path or inline) and overlay nexus.io.test +
-//     core.sessions.root so the run is hermetic.
+//     core.sessions.root + core.storage.root so the run is hermetic.
 //  3. Boot the engine, drive the single user input, wait for the agent to
 //     idle (no further turns) OR the request's MaxTurns cap OR the ctx
 //     deadline.
@@ -55,11 +55,20 @@ func Run(ctx context.Context, req *Request) (*Response, error) {
 	if err != nil {
 		return nil, ErrInternal(fmt.Errorf("create temp sessions root: %w", err))
 	}
+	// App/agent-scope plugin storage gets its own throwaway root for the
+	// same reason: nothing under ~/.nexus/plugins or ~/.nexus/agents, and no
+	// state shared with another inspect run.
+	storageRoot, err := os.MkdirTemp("", "nexus-inspect-storage-")
+	if err != nil {
+		_ = os.RemoveAll(tmpRoot)
+		return nil, ErrInternal(fmt.Errorf("create temp storage root: %w", err))
+	}
 	if os.Getenv("NEXUS_EVAL_INSPECT_KEEP_SESSIONS") == "" {
 		defer os.RemoveAll(tmpRoot)
+		defer os.RemoveAll(storageRoot)
 	}
 
-	overlaid, err := overlayConfig(cfgBytes, tmpRoot, req.UserInput)
+	overlaid, err := overlayConfig(cfgBytes, tmpRoot, storageRoot, req.UserInput)
 	if err != nil {
 		return nil, ErrConfigLoad(fmt.Errorf("overlay io.test + sessions.root: %w", err))
 	}
@@ -152,6 +161,7 @@ func resolveConfig(req *Request) ([]byte, error) {
 // inspect run hermetic and headless:
 //
 //   - core.sessions.root → sessionsRoot (always overwritten)
+//   - core.storage.root → storageRoot (always overwritten)
 //   - plugins.active includes nexus.io.test (added if absent; existing
 //     visual plugins like nexus.io.tui / nexus.io.browser are removed
 //     because they would block on stdin / serve HTTP)
@@ -159,7 +169,7 @@ func resolveConfig(req *Request) ([]byte, error) {
 //     with userInput (preserves any other test-IO config the caller had)
 //
 // The yaml.v3 node API is used so comments and unrelated keys round-trip.
-func overlayConfig(in []byte, sessionsRoot, userInput string) ([]byte, error) {
+func overlayConfig(in []byte, sessionsRoot, storageRoot, userInput string) ([]byte, error) {
 	var doc yaml.Node
 	if len(in) == 0 {
 		// Synthesize a minimal mapping.
@@ -188,6 +198,8 @@ func overlayConfig(in []byte, sessionsRoot, userInput string) ([]byte, error) {
 	core := getOrCreateMap(root, "core")
 	sessions := getOrCreateMap(core, "sessions")
 	setScalar(sessions, "root", sessionsRoot)
+	storage := getOrCreateMap(core, "storage")
+	setScalar(storage, "root", storageRoot)
 
 	plugins := getOrCreateMap(root, "plugins")
 

@@ -43,9 +43,12 @@ Reference: `pkg/eval/case/case.go:46-54`.
 A standard Nexus engine config — same schema as any `configs/*.yaml`. Two
 constraints worth noting:
 
-- The runner overrides `core.sessions.root` automatically, so the
-  case-supplied value is irrelevant in practice (the runner uses a
-  per-run tempdir).
+- The runner overrides `core.sessions.root` and `core.storage.root`
+  automatically, so the case-supplied values are never used: `nexus eval
+  run` puts sessions under `<reports_dir>/<run-id>/_sessions/`, and a
+  library caller gets the roots it passes in `runner.Options` or private
+  temp dirs removed when the run returns. The bundled cases'
+  `~/.nexus/test-sessions` only matters if you boot a case config by hand.
 - The case must use mock-mode providers or real-credential-free configs.
   No `ANTHROPIC_API_KEY`, no `OPENAI_API_KEY` — replay short-circuits
   hide the actual provider call, but plugin construction must still

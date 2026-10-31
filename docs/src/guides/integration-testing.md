@@ -1,6 +1,6 @@
 # Integration Testing
 
-Nexus provides an integration test framework for automated validation of test configurations. Tests run real engines with real LLM calls, verifying end-to-end behavior.
+Nexus provides an integration test framework for automated validation of test configurations. Tests run real engines, verifying end-to-end behavior — against scripted LLM responses (mock mode) or real provider calls (live mode).
 
 ## Quick Start
 
@@ -11,11 +11,15 @@ go test -tags integration ./tests/integration/ -v
 # Run a specific test
 go test -tags integration ./tests/integration/ -run TestMinimal -v
 
-# With timeout (tests make real API calls)
+# With timeout (live-mode tests make real API calls)
 go test -tags integration ./tests/integration/ -timeout 5m -v
 ```
 
-**Prerequisites:** `ANTHROPIC_API_KEY` must be set in the environment.
+**Prerequisites:** none for mock mode. A test whose config sets
+`mock_responses` on `nexus.io.test` never reaches a provider, needs no API
+key, and runs in well under a second. Only live-mode tests (no
+`mock_responses`) need a provider key — `ANTHROPIC_API_KEY` for the
+Anthropic-backed configs — in the environment or `.env`.
 
 ## Architecture
 
@@ -28,7 +32,7 @@ Three components work together:
 ```
 test config (YAML with nexus.io.test)
     ↓
-Engine boots normally (real plugins, real LLM)
+Engine boots normally (real plugins; scripted or real LLM)
     ↓
 Test IO plugin emits scripted io.input events
     ↓

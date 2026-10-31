@@ -6,13 +6,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// yamlSetCoreSessionsRoot returns the YAML body with core.sessions.root set
-// to root. If the path doesn't exist yet, it's inserted under an existing
-// core.sessions or core map (creating intermediate nodes as needed).
+// yamlSetCoreRoot returns the YAML body with core.<section>.root set to
+// root (section is "sessions" or "storage"). If the path doesn't exist yet,
+// it's inserted under an existing core.<section> or core map (creating
+// intermediate nodes as needed).
 //
 // The yaml.v3 node API preserves comments and ordering of unrelated keys,
 // which keeps test-bundle config.yaml round-trippable on disk.
-func yamlSetCoreSessionsRoot(in []byte, root string) ([]byte, error) {
+func yamlSetCoreRoot(in []byte, section, root string) ([]byte, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(in, &doc); err != nil {
 		return nil, fmt.Errorf("unmarshal yaml: %w", err)
@@ -21,7 +22,7 @@ func yamlSetCoreSessionsRoot(in []byte, root string) ([]byte, error) {
 		// Empty or non-mapping document: produce a synthetic one.
 		out := map[string]any{
 			"core": map[string]any{
-				"sessions": map[string]any{
+				section: map[string]any{
 					"root": root,
 				},
 			},
@@ -33,8 +34,8 @@ func yamlSetCoreSessionsRoot(in []byte, root string) ([]byte, error) {
 		return nil, fmt.Errorf("yaml root is not a mapping")
 	}
 	core := getOrCreateMapping(rootNode, "core")
-	sessions := getOrCreateMapping(core, "sessions")
-	setStringKey(sessions, "root", root)
+	sec := getOrCreateMapping(core, section)
+	setStringKey(sec, "root", root)
 	return yaml.Marshal(&doc)
 }
 

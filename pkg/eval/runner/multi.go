@@ -30,10 +30,12 @@ type MultiOptions struct {
 	// case's config bytes before constructing the engine. Surgical YAML
 	// rewrite — does not touch other keys.
 	ModelOverride string
-	// PerCase is forwarded to every Run() call. Notably, SessionsRoot here
-	// is shared — RunMany subdivides it into per-case sub-tempdirs to keep
-	// concurrent runs isolated. Pass an empty SessionsRoot to inherit the
-	// case-config default (production), or t.TempDir() in tests.
+	// PerCase is forwarded to every Run() call. A non-empty SessionsRoot is
+	// shared by every case (each session gets its own ID-named dir under
+	// it); an empty one gives each case a private temp root removed when
+	// its Run returns. An empty StorageRoot likewise gives each case its own
+	// temp storage root, so concurrent cases never share app/agent SQLite.
+	// The case config's own roots are never used.
 	PerCase Options
 }
 
@@ -152,7 +154,7 @@ func filterByTags(cases []*evalcase.Case, want []string) []*evalcase.Case {
 }
 
 // overrideDefaultModelRole rewrites core.models.default to role. Mirrors the
-// surgical-YAML approach used by overrideSessionsRoot — yaml.v3 node API,
+// surgical-YAML approach used by redirectRoots — yaml.v3 node API,
 // preserves unrelated keys.
 func overrideDefaultModelRole(in []byte, role string) ([]byte, error) {
 	var doc yaml.Node

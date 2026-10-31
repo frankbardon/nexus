@@ -56,7 +56,8 @@ tests/eval/cases/<id>/
 promotion time. There is no second fixture format.
 
 The runner reads `case.yaml`, builds the engine from `input/config.yaml`,
-overrides `core.sessions.root` to a tempdir, calls `engine.Replay()`, and
+overrides `core.sessions.root` and `core.storage.root` (never the case's own
+values), calls `engine.Replay()`, and
 collects events for assertion evaluation.
 
 ## What a report is
@@ -79,8 +80,12 @@ migration note.
 1. **Discovery.** The CLI walks `cases_dir`, parses each `case.yaml`,
    filters by `--tags`.
 2. **Per-case engine.** Each case constructs its own engine from
-   `input/config.yaml`. `core.sessions.root` is overridden to a per-run
-   tempdir under `<reports_dir>/<run-id>/_sessions/`.
+   `input/config.yaml`. `core.sessions.root` is overridden to
+   `<reports_dir>/<run-id>/_sessions/`, so sessions stay with the run's
+   report, and `core.storage.root` (app/agent plugin SQLite) to a private
+   per-case temp dir removed when the case finishes, so no case sees state
+   another left behind. The roots a case config names (the bundled cases
+   say `~/.nexus/test-sessions`) are never written.
 3. **Replay.** `journal.NewCoordinator` seeds the FIFO stash with
    `llm.response` / `tool.result` / `hitl.responded` payloads from the
    journal, then re-emits `io.input` events in seq order. The live agent

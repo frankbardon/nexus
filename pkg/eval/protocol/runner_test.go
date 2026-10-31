@@ -268,13 +268,16 @@ plugins:
     - nexus.io.tui
     - nexus.llm.anthropic
 `
-	out, err := overlayConfig([]byte(in), "/tmp/sessions", "hello world")
+	out, err := overlayConfig([]byte(in), "/tmp/sessions", "/tmp/storage", "hello world")
 	if err != nil {
 		t.Fatalf("overlayConfig: %v", err)
 	}
 	got := string(out)
 	if !strings.Contains(got, "/tmp/sessions") {
 		t.Errorf("sessions root not injected: %s", got)
+	}
+	if !strings.Contains(got, "/tmp/storage") {
+		t.Errorf("storage root not injected: %s", got)
 	}
 	if !strings.Contains(got, "nexus.io.test") {
 		t.Errorf("nexus.io.test not added: %s", got)
