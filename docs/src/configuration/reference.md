@@ -3466,6 +3466,13 @@ Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
 `nexus.memory.vector`) to build the per-turn validation set, then to
 `llm.response` to do the parsing. Emits `llm.response.cited`.
 
+Inside a nested loop (`nexus.agent.subagent`, `pkg/delegate`) a response is
+validated against the retrievals that loop's own tool calls made — keyed by
+its private turn, read from `Metadata["loop_turn_id"]` — so a child's sources
+never validate the parent turn's response, nor the parent's a child's. The
+emitted `llm.response.cited` names the parent turn (`turn_id`), and a nested
+loop's index is released when that parent turn's `agent.turn.end` fires.
+
 ---
 
 ### `nexus.rag.ingest`

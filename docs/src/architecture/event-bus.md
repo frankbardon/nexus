@@ -322,6 +322,15 @@ it recognises (#218). Providers echo request metadata, so
 `nexus.rag.citations` and `nexus.io.voice` read the same key off
 `llm.response`. A new agent loop must stamp it too.
 
+A nested loop also stamps its private turn as
+`Metadata[engine.MetaLoopTurnID]` (`"loop_turn_id"`) — the `TurnID` its
+own tool calls carry. It is for correlating the response with that loop's
+tool activity, never for binding: `nexus.rag.citations` validates a
+response's `<cite/>` tags against the retrievals keyed by `loop_turn_id`
+when present (falling back to `turn_id`), because `knowledge_search` keys
+`rag.retrieved` by the call's `TurnID`. The cited event still names the
+parent turn. A new nested loop that issues tool calls must stamp both.
+
 **The one exception: fanout legs.** The fanout coordinator's per-provider legs
 are emitted directly with `EmitAsync`. Each leg is a copy of a request that is
 already inside the hop (fanout's own `before:llm.request` handler); offering

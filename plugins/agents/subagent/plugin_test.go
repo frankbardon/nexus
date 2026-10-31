@@ -285,6 +285,11 @@ func TestSubagent_StampsParentTurnID(t *testing.T) {
 	if got := lastReq().Metadata[engine.MetaTurnID]; got != "turn-parent" {
 		t.Errorf("llm.request Metadata[%q] = %v, want turn-parent", engine.MetaTurnID, got)
 	}
+	// The private loop turn rides beside it, so rag.citations can match the
+	// response against retrievals this loop's tool calls made.
+	if got, _ := lastReq().Metadata[engine.MetaLoopTurnID].(string); !strings.HasPrefix(got, "subagent_") {
+		t.Errorf("llm.request Metadata[%q] = %q, want subagent_<id>", engine.MetaLoopTurnID, got)
+	}
 }
 
 // TestSubagent_StampsToolCallParentTurnID pins that tool calls the subagent

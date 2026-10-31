@@ -51,6 +51,10 @@ type Plugin struct {
 
 	mu    sync.Mutex
 	turns map[string]map[chunkKey]events.RetrievedChunk // per-turn retrieval index
+	// children maps a parent turn to the nested-loop private turns indexed
+	// under it, so agent.turn.end on the parent releases them too — no
+	// turn-end event ever names a private loop turn.
+	children map[string]map[string]struct{}
 
 	unsubs []func()
 }
@@ -71,6 +75,7 @@ func New() engine.Plugin {
 		strict:          true,
 		sectionPriority: defaultSectionPriority,
 		turns:           make(map[string]map[chunkKey]events.RetrievedChunk),
+		children:        make(map[string]map[string]struct{}),
 	}
 }
 
@@ -149,6 +154,12 @@ func (p *Plugin) Emissions() []string {
 // turn. The citation parser consults this on llm.response to validate
 // references — ids that point at non-retrieved chunks are stripped (in
 // strict mode) or kept with a TrustTier="unverified" tag (otherwise).
+//
+// The index is keyed by rc.TurnID. Inside a nested loop that is the loop's
+// private turn, which the loop's llm.response names under
+// engine.MetaLoopTurnID (see responseTurn), so a child's retrievals
+// validate only the child's responses. rc.ParentTurnID records the parent
+// whose turn end releases it.
 func (p *Plugin) handleRetrieved(event engine.Event[any]) {
 	rc, ok := event.Payload.(events.RetrievalContext)
 	if !ok {
@@ -164,6 +175,14 @@ func (p *Plugin) handleRetrieved(event engine.Event[any]) {
 		idx = make(map[chunkKey]events.RetrievedChunk)
 		p.turns[rc.TurnID] = idx
 	}
+	if rc.ParentTurnID != "" && rc.ParentTurnID != rc.TurnID {
+		kids, ok := p.children[rc.ParentTurnID]
+		if !ok {
+			kids = make(map[string]struct{})
+			p.children[rc.ParentTurnID] = kids
+		}
+		kids[rc.TurnID] = struct{}{}
+	}
 	for _, c := range rc.Chunks {
 		idx[chunkKey{source: c.Source, docID: c.DocID, chunkIdx: c.ChunkIdx}] = c
 	}
@@ -177,11 +196,16 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	if !ok {
 		return
 	}
+	// turnID is the transport-visible turn the cited event names; lookup is
+	// the retrieval index this response validates against. They differ only
+	// for a nested loop: its response names the parent turn (MetaTurnID) and
+	// its private tool turn (MetaLoopTurnID), and its knowledge_search
+	// retrievals were keyed by the private one. An empty turnID still emits,
+	// so renderers can use the cited text when correlation is missing.
 	turnID, _ := resp.Metadata[engine.MetaTurnID].(string)
-	if turnID == "" {
-		// Some upstream callers stash the turn under a different key. Be
-		// permissive — emit anyway with empty TurnID so renderers can use
-		// the cited text even when correlation is missing.
+	lookup, _ := resp.Metadata[engine.MetaLoopTurnID].(string)
+	if lookup == "" {
+		lookup = turnID
 	}
 
 	mode := p.mode
@@ -198,7 +222,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 	case "anthropic_native":
 		cited = p.fromAnthropicNative(resp, turnID)
 	default:
-		cited = p.fromTags(resp, turnID)
+		cited = p.fromTags(resp, turnID, lookup)
 	}
 
 	if len(cited.Citations) == 0 && cited.Text == resp.Content {
@@ -217,6 +241,10 @@ func (p *Plugin) handleTurnEnd(event engine.Event[any]) {
 	}
 	p.mu.Lock()
 	delete(p.turns, info.TurnID)
+	for kid := range p.children[info.TurnID] {
+		delete(p.turns, kid)
+	}
+	delete(p.children, info.TurnID)
 	p.mu.Unlock()
 }
 
@@ -228,13 +256,13 @@ func (p *Plugin) handleTurnEnd(event engine.Event[any]) {
 var citePattern = regexp.MustCompile(`<cite\s+([^>]*?)\s*/?>(?:</cite>)?`)
 var attrPattern = regexp.MustCompile(`(\w+)\s*=\s*"([^"]*)"`)
 
-func (p *Plugin) fromTags(resp events.LLMResponse, turnID string) events.CitedResponse {
+func (p *Plugin) fromTags(resp events.LLMResponse, turnID, lookup string) events.CitedResponse {
 	matches := citePattern.FindAllStringSubmatchIndex(resp.Content, -1)
 	if len(matches) == 0 {
 		return events.CitedResponse{SchemaVersion: events.CitedResponseVersion, TurnID: turnID, Text: resp.Content, Mode: "tag"}
 	}
 
-	allow := p.snapshot(turnID)
+	allow := p.snapshot(lookup)
 	var (
 		out   strings.Builder
 		cites []events.CitationRef

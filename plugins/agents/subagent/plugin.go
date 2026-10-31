@@ -467,6 +467,10 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 				// names no turn any transport saw start. An approval raised
 				// on this request must resume the parent's run (#218).
 				engine.MetaTurnID: parentTurnID,
+				// The private turn this loop's tool calls carry, so a
+				// consumer correlating the response with them (rag.citations
+				// matching knowledge_search retrievals) can.
+				engine.MetaLoopTurnID: turnID,
 			},
 			Tags: map[string]string{"source_plugin": defaultPluginID},
 		}

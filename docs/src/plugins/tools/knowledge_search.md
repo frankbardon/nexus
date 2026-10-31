@@ -91,7 +91,8 @@ Fields:
 3. Embed the query once via the `embeddings.provider`.
 4. Fan out one `vector.query` per namespace, all with the same vector and `K = k`.
 5. Merge all hits, sort by similarity descending, truncate to `k`.
-6. Format as JSON and emit `tool.result`.
+6. Emit `rag.retrieved` with the hits, keyed by the call's `TurnID` (plus its `ParentTurnID` when a nested loop made the call), so `nexus.rag.citations` can validate `<cite/>` tags against them. Inside a subagent or delegate loop that is the loop's private turn, so its sources validate only that loop's responses.
+7. Format as JSON and emit `tool.result`.
 
 Per-namespace failures log a warning but don't fail the call — partial results are better than zero.
 

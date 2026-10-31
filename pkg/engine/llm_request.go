@@ -239,6 +239,16 @@ const MetaTaskKind = "task_kind"
 // id names no turn a transport ever saw start.
 const MetaTurnID = "turn_id"
 
+// MetaLoopTurnID is the LLMRequest.Metadata key a nested loop (subagent,
+// delegate) sets to its private "subagent_<id>" / "delegate_<id>" turn —
+// the TurnID its tool calls carry — beside MetaTurnID's parent turn.
+// Providers echo it onto llm.response, so a consumer that correlates a
+// response with that loop's own tool activity (nexus.rag.citations matching
+// knowledge_search's rag.retrieved) reads it first and falls back to
+// MetaTurnID. It is NOT a turn any transport saw start: bind HITL and other
+// transport-visible emissions to MetaTurnID, never to this.
+const MetaLoopTurnID = "loop_turn_id"
+
 // TaskKindCompaction is the task_kind nexus.memory.compaction stamps on its
 // summarisation request. It is a named constant because two sides must agree
 // on its spelling: the producer, and every consumer that recognises a
