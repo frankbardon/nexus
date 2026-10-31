@@ -151,6 +151,7 @@ func (p *Plugin) Emissions() []string {
 		"io.status",
 		"before:hitl.requested",
 		"hitl.requested",
+		"hitl.cancel",
 	}
 }
 

@@ -3184,7 +3184,7 @@ an external coordinator (separate from history buffers).
 | `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before committing the summary back into history. Off = unchanged behavior. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). On expiry `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the summary is at least this many bytes. |
 
 ### `nexus.memory.longterm`
@@ -3200,9 +3200,9 @@ Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
 | `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
 | `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
 | `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
-| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds, and `memory_write` is tagged `awaits_human` so `nexus.gate.tool_timeout` gives it no deadline — set `require_approval.timeout` (or `nexus.gate.tool_timeout.per_tool.memory_write`) to bound the wait. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds, and `memory_write` is tagged `awaits_human` so `nexus.gate.tool_timeout` gives it no deadline — `require_approval.timeout` bounds the wait instead. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (write denied). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the write resolves by `default_choice` (denied when empty) and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.key_glob`             | string   | *(any)*   | Only require approval when the entry key matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the content is at least this many bytes. |
 
@@ -3224,7 +3224,7 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `image_namespace`       | string | `<namespace>-images`   | Vector store namespace for image embeddings. Kept separate from the text namespace so similarity queries can target one or the other. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
 | `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). On expiry `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.namespace_glob`       | string   | *(any)*   | Only require approval when the configured `namespace` matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the document content is at least this many bytes. |
 
@@ -5174,7 +5174,7 @@ definition of the same name drops the exemption. Shipped taggers:
 
 | Tool | Tagged when | Bounded instead by |
 |------|-------------|--------------------|
-| `memory_write` (`nexus.memory.longterm`) | only while `require_approval.enabled` is `true` | `require_approval.timeout` |
+| `memory_write` (`nexus.memory.longterm`) | only while `require_approval.enabled` is `true` | `require_approval.timeout` (default `30m`) |
 | AG-UI client tools (`nexus.io.agui`, any name a client advertises in `RunAgentInput.tools`) | always | the client's resume |
 
 `memory_delete` and the other memory tools never ask a human and keep the

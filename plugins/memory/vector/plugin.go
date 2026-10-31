@@ -208,6 +208,7 @@ func (p *Plugin) Emissions() []string {
 		"rag.retrieved",
 		"before:hitl.requested",
 		"hitl.requested",
+		"hitl.cancel",
 	}
 }
 

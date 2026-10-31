@@ -417,3 +417,72 @@ func TestRequestApproval_MapPayloadResponseDecoded(t *testing.T) {
 		t.Error("expected allowed=true with map[string]any response shape")
 	}
 }
+
+// TestRequestApproval_TimeoutEmitsCancel pins that an expired deadline
+// retracts the prompt via hitl.cancel (so nexus.control.hitl drops it and
+// transports dismiss it) for the same request ID, and that the outcome is
+// still the deny the timeout path always returned.
+func TestRequestApproval_TimeoutEmitsCancel(t *testing.T) {
+	bus := engine.NewEventBus()
+
+	var reqID string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if r, ok := ev.Payload.(events.HITLRequest); ok {
+			reqID = r.ID
+		}
+	})
+	var cancels []events.HITLCancel
+	bus.Subscribe("hitl.cancel", func(ev engine.Event[any]) {
+		if c, ok := ev.Payload.(events.HITLCancel); ok {
+			cancels = append(cancels, c)
+		}
+	})
+
+	_, allowed, err := RequestApproval(context.Background(), Request{
+		Bus:        bus,
+		Logger:     testLogger,
+		PluginID:   "test.plugin",
+		ActionKind: "memory.test.write",
+		Prompt:     "Approve?",
+		Timeout:    20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Error("expected allowed=false on expiry")
+	}
+	if len(cancels) != 1 {
+		t.Fatalf("hitl.cancel emitted %d times, want 1", len(cancels))
+	}
+	if cancels[0].RequestID == "" || cancels[0].RequestID != reqID {
+		t.Errorf("hitl.cancel RequestID = %q, want %q", cancels[0].RequestID, reqID)
+	}
+	if cancels[0].SchemaVersion != events.HITLCancelVersion {
+		t.Errorf("hitl.cancel SchemaVersion = %d, want %d", cancels[0].SchemaVersion, events.HITLCancelVersion)
+	}
+}
+
+// TestRequestApproval_AnsweredDoesNotCancel: an answered request is already
+// resolved, so the helper must not retract it.
+func TestRequestApproval_AnsweredDoesNotCancel(t *testing.T) {
+	bus := engine.NewEventBus()
+	observeRequest(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
+	cancelled := false
+	bus.Subscribe("hitl.cancel", func(ev engine.Event[any]) { cancelled = true })
+
+	_, allowed, err := RequestApproval(context.Background(), Request{
+		Bus:        bus,
+		Logger:     testLogger,
+		PluginID:   "test.plugin",
+		ActionKind: "memory.test.write",
+		Prompt:     "Approve?",
+		Timeout:    time.Second,
+	})
+	if err != nil || !allowed {
+		t.Fatalf("allowed=%v err=%v, want allowed", allowed, err)
+	}
+	if cancelled {
+		t.Error("hitl.cancel emitted for an answered request")
+	}
+}

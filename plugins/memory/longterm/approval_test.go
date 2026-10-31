@@ -374,3 +374,65 @@ func TestReady_MemoryWriteAwaitsHumanOnlyWithApproval(t *testing.T) {
 		})
 	}
 }
+
+// TestApprovalTimeout_DefaultsWhenUnset pins that require_approval.timeout
+// defaults to 30m: memory_write is awaits_human while approval is on, so an
+// unset timeout must not mean "wait forever".
+func TestApprovalTimeout_DefaultsWhenUnset(t *testing.T) {
+	p, _ := newTestPlugin(t, map[string]any{"enabled": true})
+	if p.approvalTimeout != 30*time.Minute {
+		t.Errorf("approvalTimeout = %v, want 30m default", p.approvalTimeout)
+	}
+
+	p, _ = newTestPlugin(t, map[string]any{"enabled": true, "timeout": "bogus"})
+	if p.approvalTimeout != 30*time.Minute {
+		t.Errorf("malformed timeout: approvalTimeout = %v, want 30m default", p.approvalTimeout)
+	}
+
+	p, _ = newTestPlugin(t, map[string]any{"enabled": true, "timeout": "5m"})
+	if p.approvalTimeout != 5*time.Minute {
+		t.Errorf("explicit timeout: approvalTimeout = %v, want 5m", p.approvalTimeout)
+	}
+}
+
+// TestApprovalTimeout_ZeroDisables pins the "0 disables" convention.
+func TestApprovalTimeout_ZeroDisables(t *testing.T) {
+	for _, v := range []string{"0", "0s"} {
+		p, _ := newTestPlugin(t, map[string]any{"enabled": true, "timeout": v})
+		if p.approvalTimeout != 0 {
+			t.Errorf("timeout %q: approvalTimeout = %v, want 0 (disabled)", v, p.approvalTimeout)
+		}
+	}
+}
+
+// TestApprovalTimeout_ExpiryDeniesAndCancels: with no default_choice an
+// expired approval denies the write, nothing is persisted, and the pending
+// prompt is retracted with hitl.cancel for the same request.
+func TestApprovalTimeout_ExpiryDeniesAndCancels(t *testing.T) {
+	p, bus := newTestPlugin(t, map[string]any{"enabled": true, "timeout": "20ms"})
+
+	var reqID, cancelID string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if r, ok := ev.Payload.(events.HITLRequest); ok {
+			reqID = r.ID
+		}
+	})
+	bus.Subscribe("hitl.cancel", func(ev engine.Event[any]) {
+		if c, ok := ev.Payload.(events.HITLCancel); ok {
+			cancelID = c.RequestID
+		}
+	})
+
+	err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k",
+		Content: "x",
+	})
+	if err == nil {
+		t.Fatal("expected expiry to deny the write")
+	}
+	if reqID == "" || cancelID != reqID {
+		t.Errorf("hitl.cancel request_id = %q, want %q", cancelID, reqID)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(p.writePath, "*")); len(matches) != 0 {
+		t.Errorf("denied write persisted files: %v", matches)
+	}
+}

@@ -120,6 +120,12 @@ until shutdown, which then waited up to `engine.shutdown.drain_timeout`
 for it. Requests for other calls are untouched. A plugin raising a HITL
 request inside a tool call should set `CallID` to get this behaviour.
 
+The memory approval gates (`memory/longterm`, `memory/vector`,
+`memory/compaction` `require_approval`) retract their own request the same
+way when their `require_approval.timeout` expires: they emit `hitl.cancel`
+for it, so the registry entry is removed and the synthetic response dismisses
+the prompt. `memory/longterm` defaults that timeout to `30m`.
+
 The plugin replays cleanly: during deterministic replay, the journaled
 `tool.result` short-circuits the live ask, so the operator is never
 re-prompted with stale questions.

@@ -38,6 +38,33 @@ nexus.memory.longterm:
 
 For CLI mode (no agent ID), `agent` and `global` behave identically --- both use the configured `path`.
 
+### Write Approval
+
+`require_approval` gates writes behind a human decision (`hitl.requested`,
+action kind `memory.longterm.write`). Off by default.
+
+```yaml
+nexus.memory.longterm:
+  require_approval:
+    enabled: true
+    timeout: 30m          # default when unset; "0" disables the deadline
+    default_choice: ""    # choice picked on expiry; empty = deny
+    match:
+      key_glob: "user_*"
+      size_threshold_bytes: 0
+```
+
+While approval is on, `memory_write` is tagged `awaits_human`, so
+`nexus.gate.tool_timeout` gives it no deadline and `require_approval.timeout`
+is what bounds the wait. It defaults to `30m` so an unanswered prompt cannot
+hold the turn forever; set `"0"` (or `"0s"`) to wait indefinitely. A
+malformed value logs a warning and keeps the default.
+
+On expiry the write is resolved by `default_choice` — denied when it is
+empty or names a reject choice — and the plugin emits `hitl.cancel` for the
+pending request, so `nexus.control.hitl` drops it and IO transports dismiss
+the prompt. An answer arriving after that is ignored.
+
 ## Storage Format
 
 One file per memory entry at `<memory_path>/<key>.md`:
@@ -85,6 +112,9 @@ When `auto_load: true`, the plugin injects a section listing all available memor
 | `memory.longterm.deleted` | Plugin -> bus | `LongTermMemoryDeleted` |
 | `memory.longterm.list` | Any -> plugin | `LongTermMemoryQuery` |
 | `memory.longterm.list.result` | Plugin -> bus | `LongTermMemoryListResult` |
+| `before:hitl.requested` / `hitl.requested` | Plugin -> bus | `HITLRequest` (only with `require_approval.enabled`) |
+| `hitl.responded` | Any -> plugin | `HITLResponse` |
+| `hitl.cancel` | Plugin -> bus | `HITLCancel` (approval deadline expired) |
 
 ## Desktop Shell Integration
 
