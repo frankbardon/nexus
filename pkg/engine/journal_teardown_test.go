@@ -199,3 +199,107 @@ func TestRecall_ToleratesTrailingTeardownEvents(t *testing.T) {
 		t.Fatalf("recalled run started at seq %d, want %d", all[len(envs)].Seq, lastSeq+1)
 	}
 }
+
+// drainFinisherPlugin finishes an in-flight turn from a core.shutdown handler,
+// standing in for an agent whose turn completes during the shutdown drain, and
+// then emits a tool.result from its Shutdown, after that turn has ended.
+type drainFinisherPlugin struct {
+	bus EventBus
+}
+
+func (p *drainFinisherPlugin) ID() string                 { return "nexus.test.drain_finisher" }
+func (p *drainFinisherPlugin) Name() string               { return p.ID() }
+func (p *drainFinisherPlugin) Version() string            { return "test" }
+func (p *drainFinisherPlugin) Dependencies() []string     { return nil }
+func (p *drainFinisherPlugin) Requires() []Requirement    { return nil }
+func (p *drainFinisherPlugin) Capabilities() []Capability { return nil }
+func (p *drainFinisherPlugin) Subscriptions() []EventSubscription {
+	return []EventSubscription{{EventType: "core.shutdown"}}
+}
+func (p *drainFinisherPlugin) Emissions() []string {
+	return []string{"llm.response", "agent.turn.end", "tool.result"}
+}
+func (p *drainFinisherPlugin) Ready() error { return nil }
+func (p *drainFinisherPlugin) Init(ctx PluginContext) error {
+	p.bus = ctx.Bus
+	ctx.Bus.Subscribe("core.shutdown", func(Event[any]) {
+		_, _ = PublishLLMResponse(p.bus, events.LLMResponse{Content: "finished in drain"})
+		_ = p.bus.Emit("agent.turn.end", events.TurnInfo{TurnID: "t1"})
+	})
+	return nil
+}
+func (p *drainFinisherPlugin) Shutdown(context.Context) error {
+	return p.bus.Emit("tool.result", events.ToolResult{ID: "late", Output: "stale"})
+}
+
+// Stop lands mid-turn and the turn finishes during the core.shutdown drain:
+// the journal records its agent.turn.end after core.shutdown, so -recall sees
+// a completed turn and does not re-fire its input. Replay stashes the turn's
+// own drain-time answer but not the tool.result emitted once it had ended.
+func TestRecall_TurnFinishingInShutdownDrainIsComplete(t *testing.T) {
+	first := newBootRetryEngine(t, &drainFinisherPlugin{})
+	if err := first.Boot(context.Background()); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	_ = first.Bus.Emit("io.input", events.UserInput{Content: "hello"})
+	_ = first.Bus.Emit("agent.turn.start", events.TurnInfo{TurnID: "t1"})
+	dir := filepath.Join(first.Session.RootDir, "journal")
+	if err := first.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	types := envelopeTypes(readJournalEnvelopes(t, dir))
+	shutdownAt := slices.Index(types, "core.shutdown")
+	turnEndAt := slices.Index(types, "agent.turn.end")
+	if shutdownAt < 0 || turnEndAt < shutdownAt {
+		t.Fatalf("precondition: want agent.turn.end after core.shutdown, got %v", types)
+	}
+
+	rep := NewReplayState()
+	coord, err := journal.NewCoordinator(dir, NewEventBus(), rep, journal.CoordinatorOptions{
+		PayloadConverter: replayPayloadConverter,
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+	if coord.IsPartialTurn() {
+		t.Fatal("turn that ended in the shutdown drain reads as partial")
+	}
+	if n := rep.Remaining("llm.response"); n != 1 {
+		t.Fatalf("llm.response stash = %d, want 1 (the drain-time answer)", n)
+	}
+	if n := rep.Remaining("tool.result"); n != 0 {
+		t.Fatalf("tool.result stash = %d, want 0 (emitted after the turn ended)", n)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Core.Sessions.Root = first.Config.Core.Sessions.Root
+	cfg.Core.Storage.Root = first.Config.Core.Storage.Root
+	p := &drainFinisherPlugin{}
+	cfg.Plugins.Active = []string{p.ID()}
+	second := newFromConfig(cfg)
+	second.Registry.Register(p.ID(), func() Plugin { return p })
+	second.RecallSessionID = first.Session.ID
+
+	var mu sync.Mutex
+	inputs := 0
+	unsub := second.Bus.Subscribe("io.input", func(Event[any]) {
+		mu.Lock()
+		inputs++
+		mu.Unlock()
+	})
+	defer unsub()
+
+	if err := second.Boot(context.Background()); err != nil {
+		t.Fatalf("recall Boot: %v", err)
+	}
+	mu.Lock()
+	got := inputs
+	mu.Unlock()
+	if err := second.Stop(context.Background()); err != nil {
+		t.Fatalf("recall Stop: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("recall re-fired %d io.input, want 0 (turn finished in the drain)", got)
+	}
+}

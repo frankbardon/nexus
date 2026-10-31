@@ -131,11 +131,25 @@ func (c *Coordinator) scan() error {
 
 	var lastTurnStart uint64
 	var lastTurnStartOk bool
+	var teardown TeardownFilter
+	skippedTeardown := 0
 
 	err = r.Iter(func(e Envelope) bool {
 		c.lastSeq = e.Seq
+		inTeardown := teardown.Observe(e)
 		switch e.Type {
 		case "llm.response", "tool.result", "hitl.responded":
+			// A stopped run journals its teardown, and anything answered
+			// there after the last open turn ended is a reply no replayed
+			// turn will ask for again. Stashing it would leave a stale entry
+			// at the head of that event type's FIFO for the next run's turn
+			// to pop. Kept on disk; just not fed to replay. A turn still open
+			// at core.shutdown that finishes in the drain keeps its answers —
+			// see TeardownFilter.
+			if inTeardown {
+				skippedTeardown++
+				return true
+			}
 			payload := e.Payload
 			if c.convert != nil {
 				if conv, cerr := c.convert(e.Type, payload); cerr == nil {
@@ -159,6 +173,9 @@ func (c *Coordinator) scan() error {
 	})
 	if err != nil {
 		return err
+	}
+	if skippedTeardown > 0 {
+		c.logger.Debug("journal replay: teardown responses not stashed", "count", skippedTeardown)
 	}
 
 	// Partial turn: a turn started but never ended.

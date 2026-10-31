@@ -43,10 +43,23 @@ through `core.shutdown`, the bus drain and every plugin's `Shutdown`, and is
 removed only immediately before the writer closes. A cleanly stopped session's
 journal therefore ends with `core.shutdown` followed by whatever plugins emitted
 on the way out. Those trailing envelopes are inert to replay and resume: replay
-re-emits only `io.input` and stashes `llm.response` / `tool.result` /
-`hitl.responded`, so shutdown is never re-run, and partial-turn detection keys
-on `agent.turn.start` / `agent.turn.end` alone, so they do not make a completed
-turn look unfinished on `-recall`. A failed `Boot` closes the journal the same
+re-emits only `io.input`, so shutdown is never re-run, and partial-turn
+detection keys on `agent.turn.start` / `agent.turn.end` alone, so they do not
+make a completed turn look unfinished on `-recall`.
+
+Replay also does not **stash** teardown answers. `journal.TeardownFilter`
+classifies every envelope from `core.shutdown` up to the next `core.boot` (a
+recalled run appends to the same journal, starting with `core.boot`) as
+teardown, and the coordinator skips any `llm.response` / `tool.result` /
+`hitl.responded` in that window rather than pushing it onto the replay FIFO,
+where it would sit as a stale entry for the next replayed request of that type
+to pop. They stay on disk. The exception is a turn still open when Stop fired
+that finishes during the shutdown drain: its answers, and its closing
+`agent.turn.end`, are session work and are kept, so replaying that turn's input
+finds its response, and `-recall` sees the turn as complete and does not
+re-fire its input. Only what follows once no turn is open is teardown. `nexus
+eval promote` uses the same filter to keep teardown out of the assertions it
+generates (see [Promotion](../eval/promotion.md)). A failed `Boot` closes the journal the same
 way, so the teardown of plugins that had already initialized is recorded too.
 `Abandon` detaches the wildcard without closing the writer, matching a killed
 process, which journals nothing further. The journal is closed before the

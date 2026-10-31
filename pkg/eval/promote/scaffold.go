@@ -55,6 +55,13 @@ type observed struct {
 // observe walks the journal envelopes once and produces a fully-populated
 // observed snapshot. Splitting this from the YAML synthesis keeps both
 // halves pure and unit-testable.
+//
+// Teardown envelopes (journal.TeardownFilter: core.shutdown and whatever
+// followed it once no turn was left open) are skipped entirely. A stopped
+// session journals its own shutdown, and baking those counts into an
+// exact-match event_count_bounds block would make the case assert on how the
+// source process exited rather than on what the session did. A turn that
+// finished during the shutdown drain still counts.
 func observe(envs []journal.Envelope) observed {
 	o := observed{
 		EventCounts: make(map[string]int),
@@ -63,8 +70,12 @@ func observe(envs []journal.Envelope) observed {
 	}
 	hits := make(map[string]struct{})
 	var turnStarts []int64
+	var teardown journal.TeardownFilter
 
 	for _, e := range envs {
+		if teardown.Observe(e) {
+			continue
+		}
 		o.EventCounts[e.Type]++
 		if nonReplayableTypes[e.Type] {
 			hits[e.Type] = struct{}{}
