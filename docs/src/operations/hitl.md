@@ -26,6 +26,24 @@ through one event family:
   out-of-band channel), payload is a `events.HITLResponse` carrying the
   picked choice and/or freeform answer.
 
+`HITLRequest.TurnID` names the agent turn that is parked on the
+question. Every emitter that has a turn sets it: `ask_user` copies the
+asking tool call's turn, `nexus.gate.approval_policy` copies the gated
+tool call's turn (`tool.invoke` rules) or the request's
+`Metadata["turn_id"]` (`engine.MetaTurnID`; `llm.request` rules — every
+agent loop stamps it: `nexus.agent.react`, `nexus.agent.planexec`,
+`nexus.agent.orchestrator`, and the nested subagent and delegate loops,
+which stamp the *parent* turn they serve rather than their private
+tool-correlation turn), the long-term memory plugin's `memory_write` approval copies the
+tool call's turn, and `nexus.agent.a2aremote` and the ICM workflow set
+the spawning loop's turn. Approvals raised outside any turn (a
+bus-driven memory store, a compaction commit, a vector write) leave it
+empty. It is not cosmetic: turn-scoped transports bind the run that
+resumes the answer to it — over AG-UI, a continuation run adopts the
+request's `TurnID`, and a resumed run that carried no turn never saw
+its turn's `agent.turn.end`, so its stream never reached `RUN_FINISHED`
+(#218).
+
 The `ask_user` tool is the LLM-facing entry point to the same
 machinery. Its schema lets the model present:
 
@@ -288,9 +306,5 @@ session — switch to a different session first or stop the agent.
   Linux are covered by the underlying `fsnotify/fsnotify` library.
 - The prompt-synthesizer capability is reserved in the event payload
   but not yet implemented; literal prompts are the only rendered shape.
-- Approval-policy gate (`gates/approval_policy/`) and per-plugin
-  `require_approval` configs (memory longterm/vector/compaction) are
-  not yet shipped; today, only the `ask_user` tool emits
-  `hitl.requested`.
 
 These follow-ups are tracked off this PR.

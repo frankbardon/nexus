@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
 	"github.com/frankbardon/nexus/pkg/testharness"
 )
@@ -41,8 +42,35 @@ func TestFanout_DispatchesAndCollects(t *testing.T) {
 	// Two per-provider response events (one per fanout leg).
 	h.AssertEventCount("provider.fanout.response", 2, 2)
 
-	// Agent should still produce output (from combined response).
+	// Agent should still produce output (from combined response). The merged
+	// response must carry the ReAct request's own _source, not the fanout's,
+	// or the agent drops it and the turn never completes with the answer.
 	h.AssertEventEmitted("io.output")
+	h.AssertOutputContains("Hello from provider")
+	h.AssertEventEmitted("agent.turn.end")
+
+	// The response the agent consumed (the merged one: it has no leg marker)
+	// carries the original request's _source and the fanout markers.
+	var merged *events.LLMResponse
+	for _, e := range h.Events() {
+		if e.Type != "llm.response" {
+			continue
+		}
+		resp, ok := e.Payload.(events.LLMResponse)
+		if !ok || engine.IsFanoutLegResponse(resp.Metadata) {
+			continue
+		}
+		merged = &resp
+	}
+	if merged == nil {
+		t.Fatal("no merged llm.response observed")
+	}
+	if src, _ := merged.Metadata["_source"].(string); src != "nexus.agent.react" {
+		t.Fatalf("merged response _source = %q, want nexus.agent.react", src)
+	}
+	if merged.Metadata["_fanout"] != true {
+		t.Fatalf("merged response missing _fanout marker: %v", merged.Metadata)
+	}
 
 	// Verify fanout.start payload has correct targets.
 	for _, e := range h.Events() {

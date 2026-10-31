@@ -121,8 +121,8 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "voice.audio.input.chunk", Priority: 50},
-		{EventType: "llm.response", Priority: 50},
+		{EventType: "voice.audio.input.chunk"},
+		{EventType: "llm.response"},
 	}
 }
 
@@ -495,7 +495,7 @@ func (p *Plugin) handleLLMResponse(e engine.Event[any]) {
 
 	turnID := ""
 	if resp.Metadata != nil {
-		if tid, ok := resp.Metadata["turn_id"].(string); ok {
+		if tid, ok := resp.Metadata[engine.MetaTurnID].(string); ok {
 			turnID = tid
 		}
 	}

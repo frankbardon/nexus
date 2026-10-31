@@ -89,8 +89,11 @@ The combined response uses the `Alternatives` field on `LLMResponse`:
 - Primary fields (`Content`, `Model`, `ToolCalls`, etc.) contain the first successful response
 - `Alternatives` contains remaining successful responses as full `LLMResponse` structs
 - `Usage` and `CostUSD` are aggregated across all responses
+- `Metadata` is the answer to the **original** request: every key the intercepted request carried is restored over the chosen leg's copy — `_source` (absent when the request had none), `turn_id`, `task_kind` and anything else its producer correlates on — so an agent loop or internal caller filtering on `_source` receives the merged answer exactly as it would a direct provider response. Keys the provider added to its response (`thinking_blocks`, reasoning items, `_vetoed`) survive. The leg markers (`_fanout_provider`, `_target_provider`) and the parent's `_intercepted_by` are removed, so `engine.IsFanoutLegResponse` is false for it.
 - `Metadata["_fanout"] = true` indicates this was a fanout response
 - `Metadata["_fanout_id"]` contains the fanout sequence ID
+- `RequestID` is the original request's
+- Each entry in `Alternatives` is an unmodified leg response and keeps its leg markers, including `_source = nexus.provider.fanout`
 
 ## Deadline Handling
 
@@ -111,7 +114,7 @@ The fanout plugin injects tracking metadata into per-provider requests:
 | `_fanout_id` | string | Unique ID for this fanout sequence |
 | `_target_provider` | string | Plugin ID of the target provider |
 | `_fanout_provider` | string | Plugin ID that this leg targets |
-| `_source` | string | Set to `nexus.provider.fanout` so agents skip individual responses |
+| `_source` | string | Set to `nexus.provider.fanout` so agents skip individual responses (the merged response restores the original) |
 
 ## Interaction with Other Plugins
 

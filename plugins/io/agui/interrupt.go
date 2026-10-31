@@ -38,12 +38,14 @@ import (
 // runAcceptsTurnEvent rather than runOwnsTurnEnd, because a park is not a
 // termination and the vocabularies differ. HITLRequest.TurnID is a genuine
 // agent-loop turn where it is set at all — nexus.control.hitl copies the
-// asking tool call's own TurnID verbatim, and nexus.agent.a2aremote and the
-// ICM workflow both set the spawning loop's turn — but two of the five
-// emitters set NO TurnID at all (nexus.gate.approval_policy carries the turn
-// in its ActionRef metadata instead, and plugins/memory's approval helper
-// names none), so a strict equality match would silently drop a question the
-// agent is blocked on and park it forever with nobody able to answer.
+// asking tool call's own TurnID verbatim, nexus.gate.approval_policy copies
+// the gated action's turn (#218: it used to carry it only in ActionRef, so a
+// resumed run adopted "" and never finished), plugins/memory's approval
+// helper sets it for a memory_write tool call, and nexus.agent.a2aremote and
+// the ICM workflow both set the spawning loop's turn — but some requests
+// still name NO turn (a memory approval raised outside any turn), so a strict
+// equality match would silently drop a question the agent is blocked on and
+// park it forever with nobody able to answer.
 func (p *Plugin) handleHITLRequested(e engine.Event[any]) {
 	req, ok := e.Payload.(events.HITLRequest)
 	if !ok {

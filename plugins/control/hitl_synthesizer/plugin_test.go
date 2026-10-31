@@ -1,11 +1,13 @@
 package hitlsynthesizer
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"text/template"
+	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
 	"github.com/frankbardon/nexus/pkg/events"
@@ -323,5 +325,106 @@ func TestBuildCacheKey_DeterministicAndPartitioned(t *testing.T) {
 	}
 	if !strings.HasPrefix(a, "tool.invoke/") {
 		t.Errorf("expected key to be partitioned by action kind, got %q", a)
+	}
+}
+
+// interceptor stands in for a before:llm.request handler that owns the
+// answer (fanout role, test IO mock): it intercepts the synthesis request
+// and, when answer is set, publishes the response from another goroutine
+// after the publish has returned — first a fanout leg sharing the
+// RequestID, then the merged response, whose _source is the interceptor's
+// own (as fanout's is), so only RequestID correlation can match it.
+func interceptor(bus engine.EventBus, answer string, block bool) {
+	bus.Subscribe("before:llm.request", func(e engine.Event[any]) {
+		vp, ok := e.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		req, _ := vp.Original.(*events.LLMRequest)
+		if req == nil {
+			return
+		}
+		if block {
+			vp.Veto = engine.VetoResult{Vetoed: true, Reason: "blocked by test"}
+			return
+		}
+		engine.InterceptLLMRequest(vp, req, "test.interceptor", "intercepted")
+		if answer == "" {
+			return
+		}
+		id := req.RequestID
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion,
+				RequestID: id, Content: "leg answer",
+				Metadata: map[string]any{"_source": "test.interceptor", engine.MetaFanoutProvider: "a"},
+			})
+			_ = bus.Emit("llm.response", events.LLMResponse{SchemaVersion: events.LLMResponseVersion,
+				RequestID: id, Content: answer,
+				Metadata: map[string]any{"_source": "test.interceptor"},
+			})
+		}()
+	})
+}
+
+func synthRequest(id string) *events.HITLRequest {
+	return &events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id,
+		ActionKind:        "tool.invoke",
+		PromptSynthesizer: CapabilityName,
+		ActionRef:         map[string]any{"tool": "shell", "command": "rm -rf /tmp/" + id},
+	}
+}
+
+func TestSynthesize_InterceptedRequest_WaitsForAsyncResponse(t *testing.T) {
+	_, bus := newTestPlugin(t)
+	interceptor(bus, "Delete the tmp dir?", false)
+
+	req := synthRequest("h-int")
+	if err := bus.Emit("hitl.requested", req); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if req.Prompt != "Delete the tmp dir?" {
+		t.Fatalf("expected the intercepted answer, got %q", req.Prompt)
+	}
+}
+
+func TestSynthesize_InterceptedRequest_ShutdownStopsWait(t *testing.T) {
+	p, bus := newTestPlugin(t)
+	interceptor(bus, "", false) // intercepts, never answers
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = p.Shutdown(context.Background())
+	}()
+	req := synthRequest("h-cancel")
+	done := make(chan struct{})
+	go func() {
+		_ = bus.Emit("hitl.requested", req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("synthesis kept waiting after Shutdown cancelled its context")
+	}
+	if req.Prompt != "Approve action: tool.invoke" {
+		t.Fatalf("expected fallback prompt, got %q", req.Prompt)
+	}
+}
+
+func TestSynthesize_BlockedRequest_FallsBackAtOnce(t *testing.T) {
+	_, bus := newTestPlugin(t)
+	interceptor(bus, "", true)
+
+	req := synthRequest("h-block")
+	start := time.Now()
+	if err := bus.Emit("hitl.requested", req); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("blocked request waited %s; a block veto must fail at once", time.Since(start))
+	}
+	if req.Prompt != "Approve action: tool.invoke" {
+		t.Fatalf("expected fallback prompt, got %q", req.Prompt)
 	}
 }

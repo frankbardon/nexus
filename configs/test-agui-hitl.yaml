@@ -44,6 +44,14 @@ plugins:
     inputs: []
     approval_mode: approve
     timeout: 20s
+    # Load-bearing: the AG-UI resume POST must be the ONLY answer to ask_user.
+    # Left at its default (true), nexus.io.test answers hitl.requested itself
+    # the instant it fires, so the agent finishes the turn while run 1 is still
+    # ending. Run 2 then passed only if its POST registered before that
+    # agent.turn.end; when the engine won the race (reliably at GOMAXPROCS=2)
+    # the turn had already ended under no run and run 2's SSE never received
+    # RunFinished — a context-deadline timeout on the resume step (#215).
+    hitl_auto_respond: false
     # Two mock LLM responses drive the two-run, one-turn cycle:
     #   1. Tool call: ask_user (mode=choices) — parks the agent on hitl and ends
     #      run 1 with an interrupt outcome.

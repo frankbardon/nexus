@@ -81,7 +81,9 @@ type Plugin struct {
 	// reservations holds per-request estimated deductions made at
 	// handleBeforeLLMRequest so the check + commit happens under one lock
 	// rather than racing across two events. Reconciled (subtract estimate,
-	// add actual) at handleLLMResponse; cleaned up on core.error.
+	// add actual) at handleLLMResponse; released on core.error, or when the
+	// same RequestID re-reserves (a fallback retry whose failed attempt never
+	// reached core.error).
 	reservations map[string]*reservation
 
 	unsubs []func()
@@ -174,7 +176,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(7), engine.WithSource(pluginID)),
 		p.bus.Subscribe("llm.response", p.handleLLMResponse,
 			engine.WithPriority(0), engine.WithSource(pluginID)),
 		// core.error releases any reservation held for the failed request
@@ -262,6 +264,15 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 	// Second pass: session-scoped ceilings, atomic check + reserve under p.mu
 	// so concurrent fan-out can't double-book the same headroom.
 	p.mu.Lock()
+	// A RequestID that already holds a reservation is being re-offered: the
+	// earlier attempt failed without reaching core.error (nexus.provider.fallback
+	// vetoes the provider error and re-publishes the same request, same
+	// RequestID, to the next provider in the chain). That attempt will never
+	// produce an llm.response, so its estimate is released here rather than
+	// overwritten — otherwise the headroom leaks for the rest of the session.
+	// Releasing before the projection also means the retry is judged against
+	// spend that excludes the dead attempt.
+	p.releaseReservationLocked(req.RequestID)
 	var res *reservation
 	for _, c := range p.ceilings {
 		if c.Dimension == dimTenant {
@@ -380,12 +391,21 @@ func (p *Plugin) handleCoreError(event engine.Event[any]) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	res, ok := p.reservations[ei.RequestID]
+	p.releaseReservationLocked(ei.RequestID)
+}
+
+// releaseReservationLocked rolls back and forgets the reservation held for
+// requestID, if any. Must be called with p.mu held.
+func (p *Plugin) releaseReservationLocked(requestID string) {
+	if requestID == "" {
+		return
+	}
+	res, ok := p.reservations[requestID]
 	if !ok {
 		return
 	}
 	p.rollbackReservationLocked(res)
-	delete(p.reservations, ei.RequestID)
+	delete(p.reservations, requestID)
 }
 
 // handleLLMResponse reconciles the request's reservation against actual usage:

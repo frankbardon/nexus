@@ -73,17 +73,17 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "io.output", Priority: 50},
-		{EventType: "io.approval.request", Priority: 10}, // run early so we auto-approve first
-		{EventType: "plan.approval.request", Priority: 10},
-		{EventType: "hitl.requested", Priority: 10},
-		{EventType: "plan.created", Priority: 50},
-		{EventType: "agent.plan", Priority: 50},
-		{EventType: "thinking.step", Priority: 50},
-		{EventType: "agent.turn.start", Priority: 50},
-		{EventType: "agent.turn.end", Priority: 50},
-		{EventType: "core.error", Priority: 50},
-		{EventType: "core.ready", Priority: 50},
+		{EventType: "io.output"},
+		{EventType: "io.approval.request"}, // default priority: auto-approve ahead of later handlers
+		{EventType: "plan.approval.request"},
+		{EventType: "hitl.requested"},
+		{EventType: "plan.created"},
+		{EventType: "agent.plan"},
+		{EventType: "thinking.step"},
+		{EventType: "agent.turn.start"},
+		{EventType: "agent.turn.end"},
+		{EventType: "core.error"},
+		{EventType: "core.ready"},
 	}
 }
 

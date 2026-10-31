@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"fmt"
+
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
@@ -68,6 +72,72 @@ func InterceptLLMRequest(vp *VetoablePayload, req *events.LLMRequest, by, reason
 	}
 	req.Metadata[MetaInterceptedBy] = by
 	vp.Veto = VetoResult{Vetoed: true, Reason: reason}
+}
+
+// MetaFanoutProvider is the LLMResponse.Metadata key nexus.provider.fanout
+// stamps on each per-provider leg of a fanout (its value is the leg's
+// provider). Legs are copies of the intercepted request and keep its
+// RequestID, so a producer correlating by RequestID must skip them and wait
+// for the merged response, which carries the same RequestID without this key.
+// Read it through IsFanoutLegResponse.
+const MetaFanoutProvider = "_fanout_provider"
+
+// IsFanoutLegResponse reports whether a response is one per-provider leg of a
+// fanout rather than the answer to the request (see MetaFanoutProvider).
+func IsFanoutLegResponse(meta map[string]any) bool {
+	p, _ := meta[MetaFanoutProvider].(string)
+	return p != ""
+}
+
+// ErrLLMRequestBlocked is returned by AwaitLLMResponse when a
+// before:llm.request handler vetoed the request outright: nothing will
+// answer it.
+var ErrLLMRequestBlocked = errors.New("llm.request vetoed")
+
+// ErrNoLLMResponse is returned by AwaitLLMResponse when the request was
+// published but no response was delivered during the synchronous emit (no
+// provider active for the request's role, or the provider failed).
+var ErrNoLLMResponse = errors.New("no LLM response (provider not active for this role?)")
+
+// AwaitLLMResponse collects the response to a request published with
+// PublishLLMRequest by a producer that blocks on it. ch is the producer's
+// own correlation channel, fed by its llm.response subscription (match on
+// RequestID, skipping IsFanoutLegResponse legs); it must be subscribed
+// before the publish so a response delivered inside the emit is not lost.
+//
+//   - Emit error: returned as is.
+//   - Blocked: ErrLLMRequestBlocked wrapping the veto reason, at once.
+//   - Intercepted: a handler owns the answer and typically publishes it
+//     asynchronously (fanout merge, test IO mock), so this waits on ch until
+//     ctx is done and then returns ctx.Err(). ctx is the only bound.
+//   - Published: the bus dispatches synchronously and a non-streaming
+//     provider answers inside the emit, so the response is either already
+//     on ch or not coming — ErrNoLLMResponse (ctx.Err() if ctx is done).
+func AwaitLLMResponse[T any](ctx context.Context, res LLMRequestResult, ch <-chan T) (T, error) {
+	var zero T
+	if res.Err != nil {
+		return zero, res.Err
+	}
+	if res.Blocked() {
+		return zero, fmt.Errorf("%w: %s", ErrLLMRequestBlocked, res.Veto.Reason)
+	}
+	select {
+	case v := <-ch:
+		return v, nil
+	default:
+	}
+	if res.Intercepted() {
+		select {
+		case v := <-ch:
+			return v, nil
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	return zero, ErrNoLLMResponse
 }
 
 // PublishLLMRequest runs req through the vetoable "before:llm.request" hook
@@ -155,6 +225,20 @@ const MetaSource = "_source"
 // internal sub-flow.
 const MetaTaskKind = "task_kind"
 
+// MetaTurnID is the LLMRequest.Metadata key naming the agent turn a request
+// serves. LLMRequest has no TurnID field, so request-time consumers read it
+// here: nexus.gate.approval_policy copies it onto the HITLRequest an
+// llm.request rule raises, which is what lets a turn-scoped transport
+// (nexus.io.agui) resume and finish the right run (#218). Providers echo
+// request metadata onto the response, so rag.citations and io.voice read it
+// back off llm.response.
+//
+// Every agent loop stamps it on every llm.request it publishes. A nested loop
+// (subagent, delegate) stamps the PARENT turn it is serving — the one whose
+// run is waiting on it — not its private tool-correlation turn id, since that
+// id names no turn a transport ever saw start.
+const MetaTurnID = "turn_id"
+
 // TaskKindCompaction is the task_kind nexus.memory.compaction stamps on its
 // summarisation request. It is a named constant because two sides must agree
 // on its spelling: the producer, and every consumer that recognises a
@@ -171,6 +255,40 @@ const (
 	TaskKindDelegate = "delegate"
 )
 
+// Task kinds of the top-level agent-loop turns. Their responses drive the
+// conversation and tool execution, so IsInternalLLMRequest treats them as
+// turns even though the loops stamp "_source" for cost attribution.
+const (
+	TaskKindReactMain              = "react_main"
+	TaskKindPlanexecStep           = "planexec_step"
+	TaskKindPlanexecSynthesize     = "planexec_synthesize"
+	TaskKindOrchestratorDecompose  = "orchestrator_decompose"
+	TaskKindOrchestratorSynthesize = "orchestrator_synthesize"
+)
+
+// Task kinds of internal sub-flows: requests Nexus makes on its own behalf
+// whose response is not a conversation turn. Every value is a wire value —
+// it lands in cost records (`nexus cost --group-by task_kind`) and router
+// rules matching metadata.task_kind — so the spellings are fixed.
+const (
+	// TaskKindPlan is nexus.planner.dynamic's plan-generation request.
+	TaskKindPlan = "plan"
+	// TaskKindClassify is nexus.router.classifier's routing probe.
+	TaskKindClassify = "classify"
+	// TaskKindSummarise is nexus.memory.summary_buffer's summary request.
+	TaskKindSummarise = "summarise"
+	// TaskKindGateRetry is the shared gate retry-with-LLM helper's request
+	// (plugins/gates/internal/retry).
+	TaskKindGateRetry = "gate_retry"
+	// TaskKindFanoutJudge is nexus.provider.fanout's judge request.
+	TaskKindFanoutJudge = "fanout_judge"
+	// TaskKindRAGContextualize is nexus.rag.ingest's contextual-chunk request.
+	TaskKindRAGContextualize = "rag_contextualize"
+	// TaskKindHITLSynthesize is nexus.control.hitl_synthesizer's answer
+	// synthesis request.
+	TaskKindHITLSynthesize = "hitl_synthesize"
+)
+
 // agentTurnTaskKinds are the task_kind values of agent-loop turns: requests
 // whose response drives the conversation and tool execution. Every other
 // _source-tagged request — planner, classifier probe, summariser, compaction,
@@ -181,13 +299,13 @@ const (
 // tools; their prompts are authored by a parent model rather than echoing
 // content the user already sent through io.input.
 var agentTurnTaskKinds = map[string]bool{
-	"react_main":              true,
-	"planexec_step":           true,
-	"planexec_synthesize":     true,
-	"orchestrator_decompose":  true,
-	"orchestrator_synthesize": true,
-	TaskKindSubagent:          true,
-	TaskKindDelegate:          true,
+	TaskKindReactMain:              true,
+	TaskKindPlanexecStep:           true,
+	TaskKindPlanexecSynthesize:     true,
+	TaskKindOrchestratorDecompose:  true,
+	TaskKindOrchestratorSynthesize: true,
+	TaskKindSubagent:               true,
+	TaskKindDelegate:               true,
 }
 
 // IsAgentTurnTaskKind reports whether kind is the task_kind of an agent-loop

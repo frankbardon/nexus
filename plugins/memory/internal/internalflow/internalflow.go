@@ -22,9 +22,9 @@ import "github.com/frankbardon/nexus/pkg/engine"
 // orchestrator_synthesize) are deliberately excluded — they ARE the
 // conversation.
 var internalTaskKinds = map[string]bool{
-	"plan":      true, // dynamic / static planner
-	"classify":  true, // classifier router probe
-	"summarise": true, // summary_buffer / compaction summary call
+	engine.TaskKindPlan:      true, // dynamic / static planner
+	engine.TaskKindClassify:  true, // classifier router probe
+	engine.TaskKindSummarise: true, // summary_buffer summary call
 	// nexus.memory.compaction's summary call. The shared constant is the
 	// fix for a drift: this list said "compact" while the producer sent
 	// "compaction", so the compaction summary was recorded into history.
@@ -50,7 +50,7 @@ func SkipForHistory(meta map[string]any) bool {
 	if meta == nil {
 		return false
 	}
-	kind, _ := meta["task_kind"].(string)
+	kind, _ := meta[engine.MetaTaskKind].(string)
 	return internalTaskKinds[kind]
 }
 

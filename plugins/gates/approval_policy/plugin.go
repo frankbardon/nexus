@@ -80,7 +80,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("before:tool.invoke", p.handleBeforeToolInvoke,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(13), engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.responded", p.handleHITLResponse,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
@@ -134,7 +134,7 @@ func (p *Plugin) handleBeforeToolInvoke(event engine.Event[any]) {
 		return
 	}
 
-	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name)
+	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name, tc.TurnID)
 	if resp.rejected {
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -175,7 +175,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	resp := p.requestApproval(*matched, payload, "llm.request", req.Model)
+	resp := p.requestApproval(*matched, payload, "llm.request", req.Model, llmRequestTurnID(req))
 	if resp.rejected {
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -221,7 +221,16 @@ type approvalOutcome struct {
 // requestApproval emits a hitl.requested for the matched rule and
 // blocks until the corresponding hitl.responded arrives or (when set)
 // the rule's timeout elapses. Returns the gate-internal interpretation.
-func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, target string) approvalOutcome {
+//
+// turnID is the agent turn the gated action belongs to, stamped on
+// HITLRequest.TurnID. It is load-bearing for turn-scoped transports, not
+// cosmetic: nexus.io.agui records the request's TurnID against the
+// interrupt and a continuation run ADOPTS it, and only a run that carries
+// the turn may finish on that turn's agent.turn.end. A request naming no
+// turn left the resumed run bound to "", so it never saw RUN_FINISHED and
+// its SSE stream hung (#218). Empty only when the action genuinely names
+// no turn.
+func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, target, turnID string) approvalOutcome {
 	choices := buildChoices(r)
 	defaultID := r.defaultChoice
 	prompt := renderPrompt(r, payload, actionKind, target)
@@ -229,6 +238,7 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 	requestID := fmt.Sprintf("approval-%d-%d", time.Now().UnixNano(), p.requestCounter.Add(1))
 
 	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: requestID,
+		TurnID:            turnID,
 		RequesterPlugin:   pluginID,
 		ActionKind:        actionKind,
 		ActionRef:         payload,
@@ -381,12 +391,29 @@ func llmRequestActionPayload(req *events.LLMRequest) map[string]any {
 	if req.MaxTokens > 0 {
 		args["max_tokens"] = req.MaxTokens
 	}
-	return map[string]any{
+	out := map[string]any{
 		"action_kind": "llm.request",
 		"model":       req.Model,
 		"role":        req.Role,
 		"args":        args,
 	}
+	if turnID := llmRequestTurnID(req); turnID != "" {
+		out["turn_id"] = turnID
+	}
+	return out
+}
+
+// llmRequestTurnID reads the agent turn an llm.request belongs to.
+// LLMRequest has no TurnID field; the turn rides Metadata[engine.MetaTurnID].
+// Every agent loop stamps it (react, planexec, orchestrator, the dynamic
+// planner, and the nested subagent / delegate loops with their parent's turn).
+// Empty when the request names no turn.
+func llmRequestTurnID(req *events.LLMRequest) string {
+	if req == nil || req.Metadata == nil {
+		return ""
+	}
+	turnID, _ := req.Metadata[engine.MetaTurnID].(string)
+	return turnID
 }
 
 // applyToolEdit overlays an EditedPayload onto a ToolCall's Arguments.

@@ -66,14 +66,14 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 // the handler never sets Veto. The remainder are post-event observers.
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "llm.stream.chunk", Priority: 50},
-		{EventType: "llm.stream.hold", Priority: 50},
-		{EventType: "llm.stream.retract", Priority: 50},
-		{EventType: "llm.stream.end", Priority: 50},
+		{EventType: "llm.stream.chunk"},
+		{EventType: "llm.stream.hold"},
+		{EventType: "llm.stream.retract"},
+		{EventType: "llm.stream.end"},
 		{EventType: "before:tool.invoke", Priority: 100}, // read-only, low priority
-		{EventType: "voice.audio.output.chunk", Priority: 50},
-		{EventType: "cancel.complete", Priority: 50},
-		{EventType: "hitl.requested", Priority: 50},
+		{EventType: "voice.audio.output.chunk"},
+		{EventType: "cancel.complete"},
+		{EventType: "hitl.requested"},
 	}
 }
 

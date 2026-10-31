@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"testing"
 
 	"github.com/frankbardon/nexus/pkg/engine"
@@ -57,7 +58,7 @@ func wireThinkingLevel(t *testing.T, p *Plugin, req events.LLMRequest) (string, 
 	if target.skip {
 		t.Fatalf("resolveTarget skipped the request for role %q", req.Role)
 	}
-	body, err := p.buildRequestBody(target.model, target.maxTokens, target.effort, req)
+	body, err := p.buildRequestBody(context.Background(), target.model, target.maxTokens, target.effort, req)
 	if err != nil {
 		t.Fatalf("buildRequestBody: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestEffort_RegistryEffortIgnoredUnderBudgetMode(t *testing.T) {
 	}
 
 	target := p.resolveTarget(req)
-	body, err := p.buildRequestBody(target.model, target.maxTokens, target.effort, req)
+	body, err := p.buildRequestBody(context.Background(), target.model, target.maxTokens, target.effort, req)
 	if err != nil {
 		t.Fatalf("buildRequestBody: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestEffort_RegistryEffortIgnoredUnderOffMode(t *testing.T) {
 
 	req := events.LLMRequest{Role: "worker", Messages: userMessages()}
 	target := p.resolveTarget(req)
-	body, err := p.buildRequestBody(target.model, target.maxTokens, target.effort, req)
+	body, err := p.buildRequestBody(context.Background(), target.model, target.maxTokens, target.effort, req)
 	if err != nil {
 		t.Fatalf("buildRequestBody: %v", err)
 	}

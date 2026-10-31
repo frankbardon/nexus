@@ -187,7 +187,7 @@ func (r usageRecord) taskKind() string {
 	if r.Metadata == nil {
 		return ""
 	}
-	if v, ok := r.Metadata["task_kind"].(string); ok {
+	if v, ok := r.Metadata[engine.MetaTaskKind].(string); ok {
 		return v
 	}
 	return ""

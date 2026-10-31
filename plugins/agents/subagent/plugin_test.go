@@ -262,3 +262,27 @@ func TestSubagent_ReplaysProviderContinuityMetadata(t *testing.T) {
 		t.Errorf("signature for call_0_lookup = %v, want sig-abc", sigs["call_0_lookup"])
 	}
 }
+
+// TestSubagent_StampsParentTurnID pins that the subagent's llm.request names
+// the parent turn that spawned it in Metadata[engine.MetaTurnID] — not its own
+// "subagent_<id>" tool-correlation turn, which no transport ever saw start. An
+// approval rule on the request copies the key onto HITLRequest.TurnID (#218).
+func TestSubagent_StampsParentTurnID(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithSession(), contract.WithPluginConfig(map[string]any{
+		"system_prompt": "Base system prompt.",
+	}))
+	p := h.Plugin().(*Plugin)
+	lastReq := wireMockLLM(h)
+
+	h.Inject("tool.invoke", events.ToolCall{
+		SchemaVersion: events.ToolCallVersion,
+		ID:            "call-1",
+		Name:          p.toolName,
+		Arguments:     map[string]any{"task": "investigate something"},
+		TurnID:        "turn-parent",
+	})
+
+	if got := lastReq().Metadata[engine.MetaTurnID]; got != "turn-parent" {
+		t.Errorf("llm.request Metadata[%q] = %v, want turn-parent", engine.MetaTurnID, got)
+	}
+}

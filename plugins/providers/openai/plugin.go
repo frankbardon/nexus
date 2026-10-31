@@ -625,6 +625,27 @@ func (p *Plugin) handleRequest(req events.LLMRequest) {
 	p.mu.Unlock()
 }
 
+// registryOnlySystem returns the prompt registry's output as a standalone
+// system prompt when the request carries no system message of its own, so the
+// registry's sections (skills catalog, dynamic variables, ...) are not lost on
+// a request built without one. It reports false when the request already has a
+// system message (that one is decorated in place instead), when there is no
+// registry, or when the registry renders nothing — an empty system message is
+// never synthesized. Both the chat and Responses builders use it, and the
+// Anthropic and Gemini providers behave the same way (GitHub #216).
+func (p *Plugin) registryOnlySystem(msgs []events.Message) (string, bool) {
+	if p.prompts == nil {
+		return "", false
+	}
+	for _, msg := range msgs {
+		if msg.Role == "system" {
+			return "", false
+		}
+	}
+	content := p.prompts.Apply("")
+	return content, content != ""
+}
+
 // buildRequestBody constructs the OpenAI Chat Completions API request body.
 // buildResponsesBody in responses.go is its counterpart on the other surface.
 func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMRequest) map[string]any {
@@ -653,8 +674,16 @@ func (p *Plugin) buildRequestBody(model string, maxTokens int, req events.LLMReq
 	// Build messages. OpenAI keeps system messages inline, every one at its
 	// own position. The prompt registry decorates the FIRST system message
 	// only (the agent's prompt) so its sections are not repeated onto a later
-	// one such as a compaction summary.
+	// one such as a compaction summary. With no system message at all, the
+	// registry output alone becomes a leading system message (see
+	// registryOnlySystem), matching the Anthropic and Gemini providers.
 	var apiMessages []map[string]any
+	if content, ok := p.registryOnlySystem(req.Messages); ok {
+		apiMessages = append(apiMessages, map[string]any{
+			"role":    "system",
+			"content": content,
+		})
+	}
 	decoratedSystem := false
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {

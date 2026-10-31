@@ -63,7 +63,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("before:llm.request", p.handleBeforeLLMRequest,
-			engine.WithPriority(10), engine.WithSource(pluginID)),
+			engine.WithPriority(6), engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.start", p.handleTurnStart,
 			engine.WithPriority(5), engine.WithSource(pluginID)),
 		p.bus.Subscribe("io.input", p.handleInput,

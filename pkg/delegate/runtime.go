@@ -257,7 +257,7 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 			}
 		}
 
-		resp, err := r.requestLLM(ctx, source, opts.posture, history, opts.tools)
+		resp, err := r.requestLLM(ctx, source, opts.input.ParentTurn, opts.posture, history, opts.tools)
 		if err != nil {
 			return Output{
 				Status:        StatusError,
@@ -331,7 +331,12 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 // requestLLM emits an llm.request tagged with the sub-session source so the
 // parent agent's response handler ignores it, then waits synchronously for
 // the matching llm.response via SyncLLM.
-func (r *Runtime) requestLLM(ctx context.Context, source string, post posture.AgentPosture, history []events.Message, tools []events.ToolDef) (events.LLMResponse, error) {
+//
+// parentTurn is stamped as Metadata[engine.MetaTurnID]: the delegated loop
+// serves its caller's turn, and an approval raised on this request must
+// resume THAT turn's run (#218). The loop's own "delegate_<id>" turn only
+// correlates its private tool results and names no turn a transport saw.
+func (r *Runtime) requestLLM(ctx context.Context, source, parentTurn string, post posture.AgentPosture, history []events.Message, tools []events.ToolDef) (events.LLMResponse, error) {
 	req := events.LLMRequest{
 		Role:      post.Model.ModelRole,
 		Model:     post.Model.Model,
@@ -339,9 +344,10 @@ func (r *Runtime) requestLLM(ctx context.Context, source string, post posture.Ag
 		Messages:  history,
 		Tools:     tools,
 		Metadata: map[string]any{
-			"_source":   source,
-			"task_kind": "delegate",
-			"posture":   post.Name,
+			"_source":           source,
+			engine.MetaTaskKind: engine.TaskKindDelegate,
+			engine.MetaTurnID:   parentTurn,
+			"posture":           post.Name,
 		},
 		Tags: map[string]string{"source_plugin": "nexus.agent.delegate"},
 	}

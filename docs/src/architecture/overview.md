@@ -63,6 +63,30 @@ When `Engine.Run()` is called:
 7. **Event loop** — The engine listens for events until a shutdown signal arrives
 8. **Shutdown** — Plugins shut down in reverse dependency order, `core.shutdown` emitted
 
+If `Boot` returns an error, the caller does not call `Stop`. Boot undoes its own
+partial work on the way out: it releases the session lock and the object-store
+handle, and it unsubscribes every engine-owned run-scoped handler installed before
+the failing step. That covers the journal wildcard, the tool cache and the cost-tag
+seeder. It also closes the journal writer, so its drain goroutine and open
+segment file do not outlive the failure. So a host that retries `Boot` on the same
+`Engine` gets each of those handlers registered exactly once and a fresh journal
+writer ([#206](https://github.com/frankbardon/nexus/issues/206)).
+
+Plugins get the same treatment. When a plugin's `Init` or any plugin's `Ready`
+fails, `Boot` calls `Shutdown` on every plugin whose `Init` already succeeded, in
+reverse init order, before it returns. A plugin whose own `Init` failed is not shut
+down. On a `Ready` failure every plugin has finished `Init`, so all of them are
+shut down, the failing one included. No `core.shutdown` is emitted and the bus is
+not drained. `Shutdown` gets a context detached from Boot's own, bounded by
+`engine.shutdown.drain_timeout`. A `Shutdown` error or panic is logged and never
+replaces the Boot error the caller receives.
+
+This means **a plugin's `Shutdown` must tolerate running after `Init` without
+`Ready`.** Anything `Ready` sets up (a started server, a watcher, a goroutine) may
+not exist yet, so nil-check it. Unsubscribing what `Init` subscribed is the main
+job here: it is what keeps a retried `Boot` from registering the plugin's
+handlers twice.
+
 ```mermaid
 sequenceDiagram
     autonumber

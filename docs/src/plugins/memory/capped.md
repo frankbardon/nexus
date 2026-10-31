@@ -44,7 +44,9 @@ Maintains a sliding window of conversation messages and persists them to the ses
 - On `memory.compacted`, the buffer is replaced with the compacted messages
 - An `llm.response` produced by an internal sub-flow is **not** recorded. The
   filter reads `task_kind` off the response metadata, and the skipped set is
-  `plan`, `classify`, `summarise`, `compact`, `subagent` and `delegate` — each
+  `plan`, `classify`, `summarise`, `compaction`, `subagent` and `delegate`
+  (`engine.TaskKindPlan`, `TaskKindClassify`, `TaskKindSummarise`,
+  `TaskKindCompaction`, `TaskKindSubagent`, `TaskKindDelegate`) — each
   of those loops keeps a history of its own. The main agent loops
   (`react_main`, `planexec_step`, `orchestrator_decompose`,
   `orchestrator_synthesize`) are deliberately absent because they *are* the

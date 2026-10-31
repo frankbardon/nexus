@@ -1,0 +1,90 @@
+# Test: nexus.io.agui resume of a nexus.gate.approval_policy interrupt, end to end.
+#
+# Regression for #218. The gate raised its hitl.requested with no TurnID (the
+# turn rode only ActionRef["turn_id"]). nexus.io.agui binds a continuation run
+# to the request's TurnID, so the resumed run carried turn "", never owned the
+# agent.turn.end, dropped the turn's content as foreign, and its SSE stream
+# never sent RUN_FINISHED.
+#
+# One Nexus turn spans TWO AG-UI runs. In run 1 the (mocked) agent calls the
+# shell tool; the approval gate's tool.invoke rule matches on
+# before:tool.invoke, emits hitl.requested and parks the turn. The AG-UI plugin
+# ends run 1 with an interrupt outcome. A continuation RunAgentInput resolving
+# the interrupt with the "allow" choice (same threadId, new runId) unblocks the
+# gate, the tool runs, the agent consumes the second mock response and run 2
+# must finish with RUN_FINISHED.
+#
+# nexus.io.test is present ONLY to supply mock LLM responses — the agui POST is
+# the sole driver and the resume POST the sole HITL answerer.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestAGUIServe_ApprovalPolicyResume
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.io.agui
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.shell
+    - nexus.gate.approval_policy
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs: []
+    approval_mode: approve
+    timeout: 20s
+    # Load-bearing (same lesson as test-agui-hitl.yaml, #215): left at its
+    # default, nexus.io.test answers hitl.requested itself the instant the
+    # gate fires and races the resume POST. The resume must be the ONLY answer.
+    hitl_auto_respond: false
+    mock_responses:
+      - tool_calls:
+          - name: shell
+            arguments: '{"command":"echo approved-run"}'
+      - content: "The approved command ran."
+
+  nexus.io.agui:
+    # Fixed high port unlikely to collide; integration tests run sequentially.
+    bind: 127.0.0.1:18190
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent."
+
+  nexus.tool.shell:
+    timeout: 10s
+    sandbox:
+      allowed_commands: ["echo"]
+      env_restrict: true
+
+  nexus.gate.approval_policy:
+    rules:
+      - match:
+          action_kind: tool.invoke
+          tool: shell
+        mode: choices
+        choices:
+          - { id: allow,  label: "Run",   kind: allow }
+          - { id: reject, label: "Block", kind: reject }
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

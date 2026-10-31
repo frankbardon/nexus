@@ -55,7 +55,7 @@ func TestToolChoice_SequenceCyclesAcrossIterations(t *testing.T) {
 		// for cost attribution.
 		kind, _ := req.Metadata["task_kind"].(string)
 		switch kind {
-		case "plan", "summarise", engine.TaskKindCompaction, "classify":
+		case engine.TaskKindPlan, engine.TaskKindSummarise, engine.TaskKindCompaction, engine.TaskKindClassify:
 			return
 		}
 		mu.Lock()

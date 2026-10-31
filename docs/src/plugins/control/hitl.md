@@ -78,10 +78,11 @@ will consume it. Conventional values:
 |------|--------|
 | `free_text` | `ask_user` tool, mode = `free_text` |
 | `ask_user.choices` | `ask_user` tool, mode = `choices` or `both` |
-| `tool.invoke` | (planned) `gates/approval_policy/` |
-| `memory.longterm.write` | (planned) memory plugin require_approval |
-| `memory.vector.write` | (planned) memory plugin require_approval |
-| `llm.request` | (planned) `gates/approval_policy/` |
+| `tool.invoke` | `gates/approval_policy/` rule on a tool call; `TurnID` is the gated call's turn |
+| `llm.request` | `gates/approval_policy/` rule on an LLM request; `TurnID` comes from `Metadata["turn_id"]` |
+| `memory.longterm.write` | `memory/longterm` `require_approval` |
+| `memory.vector.write` | `memory/vector` `require_approval` |
+| `memory.compaction.commit` | `memory/compaction` `require_approval` |
 
 ## How It Works
 

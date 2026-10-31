@@ -107,6 +107,13 @@ func TestAGUIServe_HITLInterruptResume(t *testing.T) {
 		t.Fatalf("run 2 outcome = interrupt, want a normal finish (events=%v)", types2)
 	}
 
+	// The ask_user result must ride run 2 and carry the resume's answer: the
+	// resume POST — not some other HITL answerer — is what unblocked the agent,
+	// and the rest of the turn streamed onto the continuation (#215).
+	if got, ok := toolResultContent(res2); !ok || !contains(got, `"choice_id":"staging"`) {
+		t.Fatalf("run 2 ask_user result = %q (present=%v), want the resumed choice (events=%v)", got, ok, types2)
+	}
+
 	// The continuation's final assistant text must carry the post-resume mock
 	// content, proving the parked agent unblocked and finished the turn.
 	if !streamText(res2, "Deploying to staging") {
@@ -158,6 +165,11 @@ func TestAGUIServe_HITLResumeCancelled(t *testing.T) {
 	// the retracted interrupt.
 	if got := res2.Outcome(); got == agui.OutcomeInterrupt {
 		t.Fatalf("run 2 outcome = interrupt on a cancel resume, want a terminal finish (events=%v)", types2)
+	}
+	// The agent must have been unblocked by THIS cancellation, not by an
+	// answer: the ask_user result on run 2 carries the cancel reason.
+	if got, ok := toolResultContent(res2); !ok || got != "resumed as cancelled" {
+		t.Fatalf("run 2 ask_user result = %q (present=%v), want the cancellation (events=%v)", got, ok, types2)
 	}
 }
 
@@ -233,6 +245,17 @@ func TestAGUIServe_ClientToolRoundTrip(t *testing.T) {
 	if !streamText(res2, "sunny in Paris") {
 		t.Fatalf("run 2 did not stream the continuation content (events=%v)", types2)
 	}
+}
+
+// toolResultContent returns the content of the first ToolCallResult on the
+// result's stream, and whether one was present.
+func toolResultContent(res aguiclient.Result) (string, bool) {
+	for _, e := range res.Events {
+		if tr, ok := e.(*agui.ToolCallResultEvent); ok {
+			return tr.Content, true
+		}
+	}
+	return "", false
 }
 
 // streamText reports whether the concatenated TextMessageContent deltas of the

@@ -34,7 +34,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "hello.request", Priority: 50},
+		{EventType: "hello.request"},
 	}
 }
 

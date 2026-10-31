@@ -202,6 +202,7 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "llm.stream.chunk", Priority: 50},
 		{EventType: "llm.stream.end", Priority: 50},
 		{EventType: "skill.loaded", Priority: 50},
+		{EventType: "tool.register"},
 		{EventType: "plan.result", Priority: 50},
 		{EventType: "plan.approval.response", Priority: 50},
 		{EventType: "memory.compacted", Priority: 50},
@@ -643,6 +644,7 @@ func (p *Plugin) sendStepLLMRequest() {
 
 	tools := make([]events.ToolDef, len(p.registeredTools))
 	copy(tools, p.registeredTools)
+	turnID := p.currentTurnID
 
 	p.mu.Unlock()
 
@@ -651,8 +653,9 @@ func (p *Plugin) sendStepLLMRequest() {
 		Tools:    tools,
 		Stream:   false,
 		Metadata: map[string]any{
-			"_source":   executorSource,
-			"task_kind": "planexec_step",
+			"_source":           executorSource,
+			engine.MetaTaskKind: engine.TaskKindPlanexecStep,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}
@@ -900,6 +903,7 @@ func (p *Plugin) sendSynthesisRequest() {
 
 	// Include the original conversation history for context.
 	messages = append(messages, p.history...)
+	turnID := p.currentTurnID
 
 	p.mu.Unlock()
 
@@ -907,8 +911,9 @@ func (p *Plugin) sendSynthesisRequest() {
 		Messages: messages,
 		Stream:   true,
 		Metadata: map[string]any{
-			"_source":   synthesizerSource,
-			"task_kind": "planexec_synthesize",
+			"_source":           synthesizerSource,
+			engine.MetaTaskKind: engine.TaskKindPlanexecSynthesize,
+			engine.MetaTurnID:   turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

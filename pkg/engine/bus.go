@@ -40,6 +40,29 @@ type VetoableCollisionReporter interface {
 	WarnVetoableCollisions()
 }
 
+// SubscriptionInfo describes one typed subscription currently registered on a
+// bus: the event type, the priority it was registered at, and the source tag
+// passed via WithSource (empty when none was given). It carries no handler and
+// no filter — it is a read-only view for introspection, not a way to dispatch.
+type SubscriptionInfo struct {
+	EventType string
+	Priority  int
+	Source    string
+}
+
+// SubscriptionInspector is implemented by buses that can report their typed
+// handler table. Wildcard (SubscribeAll) observers are not included. The
+// contract harness uses it to check that the priority a plugin declares in
+// Subscriptions() is the priority it actually subscribed at: the declaration
+// is what operators and ordering tooling read, the registration is what
+// dispatch obeys, and nothing else keeps the two in step.
+//
+// The result is a snapshot ordered by event type, then dispatch order within
+// a type. A subscription can land or be removed immediately after it returns.
+type SubscriptionInspector interface {
+	RegisteredSubscriptions() []SubscriptionInfo
+}
+
 // CausationController is implemented by buses that propagate per-goroutine
 // CausationContext into emitted events. Plugins and runtimes (agent loops,
 // sub-agent dispatch, IO transports binding to a session) push a context
@@ -554,6 +577,25 @@ func (b *eventBus) HasSubscribers(eventType string) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.handlers[eventType]) > 0
+}
+
+// RegisteredSubscriptions returns a snapshot of every typed subscription.
+// Documented on SubscriptionInspector.
+func (b *eventBus) RegisteredSubscriptions() []SubscriptionInfo {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	types := make([]string, 0, len(b.handlers))
+	for t := range b.handlers {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	var out []SubscriptionInfo
+	for _, t := range types {
+		for _, s := range b.handlers[t] {
+			out = append(out, SubscriptionInfo{EventType: t, Priority: s.priority, Source: s.source})
+		}
+	}
+	return out
 }
 
 // WarnVetoableCollisions scans every before:* event in the handler table

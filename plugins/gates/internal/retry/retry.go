@@ -53,7 +53,7 @@ func New(bus engine.EventBus, logger *slog.Logger, config Config) *Handler {
 
 	// Subscribe to LLM responses — filter by _source metadata in handler.
 	h.unsub = bus.Subscribe("llm.response", h.handleLLMResponse,
-		engine.WithPriority(5))
+		engine.WithPriority(5), engine.WithSource(config.Source))
 
 	return h
 }
@@ -138,8 +138,8 @@ func (h *Handler) AttemptRetry(
 			Messages: messages,
 			Stream:   false,
 			Metadata: map[string]any{
-				"_source":   tag,
-				"task_kind": "gate_retry",
+				"_source":           tag,
+				engine.MetaTaskKind: engine.TaskKindGateRetry,
 			},
 			Tags: map[string]string{"source_plugin": tag},
 		})

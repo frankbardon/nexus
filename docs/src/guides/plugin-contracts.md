@@ -85,8 +85,91 @@ Constructs the harness, calls `Init` and `Ready` on the plugin, registers cleanu
 | `AssertNotEmitted(eventType)` | No plugin-origin event of this type was captured. |
 | `AssertEmittedInOrder(types ...string)` | Types appeared in the captured stream in the given relative order. Other emissions between them are ignored. |
 | `AssertNoUndeclaredEmissions()` | Every plugin-origin event the harness saw is in the plugin's declared `Emissions()` list. Use after `Inject` to catch contract drift. |
+| *(automatic in `NewContract`)* | Every declared subscription priority equals the priority the plugin registered on the bus. See below. |
+| *(automatic in `NewContract`)* | Every event type the plugin registered on the bus is declared in `Subscriptions()`. See below. |
 
 `Captured()` returns every event observed (including injects); `PluginEmissions()` filters down to plugin-origin only.
+
+### Automatic check: declared priority matches registered priority
+
+`NewContract` does one assertion without being asked. After `Init` and `Ready`
+return it snapshots the bus's typed handler table and, for every event type the
+plugin **both** declares in `Subscriptions()` **and** actually subscribed to,
+requires the set of declared priorities to equal the set of registered ones. A
+difference fails the test:
+
+```
+plugin "nexus.provider.fanout" subscription priority mismatch on "before:llm.request": declared [2] in Subscriptions(), registered [0] on the bus
+```
+
+It exists because the two sides drift silently. `Subscriptions()` is what
+operators, docs and the `before:*` pipeline tables read; the `WithPriority` on
+the `Subscribe` call is what dispatch obeys. A plugin that declares 2 and
+subscribes with no `WithPriority` runs at 0 — ahead of the fallback
+coordinator, out of the documented order — and nothing else notices (#213).
+
+What it does and does not flag:
+
+- **Flags** a declared type registered at a different priority, and a declared
+  type that has an extra registration at a priority the plugin never declared
+  (e.g. a shared helper subscribing on the plugin's bus — declare both entries).
+- **Ignores** a declared type that is not registered at all. Many subscriptions
+  are config-conditional; whether a declared subscription fires is what
+  `AssertSubscribesTo` plus `Inject` cover.
+- **Ignores** registered types that are not declared at all (the undeclared
+  check below covers those), and anything a test subscribes through `Bus()`
+  after `NewContract` returns — the snapshot is taken first, so only the
+  plugin's own registrations are compared.
+
+`RegisteredSubscriptions()` returns that snapshot (event type, priority,
+`WithSource` tag) for tests that want to assert on it directly.
+
+The snapshot comes from `engine.SubscriptionInspector`, an optional read-only
+interface on the bus (`RegisteredSubscriptions() []engine.SubscriptionInfo`),
+in the same family as `SeqController` and `VetoableCollisionReporter`. The
+default bus implements it; wildcard (`SubscribeAll`) observers are not
+reported.
+
+When the check fires, decide which side is wrong. On `before:*` events the
+priority is part of a documented pipeline (see *Pipeline ordering on
+`before:*` events* in the [configuration reference](../configuration/reference.md#gates)
+and the handler map in [Event Bus](../architecture/event-bus.md)), so fix the
+`Subscribe` call. On plain notification events, where nothing depends on the
+number, correcting the declaration to the shipped runtime priority is the
+behaviour-neutral fix.
+
+### Automatic check: every registered subscription is declared
+
+The same snapshot drives a second check. Every subscription the plugin
+registered during `Init`/`Ready` must be for an event type listed in its
+`Subscriptions()`. An omission fails the test and names the plugin, event and
+priority:
+
+```
+plugin "nexus.gate.output_length" registered undeclared subscription "llm.response" at priority 5 (source "nexus.gate.output_length"); add it to Subscriptions()
+```
+
+A registration counts as the plugin's when its `WithSource` tag is the plugin
+ID (or the `WithPluginID` override, or the ID's part before a `/` instance
+suffix), or when it has no tag at all, since nothing but the plugin had the bus
+before the snapshot. A registration tagged with a *different* ID is left to
+that ID's own contract test.
+
+**Shared helpers.** A helper that subscribes on the owning plugin's bus, such as
+`plugins/gates/internal/retry` (`llm.response` at priority 5), is part of that
+plugin's contract. Every plugin that constructs the helper declares what it
+subscribes to, and the helper tags its subscription with the owner's ID
+(`retry.Config.Source`).
+
+**Config-conditional subscriptions** are not an exemption. Declare them
+unconditionally, or conditionally on the same config the `Subscribe` call
+reads. `nexus.io.test` declares its mock-mode `before:llm.request` and
+`llm.request` handlers only when `mock_responses` is set. There is no opt-out:
+every subscription found so far could be declared, so none was added. Fix an
+omission by adding the declaration, not by dropping the subscription.
+
+The check sees only what the harness config exercises. A subscription wired
+under a config no contract test uses is not caught.
 
 ## Patterns
 

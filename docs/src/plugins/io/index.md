@@ -30,5 +30,5 @@ Both I/O plugins follow the same event pattern:
 - **Output**: Receive `io.output` → display to user
 - **Streaming**: Receive `io.output.stream` chunks → render incrementally
 - **Approvals**: Receive `io.approval.request` → show dialog → emit `io.approval.response`
-- **Questions**: Receive `io.ask` → show prompt → emit `io.ask.response`
+- **Questions**: Receive `hitl.requested` → show prompt → emit `hitl.responded`
 - **Status**: Receive `io.status` → update status indicator

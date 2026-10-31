@@ -169,8 +169,15 @@ func intValue(v any) (int, bool) {
 // cacheState holds prompt-cache policy and the in-memory key map.
 //
 // Caching is conservative: only the stable prefix (system instruction + tool
-// declarations + initial user/model turns up to the first tool exchange) is
-// hashed and cached. The trailing delta is sent on every request.
+// declarations + the leading run of contents up to the first functionResponse
+// turn, see cachePrefix) is hashed and cached. On a hit buildRequestBody sends
+// only what the entry does not cover: the contents after that prefix.
+//
+// Nothing populates the map automatically. The read path (lookupWith, called
+// from buildRequestBody) is live, but an entry exists only after
+// createCachedContent has been called, and no code path in Nexus calls it
+// today — there is no token-count probe or auto-create. With no entries every
+// lookup misses and requests go out uncached.
 //
 // The embedded cacheSettings is the *plugin-level* policy. A request served
 // under a `core.models` role that carries its own `cache:` block resolves a
@@ -189,6 +196,11 @@ type cacheState struct {
 type cacheEntry struct {
 	name    string // resource name returned by cachedContents.create
 	expires time.Time
+	// covered is how many leading request contents the cached resource
+	// holds — len(cachePrefix(contents)) at populate time. A hit strips
+	// exactly this many from the request; the systemInstruction and tools
+	// are always covered, because createCachedContentAt always sends them.
+	covered int
 }
 
 // newCacheState builds the shared cache state from the plugin-level `cache:`
@@ -207,19 +219,15 @@ func newCacheState(cfg map[string]any, logger *slog.Logger) (*cacheState, error)
 }
 
 // lookup returns a cached_content resource name when the request prefix
-// matches a live cache entry. Returns "" when no cache should be applied.
-//
-// This is a pure-read lookup; population happens out-of-band via populate().
-// The current implementation is a stub: it computes the prefix hash and
-// returns a hit when present, but never auto-populates (auto-population
-// requires a token-count probe and a synchronous create call). Callers can
-// pre-populate via a future explicit API; for now this preserves the engine
-// hook so cached prompts work when the user manually wires them.
+// matches a live cache entry under the plugin-level policy. Returns "" when no
+// cache should be applied. It is a pure read: entries are only ever added by
+// populate, via createCachedContent.
 func (cs *cacheState) lookup(model, system string, tools []events.ToolDef, contents []map[string]any) string {
 	if cs == nil {
 		return ""
 	}
-	return cs.lookupWith(cs.enabled, model, system, tools, contents)
+	name, _ := cs.lookupWith(cs.enabled, model, system, tools, contents)
+	return name
 }
 
 // lookupWith is lookup against a per-request policy rather than the
@@ -228,9 +236,12 @@ func (cs *cacheState) lookup(model, system string, tools []events.ToolDef, conte
 // request today: the entry map is addressed by prefix hash, and `min_tokens`,
 // `ttl` and `max_entries` all belong to the write path, which is not
 // role-scoped. See Plugin.resolveCache.
-func (cs *cacheState) lookupWith(enabled bool, model, system string, tools []events.ToolDef, contents []map[string]any) string {
+//
+// covered is the number of leading contents the cached resource already holds
+// (see cacheEntry.covered); the caller must not resend them.
+func (cs *cacheState) lookupWith(enabled bool, model, system string, tools []events.ToolDef, contents []map[string]any) (name string, covered int) {
 	if cs == nil || !enabled {
-		return ""
+		return "", 0
 	}
 
 	hash := cs.prefixHash(model, system, tools, contents)
@@ -240,19 +251,19 @@ func (cs *cacheState) lookupWith(enabled bool, model, system string, tools []eve
 
 	entry, ok := cs.entries[hash]
 	if !ok {
-		return ""
+		return "", 0
 	}
 	if time.Now().After(entry.expires) {
 		delete(cs.entries, hash)
 		cs.removeOrder(hash)
-		return ""
+		return "", 0
 	}
-	return entry.name
+	return entry.name, entry.covered
 }
 
-// populate stores a cachedContents resource name against a prefix hash. Called
-// by integrations that explicitly create a cache entry (e.g. a future
-// admin tool or the cache plugin itself).
+// populate stores a cachedContents resource name against a prefix hash, and
+// records how many leading contents the resource covers. Its only production
+// caller is createCachedContentAt, after a successful cachedContents.create.
 func (cs *cacheState) populate(model, system string, tools []events.ToolDef, contents []map[string]any, name string, ttl time.Duration) {
 	if cs == nil || !cs.enabled {
 		return
@@ -265,7 +276,7 @@ func (cs *cacheState) populate(model, system string, tools []events.ToolDef, con
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	cs.entries[hash] = &cacheEntry{name: name, expires: time.Now().Add(ttl)}
+	cs.entries[hash] = &cacheEntry{name: name, expires: time.Now().Add(ttl), covered: len(cachePrefix(contents))}
 	cs.order = append(cs.order, hash)
 	for len(cs.order) > cs.maxEntries {
 		oldest := cs.order[0]
@@ -324,13 +335,7 @@ func (cs *cacheState) prefixHash(model, system string, tools []events.ToolDef, c
 		}
 	}
 
-	prefixContents := make([]map[string]any, 0, len(contents))
-	for _, c := range contents {
-		if hasFunctionResponsePart(c) {
-			break
-		}
-		prefixContents = append(prefixContents, c)
-	}
+	prefixContents := cachePrefix(contents)
 
 	payload := struct {
 		Model    string
@@ -347,6 +352,19 @@ func (cs *cacheState) prefixHash(model, system string, tools []events.ToolDef, c
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// cachePrefix is the leading run of contents up to (not including) the first
+// functionResponse turn — the part of a conversation that is both hashed and
+// stored in a cachedContents resource. prefixHash and createCachedContentAt
+// share it so the hash never describes more or less than the resource holds.
+func cachePrefix(contents []map[string]any) []map[string]any {
+	for i, c := range contents {
+		if hasFunctionResponsePart(c) {
+			return contents[:i]
+		}
+	}
+	return contents
 }
 
 func hasFunctionResponsePart(c map[string]any) bool {
@@ -374,8 +392,10 @@ func hasFunctionResponsePart(c map[string]any) bool {
 }
 
 // createCachedContent calls the cachedContents API to create a new cache
-// entry. Exposed for callers that want to pre-populate the cache; not used
-// by the auto-cache path (which stays read-only — see lookup()).
+// entry and records it in the entry map. It is the only way an entry is ever
+// created, and nothing in Nexus calls it today: it is kept so the populate
+// path stays tested and ready for an explicit caller, while the read path in
+// buildRequestBody honours whatever it records.
 func (p *Plugin) createCachedContent(ctx context.Context, model, system string, tools []events.ToolDef, contents []map[string]any, ttl time.Duration) (string, error) {
 	if !p.cache.enabled {
 		return "", fmt.Errorf("cache disabled")
@@ -405,8 +425,16 @@ func (p *Plugin) createCachedContentAt(ctx context.Context, url, model, system s
 		}
 		body["tools"] = []map[string]any{{"functionDeclarations": decls}}
 	}
-	if len(contents) > 0 {
-		body["contents"] = contents
+	// A request that hits this entry may not resend tools, so the
+	// plugin-level codeExecution tool has to live in the cache too.
+	if p.codeExecution {
+		tools, _ := body["tools"].([]map[string]any)
+		body["tools"] = append(tools, map[string]any{"codeExecution": map[string]any{}})
+	}
+	// Only the stable prefix is cached — exactly the run prefixHash covers —
+	// so a hit can strip a known number of leading contents.
+	if prefix := cachePrefix(contents); len(prefix) > 0 {
+		body["contents"] = prefix
 	}
 	if ttl > 0 {
 		body["ttl"] = fmt.Sprintf("%ds", int(ttl.Seconds()))

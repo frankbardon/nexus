@@ -12,9 +12,10 @@ make test-broker-integration  # Broker integration suite (tagged; no API key nee
 make test-objectstore-minio   # modules/objectstore-s3 against MinIO (tagged; builds/starts its own emulator, no container)
 make test-objectstore-fake-gcs # modules/objectstore-gcs against fake-gcs-server (tagged; builds/starts its own emulator, no container)
 make fmt          # Format code (gofmt)
+make fmt-check    # Fail, listing files, if gofmt would change anything (root + modules/; run by lint)
 make submodules   # List the Go submodules under modules/ that every sweep covers
 make vet          # Run go vet
-make lint         # Run staticcheck + vet, untagged and again with every build tag
+make lint         # Run fmt-check + staticcheck + vet, untagged and again with every build tag
 ```
 
 Run specific profile: `bin/nexus -config configs/coding.yaml`

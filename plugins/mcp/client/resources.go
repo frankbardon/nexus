@@ -101,6 +101,7 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []*mcp.
 		s.staticResources = map[string]*mcp.Resource{}
 		s.resourceURIs = map[string]string{}
 		s.mu.Unlock()
+		s.syncSubscriptions(ctx, nil)
 		return
 	}
 
@@ -110,7 +111,7 @@ func (s *server) reconcileStaticResources(ctx context.Context, resources []*mcp.
 		seen[slug] = true
 		s.registerStaticResource(slug, r)
 	}
-	s.subscribeResources(ctx, resources)
+	s.syncSubscriptions(ctx, resources)
 
 	s.mu.Lock()
 	for slug := range s.staticResources {

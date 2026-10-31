@@ -237,9 +237,28 @@ them apart:
 
 The two interceptors in tree are the fanout coordinator (dispatches to several
 providers, publishes one merged response) and the test IO plugin's mock mode.
-`AwaitResponse()` is `Published || Intercepted()`. Producers that only collect
-a response delivered *inside* the synchronous emit (`delegate.SyncLLM`, the
-HITL synthesizer) treat any veto, interception included, as a failure.
+`AwaitResponse()` is `Published || Intercepted()`.
+
+A producer that blocks on its response — `delegate.SyncLLM` (behind the
+delegate runtime and the subagent worker loop) and the HITL synthesizer —
+collects it with `engine.AwaitLLMResponse(ctx, res, ch)`, where `ch` is fed by
+the producer's own `llm.response` subscription, set up before the publish:
+
+```go
+res := engine.PublishLLMRequest(bus, req)
+resp, err := engine.AwaitLLMResponse(ctx, res, respCh)
+```
+
+A block veto fails at once with `engine.ErrLLMRequestBlocked`. A published
+request is answered inside the synchronous emit or not at all
+(`engine.ErrNoLLMResponse`). An intercepted one is answered asynchronously, so
+the helper waits on `ctx` and returns `ctx.Err()` when it ends first — `ctx` is
+the only bound, so pass one that ends. Correlate on `RequestID`: interceptors
+carry it onto their response (fanout's merged response also restores the
+request's own `_source` and other metadata, but each leg carries the fanout's
+`_source`). Fanout legs keep the parent's `RequestID` too, so skip
+any response for which `engine.IsFanoutLegResponse` is true
+(`Metadata["_fanout_provider"]`, `engine.MetaFanoutProvider`).
 
 **Recursion.** A `before:llm.request` handler that itself produces a request
 re-enters the hook: the classifier router's probe, and compaction triggered by
@@ -271,6 +290,37 @@ request. A blocked internal request
 fails fast: a gate retry returns invalid, a summariser or compaction releases
 its in-flight flag and leaves history as-is, a fallback retry leaves the
 original provider error to surface.
+
+**Task kinds are engine constants.** Every `task_kind` value a producer
+stamps is an exported constant in `pkg/engine/llm_request.go`, set under the
+key `engine.MetaTaskKind`. Agent-loop turns: `TaskKindReactMain`,
+`TaskKindPlanexecStep`, `TaskKindPlanexecSynthesize`,
+`TaskKindOrchestratorDecompose`, `TaskKindOrchestratorSynthesize`, and the
+nested loops `TaskKindSubagent` and `TaskKindDelegate`. Internal sub-flows:
+`TaskKindPlan`, `TaskKindClassify`, `TaskKindSummarise`, `TaskKindCompaction`,
+`TaskKindGateRetry`, `TaskKindFanoutJudge`, `TaskKindRAGContextualize` and
+`TaskKindHITLSynthesize`. Producers and consumers (`IsInternalLLMRequest`'s
+turn table, the memory plugins' `internalflow` skip list) both use the
+constants, so a spelling cannot drift between the two sides; the values are
+wire values (cost records, router rules on `metadata.task_kind`) and do not
+change. A new kind gets a constant here, and an agent-loop kind must also be
+added to the turn table or every gate treats its turns as internal.
+
+**Every agent loop stamps `turn_id`.** `LLMRequest` has no `TurnID` field,
+so the turn a request serves rides `Metadata[engine.MetaTurnID]`
+(`"turn_id"`). `nexus.agent.react`, `nexus.agent.planexec` (step and
+synthesis), `nexus.agent.orchestrator` (decompose and synthesis) and
+`nexus.planner.dynamic` stamp their current turn on every `llm.request`
+they publish. The nested loops — `nexus.agent.subagent` and the
+`pkg/delegate` runtime — stamp the **parent** turn they serve, not their
+private `subagent_<id>` / `delegate_<id>` turn: that id only correlates
+the loop's own tool results and names no turn a transport ever saw
+start. `nexus.gate.approval_policy` copies the key onto the
+`HITLRequest.TurnID` an `llm.request` rule raises, and a turn-scoped
+transport (`nexus.io.agui`) only resumes and finishes a run whose turn
+it recognises (#218). Providers echo request metadata, so
+`nexus.rag.citations` and `nexus.io.voice` read the same key off
+`llm.response`. A new agent loop must stamp it too.
 
 **The one exception: fanout legs.** The fanout coordinator's per-provider legs
 are emitted directly with `EmitAsync`. Each leg is a copy of a request that is

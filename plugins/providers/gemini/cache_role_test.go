@@ -251,11 +251,11 @@ func TestRoleCache_RoleTurnsCachingOff(t *testing.T) {
 	if cs := resolveCacheFor(p, events.LLMRequest{Role: "cheap"}); cs.enabled {
 		t.Fatal("expected the role's enabled: false to win")
 	}
-	if got := p.cache.lookupWith(false, "gemini-3-flash", "sys", nil, contents); got != "" {
+	if got, _ := p.cache.lookupWith(false, "gemini-3-flash", "sys", nil, contents); got != "" {
 		t.Fatalf("lookupWith(false) = %q, want no cache reference", got)
 	}
 	// The entry map is shared, so a role that DOES cache still sees it.
-	if got := p.cache.lookupWith(true, "gemini-3-flash", "sys", nil, contents); got != "cachedContents/abc" {
+	if got, _ := p.cache.lookupWith(true, "gemini-3-flash", "sys", nil, contents); got != "cachedContents/abc" {
 		t.Fatalf("lookupWith(true) = %q, want the shared entry", got)
 	}
 }

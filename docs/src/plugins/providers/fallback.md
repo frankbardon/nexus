@@ -65,7 +65,7 @@ Clean restart — splicing output from two different models produces incoherent 
 - **Agent plugins** — unaware of fallback. Emit `llm.request`, receive `llm.response`.
 - **Provider routing** — providers still check `cfg.Provider != pluginID` and skip non-matching requests.
 - **Single-provider configs** — backward compatible, parsed as chain of length 1.
-- **Gate plugins** — operate on `before:llm.request` as before. Fallback re-emits go through same gate checks.
+- **Gate plugins** — operate on `before:llm.request` as before. Fallback re-emits go through same gate checks. The retry keeps the original `RequestID`, and because fallback vetoes the error no `core.error` fires for the failed attempt; `nexus.gate.token_budget` therefore releases a reservation when the same `RequestID` reserves again, so the failed attempt's estimate does not leak.
 
 ## Request Metadata
 

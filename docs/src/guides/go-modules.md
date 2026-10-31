@@ -193,8 +193,9 @@ GO_SUBMODULES := $(patsubst %/go.mod,%,$(wildcard modules/*/go.mod))
 | `make test-objectstore-fake-gcs` | — | `modules/objectstore-gcs` only, `-tags fakegcsserver` |
 | `make test-race` | `go test -race ./...` | `go test -race ./...` |
 | `make fmt` | `go fmt ./...` | `go fmt ./...` |
+| `make fmt-check` | `gofmt -l` over every `.go` file outside `modules/`; fails if it lists any | `gofmt -l .`; same |
 | `make vet` | `go vet ./...`, then again with `-tags $(LINT_TAGS)` | same, both passes |
-| `make lint` | `vet` + `check-events` + `check-modules` + staticcheck, untagged and `-tags $(LINT_TAGS)` | staticcheck, both passes |
+| `make lint` | `fmt-check` + `vet` + `check-events` + `check-modules` + staticcheck, untagged and `-tags $(LINT_TAGS)` | staticcheck, both passes |
 | `make check-events` | root only | — |
 | `make check-modules` | fails on a `go.mod` outside `modules/<name>/` | — |
 | `make submodules` | prints the discovered list | — |

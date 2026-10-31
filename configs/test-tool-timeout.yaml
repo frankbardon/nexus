@@ -1,0 +1,71 @@
+# Test: a tool call whose result never arrives must not hang the turn.
+#
+# nexus.gate.tool_timeout is NOT listed in plugins.active: nexus.tool.catalog
+# auto-activates it (default-on per-call deadline). The first mock response
+# calls ask_user, and nexus.io.test is told not to answer HITL requests, so the
+# tool's result never arrives. ask_user is exempt by default (it waits on a
+# human), so this profile bounds it explicitly with a short per_tool deadline;
+# the gate then synthesizes an error tool.result, the model sees it on the next
+# request, and the second mock response closes the turn. Mock mode only.
+#
+# Run:
+#   go test -tags integration ./tests/integration/ -run TestToolTimeout
+
+core:
+  log_level: warn
+  tick_interval: 5s
+  max_concurrent_events: 100
+  models:
+    default: quick
+    quick:
+      provider: nexus.llm.anthropic
+      model: claude-haiku-4-5-20251001
+      max_tokens: 4096
+  sessions:
+    root: ~/.nexus/test-sessions
+    retention: 30d
+    id_format: datetime_short
+
+# The parked ask_user handler is still in flight at shutdown; don't wait the
+# default 30s drain for it.
+engine:
+  shutdown:
+    drain_timeout: 1s
+
+plugins:
+  active:
+    - nexus.io.test
+    - nexus.llm.anthropic
+    - nexus.agent.react
+    - nexus.tool.catalog
+    - nexus.control.hitl
+    - nexus.memory.capped
+
+  nexus.io.test:
+    inputs:
+      - "Ask me which city I mean."
+    approval_mode: approve
+    hitl_auto_respond: false
+    timeout: 20s
+    mock_responses:
+      - tool_calls:
+          - name: ask_user
+            arguments: '{"prompt":"Which city?"}'
+      - content: "No answer arrived in time."
+
+  # Config for the auto-activated gate (user config replaces the gate's
+  # defaults wholesale — see Requires() merge rule).
+  nexus.gate.tool_timeout:
+    default_timeout: 300ms
+    per_tool:
+      ask_user: 300ms
+
+  nexus.llm.anthropic:
+    api_key: "sk-mock-not-used"
+
+  nexus.agent.react:
+    system_prompt: "You are a test agent. Use tools when asked."
+
+  nexus.memory.capped:
+    max_messages: 10
+    persist: false

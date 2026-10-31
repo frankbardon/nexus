@@ -526,3 +526,48 @@ func TestApprovalPolicy_LLMRequest_MatchesAgentLoopTurns(t *testing.T) {
 		t.Fatal("approval did not complete")
 	}
 }
+
+// TestApprovalPolicy_HITLRequestCarriesTurnID pins #218: the request the gate
+// raises must name the gated action's agent turn in HITLRequest.TurnID, not
+// only in ActionRef["turn_id"]. nexus.io.agui binds the continuation run to
+// that field; left empty, the resumed run never owned agent.turn.end and its
+// stream never reached RUN_FINISHED.
+func TestApprovalPolicy_HITLRequestCarriesTurnID(t *testing.T) {
+	rules := []rule{
+		{match: map[string]any{"action_kind": "tool.invoke", "tool": "shell"}, mode: string(events.HITLModeChoices)},
+		{match: map[string]any{"action_kind": "llm.request", "model": "claude-opus-*"}, mode: string(events.HITLModeChoices)},
+	}
+	_, bus := newTestPlugin(t, rules)
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
+
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
+		Name:      "shell",
+		Arguments: map[string]any{"command": "ls"},
+		TurnID:    "turn-tool",
+	}
+	if _, err := bus.EmitVetoable("before:tool.invoke", &tc); err != nil {
+		t.Fatalf("emit tool: %v", err)
+	}
+
+	req := events.LLMRequest{SchemaVersion: events.LLMRequestVersion, Model: "claude-opus-4-7",
+		Metadata: map[string]any{"_source": "nexus.agent.react", "task_kind": "react_main", "turn_id": "turn-llm"},
+	}
+	if _, err := bus.EmitVetoable("before:llm.request", &req); err != nil {
+		t.Fatalf("emit llm: %v", err)
+	}
+
+	resp.mu.Lock()
+	defer resp.mu.Unlock()
+	if len(resp.seen) != 2 {
+		t.Fatalf("expected 2 hitl.requested, got %d", len(resp.seen))
+	}
+	if got := resp.seen[0].TurnID; got != "turn-tool" {
+		t.Errorf("tool.invoke HITLRequest.TurnID = %q, want turn-tool", got)
+	}
+	if got := resp.seen[1].TurnID; got != "turn-llm" {
+		t.Errorf("llm.request HITLRequest.TurnID = %q, want turn-llm", got)
+	}
+	if got := resp.seen[1].ActionRef["turn_id"]; got != "turn-llm" {
+		t.Errorf("llm.request ActionRef[turn_id] = %v, want turn-llm", got)
+	}
+}

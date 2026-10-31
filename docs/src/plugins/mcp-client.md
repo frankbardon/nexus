@@ -69,6 +69,15 @@ Subscriptions are gated on the server's advertised capabilities: the plugin subs
 
 When a server *did* advertise the capability and a subscribe still fails, the plugin logs a Warn naming the server and URI — once per server, so a server that rejects every URI doesn't flood the log on each `resources/list_changed` refresh; later failures drop to Debug. At `2026-07-28` the SDK sends `subscriptions/listen` without waiting for a reply, so a server-side rejection there can't be seen by the client at all; the capability gate is the only check that applies.
 
+The plugin tracks which URIs it holds a live subscription for. When a `resources/list_changed` refresh no longer lists a subscribed URI — or the list grows past `auto_register_max` and per-resource registration is dropped — it calls `Unsubscribe` for that URI and stops tracking it. On the legacy protocol that is one `resources/unsubscribe` request; at `2026-07-28` the SDK cancels that URI's `subscriptions/listen` stream. A failed unsubscribe is logged at Warn and is not fatal, and the URI leaves tracking either way. Disconnect clears tracking, since closing the session tears every subscription down.
+
+### Known limitations
+
+These come from the go-sdk's `2026-07-28` subscription model, and the plugin can't work around them:
+
+- **Subscription acks aren't visible.** The SDK sends `subscriptions/listen` without waiting for the server's acknowledgement, so the client can't tell whether the server accepted a URI. A URI the server silently refuses just never produces `mcp.resource.updated`. The capability gate is the only check that applies.
+- **One stream per subscribed URI.** The SDK opens a separate `subscriptions/listen` stream for each `Subscribe` call, so a server holds up to `resources.auto_register_max` (default 50) concurrent streams per client. Lower `auto_register_max`, or set `subscribe_updates: false`, if the server or a proxy in front of it limits concurrent streams.
+
 ## Prompts
 
 Prompts surface as slash commands. The command shape is `/<command_prefix>.<server>.<prompt>`, lowercase, underscores. With `command_prefix: mcp` (default) and a server `gh` exposing a prompt `review_pr`, the slash command is `/mcp.gh.review_pr`.

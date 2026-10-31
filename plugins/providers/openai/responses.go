@@ -145,6 +145,14 @@ func (p *Plugin) buildResponsesBodyWith(model string, maxTokens int, req events.
 // are not the operator's to fix mid-turn.
 func (p *Plugin) buildResponsesInput(msgs []events.Message) []map[string]any {
 	var items []map[string]any
+	// No system message at all: the registry output alone leads the input as
+	// a system Item, the same pass the chat path makes.
+	if content, ok := p.registryOnlySystem(msgs); ok {
+		items = append(items, map[string]any{
+			"role":    "system",
+			"content": content,
+		})
+	}
 	decoratedSystem := false
 	for _, msg := range msgs {
 		switch msg.Role {

@@ -272,22 +272,22 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 // entry below it: this transport watches the bus and renders what it sees.
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
-		{EventType: "agent.turn.start", Priority: 50},
-		{EventType: "agent.turn.end", Priority: 50},
-		{EventType: "llm.request", Priority: 50},
-		{EventType: "llm.response", Priority: 50},
-		{EventType: "llm.stream.hold", Priority: 50},
-		{EventType: "llm.stream.retract", Priority: 50},
-		{EventType: "io.output", Priority: 50},
-		{EventType: "core.error", Priority: 50},
-		{EventType: "hitl.requested", Priority: 50},
-		{EventType: "hitl.responded", Priority: 50},
-		{EventType: "tool.invoke", Priority: 50},
-		{EventType: "tool.result", Priority: 50},
-		{EventType: "thinking.step", Priority: 50},
-		{EventType: "subagent.started", Priority: 50},
-		{EventType: "subagent.iteration", Priority: 50},
-		{EventType: "subagent.complete", Priority: 50},
+		{EventType: "agent.turn.start"},
+		{EventType: "agent.turn.end"},
+		{EventType: "llm.request"},
+		{EventType: "llm.response"},
+		{EventType: "llm.stream.hold"},
+		{EventType: "llm.stream.retract"},
+		{EventType: "io.output"},
+		{EventType: "core.error"},
+		{EventType: "hitl.requested"},
+		{EventType: "hitl.responded"},
+		{EventType: "tool.invoke"},
+		{EventType: "tool.result"},
+		{EventType: "thinking.step"},
+		{EventType: "subagent.started"},
+		{EventType: "subagent.iteration"},
+		{EventType: "subagent.complete"},
 	}
 }
 

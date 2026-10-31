@@ -174,6 +174,12 @@ The provider translates Nexus tool definitions into the OpenAI function calling 
 
 Before sending a request, the provider calls `PromptRegistry.Apply()` to append dynamic sections (skills catalog, system variables, etc.) to the system prompt.
 
+When the request carries **no** system message at all, the registry output alone
+becomes a leading system message (`api: chat`) or a leading `role: system` Item
+(`api: responses`), the same way the Anthropic and Gemini providers make it the
+whole system prompt — so registry sections are never dropped on OpenAI. If the
+registry renders nothing, no system message is synthesized.
+
 ### System Messages
 
 Every `system` message in the request reaches the model, in order, **at its own
@@ -185,7 +191,11 @@ plugin put it. The prompt registry's sections are applied to the **first**
 system message only, so they are not repeated onto a later one.
 `nexus.llm.batch` keeps system messages inline the same way; the shared
 `pkg/openaiconform` vector `120-system-messages-stay-inline-in-order` pins it
-for both Responses serializers.
+for both Responses serializers, and `130-no-system-message-synthesizes-none`
+pins that a request with no system message (and nothing from the registry)
+gets no synthesized system Item on either. `nexus.llm.batch` does not carry the
+prompt registry at all, so the registry-only system message is a
+provider-only behaviour.
 
 ### Request Cancellation
 

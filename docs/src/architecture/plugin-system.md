@@ -161,6 +161,16 @@ During runtime, plugins interact exclusively through the event bus. They emit ev
 2. The engine emits `core.shutdown`, then the event bus drains in-flight events for up to `engine.shutdown.drain_timeout` (see [Event Bus → Draining](event-bus.md#draining)); a timeout is logged and shutdown continues
 3. `Shutdown()` is called on each plugin in **reverse** dependency order (late-shutdown plugins last). Plugins may still emit here
 
+### Failed Boot
+
+If a plugin's `Init` or any plugin's `Ready` returns an error, Boot calls
+`Shutdown()` on every plugin whose `Init` already succeeded, in reverse init order,
+before returning the error. There is no `core.shutdown` and no drain, and a
+`Shutdown` error or panic is logged without masking the Boot error. So
+**`Shutdown` must be safe to call after `Init` without `Ready`**: nil-check
+anything `Ready` creates, and unsubscribe what `Init` subscribed. See
+[Overview](overview.md) for the engine-side teardown on the same path.
+
 ## Dependencies
 
 Plugins declare dependencies on other plugin IDs:

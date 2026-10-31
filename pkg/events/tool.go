@@ -53,7 +53,7 @@ type ToolTimeout struct {
 	ToolName string
 	CallID   string
 	Timeout  time.Duration
-	Override string // e.g. "gates.tool_timeout.per_tool.<name>"
+	Override string // e.g. "nexus.gate.tool_timeout.per_tool.<name>"
 	TurnID   string
 }
 

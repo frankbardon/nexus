@@ -148,8 +148,9 @@ make build        # Build binary to bin/nexus
 make run          # Build and run with default config
 make test         # Run all tests
 make fmt          # Format code
+make fmt-check    # Fail if any file needs gofmt (run by lint)
 make vet          # Run go vet
-make lint         # Run staticcheck (includes vet)
+make lint         # Run staticcheck (includes fmt-check + vet)
 make clean        # Remove build artifacts
 ```
 
@@ -176,3 +177,7 @@ Topics covered:
 - [Guides](docs/src/skills/authoring.md) — Writing skills, creating custom plugins
 - [Configuration Reference](docs/src/configuration/reference.md) — Full config schema
 - **Eval harness** — golden-trace replay, baseline diffs, online sampling, and an Inspect-AI-compatible JSON protocol. See [docs/src/eval/overview.md](docs/src/eval/overview.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

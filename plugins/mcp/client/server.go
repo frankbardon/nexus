@@ -43,6 +43,12 @@ type server struct {
 	// a server that advertised resources.subscribe, so the Warn fires once
 	// per server rather than once per URI per refresh. See subscribe.go.
 	subscribeWarned atomic.Bool
+
+	// subscribedURIs is the set of URIs with a live update subscription, so
+	// a resources/list_changed refresh can unsubscribe the ones it drops.
+	// Guarded by mu. Cleared on disconnect, where closing the session tears
+	// every subscription down. See subscribe.go.
+	subscribedURIs map[string]struct{}
 }
 
 func newServer(cfg ServerConfig, parent *Plugin) *server {
@@ -55,6 +61,7 @@ func newServer(cfg ServerConfig, parent *Plugin) *server {
 		templates:       map[string]*mcp.ResourceTemplate{},
 		prompts:         map[string]*mcp.Prompt{},
 		resourceURIs:    map[string]string{},
+		subscribedURIs:  map[string]struct{}{},
 	}
 }
 
@@ -222,6 +229,7 @@ func (s *server) disconnect() {
 	s.templates = map[string]*mcp.ResourceTemplate{}
 	s.prompts = map[string]*mcp.Prompt{}
 	s.resourceURIs = map[string]string{}
+	s.subscribedURIs = map[string]struct{}{}
 	s.mu.Unlock()
 
 	if sess != nil {

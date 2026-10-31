@@ -63,11 +63,21 @@ func New() engine.Plugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) ID() string                     { return pluginID }
-func (p *Plugin) Name() string                   { return "Tool Catalog" }
-func (p *Plugin) Version() string                { return version }
-func (p *Plugin) Dependencies() []string         { return nil }
-func (p *Plugin) Requires() []engine.Requirement { return nil }
+func (p *Plugin) ID() string             { return pluginID }
+func (p *Plugin) Name() string           { return "Tool Catalog" }
+func (p *Plugin) Version() string        { return version }
+func (p *Plugin) Dependencies() []string { return nil }
+
+// Requires auto-activates nexus.gate.tool_timeout so a per-call deadline is on
+// by default wherever tools are dispatched: a tool.result that never arrives (a
+// vetoed before:tool.result, a handler that never answers) would otherwise hang
+// the waiting agent loop for good. No Default config — the gate's own defaults
+// apply (10m backstop, HITL/delegation tools exempt); an operator tunes or
+// disables it with a nexus.gate.tool_timeout block (enabled: false). Optional so
+// an embedder that does not register the gate still boots.
+func (p *Plugin) Requires() []engine.Requirement {
+	return []engine.Requirement{{ID: "nexus.gate.tool_timeout", Optional: true}}
+}
 
 // Capabilities advertises this plugin as the provider of "tool.catalog" —
 // the shared registry agents query via "tool.catalog.query" to build each

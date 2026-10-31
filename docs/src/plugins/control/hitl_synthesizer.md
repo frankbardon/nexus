@@ -39,12 +39,20 @@ prompt or `text/template`.
    tagged `Metadata["_source"] = "nexus.control.hitl_synthesizer"`.
 3. The active LLM provider returns an `llm.response` synchronously;
    the synthesizer extracts the rendered text, writes it back into
-   `req.Prompt`, and persists it to disk for next time.
+   `req.Prompt`, and persists it to disk for next time. When a
+   `before:llm.request` handler *intercepts* the request instead (a
+   fanout role, the test IO plugin's mock mode — see
+   [Event Bus](../../architecture/event-bus.md)), the answer arrives
+   asynchronously and the synthesizer waits for it, for at most 60
+   seconds or until the plugin shuts down. Responses are correlated by
+   `RequestID` (the synthesis correlation ID), which fanout's
+   merged response carries; fanout legs sharing that ID are skipped.
 4. The follow-up `Emit("hitl.requested", req)` value emission carries
    the synthesized prompt to IO plugins.
 
 If the LLM call fails (provider error, empty response, missing
-`llm.response`), the synthesizer never blocks indefinitely: it falls
+`llm.response`, a block veto on `before:llm.request`, an intercepted
+request left unanswered past the wait), the synthesizer never blocks indefinitely: it falls
 back to a Go `text/template` rendered against
 `{action_kind, action_ref, requester_plugin, request_id}` and lets
 the request continue. Failed renders are not cached — only successful
@@ -119,10 +127,10 @@ should use the canonical pattern above.
 |-------|----------|---------|
 | `before:hitl.requested` | -100 | Canonical entry point; mutates `*HITLRequest.Prompt` via `*VetoablePayload`. Never vetoes. |
 | `hitl.requested` | -100 | Backward-compat fallback for out-of-tree emitters that publish a pointer payload directly. In-tree emitters use the `before:` form. |
-| `llm.response` | 50 | Routes responses tagged with this plugin's `_source` to the awaiting synthesis call. |
+| `llm.response` | 50 | Routes the response to the awaiting synthesis call by `RequestID`, falling back to this plugin's `_source` + `_synth_id`. |
 
 ### Emits
 
 | Event | When |
 |-------|------|
-| `llm.request` | Synthesis cache miss; tagged with `Metadata["_source"]` and `Metadata["_synth_id"]` for response correlation. |
+| `llm.request` | Synthesis cache miss; `RequestID` and `Metadata["_synth_id"]` carry the correlation ID, `Metadata["_source"]` tags the request. |

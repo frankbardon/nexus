@@ -431,7 +431,7 @@ func (p *Plugin) handleMemoryWrite(tc events.ToolCall) {
 		Tags:    tags,
 	}
 
-	if err := p.doStore(req); err != nil {
+	if err := p.doStoreForTurn(req, tc.TurnID); err != nil {
 		p.emitToolResult(tc, "", err.Error())
 		return
 	}
@@ -527,13 +527,21 @@ func (p *Plugin) handleMemoryDelete(tc events.ToolCall) {
 // --- Core operations ---
 
 func (p *Plugin) doStore(req events.LongTermMemoryStoreRequest) error {
+	return p.doStoreForTurn(req, "")
+}
+
+// doStoreForTurn is doStore for a write that belongs to an agent turn (the
+// memory_write tool). turnID is forwarded onto the approval HITLRequest so a
+// turn-scoped transport resumes the right turn; the bus-event store path
+// carries no turn and passes "".
+func (p *Plugin) doStoreForTurn(req events.LongTermMemoryStoreRequest, turnID string) error {
 	sessionID := ""
 	if p.session != nil {
 		sessionID = p.session.ID
 	}
 
 	if p.shouldRequireApproval(req) {
-		if err := p.gateWithApproval(req, sessionID); err != nil {
+		if err := p.gateWithApproval(req, sessionID, turnID); err != nil {
 			return err
 		}
 	}
@@ -702,7 +710,7 @@ func (p *Plugin) shouldRequireApproval(req events.LongTermMemoryStoreRequest) bo
 // gateWithApproval emits hitl.requested for the pending write and blocks
 // until the response. Returns a non-nil error when the operator rejects
 // (or the request is cancelled / times out into reject).
-func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, sessionID string) error {
+func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, sessionID, turnID string) error {
 	preview := req.Content
 	truncated := false
 	const maxPreview = 2000
@@ -732,6 +740,7 @@ func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, session
 		DefaultChoiceID: p.approvalDefaultChoice,
 		Timeout:         p.approvalTimeout,
 		SessionID:       sessionID,
+		TurnID:          turnID,
 	})
 	if err != nil {
 		// Helper-internal failure (nil bus, etc.) — treat as a hard error.

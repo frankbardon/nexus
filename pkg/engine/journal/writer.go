@@ -453,6 +453,10 @@ func (w *Writer) writeToFile(env *Envelope) error {
 	return nil
 }
 
+// Closed reports whether Close has run. Once true, Appends drop and the drain
+// goroutine is on its way out (it has exited once Close returns nil).
+func (w *Writer) Closed() bool { return w.closed.Load() }
+
 // JournalDir returns the directory passed to NewWriter. Used by Coordinator
 // (Phase 2) and by tests.
 func (w *Writer) JournalDir() string { return w.dir }

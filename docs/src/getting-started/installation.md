@@ -26,8 +26,9 @@ This produces a binary at `bin/nexus`.
 | `make run` | Build and run with the default config (`configs/default.yaml`) |
 | `make test` | Run all tests |
 | `make fmt` | Format code with `gofmt` |
+| `make fmt-check` | Fail, listing the files, if `gofmt` would change anything (run by `make lint`, so CI enforces it) |
 | `make vet` | Run `go vet` |
-| `make lint` | Run `staticcheck` (includes vet) |
+| `make lint` | Run `staticcheck` (includes `fmt-check` and vet) |
 
 ## Setting Your API Key
 

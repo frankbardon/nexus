@@ -69,9 +69,11 @@ func (h *recordHandler) atLevel(l slog.Level) []capturedRecord {
 
 // fakeSubscriber stands in for *mcp.ClientSession.
 type fakeSubscriber struct {
-	res   *mcp.InitializeResult
-	err   error
-	calls []string
+	res      *mcp.InitializeResult
+	err      error
+	unsubErr error
+	calls    []string
+	unsubs   []string
 }
 
 func (f *fakeSubscriber) InitializeResult() *mcp.InitializeResult { return f.res }
@@ -79,6 +81,11 @@ func (f *fakeSubscriber) InitializeResult() *mcp.InitializeResult { return f.res
 func (f *fakeSubscriber) Subscribe(_ context.Context, p *mcp.SubscribeParams) error {
 	f.calls = append(f.calls, p.URI)
 	return f.err
+}
+
+func (f *fakeSubscriber) Unsubscribe(_ context.Context, p *mcp.UnsubscribeParams) error {
+	f.unsubs = append(f.unsubs, p.URI)
+	return f.unsubErr
 }
 
 func newSubscribeTestServer(h *recordHandler) *server {
@@ -156,7 +163,7 @@ func TestSubscribe_DisabledByConfig(t *testing.T) {
 	s := newSubscribeTestServer(h)
 	s.cfg.Resources.SubscribeUpdates = false
 	// No session is set; with the flag off nothing must even look for one.
-	s.subscribeResources(context.Background(), resourcesFor("test://a"))
+	s.syncSubscriptions(context.Background(), resourcesFor("test://a"))
 	if len(h.atLevel(slog.LevelWarn)) != 0 {
 		t.Fatal("subscribe_updates: false must not log")
 	}
@@ -253,4 +260,156 @@ func bootInProcessWithLogger(t *testing.T, key string, logger *slog.Logger) *Plu
 	}
 	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
 	return p
+}
+
+func subscribingFake() *fakeSubscriber {
+	return &fakeSubscriber{res: &mcp.InitializeResult{ProtocolVersion: "2025-11-25", Capabilities: &mcp.ServerCapabilities{
+		Resources: &mcp.ResourceCapabilities{Subscribe: true, ListChanged: true},
+	}}}
+}
+
+func trackedURIs(s *server) map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]struct{}, len(s.subscribedURIs))
+	for u := range s.subscribedURIs {
+		out[u] = struct{}{}
+	}
+	return out
+}
+
+// TestSubscribe_ListChangedUnsubscribesDroppedURIs: a refresh that no longer
+// lists a subscribed URI sends Unsubscribe for it and stops tracking it,
+// while the URIs still listed stay subscribed.
+func TestSubscribe_ListChangedUnsubscribesDroppedURIs(t *testing.T) {
+	h := newRecordHandler()
+	s := newSubscribeTestServer(h)
+	fake := subscribingFake()
+
+	s.syncSubscriptionsWith(context.Background(), fake, resourcesFor("test://a", "test://b"))
+	if got := trackedURIs(s); len(got) != 2 {
+		t.Fatalf("tracked = %v, want a and b", got)
+	}
+	if len(fake.unsubs) != 0 {
+		t.Fatalf("first sync must not unsubscribe, got %v", fake.unsubs)
+	}
+
+	s.syncSubscriptionsWith(context.Background(), fake, resourcesFor("test://a"))
+	if len(fake.unsubs) != 1 || fake.unsubs[0] != "test://b" {
+		t.Fatalf("unsubscribes = %v, want [test://b]", fake.unsubs)
+	}
+	got := trackedURIs(s)
+	if _, ok := got["test://b"]; ok || len(got) != 1 {
+		t.Fatalf("tracked = %v, want only test://a", got)
+	}
+
+	// The overflow path (nil keep set) drops every remaining subscription.
+	s.syncSubscriptionsWith(context.Background(), fake, nil)
+	if len(fake.unsubs) != 2 || fake.unsubs[1] != "test://a" {
+		t.Fatalf("unsubscribes = %v, want test://a dropped on overflow", fake.unsubs)
+	}
+	if got := trackedURIs(s); len(got) != 0 {
+		t.Fatalf("tracked = %v, want empty", got)
+	}
+}
+
+// TestSubscribe_UnsubscribeFailureIsLoggedNotFatal: a failed Unsubscribe is
+// logged and the URI still leaves local tracking.
+func TestSubscribe_UnsubscribeFailureIsLoggedNotFatal(t *testing.T) {
+	h := newRecordHandler()
+	s := newSubscribeTestServer(h)
+	fake := subscribingFake()
+	fake.unsubErr = errors.New("boom")
+
+	s.syncSubscriptionsWith(context.Background(), fake, resourcesFor("test://a", "test://b"))
+	s.syncSubscriptionsWith(context.Background(), fake, resourcesFor("test://a"))
+
+	if _, ok := trackedURIs(s)["test://b"]; ok {
+		t.Fatal("test://b must leave tracking even when Unsubscribe fails")
+	}
+	warns := h.atLevel(slog.LevelWarn)
+	if len(warns) != 1 || warns[0].attrs["uri"] != "test://b" || !strings.Contains(warns[0].attrs["error"], "boom") {
+		t.Fatalf("want one Warn naming test://b and the error, got %+v", warns)
+	}
+}
+
+// TestSubscribe_FailedSubscribeIsNotTracked: only acknowledged
+// subscriptions are tracked, so a dropped URI that never subscribed is not
+// unsubscribed.
+func TestSubscribe_FailedSubscribeIsNotTracked(t *testing.T) {
+	h := newRecordHandler()
+	s := newSubscribeTestServer(h)
+	fake := subscribingFake()
+	fake.err = errors.New("nope")
+
+	s.syncSubscriptionsWith(context.Background(), fake, resourcesFor("test://a"))
+	fake.err = nil
+	s.syncSubscriptionsWith(context.Background(), fake, nil)
+
+	if len(fake.unsubs) != 0 {
+		t.Fatalf("unsubscribed %v, but nothing was ever subscribed", fake.unsubs)
+	}
+}
+
+// TestSubscribe_InProcessListChangedDropsSubscription drives the real SDK
+// over the in-memory transport: the server lists two subscribable resources,
+// then removes one, which pushes resources/list_changed. The client's
+// refresh must stop tracking the dropped URI's subscription.
+func TestSubscribe_InProcessListChangedDropsSubscription(t *testing.T) {
+	const key = "test-host-server-list-changed"
+	subscribed := make(chan string, 8)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test-host", Version: "v0"}, &mcp.ServerOptions{
+		SubscribeHandler: func(_ context.Context, req *mcp.SubscribeRequest) error {
+			subscribed <- req.Params.URI
+			return nil
+		},
+		UnsubscribeHandler: func(context.Context, *mcp.UnsubscribeRequest) error { return nil },
+	})
+	read := func(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{}, nil
+	}
+	srv.AddResource(&mcp.Resource{URI: "test://keep", Name: "keep", MIMEType: "text/plain"}, read)
+	srv.AddResource(&mcp.Resource{URI: "test://drop", Name: "drop", MIMEType: "text/plain"}, read)
+	RegisterInProcessServer(key, srv)
+	t.Cleanup(func() { UnregisterInProcessServer(key) })
+
+	h := newRecordHandler()
+	p := bootInProcessWithLogger(t, key, slog.New(h))
+	s := p.servers["host"]
+
+	waitFor(t, func() bool { return len(trackedURIs(s)) == 2 }, "both URIs subscribed")
+
+	srv.RemoveResources("test://drop")
+
+	waitFor(t, func() bool {
+		got := trackedURIs(s)
+		_, dropped := got["test://drop"]
+		_, kept := got["test://keep"]
+		return !dropped && kept && len(got) == 1
+	}, "test://drop unsubscribed after resources/list_changed")
+
+	var logged bool
+	for _, r := range h.atLevel(slog.LevelDebug) {
+		if strings.Contains(r.msg, "unsubscribed resource dropped") && r.attrs["uri"] == "test://drop" {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatal("expected a Debug record for the unsubscribe of test://drop")
+	}
+	if w := h.atLevel(slog.LevelWarn); len(w) != 0 {
+		t.Fatalf("unexpected warnings: %+v", w)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for: %s", what)
 }
