@@ -11,8 +11,8 @@ code.
 This is a **serve** transport: it accepts AG-UI requests and streams AG-UI
 responses. It is additive and external-facing — it does not replace the
 `nexus.io.browser` Envelope wire that backs the built-in web UI. See [I/O Transport Plugins](./io/index.md) for the transport
-family, and `.claude/docs/io-transport.md` for why AG-UI intentionally sits
-outside the transport parity rule.
+family, and `.claude/docs/io-transport.md` for how AG-UI differs from the
+first-party browser transport.
 
 ## Details
 

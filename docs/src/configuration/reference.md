@@ -7644,5 +7644,5 @@ deployment caveats live in the
 - [Tool System](../../../.claude/docs/tool-system.md) — tool choice, parallel
   dispatch, structured output.
 - [RAG](../../../.claude/docs/rag.md) — embeddings, vector store, ingestion.
-- [I/O Transport](../../../.claude/docs/io-transport.md) — IO transport scoping,
-  parity rule.
+- [I/O Transport](../../../.claude/docs/io-transport.md) — IO transport scoping and
+  external-interop transports.

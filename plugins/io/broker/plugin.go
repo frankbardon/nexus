@@ -90,7 +90,7 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 // Subscriptions declares the engine output events forwarded to the broker as
 // outbound IO frames. Mirrors the core transport surface of io/browser and
-// io/realtime so parity holds (see .claude/docs/io-transport.md).
+// io/realtime so the transports stay aligned (see .claude/docs/io-transport.md).
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.output"},

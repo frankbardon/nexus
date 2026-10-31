@@ -6,16 +6,12 @@
 
 A modular AI agent harness built on a pure event-driven architecture in Go. The core manages only the event lifecycle and plugin registry — all behavior (LLM interaction, tool execution, output rendering, etc.) is delivered through composable plugins.
 
-Nexus can run two ways:
-
-- **CLI** — `cmd/nexus` binary with terminal UI, browser UI, or oneshot mode
-- **Desktop app** — Embed one or more agents in a Wails desktop shell using `pkg/desktop/`
+Nexus runs as the `cmd/nexus` CLI binary (terminal UI, browser UI, or oneshot mode) or embedded as a library in any Go process.
 
 ## Prerequisites
 
 - Go 1.23+
 - An API key for your LLM provider ([Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), etc.)
-- [Wails v2 CLI](https://wails.io/docs/gettingstarted/installation) (desktop apps only)
 
 ## Quick Start: CLI
 
@@ -32,24 +28,6 @@ bin/nexus -config configs/coding.yaml
 ```
 
 The API key can also be set in a `.env` file in the project root.
-
-## Quick Start: Desktop App
-
-The reference desktop app lives at `cmd/desktop/`. It hosts two example agents (hello-world and staffing-match) in a single Wails window.
-
-```bash
-cd cmd/desktop
-
-# Development mode (live reload)
-wails dev
-
-# Production build
-wails build
-```
-
-The API key is entered through the in-app settings page (stored in OS keychain).
-
-To build your own desktop app, see the [Desktop Shell documentation](docs/src/desktop/building-your-app.md).
 
 ## Configuration Profiles
 
@@ -90,7 +68,6 @@ Nexus embeds in any Go process without owning signals or process lifecycle:
 
 ```go
 eng, _ := engine.NewFromBytes(configYAML)
-eng.Registry.Register("nexus.io.wails", wailsio.New)
 eng.Registry.Register("my.custom.plugin", myplugin.New)
 eng.Boot(ctx)       // non-blocking
 <-eng.SessionEnded()
@@ -106,7 +83,7 @@ eng.Stop(ctx)
 | **Agents** | `react`, `planexec`, `subagent`, `orchestrator` | Agent loops and coordination |
 | **Providers** | `anthropic`, `openai` | LLM API providers |
 | **Tools** | `shell`, `fileio`, `pdf`, `opener`, `ask` | Capabilities agents can invoke |
-| **I/O** | `tui`, `browser`, `oneshot`, `wails` | User-facing transports |
+| **I/O** | `tui`, `browser`, `oneshot`, `agui`, `a2a` | User-facing transports |
 | **Memory** | `conversation`, `compaction` | Context persistence and management |
 | **Observers** | `logger`, `thinking` | Structured logging and thinking persistence |
 | **Planners** | `dynamic`, `static` | Optional planning phase before agent execution |
@@ -119,18 +96,16 @@ eng.Stop(ctx)
 ```
 cmd/
   nexus/                CLI entry point
-  desktop/              Reference Wails desktop app (multi-agent)
 pkg/
   engine/               Core: event bus, plugin lifecycle, sessions, config
   events/               Typed event definitions
-  ui/                   UI adapter contract (shared by browser + wails transports)
-  desktop/              Desktop shell framework (embeddable)
+  ui/                   UI adapter contract (browser transport)
 plugins/
   agents/               Agent loops (react, planexec, subagent, orchestrator)
   providers/anthropic/  Anthropic LLM provider (direct HTTP, no SDK)
   providers/openai/     OpenAI LLM provider (direct HTTP, no SDK)
   tools/                Shell, file I/O, PDF, file opener, ask user
-  io/                   TUI, browser, oneshot, wails transports
+  io/                   TUI, browser, oneshot, AG-UI, A2A transports
   memory/               Conversation history, context compaction
   observe/              Event logger, thinking persistence
   planners/             Dynamic and static planners
@@ -173,7 +148,6 @@ Topics covered:
 
 - [Architecture](docs/src/architecture/overview.md) — Event bus, plugin system, sessions
 - [Plugin Reference](docs/src/plugins/overview.md) — Every plugin's config, events, and behavior
-- [Desktop Shell](docs/src/desktop/overview.md) — Building desktop apps with `pkg/desktop/`
 - [Guides](docs/src/skills/authoring.md) — Writing skills, creating custom plugins
 - [Configuration Reference](docs/src/configuration/reference.md) — Full config schema
 - **Eval harness** — golden-trace replay, baseline diffs, online sampling, and an Inspect-AI-compatible JSON protocol. See [docs/src/eval/overview.md](docs/src/eval/overview.md).

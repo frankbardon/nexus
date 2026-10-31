@@ -42,7 +42,7 @@ nexus ingest --namespace=kb --glob="*.md" ./knowledge-base
 - **On `memory.compacted`**: auto-stores the compaction summary so past context stays recallable after the history buffer trims it.
 - **On `memory.vector.store`**: explicit-store entry point for tools/plugins that want to record deliberately.
 
-Salience is conservative by default: no per-message auto-writing (`auto_store_user_input: false`). Namespace defaults to `memory-{InstanceID}` — multi-agent desktop shells isolate automatically; override via `namespace:` config.
+Salience is conservative by default: no per-message auto-writing (`auto_store_user_input: false`). Namespace defaults to `memory-{InstanceID}` — multiple agents in one process isolate automatically; override via `namespace:` config.
 
 **Relationship to `nexus.memory.longterm`.** Fully independent. Longterm is the structured notes store — key-addressed, LLM-managed via `memory_read`/`memory_write`/`memory_list`/`memory_delete` tools, files on disk with YAML frontmatter + markdown bodies. Vector memory is embedding-addressed fuzzy recall — salient content in, semantic nearest-neighbor lookup out. They coexist.
 

@@ -2,7 +2,7 @@
 
 ## Embedder API (library use)
 
-Nexus embeds in another Go process (e.g. Wails desktop shell) without owning signals or process lifecycle. Embedder path:
+Nexus embeds in another Go process (e.g. a host application) without owning signals or process lifecycle. Embedder path:
 
 1. `engine.New(configPath)` — creates engine. `configPath == ""` uses `DefaultConfig()`.
 2. `eng.Registry.Register(id, factory)` — register plugins embedder wants. Embedder can mutate `eng.Config.Plugins.Active` and `eng.Config.Plugins.Configs` in memory; no on-disk YAML needed.
@@ -10,7 +10,7 @@ Nexus embeds in another Go process (e.g. Wails desktop shell) without owning sig
 4. `<-eng.SessionEnded()` — channel signals when plugin emits `io.session.end`. Embedders `select` on this plus own lifecycle signals.
 5. `eng.Stop(ctx)` — tears down tick goroutine, unsubs run-scoped handlers, finalizes session metadata, shuts plugins in reverse dep order.
 
-`eng.Run(ctx)` = CLI convenience wrapper: `Boot` + wait-for-signal-or-session-end + `Stop`. **Embedders must call `Boot`/`Stop` direct, never `Run`** — `Run` installs own `SIGINT`/`SIGTERM` handler, conflicts with host process (Wails, tests) owning signals.
+`eng.Run(ctx)` = CLI convenience wrapper: `Boot` + wait-for-signal-or-session-end + `Stop`. **Embedders must call `Boot`/`Stop` direct, never `Run`** — `Run` installs own `SIGINT`/`SIGTERM` handler, conflicts with host process (tests, embedding apps) owning signals.
 
 ## Auto-activation (`Requires()`)
 
