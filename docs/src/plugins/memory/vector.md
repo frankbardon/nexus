@@ -86,6 +86,10 @@ Subscribed at priority 10 — earlier than the agent's handler at 50. Sequence:
 
 When the agent builds the next `llm.request` (priority 50), the `PromptRegistry` calls `buildPromptSection` which renders the stashed hits as XML.
 
+### On `agent.turn.start` (priority 50)
+
+Recall runs before any turn exists — the agent loop mints the turn ID only after `io.input` — so the hits are announced to [`nexus.rag.citations`](../../configuration/reference.md#nexusragcitations) once the turn starts: the plugin emits `rag.retrieved` with `TurnID` set to the starting turn and one `RetrievedChunk` per stashed hit (`Source` = the entry's `source` metadata, `DocID` = its ID, `ChunkIdx`/`TrustTier` from metadata when present). The citation contract tells the model it may cite "memory recall", so a `<cite source="compaction"/>` naming a recalled entry validates for that turn, and strict mode keeps it instead of stripping it. The announced set is exactly what the prompt section renders for the turn; a resumed turn re-announces it, since the citation index was released when the cancelled turn ended. Nested loops (subagent, delegate) emit no `agent.turn.start`, so recalled memory validates the parent turn's responses only.
+
 ### On `memory.compacted`
 
 When [`nexus.memory.compaction`](./compaction.md) or summary-buffer compaction fires, the plugin extracts the system-role summary message from `CompactionComplete.Messages` and stores it. Past context stays recallable even after the active history buffer trims it.
@@ -164,11 +168,13 @@ To deliberately share memory across agents, override `namespace` to a common val
 | Event | Direction | Payload | When |
 |-------|-----------|---------|------|
 | `io.input` | Bus → plugin | `events.UserInput` | Triggers query + stash. |
+| `agent.turn.start` | Bus → plugin | `events.TurnInfo` | Announces the stashed hits for the starting turn. |
 | `memory.compacted` | Bus → plugin | `events.CompactionComplete` | Triggers auto-store of summary. |
 | `memory.vector.store` | Any → plugin | `*events.VectorMemoryStore` | Explicit store. |
 | `embeddings.request` | Plugin → bus | `*events.EmbeddingsRequest` | Used during query and store. |
 | `vector.query` | Plugin → bus | `*events.VectorQuery` | Used during turn-start retrieval. |
 | `vector.upsert` | Plugin → bus | `*events.VectorUpsert` | Used during store. |
+| `rag.retrieved` | Plugin → bus | `events.RetrievalContext` | On `agent.turn.start` with hits stashed; keyed by that turn for citation validation. |
 
 ## Limits
 

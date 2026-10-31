@@ -6,6 +6,11 @@
 //     agent's namespace, stashes hits in an internal buffer that the
 //     registered PromptSectionFunc renders into the system prompt.
 //
+//   - Listens on agent.turn.start: publishes the stashed hits as
+//     rag.retrieved stamped with that turn, so nexus.rag.citations can
+//     validate <cite/> tags naming a recalled entry. Recall itself cannot
+//     stamp the turn — io.input fires before any agent loop mints one.
+//
 //   - Auto-stores on memory.compacted: writes the summary message so that
 //     context summaries remain recallable after compaction.
 //
@@ -154,6 +159,8 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	p.unsubs = append(p.unsubs,
 		p.bus.Subscribe("io.input", p.handleInput,
 			engine.WithPriority(10), engine.WithSource(pluginID)),
+		p.bus.Subscribe("agent.turn.start", p.handleTurnStart,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("memory.compacted", p.handleCompacted,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("memory.vector.store", p.handleExplicitStore,
@@ -190,6 +197,7 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	return []engine.EventSubscription{
 		{EventType: "io.input", Priority: 10},
+		{EventType: "agent.turn.start", Priority: 50},
 		{EventType: "memory.compacted", Priority: 50},
 		{EventType: "memory.vector.store", Priority: 50},
 		// hitl.responded is dynamically subscribed by the approval helper
@@ -426,14 +434,33 @@ func (p *Plugin) queryAndStash(query string, vec []float32) {
 	p.lastQuery = query
 	p.lastMatches = filtered
 	p.mu.Unlock()
-	p.emitRetrieved(filtered)
 }
 
-// emitRetrieved publishes the retrieved-memory chunks for the citation
-// plugin. TurnID is unknown at recall time (handleInput fires before
-// agent.turn.start), so we leave it blank — the citation plugin treats
-// blank-turn entries as ambient (carried forward to the next turn it sees).
-func (p *Plugin) emitRetrieved(matches []events.VectorMatch) {
+// handleTurnStart publishes the recalled hits as the turn's retrieval
+// context. Recall runs on io.input, before any agent loop has minted the
+// turn, and nexus.rag.citations ignores a turnless rag.retrieved — so the
+// hits are announced here instead, once the turn they serve has an ID.
+//
+// The set announced is exactly what buildPromptSection renders for this
+// turn's requests (lastMatches), which is the evidence the model saw. A
+// resumed turn re-announces it: the citation index was released at the
+// cancelled turn's agent.turn.end, while the prompt still carries the
+// block. Nested loops (subagent, delegate) never emit agent.turn.start, so
+// recall is indexed under the parent turn only.
+func (p *Plugin) handleTurnStart(event engine.Event[any]) {
+	info, ok := event.Payload.(events.TurnInfo)
+	if !ok || info.TurnID == "" {
+		return
+	}
+	p.mu.Lock()
+	matches := p.lastMatches
+	p.mu.Unlock()
+	p.emitRetrieved(info.TurnID, matches)
+}
+
+// emitRetrieved publishes the recalled-memory chunks for the citation
+// plugin, keyed by the turn they were injected into.
+func (p *Plugin) emitRetrieved(turnID string, matches []events.VectorMatch) {
 	if len(matches) == 0 {
 		return
 	}
@@ -447,6 +474,7 @@ func (p *Plugin) emitRetrieved(matches []events.VectorMatch) {
 		})
 	}
 	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, Source: pluginID,
+		TurnID: turnID,
 		Chunks: chunks,
 	})
 }

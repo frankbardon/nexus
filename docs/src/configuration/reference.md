@@ -3464,7 +3464,10 @@ footnote.
 
 Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
 `nexus.memory.vector`) to build the per-turn validation set, then to
-`llm.response` to do the parsing. Emits `llm.response.cited`.
+`llm.response` to do the parsing. Emits `llm.response.cited`. Vector recall
+runs on `io.input`, before the turn exists, so `nexus.memory.vector` announces
+its hits on `agent.turn.start`, keyed by that turn; a turnless
+`rag.retrieved` is ignored.
 
 Inside a nested loop (`nexus.agent.subagent`, `pkg/delegate`) a response is
 validated against the retrievals that loop's own tool calls made — keyed by
