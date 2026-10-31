@@ -66,6 +66,12 @@ type Request struct {
 	// SessionID, when set, is forwarded as HITLRequest.SessionID for
 	// out-of-band CLI tooling. Optional.
 	SessionID string
+	// TurnID, when set, is forwarded as HITLRequest.TurnID so turn-scoped
+	// transports (nexus.io.agui, nexus.io.a2a) can bind the question — and
+	// the run that resumes it — to the agent turn that is parked on it.
+	// Set it whenever the gated action came from a turn (a tool call);
+	// leave it empty for actions that belong to no turn. Optional.
+	TurnID string
 }
 
 // RequestApproval emits hitl.requested and blocks until a matching
@@ -117,6 +123,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 
 	hitlReq := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id,
 		SessionID:       req.SessionID,
+		TurnID:          req.TurnID,
 		RequesterPlugin: req.PluginID,
 		ActionKind:      req.ActionKind,
 		ActionRef:       req.ActionRef,

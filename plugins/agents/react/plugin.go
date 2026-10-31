@@ -847,6 +847,7 @@ func (p *Plugin) sendLLMRequest() {
 	// Snapshot iteration under the lock so the metadata router and
 	// downstream cost reports see the value at request emission time.
 	iteration := p.iteration
+	turnID := p.currentTurnID
 
 	p.mu.Unlock()
 
@@ -880,6 +881,12 @@ func (p *Plugin) sendLLMRequest() {
 			"_source":           pluginID,
 			engine.MetaTaskKind: engine.TaskKindReactMain,
 			"iteration":         iteration,
+			// turn_id names the turn this request belongs to. LLMRequest has
+			// no TurnID field, so request-time consumers read it here — the
+			// approval gate stamps it onto the HITLRequest an llm.request rule
+			// raises, which is what lets a turn-scoped transport resume the
+			// right turn (#218). Same key the planners stamp.
+			"turn_id": turnID,
 		},
 		Tags: map[string]string{"source_plugin": pluginID},
 	}

@@ -313,9 +313,14 @@ termination:
   outcome for a question the client never asked, the run's own turn left
   running with no stream, and the `interruptId` → request mapping recorded
   against the wrong thread and run, so the resume `POST` that follows answers
-  the departed turn's question. Two of the five emitters set **no** `TurnID` at
-  all (`nexus.gate.approval_policy` carries the turn in its `ActionRef`
-  metadata; `plugins/memory`'s approval helper names none), which is why the
+  the departed turn's question. `nexus.gate.approval_policy` sets the gated
+  action's turn too (the tool call's `TurnID`, or an `llm.request`'s
+  `Metadata["turn_id"]`), as does `plugins/memory`'s approval helper for a
+  `memory_write` tool call. Until #218 the gate carried the turn only in its
+  `ActionRef`, so the continuation run adopted turn `""`, never owned the
+  turn's `agent.turn.end`, and its stream never sent `RUN_FINISHED`. Some
+  requests still name **no** turn — a memory approval raised outside any turn
+  (bus-driven store, compaction commit, vector write) — which is why the
   permissive rule is the right one here: a strict match would drop a question
   the agent is blocked on and park that turn forever.
 - `hitl.cancel` carries **no turn id at all** — `events.HITLCancel` is a

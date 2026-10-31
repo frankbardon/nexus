@@ -262,3 +262,42 @@ func TestApprovalDefaultChoice_RejectOnTimeout(t *testing.T) {
 		t.Errorf("returned too late: %v", elapsed)
 	}
 }
+
+// TestApproval_MemoryWriteToolCarriesTurnID pins #218 for this producer: a
+// memory_write tool call belongs to an agent turn, and the approval request
+// it raises must name that turn so a turn-scoped transport (nexus.io.agui)
+// resumes the right one. The bus-event store path names none.
+func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
+	p, bus := newTestPlugin(t, map[string]any{
+		"enabled": true,
+		"timeout": "1s",
+	})
+	var got []string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if req, ok := ev.Payload.(events.HITLRequest); ok {
+			got = append(got, req.TurnID)
+		}
+	}, engine.WithPriority(5))
+	autoRespond(bus, "allow", false)
+
+	p.handleMemoryWrite(events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1",
+		Name:      "memory_write",
+		Arguments: map[string]any{"key": "k-turn", "content": "hello"},
+		TurnID:    "turn-42",
+	})
+	if err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k-bus",
+		Content: "hello",
+	}); err != nil {
+		t.Fatalf("doStore: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("hitl.requested count = %d, want 2", len(got))
+	}
+	if got[0] != "turn-42" {
+		t.Errorf("memory_write HITLRequest.TurnID = %q, want turn-42", got[0])
+	}
+	if got[1] != "" {
+		t.Errorf("bus-event store HITLRequest.TurnID = %q, want empty", got[1])
+	}
+}
