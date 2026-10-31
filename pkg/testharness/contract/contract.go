@@ -63,6 +63,7 @@ type ContractHarness struct {
 	sessionDir  string
 	withSession bool
 	registered  []engine.SubscriptionInfo
+	inspected   bool
 	pluginID    string
 }
 
@@ -74,6 +75,7 @@ type contractConfig struct {
 	pluginCfg   map[string]any
 	withSession bool
 	logger      *slog.Logger
+	conditional map[string]bool
 }
 
 // WithPluginID overrides the harness-supplied plugin ID. Useful when a
@@ -93,6 +95,23 @@ func WithPluginConfig(cfg map[string]any) ContractOption {
 // ScopeSession storage. Off by default to keep tests fast.
 func WithSession() ContractOption {
 	return func(c *contractConfig) { c.withSession = true }
+}
+
+// WithConditionalSubscriptions exempts the named event types from the
+// declared-but-unregistered check NewContract runs automatically. Use it for
+// a subscription the plugin declares unconditionally but only registers under
+// some config (or lazily, after Ready) that this test does not exercise. Each
+// entry should carry a comment naming the config that wires it; prefer
+// passing that config instead when it is cheap to supply.
+func WithConditionalSubscriptions(eventTypes ...string) ContractOption {
+	return func(c *contractConfig) {
+		if c.conditional == nil {
+			c.conditional = map[string]bool{}
+		}
+		for _, t := range eventTypes {
+			c.conditional[t] = true
+		}
+	}
 }
 
 // WithLogger overrides the default discard logger.
@@ -215,9 +234,13 @@ func NewContract(t *testing.T, factory engine.PluginFactory, opts ...ContractOpt
 	// Subscriptions().
 	if insp, ok := h.bus.(engine.SubscriptionInspector); ok {
 		h.registered = insp.RegisteredSubscriptions()
+		h.inspected = true
 	}
 	h.checkSubscriptionPriorities()
 	h.checkUndeclaredSubscriptions()
+	if h.inspected {
+		h.checkUnregisteredSubscriptions(cfg.conditional)
+	}
 
 	t.Cleanup(func() {
 		_ = h.bus.Drain(context.Background())
@@ -441,9 +464,8 @@ func (h *ContractHarness) RegisteredSubscriptions() []engine.SubscriptionInfo {
 // checkSubscriptionPriorities runs automatically from NewContract. For every
 // event type the plugin both declares in Subscriptions() and actually
 // subscribed to during Init/Ready, the set of declared priorities must equal
-// the set of registered priorities. A declared type with no registration is
-// not an error here — plenty of subscriptions are config-conditional — and
-// AssertSubscribesTo plus Inject cover whether a declared subscription fires.
+// the set of registered priorities. A declared type with no registration at
+// all is checkUnregisteredSubscriptions' concern, not this check's.
 func (h *ContractHarness) checkSubscriptionPriorities() {
 	h.t.Helper()
 	if msg := subscriptionPriorityMismatch(h.plugin.ID(), h.plugin.Subscriptions(), h.registered); msg != "" {
@@ -523,6 +545,40 @@ func undeclaredSubscriptions(pluginID, harnessID string, declared []engine.Event
 		}
 		fmt.Fprintf(&sb, "plugin %q registered undeclared subscription %q at priority %d (source %q); add it to Subscriptions()\n",
 			pluginID, r.EventType, r.Priority, r.Source)
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+// checkUnregisteredSubscriptions runs automatically from NewContract. It is
+// the reverse of checkUndeclaredSubscriptions: every event type the plugin
+// declares in Subscriptions() must have at least one registration on the bus
+// once Init and Ready return, unless the test exempted it with
+// WithConditionalSubscriptions. A stale declaration misleads every reader of
+// Subscriptions() — boot-time policy such as the streaming response gate, docs,
+// and anyone auditing ordering — about a handler that does not exist.
+func (h *ContractHarness) checkUnregisteredSubscriptions(conditional map[string]bool) {
+	h.t.Helper()
+	if msg := unregisteredSubscriptions(h.plugin.ID(), h.plugin.Subscriptions(), h.registered, conditional); msg != "" {
+		h.t.Error(msg)
+	}
+}
+
+// unregisteredSubscriptions returns a diagnostic naming every declared event
+// type with no registration and no exemption, or "" when there are none.
+func unregisteredSubscriptions(pluginID string, declared []engine.EventSubscription, registered []engine.SubscriptionInfo, conditional map[string]bool) string {
+	have := map[string]bool{}
+	for _, r := range registered {
+		have[r.EventType] = true
+	}
+	seen := map[string]bool{}
+	var sb strings.Builder
+	for _, d := range declared {
+		if have[d.EventType] || conditional[d.EventType] || seen[d.EventType] {
+			continue
+		}
+		seen[d.EventType] = true
+		fmt.Fprintf(&sb, "plugin %q declares subscription %q (priority %d) in Subscriptions() but never registered it during Init/Ready; remove the stale declaration, or pass the config that wires it, or exempt it with WithConditionalSubscriptions\n",
+			pluginID, d.EventType, d.Priority)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }

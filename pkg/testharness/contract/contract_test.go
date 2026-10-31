@@ -216,7 +216,8 @@ func TestContract_SubscriptionPriority(t *testing.T) {
 		},
 		{
 			// Config-conditional subscriptions: declared but not wired in
-			// this config is not a priority mismatch.
+			// this config is not a priority mismatch (the exemption only
+			// silences the separate declared-but-unregistered check).
 			name:     "declared but never registered",
 			declared: []engine.EventSubscription{{EventType: "before:io.output", Priority: 8}},
 		},
@@ -226,7 +227,7 @@ func TestContract_SubscriptionPriority(t *testing.T) {
 			subT := &testing.T{}
 			NewContract(subT, func() engine.Plugin {
 				return &priorityStub{declared: tc.declared, registered: tc.registered}
-			})
+			}, WithConditionalSubscriptions("before:io.output"))
 			if subT.Failed() != tc.wantFail {
 				t.Errorf("NewContract failed = %v, want %v", subT.Failed(), tc.wantFail)
 			}
@@ -304,5 +305,69 @@ func TestUndeclaredSubscriptionsMessage(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q does not name %s", msg, want)
 		}
+	}
+}
+
+func TestContract_UnregisteredSubscription(t *testing.T) {
+	cases := []struct {
+		name        string
+		declared    []engine.EventSubscription
+		registered  []engine.EventSubscription
+		conditional []string
+		wantFail    bool
+	}{
+		{
+			// The io.test shape before 7617124: io.output declared, never
+			// subscribed.
+			name:       "stale declaration",
+			declared:   []engine.EventSubscription{{EventType: "io.input", Priority: 0}, {EventType: "io.output", Priority: 50}},
+			registered: []engine.EventSubscription{{EventType: "io.input", Priority: 0}},
+			wantFail:   true,
+		},
+		{
+			name:        "stale declaration exempted",
+			declared:    []engine.EventSubscription{{EventType: "io.input", Priority: 0}, {EventType: "io.output", Priority: 50}},
+			registered:  []engine.EventSubscription{{EventType: "io.input", Priority: 0}},
+			conditional: []string{"io.output"},
+		},
+		{
+			name:        "exemption for a different type does not cover it",
+			declared:    []engine.EventSubscription{{EventType: "io.output", Priority: 50}},
+			conditional: []string{"io.input"},
+			wantFail:    true,
+		},
+		{
+			name:       "every declared type registered",
+			declared:   []engine.EventSubscription{{EventType: "io.input", Priority: 0}, {EventType: "io.output", Priority: 50}},
+			registered: []engine.EventSubscription{{EventType: "io.input", Priority: 0}, {EventType: "io.output", Priority: 50}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subT := &testing.T{}
+			NewContract(subT, func() engine.Plugin {
+				return &priorityStub{declared: tc.declared, registered: tc.registered}
+			}, WithConditionalSubscriptions(tc.conditional...))
+			if subT.Failed() != tc.wantFail {
+				t.Errorf("NewContract failed = %v, want %v", subT.Failed(), tc.wantFail)
+			}
+		})
+	}
+}
+
+func TestUnregisteredSubscriptionsMessage(t *testing.T) {
+	msg := unregisteredSubscriptions("nexus.io.test",
+		[]engine.EventSubscription{{EventType: "io.input"}, {EventType: "io.ask", Priority: 10}, {EventType: "io.ask", Priority: 20}},
+		[]engine.SubscriptionInfo{{EventType: "io.input"}}, nil)
+	for _, want := range []string{`"nexus.io.test"`, `"io.ask"`, "priority 10", "WithConditionalSubscriptions"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not name %s", msg, want)
+		}
+	}
+	if strings.Contains(msg, `"io.input"`) {
+		t.Errorf("message %q names the registered io.input", msg)
+	}
+	if n := strings.Count(msg, `"io.ask"`); n != 1 {
+		t.Errorf("message reports io.ask %d times, want once per type", n)
 	}
 }
