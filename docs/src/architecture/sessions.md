@@ -166,7 +166,7 @@ does not have to watch the filesystem to know what a session changed:
 
 The payload carries `session_id`, the slash-separated session-relative `path`, `size`
 (the size of the whole file after the write, not the size of the change), and an
-append-aware delta: `offset` and `bytes_added`. The TUI, browser and Wails transports
+append-aware delta: `offset` and `bytes_added`. The TUI and browser transports
 subscribe to these to surface file activity; see
 [Event Reference](../events/reference.md) for the exact payload.
 

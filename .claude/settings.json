@@ -19,7 +19,6 @@
       "Bash(make test:*)",
       "Bash(make vet:*)",
       "Bash(staticcheck:*)",
-      "Bash(wails build:*)",
       "Bash(wc:*)",
       "Bash(./bin/pulse)",
       "Bash(./bin/pulse --help)",

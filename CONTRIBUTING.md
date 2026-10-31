@@ -16,7 +16,6 @@ Thanks for your interest in contributing to Nexus! This guide covers the basics.
 
 - Go 1.23+
 - An LLM provider API key for integration testing
-- [Wails v2 CLI](https://wails.io/docs/gettingstarted/installation) (only for desktop app work)
 
 ```bash
 make build    # Build binary

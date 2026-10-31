@@ -72,7 +72,7 @@ The runner overlays your config to make the run hermetic:
   exit unless `NEXUS_EVAL_INSPECT_KEEP_SESSIONS=1` is set (useful for
   post-hoc journal forensics).
 - `nexus.io.test` is added to `plugins.active` if absent; visual
-  transports (`nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails`,
+  transports (`nexus.io.tui`, `nexus.io.browser`,
   `nexus.io.oneshot`) are stripped because the run must be headless.
 - `plugins.nexus.io.test.inputs` is set to `[user_input]`,
   `approval_mode` to `approve`, `timeout` to `600s`. Any other keys you

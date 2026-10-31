@@ -486,7 +486,7 @@ cleanly on the first try.
   judge, native validators, a human gate, and a `00_input` initial
   artifact — fit in **five files under 100 lines**.
 - The same workflow runs in any IO surface Nexus supports (TUI, browser,
-  oneshot, wails) without a code change. Adding a new IO means activating
+  oneshot) without a code change. Adding a new IO means activating
   a new plugin, not modifying the workspace.
 - The `icm.*` event surface plus the engine-generic `plan.*` events give
   any UI everything it needs to render workflow progress, including

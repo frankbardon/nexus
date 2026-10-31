@@ -60,11 +60,10 @@ body:
         - LLM Provider (Anthropic)
         - LLM Provider (OpenAI)
         - Tools (Shell / FileIO / PDF)
-        - I/O (TUI / Browser / Wails)
+        - I/O (TUI / Browser / AG-UI / A2A / Broker)
         - Memory / Compaction
         - Gates
         - Planner (Dynamic / Static)
-        - Desktop Shell
         - Other
 
   - type: input

@@ -369,7 +369,7 @@ func (s *SessionWorkspace) ReadFile(subpath string) ([]byte, error) {
 //
 // It reuses WriteFile's two event types rather than introducing a third
 // "appended" type. Every existing subscriber — nexus.io.tui, nexus.io.browser,
-// nexus.io.wails, nexus.tool.fileio — treats these as "this path changed,
+// nexus.tool.fileio — treats these as "this path changed,
 // re-read it", which is exactly true of an append; a new type would have left
 // all of them silently blind to appends until each was updated, which is the
 // same invisibility this emission exists to remove. An append-aware delta
@@ -666,8 +666,8 @@ func (s *SessionWorkspace) announceRel(fullPath string) (string, bool) {
 // The single definition of that shape, and the reason it exists is that there
 // was no guard on it at all: four call sites each spelled the same five keys out
 // by hand. That is exactly the shape of thing that acquires a fifth emitter
-// carrying an absolute path and three missing keys, which is what
-// cmd/desktop/internal/matcher was doing until E3-S5.
+// carrying an absolute path and three missing keys, which is what a
+// hand-rolled emitter outside the engine was doing until E3-S5.
 //
 // The keys now come from events.SessionFile.Map rather than from a literal
 // here, so `make check-events` guards the wire shape: renaming or retyping a

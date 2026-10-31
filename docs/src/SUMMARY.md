@@ -27,14 +27,6 @@
 - [Streaming Tools](./architecture/streaming-tools.md)
 - [Replay](./architecture/replay.md)
 
-# Desktop Shell
-
-- [Overview](./desktop/overview.md)
-- [Building Your App](./desktop/building-your-app.md)
-- [API Reference](./desktop/reference.md)
-- [Design System (Brief)](./desktop/design-system-brief.md)
-- [Design System (Full Reference)](./desktop/design-system.md)
-
 # ICM Workflows
 
 - [Overview](./icm/overview.md)
@@ -89,7 +81,6 @@
   - [Browser UI](./plugins/io/browser.md)
   - [Oneshot](./plugins/io/oneshot.md)
   - [Test IO](./plugins/io/test.md)
-  - [Wails Desktop](./plugins/io/wails.md)
   - [Broker IO (dial-back)](./plugins/io/broker.md)
   - [A2A Serve](./plugins/io/a2a.md)
   - [AG-UI Serve Transport](./plugins/io-agui.md)

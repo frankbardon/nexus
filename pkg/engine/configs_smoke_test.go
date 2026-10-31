@@ -18,27 +18,8 @@ import (
 func TestConfigsSmokeBoot(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 
-	// The demo recipes are engine configs in the same format and were covered by
-	// nothing, so they are swept here too.
-	//
-	// cmd/demo/config-*.yaml and cmd/desktop/config-*.yaml are deliberately NOT
-	// here. They name plugins that are not in the default registry -- nexus.io.wails
-	// is behind a build tag, nexus.app.staffingmatch belongs to one app -- so
-	// SmokeValidateConfig cannot resolve their active set and fails for a reason
-	// that says nothing about the config. They are covered by
-	// TestEveryShippedConfigStillLoads in config_strict_test.go, which checks the
-	// half that does not need a plugin registry: that the YAML loads and names no
-	// unknown key.
 	globs := []string{
 		filepath.Join(repoRoot, "configs", "*.yaml"),
-		filepath.Join(repoRoot, "cmd", "demo", "recipe-*.yaml"),
-	}
-
-	// Not an engine config: it sits in cmd/demo because it accompanies the otel
-	// recipe, but it is a docker-compose file and its top-level keys are
-	// compose's.
-	notAnEngineConfig := map[string]bool{
-		"recipe-otel-trace-docker-compose.yaml": true,
 	}
 
 	var paths []string
@@ -47,12 +28,7 @@ func TestConfigsSmokeBoot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glob %s: %v", glob, err)
 		}
-		for _, path := range matched {
-			if notAnEngineConfig[filepath.Base(path)] {
-				continue
-			}
-			paths = append(paths, path)
-		}
+		paths = append(paths, matched...)
 	}
 	if len(paths) == 0 {
 		t.Fatal("no configs matched; this test is not checking anything")

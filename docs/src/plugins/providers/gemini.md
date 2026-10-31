@@ -130,7 +130,7 @@ Nexus's root direct-dependency list is deliberately defended, so this one is cal
 
 The measured cost was **zero new modules in the build graph**: both were already present transitively, and the change is a promotion, not an addition. Both are confined to `pkg/nexuscreds/googleadc` and `pkg/nexuscreds/gcemeta`; the parent `pkg/nexuscreds` package is stdlib-only, so a binary that blank-imports neither pays nothing for them.
 
-`bin/nexus`, `bin/nexus-broker` and the reference desktop app all blank-import `google-adc`. A custom binary must blank-import the package registering whichever source it names in `credentials`, or boot fails with an error naming that source and listing the sources the build actually carries.
+`bin/nexus` and `bin/nexus-broker` both blank-import `google-adc`. A custom binary must blank-import the package registering whichever source it names in `credentials`, or boot fails with an error naming that source and listing the sources the build actually carries.
 
 ### System Messages
 

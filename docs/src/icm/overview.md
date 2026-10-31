@@ -133,7 +133,7 @@ It is not a replacement for `nexus.agent.react` or
 | Decompose-then-parallelize one big request | `nexus.agent.orchestrator` |
 | Plan first, then execute the plan | `nexus.agent.planexec` |
 | Same N-step shape every time, reviewable in source control | `nexus.workflows.icm` |
-| Embed a workflow inside a desktop app | ICM as the agent loop, your shell as the chrome |
+| Embed a workflow inside your own application | ICM as the agent loop, your host as the chrome |
 
 It is **not** a new abstraction over LLM providers. Every model call routes
 through `delegate` (sub-agents) or through the configured judge posture

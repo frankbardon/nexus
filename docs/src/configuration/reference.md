@@ -144,12 +144,12 @@ plugins:
 | `log_level`                    | string   | `info`                 | Global log level: `trace`, `debug`, `info`, `warn`, `error`. `trace` is below `debug` — an ultra-verbose per-event level (bus dispatch, every tool-call arg, wire payloads) that stays off even during normal debug troubleshooting; call sites emit it via `logger.Log(ctx, engine.LevelTrace, "msg", "key", val)` since `*slog.Logger` has no `.Trace()` convenience method. See [Logging Levels](../operations/logging.md) for the full level-assignment rubric. |
 | `tick_interval`                | duration | `1s`                   | Interval for the internal `core.tick` heartbeat. |
 | `max_concurrent_events`        | int      | `100`                  | Maximum concurrent event handlers across the bus. |
-| `logging.bootstrap_stderr`     | bool     | `false`                | Register a stderr sink at engine construction so pre-sink slog records appear on the terminal. **Rejected** at validation time when any of `nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails` is active. |
+| `logging.bootstrap_stderr`     | bool     | `false`                | Register a stderr sink at engine construction so pre-sink slog records appear on the terminal. **Rejected** at validation time when either `nexus.io.tui` or `nexus.io.browser` is active. |
 | `logging.buffer_size`          | int      | `DefaultLogRingSize`   | Capacity of the log/event ring buffers. Values `<= 0` use the default. |
 | `sessions.root`                | string   | `~/.nexus/sessions`    | Base directory for session workspaces. |
 | `sessions.retention`           | string   | `30d`                  | Retention policy for old sessions. |
 | `sessions.id_format`           | string   | `timestamp`            | Session ID format: `timestamp`, `datetime_short`. |
-| `agent_id`                     | string   | *(empty)*              | Partitions per-agent storage and other per-agent state. Set by multi-agent embedders (the desktop shell). Empty in CLI / single-agent embedders, which collapses agent-scope storage to app-scope. |
+| `agent_id`                     | string   | *(empty)*              | Partitions per-agent storage and other per-agent state. Set by multi-agent embedders that host several agents in one process. Empty in CLI / single-agent embedders, which collapses agent-scope storage to app-scope. |
 | `storage.root`                 | string   | `~/.nexus`             | Data root for app- and agent-scope per-plugin storage. App-scope `.db` files land at `<root>/plugins/<pluginID>/store.db`; agent-scope at `<root>/agents/<agent_id>/plugins/<pluginID>/store.db`. |
 | `storage.busy_timeout_ms`      | int      | `5000`                 | SQLite `busy_timeout` PRAGMA per handle (milliseconds). |
 | `storage.cache_size_kb`        | int      | `2048`                 | SQLite `cache_size` PRAGMA per handle (negative-form, in KiB). |
@@ -1831,7 +1831,7 @@ server) when neither key-file key is set. The provider mints one token during
 `Init`, so a broken binding fails the boot rather than the first turn.
 
 `vertex.credentials` names a source registered with `pkg/nexuscreds`, not an auth
-mode. `bin/nexus`, `bin/nexus-broker` and the reference desktop app blank-import
+mode. `bin/nexus` and `bin/nexus-broker` blank-import
 `google-adc`; a custom binary must blank-import the package that registers whichever
 source it names, or boot fails with an error naming the source and listing the
 sources the build actually carries.
@@ -2691,7 +2691,7 @@ The provider mints one token during `Init`, so a broken binding fails the boot
 rather than the first turn.
 
 `credentials` names a source registered with `pkg/nexuscreds`, not an auth mode.
-`bin/nexus`, `bin/nexus-broker` and the reference desktop app blank-import
+`bin/nexus` and `bin/nexus-broker` blank-import
 `google-adc`; a custom binary must blank-import the package that registers whichever
 source it names, or boot fails with an error naming the source and listing the
 sources the build actually carries.
@@ -3534,7 +3534,7 @@ Source: `plugins/io/browser/plugin.go`.
 Source: `plugins/io/agui/plugin.go`. AG-UI ("Agent-User Interaction") serve
 transport. Clients `POST` a `RunAgentInput` to `/agui` and receive a
 `text/event-stream` SSE response (one stream per run), using the pkg/agui wire
-format rather than the browser/wails Envelope. Safe by default: binds loopback,
+format rather than the browser Envelope. Safe by default: binds loopback,
 optional bearer-token auth, and configurable CORS for browser AG-UI clients.
 
 | Key                | Type         | Default            | Description |
@@ -4407,17 +4407,6 @@ Source: `plugins/io/test/plugin.go`. Non-interactive testing transport.
 | `mock_responses`         | list     | *(empty)*   | Synthetic LLM responses. Each `{content, tool_calls: [{name, arguments}]}`. When set, the plugin vetoes real `llm.request` events. |
 | `timeout`                | duration | `60s`       | Session timeout. |
 | `read_stdin`             | bool     | `true`      | Read stdin when no other input source is available. |
-
-### `nexus.io.wails`
-
-Source: `plugins/io/wails/plugin.go`. Wails-native transport. The runtime is
-installed by the embedder via `Hub().SetRuntime()` before `engine.Boot`; this
-plugin only configures event bridging.
-
-| Key         | Type | Default     | Description |
-|-------------|------|-------------|-------------|
-| `subscribe` | list | *(empty)*   | Event types to bridge bus → frontend. Empty triggers legacy hardcoded chat-event subscriptions for parity with `nexus.io.browser`. |
-| `accept`    | list | *(empty)*   | Event types accepted from the frontend → bus. |
 
 ### `nexus.io.oneshot`
 
@@ -7655,6 +7644,5 @@ deployment caveats live in the
 - [Tool System](../../../.claude/docs/tool-system.md) — tool choice, parallel
   dispatch, structured output.
 - [RAG](../../../.claude/docs/rag.md) — embeddings, vector store, ingestion.
-- [I/O Transport](../../../.claude/docs/io-transport.md) — browser vs Wails,
-  parity rule.
-- [Desktop Shell](../../../.claude/docs/desktop-shell.md) — embedder API.
+- [I/O Transport](../../../.claude/docs/io-transport.md) — IO transport scoping and
+  external-interop transports.

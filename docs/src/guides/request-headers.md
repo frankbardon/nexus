@@ -235,7 +235,7 @@ as structure.
 | `nexus.io.realtime` | the WebSocket upgrade, per connection |
 | `nexus.io.broker` | forwarded by `nexus-broker` on every client-facing surface — see below |
 
-`nexus.io.tui`, `nexus.io.oneshot` and `nexus.io.wails` have no HTTP request
+`nexus.io.tui` and `nexus.io.oneshot` have no HTTP request
 behind them, so `UserInput.Headers` is nil and no `_header.*` label is bound.
 
 ### Through the session broker

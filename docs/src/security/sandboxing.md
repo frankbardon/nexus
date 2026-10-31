@@ -12,7 +12,7 @@ Agent-emitted code is the load-bearing case. Trail of Bits' Oct 2025
 [prompt-injection-to-RCE chain](https://blog.trailofbits.com/2025/10/22/prompt-injection-to-rce-in-ai-agents/)
 documented multiple production incidents where a compromised LLM context
 yielded host shell access through under-isolated tool execution. For
-non-developer end users (the desktop shell ships agents to laptops),
+non-developer end users (agents shipped to laptops),
 "sandbox in name only" is a regression to those incidents waiting to
 happen.
 

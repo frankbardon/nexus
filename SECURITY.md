@@ -23,10 +23,9 @@ Security issues in the following areas are in scope:
 - **LLM providers** — API key handling, request/response security
 - **Tool plugins** — Shell execution sandboxing, file I/O restrictions
 - **Gates** — Prompt injection detection, content safety, PII detection
-- **Desktop shell** — Keychain storage, settings persistence, IPC security
 
 ## Known Considerations
 
-- **API keys**: Stored in environment variables or OS keychain (desktop). Never logged or persisted in plaintext session data.
+- **API keys**: Stored in environment variables. Never logged or persisted in plaintext session data.
 - **Shell plugin**: Executes commands in a restricted sandbox. Allowed commands are explicitly configured per profile.
 - **File I/O plugin**: Restricted to configured base directory. Path traversal is blocked.

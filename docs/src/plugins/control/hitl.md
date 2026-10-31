@@ -94,7 +94,7 @@ will consume it. Conventional values:
    can mutate `req.Prompt` or veto. On veto, the request resolves as
    rejected/cancelled without reaching IO. On non-veto, the plugin
    follows up with `bus.Emit("hitl.requested", req)`.
-2. The active IO plugin (TUI, Browser, Wails, oneshot, test) renders
+2. The active IO plugin (TUI, Browser, oneshot, test) renders
    the prompt and collects the operator's answer.
 3. IO plugin emits `hitl.responded` with `{request_id, choice_id?, free_text?}`.
 4. The hitl plugin routes the response to the requester's channel.

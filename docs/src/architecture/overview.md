@@ -18,7 +18,7 @@ flowchart TB
         EB --> DISPATCH
     end
 
-    DISPATCH --> IO[IO Plugins<br/>tui · browser · wails]
+    DISPATCH --> IO[IO Plugins<br/>tui · browser]
     DISPATCH --> AG[Agent Plugins<br/>react · planexec · orchestrator]
     DISPATCH --> LLM[LLM Providers<br/>anthropic · openai · fallback]
     DISPATCH --> TL[Tool Plugins<br/>shell · file · web · knowledge_search]

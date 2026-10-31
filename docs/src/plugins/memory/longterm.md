@@ -9,7 +9,7 @@ Cross-session memory persistence. Stores memories as individual markdown files w
 ```yaml
 nexus.memory.longterm:
   # Where memory files live.
-  # Default: ~/.nexus/memory/ (CLI), ~/.nexus/agents/<agentID>/memory/ (desktop shell)
+  # Default: ~/.nexus/memory/ (CLI), ~/.nexus/agents/<agentID>/memory/ (when `core.agent_id` is set)
   path: "~/.nexus/memory/"
 
   # Memory scope: "agent" (per-agent isolated), "global" (shared across agents), or "both".
@@ -24,7 +24,7 @@ nexus.memory.longterm:
   # user explicitly asks (tools still available, just no prompting to use them).
   auto_save_instructions: ""
 
-  # Agent ID for agent-scoped storage (injected automatically by desktop shell).
+  # Agent ID for agent-scoped storage (injected automatically by a multi-agent embedder).
   agent_id: ""
 ```
 
@@ -116,6 +116,6 @@ When `auto_load: true`, the plugin injects a section listing all available memor
 | `hitl.responded` | Any -> plugin | `HITLResponse` |
 | `hitl.cancel` | Plugin -> bus | `HITLCancel` (approval deadline expired) |
 
-## Desktop Shell Integration
+## Multi-Agent Embedders
 
-The desktop shell automatically injects `agent_id` into the plugin config before boot, enabling per-agent memory isolation without manual configuration.
+A multi-agent embedder automatically injects `agent_id` into the plugin config before boot, enabling per-agent memory isolation without manual configuration.

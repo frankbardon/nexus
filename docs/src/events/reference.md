@@ -286,7 +286,7 @@ rendered. What each can honestly do differs:
 
 | Transport | On retract |
 |-----------|-----------|
-| `nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails` | erase the partial text and replace it with a note — these own their render buffer |
+| `nexus.io.tui`, `nexus.io.browser` | erase the partial text and replace it with a note — these own their render buffer |
 | `nexus.io.realtime` | forwards a `stream.retract` envelope; a text client can erase, a client that already spoke the audio cannot |
 | `nexus.io.agui` | closes the text message, **drops it from the run's messages** so it never reaches a `MESSAGES_SNAPSHOT`, and emits a `nexus.stream.retract` Custom event |
 | `nexus.io.a2a` | nothing to retract — it publishes one post-gate artifact at turn end rather than streaming deltas. Reports a `output_gate` Nexus extension event so a client can tell a policy substitution from a model that chose to refuse |
@@ -840,7 +840,7 @@ subscriber can rely on seeing exactly one `created` per path per session.
 two announcement helpers `AnnounceWrite` / `AnnounceAppend` that writers holding their
 own `os.*` call use — today `nexus.scene` (its state file and patch journal),
 `nexus.workflows.icm` (stage artifacts and copied inputs), `nexus.tool.fileio`
-(`write_file`) and the desktop matcher plugin. Every one of them publishes the
+(`write_file`).  Every one of them publishes the
 *session-relative* path, so it can be used directly as an object key. `nexus.tool.pdf` used to emit a second, hand-built
 event beside the one `WriteFile` already produced, carrying the bare basename and no
 delta; it was removed rather than reconciled, and the plugin no longer emits
@@ -882,13 +882,11 @@ coalescing a change it should have treated as a rewrite.
 | `SessionWorkspace.WriteFile` | Whole-file writes: config snapshot, plugin manifest, memory rewrites, tool output |
 | `SessionWorkspace.AppendFile` | Appends: `context/conversation.jsonl`, `metadata/timing.jsonl`, compaction output, shell history, the HITL cache |
 | `SessionWorkspace.SaveMeta` | `metadata/session.json` — rewritten on every `llm.response` and every `agent.turn.end` |
-| `SessionWorkspace.AnnounceWrite` / `AnnounceAppend` | Writers holding their own `os.*` call: `nexus.scene`, `nexus.workflows.icm`, `nexus.tool.fileio`, and the desktop matcher plugin |
+| `SessionWorkspace.AnnounceWrite` / `AnnounceAppend` | Writers holding their own `os.*` call: `nexus.scene`, `nexus.workflows.icm`, and `nexus.tool.fileio` |
 
 Every emitter goes through one of those five entry points, so every payload on the
-wire is built in one place. Two hand-built emitters that were not — `nexus.tool.pdf`
-and `cmd/desktop/internal/matcher` — published malformed events (a bare basename as
-`path`, an absolute host path, missing `session_id`, no delta keys); the first was
-removed and the second was routed through `AnnounceWrite`. Because the payload is an
+wire is built in one place. A hand-built emitter that was not — `nexus.tool.pdf` — published malformed events (a bare basename as
+`path`, an absolute host path, missing `session_id`, no delta keys) and was removed. Because the payload is an
 untyped map, a subscriber should still treat `offset` and `bytes_added` as optional
 and fall back to "the whole object changed" when they are absent — which is the same
 conservative reading `offset == 0` already asks for.

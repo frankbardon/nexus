@@ -56,11 +56,6 @@ func versionedPayloads() []versionedPayload {
 		{"ApprovalRequest", func() any { return ApprovalRequest{SchemaVersion: ApprovalRequestVersion} }, ApprovalRequestVersion},
 		{"ApprovalResponse", func() any { return ApprovalResponse{SchemaVersion: ApprovalResponseVersion} }, ApprovalResponseVersion},
 		{"HistoryReplay", func() any { return HistoryReplay{SchemaVersion: HistoryReplayVersion} }, HistoryReplayVersion},
-		{"FileOpenRequest", func() any { return FileOpenRequest{SchemaVersion: FileOpenRequestVersion} }, FileOpenRequestVersion},
-		{"FileOpenResponse", func() any { return FileOpenResponse{SchemaVersion: FileOpenResponseVersion} }, FileOpenResponseVersion},
-		{"FileOutputDirRequest", func() any { return FileOutputDirRequest{SchemaVersion: FileOutputDirRequestVersion} }, FileOutputDirRequestVersion},
-		{"FileOutputDirResponse", func() any { return FileOutputDirResponse{SchemaVersion: FileOutputDirResponseVersion} }, FileOutputDirResponseVersion},
-		{"FileSelected", func() any { return FileSelected{SchemaVersion: FileSelectedVersion} }, FileSelectedVersion},
 		{"SessionInfo", func() any { return SessionInfo{SchemaVersion: SessionInfoVersion} }, SessionInfoVersion},
 		// mcp.go
 		{"MCPResourceUpdated", func() any { return MCPResourceUpdated{SchemaVersion: MCPResourceUpdatedVersion} }, MCPResourceUpdatedVersion},

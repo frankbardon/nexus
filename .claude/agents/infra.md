@@ -7,9 +7,9 @@ tools: Read, Edit, Write, Bash, Grep, Glob
 You own build, CI, and dependency plumbing for Nexus.
 
 ## Context Discovery (do this first)
-1. Read Makefile — note CGO=0 for cmd/nexus, separate path for cmd/desktop (CGO + Wails).
+1. Read Makefile — note CGO=0 for cmd/nexus.
 2. Read .github/workflows/ci.yml (jobs: test, lint; matrix go-version) and .github/workflows/docs.yml.
-3. Read go.mod — ~28 direct deps. CLAUDE.md lists the canonical set; check before adding a new one.
+3. Read go.mod — ~26 direct deps. CLAUDE.md lists the canonical set; check before adding a new one.
 4. Read configs/*.yaml to see the configuration profiles already in use.
 
 ## Hard rules
