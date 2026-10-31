@@ -24,7 +24,7 @@ func newTestPlugin(t *testing.T, defaultTimeout time.Duration, perTool map[strin
 		defaultTimeout: defaultTimeout,
 		perTool:        perTool,
 		inflight:       map[string]*tracker{},
-		timedOut:       map[string]struct{}{},
+		timedOut:       map[string]time.Time{},
 		synthesizing:   map[string]struct{}{},
 	}
 	if p.perTool == nil {
@@ -118,7 +118,7 @@ func TestToolTimeout_DefaultTimeoutFires(t *testing.T) {
 	if tt.ToolName != "stuck" || tt.CallID != "hang" {
 		t.Fatalf("unexpected ToolTimeout %+v", tt)
 	}
-	if tt.Override != "gates.tool_timeout.per_tool.stuck" {
+	if tt.Override != "nexus.gate.tool_timeout.per_tool.stuck" {
 		t.Fatalf("unexpected override hint: %q", tt.Override)
 	}
 	if tt.Timeout != 50*time.Millisecond {
@@ -129,7 +129,7 @@ func TestToolTimeout_DefaultTimeoutFires(t *testing.T) {
 	}
 
 	// Synthesized result error must include the override hint verbatim.
-	want := "tool stuck exceeded timeout 50ms; raise via gates.tool_timeout.per_tool.stuck: <duration>"
+	want := "tool stuck exceeded timeout 50ms; raise via nexus.gate.tool_timeout.per_tool.stuck: <duration>"
 	if results[0].Error != want {
 		t.Fatalf("error mismatch:\n got: %q\nwant: %q", results[0].Error, want)
 	}
@@ -372,11 +372,105 @@ func TestToolTimeout_ErrorMessageContainsExactHint(t *testing.T) {
 
 	select {
 	case r := <-got:
-		want := "tool web_fetch exceeded timeout 25ms; raise via gates.tool_timeout.per_tool.web_fetch: <duration>"
+		want := "tool web_fetch exceeded timeout 25ms; raise via nexus.gate.tool_timeout.per_tool.web_fetch: <duration>"
 		if r.Error != want {
 			t.Fatalf("error message mismatch:\n got: %q\nwant: %q", r.Error, want)
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("did not receive synthesized result")
+	}
+}
+
+// timedOutLen reads the timedOut map size under the plugin lock.
+func timedOutLen(p *Plugin) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.timedOut)
+}
+
+// waitTimeout invokes a call and blocks until its synthetic result has been
+// fully emitted (the synthesizing marker is gone).
+func waitTimeout(t *testing.T, p *Plugin, bus engine.EventBus, id string) {
+	t.Helper()
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: id, Name: "stuck"})
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		_, timed := p.timedOut[id]
+		_, mid := p.synthesizing[id]
+		p.mu.Unlock()
+		if timed && !mid {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not time out", id)
+}
+
+// TestToolTimeout_TimedOutEvictedOnLateResult: the real late result clears
+// the marker after being vetoed, so the map does not grow.
+func TestToolTimeout_TimedOutEvictedOnLateResult(t *testing.T) {
+	p, bus := newTestPlugin(t, 20*time.Millisecond, nil)
+	waitTimeout(t, p, bus, "late")
+	if n := timedOutLen(p); n != 1 {
+		t.Fatalf("timedOut size after timeout = %d, want 1", n)
+	}
+	// The real result's tool.result observation (post-veto bookkeeping path).
+	_ = bus.Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "late", Name: "stuck"})
+	if n := timedOutLen(p); n != 0 {
+		t.Fatalf("timedOut size after late result = %d, want 0", n)
+	}
+}
+
+// TestToolTimeout_TimedOutEvictedByWindow: a call whose real result never
+// arrives is swept once it is older than lateWindow, on the next timeout.
+func TestToolTimeout_TimedOutEvictedByWindow(t *testing.T) {
+	p, bus := newTestPlugin(t, 20*time.Millisecond, nil)
+	p.lateWindow = 60 * time.Millisecond
+
+	waitTimeout(t, p, bus, "never")
+	time.Sleep(100 * time.Millisecond)
+	waitTimeout(t, p, bus, "fresh")
+
+	p.mu.Lock()
+	_, oldKept := p.timedOut["never"]
+	_, freshKept := p.timedOut["fresh"]
+	p.mu.Unlock()
+	if oldKept {
+		t.Error("expired timedOut entry was not swept")
+	}
+	if !freshKept {
+		t.Error("fresh timedOut entry was swept")
+	}
+
+	// Inside the window a late result is still suppressed; past it, not.
+	v, _ := bus.EmitVetoable("before:tool.result", &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "fresh", Name: "stuck"})
+	if !v.Vetoed {
+		t.Error("late result inside the window was not vetoed")
+	}
+	v, _ = bus.EmitVetoable("before:tool.result", &events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: "never", Name: "stuck"})
+	if v.Vetoed {
+		t.Error("late result past the window was vetoed")
+	}
+}
+
+// TestToolTimeout_ShutdownClearsTimedOut: session end drops every marker.
+func TestToolTimeout_ShutdownClearsTimedOut(t *testing.T) {
+	p, bus := newTestPlugin(t, 20*time.Millisecond, nil)
+	waitTimeout(t, p, bus, "a")
+	waitTimeout(t, p, bus, "b")
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if n := timedOutLen(p); n != 0 {
+		t.Fatalf("timedOut size after shutdown = %d, want 0", n)
+	}
+}
+
+// TestNew_BoundsTimedOut: the production constructor sets the window.
+func TestNew_BoundsTimedOut(t *testing.T) {
+	p := New().(*Plugin)
+	if p.lateWindow != lateResultWindow || p.lateWindow <= 0 {
+		t.Fatalf("lateWindow = %s, want %s", p.lateWindow, lateResultWindow)
 	}
 }

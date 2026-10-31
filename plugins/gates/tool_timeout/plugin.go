@@ -34,6 +34,15 @@ const pluginID = "nexus.gate.tool_timeout"
 // not to police a tool that is merely slow.
 const defaultTimeout = 10 * time.Minute
 
+// lateResultWindow is how long a timed-out call ID is remembered so its late
+// real tool.result can still be vetoed. A call whose result never arrives
+// would otherwise pin its entry for the life of the process; entries older
+// than this are swept whenever a new timeout is recorded, and all of them are
+// dropped on Shutdown. It is sized far above every shipped tool's own timeout
+// (the longest, delegate_a2a_* at 5m, is exempt from the gate anyway), so a
+// tool that eventually answers does so well inside the window.
+const lateResultWindow = time.Hour
+
 // builtinPerTool exempts (0 = no deadline) the tools whose wait is either
 // bounded by a human or by a wall-clock budget the tool enforces itself:
 //
@@ -60,8 +69,9 @@ func New() engine.Plugin {
 		perTool:        map[string]time.Duration{},
 		builtin:        builtinPerTool,
 		inflight:       map[string]*tracker{},
-		timedOut:       map[string]struct{}{},
+		timedOut:       map[string]time.Time{},
 		synthesizing:   map[string]struct{}{},
+		lateWindow:     lateResultWindow,
 	}
 }
 
@@ -85,7 +95,14 @@ type Plugin struct {
 
 	mu       sync.Mutex
 	inflight map[string]*tracker // call ID -> live timer
-	timedOut map[string]struct{} // call IDs we've already synthesized for; veto late real results
+	// timedOut maps call IDs we've already synthesized for to when the
+	// deadline fired; a late real result for one of them is vetoed. Bounded:
+	// an entry is dropped when the late result arrives, when it is older
+	// than lateWindow (swept on insert), and on Shutdown.
+	timedOut map[string]time.Time
+	// lateWindow is the retention for timedOut entries. Zero disables the
+	// sweep (hand-built test plugins).
+	lateWindow time.Duration
 	// synthesizing tracks IDs whose synthetic tool.result is currently in
 	// flight on the bus. Used to skip cleanup in handleToolResult so
 	// timedOut survives long enough for the eventual real result to be
@@ -173,6 +190,7 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 		t.cancel()
 		delete(p.inflight, id)
 	}
+	clear(p.timedOut)
 	p.mu.Unlock()
 	return nil
 }
@@ -237,11 +255,15 @@ func (p *Plugin) watch(ctx context.Context, tc events.ToolCall, timeout time.Dur
 		return
 	}
 	delete(p.inflight, tc.ID)
-	p.timedOut[tc.ID] = struct{}{}
+	now := time.Now()
+	p.sweepTimedOutLocked(now)
+	p.timedOut[tc.ID] = now
 	p.synthesizing[tc.ID] = struct{}{}
 	p.mu.Unlock()
 
-	override := fmt.Sprintf("gates.tool_timeout.per_tool.%s", tc.Name)
+	// Plugin config is keyed by plugin ID at the top level of the YAML, so
+	// the override lives at nexus.gate.tool_timeout.per_tool.<name>.
+	override := fmt.Sprintf("%s.per_tool.%s", pluginID, tc.Name)
 	guidance := fmt.Sprintf("tool %s exceeded timeout %s; raise via %s: <duration>",
 		tc.Name, timeout, override)
 
@@ -291,6 +313,19 @@ func (p *Plugin) handleToolResult(event engine.Event[any]) {
 	// Real tool.result (post-synthesis or never-timed-out) — clear the
 	// marker so memory doesn't grow unbounded.
 	delete(p.timedOut, res.ID)
+}
+
+// sweepTimedOutLocked drops timedOut entries older than lateWindow. Caller
+// holds p.mu.
+func (p *Plugin) sweepTimedOutLocked(now time.Time) {
+	if p.lateWindow <= 0 {
+		return
+	}
+	for id, at := range p.timedOut {
+		if now.Sub(at) > p.lateWindow {
+			delete(p.timedOut, id)
+		}
+	}
 }
 
 // handleBeforeToolResult vetoes a real tool.result that arrives after we've

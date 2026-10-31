@@ -5128,7 +5128,10 @@ Source: `plugins/gates/tool_timeout/plugin.go`. Per-call deadline gate. On
 observability event plus a synthetic `tool.result` carrying an error message
 that names the exact override key. A `before:tool.result` veto suppresses any
 late real result for the same call ID so the agent's `pendingToolCalls`
-counter stays consistent. Note: Go cancellation is cooperative — the original
+counter stays consistent. Timed-out call IDs are remembered for one hour
+(swept whenever a new timeout fires, and cleared on shutdown), so a call whose
+real result never arrives does not pin memory for the life of the process; a
+real result later than that window is no longer suppressed. Note: Go cancellation is cooperative — the original
 tool goroutine may keep running until it honors its own context. The gate's
 job is to unblock the agent, not preempt the tool.
 
@@ -5171,7 +5174,7 @@ The synthetic error message format is fixed and intended to be read by
 operators:
 
 ```
-tool <name> exceeded timeout <duration>; raise via gates.tool_timeout.per_tool.<name>: <duration>
+tool <name> exceeded timeout <duration>; raise via nexus.gate.tool_timeout.per_tool.<name>: <duration>
 ```
 
 | Key               | Type            | Default | Description |
