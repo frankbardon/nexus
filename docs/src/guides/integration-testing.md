@@ -159,6 +159,7 @@ h.AssertOutputSemantic("response recalls the user's earlier question about greet
 | `WithRetainSession()` | off | Keep the session dir (and the harness temp root) on failure for debugging; the path is logged |
 | `WithKeepSession()` | off | Keep the session dir after `Run` so the test can read post-run artifacts; still removed when the test ends |
 | `WithConfiguredRoots()` | off | Use the config's `core.sessions.root` and `core.storage.root` verbatim instead of the per-test temp dir |
+| `WithConfigRewrite(fn)` | none | Transform the raw config bytes before the engine is built (repeatable, applied in order); also accepted by `NewEngine` |
 | `WithJudge(judge)` | auto Haiku | Custom semantic judge implementation |
 | `WithFailFast()` | off | Disable bus panic recovery so handler panics keep their stack trace |
 
@@ -187,6 +188,22 @@ Plugin-owned paths (`nexus.memory.longterm` `path`, `nexus.vectorstore.chromem`
 `path`, ingest `cache_dir`, ...) are not rewritten. A test whose config writes
 to one must override it with `t.TempDir()` through `copyConfig`, as the
 longterm-memory, vector-memory, kitchen-sink and cross-provider RAG tests do.
+
+## Loopback Ports
+
+The serve-transport configs bind fixed loopback ports so they stay runnable by
+hand: `configs/test-agui-*.yaml` use `127.0.0.1:18190`, `test-a2a-serve.yaml`
+uses `127.0.0.1:18191`, and the `test-a2a-loopback-*.yaml` pair uses
+`127.0.0.1:18192` (the caller's `base_url` included). Tests never bind them.
+`tests/integration/ports_test.go` gives each top-level test its own free port
+per default address (`aguiAddr(t)`, `a2aAddr(t)`, `a2aLoopbackAddr(t)`, shared
+by that test's subtests) and rewrites every occurrence of the fixed address:
+`bootEngine` and `portsOption(t)` (a `WithConfigRewrite` for
+`testharness.New`) rewrite the config as it is loaded, and `copyConfig`
+rewrites its copy. A run therefore cannot collide with a parallel `go test` or
+with anything else on the host holding those ports. A new serve config should
+reuse one of the three defaults, or add its own to `portDefaults`; a test that
+needs an address with nothing listening uses `freeLoopbackAddr(t)`.
 
 ## Raw Event Access
 

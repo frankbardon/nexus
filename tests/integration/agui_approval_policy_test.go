@@ -24,9 +24,9 @@ import (
 // so a regression fails fast as a context-deadline error rather than a hang.
 func TestAGUIServe_ApprovalPolicyResume(t *testing.T) {
 	bootEngine(t, "configs/test-agui-approval-policy.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	const threadID = "thread-approval"
 
 	// --- Run 1: the gated shell call interrupts the run. ---

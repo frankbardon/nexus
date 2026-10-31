@@ -31,14 +31,14 @@ func TestAGUIServe_LiveStream(t *testing.T) {
 			"api_key_env": "ANTHROPIC_API_KEY",
 		},
 		"nexus.io.agui": map[string]any{
-			"bind": aguiBindAddr,
+			"bind": aguiAddr(t),
 		},
 	})
 
 	bootEngine(t, cfg)
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 

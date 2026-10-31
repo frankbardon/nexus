@@ -49,7 +49,7 @@ func collectedToolResult(h *testharness.Harness, name string) (events.ToolResult
 func TestAGUIConsume_LoopbackServeConsume(t *testing.T) {
 	// 1. Stand up the loopback SERVE engine (the "remote" AG-UI agent).
 	bootEngine(t, "configs/test-agui-serve.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
 	// 2. Boot the CALLER engine whose react agent delegates to that endpoint.
 	cfg := copyConfig(t, "configs/test-agui-consume.yaml", map[string]any{
@@ -58,7 +58,7 @@ func TestAGUIConsume_LoopbackServeConsume(t *testing.T) {
 			"agents": []any{
 				map[string]any{
 					"name":     "remote",
-					"endpoint": "http://" + aguiBindAddr + "/agui",
+					"endpoint": "http://" + aguiAddr(t) + "/agui",
 				},
 			},
 		},
@@ -115,8 +115,11 @@ func TestAGUIConsume_LoopbackServeConsume(t *testing.T) {
 // clean tool.result carrying an error (not a hang or panic), and the caller's
 // react loop still terminates normally.
 func TestAGUIConsume_UnreachableEndpoint(t *testing.T) {
-	// Point at a loopback port with nothing listening. A short per-call timeout
-	// keeps the test fast even though the connection refusal is immediate.
+	// Point at a loopback port with nothing listening: one the kernel just
+	// handed out and released, so nothing else on the host can be holding it.
+	// A short per-call timeout keeps the test fast even though the connection
+	// refusal is immediate.
+	unbound := freeLoopbackAddr(t)
 	cfg := copyConfig(t, "configs/test-agui-consume.yaml", map[string]any{
 		"nexus.agent.agui_remote": map[string]any{
 			"cache":           false,
@@ -124,7 +127,7 @@ func TestAGUIConsume_UnreachableEndpoint(t *testing.T) {
 			"agents": []any{
 				map[string]any{
 					"name":     "remote",
-					"endpoint": "http://127.0.0.1:18191/agui", // nothing bound here
+					"endpoint": "http://" + unbound + "/agui",
 				},
 			},
 		},
@@ -167,12 +170,12 @@ func TestAGUIConsume_BearerRejected(t *testing.T) {
 	// Serve engine with bearer auth enabled.
 	serveCfg := copyConfig(t, "configs/test-agui-serve.yaml", map[string]any{
 		"nexus.io.agui": map[string]any{
-			"bind":         aguiBindAddr,
+			"bind":         aguiAddr(t),
 			"bearer_token": "s3cret",
 		},
 	})
 	bootEngine(t, serveCfg)
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
 	// Caller delegates with NO bearer token -> the serve returns 401.
 	cfg := copyConfig(t, "configs/test-agui-consume.yaml", map[string]any{
@@ -181,7 +184,7 @@ func TestAGUIConsume_BearerRejected(t *testing.T) {
 			"agents": []any{
 				map[string]any{
 					"name":     "remote",
-					"endpoint": "http://" + aguiBindAddr + "/agui",
+					"endpoint": "http://" + aguiAddr(t) + "/agui",
 				},
 			},
 		},

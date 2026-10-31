@@ -23,7 +23,7 @@ import (
 //	caller engine                              callee engine
 //	nexus.io.test (mock LLM, scripted input)   nexus.io.test (mock LLM only)
 //	nexus.agent.react                          nexus.agent.react
-//	nexus.agent.a2a_remote  --- A2A wire --->  nexus.io.a2a  (127.0.0.1:18192)
+//	nexus.agent.a2a_remote  --- A2A wire --->  nexus.io.a2a  (127.0.0.1:<free port>)
 //	                            bearer token
 //
 // This is the effort's conformance backstop, and its limits are worth stating
@@ -37,11 +37,6 @@ import (
 // key and no network beyond loopback.
 
 const (
-	// a2aLoopbackAddr is the listener configured by both loopback server
-	// configs. It is deliberately NOT a2aBindAddr (18191, owned by
-	// configs/test-a2a-serve.yaml) so the two suites can never contend.
-	a2aLoopbackAddr = "127.0.0.1:18192"
-
 	// a2aLoopbackToken is the shared bearer token: presented by the caller's
 	// credentials block, validated by the callee's listener.
 	a2aLoopbackToken = "test-a2a-loopback-token"
@@ -86,8 +81,8 @@ const (
 // It reports errors rather than failing the test, because several of the
 // assertions below have to observe the callee from a bus handler's goroutine —
 // where t.Fatal is not allowed — while the caller is still running.
-func a2aLoopbackFetchTask(taskID string) (a2a.Task, int, error) {
-	req, err := http.NewRequest(http.MethodGet, "http://"+a2aLoopbackAddr+"/a2a/v1/tasks/"+taskID, nil)
+func a2aLoopbackFetchTask(addr, taskID string) (a2a.Task, int, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/a2a/v1/tasks/"+taskID, nil)
 	if err != nil {
 		return a2a.Task{}, 0, err
 	}
@@ -111,8 +106,8 @@ func a2aLoopbackFetchTask(taskID string) (a2a.Task, int, error) {
 
 // a2aLoopbackState returns the state the callee currently reports for taskID,
 // empty when it cannot be read.
-func a2aLoopbackState(taskID string) a2a.TaskState {
-	task, status, err := a2aLoopbackFetchTask(taskID)
+func a2aLoopbackState(addr, taskID string) a2a.TaskState {
+	task, status, err := a2aLoopbackFetchTask(addr, taskID)
 	if err != nil || status != http.StatusOK {
 		return ""
 	}
@@ -123,7 +118,7 @@ func a2aLoopbackState(taskID string) a2a.TaskState {
 // transport error.
 func a2aLoopbackGetTask(t *testing.T, taskID string) (a2a.Task, int) {
 	t.Helper()
-	task, status, err := a2aLoopbackFetchTask(taskID)
+	task, status, err := a2aLoopbackFetchTask(a2aLoopbackAddr(t), taskID)
 	if err != nil {
 		t.Fatalf("GetTask %s: %v", taskID, err)
 	}
@@ -132,11 +127,11 @@ func a2aLoopbackGetTask(t *testing.T, taskID string) (a2a.Task, int) {
 
 // a2aLoopbackAwaitState polls the callee until taskID reports want, and returns
 // the last state it saw plus whether it got there inside the deadline.
-func a2aLoopbackAwaitState(taskID string, want a2a.TaskState, within time.Duration) (a2a.TaskState, bool) {
+func a2aLoopbackAwaitState(addr, taskID string, want a2a.TaskState, within time.Duration) (a2a.TaskState, bool) {
 	deadline := time.Now().Add(within)
 	var last a2a.TaskState
 	for time.Now().Before(deadline) {
-		if state := a2aLoopbackState(taskID); state != "" {
+		if state := a2aLoopbackState(addr, taskID); state != "" {
 			last = state
 			if last == want {
 				return last, true
@@ -191,9 +186,9 @@ func a2aLoopbackToolDescriptions(h *testharness.Harness) []string {
 //     <artifacts> element the calling model reads.
 func TestA2ALoopback_StreamingDelegation(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-loopback-server.yaml")
-	waitForListener(t, a2aLoopbackAddr)
+	waitForListener(t, a2aLoopbackAddr(t))
 
-	h := testharness.New(t, "configs/test-a2a-loopback-caller.yaml", testharness.WithTimeout(60*time.Second))
+	h := testharness.New(t, "configs/test-a2a-loopback-caller.yaml", testharness.WithTimeout(60*time.Second), portsOption(t))
 	h.Run()
 
 	// The caller's agent chose to delegate, and the delegation returned.
@@ -258,7 +253,7 @@ func TestA2ALoopback_StreamingDelegation(t *testing.T) {
 // taking the engine down.
 func TestA2ALoopback_BearerRejected(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-loopback-server.yaml")
-	waitForListener(t, a2aLoopbackAddr)
+	waitForListener(t, a2aLoopbackAddr(t))
 
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		"nexus.agent.a2a_remote": map[string]any{
@@ -267,7 +262,7 @@ func TestA2ALoopback_BearerRejected(t *testing.T) {
 			"agents": []any{
 				map[string]any{
 					"name":        "peer",
-					"base_url":    "http://" + a2aLoopbackAddr,
+					"base_url":    "http://" + a2aLoopbackAddr(t),
 					"description": "A second Nexus instance reachable over A2A.",
 					"credentials": map[string]any{
 						"type":  "bearer",
@@ -313,11 +308,11 @@ func TestA2ALoopback_BearerRejected(t *testing.T) {
 // makes the two compose over SSE as well as over the blocking binding.
 func TestA2ALoopback_ChainedHITL(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-loopback-hitl-server.yaml")
-	waitForListener(t, a2aLoopbackAddr)
+	waitForListener(t, a2aLoopbackAddr(t))
 
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		"nexus.io.test":          a2aLoopbackCallerIO(nil),
-		"nexus.agent.a2a_remote": a2aLoopbackRemote(nil),
+		"nexus.agent.a2a_remote": a2aLoopbackRemote(t, nil),
 	})
 	h := testharness.New(t, cfg, testharness.WithTimeout(60*time.Second))
 
@@ -329,6 +324,7 @@ func TestA2ALoopback_ChainedHITL(t *testing.T) {
 		afterWait a2a.TaskState
 	}
 	observed := make(chan parkObservation, 1)
+	addr := a2aLoopbackAddr(t)
 	h.Bus().Subscribe("hitl.requested", func(e engine.Event[any]) {
 		req, ok := e.Payload.(events.HITLRequest)
 		if !ok || req.RequesterPlugin != a2aRemotePluginID {
@@ -336,9 +332,9 @@ func TestA2ALoopback_ChainedHITL(t *testing.T) {
 		}
 		taskID, _ := req.ActionRef["task_id"].(string)
 		go func() {
-			obs := parkObservation{taskID: taskID, onArrival: a2aLoopbackState(taskID)}
+			obs := parkObservation{taskID: taskID, onArrival: a2aLoopbackState(addr, taskID)}
 			time.Sleep(a2aLoopbackParkDwell)
-			obs.afterWait = a2aLoopbackState(taskID)
+			obs.afterWait = a2aLoopbackState(addr, taskID)
 			select {
 			case observed <- obs:
 			default:
@@ -430,18 +426,18 @@ func TestA2ALoopback_ChainedHITL(t *testing.T) {
 // going to resume.
 func TestA2ALoopback_ChainedHITLInputTimeout(t *testing.T) {
 	serverCfg := copyConfig(t, "configs/test-a2a-loopback-hitl-server.yaml", map[string]any{
-		"nexus.io.a2a": a2aLoopbackListener(map[string]any{
+		"nexus.io.a2a": a2aLoopbackListener(t, map[string]any{
 			"tasks": map[string]any{"input_timeout": a2aLoopbackCalleeInputTimeout},
 		}),
 	})
 	bootEngine(t, serverCfg)
-	waitForListener(t, a2aLoopbackAddr)
+	waitForListener(t, a2aLoopbackAddr(t))
 
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		"nexus.io.test": a2aLoopbackCallerIO(nil),
 		// The caller's own question deadline is far looser than the callee's, so
 		// the callee is unambiguously the one that gives up first.
-		"nexus.agent.a2a_remote": a2aLoopbackRemote(map[string]any{
+		"nexus.agent.a2a_remote": a2aLoopbackRemote(t, map[string]any{
 			"hitl": map[string]any{"input_timeout": "20s"},
 		}),
 	})
@@ -480,7 +476,7 @@ func TestA2ALoopback_ChainedHITLInputTimeout(t *testing.T) {
 	}
 
 	// The callee failed the task when its own input deadline elapsed.
-	state, reached := a2aLoopbackAwaitState(taskID, a2a.TaskStateFailed, 2*time.Second)
+	state, reached := a2aLoopbackAwaitState(a2aLoopbackAddr(t), taskID, a2a.TaskStateFailed, 2*time.Second)
 	if !reached {
 		t.Fatalf("callee task %s = %s, want FAILED once tasks.input_timeout elapsed", taskID, state)
 	}
@@ -504,12 +500,12 @@ func TestA2ALoopback_ChainedHITLInputTimeout(t *testing.T) {
 // caller that has gone away.
 func TestA2ALoopback_Cancellation(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-loopback-hitl-server.yaml")
-	waitForListener(t, a2aLoopbackAddr)
+	waitForListener(t, a2aLoopbackAddr(t))
 
 	cfg := copyConfig(t, "configs/test-a2a-loopback-caller.yaml", map[string]any{
 		// Nobody answers: the turn is cancelled with the question still up.
 		"nexus.io.test":          a2aLoopbackCallerIO(nil),
-		"nexus.agent.a2a_remote": a2aLoopbackRemote(nil),
+		"nexus.agent.a2a_remote": a2aLoopbackRemote(t, nil),
 	})
 
 	h := testharness.New(t, cfg, testharness.WithTimeout(60*time.Second))
@@ -536,7 +532,7 @@ func TestA2ALoopback_Cancellation(t *testing.T) {
 			// Deliberately shorter than a2aLoopbackStallCutoff: past it the
 			// engine is being torn down, and shutdown abandons live remote
 			// tasks too, so a CANCELED observed after it would prove nothing.
-			_, reached := a2aLoopbackAwaitState(taskID, a2a.TaskStateCanceled, 2*time.Second)
+			_, reached := a2aLoopbackAwaitState(a2aLoopbackAddr(t), taskID, a2a.TaskStateCanceled, 2*time.Second)
 			canceled <- reached
 		}()
 	})
@@ -593,10 +589,10 @@ func a2aLoopbackCallerIO(overrides map[string]any) map[string]any {
 
 // a2aLoopbackRemote renders the caller's nexus.agent.a2a_remote block with the
 // given per-agent overrides merged in, so a test states only what it changes.
-func a2aLoopbackRemote(overrides map[string]any) map[string]any {
+func a2aLoopbackRemote(t *testing.T, overrides map[string]any) map[string]any {
 	agent := map[string]any{
 		"name":        "peer",
-		"base_url":    "http://" + a2aLoopbackAddr,
+		"base_url":    "http://" + a2aLoopbackAddr(t),
 		"description": "A second Nexus instance reachable over A2A.",
 		"credentials": map[string]any{
 			"type":  "bearer",
@@ -616,10 +612,10 @@ func a2aLoopbackRemote(overrides map[string]any) map[string]any {
 // a2aLoopbackListener renders the callee's nexus.io.a2a block with overrides
 // merged in. copyConfig replaces a plugin block wholesale, so the unchanged
 // keys have to be restated.
-func a2aLoopbackListener(overrides map[string]any) map[string]any {
+func a2aLoopbackListener(t *testing.T, overrides map[string]any) map[string]any {
 	block := map[string]any{
-		"bind":         a2aLoopbackAddr,
-		"public_url":   "http://" + a2aLoopbackAddr,
+		"bind":         a2aLoopbackAddr(t),
+		"public_url":   "http://" + a2aLoopbackAddr(t),
 		"bearer_token": a2aLoopbackToken,
 		"card": map[string]any{
 			"name":        "nexus-loopback-agent",

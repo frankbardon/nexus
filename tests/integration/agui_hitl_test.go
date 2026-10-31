@@ -27,9 +27,9 @@ import (
 //	response, and run 2 completes normally.
 func TestAGUIServe_HITLInterruptResume(t *testing.T) {
 	bootEngine(t, "configs/test-agui-hitl.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -127,9 +127,9 @@ func TestAGUIServe_HITLInterruptResume(t *testing.T) {
 // turn does not hang on the retracted interrupt.
 func TestAGUIServe_HITLResumeCancelled(t *testing.T) {
 	bootEngine(t, "configs/test-agui-hitl.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -180,9 +180,9 @@ func TestAGUIServe_HITLResumeCancelled(t *testing.T) {
 // ToolCallResult and run 2 completes.
 func TestAGUIServe_ClientToolRoundTrip(t *testing.T) {
 	bootEngine(t, "configs/test-agui-clienttool.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

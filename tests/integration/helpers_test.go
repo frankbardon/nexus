@@ -12,7 +12,9 @@ import (
 
 // copyConfig loads a base config, overrides specific plugin configs, writes
 // to a temp file, and returns the path. Used when tests need different inputs
-// or settings than the base config provides.
+// or settings than the base config provides. The base config's fixed loopback
+// ports are rewritten to the test's own free ports (see rewritePorts), so the
+// copy is consistent with aguiAddr / a2aAddr / a2aLoopbackAddr.
 func copyConfig(t *testing.T, baseConfigPath string, overrides map[string]any) string {
 	t.Helper()
 
@@ -42,6 +44,8 @@ func copyConfig(t *testing.T, baseConfigPath string, overrides map[string]any) s
 	if err != nil {
 		t.Fatalf("copyConfig: marshal: %v", err)
 	}
+
+	out = rewritePorts(t, out)
 
 	tmpDir := t.TempDir()
 	tmpPath := filepath.Join(tmpDir, "test-config.yaml")

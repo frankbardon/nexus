@@ -46,6 +46,9 @@ type Harness struct {
 	// (dataRoot/sessions) and the app/agent storage root (dataRoot/data).
 	// Empty when configuredRoots is set.
 	dataRoot string
+	// rewrites transform the raw config bytes, in order, before the engine
+	// is built from them. Set by WithConfigRewrite.
+	rewrites []func([]byte) []byte
 }
 
 // Option configures the test harness.
@@ -83,6 +86,17 @@ func WithKeepSession() Option {
 func WithConfiguredRoots() Option {
 	return func(h *Harness) {
 		h.configuredRoots = true
+	}
+}
+
+// WithConfigRewrite registers fn to transform the raw config file bytes
+// before the engine is constructed from them (and before the sessions and
+// storage roots are redirected). Rewrites run in the order given. It lets a
+// test keep a checked-in config runnable by hand — a fixed loopback port, say
+// — while substituting a per-test value, without writing a temp copy.
+func WithConfigRewrite(fn func([]byte) []byte) Option {
+	return func(h *Harness) {
+		h.rewrites = append(h.rewrites, fn)
 	}
 }
 
@@ -131,7 +145,7 @@ func New(t *testing.T, configPath string, opts ...Option) *Harness {
 	}
 
 	var eng *engine.Engine
-	eng, h.dataRoot = newEngine(t, absPath, h.configuredRoots, &h.retainSession)
+	eng, h.dataRoot = newEngine(t, absPath, h.configuredRoots, h.rewrites, &h.retainSession)
 	h.eng = eng
 
 	// Apply fail-fast on the bus before Boot so the very first dispatch in
@@ -160,13 +174,21 @@ func New(t *testing.T, configPath string, opts ...Option) *Harness {
 // against a serve transport, say) and so cannot use Harness.Run, but must
 // still keep their state out of ~/.nexus. A relative configPath resolves
 // against the project root.
-func NewEngine(t *testing.T, configPath string) *engine.Engine {
+//
+// Only the options that shape engine construction take effect here
+// (WithConfigRewrite, WithConfiguredRoots); the rest configure Harness.Run
+// and are ignored.
+func NewEngine(t *testing.T, configPath string, opts ...Option) *engine.Engine {
 	t.Helper()
 	absPath := configPath
 	if !filepath.IsAbs(configPath) {
 		absPath = filepath.Join(findProjectRoot(t), configPath)
 	}
-	eng, _ := newEngine(t, absPath, false, nil)
+	h := &Harness{}
+	for _, opt := range opts {
+		opt(h)
+	}
+	eng, _ := newEngine(t, absPath, h.configuredRoots, h.rewrites, nil)
 	return eng
 }
 
@@ -175,23 +197,33 @@ func NewEngine(t *testing.T, configPath string) *engine.Engine {
 // cleanup, and builds the engine from the config with both roots rewritten
 // into it, returning the temp root ("" under configuredRoots). retain, when
 // non-nil, is read at cleanup: true plus a failed test keeps the dir.
+// rewrites are applied to the raw config bytes first, in order.
 //
 // The rewrite happens on the YAML before the engine is constructed because
 // the storage manager captures its root at construction; setting eng.Config
 // afterwards would redirect sessions but not app/agent storage. engine.New is
 // LoadConfig(file bytes) + construction, so NewFromBytes on the rewritten
 // bytes is equivalent; ConfigPath is restored for config reloads.
-func newEngine(t *testing.T, absPath string, configuredRoots bool, retain *bool) (*engine.Engine, string) {
+func newEngine(t *testing.T, absPath string, configuredRoots bool, rewrites []func([]byte) []byte, retain *bool) (*engine.Engine, string) {
 	t.Helper()
 	fail := func(err error) {
 		t.Fatalf("testharness: failed to create engine from %s: %v", absPath, err)
 	}
 
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		fail(fmt.Errorf("read config: %w", err))
+	}
+	for _, rw := range rewrites {
+		data = rw(data)
+	}
+
 	if configuredRoots {
-		eng, err := engine.New(absPath)
+		eng, err := engine.NewFromBytes(data)
 		if err != nil {
 			fail(err)
 		}
+		eng.ConfigPath = absPath
 		allplugins.RegisterAll(eng.Registry)
 		return eng, ""
 	}
@@ -208,10 +240,6 @@ func newEngine(t *testing.T, absPath string, configuredRoots bool, retain *bool)
 		os.RemoveAll(dir)
 	})
 
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		fail(fmt.Errorf("read config: %w", err))
-	}
 	data, err = overrideRoots(data, filepath.Join(dir, "sessions"), filepath.Join(dir, "data"))
 	if err != nil {
 		fail(fmt.Errorf("override roots: %w", err))

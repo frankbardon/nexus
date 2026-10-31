@@ -30,7 +30,7 @@ func TestAGUIServe_HITLInterruptResume_Live(t *testing.T) {
 			"api_key_env": "ANTHROPIC_API_KEY",
 		},
 		"nexus.io.agui": map[string]any{
-			"bind": aguiBindAddr,
+			"bind": aguiAddr(t),
 		},
 		"nexus.agent.react": map[string]any{
 			"system_prompt": "You are a deployment assistant. You MUST call the " +
@@ -42,9 +42,9 @@ func TestAGUIServe_HITLInterruptResume_Live(t *testing.T) {
 	})
 
 	bootEngine(t, cfg)
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 

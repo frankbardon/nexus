@@ -179,3 +179,32 @@ func TestNewEngine_RedirectsRoots(t *testing.T) {
 		t.Error("nexus.io.test not registered; NewEngine must register the built-in plugins")
 	}
 }
+
+// TestWithConfigRewrite pins that rewrites run on the raw config bytes, in
+// order, for New and NewEngine alike, under both root modes.
+func TestWithConfigRewrite(t *testing.T) {
+	cfgPath := writeConfig(t, homeRootsConfig)
+	replace := func(old, new string) Option {
+		return WithConfigRewrite(func(b []byte) []byte {
+			return []byte(strings.ReplaceAll(string(b), old, new))
+		})
+	}
+	// The second rewrite only matches what the first produced, so order matters.
+	opts := []Option{replace("max_messages: 10", "max_messages: 7"), replace("max_messages: 7", "max_messages: 3")}
+	maxMessages := func(t *testing.T, eng *engine.Engine) {
+		t.Helper()
+		if got := eng.Config.Plugins.Configs["nexus.memory.capped"]["max_messages"]; got != 3 {
+			t.Errorf("max_messages = %v, want 3 (rewrites not applied in order)", got)
+		}
+	}
+
+	t.Run("New", func(t *testing.T) { maxMessages(t, New(t, cfgPath, opts...).eng) })
+	t.Run("NewEngine", func(t *testing.T) { maxMessages(t, NewEngine(t, cfgPath, opts...)) })
+	t.Run("ConfiguredRoots", func(t *testing.T) {
+		eng := NewEngine(t, cfgPath, append(opts, WithConfiguredRoots())...)
+		maxMessages(t, eng)
+		if eng.ConfigPath != cfgPath {
+			t.Errorf("ConfigPath = %q, want %q", eng.ConfigPath, cfgPath)
+		}
+	})
+}
