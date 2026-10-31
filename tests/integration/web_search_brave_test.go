@@ -106,7 +106,7 @@ func TestWebSearch_Brave(t *testing.T) {
 		want := []string{
 			"https://example.com/brave-v2",
 			"https://example.com/openai-search",
-			"Brave releases v2",                 // <strong> tags stripped
+			"Brave releases v2", // <strong> tags stripped
 			"OpenAI announces native search",
 			"nexus.search.brave", // provider tag in formatted output
 		}
