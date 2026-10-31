@@ -37,6 +37,21 @@ from the live tick goroutine and which otel / eval already treat as
 noise. See [configuration reference](../configuration/reference.md#journal)
 for the full key.
 
+The journal also records the run's own teardown. Its wildcard subscription is
+not one of the run-scoped subscriptions `Stop` removes first; it stays attached
+through `core.shutdown`, the bus drain and every plugin's `Shutdown`, and is
+removed only immediately before the writer closes. A cleanly stopped session's
+journal therefore ends with `core.shutdown` followed by whatever plugins emitted
+on the way out. Those trailing envelopes are inert to replay and resume: replay
+re-emits only `io.input` and stashes `llm.response` / `tool.result` /
+`hitl.responded`, so shutdown is never re-run, and partial-turn detection keys
+on `agent.turn.start` / `agent.turn.end` alone, so they do not make a completed
+turn look unfinished on `-recall`. A failed `Boot` closes the journal the same
+way, so the teardown of plugins that had already initialized is recorded too.
+`Abandon` detaches the wildcard without closing the writer, matching a killed
+process, which journals nothing further. The journal is closed before the
+object-store shutdown snapshot, so the stored copy carries the teardown events.
+
 ## Session Metadata
 
 Each session tracks metadata in `metadata/session.json`:
@@ -885,6 +900,7 @@ and releases the local lock. `Abandon` **drops** one:
 | Owner marker in the store | **deleted** | **left in place** |
 | Shutdown snapshot, `Flush` | yes | **no** |
 | Plugin `Shutdown`, journal close, SQLite close, session metadata, session lock | all done | **none of it** |
+| Journal records further events | yes, through teardown | **no** — wildcard detached, writer left open |
 
 It exists for two callers. A host on ephemeral compute that is being reclaimed
 and does not want to pay a whole-tree snapshot of a session nobody will read.
