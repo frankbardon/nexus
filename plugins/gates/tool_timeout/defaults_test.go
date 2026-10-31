@@ -1,12 +1,15 @@
 package tooltimeout
 
 import (
+	"context"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/engine"
+	"github.com/frankbardon/nexus/pkg/events"
 )
 
 // initPlugin runs the real factory + Init against cfg, as the engine does for
@@ -102,5 +105,75 @@ func TestDefaults_NegativeRejected(t *testing.T) {
 	}
 	if _, err := initPlugin(t, map[string]any{"per_tool": map[string]any{"shell": "-5s"}}); err == nil || !strings.Contains(err.Error(), "negative") {
 		t.Errorf("negative per_tool: err = %v", err)
+	}
+}
+
+// TestDefaults_AwaitsHumanTagExempts: a tool whose definition carries
+// events.ToolTagAwaitsHuman — learned from tool.register or from a finished
+// tool.catalog.query snapshot (per-run tools such as AG-UI client tools) —
+// gets no deadline; an untagged redefinition restores the default; and an
+// operator per_tool key still bounds a tagged tool.
+func TestDefaults_AwaitsHumanTagExempts(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	if err := p.Init(engine.PluginContext{
+		Config: map[string]any{"per_tool": map[string]any{"bounded_*": "3m"}},
+		Bus:    bus, Logger: slog.Default(),
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	human := []string{events.ToolTagAwaitsHuman}
+
+	_ = bus.Emit("tool.register", events.ToolDef{Name: "memory_write", Tags: human})
+	_ = bus.Emit("tool.register", events.ToolDef{Name: "memory_read"})
+	_ = bus.Emit("tool.register", events.ToolDef{Name: "bounded_approval", Tags: human})
+
+	// A catalog handler appends a per-run client tool; the gate observes the
+	// finished snapshot.
+	bus.Subscribe("tool.catalog.query", func(e engine.Event[any]) {
+		q := e.Payload.(*events.ToolCatalogQuery)
+		q.Tools = append(q.Tools, events.ToolDef{Name: "pick_color", Tags: human})
+	}, engine.WithPriority(60))
+	_ = bus.Emit("tool.catalog.query", &events.ToolCatalogQuery{})
+
+	for name, want := range map[string]time.Duration{
+		"memory_write":     0,
+		"pick_color":       0,
+		"memory_read":      10 * time.Minute,
+		"bounded_approval": 3 * time.Minute,
+	} {
+		if got := p.resolveTimeout(name); got != want {
+			t.Errorf("resolveTimeout(%q) = %s, want %s", name, got, want)
+		}
+	}
+
+	// Re-registered without the tag (e.g. approval turned off): default again.
+	_ = bus.Emit("tool.register", events.ToolDef{Name: "memory_write"})
+	if got := p.resolveTimeout("memory_write"); got != 10*time.Minute {
+		t.Errorf("untagged re-register: memory_write = %s, want 10m", got)
+	}
+}
+
+// TestDefaults_AwaitsHumanNoSyntheticTimeout: end to end, an exempt tagged
+// tool gets no timer, so no tool.timeout fires however long the human takes.
+func TestDefaults_AwaitsHumanNoSyntheticTimeout(t *testing.T) {
+	bus := engine.NewEventBus()
+	p := New().(*Plugin)
+	if err := p.Init(engine.PluginContext{
+		Config: map[string]any{"default_timeout": "20ms"},
+		Bus:    bus, Logger: slog.Default(),
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	_ = bus.Emit("tool.register", events.ToolDef{Name: "memory_write", Tags: []string{events.ToolTagAwaitsHuman}})
+
+	var fired atomic.Int32
+	bus.Subscribe("tool.timeout", func(engine.Event[any]) { fired.Add(1) })
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1", Name: "memory_write"})
+	_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c2", Name: "shell"})
+	time.Sleep(100 * time.Millisecond)
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("tool.timeout fired %d times, want 1 (shell only)", got)
 	}
 }

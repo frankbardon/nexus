@@ -48,6 +48,7 @@ type Plugin struct {
 	turnDepth     int    // number of in-flight turns (start - end)
 	turnsSeen     int    // total agent.turn.start events observed after input was sent
 	inputSent     bool   // whether we have emitted the initial io.input
+	running       bool   // whether core.ready fired, i.e. Boot succeeded and the run began
 	finalized     bool   // whether we have already flushed output + ended the session
 	pendingPrompt string // resolved prompt staged in Ready(), dispatched on core.ready
 
@@ -184,6 +185,7 @@ func (p *Plugin) handleCoreReady(_ engine.Event[any]) {
 	}
 	prompt := p.pendingPrompt
 	p.inputSent = true
+	p.running = true
 	p.mu.Unlock()
 
 	if prompt == "" {
@@ -203,7 +205,16 @@ func (p *Plugin) handleCoreReady(_ engine.Event[any]) {
 func (p *Plugin) Shutdown(ctx context.Context) error {
 	// If the agent never finished (e.g. shutdown via signal), still attempt
 	// to write whatever we captured so the caller gets something actionable.
-	p.finalize()
+	// Skip it when the run never began: core.ready only fires after a
+	// successful Boot, so a Shutdown without it is the engine tearing down a
+	// failed Boot, and a transcript there would be an empty success-shaped
+	// document for a run that never happened. The Boot error is the report.
+	p.mu.Lock()
+	running := p.running
+	p.mu.Unlock()
+	if running {
+		p.finalize()
+	}
 
 	for _, unsub := range p.unsubs {
 		unsub()

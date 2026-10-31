@@ -498,6 +498,7 @@ func (lm *LifecycleManager) buildPluginContext(configuredID string) (PluginConte
 		Logging:      lm.logging,
 		InstanceID:   instanceID,
 		Replay:       lm.replay,
+		ToolCalls:    lm.toolCalls,
 		Journal:      lm.journal,
 		Sandbox:      sb,
 	}, nil

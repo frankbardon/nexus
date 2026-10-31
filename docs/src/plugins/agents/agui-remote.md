@@ -87,6 +87,12 @@ remote work as a sub-run:
 | *(run begins)* | `subagent.started` |
 | *(run ends)* | `subagent.complete` — carries the terminal result or error |
 
+The `subagent.*` events carry the invoking call's `ToolCall.BindingTurnID()`
+as `ParentTurnID` — the transport-visible parent turn when the tool is called
+from inside a subagent/delegate loop, else the call's own turn — matching the
+local delegate and subagent. The `tool.result` keeps the call's `TurnID`,
+which is what results are matched on.
+
 The terminal outcome — accumulated text deltas, or the `RunFinished` result
 payload when the remote streamed no text — becomes the `tool.result` `Output`
 returned to the parent agent. The whole `tool.result` passes through the

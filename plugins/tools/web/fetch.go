@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,7 +58,9 @@ func (p *Plugin) handleFetch(tc events.ToolCall) {
 		return
 	}
 
-	body, finalURL, err := p.doFetch(parsed.String())
+	callCtx, release := p.toolCalls.Begin(context.Background(), tc.ID)
+	defer release()
+	body, finalURL, err := p.doFetch(callCtx, parsed.String())
 	if err != nil {
 		p.emitResult(tc, "", err.Error())
 		return
@@ -125,8 +128,8 @@ func domainMatch(host, pattern string) bool {
 	return strings.HasSuffix(host, "."+pattern)
 }
 
-func (p *Plugin) doFetch(target string) ([]byte, string, error) {
-	req, err := http.NewRequest("GET", target, nil)
+func (p *Plugin) doFetch(ctx context.Context, target string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("build request: %w", err)
 	}

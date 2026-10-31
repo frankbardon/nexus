@@ -46,6 +46,10 @@ type Engine struct {
 	// after construction; idle until a replay coordinator activates it.
 	// Plugins inspect Replay.Active() to short-circuit side effects.
 	Replay *ReplayState
+	// ToolCalls is the per-call tool context registry handed to plugins as
+	// PluginContext.ToolCalls. Always non-nil after construction. Boot
+	// attaches it to tool.timeout; Stop cancels whatever is still live.
+	ToolCalls *ToolCallContexts
 	// Storage opens scoped per-plugin SQLite-backed storage. Always
 	// non-nil after construction; closed by Stop. Plugins access it via
 	// PluginContext.Storage rather than reaching here directly.
@@ -68,6 +72,13 @@ type Engine struct {
 	runUnsubs  []func()
 	runCancel  context.CancelFunc
 	sessionEnd chan struct{}
+
+	// journalUnsub removes the journal's wildcard subscription. Deliberately
+	// NOT in runUnsubs: the wildcard has to outlive the run-scoped teardown at
+	// the top of Stop so core.shutdown and whatever plugins emit from their
+	// Shutdown still reach disk. closeJournal removes it immediately before
+	// closing the writer; Abandon removes it without closing anything.
+	journalUnsub func()
 
 	// objectStore is the optional remote backing for the session tree. Nil
 	// whenever core.object_store names no backend, which is the
@@ -167,6 +178,8 @@ func newFromConfig(cfg *Config) *Engine {
 	ctxMgr := NewContextManager(bus, logger)
 	replay := NewReplayState()
 	lifecycle.replay = replay
+	toolCalls := NewToolCallContexts()
+	lifecycle.toolCalls = toolCalls
 
 	storageRoot := storageRoot(cfg)
 	storageMgr := storage.NewManager(
@@ -190,6 +203,7 @@ func newFromConfig(cfg *Config) *Engine {
 		Logger:    logger,
 		Logging:   fanout,
 		Replay:    replay,
+		ToolCalls: toolCalls,
 		Storage:   storageMgr,
 	}
 	// Resolve session-scoped storage paths against whatever Session is set
@@ -260,16 +274,18 @@ func (e *Engine) Boot(ctx context.Context) error {
 		}
 	}()
 	// Drop every run-scoped subscription installed so far if Boot fails —
-	// the journal wildcard, the tool cache, the tag seeder and anything else
+	// the tool cache, the tag seeder and anything else
 	// appended to e.runUnsubs before the failing step. The caller will not
 	// call Stop on a failed boot, so without this a retried Boot on the same
 	// engine registered each handler a second time (#206). Deferred after the
 	// object-store release so it runs before it: the snapshot handlers read
 	// e.objectStore, the same ordering Stop and Abandon depend on.
 	//
-	// The journal writer is closed in the same defer, after the unsubscribe
-	// so the wildcard handler can no longer Append to it — the order Stop
-	// uses. Without it a failed Boot left the drain goroutine and the open
+	// The journal writer is closed in the same defer, after the run-scoped
+	// unsubscribe — the order Stop uses. closeJournal detaches the journal's
+	// own wildcard (which is not run-scoped) before closing, so the teardown
+	// Lifecycle.Boot already ran for initialized plugins is journaled and no
+	// handler can Append to a closed writer. Without it a failed Boot left the drain goroutine and the open
 	// segment file behind, and a retry started a second writer over the
 	// same directory. Plugins that already completed Init have been shut
 	// down by Lifecycle.Boot itself before this runs.
@@ -388,6 +404,11 @@ func (e *Engine) Boot(ctx context.Context) error {
 	// before:session.tag.delete, with the reserved ("_"-prefixed) namespace
 	// unconditionally barred from this path. See session_tags.go.
 	e.installSessionTagHandlers()
+
+	// A tool.timeout cancels the timed-out call's dispatch context, so a
+	// handler that runs under ToolCalls.Begin stops instead of running on
+	// in the background after the agent has been handed an error result.
+	e.runUnsubs = append(e.runUnsubs, e.ToolCalls.Attach(e.Bus))
 
 	// Track token usage and cost from LLM responses.
 	e.runUnsubs = append(e.runUnsubs, e.Bus.Subscribe("llm.response", func(event Event[any]) {
@@ -758,6 +779,10 @@ func (e *Engine) Stop(ctx context.Context) error {
 
 	e.unsubscribeRunScoped()
 
+	// Cancel every tool call still in flight so its handler unwinds rather
+	// than outliving the run.
+	e.ToolCalls.CancelAll(ErrToolCallsStopped)
+
 	// Stop the object-store recovery worker before anything else is torn down.
 	// It snapshots through the journal writer this function closes further
 	// down, and it emits on a bus whose run subscriptions have just gone: both
@@ -769,12 +794,22 @@ func (e *Engine) Stop(ctx context.Context) error {
 	e.EndSession()
 
 	if err := e.Lifecycle.Shutdown(ctx); err != nil {
+		// The journal wildcard is not run-scoped, so it would otherwise keep
+		// appending after a failed Stop. Close it on the way out.
+		e.closeJournal()
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
 
-	// Close the journal last so any teardown events (plugin Shutdown,
-	// session.end finalization) reach disk. Use a short-deadline context
-	// so a stuck drain cannot block engine shutdown indefinitely.
+	// Close the journal after plugin Shutdown so every envelope already
+	// queued is drained to disk. Teardown events ARE recorded: the journal's
+	// wildcard is not run-scoped (see Engine.journalUnsub), so it survived
+	// unsubscribeRunScoped at the top of Stop and saw core.shutdown, the bus
+	// drain, and everything plugins emitted from Shutdown. closeJournal
+	// removes it immediately before closing the writer. The journal therefore
+	// ends at the last event of teardown; replay re-emits only io.input and
+	// stashes provider/tool/hitl answers, so trailing teardown envelopes are
+	// inert there. Use a short-deadline context so a stuck drain cannot block
+	// engine shutdown indefinitely.
 	//
 	// The writer is kept in a local so the shutdown snapshot below can still
 	// capture its segments: a closed writer is the ideal thing to snapshot,
@@ -888,6 +923,11 @@ func (e *Engine) Abandon() {
 	// ordering for the same reason.
 	e.unsubscribeRunScoped()
 
+	// A killed process journals nothing further, so neither does an abandoned
+	// engine: detach the journal's wildcard (it is not run-scoped) but leave
+	// the writer open, per the doc comment above. A later Stop still closes it.
+	e.detachJournal()
+
 	// The recovery worker first, for the reason Stop gives at the same point:
 	// it snapshots through the journal writer and emits on the bus, so it has
 	// to be gone before anything is taken out from under it. Its stop signal
@@ -931,12 +971,26 @@ func (e *Engine) unsubscribeRunScoped() {
 	e.runUnsubs = nil
 }
 
-// closeJournal closes the journal writer Boot started, if any, and detaches
-// it from the engine and the lifecycle manager. It returns the closed writer
-// so Stop can still snapshot its segments. A short deadline keeps a stuck
-// drain from blocking teardown indefinitely. Shared by Stop and Boot's own
-// failure path; idempotent.
+// detachJournal removes the journal's bus wildcard, if installed, so no
+// further events are appended. It does not close the writer. Idempotent.
+func (e *Engine) detachJournal() {
+	if e.journalUnsub != nil {
+		e.journalUnsub()
+		e.journalUnsub = nil
+	}
+}
+
+// closeJournal detaches the journal's bus wildcard, then closes the journal
+// writer Boot started, if any, and detaches it from the engine and the
+// lifecycle manager. Unsubscribing first is what makes the close race-free:
+// once the wildcard is gone no dispatch can Append, and an Append already in
+// flight holds the writer's send lock, which Close waits for (an Append that
+// loses the race to Close is dropped, never sent on a closed channel). It
+// returns the closed writer so Stop can still snapshot its segments. A short
+// deadline keeps a stuck drain from blocking teardown indefinitely. Shared by
+// Stop and Boot's own failure path; idempotent.
 func (e *Engine) closeJournal() *journal.Writer {
+	e.detachJournal()
 	w := e.Journal
 	if w == nil {
 		return nil
@@ -1031,7 +1085,8 @@ func (e *Engine) startJournal() error {
 		env := buildEnvelope(ev, bus.CurrentSeq(), bus.ParentSeq())
 		w.Append(env)
 	})
-	e.runUnsubs = append(e.runUnsubs, unsub)
+	// Not run-scoped: kept until closeJournal so teardown is journaled.
+	e.journalUnsub = unsub
 	return nil
 }
 

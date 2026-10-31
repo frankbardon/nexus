@@ -35,6 +35,35 @@ var DefaultChoices = []events.HITLChoice{
 	{ID: "reject", Label: "Reject", Kind: events.ChoiceReject},
 }
 
+// DefaultTimeout bounds a require_approval wait when the plugin's
+// require_approval.timeout key is unset. Without it an unanswered prompt
+// would hold the gated action (and, for a tool call, the turn) forever.
+const DefaultTimeout = 30 * time.Minute
+
+// ParseTimeout reads a require_approval.timeout config value and returns the
+// wait bound the memory plugins share: unset (nil or "") is DefaultTimeout;
+// any zero duration ("0", "0s") disables the deadline and returns 0; a
+// positive Go duration string is used as-is. A malformed, negative or
+// non-string value returns DefaultTimeout with ok=false so the caller can
+// log a warning and keep booting.
+func ParseTimeout(raw any) (d time.Duration, ok bool) {
+	if raw == nil {
+		return DefaultTimeout, true
+	}
+	s, isStr := raw.(string)
+	if !isStr {
+		return DefaultTimeout, false
+	}
+	if s == "" {
+		return DefaultTimeout, true
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil || parsed < 0 {
+		return DefaultTimeout, false
+	}
+	return parsed, true
+}
+
 // Request is the input to RequestApproval.
 type Request struct {
 	// Bus is the event bus used to emit hitl.requested and observe
@@ -61,7 +90,9 @@ type Request struct {
 	// empty, no default is set; expiry resolves with Cancelled=true.
 	DefaultChoiceID string
 	// Timeout, when > 0, sets a Deadline on the request and aborts the
-	// in-process wait if no response arrives in time.
+	// in-process wait if no response arrives in time. On expiry the helper
+	// emits hitl.cancel for the request so transports dismiss the prompt;
+	// callers must declare "hitl.cancel" in Emissions().
 	Timeout time.Duration
 	// SessionID, when set, is forwarded as HITLRequest.SessionID for
 	// out-of-band CLI tooling. Optional.
@@ -72,6 +103,10 @@ type Request struct {
 	// Set it whenever the gated action came from a turn (a tool call);
 	// leave it empty for actions that belong to no turn. Optional.
 	TurnID string
+	// CallID, when set, is forwarded as HITLRequest.CallID: the ID of the
+	// tool call the gated action belongs to, so nexus.control.hitl cancels
+	// the request if that call times out. Optional.
+	CallID string
 }
 
 // RequestApproval emits hitl.requested and blocks until a matching
@@ -124,6 +159,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 	hitlReq := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id,
 		SessionID:       req.SessionID,
 		TurnID:          req.TurnID,
+		CallID:          req.CallID,
 		RequesterPlugin: req.PluginID,
 		ActionKind:      req.ActionKind,
 		ActionRef:       req.ActionRef,
@@ -192,6 +228,15 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 			"request_id", id,
 			"default_choice_id", req.DefaultChoiceID,
 		)
+		// Retract the prompt: nexus.control.hitl drops the registry entry
+		// and emits the synthetic hitl.responded{Cancelled} that transports
+		// dismiss the question on. Without it an operator could still answer
+		// a request nobody is waiting for. The synthetic response lands in
+		// respCh (buffered) and is discarded; the outcome below stands.
+		_ = req.Bus.Emit("hitl.cancel", events.HITLCancel{SchemaVersion: events.HITLCancelVersion,
+			RequestID: id,
+			Reason:    "deadline expired",
+		})
 		// Deadline expired without a response. Resolve to default choice
 		// when one is set; otherwise treat as cancelled.
 		resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion, RequestID: id,

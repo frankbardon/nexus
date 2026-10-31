@@ -63,6 +63,19 @@ The implementation lives in `pkg/eval/promote/`. The pipeline:
       with `count_tolerance: 0` and `arg_keys: true`.
     - `semantic: []` — empty, with a TODO comment for Phase 5 LLM-judge
       rubrics.
+
+   The pass skips the source run's **teardown**. A stopped session's
+   journal ends with `core.shutdown`, the shutdown drain and whatever
+   plugins emitted from `Shutdown`; none of that is session behaviour, so
+   every envelope from `core.shutdown` up to the next `core.boot` (a
+   recalled run appends to the same journal) is left out of every
+   synthesized assertion — counts, tokens, latency, tools and the
+   non-replayable warning alike. The one exception is a turn that was still
+   open when `core.shutdown` fired and finished during the drain: its
+   envelopes, through its closing `agent.turn.end`, still count. The
+   classification is `journal.TeardownFilter`, shared with replay. Only
+   generated assertions change; the journal is copied whole, and
+   hand-written assertions are evaluated exactly as before.
 6. **Write `case.yaml`** with `name`, `description` (synthesized when
    omitted), `tags`, `owner` (falling back to `$USER`, then `unknown`),
    `freshness_days: 30`, `model_baseline` (extracted from

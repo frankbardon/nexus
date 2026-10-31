@@ -22,6 +22,13 @@ Executes shell commands in a controlled environment with optional command allowl
 | `sandbox.env_restrict` | bool | `false` | Strip sensitive env vars before execution. |
 | `sandbox.timeout` | duration | `30s` | Per-command default; top-level `timeout` wins per-call. |
 
+When a command is cancelled — by its own `timeout`, or because
+`nexus.gate.tool_timeout` timed the call out (a `tool.timeout` for its call ID)
+— the host sandbox runs it in its own process group and SIGKILLs the whole
+group on unix, so a backgrounded job or pipeline stage does not outlive the
+call. A gate-cancelled call answers with `command cancelled: ...`; that result
+is normally dropped, since the gate has already returned a timeout error.
+
 ## Tool Parameters
 
 | Parameter | Type | Required | Description |

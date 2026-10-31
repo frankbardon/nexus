@@ -127,7 +127,9 @@ this repository must apply the same predicate.
 The sub-agent's **tool calls** need a second, separate guard, because they are
 dispatched on the shared bus and carry no LLM metadata to filter on. Every
 `tool.invoke` and `tool.result` inside a sub-session carries
-`TurnID: "delegate_<sub_session_id>"`, and `nexus.memory.capped` records a
+`TurnID: "delegate_<sub_session_id>"` (plus `ParentTurnID` set to the caller's
+turn, which a HITL request raised on the call binds to — see
+[HITL](../../operations/hitl.md)), and `nexus.memory.capped` records a
 result only when its `TurnID` is the conversation's own — otherwise the parent's
 history grows a `tool` message whose `ToolCallID` no assistant turn ever
 declared, which Gemini maps to a `functionResponse` naming a function the

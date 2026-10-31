@@ -571,3 +571,41 @@ func TestApprovalPolicy_HITLRequestCarriesTurnID(t *testing.T) {
 		t.Errorf("llm.request ActionRef[turn_id] = %v, want turn-llm", got)
 	}
 }
+
+// TestApprovalPolicy_ToolInvoke_PrefersParentTurnID pins that a tool.invoke
+// raised inside a nested loop binds its HITLRequest to the parent turn the
+// loop serves, not the loop's private result-matching TurnID. nexus.io.agui
+// drops a hitl.requested naming a turn it never saw start, so the parent
+// run never saw the approval (#224).
+func TestApprovalPolicy_ToolInvoke_PrefersParentTurnID(t *testing.T) {
+	rules := []rule{{match: map[string]any{"action_kind": "tool.invoke", "tool": "shell"}, mode: string(events.HITLModeChoices)}}
+	_, bus := newTestPlugin(t, rules)
+	resp := newScriptedResponder(bus, events.HITLResponse{SchemaVersion: events.HITLResponseVersion, ChoiceID: "allow"})
+
+	tc := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "t1",
+		Name:         "shell",
+		Arguments:    map[string]any{"command": "ls"},
+		TurnID:       "subagent_spawn-1",
+		ParentTurnID: "turn-parent",
+	}
+	if _, err := bus.EmitVetoable("before:tool.invoke", &tc); err != nil {
+		t.Fatalf("emit tool: %v", err)
+	}
+
+	resp.mu.Lock()
+	defer resp.mu.Unlock()
+	if len(resp.seen) != 1 {
+		t.Fatalf("expected 1 hitl.requested, got %d", len(resp.seen))
+	}
+	if got := resp.seen[0].TurnID; got != "turn-parent" {
+		t.Errorf("HITLRequest.TurnID = %q, want turn-parent", got)
+	}
+	// CallID ties the approval to the gated call so nexus.control.hitl
+	// cancels it on tool.timeout for that call (#219).
+	if got := resp.seen[0].CallID; got != "t1" {
+		t.Errorf("HITLRequest.CallID = %q, want t1", got)
+	}
+	if tc.TurnID != "subagent_spawn-1" {
+		t.Errorf("gate rewrote ToolCall.TurnID to %q; result matching would break", tc.TurnID)
+	}
+}

@@ -19,6 +19,8 @@ core:
       model: mock
       max_tokens: 4096
   sessions:
+    # Manual runs only (bin/nexus -config ...). pkg/testharness replaces
+    # this, and core.storage.root, with a per-test temp dir.
     root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short
@@ -67,4 +69,5 @@ plugins:
     dimensions: 64
 
   nexus.vectorstore.chromem:
-    # Use the per-plugin session dir for the persistence path.
+    # No path: manual runs use the default ~/.nexus/vectors. The integration
+    # tests override path with t.TempDir() via copyConfig.

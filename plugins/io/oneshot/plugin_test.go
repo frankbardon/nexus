@@ -1,6 +1,9 @@
 package oneshot
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -78,5 +81,45 @@ func TestOneshot_DefersInputUntilCoreReady(t *testing.T) {
 	}
 	if inputs[0].Content != "hello" {
 		t.Fatalf("io.input content = %q, want %q", inputs[0].Content, "hello")
+	}
+}
+
+// TestOneshot_NoTranscriptWhenBootFailed: the engine shuts down a plugin
+// whose Init succeeded when a later Init or any Ready fails, and core.ready
+// never fires. That Shutdown must not write a transcript for a run that never
+// began (#222). The harness runs Init and Ready but emits no core.ready, which
+// is exactly a Boot that failed in another plugin's Ready.
+func TestOneshot_NoTranscriptWhenBootFailed(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "transcript.json")
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"input":       "hello",
+		"read_stdin":  false,
+		"output_file": out,
+	}))
+
+	if err := h.Plugin().Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("transcript written after a Boot that never reached core.ready (stat err = %v)", err)
+	}
+}
+
+// TestOneshot_TranscriptOnShutdownAfterRunBegan: once core.ready has fired,
+// a Shutdown before the agent finishes (e.g. a signal) still writes whatever
+// was captured.
+func TestOneshot_TranscriptOnShutdownAfterRunBegan(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "transcript.json")
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"read_stdin":  false,
+		"output_file": out,
+	}))
+	h.Inject("core.ready", nil)
+
+	if err := h.Plugin().Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("transcript not written on Shutdown after core.ready: %v", err)
 	}
 }

@@ -75,7 +75,15 @@ writer ([#206](https://github.com/frankbardon/nexus/issues/206)).
 Plugins get the same treatment. When a plugin's `Init` or any plugin's `Ready`
 fails, `Boot` calls `Shutdown` on every plugin whose `Init` already succeeded, in
 reverse init order, before it returns. A plugin whose own `Init` failed is not shut
-down. On a `Ready` failure every plugin has finished `Init`, so all of them are
+down; instead the engine removes every bus subscription that plugin made before
+its `Init` returned the error. It does this by recording the subscriptions made
+during each plugin's `Init` (typed, `SubscribeAll` and `SubscribeAllReplay`) and
+unsubscribing them, newest first, when that `Init` fails, so a plugin that
+subscribes and then fails leaves no handler behind and needs no cleanup code of
+its own ([#222](https://github.com/frankbardon/nexus/issues/222)). Only
+subscriptions are undone this way. Anything else a failing `Init` opened (a file,
+a goroutine, a listener) is still the plugin's to release before it returns the
+error. On a `Ready` failure every plugin has finished `Init`, so all of them are
 shut down, the failing one included. No `core.shutdown` is emitted and the bus is
 not drained. `Shutdown` gets a context detached from Boot's own, bounded by
 `engine.shutdown.drain_timeout`. A `Shutdown` error or panic is logged and never

@@ -123,6 +123,9 @@ func (b *Backend) execShell(ctx context.Context, req sandbox.ExecRequest) (sandb
 	// Wait in awaitGoroutines. WaitDelay forces the I/O pipes shut a
 	// bounded time after context cancel so Wait returns promptly.
 	cmd.WaitDelay = 2 * time.Second
+	// On cancellation (deadline or a caller cancelling ctx, e.g. a
+	// tool.timeout), kill the whole process group, not just the shell.
+	killTreeOnCancel(cmd)
 
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
@@ -175,6 +178,12 @@ func (b *Backend) execShell(ctx context.Context, req sandbox.ExecRequest) (sandb
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		return res, nil
+	}
+	if ctx.Err() != nil {
+		// The caller cancelled before the command finished: the process
+		// group was killed, so whatever exit code it left is not the
+		// command's own answer.
+		return res, fmt.Errorf("host sandbox: cancelled: %w", context.Cause(ctx))
 	}
 	if runErr != nil {
 		// Non-zero exit lands here without ctx error; keep res, propagate

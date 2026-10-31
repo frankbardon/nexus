@@ -26,8 +26,14 @@ type RetrievalContext struct {
 	SchemaVersion int `json:"_schema_version"`
 
 	TurnID string
-	Source string // emitter plugin ID for debug
-	Chunks []RetrievedChunk
+	// ParentTurnID, when set, is the turn a nested loop (subagent,
+	// delegate) serves while TurnID is that loop's private tool turn — the
+	// ToolCall's ParentTurnID. Consumers index on TurnID and use this only
+	// to release the index when the parent turn ends: no agent.turn.end
+	// ever names the private turn.
+	ParentTurnID string
+	Source       string // emitter plugin ID for debug
+	Chunks       []RetrievedChunk
 }
 
 // CitationRef is one parsed source attribution attached to an LLM response.

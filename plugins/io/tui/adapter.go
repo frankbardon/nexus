@@ -21,6 +21,8 @@ type Adapter struct {
 	approvalHandler func(ui.ApprovalResponseMessage)
 	cancelHandler   func()
 	resumeHandler   func()
+	exitHandler     func()
+	stopping        bool
 	approvalCh      chan ui.ApprovalResponseMessage
 
 	askCh chan ui.HITLResponseMessage
@@ -52,14 +54,40 @@ func (a *Adapter) Start(ctx context.Context) error {
 	go func() {
 		defer close(a.done)
 		_, _ = a.program.Run()
+		a.programExited()
 	}()
 
 	return nil
 }
 
+// programExited runs once the BubbleTea program has returned. A program that
+// quit on the user's own key (Ctrl-C) rather than because the engine is
+// shutting it down must end the session: otherwise the terminal is restored
+// but the engine keeps running headless, and nothing ever reaches Stop (and
+// its CancelAll of in-flight tool calls) until a real SIGINT arrives.
+func (a *Adapter) programExited() {
+	a.mu.Lock()
+	h, stopping := a.exitHandler, a.stopping
+	a.mu.Unlock()
+	if h != nil && !stopping {
+		h()
+	}
+}
+
+// OnExit registers the callback run when the user quits the TUI (the program
+// exits for any reason other than Stop).
+func (a *Adapter) OnExit(handler func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.exitHandler = handler
+}
+
 // Stop signals the BubbleTea program to quit and waits for it to fully
 // tear down (restoring the terminal from alt screen mode).
 func (a *Adapter) Stop(_ context.Context) error {
+	a.mu.Lock()
+	a.stopping = true
+	a.mu.Unlock()
 	if a.program != nil {
 		a.program.Send(quitMsg{})
 		a.Wait()

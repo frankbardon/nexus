@@ -6,8 +6,12 @@ import (
 	"github.com/frankbardon/nexus/pkg/testharness/contract"
 )
 
+// The harness calls Ready, which binds the WS server. An ephemeral loopback
+// port keeps the test off the default :7676, which anything may hold.
 func TestContract(t *testing.T) {
-	h := contract.NewContract(t, New)
+	h := contract.NewContract(t, New, contract.WithPluginConfig(map[string]any{
+		"listen_addr": "127.0.0.1:0",
+	}))
 	h.AssertSubscribesTo(
 		"llm.stream.chunk", "llm.stream.end",
 		"before:tool.invoke", "voice.audio.output.chunk",

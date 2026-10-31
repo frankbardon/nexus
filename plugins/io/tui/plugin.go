@@ -118,6 +118,13 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		_ = p.bus.Emit("cancel.request", events.CancelRequest{SchemaVersion: events.CancelRequestVersion, Source: "tui"})
 	})
 
+	// Ctrl-C quits the BubbleTea program (after a cancel.request when a turn
+	// is running). Ending the session here is what makes the host call
+	// Engine.Stop, which cancels any tool call still in flight.
+	p.adapter.OnExit(func() {
+		_ = p.bus.Emit("io.session.end", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "tui"})
+	})
+
 	p.adapter.OnResume(func() {
 		_ = p.bus.Emit("cancel.resume", events.CancelResume{SchemaVersion:
 

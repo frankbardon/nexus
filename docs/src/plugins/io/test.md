@@ -25,8 +25,6 @@ plugins:
         action: approve
       - match: "rm -rf"
         action: deny
-    ask_responses:                   # canned answers for io.ask events
-      - "yes"
     hitl_responses:                  # canned answers for hitl.requested events
       - "staging"
     hitl_auto_respond: true          # answer hitl.requested at all (default: true)
@@ -88,11 +86,14 @@ parked on a human, say) must arrange for the wait to end inside it.
 
 ### Input Feeding
 
-Inputs are sent sequentially. The plugin waits for the agent to become idle (turn depth returns to zero) before sending the next input. After all inputs are sent and the final turn completes, the plugin emits `io.session.end`.
+Feeding starts on `core.ready`, not in the plugin's own `Ready()`: the engine runs every plugin's `Ready()` concurrently and emits `core.ready` only once all of them have returned, so the first input cannot reach an agent before tool plugins have published their `tool.register` (an earlier input could, and the catalog then answered the call with `unknown tool`). Inputs are sent sequentially. The plugin waits for the agent to become idle (turn depth returns to zero) before sending the next input. After all inputs are sent and the final turn completes, the plugin emits `io.session.end`.
 
-### Ask Responses
+### Questions to the user
 
-When the agent emits `io.ask` events, the plugin responds with canned answers from `ask_responses` in order. The last response in the list repeats for any remaining asks. If `ask_responses` is empty, an empty string is returned.
+Agents ask the user a question through `hitl.requested` (the `ask_user` tool
+owned by `nexus.control.hitl`); answer those with `hitl_responses`. The legacy
+`io.ask` / `io.ask.response` pair and its `ask_responses` key were retired —
+nothing in Nexus emits `io.ask` any more.
 
 ## Event Collection
 
@@ -117,8 +118,8 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 |-------|---------|
 | `io.approval.request` | Auto-respond per approval config |
 | `plan.approval.request` | Auto-respond per approval config |
-| `io.ask` | Respond with canned answers |
 | `hitl.requested` | Respond per `hitl_responses` / `hitl_auto_respond` |
+| `core.ready` | Start feeding scripted inputs once every plugin is ready |
 | `agent.turn.start` | Track turn depth for input pacing |
 | `agent.turn.end` | Detect idle state, trigger next input or session end |
 | `before:llm.request` (priority 20) | Mock mode only: answer the request from `mock_responses` |
@@ -133,6 +134,5 @@ See the [Integration Testing guide](../../guides/integration-testing.md) for ful
 | `io.input` | For each scripted input |
 | `io.approval.response` | In response to approval requests |
 | `plan.approval.response` | In response to plan approval requests |
-| `io.ask.response` | In response to ask events |
 | `hitl.responded` | In response to `hitl.requested`, unless `hitl_auto_respond: false` |
 | `io.session.end` | After all inputs processed or timeout |

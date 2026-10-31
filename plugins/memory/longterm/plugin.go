@@ -101,6 +101,7 @@ func (p *Plugin) Emissions() []string {
 		"tool.result",
 		"before:hitl.requested",
 		"hitl.requested",
+		"hitl.cancel",
 	}
 }
 
@@ -254,6 +255,19 @@ func (p *Plugin) Ready() error {
 				"required": []string{"key"},
 			},
 		},
+	}
+
+	// With require_approval on, memory_write blocks on a human decision from
+	// inside its handler; tag it so nexus.gate.tool_timeout's machine-sized
+	// default deadline does not cut the approval off (require_approval.timeout
+	// bounds that wait instead). Off, it is an ordinary file write and keeps
+	// the default deadline.
+	if p.approvalEnabled {
+		for i := range tools {
+			if tools[i].Name == "memory_write" {
+				tools[i].Tags = append(tools[i].Tags, events.ToolTagAwaitsHuman)
+			}
+		}
 	}
 
 	for _, tool := range tools {
@@ -431,7 +445,9 @@ func (p *Plugin) handleMemoryWrite(tc events.ToolCall) {
 		Tags:    tags,
 	}
 
-	if err := p.doStoreForTurn(req, tc.TurnID); err != nil {
+	// BindingTurnID: inside a subagent/delegate loop tc.TurnID is a private
+	// turn no transport saw start; the approval must name the parent (#224).
+	if err := p.doStoreForTurn(req, tc.BindingTurnID(), tc.ID); err != nil {
 		p.emitToolResult(tc, "", err.Error())
 		return
 	}
@@ -527,21 +543,23 @@ func (p *Plugin) handleMemoryDelete(tc events.ToolCall) {
 // --- Core operations ---
 
 func (p *Plugin) doStore(req events.LongTermMemoryStoreRequest) error {
-	return p.doStoreForTurn(req, "")
+	return p.doStoreForTurn(req, "", "")
 }
 
 // doStoreForTurn is doStore for a write that belongs to an agent turn (the
 // memory_write tool). turnID is forwarded onto the approval HITLRequest so a
 // turn-scoped transport resumes the right turn; the bus-event store path
-// carries no turn and passes "".
-func (p *Plugin) doStoreForTurn(req events.LongTermMemoryStoreRequest, turnID string) error {
+// carries no turn and passes "". callID is the memory_write call's ID,
+// forwarded as HITLRequest.CallID so a timed-out call's approval is
+// cancelled rather than left open.
+func (p *Plugin) doStoreForTurn(req events.LongTermMemoryStoreRequest, turnID, callID string) error {
 	sessionID := ""
 	if p.session != nil {
 		sessionID = p.session.ID
 	}
 
 	if p.shouldRequireApproval(req) {
-		if err := p.gateWithApproval(req, sessionID, turnID); err != nil {
+		if err := p.gateWithApproval(req, sessionID, turnID, callID); err != nil {
 			return err
 		}
 	}
@@ -671,11 +689,15 @@ func (p *Plugin) parseApprovalConfig(raw any) {
 	if v, ok := cfg["default_choice"].(string); ok {
 		p.approvalDefaultChoice = v
 	}
-	if v, ok := cfg["timeout"].(string); ok && v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			p.approvalTimeout = d
-		}
+	// Unset bounds the wait at approval.DefaultTimeout (30m) so an
+	// unanswered prompt cannot block forever. "0" (any zero duration)
+	// disables the deadline; a malformed value keeps the default.
+	d, ok := approval.ParseTimeout(cfg["timeout"])
+	if !ok {
+		p.logger.Warn("longterm: invalid require_approval.timeout; using default",
+			"value", cfg["timeout"], "default", approval.DefaultTimeout)
 	}
+	p.approvalTimeout = d
 	match, _ := cfg["match"].(map[string]any)
 	if v, ok := match["key_glob"].(string); ok {
 		p.approvalKeyGlob = v
@@ -710,7 +732,7 @@ func (p *Plugin) shouldRequireApproval(req events.LongTermMemoryStoreRequest) bo
 // gateWithApproval emits hitl.requested for the pending write and blocks
 // until the response. Returns a non-nil error when the operator rejects
 // (or the request is cancelled / times out into reject).
-func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, sessionID, turnID string) error {
+func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, sessionID, turnID, callID string) error {
 	preview := req.Content
 	truncated := false
 	const maxPreview = 2000
@@ -741,6 +763,7 @@ func (p *Plugin) gateWithApproval(req events.LongTermMemoryStoreRequest, session
 		Timeout:         p.approvalTimeout,
 		SessionID:       sessionID,
 		TurnID:          turnID,
+		CallID:          callID,
 	})
 	if err != nil {
 		// Helper-internal failure (nil bus, etc.) — treat as a hard error.

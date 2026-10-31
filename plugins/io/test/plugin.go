@@ -77,6 +77,7 @@ type Plugin struct {
 	mockIndex     int
 	allInputsSent bool
 	finalized     bool
+	feedOnce      sync.Once     // starts feedInputs exactly once, on core.ready
 	done          chan struct{} // closed when session ends
 }
 
@@ -105,11 +106,10 @@ func (p *Plugin) Capabilities() []engine.Capability { return nil }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
 	subs := []engine.EventSubscription{
-		{EventType: "io.output", Priority: 50},
 		{EventType: "io.approval.request"},
 		{EventType: "plan.approval.request"},
 		{EventType: "hitl.requested"},
-		{EventType: "io.ask", Priority: 10},
+		{EventType: "core.ready"},
 		{EventType: "agent.turn.start"},
 		{EventType: "agent.turn.end"},
 	}
@@ -130,7 +130,7 @@ func (p *Plugin) Emissions() []string {
 		"before:io.input",
 		"io.approval.response",
 		"plan.approval.response",
-		"io.ask.response",
+		"hitl.responded",
 		"io.session.start",
 		"io.session.end",
 		"before:llm.response",
@@ -217,6 +217,7 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 		p.bus.Subscribe("io.approval.request", p.handleApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("plan.approval.request", p.handlePlanApprovalRequest, engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.requested", p.handleHITL, engine.WithSource(pluginID)),
+		p.bus.Subscribe("core.ready", p.handleCoreReady, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.start", p.handleTurnStart, engine.WithSource(pluginID)),
 		p.bus.Subscribe("agent.turn.end", p.handleTurnEnd, engine.WithSource(pluginID)),
 	)
@@ -246,12 +247,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 	return nil
 }
 
-// Ready emits session start and begins feeding inputs.
+// Ready emits session start and arms the timeout watchdog. Inputs are NOT fed
+// from here: see handleCoreReady.
 func (p *Plugin) Ready() error {
 	_ = p.bus.Emit("io.session.start", events.SessionInfo{SchemaVersion: events.SessionInfoVersion, Transport: "test"})
-
-	// Feed inputs asynchronously so Ready returns promptly.
-	go p.feedInputs()
 
 	// Timeout watchdog.
 	go func() {
@@ -266,6 +265,23 @@ func (p *Plugin) Ready() error {
 	}()
 
 	return nil
+}
+
+// handleCoreReady begins feeding scripted inputs once the WHOLE engine is up.
+//
+// The engine runs every plugin's Ready concurrently and emits core.ready only
+// after all of them return. Feeding from this plugin's own Ready raced the rest
+// of that phase — notably the tool plugins, which publish tool.register from
+// their Ready — so under load the first scripted turn could invoke a tool the
+// catalog had not yet heard of, get "unknown tool" back from its fallback, and
+// finish while the real handler was still running. nexus.io.oneshot and
+// nexus.io.broker gate their first input on core.ready for the same reason.
+func (p *Plugin) handleCoreReady(_ engine.Event[any]) {
+	p.feedOnce.Do(func() {
+		// Asynchronously: the bus dispatches core.ready synchronously inside
+		// Boot, and feeding blocks on turns finishing.
+		go p.feedInputs()
+	})
 }
 
 // Shutdown unsubscribes all handlers.
@@ -499,7 +515,7 @@ func (p *Plugin) parseMockResponses(cfg map[string]any) {
 	}
 }
 
-// -- approval/ask handlers ---------------------------------------------------
+// -- approval/hitl handlers --------------------------------------------------
 
 func (p *Plugin) handleApprovalRequest(e engine.Event[any]) {
 	req, ok := e.Payload.(events.ApprovalRequest)

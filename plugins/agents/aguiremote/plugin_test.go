@@ -240,6 +240,106 @@ func TestDelegate_MissingTask(t *testing.T) {
 	}
 }
 
+// TestDelegate_NestedLoopEventsCarryBindingTurn pins #224: invoked from a
+// subagent/delegate loop the call carries a private TurnID plus ParentTurnID;
+// subagent.started/iteration/complete must carry the binding (parent) turn,
+// consistent with subagent/delegate, while tool.result keeps the private
+// TurnID for result matching.
+func TestDelegate_NestedLoopEventsCarryBindingTurn(t *testing.T) {
+	srv := sseServer(t,
+		agui.NewRunStarted("t", "r"),
+		agui.NewTextMessageStart("m1", "assistant"),
+		agui.NewTextMessageContent("m1", "done"),
+		agui.NewTextMessageEnd("m1"),
+		agui.NewRunFinished("t", "r"),
+	)
+	defer srv.Close()
+
+	bus := engine.NewEventBus()
+	p := New()
+	if err := p.Init(engine.PluginContext{
+		Config: baseConfig(srv.URL),
+		Bus:    bus,
+		Logger: discardLogger(),
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := p.Ready(); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		turns  = map[string][]string{}
+		result events.ToolResult
+	)
+	done := make(chan struct{})
+	bus.Subscribe("subagent.started", func(ev engine.Event[any]) {
+		if e, ok := ev.Payload.(events.SubagentStarted); ok {
+			mu.Lock()
+			turns["started"] = append(turns["started"], e.ParentTurnID)
+			mu.Unlock()
+		}
+	})
+	bus.Subscribe("subagent.iteration", func(ev engine.Event[any]) {
+		if e, ok := ev.Payload.(events.SubagentIteration); ok {
+			mu.Lock()
+			turns["iteration"] = append(turns["iteration"], e.ParentTurnID)
+			mu.Unlock()
+		}
+	})
+	bus.Subscribe("subagent.complete", func(ev engine.Event[any]) {
+		if e, ok := ev.Payload.(events.SubagentComplete); ok {
+			mu.Lock()
+			turns["complete"] = append(turns["complete"], e.ParentTurnID)
+			mu.Unlock()
+		}
+	})
+	var once sync.Once
+	bus.Subscribe("tool.result", func(ev engine.Event[any]) {
+		if tr, ok := ev.Payload.(events.ToolResult); ok {
+			once.Do(func() {
+				mu.Lock()
+				result = tr
+				mu.Unlock()
+				close(done)
+			})
+		}
+	})
+
+	_ = bus.Emit("tool.invoke", events.ToolCall{
+		SchemaVersion: events.ToolCallVersion,
+		ID:            "call-1",
+		Name:          "delegate_agui_researcher",
+		Arguments:     map[string]any{"task": "summarize"},
+		TurnID:        "subagent_xyz",
+		ParentTurnID:  "turn-parent",
+	})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for tool.result")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, kind := range []string{"started", "iteration", "complete"} {
+		got := turns[kind]
+		if len(got) == 0 {
+			t.Errorf("no subagent.%s observed", kind)
+			continue
+		}
+		for _, tid := range got {
+			if tid != "turn-parent" {
+				t.Errorf("subagent.%s ParentTurnID = %q, want turn-parent", kind, tid)
+			}
+		}
+	}
+	if result.TurnID != "subagent_xyz" {
+		t.Errorf("tool.result TurnID = %q, want subagent_xyz (result matching)", result.TurnID)
+	}
+}
+
 func TestInit_RequiresAgents(t *testing.T) {
 	p := New()
 	err := p.Init(engine.PluginContext{

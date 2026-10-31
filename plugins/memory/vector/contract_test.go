@@ -7,8 +7,12 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	h := contract.NewContract(t, New, contract.WithSession())
-	h.AssertSubscribesTo("io.input", "memory.compacted", "memory.vector.store", "hitl.responded")
+	h := contract.NewContract(t, New, contract.WithSession(),
+		// hitl.responded is subscribed lazily by the approval helper only
+		// while a require_approval commit is pending, never during Init.
+		contract.WithConditionalSubscriptions("hitl.responded"),
+	)
+	h.AssertSubscribesTo("io.input", "agent.turn.start", "memory.compacted", "memory.vector.store", "hitl.responded")
 	declared := map[string]bool{}
 	for _, e := range h.Plugin().Emissions() {
 		declared[e] = true

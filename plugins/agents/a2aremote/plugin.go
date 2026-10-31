@@ -423,7 +423,10 @@ func parseInvocation(tc events.ToolCall) (invocation, error) {
 	if strings.TrimSpace(task) == "" {
 		return invocation{}, fmt.Errorf("task is required: describe what the remote agent should accomplish")
 	}
-	in := invocation{task: task, parentTurn: tc.TurnID}
+	// BindingTurnID: parentTurn rides the hitl.requested raised when the
+	// remote parks at INPUT_REQUIRED, and inside a subagent/delegate loop
+	// tc.TurnID is a private turn no transport saw start (#224).
+	in := invocation{task: task, parentTurn: tc.BindingTurnID(), callID: tc.ID}
 	if raw, ok := tc.Arguments["context"].(map[string]any); ok {
 		in.contextMap = raw
 	}

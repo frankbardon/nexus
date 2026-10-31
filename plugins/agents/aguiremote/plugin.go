@@ -245,7 +245,10 @@ func (p *Plugin) onToolInvoke(ev engine.Event[any]) {
 	// Run in a goroutine so the synchronous bus dispatch loop is not blocked
 	// across what may be a multi-second remote run.
 	go func() {
-		out := p.runRemote(ra, task, contextMap, timeout, tc.TurnID, depth)
+		// subagent.* events carry the transport-visible turn: inside a
+		// subagent/delegate loop tc.TurnID is a private turn (#224). The
+		// tool.result below keeps tc.TurnID — that is result matching.
+		out := p.runRemote(ra, task, contextMap, timeout, tc.BindingTurnID(), depth)
 		result := events.ToolResult{
 			SchemaVersion: events.ToolResultVersion,
 			ID:            tc.ID,

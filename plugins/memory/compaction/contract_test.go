@@ -7,7 +7,11 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	h := contract.NewContract(t, New)
+	h := contract.NewContract(t, New,
+		// hitl.responded is subscribed lazily by the approval helper only
+		// while a require_approval commit is pending, never during Init.
+		contract.WithConditionalSubscriptions("hitl.responded"),
+	)
 	h.AssertSubscribesTo(
 		"io.input", "io.output", "tool.invoke", "tool.result",
 		"agent.turn.end", "llm.response", "memory.compact.request", "hitl.responded",

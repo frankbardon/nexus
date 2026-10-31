@@ -14,15 +14,12 @@ import (
 	"github.com/frankbardon/nexus/pkg/events"
 )
 
-// a2aBindAddr is the loopback address configured in configs/test-a2a-serve.yaml.
-// Integration tests run sequentially, so a fixed high port is safe.
-const a2aBindAddr = "127.0.0.1:18191"
-
 // a2aToken is the shared bearer token that config guards the operations with.
 const a2aToken = "test-a2a-token"
 
-// a2aURL builds an absolute URL against the test listener.
-func a2aURL(path string) string { return "http://" + a2aBindAddr + path }
+// a2aURL builds an absolute URL against the current test's listener (see
+// a2aAddr; configs/test-a2a-serve.yaml's fixed port is rewritten per test).
+func a2aURL(t *testing.T, path string) string { return "http://" + a2aAddr(t) + path }
 
 // a2aPost issues an authenticated A2A request and returns the response. The
 // caller owns the body.
@@ -32,7 +29,7 @@ func a2aPost(t *testing.T, path string, payload any) *http.Response {
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, a2aURL(path), bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, a2aURL(t, path), bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -86,7 +83,7 @@ func a2aStates(fs []a2a.StreamResponse) []a2a.TaskState {
 // WORKING -> COMPLETED with the final assistant text as an artifact.
 func TestA2AServe_MockStreamingTurn(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-serve.yaml")
-	waitForListener(t, a2aBindAddr)
+	waitForListener(t, a2aAddr(t))
 
 	resp := a2aPost(t, "/a2a", a2aRPC(a2a.MethodSendStreamingMessage,
 		a2aSendMessage("m-1", "What is the mock answer?", "a2a-ctx-1")))
@@ -158,7 +155,7 @@ func TestA2AServe_MockStreamingTurn(t *testing.T) {
 // than silently handed this conversation.
 func TestA2AServe_MockContextContinuesTheSession(t *testing.T) {
 	eng := bootEngine(t, "configs/test-a2a-serve.yaml")
-	waitForListener(t, a2aBindAddr)
+	waitForListener(t, a2aAddr(t))
 
 	first := a2aSendBlocking(t, "m-1", "first question", "a2a-ctx-2")
 	if first.Task == nil {
@@ -215,11 +212,11 @@ func TestA2AServe_MockContextContinuesTheSession(t *testing.T) {
 // turn in its own framing, and that the card now advertises streaming.
 func TestA2AServe_MockRESTBinding(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-serve.yaml")
-	waitForListener(t, a2aBindAddr)
+	waitForListener(t, a2aAddr(t))
 
 	// The card is the client's entry point, and it must not understate what the
 	// listener does.
-	cardResp, err := http.Get(a2aURL(a2a.AgentCardPath))
+	cardResp, err := http.Get(a2aURL(t, a2a.AgentCardPath))
 	if err != nil {
 		t.Fatalf("fetch agent card: %v", err)
 	}
@@ -253,13 +250,13 @@ func TestA2AServe_MockRESTBinding(t *testing.T) {
 // behind the credential guard.
 func TestA2AServe_MockUnauthenticated(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-serve.yaml")
-	waitForListener(t, a2aBindAddr)
+	waitForListener(t, a2aAddr(t))
 
 	body, err := json.Marshal(a2aRPC(a2a.MethodSendMessage, a2aSendMessage("m-x", "hello", "a2a-ctx-auth")))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, a2aURL("/a2a"), bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, a2aURL(t, "/a2a"), bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -302,7 +299,7 @@ func a2aSendBlocking(t *testing.T, messageID, text, contextID string) a2a.SendMe
 // a2aGet issues an authenticated GET against the REST binding.
 func a2aGet(t *testing.T, path string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, a2aURL(path), nil)
+	req, err := http.NewRequest(http.MethodGet, a2aURL(t, path), nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -320,7 +317,7 @@ func a2aGet(t *testing.T, path string) *http.Response {
 // is then polled, listed and re-subscribed to across BOTH bindings.
 func TestA2AServe_MockTaskReadOperations(t *testing.T) {
 	bootEngine(t, "configs/test-a2a-serve.yaml")
-	waitForListener(t, a2aBindAddr)
+	waitForListener(t, a2aAddr(t))
 
 	created := a2aSendBlocking(t, "m-read", "What is the mock answer?", "a2a-ctx-read")
 	if created.Task == nil {

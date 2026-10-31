@@ -189,3 +189,48 @@ func TestPercentileAndSlack(t *testing.T) {
 		t.Errorf("withSlack(5, 0.10) = %d want > 5", got)
 	}
 }
+
+// A journal from a stopped session ends in its own teardown. Generated
+// assertions must describe the session, not how the source process exited:
+// core.shutdown and what followed it once no turn was open stay out of the
+// observed counts and totals, while a turn finishing in the drain stays in.
+func TestObserve_ExcludesTeardown(t *testing.T) {
+	base := fakeJournal()
+	last := base[len(base)-1]
+	envs := append(base[:len(base)-1:len(base)-1],
+		journal.Envelope{Seq: 8, Ts: last.Ts, Type: "core.shutdown"},
+		journal.Envelope{Seq: 9, Ts: last.Ts, Type: "llm.response", Payload: map[string]any{
+			"Usage": map[string]any{"PromptTokens": 5, "CompletionTokens": 5},
+		}},
+		journal.Envelope{Seq: 10, Ts: last.Ts, Type: "agent.turn.end"},
+		journal.Envelope{Seq: 11, Ts: last.Ts, Type: "tool.invoke", Payload: map[string]any{"Name": "cleanup"}},
+		journal.Envelope{Seq: 12, Ts: last.Ts, Type: "llm.error"},
+		journal.Envelope{Seq: 13, Ts: last.Ts, Type: "test.teardown.probe"},
+	)
+	o := observe(envs)
+	for _, typ := range []string{"core.shutdown", "test.teardown.probe", "llm.error"} {
+		if n, ok := o.EventCounts[typ]; ok {
+			t.Errorf("EventCounts[%q] = %d, want absent", typ, n)
+		}
+	}
+	if got := o.EventCounts["agent.turn.end"]; got != 1 {
+		t.Errorf("agent.turn.end count = %d, want 1 (turn finished in the drain)", got)
+	}
+	if got := o.EventCounts["llm.response"]; got != 3 {
+		t.Errorf("llm.response count = %d, want 3", got)
+	}
+	if _, ok := o.ToolCounts["cleanup"]; ok {
+		t.Errorf("teardown tool.invoke counted: %v", o.ToolCounts)
+	}
+	if len(o.NonReplayableHits) != 0 {
+		t.Errorf("teardown llm.error flagged non-replayable: %v", o.NonReplayableHits)
+	}
+
+	out, err := SynthesizeAssertions(envs)
+	if err != nil {
+		t.Fatalf("SynthesizeAssertions: %v", err)
+	}
+	if strings.Contains(string(out), "core.shutdown") {
+		t.Errorf("generated assertions mention core.shutdown:\n%s", out)
+	}
+}

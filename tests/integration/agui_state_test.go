@@ -77,9 +77,9 @@ func assertJSONEqual(t *testing.T, got json.RawMessage, want string) {
 // must reconstruct the final shared-state document.
 func TestAGUIState_OutboundSnapshotDeltas(t *testing.T) {
 	bootEngine(t, "configs/test-agui-state.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -144,9 +144,9 @@ func TestAGUIState_OutboundSnapshotDeltas(t *testing.T) {
 // ToolCallResult must carry the seeded content, proving the store adopted it.
 func TestAGUIState_InboundSeedObserved(t *testing.T) {
 	bootEngine(t, "configs/test-agui-state-inbound.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -203,9 +203,9 @@ func TestAGUIState_InboundSeedObserved(t *testing.T) {
 // key the agent did not touch — and the mutation flows back as a StateDelta.
 func TestAGUIState_ConflictAgentWins(t *testing.T) {
 	bootEngine(t, "configs/test-agui-state-conflict.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

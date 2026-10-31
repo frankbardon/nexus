@@ -125,12 +125,20 @@ natural completion.
 
 ```go
 res, err := runner.RunLive(ctx, c, runner.Options{
-	SessionsRoot: t.TempDir(), // or "" to accept the case-config default
+	SessionsRoot: t.TempDir(), // or "" for a private temp root removed on return
 })
 if err != nil {
 	// ...
 }
 ```
+
+Neither path ever uses the case config's own `core.sessions.root` or
+`core.storage.root`. `SessionsRoot` / `StorageRoot` in `runner.Options`
+name where the session tree and app/agent plugin storage go and are left
+in place for you; leave either empty and that run gets a private temp dir,
+removed once `Run`/`RunLive` returns (the live journal is read before
+then). An empty `StorageRoot` therefore also isolates concurrent cases
+from each other's app/agent SQLite.
 
 `RunLive` returns the same `*runner.Result` shape as `Run` — including
 `Assertions` evaluated against the live-observed stream, so

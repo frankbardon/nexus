@@ -62,11 +62,15 @@ Every versioned payload struct and its current `_schema_version` is available at
 | `io.status` | `StatusUpdate` | Agent state changed |
 | `io.approval.request` | `ApprovalRequest` | Approval needed for an action |
 | `io.approval.response` | `ApprovalResponse` | User responded to approval |
-| `io.ask` | `AskUser` | Agent asking user a question |
-| `io.ask.response` | `AskUserResponse` | User answered the question |
 | `io.history.replay` | `HistoryReplay` | Replaying conversation on resume |
 | `io.session.start` | `SessionInfo` | Session started |
 | `io.session.end` | *(none)* | Session ended |
+
+The legacy `io.ask` / `io.ask.response` pair (`AskUser` / `AskUserResponse`)
+was retired: nothing emits or consumes it. Questions to the user go through
+`hitl.requested` / `hitl.responded` (see [nexus.control.hitl](../plugins/control/hitl.md)). Journals
+recorded while the pair still existed replay cleanly — the replay coordinator
+ignores both types.
 
 ### Payloads
 
@@ -120,19 +124,6 @@ Every versioned payload struct and its current `_schema_version` is available at
 | `PromptID` | string | Matches the request |
 | `Approved` | bool | Whether approved |
 | `Always` | bool | Remember this decision |
-
-**AskUser**
-| Field | Type | Description |
-|-------|------|-------------|
-| `PromptID` | string | Unique identifier |
-| `Question` | string | The question text |
-| `TurnID` | string | Associated turn |
-
-**AskUserResponse**
-| Field | Type | Description |
-|-------|------|-------------|
-| `PromptID` | string | Matches the request |
-| `Answer` | string | User's response |
 
 ---
 

@@ -13,6 +13,7 @@ import (
 	"github.com/frankbardon/nexus/pkg/engine/journal"
 	evalcase "github.com/frankbardon/nexus/pkg/eval/case"
 	"github.com/frankbardon/nexus/pkg/events"
+	"gopkg.in/yaml.v3"
 )
 
 // TestRun_ReplaysSyntheticJournal builds a minimal case in-test, hand-crafts
@@ -394,4 +395,121 @@ func TestRun_ExtraPluginOverridesBuiltin(t *testing.T) {
 	if !fake.initCalled {
 		t.Error("expected the ExtraPlugins factory to shadow the same-ID built-in")
 	}
+}
+
+// TestRunAndRunLive_NoRootsKeepCaseRootsUntouched pins the default for a
+// caller that passes no SessionsRoot/StorageRoot: the case config names
+// ~/.nexus/test-sessions (as tests/eval/cases/*/input/config.yaml do) and
+// ~/.nexus as its storage root, yet neither Run nor RunLive may write there,
+// and the private temp roots they use instead must be gone on return. HOME
+// and TMPDIR are pointed at fresh dirs so both halves are observable.
+func TestRunAndRunLive_NoRootsKeepCaseRootsUntouched(t *testing.T) {
+	const extraID = "acme.tool.echo"
+	for _, tc := range []struct {
+		name  string
+		run   func(context.Context, *evalcase.Case, Options) (*Result, error)
+		build func(t *testing.T) *evalcase.Case
+	}{
+		{"Run", Run, func(t *testing.T) *evalcase.Case {
+			c, _ := buildExtraPluginCase(t, extraID)
+			return c
+		}},
+		{"RunLive", RunLive, func(t *testing.T) *evalcase.Case {
+			c, _ := buildLiveCase(t, "live reply",
+				[]journal.Envelope{{Seq: 1, Type: "io.session.start", Payload: map[string]any{"session_id": "golden"}}},
+				"deterministic: []\n")
+			cfg, err := overlayLiveInputs(c.ConfigYAML, c.Inputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// overlayLiveInputs only appends nexus.io.test; reuse its
+			// sequence helpers to name the probe too.
+			var doc yaml.Node
+			if err := yaml.Unmarshal(cfg, &doc); err != nil {
+				t.Fatal(err)
+			}
+			active := getOrCreateSequence(getOrCreateMapping(doc.Content[0], "plugins"), "active")
+			active.Content = append(active.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: extraID})
+			if c.ConfigYAML, err = yaml.Marshal(&doc); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			tmp := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("TMPDIR", tmp)
+
+			c := tc.build(t)
+			cfg, err := yamlSetCoreRoot(c.ConfigYAML, "sessions", "~/.nexus/test-sessions")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg, err = yamlSetCoreRoot(cfg, "storage", "~/.nexus"); err != nil {
+				t.Fatal(err)
+			}
+			c.ConfigYAML = cfg
+
+			// The run must actually create a session somewhere, or "nothing
+			// under the case root" proves nothing: capture the live session
+			// dir from inside the run via a plugin that sees the workspace.
+			var sessionDir string
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			res, err := tc.run(ctx, c, Options{
+				ExtraPlugins: map[string]engine.PluginFactory{
+					extraID: func() engine.Plugin {
+						return &sessionDirProbe{fakeExtraPlugin: fakeExtraPlugin{id: extraID}, dir: &sessionDir}
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if res == nil {
+				t.Fatalf("%s: nil result", tc.name)
+			}
+			if sessionDir == "" {
+				t.Fatal("probe never saw a session dir")
+			}
+			if !strings.HasPrefix(sessionDir, tmp) {
+				t.Errorf("session dir %q not under the run's temp root %q", sessionDir, tmp)
+			}
+
+			if _, err := os.Stat(filepath.Join(home, ".nexus")); !os.IsNotExist(err) {
+				var found []string
+				_ = filepath.Walk(filepath.Join(home, ".nexus"), func(p string, _ os.FileInfo, _ error) error {
+					if len(found) < 5 {
+						found = append(found, p)
+					}
+					return nil
+				})
+				t.Errorf("eval run wrote under ~/.nexus: %v", found)
+			}
+			entries, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), "nexus-eval-") {
+					t.Errorf("temp root %s not removed after %s returned", e.Name(), tc.name)
+				}
+			}
+		})
+	}
+}
+
+// sessionDirProbe records the session workspace root the engine handed it.
+type sessionDirProbe struct {
+	fakeExtraPlugin
+	dir *string
+}
+
+func (p *sessionDirProbe) Init(ctx engine.PluginContext) error {
+	if ctx.Session != nil {
+		*p.dir = ctx.Session.RootDir
+	}
+	return nil
 }

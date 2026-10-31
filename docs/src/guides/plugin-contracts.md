@@ -67,6 +67,7 @@ Constructs the harness, calls `Init` and `Ready` on the plugin, registers cleanu
 | `WithPluginConfig(map[string]any)` | YAML-derived config map the plugin would normally receive. |
 | `WithPluginID(string)` | Override the plugin ID (use for instance-suffixed IDs like `nexus.agent.subagent/researcher`). Defaults to `plugin.ID()`. |
 | `WithSession()` | Boot with a real `SessionWorkspace` rooted in a temp dir. Enables plugins that touch `ctx.Session`, `ctx.DataDir`, or `ScopeSession` storage. Off by default to keep tests fast. |
+| `WithConditionalSubscriptions(types ...string)` | Exempt these declared event types from the automatic declared-but-unregistered check. For subscriptions registered only under a config the test does not exercise, or lazily after `Ready`. Comment each entry with the config or path that wires it. |
 | `WithLogger(*slog.Logger)` | Override the default discard logger. |
 
 ### Driving events
@@ -87,6 +88,7 @@ Constructs the harness, calls `Init` and `Ready` on the plugin, registers cleanu
 | `AssertNoUndeclaredEmissions()` | Every plugin-origin event the harness saw is in the plugin's declared `Emissions()` list. Use after `Inject` to catch contract drift. |
 | *(automatic in `NewContract`)* | Every declared subscription priority equals the priority the plugin registered on the bus. See below. |
 | *(automatic in `NewContract`)* | Every event type the plugin registered on the bus is declared in `Subscriptions()`. See below. |
+| *(automatic in `NewContract`)* | Every event type declared in `Subscriptions()` was registered on the bus, unless exempted with `WithConditionalSubscriptions`. See below. |
 
 `Captured()` returns every event observed (including injects); `PluginEmissions()` filters down to plugin-origin only.
 
@@ -113,9 +115,8 @@ What it does and does not flag:
 - **Flags** a declared type registered at a different priority, and a declared
   type that has an extra registration at a priority the plugin never declared
   (e.g. a shared helper subscribing on the plugin's bus — declare both entries).
-- **Ignores** a declared type that is not registered at all. Many subscriptions
-  are config-conditional; whether a declared subscription fires is what
-  `AssertSubscribesTo` plus `Inject` cover.
+- **Ignores** a declared type that is not registered at all. That is the
+  declared-but-unregistered check's job (below), not a priority mismatch.
 - **Ignores** registered types that are not declared at all (the undeclared
   check below covers those), and anything a test subscribes through `Bus()`
   after `NewContract` returns — the snapshot is taken first, so only the
@@ -170,6 +171,40 @@ omission by adding the declaration, not by dropping the subscription.
 
 The check sees only what the harness config exercises. A subscription wired
 under a config no contract test uses is not caught.
+
+### Automatic check: every declared subscription is registered
+
+The reverse direction. Every event type in `Subscriptions()` must have at least
+one registration on the bus when `Init` and `Ready` return. A stale
+declaration, one whose handler was removed or never written, fails the test:
+
+```
+plugin "nexus.io.test" declares subscription "io.output" (priority 50) in Subscriptions() but never registered it during Init/Ready; remove the stale declaration, or pass the config that wires it, or exempt it with WithConditionalSubscriptions
+```
+
+This matters because `Subscriptions()` is read at boot. The streaming response
+gate policy (`core.streaming.response_gate_policy`), for example, decides from
+declarations alone whether a plugin gates `before:llm.response`. Docs and
+ordering audits read the same list.
+
+The check is on by default and matches at the event-type level. Priorities are
+the priority check's concern, and a registration under any `WithSource` tag
+counts. Fix a failure one of three ways, in order of preference:
+
+1. **Remove the stale declaration.** This is the right fix when nothing ever
+   subscribes to the type (`nexus.io.test`'s retired `io.output@50` and
+   `io.ask@10`).
+2. **Pass the config that wires it.** If the subscription depends on config,
+   give `WithPluginConfig` the config that enables it, so the test also covers
+   the handler.
+3. **Exempt it** with `WithConditionalSubscriptions(types...)` when the
+   subscription can't be registered at `Init`/`Ready` time, and leave a comment
+   saying why. The exemptions in the tree today:
+
+   | Plugin | Exempted | Why |
+   |--------|----------|-----|
+   | `nexus.memory.compaction`, `nexus.memory.longterm`, `nexus.memory.vector` | `hitl.responded` | The `require_approval` helper subscribes lazily, only while a commit waits for approval. |
+   | `nexus.observe.thinking` | `thinking.step`, `plan.progress` | A marker/feature-flag plugin. Its declarations are kept on purpose for registry and manifest tooling, and it never subscribes because the journal is the source of truth. |
 
 ## Patterns
 

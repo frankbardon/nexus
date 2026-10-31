@@ -3183,8 +3183,8 @@ an external coordinator (separate from history buffers).
 | `protect_recent`    | int    | `4`              | Recent messages exempt from compaction. |
 | `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before committing the summary back into history. Off = unchanged behavior. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (commit skipped). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the commit resolves by `default_choice` — when denied (empty default) the summary is dropped and history is left intact — and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the summary is at least this many bytes. |
 
 ### `nexus.memory.longterm`
@@ -3200,9 +3200,9 @@ Registers LLM tools: `memory_write`, `memory_read`, `memory_list`,
 | `agent_id`              | string | *(auto)*           | Agent identifier when `scope` includes `agent`. |
 | `auto_load`             | bool   | `true`             | Load memory index at startup and inject into the system prompt. |
 | `auto_save_instructions`| string | *(none)*           | Instructions appended to the system prompt (e.g. "save important decisions"). |
-| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before persisting writes. Off by default; on = every write blocks until an operator responds, and `memory_write` is tagged `awaits_human` so `nexus.gate.tool_timeout` gives it no deadline — `require_approval.timeout` bounds the wait instead. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (write denied). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the write resolves by `default_choice` (denied when empty) and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.key_glob`             | string   | *(any)*   | Only require approval when the entry key matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the content is at least this many bytes. |
 
@@ -3223,8 +3223,8 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `store_images`          | bool   | `false`                | Embed image attachments on `UserInput.Files` (any `MimeType` starting with `image/`) via the multimodal `embeddings.provider` and store the resulting vector under `image_namespace`. Requires a multimodal adapter (e.g. `nexus.embeddings.cohere_multimodal`); text-only adapters will reject and the path no-ops. Off by default — opt-in. |
 | `image_namespace`       | string | `<namespace>-images`   | Vector store namespace for image embeddings. Kept separate from the text namespace so similarity queries can target one or the other. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (document not stored). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the write resolves by `default_choice` — when denied (empty default) no `vector.upsert` is issued — and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.namespace_glob`       | string   | *(any)*   | Only require approval when the configured `namespace` matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the document content is at least this many bytes. |
 
@@ -3459,12 +3459,25 @@ footnote.
 | Key                | Type   | Default | Description |
 |--------------------|--------|---------|-------------|
 | `mode`             | string | `auto`  | Citation source: `tag` (parses `<cite source="..." chunk="N"/>` markers), `anthropic_native` (reads `LLMResponse.Citations[]` populated by Anthropic), or `auto` (uses native when present, falls back to tag). |
-| `strict`           | bool   | `true`  | When true, citations whose `(source, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped. When false, they are kept and tagged with `TrustTier="unverified"`. |
+| `strict`           | bool   | `true`  | When true, citations whose `(source, doc, chunk)` does not match a chunk recorded in the current turn's retrieval context are dropped (an attribute absent on either side is a wildcard). When false, they are kept and tagged with `TrustTier="unverified"`. |
 | `section_priority` | int    | `60`    | Priority of the citation-contract section in the system prompt (only used in tag/auto modes). |
 
 Subscribes to `rag.retrieved` (emitted by `nexus.tool.knowledge_search` and
 `nexus.memory.vector`) to build the per-turn validation set, then to
-`llm.response` to do the parsing. Emits `llm.response.cited`.
+`llm.response` to do the parsing. Emits `llm.response.cited`. Vector recall
+runs on `io.input`, before the turn exists, so `nexus.memory.vector` announces
+its hits on `agent.turn.start`, keyed by that turn; a turnless
+`rag.retrieved` is ignored. The citation contract also teaches an optional
+`doc="<doc>"` attribute: each `<recalled_memory>` item renders `doc` (the
+entry's ID), so a cite can name one recalled entry when several share a
+`source` such as `compaction`.
+
+Inside a nested loop (`nexus.agent.subagent`, `pkg/delegate`) a response is
+validated against the retrievals that loop's own tool calls made — keyed by
+its private turn, read from `Metadata["loop_turn_id"]` — so a child's sources
+never validate the parent turn's response, nor the parent's a child's. The
+emitted `llm.response.cited` names the parent turn (`turn_id`), and a nested
+loop's index is released when that parent turn's `agent.turn.end` fires.
 
 ---
 
@@ -5131,9 +5144,24 @@ late real result for the same call ID so the agent's `pendingToolCalls`
 counter stays consistent. Timed-out call IDs are remembered for one hour
 (swept whenever a new timeout fires, and cleared on shutdown), so a call whose
 real result never arrives does not pin memory for the life of the process; a
-real result later than that window is no longer suppressed. Note: Go cancellation is cooperative — the original
-tool goroutine may keep running until it honors its own context. The gate's
-job is to unblock the agent, not preempt the tool.
+real result later than that window is no longer suppressed.
+
+**Cancellation.** The engine cancels the timed-out call's dispatch context on
+that `tool.timeout`: every tool handler can take a per-call context from
+`PluginContext.ToolCalls.Begin(parent, call.ID)` (an engine-owned registry,
+`engine.ToolCallContexts`), and `context.Cause` on it reports
+`engine.ErrToolCallTimedOut`. `shell` kills the command's whole process group
+(grandchildren included, on unix), `run_code` (both compilers) and `web_fetch`
+abort. Cancellation is cooperative: a handler that does not take the context, or
+ignores it, keeps running until it finishes on its own, and its late result is
+still vetoed as above. The engine also cancels every live call context of a
+cancelled turn on `cancel.active` (cause `engine.ErrToolCallCancelled`; nested
+subagent/delegate calls bound to that turn via `ParentTurnID` included), and
+every live call context on `Stop`, with cause `engine.ErrToolCallsStopped`. `nexus.control.hitl` also
+watches `tool.timeout` and cancels every open `hitl.requested` whose `CallID` is
+the timed-out call (a synthetic `hitl.responded{cancelled: true}`), so an
+approval or question raised for a call that is already over does not stay open
+until shutdown.
 
 **On by default.** `nexus.tool.catalog` auto-activates this gate through
 `Requires()`, so it runs in every profile that dispatches tools through the
@@ -5152,22 +5180,36 @@ themselves have **no deadline** by default (built-in exemptions):
 | `delegate_a2a_*`   | Bounded by the remote's `timeout` / `hitl.input_timeout`. |
 | `delegate_agui_*`  | Bounded by the remote's own `timeout`. |
 
-Tools that block on HITL *inside* their handler (e.g. `nexus.memory.longterm`
-write approvals, AG-UI client tools) are **not** exempt: if an approval can
-legitimately take longer than 10m, raise their `per_tool` entry.
+Tools that block on a human *inside* their handler are exempt too, by a tag
+rather than by name: any tool whose `ToolDef.Tags` carries `awaits_human`
+(`events.ToolTagAwaitsHuman`) has no deadline. The gate learns the tag from
+`tool.register` and from finished `tool.catalog.query` snapshots (so per-run
+tools that are never registered are covered), and a later untagged
+definition of the same name drops the exemption. Shipped taggers:
+
+| Tool | Tagged when | Bounded instead by |
+|------|-------------|--------------------|
+| `memory_write` (`nexus.memory.longterm`) | only while `require_approval.enabled` is `true` | `require_approval.timeout` (default `30m`) |
+| AG-UI client tools (`nexus.io.agui`, any name a client advertises in `RunAgentInput.tools`) | always | the client's resume |
+
+`memory_delete` and the other memory tools never ask a human and keep the
+default deadline.
 
 Per-tool override keys may be exact tool names (`web_fetch`) or
 [`path.Match`](https://pkg.go.dev/path#Match)-style globs (`mcp.*`).
 Resolution: the user's `per_tool` map first (an exact key wins; among glob
 matches the longest pattern wins), then the built-in exemptions (same rule),
-otherwise `default_timeout`. A user key always beats a built-in exemption, so
-`per_tool: {ask_user: 15m}` bounds `ask_user`, and a catch-all `"*": 2m`
-bounds the exempt tools too. A duration of `0s` means "no deadline".
+then the `awaits_human` tag, otherwise `default_timeout`. A user key always
+beats an exemption, so `per_tool: {ask_user: 15m}` bounds `ask_user`,
+`per_tool: {memory_write: 30m}` bounds an approval-gated write, and a
+catch-all `"*": 2m` bounds every exempt tool too. A duration of `0s` means
+"no deadline".
+
 
 **Opt-out:** `enabled: false` turns every deadline off; `default_timeout: 0s`
 keeps only explicit `per_tool` deadlines. Because the gate is auto-activated,
 supplying any `nexus.gate.tool_timeout` block replaces nothing but the keys you
-set — the built-in exemptions and the `10m` default live in code, not in a
+set — the built-in exemptions, the `awaits_human` tag rule and the `10m` default live in code, not in a
 `Requires()` default config.
 
 The synthetic error message format is fixed and intended to be read by
@@ -5180,8 +5222,8 @@ tool <name> exceeded timeout <duration>; raise via nexus.gate.tool_timeout.per_t
 | Key               | Type            | Default | Description |
 |-------------------|-----------------|---------|-------------|
 | `enabled`         | bool            | `true`  | `false` disables every deadline (the gate stays active but never fires). |
-| `default_timeout` | duration string | `10m`   | Applied when neither a `per_tool` key nor a built-in exemption matches. `0s` = no default deadline. Was `30s` before the gate became default-on. Negative values fail boot. |
-| `per_tool`        | map[string]duration | `{}` (built-in exemptions above still apply) | Per-tool overrides keyed by exact tool name or `path.Match` glob. `0s` = no deadline for that tool. Consulted before the built-in exemptions. |
+| `default_timeout` | duration string | `10m`   | Applied when no `per_tool` key, built-in exemption or `awaits_human` tag matches. `0s` = no default deadline. Was `30s` before the gate became default-on. Negative values fail boot. |
+| `per_tool`        | map[string]duration | `{}` (built-in and `awaits_human` exemptions above still apply) | Per-tool overrides keyed by exact tool name or `path.Match` glob. `0s` = no deadline for that tool. Consulted before every exemption. |
 
 ### `nexus.gate.prompt_injection`
 

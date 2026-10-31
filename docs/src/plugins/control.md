@@ -36,7 +36,7 @@ No configuration options.
 1. When the user triggers a cancel (e.g., pressing a key in the TUI), the I/O plugin emits `cancel.request`
 2. The cancel controller checks if there's an active turn
 3. If so, it emits `cancel.active` with the turn ID
-4. All plugins listening for `cancel.active` abort their current work (LLM provider cancels the API call, agent stops iterating)
+4. All plugins listening for `cancel.active` abort their current work (LLM provider cancels the API call, agent stops iterating). The engine itself also listens: every in-flight tool call bound to the cancelled turn has its per-call context cancelled with cause `engine.ErrToolCallCancelled` — so a long `shell` command has its process group killed rather than running on until engine stop — including calls a subagent or delegate loop is running for that turn (matched through the call's `ParentTurnID`). Calls of other turns are untouched.
 5. When the user resumes, `cancel.resume` restarts the flow
 
 ## When to Use

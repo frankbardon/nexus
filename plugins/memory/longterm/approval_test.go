@@ -272,10 +272,11 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 		"enabled": true,
 		"timeout": "1s",
 	})
-	var got []string
+	var got, calls []string
 	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
 		if req, ok := ev.Payload.(events.HITLRequest); ok {
 			got = append(got, req.TurnID)
+			calls = append(calls, req.CallID)
 		}
 	}, engine.WithPriority(5))
 	autoRespond(bus, "allow", false)
@@ -299,5 +300,139 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 	}
 	if got[1] != "" {
 		t.Errorf("bus-event store HITLRequest.TurnID = %q, want empty", got[1])
+	}
+	// CallID ties the approval to the memory_write call (#219); the
+	// bus-event store path belongs to no call.
+	if calls[0] != "c1" || calls[1] != "" {
+		t.Errorf("HITLRequest.CallID = %q, want [c1 \"\"]", calls)
+	}
+}
+
+// TestApproval_MemoryWriteInNestedLoopBindsParentTurn pins #224 for this
+// producer: a memory_write dispatched by a subagent/delegate loop carries a
+// private TurnID plus ParentTurnID, and the approval must name the parent
+// (transport-visible) turn or a turn-scoped transport drops it.
+func TestApproval_MemoryWriteInNestedLoopBindsParentTurn(t *testing.T) {
+	p, bus := newTestPlugin(t, map[string]any{
+		"enabled": true,
+		"timeout": "1s",
+	})
+	var got []string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if req, ok := ev.Payload.(events.HITLRequest); ok {
+			got = append(got, req.TurnID)
+		}
+	}, engine.WithPriority(5))
+	autoRespond(bus, "allow", false)
+
+	p.handleMemoryWrite(events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1",
+		Name:         "memory_write",
+		Arguments:    map[string]any{"key": "k-nested", "content": "hello"},
+		TurnID:       "subagent_abc",
+		ParentTurnID: "turn-parent",
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("hitl.requested count = %d, want 1", len(got))
+	}
+	if got[0] != "turn-parent" {
+		t.Errorf("nested memory_write HITLRequest.TurnID = %q, want turn-parent", got[0])
+	}
+}
+
+// TestReady_MemoryWriteAwaitsHumanOnlyWithApproval: memory_write is tagged
+// events.ToolTagAwaitsHuman (so nexus.gate.tool_timeout exempts it) exactly
+// when require_approval is on, and no other memory tool ever is.
+func TestReady_MemoryWriteAwaitsHumanOnlyWithApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+		want bool
+	}{
+		{"approval off", nil, false},
+		{"approval on", map[string]any{"enabled": true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, bus := newTestPlugin(t, tc.cfg)
+			tagged := map[string]bool{}
+			bus.Subscribe("tool.register", func(ev engine.Event[any]) {
+				td := ev.Payload.(events.ToolDef)
+				tagged[td.Name] = td.HasTag(events.ToolTagAwaitsHuman)
+			})
+			if err := p.Ready(); err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if len(tagged) != 4 {
+				t.Fatalf("registered %d tools, want 4: %v", len(tagged), tagged)
+			}
+			for name, got := range tagged {
+				want := tc.want && name == "memory_write"
+				if got != want {
+					t.Errorf("%s awaits_human = %v, want %v", name, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestApprovalTimeout_DefaultsWhenUnset pins that require_approval.timeout
+// defaults to 30m: memory_write is awaits_human while approval is on, so an
+// unset timeout must not mean "wait forever".
+func TestApprovalTimeout_DefaultsWhenUnset(t *testing.T) {
+	p, _ := newTestPlugin(t, map[string]any{"enabled": true})
+	if p.approvalTimeout != 30*time.Minute {
+		t.Errorf("approvalTimeout = %v, want 30m default", p.approvalTimeout)
+	}
+
+	p, _ = newTestPlugin(t, map[string]any{"enabled": true, "timeout": "bogus"})
+	if p.approvalTimeout != 30*time.Minute {
+		t.Errorf("malformed timeout: approvalTimeout = %v, want 30m default", p.approvalTimeout)
+	}
+
+	p, _ = newTestPlugin(t, map[string]any{"enabled": true, "timeout": "5m"})
+	if p.approvalTimeout != 5*time.Minute {
+		t.Errorf("explicit timeout: approvalTimeout = %v, want 5m", p.approvalTimeout)
+	}
+}
+
+// TestApprovalTimeout_ZeroDisables pins the "0 disables" convention.
+func TestApprovalTimeout_ZeroDisables(t *testing.T) {
+	for _, v := range []string{"0", "0s"} {
+		p, _ := newTestPlugin(t, map[string]any{"enabled": true, "timeout": v})
+		if p.approvalTimeout != 0 {
+			t.Errorf("timeout %q: approvalTimeout = %v, want 0 (disabled)", v, p.approvalTimeout)
+		}
+	}
+}
+
+// TestApprovalTimeout_ExpiryDeniesAndCancels: with no default_choice an
+// expired approval denies the write, nothing is persisted, and the pending
+// prompt is retracted with hitl.cancel for the same request.
+func TestApprovalTimeout_ExpiryDeniesAndCancels(t *testing.T) {
+	p, bus := newTestPlugin(t, map[string]any{"enabled": true, "timeout": "20ms"})
+
+	var reqID, cancelID string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if r, ok := ev.Payload.(events.HITLRequest); ok {
+			reqID = r.ID
+		}
+	})
+	bus.Subscribe("hitl.cancel", func(ev engine.Event[any]) {
+		if c, ok := ev.Payload.(events.HITLCancel); ok {
+			cancelID = c.RequestID
+		}
+	})
+
+	err := p.doStore(events.LongTermMemoryStoreRequest{SchemaVersion: events.LongTermMemoryStoreRequestVersion, Key: "k",
+		Content: "x",
+	})
+	if err == nil {
+		t.Fatal("expected expiry to deny the write")
+	}
+	if reqID == "" || cancelID != reqID {
+		t.Errorf("hitl.cancel request_id = %q, want %q", cancelID, reqID)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(p.writePath, "*")); len(matches) != 0 {
+		t.Errorf("denied write persisted files: %v", matches)
 	}
 }

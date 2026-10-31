@@ -6,39 +6,27 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/frankbardon/nexus/pkg/agui"
 	"github.com/frankbardon/nexus/pkg/agui/aguiclient"
 	"github.com/frankbardon/nexus/pkg/engine"
-	"github.com/frankbardon/nexus/pkg/engine/allplugins"
+	"github.com/frankbardon/nexus/pkg/testharness"
 )
-
-// aguiBindAddr is the loopback address configured in configs/test-agui-serve.yaml
-// (and its live-mode override). Integration tests run sequentially, so a fixed
-// high port is safe.
-const aguiBindAddr = "127.0.0.1:18190"
 
 // bootEngine boots a real engine from configPath with every plugin registered
 // (the same registry cmd/nexus and the test harness use) and returns it with a
 // cleanup that stops it. Unlike testharness.Run it does NOT block on the test IO
 // plugin's Done channel — the AG-UI POST is the driver here, not scripted io.test
-// inputs, so the caller controls the lifecycle.
+// inputs, so the caller controls the lifecycle. testharness.NewEngine redirects
+// the sessions and storage roots into a per-test temp dir, as the harness does,
+// and the config's fixed loopback ports are rewritten to the test's own free
+// ports (see rewritePorts).
 func bootEngine(t *testing.T, configPath string) *engine.Engine {
 	t.Helper()
 
-	abs := configPath
-	if !filepath.IsAbs(configPath) {
-		abs = filepath.Join(findRoot(t), configPath)
-	}
-	eng, err := engine.New(abs)
-	if err != nil {
-		t.Fatalf("engine.New(%s): %v", configPath, err)
-	}
-	allplugins.RegisterAll(eng.Registry)
-
+	eng := testharness.NewEngine(t, configPath, portsOption(t))
 	if err := eng.Boot(context.Background()); err != nil {
 		t.Fatalf("engine.Boot: %v", err)
 	}
@@ -88,9 +76,9 @@ func assertOrderedSubsequence(t *testing.T, got []agui.EventType, want ...agui.E
 // the stream.
 func TestAGUIServe_MockStream(t *testing.T) {
 	bootEngine(t, "configs/test-agui-serve.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -158,14 +146,14 @@ func TestAGUIServe_MockStream(t *testing.T) {
 func TestAGUIServe_MockBearerRejected(t *testing.T) {
 	cfg := copyConfig(t, "configs/test-agui-serve.yaml", map[string]any{
 		"nexus.io.agui": map[string]any{
-			"bind":         aguiBindAddr,
+			"bind":         aguiAddr(t),
 			"bearer_token": "s3cret",
 		},
 	})
 	bootEngine(t, cfg)
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	url := "http://" + aguiBindAddr + "/agui"
+	url := "http://" + aguiAddr(t) + "/agui"
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 

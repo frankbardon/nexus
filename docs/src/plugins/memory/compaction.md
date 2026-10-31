@@ -24,6 +24,29 @@ Monitors conversation size and automatically summarizes older messages using an 
 | `prompt_file` | string | *(none)* | Path to a custom compaction prompt file |
 | `persist` | bool | `true` | Persist the live tracked log and archive snapshots to the session workspace |
 
+### Commit Approval
+
+`require_approval` gates committing the summary back into history behind a
+human decision (`hitl.requested`, action kind `memory.compaction.commit`).
+Off by default.
+
+```yaml
+nexus.memory.compaction:
+  require_approval:
+    enabled: true
+    timeout: 30m          # default when unset; "0" disables the deadline
+    default_choice: ""    # choice picked on expiry; empty = skip the commit
+    match:
+      size_threshold_bytes: 0
+```
+
+`require_approval.timeout` defaults to `30m` so an unanswered prompt cannot
+leave compaction pending forever; set `"0"` (or `"0s"`) to wait indefinitely.
+A malformed value logs a warning and keeps the default. On expiry the commit
+is resolved by `default_choice`; when that denies it (empty or a reject
+choice) the summary is dropped, the live history is left intact for a later
+attempt, and the plugin emits `hitl.cancel` so transports dismiss the prompt.
+
 ## Events
 
 ### Subscribes To

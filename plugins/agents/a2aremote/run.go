@@ -15,9 +15,12 @@ import (
 
 // invocation is one tool call, parsed.
 type invocation struct {
-	task        string
-	contextMap  map[string]any
-	parentTurn  string
+	task       string
+	contextMap map[string]any
+	parentTurn string
+	// callID is the delegate tool call's ID, stamped on any hitl.requested
+	// the call raises so a tool.timeout for it cancels the question.
+	callID      string
 	parentDepth int
 	// timeout is the per-call override from the tool arguments, zero when the
 	// model did not supply one.
@@ -113,7 +116,7 @@ func (p *Plugin) runRemote(parent context.Context, ra *remote, in invocation) ou
 		defer cancel()
 	}
 
-	sess := newSession(p, ra, spawnID, in.parentTurn, cancel)
+	sess := newSession(p, ra, spawnID, in.parentTurn, in.callID, cancel)
 	p.trackSession(sess)
 	defer p.untrackSession(sess)
 

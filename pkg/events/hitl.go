@@ -49,10 +49,10 @@ type HITLChoice struct {
 }
 
 // HITLRequest is the unified human-in-the-loop request payload. It
-// supersedes AskUser and the design-doc-only ApprovalRequest: any plugin
-// that needs an operator's input — clarifying a question, approving a
-// destructive tool call, picking among curated plans, or signing off on a
-// memory write — emits this single event type.
+// supersedes the retired io.ask (AskUser) event and the design-doc-only
+// ApprovalRequest: any plugin that needs an operator's input — clarifying a
+// question, approving a destructive tool call, picking among curated plans,
+// or signing off on a memory write — emits this single event type.
 //
 // Exactly one of Prompt, PromptTemplate, or PromptSynthesizer should be
 // set. The control/hitl plugin renders the final string at request time;
@@ -108,6 +108,14 @@ type HITLRequest struct {
 	// Metadata is for plugin-specific extensions. Not interpreted by
 	// the engine.
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// CallID, when set, is the ToolCall.ID of the tool call this request
+	// was raised on or for: ask_user's own call, the call an approval gate
+	// is holding at before:tool.invoke, the delegate call whose remote
+	// asked a question. nexus.control.hitl cancels every pending request
+	// naming a call when a tool.timeout fires for it, so a prompt for a
+	// call that is already over does not stay open until shutdown. Empty
+	// for requests that belong to no tool call.
+	CallID string `json:"call_id,omitempty"`
 }
 
 // HITLResponse is the operator's answer to a HITLRequest. Exactly one of

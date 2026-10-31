@@ -19,6 +19,8 @@ core:
       model: mock
       max_tokens: 4096
   sessions:
+    # Manual runs only (bin/nexus -config ...). pkg/testharness replaces
+    # this, and core.storage.root, with a per-test temp dir.
     root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short
@@ -62,5 +64,6 @@ plugins:
   nexus.memory.longterm:
     scope: global
     auto_load: true
-    # Path is per-test-run; the harness cleans the session dir afterwards.
+    # Manual runs only. Plugin paths are not redirected by pkg/testharness,
+    # so every test overrides this with t.TempDir() via copyConfig.
     path: "~/.nexus/test-sessions/longterm-memory/"

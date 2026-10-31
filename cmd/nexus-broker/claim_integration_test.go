@@ -60,29 +60,7 @@ func TestClaimSpawnProxyRoundTrip(t *testing.T) {
 	}
 	defer client.Close(websocket.StatusNormalClosure, "")
 
-	out, err := brokerframe.Encode(brokerframe.Frame{
-		LeaseID: cr.LeaseID,
-		Signal:  brokerframe.SignalIO,
-		Payload: []byte(`{"hello":"world"}`),
-	})
-	if err != nil {
-		t.Fatalf("encode frame: %v", err)
-	}
-	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
-
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"world"}` {
-		t.Fatalf("unexpected echo frame: %+v", echo)
-	}
+	roundTripIOFrame(t, ctx, client, cr.LeaseID, `{"hello":"world"}`)
 }
 
 // TestClaimResumePassesRecall proves the resume path deterministically: a claim
@@ -437,28 +415,7 @@ func TestQueuedClaimProceedsWhenSlotFrees(t *testing.T) {
 	}
 	defer client.Close(websocket.StatusNormalClosure, "")
 
-	out, err := brokerframe.Encode(brokerframe.Frame{
-		LeaseID: second.LeaseID,
-		Signal:  brokerframe.SignalIO,
-		Payload: []byte(`{"hello":"queued"}`),
-	})
-	if err != nil {
-		t.Fatalf("encode frame: %v", err)
-	}
-	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"queued"}` {
-		t.Fatalf("unexpected echo frame: %+v", echo)
-	}
+	roundTripIOFrame(t, ctx, client, second.LeaseID, `{"hello":"queued"}`)
 	if got := reg.SlotsInUse(); got != 1 {
 		t.Fatalf("slots in use after B proceeds = %d, want 1 (no drift)", got)
 	}
@@ -681,28 +638,7 @@ func TestAuthenticatedClaimSpawnsAndProxiesEndToEnd(t *testing.T) {
 	}
 	defer client.Close(websocket.StatusNormalClosure, "")
 
-	out, err := brokerframe.Encode(brokerframe.Frame{
-		LeaseID: cr.LeaseID,
-		Signal:  brokerframe.SignalIO,
-		Payload: []byte(`{"hello":"authed"}`),
-	})
-	if err != nil {
-		t.Fatalf("encode frame: %v", err)
-	}
-	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"authed"}` {
-		t.Fatalf("unexpected echo frame: %+v", echo)
-	}
+	roundTripIOFrame(t, ctx, client, cr.LeaseID, `{"hello":"authed"}`)
 }
 
 // TestUnauthenticatedClaimIsRefusedAndSpawnsNothing is the load-bearing half of
@@ -846,28 +782,8 @@ func TestCrossPrincipalLeaseAccessIsRefused(t *testing.T) {
 	}
 	defer client.Close(websocket.StatusNormalClosure, "")
 
-	out, err := brokerframe.Encode(brokerframe.Frame{
-		LeaseID: cr.LeaseID,
-		Signal:  brokerframe.SignalIO,
-		Payload: []byte(`{"hello":"still-alive"}`),
-	})
-	if err != nil {
-		t.Fatalf("encode frame: %v", err)
-	}
-	if err := client.Write(dctx, websocket.MessageText, out); err != nil {
-		t.Fatalf("owner write after refused cross-principal attempts: %v", err)
-	}
-	_, data, err := client.Read(dctx)
-	if err != nil {
-		t.Fatalf("owner read after refused cross-principal attempts: %v", err)
-	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != `{"hello":"still-alive"}` {
-		t.Fatalf("unexpected echo frame: %+v", echo)
-	}
+	// The owner's lease still round-trips after B's refused attempts.
+	roundTripIOFrame(t, dctx, client, cr.LeaseID, `{"hello":"still-alive"}`)
 
 	// And A can still release its own lease through the full shared teardown.
 	//
@@ -1094,16 +1010,41 @@ func roundTripIOFrame(t *testing.T, ctx context.Context, conn *websocket.Conn, l
 	if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
 		t.Fatalf("client write: %v", err)
 	}
-	_, data, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	echo, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode echo: %v", err)
-	}
-	if echo.Signal != brokerframe.SignalIO || string(echo.Payload) != payload {
+	echo := readClientIOFrame(t, ctx, conn)
+	if string(echo.Payload) != payload {
 		t.Fatalf("unexpected echo frame: %+v (want payload %s)", echo, payload)
+	}
+}
+
+// readClientIOFrame reads client-bound frames off conn until the first SignalIO
+// frame and returns it, skipping lifecycle frames the instance pushes on its own.
+//
+// A test that writes one IO frame and reads exactly one frame back is asserting
+// an ordering the broker does not promise. The instance announces itself on
+// every dial (register, ready, session-id-report), and the session-id-report is
+// forwarded to the client: on a fresh claim POST /claim normally absorbs it
+// before the client can attach, but only within session_report_grace, and a
+// REATTACHING instance re-sends it while a client is already connected — which
+// made TestBrokerRestartReattachesLiveInstance fail ~1 in 40 runs (#155).
+//
+// Only non-IO frames are skipped: the first IO frame is returned as-is so the
+// caller still fails on a wrong payload rather than reading past it, and ctx
+// bounds the wait, so an echo that never arrives still fails the test.
+func readClientIOFrame(t *testing.T, ctx context.Context, conn *websocket.Conn) brokerframe.Frame {
+	t.Helper()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("client read while waiting for an IO frame: %v", err)
+		}
+		frame, err := brokerframe.Decode(data)
+		if err != nil {
+			t.Fatalf("decode client-bound frame: %v", err)
+		}
+		if frame.Signal == brokerframe.SignalIO {
+			return frame
+		}
+		t.Logf("skipping unsolicited %q frame ahead of the IO frame", frame.Signal)
 	}
 }
 
@@ -1653,52 +1594,13 @@ func TestBrokerRestartReattachesLiveInstance(t *testing.T) {
 	}
 	defer client.Close(websocket.StatusNormalClosure, "")
 
-	out, err := brokerframe.Encode(brokerframe.Frame{
-		LeaseID: cr.LeaseID,
-		Signal:  brokerframe.SignalIO,
-		Payload: []byte(`{"after":"restart"}`),
-	})
-	if err != nil {
-		t.Fatalf("encode frame: %v", err)
-	}
-	if err := client.Write(ctx, websocket.MessageText, out); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
-	// Read until the echo arrives rather than asserting it is the NEXT frame.
-	//
-	// A reattaching instance is not silent: it re-reports its engine session id
-	// once the socket is back, and that session-id-report is client-bound, so it
-	// can legitimately land on this connection ahead of the echo. Asserting on a
-	// single Read made this test a race between the stub's reconnect bookkeeping
-	// and its echo — it failed roughly 1 in 40 runs on an idle machine and hit
-	// two of the first two dependency PRs to run in CI after v0.18.1, in the
-	// REQUIRED test job.
-	//
-	// This still requires the echo to arrive, and still refuses a wrong one: only
-	// frames that are not the echo we are waiting for are skipped, ctx bounds the
-	// wait, and a mismatched SignalIO payload fails immediately rather than being
-	// skipped as noise. See #155.
-	var echo brokerframe.Frame
-	for {
-		_, data, err := client.Read(ctx)
-		if err != nil {
-			t.Fatalf("client read while waiting for the echo: %v", err)
-		}
-		frame, err := brokerframe.Decode(data)
-		if err != nil {
-			t.Fatalf("decode frame: %v", err)
-		}
-		if frame.Signal != brokerframe.SignalIO {
-			// Reconnect bookkeeping, not our echo. Keep reading.
-			t.Logf("skipping %q frame ahead of the echo", frame.Signal)
-			continue
-		}
-		echo = frame
-		break
-	}
-	if string(echo.Payload) != `{"after":"restart"}` {
-		t.Fatalf("unexpected echo through the restored lease: %+v", echo)
-	}
+	// Round-trip through readClientIOFrame rather than asserting the echo is the
+	// NEXT frame: a reattaching instance re-reports its engine session id once the
+	// socket is back, and that session-id-report is client-bound, so it can land on
+	// this connection ahead of the echo. A single Read made this test a race
+	// between the stub's reconnect bookkeeping and its echo (#155). The helper
+	// still requires the echo, bounded by ctx, and still refuses a wrong one.
+	roundTripIOFrame(t, ctx, client, cr.LeaseID, `{"after":"restart"}`)
 
 	// And the lease can still be released normally, which proves it is an ordinary
 	// lease now and not a special case.
@@ -2198,14 +2100,7 @@ func stubReport(t *testing.T, cr claimResponse) stubcore.Report {
 		t.Fatalf("write report request: %v", err)
 	}
 
-	_, data, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("read report: %v", err)
-	}
-	frame, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode report frame: %v", err)
-	}
+	frame := readClientIOFrame(t, ctx, conn)
 	var report stubcore.Report
 	if err := json.Unmarshal(frame.Payload, &report); err != nil {
 		t.Fatalf("decode report payload %q: %v", frame.Payload, err)

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -62,10 +63,20 @@ type Options struct {
 	// ReplayTimeout caps the replay run (per-turn timeout lives in the
 	// journal coordinator; this is the overall ceiling).
 	ReplayTimeout time.Duration
-	// SessionsRoot, when non-empty, is the absolute path the engine should
-	// use as core.sessions.root. Tests pass t.TempDir(); production passes
-	// the empty string and accepts the case-config default.
+	// SessionsRoot, when non-empty, is the path the engine uses as
+	// core.sessions.root; the session tree is left there for the caller
+	// (`nexus eval run` passes <run-dir>/_sessions so sessions stay with the
+	// run's report). When empty, the run gets a private temp dir that is
+	// removed once Run/RunLive returns. Either way the case config's own
+	// core.sessions.root is never used, so an eval run never writes into
+	// the root a case bundle happens to name (e.g. ~/.nexus/test-sessions).
 	SessionsRoot string
+	// StorageRoot, when non-empty, is the path the engine uses as
+	// core.storage.root (app- and agent-scope plugin SQLite). When empty,
+	// each Run/RunLive gets a private temp dir removed on return, so no case
+	// reads app/agent state another run left behind and nothing lands under
+	// ~/.nexus/plugins or ~/.nexus/agents.
+	StorageRoot string
 	// ExtraPlugins registers additional plugin factories onto the engine's
 	// registry, keyed by plugin ID, alongside the built-ins
 	// allplugins.RegisterAll already provides. This is an embedder's seam
@@ -95,7 +106,8 @@ type Options struct {
 //
 //  1. Decode the case config (raw YAML stored on the case so the engine
 //     owns parsing).
-//  2. Optionally override core.sessions.root (tests use t.TempDir()).
+//  2. Override core.sessions.root and core.storage.root (Options roots, or
+//     private temp dirs removed on return — see redirectRoots).
 //  3. engine.NewFromBytes → allplugins.RegisterAll → Boot.
 //  4. Subscribe a wildcard collector for the observed stream.
 //  5. Drive replay via engine.Replay (a thin wrapper around
@@ -113,19 +125,13 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 		opts.ReplayTimeout = 60 * time.Second
 	}
 
-	cfgBytes := c.ConfigYAML
-	if opts.SessionsRoot != "" {
-		// The engine accepts overrides via the YAML body; rather than mutate
-		// a parsed Config (the embedder pattern explicitly forbids that),
-		// rewrite the bytes with a small YAML overlay below the top-level
-		// `core.sessions.root`. This is intentionally surgical: a full YAML
-		// merge would require pulling in extra deps.
-		var err error
-		cfgBytes, err = overrideSessionsRoot(cfgBytes, opts.SessionsRoot)
-		if err != nil {
-			return nil, fmt.Errorf("override sessions root: %w", err)
-		}
+	// Registered before bootEngine so it runs after the deferred eng.Stop
+	// below (defers are LIFO): the temp roots outlive the engine.
+	cfgBytes, cleanupRoots, err := redirectRoots(c.ConfigYAML, opts)
+	if err != nil {
+		return nil, err
 	}
+	defer cleanupRoots()
 
 	eng, err := bootEngine(ctx, cfgBytes, opts)
 	if err != nil {
@@ -170,7 +176,7 @@ func Run(ctx context.Context, c *evalcase.Case, opts Options) (*Result, error) {
 	}
 
 	// Drive replay. Coordinator handles seeding the FIFO stash with
-	// llm.response/tool.result/io.ask.response payloads from the journal
+	// llm.response/tool.result/hitl.responded payloads from the journal
 	// and re-firing io.inputs in seq order.
 	replayCtx, replayCancel := context.WithTimeout(ctx, opts.ReplayTimeout)
 	defer replayCancel()
@@ -238,15 +244,13 @@ func RunLive(ctx context.Context, c *evalcase.Case, opts Options) (*Result, erro
 		opts.ReplayTimeout = 60 * time.Second
 	}
 
-	cfgBytes := c.ConfigYAML
-	if opts.SessionsRoot != "" {
-		var err error
-		cfgBytes, err = overrideSessionsRoot(cfgBytes, opts.SessionsRoot)
-		if err != nil {
-			return nil, fmt.Errorf("override sessions root: %w", err)
-		}
+	// Same LIFO ordering as Run: temp roots are removed after eng.Stop.
+	cfgBytes, cleanupRoots, err := redirectRoots(c.ConfigYAML, opts)
+	if err != nil {
+		return nil, err
 	}
-	cfgBytes, err := overlayLiveInputs(cfgBytes, c.Inputs)
+	defer cleanupRoots()
+	cfgBytes, err = overlayLiveInputs(cfgBytes, c.Inputs)
 	if err != nil {
 		return nil, fmt.Errorf("overlay live inputs: %w", err)
 	}
@@ -467,24 +471,71 @@ func loadJournal(journalDir string) ([]evalcase.ObservedEvent, error) {
 	return out, nil
 }
 
-// overrideSessionsRoot rewrites the YAML's core.sessions.root key to a new
-// absolute path. The implementation parses to a generic node, surgical-
-// edits, and re-marshals — preserves the rest of the config exactly.
-func overrideSessionsRoot(in []byte, root string) ([]byte, error) {
-	// Use yaml.v3 node-level API to keep formatting reasonably stable.
-	// Defer the import here to avoid pulling extra surface into the file
-	// header; gopkg.in/yaml.v3 is already a project-wide dep.
-	return rewriteCoreSessionsRoot(in, root)
+// redirectRoots rewrites the case config's core.sessions.root and
+// core.storage.root so an eval run never writes where the case bundle points
+// (case configs name roots like ~/.nexus/test-sessions for manual runs).
+// Each root comes from opts when set, otherwise from a fresh temp dir. The
+// returned cleanup removes only the temp dirs it created — a caller-supplied
+// root is the caller's to keep — and must run after the engine stops.
+//
+// The engine accepts overrides via the YAML body; rather than mutate a parsed
+// Config (the embedder pattern explicitly forbids that), the bytes are
+// rewritten surgically with the yaml.v3 node API.
+func redirectRoots(in []byte, opts Options) ([]byte, func(), error) {
+	var temps []string
+	cleanup := func() {
+		for _, d := range temps {
+			_ = os.RemoveAll(d)
+		}
+	}
+	pick := func(given, pattern string) (string, error) {
+		if given != "" {
+			return given, nil
+		}
+		d, err := os.MkdirTemp("", pattern)
+		if err != nil {
+			return "", err
+		}
+		temps = append(temps, d)
+		return d, nil
+	}
+
+	sessionsRoot, err := pick(opts.SessionsRoot, "nexus-eval-sessions-")
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("create temp sessions root: %w", err)
+	}
+	storageRoot, err := pick(opts.StorageRoot, "nexus-eval-storage-")
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("create temp storage root: %w", err)
+	}
+
+	out, err := rewriteCoreSessionsRoot(in, sessionsRoot)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("override sessions root: %w", err)
+	}
+	out, err = rewriteCoreRoot(out, "storage", storageRoot)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("override storage root: %w", err)
+	}
+	return out, cleanup, nil
 }
 
-// rewriteCoreSessionsRoot is split out so it can be unit-tested without a
-// full Run.
+// rewriteCoreSessionsRoot rewrites the YAML's core.sessions.root key to an
+// absolute form of root, preserving the rest of the config. Split out so it
+// can be unit-tested without a full Run.
 func rewriteCoreSessionsRoot(in []byte, root string) ([]byte, error) {
-	abs, err := filepath.Abs(root)
+	return rewriteCoreRoot(in, "sessions", root)
+}
+
+// rewriteCoreRoot sets core.<section>.root to the absolute form of root.
+func rewriteCoreRoot(in []byte, section, root string) ([]byte, error) {
+	abs, err := filepath.Abs(engine.ExpandPath(root))
 	if err != nil {
 		return nil, err
 	}
-	// Defer-import the yaml package via a small helper. Done inline to keep
-	// the surface flat.
-	return yamlSetCoreSessionsRoot(in, abs)
+	return yamlSetCoreRoot(in, section, abs)
 }

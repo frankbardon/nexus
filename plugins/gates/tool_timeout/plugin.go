@@ -1,14 +1,17 @@
 // Package tooltimeout implements nexus.gate.tool_timeout, a per-call deadline
 // gate for tool invocations. It observes tool.invoke, starts a timer per
 // call, and on expiry synthesizes a tool.result error plus a tool.timeout
-// event so the agent's bookkeeping unwinds even when a tool hangs.
+// event so the agent's bookkeeping unwinds even when a tool hangs. The
+// engine cancels the timed-out call's dispatch context on that tool.timeout
+// (see engine.ToolCallContexts), so tools that honor it stop working too.
 //
 // The gate is on by default: nexus.tool.catalog auto-activates it through
 // Requires(), so every profile that dispatches tools through the catalog gets
 // a per-call deadline without listing the gate. The default deadline is a
 // backstop (minutes, not seconds) sized above every shipped tool's own
 // timeout, and tools whose wait is bounded by a human or by their own
-// wall-clock budget are exempt by default (see builtinPerTool).
+// wall-clock budget are exempt by default (see builtinPerTool), as is any tool
+// whose definition carries events.ToolTagAwaitsHuman (see awaitsHuman).
 package tooltimeout
 
 import (
@@ -33,6 +36,11 @@ const pluginID = "nexus.gate.tool_timeout"
 // never arrives (a vetoed before:tool.result, a handler that never answers),
 // not to police a tool that is merely slow.
 const defaultTimeout = 10 * time.Minute
+
+// catalogObservePriority runs the gate's tool.catalog.query observer after
+// every handler that fills the snapshot (nexus.tool.catalog at 10,
+// nexus.io.agui's per-run client tools at 60), so it sees the final list.
+const catalogObservePriority = 1000
 
 // lateResultWindow is how long a timed-out call ID is remembered so its late
 // real tool.result can still be vetoed. A call whose result never arrives
@@ -71,6 +79,7 @@ func New() engine.Plugin {
 		inflight:       map[string]*tracker{},
 		timedOut:       map[string]time.Time{},
 		synthesizing:   map[string]struct{}{},
+		awaitsHuman:    map[string]struct{}{},
 		lateWindow:     lateResultWindow,
 	}
 }
@@ -93,7 +102,16 @@ type Plugin struct {
 	// disabled turns every deadline off (enabled: false).
 	disabled bool
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// awaitsHuman holds the names of tools whose latest definition carries
+	// events.ToolTagAwaitsHuman: they block on a human from inside their
+	// handler (an approval, a client-executed tool), so they get no deadline
+	// unless a per_tool key names them. Learned from tool.register and from
+	// tool.catalog.query snapshots (per-run tools such as AG-UI client tools
+	// never go through tool.register); a later untagged definition of the
+	// same name drops it. Nil in hand-built test plugins.
+	awaitsHuman map[string]struct{}
+
 	inflight map[string]*tracker // call ID -> live timer
 	// timedOut maps call IDs we've already synthesized for to when the
 	// deadline fired; a late real result for one of them is vetoed. Bounded:
@@ -118,7 +136,7 @@ type tracker struct {
 
 func (p *Plugin) ID() string                        { return pluginID }
 func (p *Plugin) Name() string                      { return "Tool Timeout Gate" }
-func (p *Plugin) Version() string                   { return "0.2.0" }
+func (p *Plugin) Version() string                   { return "0.3.0" }
 func (p *Plugin) Dependencies() []string            { return nil }
 func (p *Plugin) Requires() []engine.Requirement    { return nil }
 func (p *Plugin) Capabilities() []engine.Capability { return nil }
@@ -169,6 +187,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(5), engine.WithSource(pluginID)),
 		p.bus.Subscribe("before:tool.result", p.handleBeforeToolResult,
 			engine.WithPriority(5), engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.register", p.handleToolRegister,
+			engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.catalog.query", p.handleCatalogQuery,
+			engine.WithPriority(catalogObservePriority), engine.WithSource(pluginID)),
 	)
 
 	p.logger.Info("tool_timeout gate initialized",
@@ -200,11 +222,54 @@ func (p *Plugin) Subscriptions() []engine.EventSubscription {
 		{EventType: "tool.invoke", Priority: 10},
 		{EventType: "tool.result", Priority: 5},
 		{EventType: "before:tool.result", Priority: 5},
+		{EventType: "tool.register"},
+		{EventType: "tool.catalog.query", Priority: catalogObservePriority},
 	}
 }
 
 func (p *Plugin) Emissions() []string {
 	return []string{"tool.result", "tool.timeout"}
+}
+
+// handleToolRegister records whether a registered tool awaits a human.
+func (p *Plugin) handleToolRegister(event engine.Event[any]) {
+	switch td := event.Payload.(type) {
+	case events.ToolDef:
+		p.noteToolDefs([]events.ToolDef{td})
+	case *events.ToolDef:
+		if td != nil {
+			p.noteToolDefs([]events.ToolDef{*td})
+		}
+	}
+}
+
+// handleCatalogQuery observes the finished catalog snapshot. It never edits
+// the list; it only learns which tools — including per-run ones that were
+// never registered, like AG-UI client tools — await a human.
+func (p *Plugin) handleCatalogQuery(event engine.Event[any]) {
+	q, ok := event.Payload.(*events.ToolCatalogQuery)
+	if !ok || q == nil {
+		return
+	}
+	p.noteToolDefs(q.Tools)
+}
+
+func (p *Plugin) noteToolDefs(defs []events.ToolDef) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.awaitsHuman == nil {
+		p.awaitsHuman = map[string]struct{}{}
+	}
+	for _, td := range defs {
+		if td.Name == "" {
+			continue
+		}
+		if td.HasTag(events.ToolTagAwaitsHuman) {
+			p.awaitsHuman[td.Name] = struct{}{}
+		} else {
+			delete(p.awaitsHuman, td.Name)
+		}
+	}
 }
 
 func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
@@ -221,12 +286,14 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 		return
 	}
 
-	// Cooperative cancellation: this context is plumbed nowhere by the
-	// engine today — tools that already use exec.CommandContext or net/http
-	// with their own timeout honor their own deadline. Our timer's role is
-	// purely to unblock the agent's bookkeeping (pendingToolCalls,
-	// semaphore) by synthesizing a tool.result on expiry. The original tool
-	// goroutine may keep running until it completes or the process exits.
+	// This timer is the gate's own; it is not the tool's context. On expiry
+	// the gate emits tool.timeout, which the engine's per-call registry
+	// (engine.ToolCallContexts, attached at Boot) turns into cancelling the
+	// context the tool handler took with PluginContext.ToolCalls.Begin.
+	// That cancellation is cooperative: a handler that never called Begin,
+	// or ignores its context, keeps running, and its late result is vetoed
+	// in handleBeforeToolResult. The synthesized tool.result is what
+	// unblocks the agent's bookkeeping (pendingToolCalls, semaphore).
 	timerCtx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	p.mu.Lock()
@@ -353,8 +420,9 @@ func (p *Plugin) handleBeforeToolResult(event engine.Event[any]) {
 
 // resolveTimeout returns the timeout for a given tool name; 0 means no
 // deadline. Resolution: the user's per_tool map (exact key, then longest
-// matching glob), then the built-in exemptions (same order), then
-// default_timeout. enabled: false short-circuits to 0.
+// matching glob), then the built-in exemptions (same order), then tools
+// tagged events.ToolTagAwaitsHuman (no deadline), then default_timeout.
+// enabled: false short-circuits to 0.
 func (p *Plugin) resolveTimeout(name string) time.Duration {
 	if p.disabled {
 		return 0
@@ -364,6 +432,12 @@ func (p *Plugin) resolveTimeout(name string) time.Duration {
 	}
 	if d, ok := lookup(p.builtin, name); ok {
 		return d
+	}
+	p.mu.Lock()
+	_, human := p.awaitsHuman[name]
+	p.mu.Unlock()
+	if human {
+		return 0
 	}
 	return p.defaultTimeout
 }

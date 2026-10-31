@@ -81,9 +81,9 @@ func TestUnknownTool_ReactRecovers(t *testing.T) {
 // mock calls get_weather, and simply does not advertise the tool.
 func TestUnknownTool_AGUIRunFinishes(t *testing.T) {
 	bootEngine(t, "configs/test-agui-clienttool.yaml")
-	waitForListener(t, aguiBindAddr)
+	waitForListener(t, aguiAddr(t))
 
-	c := aguiclient.New("http://" + aguiBindAddr + "/agui")
+	c := aguiclient.New("http://" + aguiAddr(t) + "/agui")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 

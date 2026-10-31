@@ -258,7 +258,7 @@ func (p *Plugin) handle(tc events.ToolCall) {
 		all = all[:k]
 	}
 
-	p.emitRetrieved(tc.TurnID, all)
+	p.emitRetrieved(tc, all)
 
 	output, err := p.formatOutput(query, all)
 	if err != nil {
@@ -323,8 +323,14 @@ func (p *Plugin) resolveNamespaces(requested []string) []string {
 
 // emitRetrieved publishes the per-turn retrieval context so the citation
 // plugin can validate references against actually-retrieved chunks.
-func (p *Plugin) emitRetrieved(turnID string, hits []hit) {
-	if turnID == "" || len(hits) == 0 {
+//
+// It is keyed by the call's own TurnID — inside a nested loop, the loop's
+// private turn, which that loop's llm.response names under
+// engine.MetaLoopTurnID — so a child's sources validate only the child's
+// responses, never the parent turn's. ParentTurnID lets the consumer
+// release the index when the parent turn ends.
+func (p *Plugin) emitRetrieved(tc events.ToolCall, hits []hit) {
+	if tc.TurnID == "" || len(hits) == 0 {
 		return
 	}
 	chunks := make([]events.RetrievedChunk, 0, len(hits))
@@ -336,9 +342,10 @@ func (p *Plugin) emitRetrieved(turnID string, hits []hit) {
 			TrustTier: h.match.Metadata["trust_tier"],
 		})
 	}
-	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: turnID,
-		Source: pluginID,
-		Chunks: chunks,
+	_ = p.bus.Emit("rag.retrieved", events.RetrievalContext{SchemaVersion: events.RetrievalContextVersion, TurnID: tc.TurnID,
+		ParentTurnID: tc.ParentTurnID,
+		Source:       pluginID,
+		Chunks:       chunks,
 	})
 }
 

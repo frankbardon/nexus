@@ -19,6 +19,8 @@ core:
       model: mock
       max_tokens: 4096
   sessions:
+    # Manual runs only (bin/nexus -config ...). pkg/testharness replaces
+    # this, and core.storage.root, with a per-test temp dir.
     root: ~/.nexus/test-sessions
     retention: 30d
     id_format: datetime_short
@@ -111,5 +113,6 @@ plugins:
   nexus.memory.longterm:
     scope: global
     auto_load: false
+    # Manual runs only; TestKitchenSink_Boot overrides it with t.TempDir().
     path: "~/.nexus/test-sessions/memory/"
 

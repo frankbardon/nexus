@@ -32,6 +32,7 @@ type invocation struct {
 	ctx          context.Context
 	bus          engine.EventBus
 	turnID       string
+	parentTurnID string // outer run_code's ParentTurnID; inner calls inherit it so their HITL binds to the same turn
 	parentCallID string // outer run_code tool_use_id; stamped on inner calls
 
 	mu      sync.Mutex
@@ -166,6 +167,7 @@ func (inv *invocation) callToolTyped(name string, argsVal reflect.Value, argsTyp
 		Name:         name,
 		Arguments:    raw,
 		TurnID:       inv.turnID,
+		ParentTurnID: inv.parentTurnID,
 		ParentCallID: inv.parentCallID,
 	}
 
@@ -263,6 +265,7 @@ func (inv *invocation) callTool(name string, argsVal reflect.Value, argsType ref
 		Name:         name,
 		Arguments:    raw,
 		TurnID:       inv.turnID,
+		ParentTurnID: inv.parentTurnID,
 		ParentCallID: inv.parentCallID,
 	}
 

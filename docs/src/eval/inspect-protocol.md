@@ -67,10 +67,10 @@ fields.
 
 The runner overlays your config to make the run hermetic:
 
-- `core.sessions.root` is overridden to a temp directory under
-  `os.TempDir()`. The directory is removed on exit unless
-  `NEXUS_EVAL_INSPECT_KEEP_SESSIONS=1` is set (useful for post-hoc
-  journal forensics).
+- `core.sessions.root` and `core.storage.root` are overridden to
+  separate temp directories under `os.TempDir()`. Both are removed on
+  exit unless `NEXUS_EVAL_INSPECT_KEEP_SESSIONS=1` is set (useful for
+  post-hoc journal forensics).
 - `nexus.io.test` is added to `plugins.active` if absent; visual
   transports (`nexus.io.tui`, `nexus.io.browser`, `nexus.io.wails`,
   `nexus.io.oneshot`) are stripped because the run must be headless.

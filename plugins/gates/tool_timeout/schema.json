@@ -13,12 +13,12 @@
     "default_timeout": {
       "type": "string",
       "default": "10m",
-      "description": "Default per-call timeout as a Go duration string (e.g. '30s', '10m'). Applied when neither a per_tool key nor a built-in exemption matches. '0s' means no default deadline."
+      "description": "Default per-call timeout as a Go duration string (e.g. '30s', '10m'). Applied when no per_tool key, built-in exemption or awaits_human-tagged tool matches. '0s' means no default deadline."
     },
     "per_tool": {
       "type": "object",
       "additionalProperties": {"type": "string"},
-      "description": "Per-tool overrides keyed by tool name. Values are Go duration strings. Keys may be exact names ('web_fetch') or glob patterns matched via path.Match ('mcp.*'). '0s' means no deadline for that tool. Resolution: exact key wins; among glob matches the longest pattern wins; user keys are consulted before the built-in exemptions (ask_user, delegate, spawn_*, delegate_a2a_*, delegate_agui_* = no deadline); otherwise default_timeout applies."
+      "description": "Per-tool overrides keyed by tool name. Values are Go duration strings. Keys may be exact names ('web_fetch') or glob patterns matched via path.Match ('mcp.*'). '0s' means no deadline for that tool. Resolution: exact key wins; among glob matches the longest pattern wins; user keys are consulted before the built-in exemptions (ask_user, delegate, spawn_*, delegate_a2a_*, delegate_agui_* = no deadline) and before tools tagged awaits_human (no deadline); otherwise default_timeout applies."
     }
   }
 }

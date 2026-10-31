@@ -208,6 +208,27 @@ type ToolDef struct {
 	Tags     []string // Cross-cutting metadata for filtering.
 }
 
+// ToolTagAwaitsHuman marks a ToolDef whose call can block on a human (or a
+// human-driven client) from inside its handler — a write approval, a
+// client-executed tool whose result comes back on a later request. A per-call
+// deadline sized for machines would cut such a call off while the person is
+// still deciding, so nexus.gate.tool_timeout exempts tools carrying this tag
+// by default, learned from tool.register and from tool.catalog.query
+// snapshots. The owning plugin sets the tag only when the wait is real (e.g.
+// longterm memory_write only while require_approval is on), so the flag stays
+// with the plugin that knows, and the gate never hard-codes a foreign name.
+const ToolTagAwaitsHuman = "awaits_human"
+
+// HasTag reports whether the tool definition carries tag.
+func (d ToolDef) HasTag(tag string) bool {
+	for _, t := range d.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
 // LLMResponse is the complete response from a language model.
 type LLMResponse struct {
 	SchemaVersion int `json:"_schema_version"`

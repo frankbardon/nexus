@@ -39,6 +39,12 @@ type Plugin struct {
 	mu      sync.Mutex
 	pending map[string]chan events.HITLResponse
 
+	// byCall maps the ID of every open hitl.requested that names a tool
+	// call (HITLRequest.CallID) — whoever raised it — to that call ID, so
+	// a tool.timeout for the call can cancel it. Entries leave on the
+	// request's hitl.responded. Guarded by mu.
+	byCall map[string]string
+
 	// reg is the optional filesystem-backed registry (config-gated by
 	// registry.enabled). When non-nil, every hitl.requested is mirrored to
 	// disk and an fsnotify watcher dispatches matching response files back
@@ -57,6 +63,7 @@ func (p *Plugin) LiveCalls() uint64 { return p.liveCalls.Load() }
 func New() engine.Plugin {
 	return &Plugin{
 		pending: make(map[string]chan events.HITLResponse),
+		byCall:  make(map[string]string),
 	}
 }
 
@@ -79,6 +86,10 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 			engine.WithPriority(50), engine.WithSource(pluginID)),
 		p.bus.Subscribe("hitl.cancel", p.handleCancel,
 			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("hitl.requested", p.handleRequest,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
+		p.bus.Subscribe("tool.timeout", p.handleToolTimeout,
+			engine.WithPriority(50), engine.WithSource(pluginID)),
 	)
 
 	if cfg, ok := ctx.Config["registry"].(map[string]any); ok {
@@ -93,10 +104,6 @@ func (p *Plugin) Init(ctx engine.PluginContext) error {
 				return fmt.Errorf("hitl registry: %w", err)
 			}
 			p.reg = reg
-			p.unsubs = append(p.unsubs,
-				p.bus.Subscribe("hitl.requested", p.handleRequest,
-					engine.WithPriority(50), engine.WithSource(pluginID)),
-			)
 			p.logger.Debug("hitl registry enabled", "dir", reg.Dir())
 		}
 	}
@@ -164,15 +171,13 @@ func (p *Plugin) Shutdown(_ context.Context) error {
 }
 
 func (p *Plugin) Subscriptions() []engine.EventSubscription {
-	subs := []engine.EventSubscription{
+	return []engine.EventSubscription{
 		{EventType: "tool.invoke", Priority: 50},
 		{EventType: "hitl.responded", Priority: 50},
 		{EventType: "hitl.cancel", Priority: 50},
+		{EventType: "hitl.requested", Priority: 50},
+		{EventType: "tool.timeout", Priority: 50},
 	}
-	if p.reg != nil {
-		subs = append(subs, engine.EventSubscription{EventType: "hitl.requested", Priority: 50})
-	}
-	return subs
 }
 
 func (p *Plugin) Emissions() []string {
@@ -252,6 +257,7 @@ func (p *Plugin) handleResponse(event engine.Event[any]) {
 
 	p.mu.Lock()
 	ch, exists := p.pending[resp.RequestID]
+	delete(p.byCall, resp.RequestID)
 	p.mu.Unlock()
 
 	// Clean up the registry file for this request — covers the case where
@@ -293,26 +299,83 @@ func (p *Plugin) handleCancel(event engine.Event[any]) {
 		reason, _ := m["reason"].(string)
 		c = events.HITLCancel{SchemaVersion: events.HITLCancelVersion, RequestID: id, Reason: reason}
 	}
-	if c.RequestID == "" {
+	p.cancelRequest(c.RequestID, c.Reason)
+}
+
+// cancelRequest is the one cancellation path: it drops the request's
+// registry file and emits a synthetic hitl.responded{Cancelled: true}.
+// That response unblocks whichever plugin is waiting on the request (each
+// requester correlates hitl.responded by RequestID) and is what IO
+// transports retract the prompt on.
+func (p *Plugin) cancelRequest(requestID, reason string) {
+	if requestID == "" {
 		return
 	}
 	if p.reg != nil {
-		p.reg.removeRequest(c.RequestID)
+		p.reg.removeRequest(requestID)
 	}
 	resp := events.HITLResponse{SchemaVersion: events.HITLResponseVersion,
-		RequestID:    c.RequestID,
+		RequestID:    requestID,
 		Cancelled:    true,
-		CancelReason: c.Reason,
+		CancelReason: reason,
 	}
 	_ = p.bus.Emit("hitl.responded", resp)
 }
 
-// handleRequest mirrors hitl.requested to the on-disk registry. Only wired
-// when registry.enabled is true.
+// handleToolTimeout cancels every open request raised on or for the
+// timed-out call (HITLRequest.CallID == ToolTimeout.CallID). The call is
+// over — its result, if it ever arrives, is vetoed by the timeout gate — so
+// a prompt still open for it would otherwise sit unanswered until shutdown
+// and hold the drain for up to engine.shutdown.drain_timeout. This covers
+// requests raised by any plugin (ask_user, approval gates, delegate
+// tools), not only this plugin's own.
+func (p *Plugin) handleToolTimeout(event engine.Event[any]) {
+	var tt events.ToolTimeout
+	switch v := event.Payload.(type) {
+	case events.ToolTimeout:
+		tt = v
+	case *events.ToolTimeout:
+		if v == nil {
+			return
+		}
+		tt = *v
+	default:
+		return
+	}
+	if tt.CallID == "" {
+		return
+	}
+
+	var ids []string
+	p.mu.Lock()
+	for reqID, callID := range p.byCall {
+		if callID == tt.CallID {
+			ids = append(ids, reqID)
+			delete(p.byCall, reqID)
+		}
+	}
+	p.mu.Unlock()
+
+	reason := fmt.Sprintf("tool call %s (%s) timed out after %s", tt.CallID, tt.ToolName, tt.Timeout)
+	for _, id := range ids {
+		p.logger.Info("hitl: cancelling request for timed-out tool call",
+			"request_id", id, "call_id", tt.CallID, "tool", tt.ToolName)
+		p.cancelRequest(id, reason)
+	}
+}
+
+// handleRequest records a request that names a tool call (so tool.timeout
+// can cancel it) and, when registry.enabled is true, mirrors it to the
+// on-disk registry.
 func (p *Plugin) handleRequest(event engine.Event[any]) {
 	req, ok := event.Payload.(events.HITLRequest)
 	if !ok {
 		return
+	}
+	if req.CallID != "" && req.ID != "" {
+		p.mu.Lock()
+		p.byCall[req.ID] = req.CallID
+		p.mu.Unlock()
 	}
 	if p.reg == nil {
 		return
@@ -380,8 +443,12 @@ func buildRequestFromToolCall(tc events.ToolCall) (events.HITLRequest, string) {
 	}
 
 	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: fmt.Sprintf("hitl-%s-%s", tc.TurnID, tc.ID),
-		TurnID:          tc.TurnID,
+		// BindingTurnID: inside a subagent/delegate loop tc.TurnID is the
+		// loop's private result-matching turn, which turn-scoped transports
+		// (nexus.io.agui) drop a hitl.requested for (#224).
+		TurnID:          tc.BindingTurnID(),
 		RequesterPlugin: pluginID,
+		CallID:          tc.ID,
 		ActionKind:      "free_text",
 		Mode:            mode,
 		Choices:         choices,

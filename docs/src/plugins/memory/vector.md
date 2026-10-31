@@ -48,6 +48,30 @@ The active `embeddings.provider` plugin owns the model choice — set the
 embedding model on that plugin. The model used to populate a namespace
 must match the model used to query it.
 
+### Write Approval
+
+`require_approval` gates each store behind a human decision
+(`hitl.requested`, action kind `memory.vector.write`) before the
+`vector.upsert`. Off by default.
+
+```yaml
+nexus.memory.vector:
+  require_approval:
+    enabled: true
+    timeout: 30m          # default when unset; "0" disables the deadline
+    default_choice: ""    # choice picked on expiry; empty = don't store
+    match:
+      namespace_glob: "memory-*"
+      size_threshold_bytes: 0
+```
+
+`require_approval.timeout` defaults to `30m` so an unanswered prompt cannot
+block a store forever; set `"0"` (or `"0s"`) to wait indefinitely. A
+malformed value logs a warning and keeps the default. On expiry the write is
+resolved by `default_choice`; when that denies it (empty or a reject choice)
+nothing is upserted, and the plugin emits `hitl.cancel` so transports
+dismiss the prompt.
+
 ## Behavior
 
 ### On `io.input` (priority 10)
@@ -61,6 +85,10 @@ Subscribed at priority 10 — earlier than the agent's handler at 50. Sequence:
 5. Optionally also store the input itself (`auto_store_user_input`).
 
 When the agent builds the next `llm.request` (priority 50), the `PromptRegistry` calls `buildPromptSection` which renders the stashed hits as XML.
+
+### On `agent.turn.start` (priority 50)
+
+Recall runs before any turn exists — the agent loop mints the turn ID only after `io.input` — so the hits are announced to [`nexus.rag.citations`](../../configuration/reference.md#nexusragcitations) once the turn starts: the plugin emits `rag.retrieved` with `TurnID` set to the starting turn and one `RetrievedChunk` per stashed hit (`Source` = the entry's `source` metadata, `DocID` = its ID, `ChunkIdx`/`TrustTier` from metadata when present). The citation contract tells the model it may cite "memory recall", so a `<cite source="compaction" doc="<id>"/>` naming a recalled entry validates for that turn, and strict mode keeps it instead of stripping it. The announced set is exactly what the prompt section renders for the turn; a resumed turn re-announces it, since the citation index was released when the cancelled turn ended. Nested loops (subagent, delegate) emit no `agent.turn.start`, so recalled memory validates the parent turn's responses only.
 
 ### On `memory.compacted`
 
@@ -91,14 +119,16 @@ When at least one hit clears `min_similarity`, the plugin renders:
 These items were recalled from your vector memory based on the current user message.
 Use them if relevant; ignore them if not.
 
-  <item rank="1" similarity="0.842" source="compaction">
+  <item rank="1" similarity="0.842" source="compaction" doc="compaction-1f3a9c2e">
     Summary of prior turns: user is debugging the websocket reconnect logic...
   </item>
-  <item rank="2" similarity="0.711" source="explicit">
+  <item rank="2" similarity="0.711" source="explicit" doc="explicit-7b04d1aa">
     User mentioned the bug was specific to the staging environment.
   </item>
 </recalled_memory>
 ```
+
+Each item carries `doc`, the entry's vector-store ID — the same value announced as `RetrievedChunk.DocID` on `rag.retrieved` — and `chunk` when the entry has `chunk_idx` metadata. Attribute values are XML-escaped. Because many entries share a `source` (every compaction summary is `source="compaction"`), a source-only `<cite source="compaction"/>` matches any of them; the citation contract tells the model to add `doc="<doc>"`, and `<cite source="compaction" doc="compaction-1f3a9c2e"/>` validates as that one entry only — a `doc` no recalled entry has is stripped in strict mode even when the source matches.
 
 When no hits clear the filter, the section returns an empty string and `PromptRegistry` skips it — turns with no recall add nothing to the prompt.
 
@@ -140,11 +170,13 @@ To deliberately share memory across agents, override `namespace` to a common val
 | Event | Direction | Payload | When |
 |-------|-----------|---------|------|
 | `io.input` | Bus → plugin | `events.UserInput` | Triggers query + stash. |
+| `agent.turn.start` | Bus → plugin | `events.TurnInfo` | Announces the stashed hits for the starting turn. |
 | `memory.compacted` | Bus → plugin | `events.CompactionComplete` | Triggers auto-store of summary. |
 | `memory.vector.store` | Any → plugin | `*events.VectorMemoryStore` | Explicit store. |
 | `embeddings.request` | Plugin → bus | `*events.EmbeddingsRequest` | Used during query and store. |
 | `vector.query` | Plugin → bus | `*events.VectorQuery` | Used during turn-start retrieval. |
 | `vector.upsert` | Plugin → bus | `*events.VectorUpsert` | Used during store. |
+| `rag.retrieved` | Plugin → bus | `events.RetrievalContext` | On `agent.turn.start` with hits stashed; keyed by that turn for citation validation. |
 
 ## Limits
 

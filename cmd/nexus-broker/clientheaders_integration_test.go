@@ -91,14 +91,7 @@ func stubReportWithHeaders(t *testing.T, cr claimResponse, headers map[string]st
 		t.Fatalf("write report request: %v", err)
 	}
 
-	_, data, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("read report: %v", err)
-	}
-	frame, err := brokerframe.Decode(data)
-	if err != nil {
-		t.Fatalf("decode report frame: %v", err)
-	}
+	frame := readClientIOFrame(t, ctx, conn)
 	var report stubcore.Report
 	if err := json.Unmarshal(frame.Payload, &report); err != nil {
 		t.Fatalf("decode report payload %q: %v", frame.Payload, err)

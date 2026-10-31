@@ -34,6 +34,9 @@ func TestBuildRequestFromToolCallFreeText(t *testing.T) {
 	if req.ActionKind != "free_text" {
 		t.Fatalf("ActionKind = %q; want free_text", req.ActionKind)
 	}
+	if req.CallID != "call-1" {
+		t.Fatalf("CallID = %q; want call-1", req.CallID)
+	}
 }
 
 func TestBuildRequestFromToolCallChoices(t *testing.T) {
