@@ -271,7 +271,8 @@ func (p *Plugin) handleBeforeRequest(event engine.Event[any]) {
 		newMeta["_target_provider"] = pc.Provider
 		newMeta[engine.MetaFanoutProvider] = pc.Provider
 		// Tag with _source so agent handlers skip individual fanout responses.
-		// The final combined response emitted by finalize() has no _source.
+		// The merged response restores the original request's _source (see
+		// mergedMetadata).
 		newMeta["_source"] = pluginID
 
 		fanReq := *req
@@ -553,22 +554,46 @@ func (p *Plugin) finalize(fanoutID string, state *fanoutState) {
 	}
 }
 
+// mergedMetadata builds the merged response's Metadata from the chosen leg's
+// (legMeta) and the intercepted request's (origMeta).
+//
+// The legs overwrite _source with the fanout's own ID so agent loops skip each
+// per-provider answer, and providers echo request Metadata onto the response,
+// so the leg's map says _source = nexus.provider.fanout. The merged response
+// is the answer to the ORIGINAL request, so every key the original request
+// carried is restored over the leg's copy — _source (removed when the request
+// had none), turn_id and whatever else its producer correlates on. Keys the
+// provider added (thinking blocks, reasoning items, _vetoed) survive. The leg
+// markers (_fanout_provider, _target_provider) and the parent's intercept
+// marker are dropped; _fanout and _fanout_id mark the merged result.
+func mergedMetadata(legMeta, origMeta map[string]any, fanoutID string) map[string]any {
+	out := make(map[string]any, len(legMeta)+len(origMeta)+2)
+	for k, v := range legMeta {
+		switch k {
+		case "_fanout_id", engine.MetaFanoutProvider, "_target_provider", engine.MetaSource:
+			continue
+		}
+		out[k] = v
+	}
+	for k, v := range origMeta {
+		if k == engine.MetaInterceptedBy {
+			continue
+		}
+		out[k] = v
+	}
+	out["_fanout"] = true
+	out["_fanout_id"] = fanoutID
+	return out
+}
+
 // emitFinalResponse builds the combined response and emits it. First response
 // in the slice is primary, rest become alternatives.
 func (p *Plugin) emitFinalResponse(fanoutID string, state *fanoutState, responses []events.LLMResponse) {
 	primary := responses[0]
-
-	// Strip fanout metadata from primary.
-	cleanMeta := make(map[string]any)
-	for k, v := range primary.Metadata {
-		if k == "_fanout_id" || k == engine.MetaFanoutProvider || k == "_target_provider" {
-			continue
-		}
-		cleanMeta[k] = v
-	}
-	cleanMeta["_fanout"] = true
-	cleanMeta["_fanout_id"] = fanoutID
-	primary.Metadata = cleanMeta
+	state.mu.Lock()
+	origMeta := state.request.Metadata
+	state.mu.Unlock()
+	primary.Metadata = mergedMetadata(primary.Metadata, origMeta, fanoutID)
 
 	// Remaining responses become alternatives.
 	if len(responses) > 1 {

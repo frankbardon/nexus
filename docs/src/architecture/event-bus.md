@@ -254,8 +254,9 @@ request is answered inside the synchronous emit or not at all
 (`engine.ErrNoLLMResponse`). An intercepted one is answered asynchronously, so
 the helper waits on `ctx` and returns `ctx.Err()` when it ends first — `ctx` is
 the only bound, so pass one that ends. Correlate on `RequestID`: interceptors
-carry it onto their response, while fanout's merged response carries the
-fanout's own `_source`. Fanout legs keep the parent's `RequestID` too, so skip
+carry it onto their response (fanout's merged response also restores the
+request's own `_source` and other metadata, but each leg carries the fanout's
+`_source`). Fanout legs keep the parent's `RequestID` too, so skip
 any response for which `engine.IsFanoutLegResponse` is true
 (`Metadata["_fanout_provider"]`, `engine.MetaFanoutProvider`).
 

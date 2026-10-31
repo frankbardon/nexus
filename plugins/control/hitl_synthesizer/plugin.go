@@ -349,9 +349,9 @@ func (p *Plugin) synthesize(req *events.HITLRequest) (string, error) {
 
 // handleLLMResponse routes the response to a synthesis request back to the
 // synthesize() call waiting for it. It correlates on RequestID (the
-// synthesis correlation ID) first — that is what survives an interceptor
-// such as fanout, whose merged response carries the fanout's own _source —
-// and falls back to the _source + _synth_id metadata pair. Fanout legs share
+// synthesis correlation ID) first — that is what any interceptor carries
+// onto its response (fanout's merged one also restores the request's
+// _source) — and falls back to the _source + _synth_id metadata pair. Fanout legs share
 // the RequestID and are skipped.
 func (p *Plugin) handleLLMResponse(event engine.Event[any]) {
 	resp, ok := event.Payload.(events.LLMResponse)

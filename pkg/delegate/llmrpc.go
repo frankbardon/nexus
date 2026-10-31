@@ -78,7 +78,8 @@ func SyncLLM(ctx context.Context, bus engine.EventBus, req events.LLMRequest) (e
 
 func responseMatches(resp events.LLMResponse, requestID, source string) bool {
 	// A fanout leg shares the request's RequestID (and carries the fanout's
-	// own _source); only the merged response answers the request.
+	// own _source); only the merged response, which restores the request's
+	// _source, answers the request.
 	if engine.IsFanoutLegResponse(resp.Metadata) {
 		return false
 	}

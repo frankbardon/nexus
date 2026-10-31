@@ -45,8 +45,8 @@ prompt or `text/template`.
    [Event Bus](../../architecture/event-bus.md)), the answer arrives
    asynchronously and the synthesizer waits for it, for at most 60
    seconds or until the plugin shuts down. Responses are correlated by
-   `RequestID` (the synthesis correlation ID), which survives fanout's
-   merged response; fanout legs sharing that ID are skipped.
+   `RequestID` (the synthesis correlation ID), which fanout's
+   merged response carries; fanout legs sharing that ID are skipped.
 4. The follow-up `Emit("hitl.requested", req)` value emission carries
    the synthesized prompt to IO plugins.
 
