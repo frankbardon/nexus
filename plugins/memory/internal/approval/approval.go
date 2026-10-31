@@ -72,6 +72,10 @@ type Request struct {
 	// Set it whenever the gated action came from a turn (a tool call);
 	// leave it empty for actions that belong to no turn. Optional.
 	TurnID string
+	// CallID, when set, is forwarded as HITLRequest.CallID: the ID of the
+	// tool call the gated action belongs to, so nexus.control.hitl cancels
+	// the request if that call times out. Optional.
+	CallID string
 }
 
 // RequestApproval emits hitl.requested and blocks until a matching
@@ -124,6 +128,7 @@ func RequestApproval(ctx context.Context, req Request) (events.HITLResponse, boo
 	hitlReq := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: id,
 		SessionID:       req.SessionID,
 		TurnID:          req.TurnID,
+		CallID:          req.CallID,
 		RequesterPlugin: req.PluginID,
 		ActionKind:      req.ActionKind,
 		ActionRef:       req.ActionRef,

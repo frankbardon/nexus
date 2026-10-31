@@ -155,6 +155,11 @@ func TestRemoteQuestionReachesTheHumanAndResumesTheTask(t *testing.T) {
 	if q.ActionKind != hitlActionKind {
 		t.Errorf("action kind = %q, want %q", q.ActionKind, hitlActionKind)
 	}
+	// CallID ties the question to the delegate call, so a tool.timeout for
+	// it cancels the question rather than leaving it open (#219).
+	if q.CallID != "call-delegate_a2a_researcher" {
+		t.Errorf("call id = %q, want the delegate call's id", q.CallID)
+	}
 	if got, _ := q.ActionRef["task_id"].(string); got != "task-77" {
 		t.Errorf("action_ref.task_id = %q, want the parked task", got)
 	}

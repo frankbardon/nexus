@@ -137,7 +137,7 @@ func (p *Plugin) handleBeforeToolInvoke(event engine.Event[any]) {
 	// BindingTurnID, not TurnID: inside a subagent/delegate loop TurnID is
 	// the loop's private result-matching turn, which no transport saw start
 	// — nexus.io.agui drops a hitl.requested naming it (#224).
-	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name, tc.BindingTurnID())
+	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name, tc.BindingTurnID(), tc.ID)
 	if resp.rejected {
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -178,7 +178,7 @@ func (p *Plugin) handleBeforeLLMRequest(event engine.Event[any]) {
 		return
 	}
 
-	resp := p.requestApproval(*matched, payload, "llm.request", req.Model, llmRequestTurnID(req))
+	resp := p.requestApproval(*matched, payload, "llm.request", req.Model, llmRequestTurnID(req), "")
 	if resp.rejected {
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,
@@ -233,7 +233,11 @@ type approvalOutcome struct {
 // turn left the resumed run bound to "", so it never saw RUN_FINISHED and
 // its SSE stream hung (#218). Empty only when the action genuinely names
 // no turn.
-func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, target, turnID string) approvalOutcome {
+//
+// callID is the gated tool call's ID (empty for llm.request), stamped on
+// HITLRequest.CallID so nexus.control.hitl can cancel the request if a
+// tool.timeout fires for that call.
+func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, target, turnID, callID string) approvalOutcome {
 	choices := buildChoices(r)
 	defaultID := r.defaultChoice
 	prompt := renderPrompt(r, payload, actionKind, target)
@@ -242,6 +246,7 @@ func (p *Plugin) requestApproval(r rule, payload map[string]any, actionKind, tar
 
 	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: requestID,
 		TurnID:            turnID,
+		CallID:            callID,
 		RequesterPlugin:   pluginID,
 		ActionKind:        actionKind,
 		ActionRef:         payload,

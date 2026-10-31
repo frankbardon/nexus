@@ -5142,7 +5142,11 @@ that `tool.timeout`: every tool handler can take a per-call context from
 abort. Cancellation is cooperative: a handler that does not take the context, or
 ignores it, keeps running until it finishes on its own, and its late result is
 still vetoed as above. The engine also cancels every live call context on
-`Stop`, with cause `engine.ErrToolCallsStopped`.
+`Stop`, with cause `engine.ErrToolCallsStopped`. `nexus.control.hitl` also
+watches `tool.timeout` and cancels every open `hitl.requested` whose `CallID` is
+the timed-out call (a synthetic `hitl.responded{cancelled: true}`), so an
+approval or question raised for a call that is already over does not stay open
+until shutdown.
 
 **On by default.** `nexus.tool.catalog` auto-activates this gate through
 `Requires()`, so it runs in every profile that dispatches tools through the

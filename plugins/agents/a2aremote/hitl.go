@@ -104,6 +104,7 @@ func (p *Plugin) askHuman(ctx context.Context, s *session, question string, roun
 		SchemaVersion:   events.HITLRequestVersion,
 		ID:              requestID,
 		TurnID:          s.parentTurn,
+		CallID:          s.callID,
 		RequesterPlugin: pluginID,
 		ActionKind:      hitlActionKind,
 		Mode:            events.HITLModeFreeText,

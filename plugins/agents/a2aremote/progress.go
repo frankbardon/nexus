@@ -62,6 +62,9 @@ type session struct {
 	ra         *remote
 	spawnID    string
 	parentTurn string
+	// callID is the ToolCall.ID of the delegate call this session serves,
+	// carried onto HITLRequest.CallID.
+	callID string
 	// remoteTurn is the turn id the republished progress is published under. It
 	// is derived from the spawn id rather than reusing the caller's turn so a
 	// transport can group a remote's output separately from the local turn that
@@ -89,12 +92,13 @@ type session struct {
 }
 
 // newSession builds a session for one call.
-func newSession(p *Plugin, ra *remote, spawnID, parentTurn string, cancel context.CancelFunc) *session {
+func newSession(p *Plugin, ra *remote, spawnID, parentTurn, callID string, cancel context.CancelFunc) *session {
 	return &session{
 		p:          p,
 		ra:         ra,
 		spawnID:    spawnID,
 		parentTurn: parentTurn,
+		callID:     callID,
 		remoteTurn: "a2a_remote_" + spawnID,
 		progress:   ra.cfg.transport.republishProgress(),
 		cancel:     cancel,

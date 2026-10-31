@@ -600,6 +600,11 @@ func TestApprovalPolicy_ToolInvoke_PrefersParentTurnID(t *testing.T) {
 	if got := resp.seen[0].TurnID; got != "turn-parent" {
 		t.Errorf("HITLRequest.TurnID = %q, want turn-parent", got)
 	}
+	// CallID ties the approval to the gated call so nexus.control.hitl
+	// cancels it on tool.timeout for that call (#219).
+	if got := resp.seen[0].CallID; got != "t1" {
+		t.Errorf("HITLRequest.CallID = %q, want t1", got)
+	}
 	if tc.TurnID != "subagent_spawn-1" {
 		t.Errorf("gate rewrote ToolCall.TurnID to %q; result matching would break", tc.TurnID)
 	}

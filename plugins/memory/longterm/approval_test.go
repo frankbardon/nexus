@@ -272,10 +272,11 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 		"enabled": true,
 		"timeout": "1s",
 	})
-	var got []string
+	var got, calls []string
 	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
 		if req, ok := ev.Payload.(events.HITLRequest); ok {
 			got = append(got, req.TurnID)
+			calls = append(calls, req.CallID)
 		}
 	}, engine.WithPriority(5))
 	autoRespond(bus, "allow", false)
@@ -299,6 +300,11 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 	}
 	if got[1] != "" {
 		t.Errorf("bus-event store HITLRequest.TurnID = %q, want empty", got[1])
+	}
+	// CallID ties the approval to the memory_write call (#219); the
+	// bus-event store path belongs to no call.
+	if calls[0] != "c1" || calls[1] != "" {
+		t.Errorf("HITLRequest.CallID = %q, want [c1 \"\"]", calls)
 	}
 }
 

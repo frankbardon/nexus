@@ -8,9 +8,9 @@ import (
 
 func TestContract(t *testing.T) {
 	h := contract.NewContract(t, New)
-	// hitl.requested is dynamically added; static subs include the tool +
-	// response handlers.
-	h.AssertSubscribesTo("tool.invoke", "hitl.responded", "hitl.cancel")
+	// hitl.requested is always observed (call tracking + optional
+	// registry mirror); tool.timeout cancels requests for a timed-out call.
+	h.AssertSubscribesTo("tool.invoke", "hitl.responded", "hitl.cancel", "hitl.requested", "tool.timeout")
 	declared := map[string]bool{}
 	for _, e := range h.Plugin().Emissions() {
 		declared[e] = true
