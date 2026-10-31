@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	cloud.google.com/go/compute/metadata v0.10.0
-	codeberg.org/readeck/go-readability/v2 v2.1.2
+	codeberg.org/readeck/go-readability/v2 v2.1.3
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
