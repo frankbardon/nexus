@@ -21,8 +21,9 @@ Thanks for your interest in contributing to Nexus! This guide covers the basics.
 ```bash
 make build    # Build binary
 make test     # Run tests
-make lint     # Run staticcheck + vet
+make lint     # Run fmt-check + staticcheck + vet
 make fmt      # Format code
+make fmt-check  # Fail if any file needs gofmt (run by lint and CI)
 ```
 
 ## Code Conventions

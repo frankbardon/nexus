@@ -1,4 +1,4 @@
-.PHONY: build build-broker run clean test test-race test-broker-integration test-objectstore-minio test-objectstore-fake-gcs fmt vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
+.PHONY: build build-broker run clean test test-race test-broker-integration test-objectstore-minio test-objectstore-fake-gcs fmt fmt-check vet lint docs docs-serve docs-clean build-yaegi-wasm verify-yaegi-wasm check-events check-modules submodules
 
 BINARY_NAME=nexus
 BROKER_BINARY_NAME=nexus-broker
@@ -206,6 +206,18 @@ fmt:
 	$(GO) fmt ./...
 	$(call in_submodules,$(GO) fmt ./...)
 
+# Read-only counterpart to fmt: fails, listing the offenders, when gofmt would
+# rewrite anything. `gofmt -l` exits 0 even when it finds files, so the check is
+# on its output: `! grep .` fails as soon as one path comes through. The root
+# pass skips modules/ because the submodule sweep covers each one, which keeps a
+# failure attributable to one module. lint depends on this, which is how CI
+# enforces it -- before, `make fmt` was the only thing that ever ran gofmt, and
+# unformatted files merged unnoticed.
+fmt-check:
+	@find . -name '*.go' -not -path './modules/*' -not -path './.git/*' -print0 \
+		| xargs -0 gofmt -l | sed 's/^/unformatted: /' | { ! grep .; }
+	$(call in_submodules,gofmt -l . | sed 's/^/unformatted: /' | { ! grep .; })
+
 # The tagged pass is here for the same reason it is on lint: without it, vet
 # never sees a file behind //go:build integration or //go:build minio. See
 # LINT_TAGS below.
@@ -250,7 +262,7 @@ STATICCHECK_VERSION ?= v0.8.2
 # exercises them today.
 LINT_TAGS ?= integration,evalrecord,minio,fakegcsserver
 
-lint: vet check-events check-modules
+lint: fmt-check vet check-events check-modules
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags $(LINT_TAGS) ./...
 	$(call in_submodules,$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...)

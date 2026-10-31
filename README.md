@@ -148,8 +148,9 @@ make build        # Build binary to bin/nexus
 make run          # Build and run with default config
 make test         # Run all tests
 make fmt          # Format code
+make fmt-check    # Fail if any file needs gofmt (run by lint)
 make vet          # Run go vet
-make lint         # Run staticcheck (includes vet)
+make lint         # Run staticcheck (includes fmt-check + vet)
 make clean        # Remove build artifacts
 ```
 
