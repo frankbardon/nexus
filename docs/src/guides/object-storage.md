@@ -242,7 +242,7 @@ to run against Google Cloud Storage. Nothing else in the program changes.
 
 `engine.NewFromBytes` is the alternative constructor for a host that
 `//go:embed`s its `config.yaml` and wants no filesystem dependency at boot.
-Embedders that own their own lifecycle (a desktop shell, a test harness) call
+Embedders that own their own lifecycle (a GUI host, a test harness) call
 `Boot` and `Stop` directly rather than `Run`, which owns signal handling.
 
 ### Verifying the wiring

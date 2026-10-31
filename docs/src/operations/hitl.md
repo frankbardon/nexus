@@ -74,7 +74,7 @@ bare string from the old `ask_user` tool need a schema update.
 ## Async response: out-of-band channels via the filesystem registry
 
 By default the hitl plugin routes responses synchronously through the
-active IO plugin (TUI, browser, Wails). For long-running sessions where
+active IO plugin (TUI, browser). For long-running sessions where
 the operator is in another room, on Slack, or behind a webhook, the
 plugin can additionally mirror every `hitl.requested` to a filesystem
 registry that any external tool can answer.
@@ -255,45 +255,6 @@ platforms (Windows in particular), every lock is treated as live —
 operators must use `--force` to recover. This is deliberate: silently
 overwriting a real run's lock is worse than asking the operator to
 opt in.
-
-### Desktop UI
-
-The reference Wails desktop app (`cmd/desktop/`) exposes the same
-primitives as a side drawer:
-
-- **HITL approval card** — Whenever any agent emits `hitl.requested`,
-  the desktop renders a centered modal with the prompt plus the
-  appropriate input controls:
-  - `mode: free_text` shows a textarea + Submit button.
-  - `mode: choices` shows a vertical list of clickable choice buttons,
-    one per `choices[]` entry.
-  - `mode: both` shows both — choice buttons up top, textarea below.
-  Submitting routes the response back through the agent's bus as a
-  `hitl.responded` event with `request_id`, optional `choice_id`, and
-  optional `free_text`.
-
-- **Session timeline drawer** — Each session row in the left-hand
-  Sessions panel has a clock-rotate icon. Clicking it slides in a
-  right-side drawer with two tabs:
-  - *Events* — the journal as a scrollable list (seq, time, event type,
-    side-effect / vetoed badges). Clicking a row toggles an inline
-    payload preview. Hovering reveals a "rewind to here" button.
-  - *Archives* — every rewind snapshot for the session, with a
-    *Restore* button per row. Restoring rotates the current live
-    journal to its own archive, then swaps the chosen one in.
-
-Both the rewind and restore actions show a confirmation modal first
-(*"This will archive the live journal and truncate to seq N"* /
-*"This will rotate the live journal and replace it with archive X"*).
-Success and error outcomes are surfaced as toasts in the bottom-right
-corner.
-
-The desktop bindings (`pkg/desktop/Shell`) wrap the same engine
-primitives (`engine.RewindSession`, `engine.RestoreSession`,
-`engine.ListSessionArchives`) as the CLI, plus a lightweight
-`InspectSession` / `GetSessionEvent` pair for the timeline list. The
-shell refuses to rewind or restore the agent's currently running
-session — switch to a different session first or stop the agent.
 
 ### When to use it
 

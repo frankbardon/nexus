@@ -8,7 +8,6 @@ I/O plugins handle user interaction — displaying agent output and collecting u
 |--------|----|-----------|
 | [Terminal UI](./tui.md) | `nexus.io.tui` | BubbleTea-based terminal interface |
 | [Browser UI](./browser.md) | `nexus.io.browser` | HTTP/WebSocket web interface |
-| [Wails Desktop](./wails.md) | `nexus.io.wails` | Wails webview transport for desktop apps |
 | [Oneshot](./oneshot.md) | `nexus.io.oneshot` | Non-interactive single-turn JSON transcript (scripting / CI) |
 | [Broker IO](./broker.md) | `nexus.io.broker` | Dial-back transport for instances spawned by the [session broker](../../guides/session-broker.md) |
 

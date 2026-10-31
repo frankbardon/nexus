@@ -37,7 +37,7 @@ nexus.memory.vector:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `namespace` | string | `memory-{InstanceID}` | Vector store namespace for this agent. The default sanitizes the InstanceID for filesystem safety (`/` → `-`, `:` → `-`). Multi-agent desktop shells isolate automatically. |
+| `namespace` | string | `memory-{InstanceID}` | Vector store namespace for this agent. The default sanitizes the InstanceID for filesystem safety (`/` → `-`, `:` → `-`). Multi-agent embedders isolate automatically. |
 | `top_k` | int | `5` | Max hits queried per turn. |
 | `min_similarity` | float | `0.0` | Hits below this similarity are dropped from the prompt. `0` disables filtering. |
 | `auto_store_compaction` | bool | `true` | Write the compaction summary on `memory.compacted`. |
@@ -161,7 +161,7 @@ Plus any extra string metadata supplied on the `VectorMemoryStore` payload.
 
 ## Multi-agent shells
 
-In a desktop shell hosting multiple agents, each plugin instance receives a distinct `InstanceID` (see [Plugin System → Instance IDs](../../architecture/plugin-system.md)). The default namespace `memory-{InstanceID}` keeps each agent's recall isolated automatically — no extra configuration needed.
+In an embedder hosting multiple agents, each plugin instance receives a distinct `InstanceID` (see [Plugin System → Instance IDs](../../architecture/plugin-system.md)). The default namespace `memory-{InstanceID}` keeps each agent's recall isolated automatically — no extra configuration needed.
 
 To deliberately share memory across agents, override `namespace` to a common value.
 

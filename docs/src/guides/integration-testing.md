@@ -238,7 +238,7 @@ go test -tags integration ./...
 
 ## Testing UI Plugins (Future)
 
-The test IO plugin validates the **bus contract** shared by all IO plugins (TUI, browser, wails). When integration tests pass, the bus-side behavior is validated.
+The test IO plugin validates the **bus contract** shared by all IO plugins (TUI, browser). When integration tests pass, the bus-side behavior is validated.
 
 Transport-specific rendering requires separate test suites per plugin:
 
@@ -246,7 +246,6 @@ Transport-specific rendering requires separate test suites per plugin:
 |--------|-----------|--------------|
 | TUI | BubbleTea | `teatest` package (headless terminal simulation) |
 | Browser | HTTP/WS | `httptest` + WebSocket client |
-| Wails | Runtime bindings | Mock `runtime.Runtime` interface |
 
 These validate that the transport correctly bridges bus events to/from the UI. The test IO plugin serves as a reference for the event flow, ordering, and payload shapes.
 

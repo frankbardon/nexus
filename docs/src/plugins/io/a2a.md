@@ -16,9 +16,9 @@ contributes the listener, the credential guard, the card assembly and the
 routing.
 
 It is the A2A sibling of [`nexus.io.agui`](../io-agui.md) and inherits that
-plugin's exemption from the browser/wails transport parity rule: an external
+plugin's exemption from the transport parity rule: an external
 interop transport is not a Nexus UI, so nothing here is back-ported into
-`nexus.io.browser` or `nexus.io.wails`.
+`nexus.io.browser`.
 
 ## Current maturity
 

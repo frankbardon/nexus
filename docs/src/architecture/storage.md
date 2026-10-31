@@ -15,7 +15,7 @@ mode and a 5-second busy timeout are on by default.
 | `ScopeAgent`   | `~/.nexus/agents/<agent_id>/plugins/<pluginID>/store.db` | Persists across sessions for one agent. Collapses to `ScopeApp` when no `core.agent_id` is configured. |
 | `ScopeApp`     | `~/.nexus/plugins/<pluginID>/store.db` | Machine-wide, survives across sessions and agents. |
 
-Multi-agent embedders (the desktop shell) set `core.agent_id` per engine
+Multi-agent embedders set `core.agent_id` per engine
 instance so each agent gets its own `ScopeAgent` partition. CLI and
 single-agent embedders leave it empty, which collapses agent scope to app
 scope so plugins do not end up with two separate connection pools pointing
