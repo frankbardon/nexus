@@ -12,7 +12,10 @@ updates:
       - /modules/*
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    # Raised from 5: one PR per module per bump, so root plus the modules/* entries
+    # share this budget and a backlog of 5 stopped Dependabot raising PRs for
+    # releases that already existed.
+    open-pull-requests-limit: 10
     labels:
       - dependencies
 

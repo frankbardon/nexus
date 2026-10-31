@@ -333,6 +333,12 @@ Points worth knowing:
   `@dependabot recreate`: Dependabot rebuilds the branch from scratch, its own
   push fires `pull_request`, and this workflow tidies the fresh branch again.
   That tradeoff was accepted over every root bump arriving red.
+- **The gomod `open-pull-requests-limit` is 10.** The root and every `modules/*`
+  directory share the one gomod entry in `.github/dependabot.yml`, so their open
+  PRs count against a single budget; at 5 a backlog of unmerged bumps stopped
+  Dependabot raising PRs for releases that already existed. Grouping minor/patch
+  bumps (`groups:`) is deliberately not enabled: one bump per PR keeps each
+  tidy run and review attributable.
 - **Submodule-directory PRs usually tidy to a no-op.** Nothing inherits from a
   submodule, so a `/modules/*` bump rarely leaves another module stale; the job
   still runs (the branch name does not say which directory it came from) and
