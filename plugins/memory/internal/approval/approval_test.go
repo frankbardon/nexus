@@ -486,3 +486,35 @@ func TestRequestApproval_AnsweredDoesNotCancel(t *testing.T) {
 		t.Error("hitl.cancel emitted for an answered request")
 	}
 }
+
+// TestParseTimeout pins the require_approval.timeout convention every memory
+// plugin shares: unset defaults to 30m, any zero duration disables, and a
+// malformed value keeps the default but reports ok=false.
+func TestParseTimeout(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    any
+		want   time.Duration
+		wantOK bool
+	}{
+		{"unset", nil, 30 * time.Minute, true},
+		{"empty", "", 30 * time.Minute, true},
+		{"zero", "0", 0, true},
+		{"zero seconds", "0s", 0, true},
+		{"explicit", "5m", 5 * time.Minute, true},
+		{"malformed", "bogus", 30 * time.Minute, false},
+		{"negative", "-1m", 30 * time.Minute, false},
+		{"non-string", 300, 30 * time.Minute, false},
+	}
+	if DefaultTimeout != 30*time.Minute {
+		t.Fatalf("DefaultTimeout = %v, want 30m", DefaultTimeout)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseTimeout(tc.raw)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("ParseTimeout(%#v) = (%v, %v), want (%v, %v)", tc.raw, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}

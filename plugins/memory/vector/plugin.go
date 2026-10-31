@@ -574,11 +574,15 @@ func (p *Plugin) parseApprovalConfig(raw any) {
 	if v, ok := cfg["default_choice"].(string); ok {
 		p.approvalDefaultChoice = v
 	}
-	if v, ok := cfg["timeout"].(string); ok && v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			p.approvalTimeout = d
-		}
+	// Unset bounds the wait at approval.DefaultTimeout (30m) so an
+	// unanswered prompt cannot block forever. "0" (any zero duration)
+	// disables the deadline; a malformed value keeps the default.
+	d, ok := approval.ParseTimeout(cfg["timeout"])
+	if !ok {
+		p.logger.Warn("vector: invalid require_approval.timeout; using default",
+			"value", cfg["timeout"], "default", approval.DefaultTimeout)
 	}
+	p.approvalTimeout = d
 	match, _ := cfg["match"].(map[string]any)
 	if v, ok := match["namespace_glob"].(string); ok {
 		p.approvalNamespaceGlob = v

@@ -124,7 +124,7 @@ The memory approval gates (`memory/longterm`, `memory/vector`,
 `memory/compaction` `require_approval`) retract their own request the same
 way when their `require_approval.timeout` expires: they emit `hitl.cancel`
 for it, so the registry entry is removed and the synthetic response dismisses
-the prompt. `memory/longterm` defaults that timeout to `30m`.
+the prompt. All three default that timeout to `30m` (`"0"` disables it).
 
 The plugin replays cleanly: during deterministic replay, the journaled
 `tool.result` short-circuits the live ask, so the operator is never

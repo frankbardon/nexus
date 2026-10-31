@@ -3183,8 +3183,8 @@ an external coordinator (separate from history buffers).
 | `protect_recent`    | int    | `4`              | Recent messages exempt from compaction. |
 | `persist`           | bool   | `true`           | Persist snapshots and archives to the session workspace. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before committing the summary back into history. Off = unchanged behavior. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). On expiry `hitl.cancel` retracts the pending prompt. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (commit skipped). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the commit resolves by `default_choice` — when denied (empty default) the summary is dropped and history is left intact — and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the summary is at least this many bytes. |
 
 ### `nexus.memory.longterm`
@@ -3223,8 +3223,8 @@ Source: `plugins/memory/vector/plugin.go`. Provides `memory.vector`. Requires
 | `store_images`          | bool   | `false`                | Embed image attachments on `UserInput.Files` (any `MimeType` starting with `image/`) via the multimodal `embeddings.provider` and store the resulting vector under `image_namespace`. Requires a multimodal adapter (e.g. `nexus.embeddings.cohere_multimodal`); text-only adapters will reject and the path no-ops. Off by default — opt-in. |
 | `image_namespace`       | string | `<namespace>-images`   | Vector store namespace for image embeddings. Kept separate from the text namespace so similarity queries can target one or the other. |
 | `require_approval.enabled`                    | bool     | `false`   | Emit `hitl.requested` before each `vector.upsert`. Off = unchanged behavior. |
-| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled. |
-| `require_approval.timeout`                    | duration | *(none)*  | Optional deadline (`5m`, `30s`, …). On expiry `hitl.cancel` retracts the pending prompt. |
+| `require_approval.default_choice`             | string   | *(none)*  | Choice ID picked when the deadline expires (e.g. `reject`). Empty = treat timeout as cancelled (document not stored). |
+| `require_approval.timeout`                    | duration | `30m`     | Deadline for an approval (`5m`, `30s`, …). `"0"` / `"0s"` disables it (wait forever); a malformed or negative value logs a warning and keeps `30m`. On expiry the write resolves by `default_choice` — when denied (empty default) no `vector.upsert` is issued — and `hitl.cancel` retracts the pending prompt. |
 | `require_approval.match.namespace_glob`       | string   | *(any)*   | Only require approval when the configured `namespace` matches this glob. |
 | `require_approval.match.size_threshold_bytes` | int      | *(any)*   | Only require approval when the document content is at least this many bytes. |
 

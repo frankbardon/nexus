@@ -49,10 +49,6 @@ type Plugin struct {
 	approvalSizeThreshold int    // optional — only require approval when content >= N bytes
 }
 
-// defaultApprovalTimeout bounds a require_approval wait when
-// require_approval.timeout is unset.
-const defaultApprovalTimeout = 30 * time.Minute
-
 // New creates a new long-term memory plugin.
 func New() engine.Plugin {
 	return &Plugin{
@@ -693,19 +689,15 @@ func (p *Plugin) parseApprovalConfig(raw any) {
 	if v, ok := cfg["default_choice"].(string); ok {
 		p.approvalDefaultChoice = v
 	}
-	// Unset bounds the wait at defaultApprovalTimeout: memory_write is
-	// tagged awaits_human while approval is on, so nothing else would stop
-	// an unanswered prompt from holding the turn forever. "0" (any zero
-	// duration) disables the deadline; a malformed value keeps the default.
-	p.approvalTimeout = defaultApprovalTimeout
-	if v, ok := cfg["timeout"].(string); ok && v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
-			p.approvalTimeout = d
-		} else {
-			p.logger.Warn("longterm: invalid require_approval.timeout; using default",
-				"value", v, "default", defaultApprovalTimeout)
-		}
+	// Unset bounds the wait at approval.DefaultTimeout (30m) so an
+	// unanswered prompt cannot block forever. "0" (any zero duration)
+	// disables the deadline; a malformed value keeps the default.
+	d, ok := approval.ParseTimeout(cfg["timeout"])
+	if !ok {
+		p.logger.Warn("longterm: invalid require_approval.timeout; using default",
+			"value", cfg["timeout"], "default", approval.DefaultTimeout)
 	}
+	p.approvalTimeout = d
 	match, _ := cfg["match"].(map[string]any)
 	if v, ok := match["key_glob"].(string); ok {
 		p.approvalKeyGlob = v

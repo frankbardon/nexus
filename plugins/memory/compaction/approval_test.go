@@ -209,3 +209,58 @@ func TestCompactionApprovalTimeoutDefaultRejects(t *testing.T) {
 		t.Errorf("expected message count unchanged on timeout-reject, got %d", len(p.messages))
 	}
 }
+
+// TestCompactionApprovalTimeout_Default pins require_approval.timeout's 30m
+// default, the "0 disables" convention, and that a malformed value keeps the
+// default rather than meaning "wait forever".
+func TestCompactionApprovalTimeout_Default(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  map[string]any
+		want time.Duration
+	}{
+		{"unset", map[string]any{"enabled": true}, 30 * time.Minute},
+		{"malformed", map[string]any{"enabled": true, "timeout": "bogus"}, 30 * time.Minute},
+		{"explicit", map[string]any{"enabled": true, "timeout": "5m"}, 5 * time.Minute},
+		{"zero disables", map[string]any{"enabled": true, "timeout": "0"}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newApprovalTestPlugin(t, tc.cfg)
+			if p.approvalTimeout != tc.want {
+				t.Errorf("approvalTimeout = %v, want %v", p.approvalTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompactionApprovalTimeout_ExpiryKeepsHistoryAndCancels: with no
+// default_choice an expired approval aborts the commit (history untouched,
+// no memory.compacted) and retracts the prompt with hitl.cancel.
+func TestCompactionApprovalTimeout_ExpiryKeepsHistoryAndCancels(t *testing.T) {
+	p, bus := newApprovalTestPlugin(t, map[string]any{"enabled": true, "timeout": "20ms"})
+	compacted := captureCompacted(bus)
+
+	var reqID, cancelID string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if r, ok := ev.Payload.(events.HITLRequest); ok {
+			reqID = r.ID
+		}
+	})
+	bus.Subscribe("hitl.cancel", func(ev engine.Event[any]) {
+		if c, ok := ev.Payload.(events.HITLCancel); ok {
+			cancelID = c.RequestID
+		}
+	})
+
+	p.finishCompaction("summary")
+	if len(p.messages) != 5 {
+		t.Errorf("expected message count unchanged on expiry, got %d", len(p.messages))
+	}
+	if len(*compacted) != 0 {
+		t.Errorf("expected no memory.compacted on expiry, got %d", len(*compacted))
+	}
+	if reqID == "" || cancelID != reqID {
+		t.Errorf("hitl.cancel request_id = %q, want %q", cancelID, reqID)
+	}
+}

@@ -48,6 +48,30 @@ The active `embeddings.provider` plugin owns the model choice — set the
 embedding model on that plugin. The model used to populate a namespace
 must match the model used to query it.
 
+### Write Approval
+
+`require_approval` gates each store behind a human decision
+(`hitl.requested`, action kind `memory.vector.write`) before the
+`vector.upsert`. Off by default.
+
+```yaml
+nexus.memory.vector:
+  require_approval:
+    enabled: true
+    timeout: 30m          # default when unset; "0" disables the deadline
+    default_choice: ""    # choice picked on expiry; empty = don't store
+    match:
+      namespace_glob: "memory-*"
+      size_threshold_bytes: 0
+```
+
+`require_approval.timeout` defaults to `30m` so an unanswered prompt cannot
+block a store forever; set `"0"` (or `"0s"`) to wait indefinitely. A
+malformed value logs a warning and keeps the default. On expiry the write is
+resolved by `default_choice`; when that denies it (empty or a reject choice)
+nothing is upserted, and the plugin emits `hitl.cancel` so transports
+dismiss the prompt.
+
 ## Behavior
 
 ### On `io.input` (priority 10)

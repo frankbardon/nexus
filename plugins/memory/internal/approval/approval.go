@@ -35,6 +35,35 @@ var DefaultChoices = []events.HITLChoice{
 	{ID: "reject", Label: "Reject", Kind: events.ChoiceReject},
 }
 
+// DefaultTimeout bounds a require_approval wait when the plugin's
+// require_approval.timeout key is unset. Without it an unanswered prompt
+// would hold the gated action (and, for a tool call, the turn) forever.
+const DefaultTimeout = 30 * time.Minute
+
+// ParseTimeout reads a require_approval.timeout config value and returns the
+// wait bound the memory plugins share: unset (nil or "") is DefaultTimeout;
+// any zero duration ("0", "0s") disables the deadline and returns 0; a
+// positive Go duration string is used as-is. A malformed, negative or
+// non-string value returns DefaultTimeout with ok=false so the caller can
+// log a warning and keep booting.
+func ParseTimeout(raw any) (d time.Duration, ok bool) {
+	if raw == nil {
+		return DefaultTimeout, true
+	}
+	s, isStr := raw.(string)
+	if !isStr {
+		return DefaultTimeout, false
+	}
+	if s == "" {
+		return DefaultTimeout, true
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil || parsed < 0 {
+		return DefaultTimeout, false
+	}
+	return parsed, true
+}
+
 // Request is the input to RequestApproval.
 type Request struct {
 	// Bus is the event bus used to emit hitl.requested and observe
