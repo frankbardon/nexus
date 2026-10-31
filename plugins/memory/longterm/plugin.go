@@ -444,7 +444,9 @@ func (p *Plugin) handleMemoryWrite(tc events.ToolCall) {
 		Tags:    tags,
 	}
 
-	if err := p.doStoreForTurn(req, tc.TurnID, tc.ID); err != nil {
+	// BindingTurnID: inside a subagent/delegate loop tc.TurnID is a private
+	// turn no transport saw start; the approval must name the parent (#224).
+	if err := p.doStoreForTurn(req, tc.BindingTurnID(), tc.ID); err != nil {
 		p.emitToolResult(tc, "", err.Error())
 		return
 	}

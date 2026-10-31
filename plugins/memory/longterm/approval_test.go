@@ -308,6 +308,38 @@ func TestApproval_MemoryWriteToolCarriesTurnID(t *testing.T) {
 	}
 }
 
+// TestApproval_MemoryWriteInNestedLoopBindsParentTurn pins #224 for this
+// producer: a memory_write dispatched by a subagent/delegate loop carries a
+// private TurnID plus ParentTurnID, and the approval must name the parent
+// (transport-visible) turn or a turn-scoped transport drops it.
+func TestApproval_MemoryWriteInNestedLoopBindsParentTurn(t *testing.T) {
+	p, bus := newTestPlugin(t, map[string]any{
+		"enabled": true,
+		"timeout": "1s",
+	})
+	var got []string
+	bus.Subscribe("hitl.requested", func(ev engine.Event[any]) {
+		if req, ok := ev.Payload.(events.HITLRequest); ok {
+			got = append(got, req.TurnID)
+		}
+	}, engine.WithPriority(5))
+	autoRespond(bus, "allow", false)
+
+	p.handleMemoryWrite(events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: "c1",
+		Name:         "memory_write",
+		Arguments:    map[string]any{"key": "k-nested", "content": "hello"},
+		TurnID:       "subagent_abc",
+		ParentTurnID: "turn-parent",
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("hitl.requested count = %d, want 1", len(got))
+	}
+	if got[0] != "turn-parent" {
+		t.Errorf("nested memory_write HITLRequest.TurnID = %q, want turn-parent", got[0])
+	}
+}
+
 // TestReady_MemoryWriteAwaitsHumanOnlyWithApproval: memory_write is tagged
 // events.ToolTagAwaitsHuman (so nexus.gate.tool_timeout exempts it) exactly
 // when require_approval is on, and no other memory tool ever is.
