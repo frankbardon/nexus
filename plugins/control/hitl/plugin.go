@@ -380,7 +380,10 @@ func buildRequestFromToolCall(tc events.ToolCall) (events.HITLRequest, string) {
 	}
 
 	req := events.HITLRequest{SchemaVersion: events.HITLRequestVersion, ID: fmt.Sprintf("hitl-%s-%s", tc.TurnID, tc.ID),
-		TurnID:          tc.TurnID,
+		// BindingTurnID: inside a subagent/delegate loop tc.TurnID is the
+		// loop's private result-matching turn, which turn-scoped transports
+		// (nexus.io.agui) drop a hitl.requested for (#224).
+		TurnID:          tc.BindingTurnID(),
 		RequesterPlugin: pluginID,
 		ActionKind:      "free_text",
 		Mode:            mode,

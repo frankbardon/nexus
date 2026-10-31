@@ -286,10 +286,12 @@ func buildInput(tc events.ToolCall) (delegate.Input, error) {
 	}
 
 	in := delegate.Input{
-		Posture:    postureName,
-		Task:       task,
-		Context:    contextMap,
-		ParentTurn: tc.TurnID,
+		Posture: postureName,
+		Task:    task,
+		Context: contextMap,
+		// BindingTurnID so a delegate called from inside another nested
+		// loop serves the outermost visible turn, not that loop's private one.
+		ParentTurn: tc.BindingTurnID(),
 	}
 	if v, ok := tc.Arguments["max_tokens"].(float64); ok && v > 0 {
 		in.Overrides.MaxTokens = int(v)

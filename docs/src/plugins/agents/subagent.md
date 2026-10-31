@@ -95,6 +95,13 @@ When a subagent runs, these events are emitted:
 | `subagent.iteration` | SpawnID, Iteration, Content | Each reasoning iteration |
 | `subagent.complete` | SpawnID, Result, TokensUsed, CostUSD | Subagent finished |
 
+The subagent's own `tool.invoke` calls carry `TurnID: "subagent_<spawn_id>"`,
+a private turn used only to match their `tool.result`s, plus `ParentTurnID`
+set to the turn that spawned it. A HITL request raised on one of those calls
+(an approval rule, `ask_user`) binds to `ParentTurnID` via
+`ToolCall.BindingTurnID()`, so a turn-scoped transport such as AG-UI shows it
+on the parent's run — see [HITL](../../operations/hitl.md).
+
 ## Example
 
 A ReAct agent with a research subagent:

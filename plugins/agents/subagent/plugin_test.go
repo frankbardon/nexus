@@ -286,3 +286,69 @@ func TestSubagent_StampsParentTurnID(t *testing.T) {
 		t.Errorf("llm.request Metadata[%q] = %v, want turn-parent", engine.MetaTurnID, got)
 	}
 }
+
+// TestSubagent_StampsToolCallParentTurnID pins that tool calls the subagent
+// loop issues keep its private "subagent_<id>" TurnID for result matching
+// AND carry the parent turn as ParentTurnID, which a HITL request raised on
+// the call binds to (#224).
+func TestSubagent_StampsToolCallParentTurnID(t *testing.T) {
+	h := contract.NewContract(t, New, contract.WithSession(), contract.WithPluginConfig(map[string]any{
+		"system_prompt": "Base system prompt.",
+	}))
+	p := h.Plugin().(*Plugin)
+
+	calls := 0
+	h.Bus().Subscribe("llm.request", func(ev engine.Event[any]) {
+		req, ok := ev.Payload.(events.LLMRequest)
+		if !ok {
+			return
+		}
+		calls++
+		out := events.LLMResponse{SchemaVersion: events.LLMResponseVersion, RequestID: req.RequestID, Content: "done"}
+		if calls == 1 {
+			out.Content = ""
+			out.ToolCalls = []events.ToolCallRequest{{ID: "call_0_lookup", Name: "lookup", Arguments: `{}`}}
+		}
+		_ = h.Bus().Emit("llm.response", out)
+	}, engine.WithPriority(1))
+
+	var seen []events.ToolCall
+	h.Bus().Subscribe("before:tool.invoke", func(ev engine.Event[any]) {
+		vp, ok := ev.Payload.(*engine.VetoablePayload)
+		if !ok {
+			return
+		}
+		if call, ok := vp.Original.(*events.ToolCall); ok && call.Name == "lookup" {
+			seen = append(seen, *call)
+		}
+	}, engine.WithPriority(1))
+	h.Bus().Subscribe("tool.invoke", func(ev engine.Event[any]) {
+		call, ok := ev.Payload.(events.ToolCall)
+		if !ok || call.Name != "lookup" {
+			return
+		}
+		_ = h.Bus().Emit("tool.result", events.ToolResult{SchemaVersion: events.ToolResultVersion,
+			ID: call.ID, Name: call.Name, Output: "ok", TurnID: call.TurnID})
+	}, engine.WithPriority(1))
+
+	h.Inject("tool.invoke", events.ToolCall{
+		SchemaVersion: events.ToolCallVersion,
+		ID:            "call-1",
+		Name:          p.toolName,
+		Arguments:     map[string]any{"task": "investigate something"},
+		TurnID:        "turn-parent",
+	})
+
+	if len(seen) != 1 {
+		t.Fatalf("observed %d gated lookup calls, want 1", len(seen))
+	}
+	if !strings.HasPrefix(seen[0].TurnID, "subagent_") {
+		t.Errorf("ToolCall.TurnID = %q, want the private subagent_<id> turn", seen[0].TurnID)
+	}
+	if seen[0].ParentTurnID != "turn-parent" {
+		t.Errorf("ToolCall.ParentTurnID = %q, want turn-parent", seen[0].ParentTurnID)
+	}
+	if got := seen[0].BindingTurnID(); got != "turn-parent" {
+		t.Errorf("BindingTurnID() = %q, want turn-parent", got)
+	}
+}

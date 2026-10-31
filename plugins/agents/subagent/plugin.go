@@ -349,7 +349,9 @@ func (p *Plugin) handleToolInvoke(event engine.Event[any]) {
 			})
 			defer pop()
 		}
-		return p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.TurnID)
+		// BindingTurnID so a subagent spawned from inside another nested
+		// loop serves the outermost visible turn, not that loop's private one.
+		return p.runSubagent(spawnID, task, systemPrompt, modelRole, tc.BindingTurnID())
 	}()
 
 	toolResult := events.ToolResult{SchemaVersion: events.ToolResultVersion, ID: tc.ID,
@@ -503,7 +505,7 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 		}
 
 		// Execute tool calls and collect results.
-		results := p.executeToolCalls(resp.ToolCalls, turnID)
+		results := p.executeToolCalls(resp.ToolCalls, turnID, parentTurnID)
 		for _, result := range results {
 			content := result.Output
 			if result.Error != "" {
@@ -518,8 +520,11 @@ func (p *Plugin) runSubagent(spawnID, task, systemPrompt, modelRole, parentTurnI
 	}
 }
 
-// executeToolCalls invokes tools and collects their results.
-func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID string) []events.ToolResult {
+// executeToolCalls invokes tools and collects their results. turnID is
+// this loop's private turn, used only to match tool.result; parentTurnID
+// is the turn the subagent serves, stamped as ToolCall.ParentTurnID so a
+// HITL request raised on the call binds to a turn the transport saw.
+func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID, parentTurnID string) []events.ToolResult {
 	results := make([]events.ToolResult, 0, len(toolCalls))
 	resultCh := make(chan events.ToolResult, len(toolCalls))
 	remaining := len(toolCalls)
@@ -544,9 +549,10 @@ func (p *Plugin) executeToolCalls(toolCalls []events.ToolCallRequest, turnID str
 		}
 
 		toolCall := events.ToolCall{SchemaVersion: events.ToolCallVersion, ID: tc.ID,
-			Name:      tc.Name,
-			Arguments: args,
-			TurnID:    turnID,
+			Name:         tc.Name,
+			Arguments:    args,
+			TurnID:       turnID,
+			ParentTurnID: parentTurnID,
 		}
 
 		if veto, err := p.bus.EmitVetoable("before:tool.invoke", &toolCall); err == nil && veto.Vetoed {

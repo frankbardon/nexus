@@ -44,6 +44,19 @@ request's `TurnID`, and a resumed run that carried no turn never saw
 its turn's `agent.turn.end`, so its stream never reached `RUN_FINISHED`
 (#218).
 
+"The tool call's turn" means `ToolCall.BindingTurnID()`, not
+`ToolCall.TurnID`. A nested loop (`nexus.agent.subagent`, `pkg/delegate`)
+dispatches its tool calls with a private `TurnID` (`subagent_<id>`,
+`delegate_<id>`) so their `tool.result`s never collide with the
+parent's, and stamps the turn it serves as `ToolCall.ParentTurnID`;
+`BindingTurnID()` returns `ParentTurnID` when set and `TurnID`
+otherwise. `ask_user`, `nexus.gate.approval_policy` and
+`nexus.agent.a2aremote` all read it, and `run_code`'s inner calls
+inherit the outer call's `ParentTurnID`. Before #224 the gate copied the
+private turn, and `nexus.io.agui` dropped the request because no run
+carried that turn — the parent run never saw the approval. Anything that
+matches **results** keeps keying on `TurnID`.
+
 The `ask_user` tool is the LLM-facing entry point to the same
 machinery. Its schema lets the model present:
 

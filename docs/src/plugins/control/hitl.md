@@ -78,7 +78,7 @@ will consume it. Conventional values:
 |------|--------|
 | `free_text` | `ask_user` tool, mode = `free_text` |
 | `ask_user.choices` | `ask_user` tool, mode = `choices` or `both` |
-| `tool.invoke` | `gates/approval_policy/` rule on a tool call; `TurnID` is the gated call's turn |
+| `tool.invoke` | `gates/approval_policy/` rule on a tool call; `TurnID` is the gated call's `BindingTurnID()` — its `ParentTurnID` inside a subagent/delegate loop, else its `TurnID` |
 | `llm.request` | `gates/approval_policy/` rule on an LLM request; `TurnID` comes from `Metadata["turn_id"]` |
 | `memory.longterm.write` | `memory/longterm` `require_approval` |
 | `memory.vector.write` | `memory/vector` `require_approval` |

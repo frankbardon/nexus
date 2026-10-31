@@ -312,7 +312,7 @@ func (r *Runtime) runLoop(ctx context.Context, opts runOpts) Output {
 			}
 		}
 
-		results := r.invokeTools(ctx, turnID, resp.ToolCalls)
+		results := r.invokeTools(ctx, turnID, opts.input.ParentTurn, resp.ToolCalls)
 		toolCalls += len(resp.ToolCalls)
 		for _, res := range results {
 			content := res.Output
@@ -359,8 +359,10 @@ func (r *Runtime) requestLLM(ctx context.Context, source, parentTurn string, pos
 }
 
 // invokeTools dispatches a batch of tool calls with TurnID set to the
-// sub-session's turn ID so result correlation is unambiguous.
-func (r *Runtime) invokeTools(_ context.Context, turnID string, calls []events.ToolCallRequest) []events.ToolResult {
+// sub-session's turn ID so result correlation is unambiguous, and
+// ParentTurnID set to the caller's turn so a HITL request raised on a call
+// (approval_policy, ask_user) binds to a turn the transport saw start.
+func (r *Runtime) invokeTools(_ context.Context, turnID, parentTurn string, calls []events.ToolCallRequest) []events.ToolResult {
 	results := make([]events.ToolResult, 0, len(calls))
 	resultCh := make(chan events.ToolResult, len(calls))
 	unsub := r.Bus.Subscribe("tool.result", func(ev engine.Event[any]) {
@@ -386,6 +388,7 @@ func (r *Runtime) invokeTools(_ context.Context, turnID string, calls []events.T
 			Name:          tc.Name,
 			Arguments:     args,
 			TurnID:        turnID,
+			ParentTurnID:  parentTurn,
 		}
 		if veto, err := r.Bus.EmitVetoable("before:tool.invoke", &call); err == nil && veto.Vetoed {
 			resultCh <- events.ToolResult{

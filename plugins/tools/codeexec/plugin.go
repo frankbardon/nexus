@@ -525,6 +525,7 @@ func (p *Plugin) runScript(tc events.ToolCall) {
 		ctx:          ctx,
 		bus:          p.bus,
 		turnID:       tc.TurnID,
+		parentTurnID: tc.ParentTurnID,
 		parentCallID: tc.ID,
 		pending:      map[string]chan events.ToolResult{},
 	}

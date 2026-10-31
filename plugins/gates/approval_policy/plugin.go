@@ -134,7 +134,10 @@ func (p *Plugin) handleBeforeToolInvoke(event engine.Event[any]) {
 		return
 	}
 
-	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name, tc.TurnID)
+	// BindingTurnID, not TurnID: inside a subagent/delegate loop TurnID is
+	// the loop's private result-matching turn, which no transport saw start
+	// — nexus.io.agui drops a hitl.requested naming it (#224).
+	resp := p.requestApproval(*matched, payload, "tool.invoke", tc.Name, tc.BindingTurnID())
 	if resp.rejected {
 		vp.Veto = engine.VetoResult{
 			Vetoed: true,

@@ -17,7 +17,20 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments map[string]any
-	TurnID    string
+	// TurnID correlates this call's tool.result back to the loop that
+	// issued it. Nested loops (subagent, delegate) use a private turn
+	// ("subagent_<id>", "delegate_<id>") here so their results never
+	// collide with the parent's — a turn no transport ever saw start.
+	TurnID string
+	// ParentTurnID, when set, is the turn this call is BOUND to for
+	// anything a transport scopes by turn — chiefly a HITL request raised
+	// on the call (approval_policy, ask_user). Nested loops set it to the
+	// turn they serve, because a hitl.requested carrying the private
+	// TurnID above is dropped by turn-scoped transports (nexus.io.agui)
+	// and the parent run never sees the approval. Empty for calls issued
+	// directly by a top-level loop, where TurnID already is that turn.
+	// Read it through BindingTurnID, never directly.
+	ParentTurnID string
 	// ParentCallID, when set, marks this call as internal to another tool
 	// (e.g. dispatched by a run_code script). Conversation history omits
 	// these so the LLM never sees tool_use_ids it didn't originate — gates
@@ -28,6 +41,17 @@ type ToolCall struct {
 	// multiple tool calls; lets observers reorder completion-order events
 	// back into request order under parallel dispatch.
 	Sequence int
+}
+
+// BindingTurnID is the turn a HITL request (or any other turn-scoped,
+// transport-visible emission) raised on this call should carry:
+// ParentTurnID when a nested loop set it, otherwise TurnID. It is NOT the
+// key for matching tool results — that stays TurnID.
+func (tc ToolCall) BindingTurnID() string {
+	if tc.ParentTurnID != "" {
+		return tc.ParentTurnID
+	}
+	return tc.TurnID
 }
 
 // ToolCatalogQuery is a synchronous request for the currently registered

@@ -306,15 +306,17 @@ The two **HITL** handlers take the delivering rule, because a park is not a
 termination:
 
 - `hitl.requested` carries a real agent-loop turn wherever it carries one at
-  all — `nexus.control.hitl` copies the asking tool call's own `TurnID`
-  verbatim, and `nexus.agent.a2aremote` and the ICM workflow both set the
+  all — `nexus.control.hitl` copies the asking tool call's binding turn
+  (`ToolCall.BindingTurnID()`: the parent turn inside a nested loop, else its
+  `TurnID`), and `nexus.agent.a2aremote` and the ICM workflow both set the
   spawning loop's turn — so it is comparable to the turn the run bound. A
   question from a turn this run does not carry would **park** it: an interrupt
   outcome for a question the client never asked, the run's own turn left
   running with no stream, and the `interruptId` → request mapping recorded
   against the wrong thread and run, so the resume `POST` that follows answers
   the departed turn's question. `nexus.gate.approval_policy` sets the gated
-  action's turn too (the tool call's `TurnID`, or an `llm.request`'s
+  action's turn too (the tool call's `BindingTurnID()` — its `ParentTurnID`
+  inside a subagent/delegate loop, else its `TurnID` (#224) — or an `llm.request`'s
   `Metadata["turn_id"]`), as does `plugins/memory`'s approval helper for a
   `memory_write` tool call. Until #218 the gate carried the turn only in its
   `ActionRef`, so the continuation run adopted turn `""`, never owned the
