@@ -36,9 +36,16 @@ defer release()
 ```
 
 The engine cancels that context when a `tool.timeout` names the call's ID
-(`nexus.gate.tool_timeout` emits one when a call exceeds its deadline) and when
-it stops; `context.Cause(ctx)` is `engine.ErrToolCallTimedOut` or
-`engine.ErrToolCallsStopped`. `shell` (process group killed), `run_code` and
+(`nexus.gate.tool_timeout` emits one when a call exceeds its deadline), when
+the call's turn is cancelled (a `cancel.active` naming the turn, which
+`nexus.control.cancel` emits on a user interrupt), and when it stops;
+`context.Cause(ctx)` is `engine.ErrToolCallTimedOut`,
+`engine.ErrToolCallCancelled` or `engine.ErrToolCallsStopped`. The registry
+learns each call's turn from its `tool.invoke` (it subscribes ahead of every
+tool handler): a call is bound to its `TurnID` and, for a call a nested loop
+(subagent, delegate) issued, to its `ParentTurnID` too, so cancelling a turn
+also kills the calls its sub-agents are running. A `cancel.active` naming no
+turn cancels every live call. Calls of other turns are untouched. `shell` (process group killed), `run_code` and
 `web_fetch` honor it. It is cooperative — a handler that ignores it runs on,
 and its late result is vetoed by the gate — and `ToolCalls` is nil-safe, so a
 hand-built test `PluginContext` needs no registry. A `Cancel` for an ID with no

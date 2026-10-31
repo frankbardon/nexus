@@ -60,3 +60,16 @@ All subscriptions use the default priority `0`.
 - File creation/update notifications
 - Session resume with history replay
 - Built-in commands: `/quit`, `/exit`
+
+## Interrupt keys
+
+- **Esc** while a turn is running emits `cancel.request`: with `nexus.control.cancel`
+  active, the turn is cancelled (resumable with `/resume`) and every tool call it
+  has in flight — a running `shell` command's whole process group included — is
+  cancelled. The TUI stays open.
+- **Ctrl-C** quits. While a turn is running it first emits `cancel.request`, as Esc
+  does. Either way the program exit emits `io.session.end`, so the host stops the
+  engine, and `Engine.Stop` cancels every tool call still in flight. (The terminal is
+  in raw mode, so Ctrl-C reaches the TUI as a key, not as `SIGINT`; and a sandboxed
+  shell command runs in its own process group, so it never sees a terminal signal
+  either way — the engine's cancellation is what kills it.)

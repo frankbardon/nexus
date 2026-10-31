@@ -70,6 +70,87 @@ func TestShell_TimedOutCommandIsKilled(t *testing.T) {
 		t.Fatal("shell call never returned after tool.timeout")
 	}
 
+	waitForExit(t, pid)
+	if calls.Live("sh-1") {
+		t.Fatal("shell did not release its per-call context")
+	}
+}
+
+// Cancelling a turn (cancel.active naming it) must kill a long command that
+// turn is running — here one dispatched by a nested loop (private TurnID,
+// ParentTurnID = the cancelled turn) — the same way a timeout does, while a
+// command running for another turn keeps going.
+func TestShell_TurnCancelKillsCommand(t *testing.T) {
+	bus := engine.NewEventBus()
+	calls := engine.NewToolCallContexts()
+	t.Cleanup(calls.Attach(bus))
+
+	sb, err := host.New(map[string]any{})
+	if err != nil {
+		t.Fatalf("host sandbox: %v", err)
+	}
+	p := &Plugin{
+		bus:       bus,
+		logger:    slog.Default(),
+		sandbox:   sb,
+		toolCalls: calls,
+		timeout:   30 * time.Second,
+	}
+	bus.Subscribe("tool.invoke", p.handleEvent, engine.WithPriority(50))
+
+	results := make(chan events.ToolResult, 2)
+	bus.Subscribe("tool.result", func(e engine.Event[any]) {
+		if r, ok := e.Payload.(events.ToolResult); ok {
+			results <- r
+		}
+	})
+
+	dir := t.TempDir()
+	invoke := func(id, turn, parent, pidFile string) {
+		cmd := "sleep 30 & echo $! > " + pidFile + "; wait"
+		go func() {
+			_ = bus.Emit("tool.invoke", events.ToolCall{SchemaVersion: events.ToolCallVersion,
+				ID: id, Name: "shell", TurnID: turn, ParentTurnID: parent,
+				Arguments: map[string]any{"command": cmd}})
+		}()
+	}
+	victimPID := filepath.Join(dir, "victim")
+	otherPID := filepath.Join(dir, "other")
+	invoke("sh-victim", "delegate_1", "turn-1", victimPID)
+	invoke("sh-other", "turn-2", "", otherPID)
+	pid := waitForPID(t, victimPID)
+	other := waitForPID(t, otherPID)
+	t.Cleanup(func() { _ = syscall.Kill(other, syscall.SIGKILL) })
+
+	start := time.Now()
+	_ = bus.Emit("cancel.active", events.CancelActive{SchemaVersion: events.CancelActiveVersion, TurnID: "turn-1"})
+
+	select {
+	case r := <-results:
+		if r.ID != "sh-victim" {
+			t.Fatalf("first result is for %q, want sh-victim", r.ID)
+		}
+		if !strings.Contains(r.Error, "cancelled") {
+			t.Fatalf("result error = %q, want a cancellation", r.Error)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("shell took %s to return after cancellation", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("shell call never returned after its turn was cancelled")
+	}
+	waitForExit(t, pid)
+
+	if err := syscall.Kill(other, 0); err != nil {
+		t.Fatalf("other turn's command died on turn-1's cancel (kill(0) = %v)", err)
+	}
+	if !calls.Live("sh-other") {
+		t.Fatal("other turn's call context is no longer live")
+	}
+}
+
+func waitForExit(t *testing.T, pid int) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		err := syscall.Kill(pid, 0)
@@ -81,9 +162,6 @@ func TestShell_TimedOutCommandIsKilled(t *testing.T) {
 			t.Fatalf("grandchild pid %d still alive after the call was cancelled (kill(0) = %v)", pid, err)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if calls.Live("sh-1") {
-		t.Fatal("shell did not release its per-call context")
 	}
 }
 

@@ -14,6 +14,11 @@ import (
 // tool.timeout event naming its call ID). Match it with errors.Is.
 var ErrToolCallTimedOut = errors.New("tool call timed out")
 
+// ErrToolCallCancelled is the cancellation cause for a call whose turn was
+// cancelled (a cancel.active event naming the call's turn, or naming no turn
+// at all). Match it with errors.Is.
+var ErrToolCallCancelled = errors.New("tool call cancelled")
+
 // ErrToolCallsStopped is the cancellation cause for every call still in
 // flight when the engine stops.
 var ErrToolCallsStopped = errors.New("engine stopped")
@@ -34,6 +39,12 @@ var ErrToolCallsStopped = errors.New("engine stopped")
 // (tool.invoke, tool.result, tool.timeout) is correlated. A Cancel for an ID
 // with no live Begin is a no-op: it does not pre-cancel a later Begin.
 //
+// Once attached to a bus, the registry also learns which turn each call
+// belongs to from tool.invoke, so CancelTurn (and a cancel.active event) can
+// reach every live call a cancelled turn set in motion — including calls a
+// nested loop (subagent, delegate) issued on that turn's behalf, which carry
+// the turn as ParentTurnID.
+//
 // The zero value is not usable; build one with NewToolCallContexts. A nil
 // *ToolCallContexts is valid and behaves as a registry nothing ever cancels,
 // so plugins can use PluginContext.ToolCalls unconditionally even when a
@@ -41,6 +52,11 @@ var ErrToolCallsStopped = errors.New("engine stopped")
 type ToolCallContexts struct {
 	mu    sync.Mutex
 	calls map[string][]*toolCallEntry
+	// turns maps a call ID to the turns it is bound to (its TurnID and,
+	// for a nested loop's call, the parent turn it serves). Recorded from
+	// tool.invoke by Attach; dropped on tool.result or when the call's last
+	// context is released.
+	turns map[string][]string
 }
 
 type toolCallEntry struct {
@@ -51,7 +67,7 @@ type toolCallEntry struct {
 // Engine and hands it to every plugin as PluginContext.ToolCalls; tests that
 // drive a plugin against a bare bus build their own and Attach it.
 func NewToolCallContexts() *ToolCallContexts {
-	return &ToolCallContexts{calls: map[string][]*toolCallEntry{}}
+	return &ToolCallContexts{calls: map[string][]*toolCallEntry{}, turns: map[string][]string{}}
 }
 
 // Begin derives a cancellable context for the call with the given ID from
@@ -100,6 +116,35 @@ func (r *ToolCallContexts) Cancel(callID string, cause error) bool {
 	return len(entries) > 0
 }
 
+// CancelTurn cancels every live call bound to turnID with cause (nil means
+// context.Canceled) and returns how many contexts it cancelled. A call is
+// bound to a turn when its tool.invoke carried that turn as TurnID or as
+// ParentTurnID (see events.ToolCall.BindingTurnID), so cancelling a parent
+// turn also reaches the calls a subagent or delegate loop issued for it.
+// Calls of other turns are untouched. The turn mapping comes from the bus,
+// so CancelTurn only reaches calls whose tool.invoke an attached registry
+// saw.
+func (r *ToolCallContexts) CancelTurn(turnID string, cause error) int {
+	if r == nil || turnID == "" {
+		return 0
+	}
+	r.mu.Lock()
+	var entries []*toolCallEntry
+	for callID, turns := range r.turns {
+		for _, t := range turns {
+			if t == turnID {
+				entries = append(entries, r.calls[callID]...)
+				break
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, e := range entries {
+		e.cancel(cause)
+	}
+	return len(entries)
+}
+
 // CancelAll cancels every live call with cause. The engine calls it on Stop.
 func (r *ToolCallContexts) CancelAll(cause error) {
 	if r == nil {
@@ -126,15 +171,111 @@ func (r *ToolCallContexts) Live(callID string) bool {
 	return len(r.calls[callID]) > 0
 }
 
-// Attach subscribes the registry to bus so a tool.timeout event cancels the
-// timed-out call's context with a cause wrapping ErrToolCallTimedOut. It
-// returns the unsubscribe func. The engine attaches its registry at Boot;
-// any plugin that emits tool.timeout therefore cancels the dispatch with no
-// further wiring.
+// toolInvokeTrackPriority runs the registry's tool.invoke subscriber ahead of
+// every tool handler, so a call's turn is known before its handler calls
+// Begin (handlers typically run synchronously inside the dispatch).
+const toolInvokeTrackPriority = -1 << 20
+
+// Attach subscribes the registry to bus:
+//
+//   - tool.invoke records the call's turn(s) so CancelTurn can find it;
+//     tool.result forgets them.
+//   - tool.timeout cancels the timed-out call's context with a cause
+//     wrapping ErrToolCallTimedOut.
+//   - cancel.active cancels every live call bound to the cancelled turn
+//     (every live call, when the event names no turn) with a cause wrapping
+//     ErrToolCallCancelled.
+//
+// It returns the unsubscribe func. The engine attaches its registry at Boot;
+// any plugin that emits tool.timeout or cancel.active therefore cancels the
+// dispatch with no further wiring.
 func (r *ToolCallContexts) Attach(bus EventBus) func() {
 	if r == nil || bus == nil {
 		return func() {}
 	}
+	unsubs := []func(){
+		bus.Subscribe("tool.invoke", func(event Event[any]) {
+			if tc, ok := toolCallPayload(event.Payload); ok {
+				r.track(tc)
+			}
+		}, WithPriority(toolInvokeTrackPriority), WithSource("nexus.engine.toolcalls")),
+		bus.Subscribe("tool.result", func(event Event[any]) {
+			switch p := event.Payload.(type) {
+			case events.ToolResult:
+				r.untrack(p.ID)
+			case *events.ToolResult:
+				if p != nil {
+					r.untrack(p.ID)
+				}
+			}
+		}, WithSource("nexus.engine.toolcalls")),
+		bus.Subscribe("cancel.active", func(event Event[any]) {
+			var ca events.CancelActive
+			switch p := event.Payload.(type) {
+			case events.CancelActive:
+				ca = p
+			case *events.CancelActive:
+				if p == nil {
+					return
+				}
+				ca = *p
+			default:
+				return
+			}
+			if ca.TurnID == "" {
+				r.CancelAll(fmt.Errorf("%w: cancel requested", ErrToolCallCancelled))
+				return
+			}
+			r.CancelTurn(ca.TurnID, fmt.Errorf("%w: turn %s cancelled", ErrToolCallCancelled, ca.TurnID))
+		}, WithSource("nexus.engine.toolcalls")),
+		r.attachTimeout(bus),
+	}
+	return func() {
+		for _, u := range unsubs {
+			u()
+		}
+	}
+}
+
+func toolCallPayload(payload any) (events.ToolCall, bool) {
+	switch p := payload.(type) {
+	case events.ToolCall:
+		return p, true
+	case *events.ToolCall:
+		if p != nil {
+			return *p, true
+		}
+	}
+	return events.ToolCall{}, false
+}
+
+// track records the turns a call is bound to.
+func (r *ToolCallContexts) track(tc events.ToolCall) {
+	if tc.ID == "" {
+		return
+	}
+	var turns []string
+	if tc.TurnID != "" {
+		turns = append(turns, tc.TurnID)
+	}
+	if b := tc.BindingTurnID(); b != "" && b != tc.TurnID {
+		turns = append(turns, b)
+	}
+	if len(turns) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.turns[tc.ID] = turns
+	r.mu.Unlock()
+}
+
+func (r *ToolCallContexts) untrack(callID string) {
+	r.mu.Lock()
+	delete(r.turns, callID)
+	r.mu.Unlock()
+}
+
+func (r *ToolCallContexts) attachTimeout(bus EventBus) func() {
 	return bus.Subscribe("tool.timeout", func(event Event[any]) {
 		var tt events.ToolTimeout
 		switch p := event.Payload.(type) {
@@ -164,6 +305,7 @@ func (r *ToolCallContexts) remove(callID string, e *toolCallEntry) {
 	}
 	if len(es) == 0 {
 		delete(r.calls, callID)
+		delete(r.turns, callID)
 	} else {
 		r.calls[callID] = es
 	}

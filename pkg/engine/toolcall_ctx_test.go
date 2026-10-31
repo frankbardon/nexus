@@ -134,3 +134,84 @@ func TestEngine_ToolCallsWiredIntoBootAndStop(t *testing.T) {
 		t.Fatalf("Stop did not cancel the live call: cause %v", context.Cause(live))
 	}
 }
+
+func TestToolCallContexts_TurnCancelCancelsOnlyThatTurn(t *testing.T) {
+	bus := NewEventBus()
+	r := NewToolCallContexts()
+	unsub := r.Attach(bus)
+	defer unsub()
+
+	begin := func(tc events.ToolCall) (context.Context, func()) {
+		_ = bus.Emit("tool.invoke", tc)
+		return r.Begin(context.Background(), tc.ID)
+	}
+	direct, rel1 := begin(events.ToolCall{ID: "c1", Name: "shell", TurnID: "turn-1"})
+	defer rel1()
+	// A nested loop's call for turn-1: private TurnID, bound to turn-1.
+	nested, rel2 := begin(events.ToolCall{ID: "c2", Name: "shell", TurnID: "delegate_x", ParentTurnID: "turn-1"})
+	defer rel2()
+	other, rel3 := begin(events.ToolCall{ID: "c3", Name: "shell", TurnID: "turn-2"})
+	defer rel3()
+
+	_ = bus.Emit("cancel.active", events.CancelActive{SchemaVersion: events.CancelActiveVersion, TurnID: "turn-1"})
+
+	for name, ctx := range map[string]context.Context{"direct": direct, "nested": nested} {
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+			t.Fatalf("%s call of the cancelled turn was not cancelled", name)
+		}
+		if cause := context.Cause(ctx); !errors.Is(cause, ErrToolCallCancelled) {
+			t.Fatalf("%s cause = %v, want ErrToolCallCancelled", name, cause)
+		}
+	}
+	if other.Err() != nil {
+		t.Fatal("cancelling turn-1 cancelled turn-2's call")
+	}
+}
+
+func TestToolCallContexts_UnscopedCancelCancelsAll(t *testing.T) {
+	bus := NewEventBus()
+	r := NewToolCallContexts()
+	unsub := r.Attach(bus)
+	defer unsub()
+
+	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", TurnID: "turn-1"})
+	a, relA := r.Begin(context.Background(), "c1")
+	defer relA()
+	b, relB := r.Begin(context.Background(), "untracked")
+	defer relB()
+
+	_ = bus.Emit("cancel.active", events.CancelActive{SchemaVersion: events.CancelActiveVersion})
+	if !errors.Is(context.Cause(a), ErrToolCallCancelled) || !errors.Is(context.Cause(b), ErrToolCallCancelled) {
+		t.Fatalf("causes = %v, %v; want ErrToolCallCancelled for both", context.Cause(a), context.Cause(b))
+	}
+}
+
+func TestToolCallContexts_TurnMappingDropped(t *testing.T) {
+	bus := NewEventBus()
+	r := NewToolCallContexts()
+	unsub := r.Attach(bus)
+	defer unsub()
+
+	// Released call: mapping goes with the last context.
+	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c1", TurnID: "turn-1"})
+	_, rel := r.Begin(context.Background(), "c1")
+	rel()
+	// Answered call that never called Begin: tool.result drops it.
+	_ = bus.Emit("tool.invoke", events.ToolCall{ID: "c2", TurnID: "turn-1"})
+	_ = bus.Emit("tool.result", events.ToolResult{ID: "c2"})
+
+	r.mu.Lock()
+	n := len(r.turns)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("turn mapping holds %d entries after calls finished, want 0", n)
+	}
+	// A later Begin under the reused ID is not bound to the old turn.
+	ctx, rel2 := r.Begin(context.Background(), "c1")
+	defer rel2()
+	if got := r.CancelTurn("turn-1", nil); got != 0 || ctx.Err() != nil {
+		t.Fatalf("CancelTurn reached %d stale calls", got)
+	}
+}
